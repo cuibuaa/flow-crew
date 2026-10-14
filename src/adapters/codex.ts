@@ -1,26 +1,26 @@
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { writeFileSync, appendFileSync, mkdirSync, renameSync, rmSync } from '../engine-fs.js';
+
+
+import { findExecutableOnPath } from './availability.js';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
-import type { Adapter, AdapterFailureKind, AgentConfig, RunOpts, RunResult } from './base.js';
+import type { Adapter, AdapterFailureKind, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
 import { classifyAdapterFailure } from './failure.js';
-import { findExecutableOnPath } from './availability.js';
+import { providerFailureFromEvent, type ProviderFailure } from '../provider-result.js';
 import { extractFinalMessage } from './transcript.js';
 import { applyFix, diagnoseAdapterFailure, type AdapterFix, type Diagnosis } from './diagnose.js';
-import { CommandActivityTracker } from '../command-activity.js';
+import { prepareAdapterHome, withAdapterCredentials } from '../adapter-home.js';
+import { captureCodexRollouts, codexRolloutInterval, parsePrintedTokenUsage, sumInvocationUsage, type NativeInvocationUsage } from '../invocation-usage.js';
+import { generationCompatibleSchema } from '../reality-gate/checks/json-schema-match.js';
+import { atomicWrite } from '../store.js';
 
 /** Parse token usage from codex CLI output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
-  const m = output.match(/[Tt]okens[^:]*:\s*([\d,]+)\s*(?:in(?:put)?)\s*[/,]\s*([\d,]+)\s*(?:out(?:put)?)/);
-  if (m) return { tokens_in: parseInt(m[1].replace(/,/g, ''), 10), tokens_out: parseInt(m[2].replace(/,/g, ''), 10) };
-  const inM = output.match(/input_tokens\s*[:=]\s*([\d,]+)/);
-  const outM = output.match(/output_tokens\s*[:=]\s*([\d,]+)/);
-  if (inM || outM) return {
-    tokens_in: inM ? parseInt(inM[1].replace(/,/g, ''), 10) : undefined,
-    tokens_out: outM ? parseInt(outM[1].replace(/,/g, ''), 10) : undefined,
-  };
+  const counters = parsePrintedTokenUsage(output);
+  if (counters.tokens_in !== undefined || counters.tokens_out !== undefined) return counters;
   // codex `exec` prints a total-usage footer "tokens used\n<n>"; best-effort capture
   // it as output tokens so codex token telemetry isn't silently always undefined.
   const used = output.match(/tokens used\s*\n\s*([\d,]+)/i);
@@ -70,7 +70,7 @@ function writeCodexSession(runDir: string, stageId: string, metadata: CodexSessi
 }
 
 function numericUsage(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function normalizeReportedWrite(path: string, workDir?: string): string | undefined {
@@ -105,10 +105,14 @@ export interface ParsedCodexJsonl {
   output: string;
   /** Diagnostic from a terminal CLI event, separate from agent-authored text. */
   terminalError?: string;
+  providerFailure?: ProviderFailure;
   adapterFailureKind?: AdapterFailureKind;
   sessionId?: string;
   tokens_in?: number;
   tokens_out?: number;
+  tokens_cached?: number;
+  tokens_reasoning?: number;
+  completed: boolean;
   writes: string[];
 }
 
@@ -120,8 +124,12 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
   let tokensOut = 0;
   let sawTokensIn = false;
   let sawTokensOut = false;
+  let tokensCached: number | undefined;
+  let tokensReasoning: number | undefined;
+  let completed = false;
   const messages: string[] = [];
   let terminalError: string | undefined;
+  let providerFailure: ProviderFailure | undefined;
   const writes = new Set<string>();
 
   for (const line of output.split(/\r?\n/)) {
@@ -138,8 +146,13 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
     if (type === 'message' && event.role === 'assistant' && typeof event.content === 'string' && event.content.trim()) messages.push(event.content.trim());
     if (itemType === 'file_change' || type === 'file_change') collectFileChangePaths(item ?? event, writes, workDir);
 
-    if (type === 'turn.completed') terminalError = undefined;
+    if (type === 'turn.completed') {
+      completed = true;
+      terminalError = undefined;
+      providerFailure = undefined;
+    }
     if (type === 'error' || type === 'turn.failed' || itemType === 'error') {
+      completed = false;
       const nestedError = event.error && typeof event.error === 'object'
         ? event.error as Record<string, unknown>
         : undefined;
@@ -149,6 +162,9 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
             : typeof item?.message === 'string' ? item.message
               : undefined;
       if (message?.trim()) terminalError = message.trim();
+      if (type === 'error' || type === 'turn.failed') {
+        providerFailure = providerFailureFromEvent('codex', event);
+      }
     }
 
     const usage = event.usage && typeof event.usage === 'object' ? event.usage as Record<string, unknown> : undefined;
@@ -156,6 +172,10 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
     const outputTokens = numericUsage(usage?.output_tokens ?? usage?.outputTokens);
     if (input !== undefined) { tokensIn += input; sawTokensIn = true; }
     if (outputTokens !== undefined) { tokensOut += outputTokens; sawTokensOut = true; }
+    const cached = numericUsage(usage?.cached_input_tokens);
+    const reasoning = numericUsage(usage?.reasoning_output_tokens);
+    if (cached !== undefined) tokensCached = (tokensCached ?? 0) + cached;
+    if (reasoning !== undefined) tokensReasoning = (tokensReasoning ?? 0) + reasoning;
   }
 
   const finalMessage = messages.at(-1) ?? '';
@@ -166,10 +186,14 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
       ? [finalMessage, terminalError].filter(Boolean).join('\n')
       : (terminalError ?? finalMessage),
     ...(terminalError ? { terminalError } : {}),
+    ...(providerFailure ? { providerFailure } : {}),
     ...(adapterFailureKind ? { adapterFailureKind } : {}),
     sessionId,
     tokens_in: sawTokensIn ? tokensIn : undefined,
     tokens_out: sawTokensOut ? tokensOut : undefined,
+    tokens_cached: tokensCached,
+    tokens_reasoning: tokensReasoning,
+    completed,
     writes: [...writes].sort(),
   };
 }
@@ -180,65 +204,6 @@ function tomlString(value: string): string {
 
 function userCodexHome(): string {
   return process.env.CODEX_HOME || join(homedir(), '.codex');
-}
-
-function syncCodexAuthFiles(codexHome: string): void {
-  const sourceHome = userCodexHome();
-  if (sourceHome === codexHome) return;
-
-  for (const fileName of ['auth.json', 'credentials.json', 'installation_id']) {
-    const sourcePath = join(sourceHome, fileName);
-    const targetPath = join(codexHome, fileName);
-    try {
-      if (!existsSync(sourcePath)) continue;
-      if (!statSync(sourcePath).isFile()) continue;
-      // Codex login refreshes rotate auth data. Long-running FlowCrew retries
-      // must not keep using a stale per-stage copy after the global login state
-      // has moved forward.
-      copyFileSync(sourcePath, targetPath);
-    } catch {
-      // Missing auth files are fine for environments that authenticate another way.
-    }
-  }
-}
-
-function linkSharedPluginsCache(codexHome: string): void {
-  // Codex CLI clones a plugins repo into $CODEX_HOME/.tmp/plugins/ on first
-  // run. Without intervention every per-stage codex_home re-clones it
-  // (~13-19M per spawn -> 100s of GB across long-running FlowCrew campaigns).
-  // Symlink that path to a single shared cache so Codex sees it as already
-  // present and skips the clone.
-  const sharedDir = process.env.CODEX_PLUGINS_CACHE
-    || join(homedir(), '.codex-plugins-shared');
-  try {
-    if (!existsSync(sharedDir)) mkdirSync(sharedDir, { recursive: true });
-    const tmpDir = join(codexHome, '.tmp');
-    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const pluginsLink = join(tmpDir, 'plugins');
-    if (!existsSync(pluginsLink)) {
-      symlinkSync(sharedDir, pluginsLink, 'dir');
-    }
-  } catch {
-    // best-effort; fall back to per-stage clone if symlink fails
-  }
-}
-
-function linkSharedSkillsCache(codexHome: string): void {
-  // Codex CLI populates $CODEX_HOME/skills/ with built-in skill assets
-  // (.system/imagegen etc, ~500K per stage). Same pattern as plugins:
-  // symlink to a shared dir so the first stage populates it and subsequent
-  // stages re-use the bytes.
-  const sharedDir = process.env.CODEX_SKILLS_CACHE
-    || join(homedir(), '.codex-skills-shared');
-  try {
-    if (!existsSync(sharedDir)) mkdirSync(sharedDir, { recursive: true });
-    const link = join(codexHome, 'skills');
-    if (!existsSync(link)) {
-      symlinkSync(sharedDir, link, 'dir');
-    }
-  } catch {
-    // best-effort
-  }
 }
 
 function cleanupRunEndArtifacts(codexHome: string): void {
@@ -263,8 +228,10 @@ function cleanupRunEndArtifacts(codexHome: string): void {
  * cruft (~90M/stage, dominated by the `.tmp/plugins` git packs) with zero
  * post-run value; the stage's captured output (`live.log`) and deliverables live
  * OUTSIDE codex_home (siblings under stages/<id>/) and are untouched. On any
- * FAILURE / abort / timeout keep codex_home for debugging, dropping only the
- * already-checkpointed SQLite WAL/SHM. This bounds ~/.fc/runs disk growth: before
+ * FAILURE / abort / timeout keep credential-free codex_home for debugging,
+ * dropping the already-checkpointed SQLite WAL/SHM. Credentials are retired by
+ * their native execution scope, independently of this retention policy.
+ * This bounds ~/.fc/runs disk growth: before
  * this, codex_home was 99% of a run's size and accumulated unboundedly.
  */
 export function finalizeCodexHome(codexHome: string, exitCode: number): void {
@@ -315,27 +282,23 @@ export interface CodexCapabilityMemory {
   learnedAt: string;
 }
 
-let cachedCodexVersion: string | undefined;
-
-function detectedCodexVersion(executable: string): string {
-  if (cachedCodexVersion !== undefined && executable === 'codex') return cachedCodexVersion;
-  let version = 'unknown';
+/** Capability memory is tied to file identity, without executing the adapter
+ * merely to ask its version. ctime/mode also invalidate restored-mtime edits. */
+function detectedCodexVersion(executable: string, cwd: string): string {
+  const selected = findExecutableOnPath(executable, process.env.PATH, cwd);
+  if (!selected) return 'unknown';
   try {
-    version = execFileSync(executable, ['--version'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2_000,
-    }).trim() || 'unknown';
-  } catch { /* an unavailable CLI will fail normally when the adapter starts */ }
-  if (executable === 'codex') cachedCodexVersion = version;
-  return version;
+    const info = statSync(selected, { bigint: true });
+    const path = realpathSync(selected);
+    return `fingerprint:${path}:${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}:${info.mode}`;
+  } catch { return 'unknown'; }
 }
 
 /** Stable scope for learned adapter capabilities. A changed CLI, provider, or
  * model deliberately produces a different key and therefore gets re-probed. */
 export function resolveCodexCapabilityIdentity(
   role: Pick<AgentConfig, 'model' | 'reasoning_effort'>,
-  overrides: Partial<CodexCapabilityIdentity> = {},
+  overrides: Partial<CodexCapabilityIdentity> & { cwd?: string } = {},
 ): CodexCapabilityIdentity {
   const executable = overrides.executable ?? 'codex';
   const model = overrides.model ?? (
@@ -354,7 +317,7 @@ export function resolveCodexCapabilityIdentity(
   );
   return {
     executable,
-    version: overrides.version ?? detectedCodexVersion(executable),
+    version: overrides.version ?? detectedCodexVersion(executable, overrides.cwd ?? process.cwd()),
     provider: overrides.provider ?? globalCodexConfigValue('model_provider') ?? 'codex',
     model,
     reasoningEffort,
@@ -398,11 +361,7 @@ export function rememberCodexUnsupportedEffort(runDir: string, identity: CodexCa
   } catch { /* a lost optimization must not change adapter correctness */ }
 }
 
-export function writeCodexConfig(codexHome: string, role: AgentConfig): string {
-  mkdirSync(codexHome, { recursive: true });
-  syncCodexAuthFiles(codexHome);
-  linkSharedPluginsCache(codexHome);
-  linkSharedSkillsCache(codexHome);
+export function writeCodexConfig(codexHome: string, role: AgentConfig, sessionHome?: string): string {
   const lines = [
     '# Generated by FlowCrew. Do not edit global Codex config for this run.',
   ];
@@ -426,7 +385,10 @@ export function writeCodexConfig(codexHome: string, role: AgentConfig): string {
   if (effort) lines.push(`model_reasoning_effort = ${tomlString(effort)}`);
   lines.push(`developer_instructions = ${tomlString(role.prompt ?? '')}`);
   const configPath = join(codexHome, 'config.toml');
-  writeFileSync(configPath, `${lines.join('\n')}\n`);
+  prepareAdapterHome({ home: codexHome,
+    plugins: process.env.CODEX_PLUGINS_CACHE || join(homedir(), '.codex-plugins-shared'),
+    skills: process.env.CODEX_SKILLS_CACHE || join(homedir(), '.codex-skills-shared'),
+    sessionHome, config: `${lines.join('\n')}\n` });
   return configPath;
 }
 
@@ -434,28 +396,25 @@ export function stageCodexHome(runDir: string, stageId: string): string {
   return join(runDir, 'stages', stageId, 'codex_home');
 }
 
-export function codexArgs(): string[] {
-  return ['--dangerously-bypass-approvals-and-sandbox'];
+export function codexArgs(tools?: readonly string[]): string[] {
+  // An empty role tool list forbids Codex judge writes. Read-only still permits
+  // inspection tools; the judge prompt restricts comparison to the supplied text.
+  return tools?.length === 0 ? ['--sandbox', 'read-only'] : ['--dangerously-bypass-approvals-and-sandbox'];
 }
 
-function preserveMissingCodexDiagnostic(result: RunResult): void {
-  // execWithStdin currently settles an asynchronous spawn error without its
-  // Error object. Recover only the unambiguous missing-executable case; an
-  // executable that exits silently must keep its original empty output.
-  if (result.exitCode === 1 && result.output === '' && findExecutableOnPath('codex') === undefined) {
-    result.output = 'Command not found: codex. Install the adapter CLI and try again.';
-  }
-}
-
-export function buildCodexExecArgs(_prompt: string, sessionId?: string): string[] {
+export function buildCodexExecArgs(_prompt: string, sessionId?: string, schemaPath?: string, tools?: readonly string[]): string[] {
   if (sessionId !== undefined && !isCodexSessionUuid(sessionId)) {
     throw new Error('Codex session resume requires an explicit UUID');
   }
+  const permissions = codexArgs(tools);
+  // resume inherits the parent exec sandbox flag; its own parser does not accept --sandbox.
   const args = sessionId
-    ? ['exec', 'resume', '--json', ...codexArgs(), sessionId]
-    : ['exec', '--json', ...codexArgs()];
+    ? tools?.length === 0 ? ['exec', ...permissions, 'resume', '--json', sessionId]
+      : ['exec', 'resume', '--json', ...permissions, sessionId]
+    : ['exec', '--json', ...permissions];
   // Terminate option parsing, then tell Codex to read the prompt from stdin.
   // Keeping prompt bytes out of argv avoids the OS per-argument size ceiling.
+  if (schemaPath) args.push('--output-schema', schemaPath);
   args.push('--', '-');
   return args;
 }
@@ -473,63 +432,107 @@ export function buildCodexExecArgs(_prompt: string, sessionId?: string): string[
  *   --config reasoning_effort="<effort>": set reasoning effort
  */
 export class CodexAdapter implements Adapter {
+  readonly capturesInvocationInput = true;
+
   async run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-    const ownerStageId = opts.resumeSessionId ? (opts.sessionOwnerStageId ?? opts.stageId) : opts.stageId;
+    const ownerStageId = opts.stageId;
     const codexHome = stageCodexHome(opts.runDir, ownerStageId);
+    let sessionHome = opts.resumeSessionId && opts.sessionOwnerStageId && opts.sessionOwnerStageId !== opts.stageId
+      ? stageCodexHome(opts.runDir, opts.sessionOwnerStageId) : undefined;
     // Mutable because a dead session is recoverable: `fresh_session` abandons the resume
     // id and rebuilds these arguments. Tracking it here rather than reading
     // `opts.resumeSessionId` later matters — the session capture below falls back to the
     // resume id, which would otherwise record the dead session as this stage's own.
     let resumeSessionId = opts.resumeSessionId;
-    let args = buildCodexExecArgs(prompt, resumeSessionId);
+    let invocationPrompt = prompt;
+    // Materialize only the schema this CLI will consume, outside its write authority.
+    const schemaPath = opts.outputSchema && generationCompatibleSchema(opts.outputSchema)
+      ? join(opts.runDir, 'stages', opts.stageId, 'output_schema.json') : undefined;
 
-    let result: RunResult | undefined;
+    let result: ExecResult | undefined;
+    const invocations: NativeInvocationUsage[] = [];
+    let durationMs = 0;
     const liveLogPath = join(opts.runDir, 'stages', opts.stageId, 'live.log');
     try {
+      if (schemaPath) {
+        mkdirSync(join(opts.runDir, 'stages', opts.stageId), { recursive: true });
+        atomicWrite(schemaPath, JSON.stringify(opts.outputSchema));
+      }
       // SURGICAL param-fix retry: when the failure output NAMES a fixable
       // parameter, fix exactly that and retry — instead of a blind same-config
       // retry that re-sends the request the server just rejected (and, with a
       // 30-minute stage timeout, burns real wall time to fail identically).
       // At most 2 fixes, each fix applied at most once.
-      const capabilityIdentity = resolveCodexCapabilityIdentity(role);
+      const capabilityIdentity = resolveCodexCapabilityIdentity(role, { cwd: opts.workDir });
       const rememberedEffortRejection = readCodexCapabilityMemory(opts.runDir, capabilityIdentity) !== undefined;
       let effectiveRole = rememberedEffortRejection ? applyFix(role, 'drop_effort') : role;
       const applied = new Set<AdapterFix>();
       if (rememberedEffortRejection) applied.add('drop_effort');
       let diagnosis: Diagnosis = { fix: 'none', friendly: '', matched: '' };
       for (;;) {
-        writeCodexConfig(codexHome, effectiveRole);
-        const commandActivity = opts.attemptIndex !== undefined && opts.attemptStartedAt
-          ? new CommandActivityTracker({
-              runDir: opts.runDir,
-              stageId: opts.stageId,
-              attemptIndex: opts.attemptIndex,
-              attemptStartedAt: opts.attemptStartedAt,
-              onLifecycle: opts.onCommandLifecycle,
-            })
-          : undefined;
-        try {
-          result = await execWithStdin('codex', args, prompt, {
-            cwd: opts.workDir,
-            timeout_ms: opts.timeout_ms,
-            liveLogPath,
-            env: { CODEX_HOME: codexHome },
-            onStdout: (chunk) => commandActivity?.feed(chunk),
-            abortSignal: opts.abortSignal,
-          });
-          preserveMissingCodexDiagnostic(result);
-        } finally {
-          commandActivity?.close();
-        }
+        const args = buildCodexExecArgs(invocationPrompt, resumeSessionId, schemaPath, effectiveRole.tools);
+        const configToml = readFileSync(writeCodexConfig(codexHome, effectiveRole, sessionHome), 'utf8');
+        const suppliedModel = configToml.match(/^model = (.+)$/m)?.[1];
+        sessionHome = undefined;
+        const countersBefore = captureCodexRollouts(codexHome);
+        const invocationStartedAt = new Date().toISOString();
+        opts.onInvocationInput?.({
+          systemPrompt: effectiveRole.prompt,
+          userPrompt: invocationPrompt,
+          model: suppliedModel ? JSON.parse(suppliedModel) as string : 'provider-default-unresolved',
+          resumeSessionId,
+          transport: { kind: 'request', payload: JSON.stringify({ executable: 'codex', argv: args, stdin: invocationPrompt,
+            configToml, outputSchema: schemaPath ? readFileSync(schemaPath, 'utf8') : undefined }) },
+        });
+        result = await withAdapterCredentials(codexHome, userCodexHome(), () => execWithStdin('codex', args, invocationPrompt, {
+          cwd: opts.workDir,
+          timeout_ms: opts.timeout_ms,
+          liveLogPath,
+          env: { CODEX_HOME: codexHome },
+          captureStreams: true,
+          execution: opts,
+          onStdout: (chunk, activity) => activity?.feed(chunk),
+          abortSignal: opts.abortSignal,
+        }));
+        // Settle before any diagnosis can replace this native call, and before
+        // successful-home cleanup removes its rollout evidence.
+        const events = parseCodexJsonl(result.stdout ?? result.output, opts.workDir);
+        const sessionId = events.sessionId ?? resumeSessionId;
+        const interval = sessionId
+          ? codexRolloutInterval(countersBefore, captureCodexRollouts(codexHome), sessionId)
+          : { reason: 'session_id_unavailable' };
+        const stdoutUsage = events.eventCount > 0 ? events : parseTokens(result.output);
+        const usage = interval.usage ?? stdoutUsage;
+        const mismatch = interval.usage && events.completed && events.tokens_in !== undefined && events.tokens_out !== undefined
+          && (interval.usage.tokens_in !== events.tokens_in || interval.usage.tokens_out !== events.tokens_out);
+        invocations.push({
+          startedAt: invocationStartedAt, completedAt: new Date().toISOString(), exitCode: result.exitCode, sessionId,
+          tokens_in: usage.tokens_in, tokens_out: usage.tokens_out,
+          tokens_cached: 'tokens_cached' in usage ? numericUsage(usage.tokens_cached) : undefined,
+          tokens_reasoning: 'tokens_reasoning' in usage ? numericUsage(usage.tokens_reasoning) : undefined,
+          tokenUsage: result.exitCode === 0 && events.completed && !mismatch && usage.tokens_in !== undefined && usage.tokens_out !== undefined
+            ? 'known' : usage.tokens_in !== undefined || usage.tokens_out !== undefined ? 'partial' : 'unknown',
+          source: interval.usage ? 'rollout_interval' : events.eventCount > 0 ? 'native_stdout' : 'unknown',
+          reason: mismatch ? 'rollout_stdout_disagreement' : interval.reason,
+        });
+        durationMs += result.duration_ms;
         if (result.exitCode === 0) break;
-        diagnosis = diagnoseAdapterFailure(result.output, result.exitCode);
+        // Machine events and the stderr stream are failure evidence. Agent
+        // messages inside JSONL must not supply a CLI parameter-fix diagnosis.
+        const attemptEvents = parseCodexJsonl(result.stdout ?? result.output);
+        const failureEvidence = attemptEvents.eventCount > 0
+          ? [attemptEvents.terminalError, result.stderr].filter(Boolean).join('\n')
+          : result.output;
+        diagnosis = result.spawnError && result.exitCode !== 124 && result.exitCode !== 137
+          ? { fix: 'none', friendly: `Could not launch Codex: ${result.spawnError.message}. Check the executable, its interpreter and working directory ${result.spawnError.cwd}.`, matched: result.spawnError.code ?? 'spawn error' }
+          : diagnoseAdapterFailure(failureEvidence, result.exitCode);
         if (diagnosis.fix === 'none' || applied.has(diagnosis.fix) || applied.size >= 2) break;
         applied.add(diagnosis.fix);
         if (diagnosis.fix === 'drop_effort') rememberCodexUnsupportedEffort(opts.runDir, capabilityIdentity);
         effectiveRole = applyFix(effectiveRole, diagnosis.fix);
         if (diagnosis.fix === 'fresh_session') {
           resumeSessionId = undefined;
-          args = buildCodexExecArgs(prompt, undefined);
+          invocationPrompt = opts.freshSessionPrompt ?? prompt;
         }
         try {
           appendFileSync(liveLogPath,
@@ -538,14 +541,15 @@ export class CodexAdapter implements Adapter {
       }
       if (result.exitCode !== 0 && diagnosis.friendly) result.friendlyError = diagnosis.friendly;
       const rawOutput = result.output;
-      const parsed = parseCodexJsonl(rawOutput, opts.workDir);
-      const tokens = parsed.eventCount > 0
-        ? { tokens_in: parsed.tokens_in, tokens_out: parsed.tokens_out }
-        : parseTokens(rawOutput);
-      if (tokens.tokens_in !== undefined) result.tokens_in = tokens.tokens_in;
-      if (tokens.tokens_out !== undefined) result.tokens_out = tokens.tokens_out;
+      const parsed = parseCodexJsonl(result.stdout ?? rawOutput, opts.workDir);
+      Object.assign(result, sumInvocationUsage(invocations), { invocations, duration_ms: durationMs });
       const capturedSessionId = parsed.sessionId ?? (isCodexSessionUuid(resumeSessionId) ? resumeSessionId : undefined);
-      if (capturedSessionId) {
+      // A different thread is not proof that the requested thread continued.
+      if (resumeSessionId && parsed.sessionId && parsed.sessionId !== resumeSessionId) {
+        result.exitCode = 1;
+        result.friendlyError = 'Codex resume returned a different thread UUID; continuation was not verified';
+      }
+      if (capturedSessionId && !(resumeSessionId && parsed.sessionId && parsed.sessionId !== resumeSessionId)) {
         result.sessionId = capturedSessionId;
         writeCodexSession(opts.runDir, opts.stageId, {
           version: 1,
@@ -561,20 +565,30 @@ export class CodexAdapter implements Adapter {
       } else {
         result.writeAttribution = 'unknown';
       }
-      // Return the agent's final message plus a structured terminal error, if
-      // present. `codex exec` echoes the entire session (banner + full prompt +
+      // Return the agent's final message plus failure diagnostics from the
+      // terminal event, stderr or launch error. `codex exec` echoes the entire session (banner + full prompt +
       // prior-stage transcripts + token footer). Returning that raw stream
       // would pollute output.md, downstream handoff context, and run summaries. The raw
       // transcript is preserved in live.log for debugging.
       // (Parse tokens above FIRST — cleaning strips the "tokens used" footer.)
-      result.output = parsed.output || extractFinalMessage(rawOutput);
+      result.output = result.spawnError ? rawOutput
+        : parsed.output || extractFinalMessage(result.stdout ?? rawOutput);
+      if (result.exitCode !== 0 && result.stderr?.trim() && !result.output.includes(result.stderr.trim())) {
+        result.output = [result.output, result.stderr.trim()].filter(Boolean).join('\n');
+      }
+      if (result.exitCode === 137 && !result.output.includes('[stage cancelled by control plane]')) {
+        result.output += '\n[stage cancelled by control plane]\n';
+      }
       if (result.exitCode !== 0 && result.exitCode !== 124 && result.exitCode !== 137) {
-        const kind = parsed.eventCount > 0
-          ? parsed.adapterFailureKind
+        const kind = result.spawnError ? undefined : parsed.eventCount > 0
+          ? parsed.adapterFailureKind ?? classifyAdapterFailure(result.stderr ?? '')
           : classifyAdapterFailure(rawOutput);
         result.adapterError = kind !== undefined;
         result.adapterFailureKind = kind;
+        if (result.exitCode !== 125 && !result.spawnError) result.providerFailure = parsed.providerFailure;
       }
+      delete result.stdout;
+      delete result.stderr;
       return result;
     } finally {
       // Preserve a successful owner home only when the scheduler proved there

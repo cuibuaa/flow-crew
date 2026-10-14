@@ -1,3 +1,6 @@
+import { spawnSync } from 'node:child_process';
+import { normalizedProjectContentPath } from './scheduler/sched_admission/scope-services.js';
+
 /**
  * One inventory for paths produced by language tooling.  Consumers project
  * the policy they need instead of maintaining unrelated closed lists.
@@ -14,7 +17,6 @@ export interface GeneratedPathPolicy {
 export const GENERATED_PATH_POLICIES: readonly GeneratedPathPolicy[] = [
   { directoryName: '.git', rollbackInventoryExcluded: true },
   { directoryName: '.fc', rollbackInventoryExcluded: true },
-  { directoryName: 'node_modules', rollbackInventoryExcluded: true },
   { directoryName: '.cache', rollbackInventoryExcluded: true, liveConstraintCacheAnchor: true },
   { directoryName: '__pycache__', rollbackInventoryExcluded: true, liveConstraintCacheAnchor: true },
   { directoryName: '.pytest_cache', rollbackInventoryExcluded: true, liveConstraintCacheAnchor: true },
@@ -40,6 +42,23 @@ export const ROLLBACK_INVENTORY_EXCLUDED_DIRECTORIES = new Set(
     .filter((entry) => entry.rollbackInventoryExcluded && entry.directoryName)
     .map((entry) => entry.directoryName!),
 );
+
+/** Git owns the boundary between authored content and disposable output.
+ * Tracked files remain protected even when their
+ * names match an ignore rule; callers also retain declared read-only inputs. */
+export function ignoredGeneratedPaths(projectDir: string, paths: readonly string[]): Set<string> {
+  const candidates = [...new Set(paths.map(normalizedProjectContentPath)
+    .filter((path): path is string => typeof path === 'string'))];
+  if (!candidates.length) return new Set();
+  const result = spawnSync('git', ['check-ignore', '--stdin', '-z'], {
+    cwd: projectDir, input: `${candidates.join('\0')}\0`, encoding: 'utf8',
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    maxBuffer: 32 * 1024 * 1024, timeout: 15_000,
+  });
+  return result.status === 0
+    ? new Set(result.stdout.split('\0').filter(Boolean))
+    : new Set();
+}
 
 export function isRecognizedGeneratedCacheAnchor(segment: string): boolean {
   return GENERATED_PATH_POLICIES.some((entry) => (

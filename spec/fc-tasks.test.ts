@@ -623,6 +623,18 @@ describe('fc_tasks validating atomic writes', () => {
     expect(JSON.parse(readFileSync(join(root, 'write-session', 'created.json'), 'utf-8'))).toEqual(created);
   });
 
+  it('accepts large text within the serialized entry budget and refuses an oversized entry', () => {
+    const description = 'x'.repeat(300 * 1024);
+    createTaskEntry({ storeRoot: root, session: 'text-budget', entry: task('large', 'pending', { description }) });
+    expect(readTaskLedger(root, 'text-budget')).toMatchObject({
+      state: 'ready', issues: [], entries: [{ id: 'large', description }],
+    });
+    expect(() => createTaskEntry({
+      storeRoot: root, session: 'text-budget', entry: task('oversized', 'pending', { description: 'x'.repeat(1024 * 1024) }),
+    })).toThrow(/entry exceeds .*file limit/u);
+    expect(readdirSync(join(root, 'text-budget'))).toEqual(['large.json']);
+  });
+
   it('populates and verifies an optional stable engine task link before publication', () => {
     const engineRoot = join(root, 'engine');
     writeEngineTask(engineRoot, {
@@ -909,6 +921,7 @@ describe('fc_tasks validating atomic writes', () => {
     ['illegal status', { status: 'invented' }, /status must be one of pending, in_progress, completed/u],
     ['dangling blockedBy', { blockedBy: ['missing'] }, /work\.blockedBy names missing entry missing/u],
     ['explicit null', { description: null }, /description must be a string/u],
+    ['duplicate relationship', { blockedBy: ['work', 'work'] }, /must not contain duplicate ids/u],
   ] as const)('refuses a partial update with %s without changing stored bytes', (_label, patch, refusal) => {
     const path = writeEntry('partial-refusal', 'existing.json', task('work', 'in_progress'));
     const before = readFileSync(path);

@@ -1,3 +1,4 @@
+import { emptyInbox } from './test-support/engine-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -32,14 +33,7 @@ const RESEARCH_WORKFLOW = [
   '    is_gate: true',
 ].join('\n');
 
-function emptyInbox(): CampaignInboxOverviewLike {
-  return {
-    approvals: { status: 'complete', items: [] },
-    deferred: { status: 'complete', items: [] },
-    stale: { status: 'complete', items: [] },
-    patches: { status: 'complete', items: [], coverage: { succeeded: 1, failed: 0 } },
-  };
-}
+
 
 function runState(id: string, extra: Partial<StoreState> = {}): StoreState {
   return {
@@ -349,6 +343,12 @@ describe('research trend admission', () => {
 });
 
 describe('cost, canonical states, title, and proof of work', () => {
+  it('has complete token accounting for current runs without model-supervisor state', () => {
+    const state = runState('stage-cost', { supervise: undefined });
+    expect(deriveRunTokenCost(state)).toMatchObject({ tokens: 15, supervisorTokens: 0, complete: true });
+    expect(deriveRunTokenCost({ ...state, supervise: true })).toMatchObject({ tokens: 15, complete: false });
+  });
+
   it('accounts iteration evidence once when the legacy retired-usage mirror is also present', () => {
     const historicalStatus = {
       status: STAGE_STATUS.COMPLETE,
@@ -505,7 +505,6 @@ describe('campaign-local attention and failure isolation', () => {
       title: 'Approve our change',
       createdAt: NOW.toISOString(),
       state: 'pending',
-      standingRuleEligible: { ok: false },
       campaignId,
     });
     inbox.approvals.items.push({
@@ -517,7 +516,6 @@ describe('campaign-local attention and failure isolation', () => {
       title: 'Other campaign approval',
       createdAt: NOW.toISOString(),
       state: 'pending',
-      standingRuleEligible: { ok: false },
       campaignId: 'other-campaign',
     });
     inbox.deferred.items.push({ id: 1, runId: early.runId, name: 'approval mirror', deferReason: 'approval pending' });

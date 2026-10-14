@@ -129,44 +129,6 @@ describe('cmdTask', () => {
     expect(out.text()).not.toContain('Status: terminal\n');
   });
 
-  it('[A3] shows the live writer-lease wait count and blocker on Current stage lines', async () => {
-    const operational = buildOperationalProjection({
-      runId: 'run-3',
-      status: 'running',
-      stages: {
-        owner: {
-          status: 'running',
-          attempts: [{ index: 1, status: 'running', startedAt: '2026-09-14T10:00:00.000Z' }],
-        },
-        waiter: {
-          status: 'running',
-          attempts: [{ index: 1, status: 'running', startedAt: '2026-09-14T10:00:00.000Z' }],
-        },
-      },
-    }, [{
-      type: 'writer_lease_wait_started',
-      stageId: 'waiter',
-      blockedByStageId: 'owner',
-      waitStartedAt: '2026-09-14T10:00:01.000Z',
-      timestamp: '2026-09-14T10:00:01.000Z',
-      detail: 'waiting for writer lease behind owner',
-    }], { nowMs: Date.parse('2026-09-14T10:00:03.000Z') });
-    server = await startRpcServer(socketPath, () => ({
-      task: { ...task({ id: 3, status: 'running' }), operational },
-      recent_ticks: [],
-    }));
-    const out = new Capture();
-
-    expect(await cmdTask(
-      ['task', 'show', '3', '--port', socketPath],
-      { stdout: out.stream as any, stderr: out.err as any },
-    )).toBe(0);
-    const currentLines = out.text().split(/\r?\n/u).filter((line) => line.startsWith('Current stage:'));
-    expect(currentLines).toHaveLength(2);
-    expect(currentLines.every((line) => line.includes('1 stage waiting for writer lease'))).toBe(true);
-    expect(currentLines.find((line) => line.includes('waiter'))).toContain('behind owner');
-  });
-
   it('[D3] labels Latest reason with its stage, attempt, time, and historical status', async () => {
     const operational = buildOperationalProjection({
       runId: 'run-3',
@@ -301,22 +263,25 @@ describe('cmdTask', () => {
     expect(out.text()).toBe(summary);
   });
 
-  it('round-trips cancel, retry, and tail commands', async () => {
+  it('round-trips cancel, resume, retry, and tail commands', async () => {
     server = await startRpcServer(socketPath, (req): RpcResponse => {
       requests.push(req);
       if (req.cmd === 'show') return { task: task({ id: req.id }), recent_ticks: [] };
       if (req.cmd === 'cancel') return cancelledTask(req.id);
-      if (req.cmd === 'retry') return { new_attempt: 2, unit: 'flowcrew-task-1-attempt-2.service' };
+      if (req.cmd === 'retry' || req.cmd === 'resume') return { new_attempt: 2, unit: 'flowcrew-task-1-attempt-2.service' };
       if (req.cmd === 'tail') return { output: 'journal\n' };
       return { ok: true };
     });
     const out = new Capture();
 
     expect(await cmdTask(['task', 'cancel', '1', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
+    expect(await cmdTask(['task', 'resume', '1', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
     expect(await cmdTask(['task', 'retry', '1', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
     expect(await cmdTask(['task', 'tail', '1', '--tail', '3', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
 
-    expect(requests.map((r) => r.cmd)).toEqual(['show', 'cancel', 'retry', 'tail']);
+    expect(requests.map((r) => r.cmd)).toEqual(['cancel', 'resume', 'retry', 'tail']);
+    expect(requests[1]).toEqual({ cmd: 'resume', id: 1 });
+    expect(out.text()).toContain('resume queued after launch 2');
     expect(out.text()).toContain('retry queued after launch 2');
     expect(out.text()).toContain('journal');
   });

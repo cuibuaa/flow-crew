@@ -1,3 +1,5 @@
+import { atomicWrite } from '../src/store.js';
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
@@ -11,7 +13,6 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
-import type { SupervisorConfig } from '../src/config.js';
 import {
   beginStageAttempt,
   completeStageAttempt,
@@ -22,15 +23,7 @@ import {
   setFcGlobalDir,
   writeRunState,
 } from '../src/store.js';
-import {
-  inspectStageExecutionFacts,
-  Supervisor,
-  type DirectionEvidenceBinding,
-  type SupervisorAssessment,
-  type SupervisorStageEvidence,
-} from '../src/supervisor.js';
-import { recordRunEvent } from '../src/run-events.js';
-import { readTraceEvents } from '../src/trace.js';
+import { inspectStageExecutionFacts } from '../src/stage-watchdog.js';
 import { runStage } from '../src/worker.js';
 
 const stageId = 'acceptance_gate';
@@ -39,19 +32,6 @@ const role: AgentConfig = {
   description: 'test gate',
   tools: [],
   prompt: 'verify the deliverable',
-};
-const supervisorConfig: SupervisorConfig = {
-  enabled: true,
-  adapter: 'scripted',
-  model: 'test',
-  reasoningEffort: 'low',
-  pollIntervalMs: 30_000,
-  routineAssessmentIntervalMs: 180_000,
-  cooldownAfterActionMs: 0,
-  maxAssessmentsPerIteration: 20,
-  tailBytes: 16_384,
-  minDeltaBytes: 4096,
-  stuckThresholdMs: 1_000,
 };
 
 let projectDir: string;
@@ -106,7 +86,7 @@ function waitThenReturnOnAbort(cleanDelayMs = 2_500): Adapter {
         settled = true;
         clearTimeout(cleanTimer);
         resolve(aborted
-          ? { output: '[stage aborted by supervisor]\n', exitCode: 137, duration_ms: 2_000 }
+          ? { output: '[stage aborted]\n', exitCode: 137, duration_ms: 2_000 }
           : { output: 'completed normally\n', exitCode: 0, duration_ms: cleanDelayMs });
       };
       const cleanTimer = setTimeout(() => finish(false), cleanDelayMs);
@@ -118,6 +98,7 @@ function waitThenReturnOnAbort(cleanDelayMs = 2_500): Adapter {
 
 function stageOptions() {
   return {
+      artifactContract: fixtureArtifactContract(stageId),
     stageId,
     role,
     dependsOn: [] as string[],
@@ -130,7 +111,7 @@ function stageOptions() {
   };
 }
 
-describe('factual supervisor stall decisions', () => {
+describe('current-attempt watchdog facts', () => {
   it('distinguishes current-attempt verdict, handoff, and commit facts', () => {
     markRunningAttempt();
     writeFileSync(join(currentRunDir, `verdict_${stageId}.json`), '{"pass":false}\n');
@@ -182,329 +163,13 @@ describe('factual supervisor stall decisions', () => {
     expect(facts.protectedFromIdleAbort).toBe(false);
   });
 
-  it('does not abort a quiet stage while it is writing durable artifacts', async () => {
-    markRunningAttempt();
-    const adapter: Adapter = {
-      run: async () => ({
-        output: '{"verdict":"WAIT","target_stage":null,"reason":"artifact progress","guidance":null}',
-        exitCode: 0,
-        duration_ms: 1,
-      }),
-    };
-    const supervisor = new Supervisor(projectDir, currentRunId, adapter, supervisorConfig, 'test goal');
-    const internals = supervisor as unknown as {
-      tick(): Promise<void>;
-      act(assessment: SupervisorAssessment): Promise<SupervisorAssessment>;
-      prevStageStatusSnapshot: Record<string, string>;
-      stageLastProgressMs: Record<string, number>;
-      watchdogLastArtifactCheckMs: number;
-    };
-    internals.prevStageStatusSnapshot = { [stageId]: 'running' };
-    internals.stageLastProgressMs = { [stageId]: Date.now() - 10_000 };
-    internals.watchdogLastArtifactCheckMs = Date.now() - 1_000;
-    const checkpoint = join(currentRunDir, 'stages', stageId, 'checkpoint.json');
-    writeFileSync(checkpoint, '{"completed_checks":17}\n');
-    const future = new Date(Date.now() + 100);
-    utimesSync(checkpoint, future, future);
-
-    await internals.tick();
-
-    expect(existsSync(join(currentRunDir, 'signals', `abort_${stageId}.json`))).toBe(false);
-  });
-
-  it('rechecks durable progress written during semantic assessment before an idle ABORT', async () => {
-    vi.useFakeTimers();
-    const now = Date.now();
-    const startedAt = new Date(now - 60_000).toISOString();
-    markRunningAttempt(startedAt);
-    const checkpoint = join(currentRunDir, 'stages', stageId, 'checkpoint.json');
-    const adapter: Adapter = {
-      run: async () => new Promise((resolve) => {
-        setTimeout(() => {
-          writeFileSync(checkpoint, '{"completed_checks":18}\n');
-          resolve({
-            output: '{"verdict":"ABORT","target_stage":"acceptance_gate","reason":"stdout was quiet","guidance":null}',
-            exitCode: 0,
-            duration_ms: 1_500,
-          });
-        }, 1_500);
-      }),
-    };
-    const supervisor = new Supervisor(projectDir, currentRunId, adapter, supervisorConfig, 'test goal');
-    const internals = supervisor as unknown as {
-      tick(): Promise<void>;
-      prevStageStatusSnapshot: Record<string, string>;
-      stageLastProgressMs: Record<string, number>;
-      watchdogAttemptKeys: Record<string, string>;
-      watchdogLastArtifactCheckMs: number;
-    };
-    internals.prevStageStatusSnapshot = { [stageId]: 'running' };
-    internals.stageLastProgressMs = { [stageId]: now - 500 };
-    internals.watchdogAttemptKeys = { [stageId]: `${stageId}:1:${startedAt}` };
-    internals.watchdogLastArtifactCheckMs = now;
-    writeFileSync(join(currentRunDir, 'user_input.md'), 'check progress now\n');
-
-    const tick = internals.tick();
-    await vi.advanceTimersByTimeAsync(1_500);
-    await tick;
-
-    expect(readFileSync(checkpoint, 'utf-8')).toContain('18');
-    expect(existsSync(join(currentRunDir, 'signals', `abort_${stageId}.json`))).toBe(false);
-    const supervisorState = JSON.parse(readFileSync(
-      join(currentRunDir, 'supervisor_state.json'),
-      'utf-8',
-    )) as { actions: Array<{ verdict: string; reason: string }> };
-    expect(supervisorState.actions.at(-1)).toMatchObject({ verdict: 'WAIT' });
-    expect(supervisorState.actions.at(-1)?.reason).toMatch(/artifact progress/i);
-  });
-
-  it('protects the current attempt after terminal output is written while its verdict is finalizing', async () => {
-    markRunningAttempt();
-    writeFileSync(
-      join(currentRunDir, 'stages', stageId, 'output.md'),
-      'Final consistency check complete. I am now writing the one-time verdict.\n',
-    );
-    const adapter: Adapter = {
-      run: async () => ({
-        output: '{"verdict":"ABORT","target_stage":"acceptance_gate","reason":"already emitted a failing verdict","guidance":null}',
-        exitCode: 0,
-        duration_ms: 1,
-      }),
-    };
-    const supervisor = new Supervisor(projectDir, currentRunId, adapter, supervisorConfig, 'test goal');
-    const internals = supervisor as unknown as {
-      tick(): Promise<void>;
-      prevStageStatusSnapshot: Record<string, string>;
-      stageLastProgressMs: Record<string, number>;
-      watchdogLastArtifactCheckMs: number;
-    };
-    internals.prevStageStatusSnapshot = { [stageId]: 'running' };
-    internals.stageLastProgressMs = { [stageId]: Date.now() - 10_000 };
-    internals.watchdogLastArtifactCheckMs = Date.now() + 10_000;
-
-    await internals.tick();
-    const semanticResult = await internals.act({
-      verdict: 'ABORT',
-      targetStage: stageId,
-      reason: 'already emitted a failing verdict',
-      guidance: null,
-    });
-
-    expect(existsSync(join(currentRunDir, 'signals', `abort_${stageId}.json`))).toBe(false);
-    expect(existsSync(join(currentRunDir, `verdict_${stageId}.json`))).toBe(false);
-    expect(semanticResult.verdict).toBe('WAIT');
-    expect(semanticResult.reason).toMatch(/finalization window/i);
-  });
-
-  it('replaces an unverified model claim with a reason that states no verdict was observed', async () => {
-    markRunningAttempt();
-    const adapter: Adapter = { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) };
-    const supervisor = new Supervisor(projectDir, currentRunId, adapter, supervisorConfig, 'test goal');
-    const internals = supervisor as unknown as {
-      act(assessment: SupervisorAssessment): Promise<void>;
-      stageLastProgressMs: Record<string, number>;
-    };
-    internals.stageLastProgressMs = { [stageId]: Date.now() - 10_000 };
-
-    await internals.act({
-      verdict: 'ABORT',
-      targetStage: stageId,
-      reason: 'The gate is stuck after already emitting an honest failing verdict.',
-      guidance: null,
-    });
-
-    const signal = JSON.parse(readFileSync(
-      join(currentRunDir, 'signals', `abort_${stageId}.json`),
-      'utf-8',
-    )) as {
-      version: number;
-      stageId: string;
-      attemptIndex: number;
-      reason: string;
-      source: string;
-      unverifiedAssessmentReason: string;
-    };
-    expect(signal).toMatchObject({
-      version: 1,
-      stageId,
-      attemptIndex: 1,
-      source: 'supervisor',
-      unverifiedAssessmentReason: 'The gate is stuck after already emitting an honest failing verdict.',
-    });
-    expect(signal.reason).toMatch(/no verdict observed/i);
-    expect(signal.reason).not.toContain('already emitting');
-  });
-
-  it('labels the raw model claim unverified and persists the grounded effective assessment', async () => {
-    const startedAt = new Date(Date.now() - 60_000).toISOString();
-    markRunningAttempt(startedAt);
-    const rawReason = 'The gate already emitted a failing verdict and should be killed.';
-    const adapter: Adapter = {
-      run: async () => {
-        writeFileSync(
-          join(currentRunDir, 'stages', stageId, 'output.md'),
-          'Final checks complete; writing the one-time verdict now.\n',
-        );
-        return {
-          output: JSON.stringify({
-            verdict: 'ABORT',
-            target_stage: stageId,
-            reason: rawReason,
-            guidance: null,
-          }),
-          exitCode: 0,
-          duration_ms: 1,
-        };
-      },
-    };
-    const supervisor = new Supervisor(projectDir, currentRunId, adapter, supervisorConfig, 'test goal');
-    const internals = supervisor as unknown as {
-      tick(): Promise<void>;
-      prevStageStatusSnapshot: Record<string, string>;
-      stageLastProgressMs: Record<string, number>;
-      watchdogAttemptKeys: Record<string, string>;
-    };
-    internals.prevStageStatusSnapshot = { [stageId]: 'running' };
-    internals.stageLastProgressMs = { [stageId]: Date.now() };
-    internals.watchdogAttemptKeys = { [stageId]: `${stageId}:1:${startedAt}` };
-    writeFileSync(join(currentRunDir, 'user_input.md'), 'verify the finalization state\n');
-
-    await internals.tick();
-
-    expect(existsSync(join(currentRunDir, 'signals', `abort_${stageId}.json`))).toBe(false);
-    const usage = JSON.parse(readFileSync(
-      join(currentRunDir, 'stages', '_supervisor', 'status.json'),
-      'utf-8',
-    )) as {
-      attempts: Array<{
-        verdict?: string;
-        effectiveReason?: string;
-        unverifiedAssessment?: { verdict: string; reason: string };
-      }>;
-    };
-    expect(usage.attempts.at(-1)).toMatchObject({
-      verdict: 'WAIT',
-      unverifiedAssessment: { verdict: 'ABORT', reason: rawReason },
-    });
-    expect(usage.attempts.at(-1)?.effectiveReason).toMatch(/no verdict observed/i);
-    expect(usage.attempts.at(-1)?.effectiveReason).toMatch(/finalization window/i);
-
-    const trace = readTraceEvents(projectDir, currentRunId, '_supervisor');
-    expect(trace.at(-1)?.outputSummary).toContain(rawReason);
-    expect(trace.at(-1)?.outputSummary).toMatch(/unverified model assessment/i);
-  });
-
-  it('still aborts a productive wrong direction after repeated GUIDE decisions', async () => {
-    markRunningAttempt();
-    const attempt = readRunState(projectDir, currentRunId).stages[stageId].attempts!.at(-1)!;
-    const now = Date.now();
-    const directionKey = 'same_wrong_implementation_path';
-    const adapter: Adapter = { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) };
-    const supervisor = new Supervisor(projectDir, currentRunId, adapter, supervisorConfig, 'test goal');
-    const guideAssessment: SupervisorAssessment = {
-      verdict: 'GUIDE',
-      targetStage: stageId,
-      reason: 'same wrong implementation path',
-      guidance: 'use the required production path',
-      directionKey,
-    };
-    const internals = supervisor as unknown as {
-      act(
-        assessment: SupervisorAssessment,
-        progressSinceMs?: number,
-        source?: 'supervisor' | 'operator',
-        observedDeliverables?: ReadonlyMap<string, never>,
-        observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
-        observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
-        comparisonStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
-      ): Promise<SupervisorAssessment>;
-      actions: Array<{
-        timestamp: string;
-        tick: number;
-        assessment: SupervisorAssessment;
-        runningStages: string[];
-        targetAttemptIndex: number;
-        source: 'supervisor';
-        directionEvidence: DirectionEvidenceBinding;
-      }>;
-      stageLastProgressMs: Record<string, number>;
-    };
-    internals.actions = [1, 2].map((tick) => ({
-      timestamp: new Date(now - (tick === 1 ? 4_000 : 2_000)).toISOString(),
-      tick,
-      assessment: {
-        ...guideAssessment,
-        guidanceId: `guide-${tick}`,
-        evidenceIds: [`ev_${tick === 1 ? 'a' : 'b'}`.padEnd(23, tick === 1 ? 'a' : 'b')],
-      },
-      runningStages: [stageId],
-      targetAttemptIndex: attempt.index,
-      source: 'supervisor',
-      directionEvidence: {
-        version: 1,
-        stageId,
-        attemptIndex: attempt.index,
-        attemptStartedAt: attempt.startedAt,
-        generation: (tick === 1 ? 'a' : 'b').repeat(64),
-      },
-    }));
-    for (const [offset, guidanceId, invocationIndex] of [[3_000, 'guide-1', 8], [1_000, 'guide-2', 9]] as const) {
-      recordRunEvent(projectDir, currentRunId, {
-        type: 'guidance_delivery_checked', runId: currentRunId,
-        timestamp: new Date(now - offset).toISOString(), stageId,
-        attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
-        boundary: 'adapter_invocation', invocationIndex,
-        guidanceIds: [guidanceId], delivered: true, source: 'worker',
-      });
-    }
-    internals.stageLastProgressMs = { [stageId]: Date.now() };
-
-    const result = await internals.act({
-      verdict: 'ABORT',
-      targetStage: stageId,
-      reason: 'the same wrong direction continues despite active output',
-      guidance: null,
-      directionKey,
-      evidenceIds: ['ev_cccccccccccccccccccc'],
-      assessedAt: new Date(now).toISOString(),
-    }, Date.now() + 1_000, 'supervisor', undefined, new Map([[stageId, {
-      version: 1, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
-      generation: 'c'.repeat(64),
-    }]]), undefined, new Map([[stageId, {
-      version: 1,
-      stageId,
-      attemptIndex: attempt.index,
-      attemptStartedAt: attempt.startedAt,
-      rows: [{
-        id: 'ev_cccccccccccccccccccc',
-        kind: 'command_invocation',
-        authority: 'action',
-        text: 'continue the same implementation path',
-      }],
-    }], ['unaccused', {
-      version: 1,
-      stageId: 'unaccused',
-      attemptIndex: 1,
-      attemptStartedAt: attempt.startedAt,
-      rows: [{
-        id: 'ev_dddddddddddddddddddd',
-        kind: 'command_invocation',
-        authority: 'action',
-        text: 'npm test completed',
-      }],
-    }]]));
-
-    expect(result.verdict).toBe('ABORT');
-    expect(result.reason).toContain('2 prior GUIDE decisions observed');
-    expect(existsSync(join(currentRunDir, 'signals', `abort_${stageId}.json`))).toBe(true);
-  });
 });
 
 describe('attempt-scoped one-shot abort signals', () => {
   it('consumes a matching signal once so the next same-name attempt runs normally', async () => {
     vi.useFakeTimers();
     const signalPath = join(currentRunDir, 'signals', `abort_${stageId}.json`);
-    writeFileSync(signalPath, JSON.stringify({
+    atomicWrite(signalPath, JSON.stringify({
       version: 1,
       stageId,
       attemptIndex: 1,
@@ -538,7 +203,7 @@ describe('attempt-scoped one-shot abort signals', () => {
       completedAt: '2026-08-01T00:00:01.000Z',
     });
     const signalPath = join(currentRunDir, 'signals', `abort_${stageId}.json`);
-    writeFileSync(signalPath, JSON.stringify({
+    atomicWrite(signalPath, JSON.stringify({
       version: 1,
       stageId,
       attemptIndex: 1,
@@ -554,16 +219,16 @@ describe('attempt-scoped one-shot abort signals', () => {
 
     expect(result.exitCode).toBe(0);
     expect(existsSync(signalPath)).toBe(false);
-    expect(liveLog).toMatch(/ignored stale supervisor abort signal/i);
+    expect(liveLog).toMatch(/ignored stale stage abort signal/i);
     expect(liveLog).toContain('expected attempt 2');
     expect(liveLog).toContain('observed attempt 1');
   });
 
-  it('keeps an owned supervisor ABORT authoritative when the adapter throws before the next poll', async () => {
+  it('keeps an owned archived supervisor signal authoritative when the adapter throws before the next poll', async () => {
     const signalPath = join(currentRunDir, 'signals', `abort_${stageId}.json`);
     const adapter: Adapter = {
       run: async () => {
-        writeFileSync(signalPath, JSON.stringify({
+        atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId,
           attemptIndex: 1,
@@ -579,7 +244,7 @@ describe('attempt-scoped one-shot abort signals', () => {
     expect(result).toMatchObject({
       exitCode: 137,
       timedOut: false,
-      timeoutTerminationCause: 'supervisor_abort',
+      timeoutTerminationCause: 'stage_abort',
     });
     expect(existsSync(signalPath)).toBe(false);
   });

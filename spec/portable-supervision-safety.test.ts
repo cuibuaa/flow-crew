@@ -1,7 +1,7 @@
 /**
  * Regression invariant: portable supervision binds process identity before
- * signalling, owns the complete agent process group, and fails closed when
- * lifecycle evidence is ambiguous.
+ * signalling, owns the complete agent process group, and preserves ambiguous
+ * lifecycle evidence when an operator closes the workflow.
  *
  * Maintenance contract: this is a permanent cross-platform regression suite,
  * not a run-specific gate artifact. Keep it active in the default Vitest set.
@@ -27,17 +27,18 @@ import {
   processStartToken,
   processStartTokensMatch,
 } from '../src/run-lock.js';
+import { RunCancellationCoordinator } from '../src/run-control.js';
 import {
-  CancellationObservationLimitError,
-  RunCancellationCoordinator,
-} from '../src/run-control.js';
-import {
+  atomicWriteJson,
+  observePortableUnit,
   readSupervisionRunning,
+  SUPERVISION_PROTOCOL_VERSION,
   supervisionPaths,
   type SupervisorBackend,
   type UnitStatus,
 } from '../src/supervision.js';
 import { TASK_STATUS, TaskRegistry } from '../src/task-registry.js';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 
 const TERMINATION_WAIT_MS = 5_000;
 const POLL_MS = 25;
@@ -134,7 +135,9 @@ async function launchOwnedProcessTree(
   });
 
   const recordPath = fallbackRecordPath(baseDir, unit);
-  const initialized = await waitUntil(() => existsSync(pidPath) && existsSync(recordPath));
+  // The fixture creates the pid file before it writes it; wait for both pids, not only for the file.
+  const initialized = await waitUntil(() => existsSync(recordPath) && existsSync(pidPath)
+    && /^\d+,\d+/.test(readFileSync(pidPath, 'utf-8')));
   expect(initialized, `fallback unit ${unit} never initialized`).toBe(true);
   const [agentPid, childPid] = readFileSync(pidPath, 'utf-8').split(',').map(Number);
   const recorded = JSON.parse(readFileSync(recordPath, 'utf-8')) as { pid?: number };
@@ -165,6 +168,78 @@ class PersistentlyActiveUnits implements SupervisorBackend {
 }
 
 describe('portable supervision safety invariants', () => {
+  it.each([0, 3, 143])('observes durable exit %i published between the first status read and loss of shim binding', (normalized) => {
+    const unit = 'publication-race.service';
+    const paths = supervisionPaths(fixtureRoot, unit);
+    const deadShim = 2147483647;
+    atomicWriteJson(paths.running, {
+      version: SUPERVISION_PROTOCOL_VERSION,
+      shimPid: deadShim, shimCommand: 'fixture-finished-shim',
+      agentPid: 2147483646, command: 'fixture-finished-agent', startedAt: new Date().toISOString(),
+    });
+    const exit = {
+      version: SUPERVISION_PROTOCOL_VERSION,
+      exitCode: normalized === 143 ? null : normalized,
+      normalized,
+      ...(normalized === 143 ? { signal: 'SIGTERM' } : {}),
+      endedAt: new Date().toISOString(),
+    };
+    const originalKill = process.kill;
+    let published = false;
+    const probe = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid === deadShim && signal === 0) {
+        // The reader has already seen the exit path absent. Match finalize's
+        // atomic publication followed by shim exit; never send a real signal.
+        expect(existsSync(paths.exit)).toBe(false);
+        atomicWriteJson(paths.exit, exit);
+        published = true;
+        throw Object.assign(new Error('fixture shim exited'), { code: 'ESRCH' });
+      }
+      return originalKill.call(process, pid, signal);
+    });
+    try {
+      const observation = observePortableUnit(fixtureRoot, unit);
+      expect(published).toBe(true);
+      expect(observation).toEqual({
+        status: { kind: 'terminal', exitCode: normalized, ...(normalized === 143 ? { signal: 'SIGTERM' } : {}) },
+        exit,
+      });
+    } finally {
+      probe.mockRestore();
+    }
+  });
+
+  it('keeps a lost shim with a live owned child and absent or invalid exit evidence unobservable', async () => {
+    const temporaryHome = join(fixtureRoot, 'home');
+    const temporaryFcHome = join(fixtureRoot, 'fc');
+    mkdirSync(temporaryHome);
+    mkdirSync(temporaryFcHome);
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      cwd: fixtureRoot,
+      env: { ...process.env, HOME: temporaryHome, USERPROFILE: temporaryHome, FC_HOME: temporaryFcHome },
+      stdio: 'ignore',
+    });
+    ownedChildren.add(child);
+    await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    const unit = 'lost-shim-live-child.service';
+    const paths = supervisionPaths(fixtureRoot, unit);
+    atomicWriteJson(paths.running, {
+      version: SUPERVISION_PROTOCOL_VERSION,
+      shimPid: 2147483647, shimCommand: 'fixture-lost-shim',
+      agentPid: child.pid, command: 'fixture-live-child', startedAt: new Date().toISOString(),
+    });
+    const unknown = { kind: 'unobservable', reason: 'shim died while its agent or command group may still be running' };
+    expect(processIsAlive(child.pid!)).toBe(true);
+    expect(observePortableUnit(fixtureRoot, unit).status).toEqual(unknown);
+    atomicWriteJson(paths.exit, { version: 999, exitCode: 0, normalized: 0, endedAt: new Date().toISOString() });
+    expect(observePortableUnit(fixtureRoot, unit).status).toEqual(unknown);
+    expect(processIsAlive(child.pid!)).toBe(true);
+    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    child.kill('SIGKILL');
+    await exited;
+    ownedChildren.delete(child);
+  });
+
   it('keeps the portable identity, group signal, and ENOENT authority in one safety bundle', () => {
     const orchestrator = readFileSync(new URL('../src/orchestrator.ts', import.meta.url), 'utf-8');
     expect(orchestrator).toContain('processStartTokensMatch(recordedToken, processStartToken(fallbackPid))');
@@ -365,7 +440,9 @@ describe('portable supervision safety invariants', () => {
 
   it('builds the supervised command with the daemon absolute Node interpreter', () => {
     const registry = new TaskRegistry({ baseDir: fixtureRoot });
-    const task = registry.create({ config_path: join(fixtureRoot, 'campaign.yml'), projectDir: fixtureRoot });
+    const brief = 'Verify the absolute interpreter used by supervised commands.';
+    const task = registry.create({ brief_text: brief, projectDir: fixtureRoot,
+      brief_admission: createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: '2026-07-30T00:00:00.000Z' }) });
 
     const command = buildCommand(task, join(fixtureRoot, 'cli.js'));
 
@@ -373,7 +450,7 @@ describe('portable supervision safety invariants', () => {
     expect(command.startsWith("'node' ")).toBe(false);
   });
 
-  it('exhausts retries for every persistently nonterminal observation', async () => {
+  it('settles operator cancellation with a persistently active unit and retains that observation', async () => {
     const registry = new TaskRegistry({ baseDir: fixtureRoot });
     const units = new PersistentlyActiveUnits();
     const task = registry.create({
@@ -386,14 +463,14 @@ describe('portable supervision safety invariants', () => {
       units,
       timeoutMs: 0,
       signalGraceMs: 0,
-      maxUnobservableObservations: 2,
     });
 
-    await expect(coordinator().cancelTask(task.id)).resolves.toMatchObject({ ok: false, status: 'cancelling' });
-    await expect(coordinator().cancelTask(task.id)).rejects.toBeInstanceOf(CancellationObservationLimitError);
-    expect(registry.get(task.id)?.status).toBe(TASK_STATUS.STUCK);
-    const callsAtLimit = units.stopCalls;
-    await expect(coordinator().cancelTask(task.id)).rejects.toBeInstanceOf(CancellationObservationLimitError);
-    expect(units.stopCalls).toBe(callsAtLimit);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await expect(coordinator().cancelTask(task.id)).resolves.toMatchObject({
+        ok: true, status: 'cancelled', observation: { unitState: { kind: 'active' } },
+      });
+      expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLED, completed_at: expect.any(String) });
+    }
+    expect(units.stopCalls).toBeGreaterThan(0);
   });
 });

@@ -412,12 +412,15 @@ describe('systemd confirmation truth', () => {
       const result = await coordinator.cancelTask(task.id);
 
       expect(result).toMatchObject({
-        ok: false,
-        status: 'cancelling',
-        observation: { unitState: { kind: 'unobservable', reason: 'systemctl probe failed' } },
+        ok: true,
+        status: 'cancelled',
+        observation: {
+          unitState: { kind: 'unobservable', reason: 'systemctl probe failed' },
+          schedulerAlive: false, runReadable: true, launchInFlight: false,
+        },
       });
-      expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLING);
-      expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.RUNNING);
+      expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLED);
+      expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.STOPPED);
     } finally {
       if (priorPath === undefined) delete process.env.PATH;
       else process.env.PATH = priorPath;
@@ -463,12 +466,15 @@ describe('systemd confirmation truth', () => {
       const result = await coordinator.cancelTask(task.id);
 
       expect(result).toMatchObject({
-        ok: false,
-        status: 'cancelling',
-        observation: { unitState: { kind: 'unobservable', reason: 'systemctl probe failed' } },
+        ok: true,
+        status: 'cancelled',
+        observation: {
+          unitState: { kind: 'unobservable', reason: 'systemctl probe failed' },
+          schedulerAlive: false, runReadable: true, launchInFlight: false,
+        },
       });
-      expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLING);
-      expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.RUNNING);
+      expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLED);
+      expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.STOPPED);
     } finally {
       if (priorPath === undefined) delete process.env.PATH;
       else process.env.PATH = priorPath;
@@ -477,9 +483,32 @@ describe('systemd confirmation truth', () => {
 });
 
 describe('cancel-and-confirm coordinator', () => {
+  it.each([RUN_STATUS.STOPPED, RUN_STATUS.FAILED, RUN_STATUS.INCOMPLETE])('stops an owned continuation before preserving its archived %s verdict', async status => {
+    const runId = 'continuation-admission';
+    const directory = writeRun(runId, status, LIVE_FIXTURE_PID);
+    const archived = readFileSync(join(directory, 'run.json'), 'utf8');
+    let alive = true;
+    const signals: NodeJS.Signals[] = [];
+    const coordinator = new RunCancellationCoordinator({
+      registry, units: new FakeSystemd(), timeoutMs: 1_000, pollMs: 1, signalGraceMs: 0,
+      isSchedulerPidAlive: () => alive, canSignalScheduler: () => true,
+      signalScheduler: (_pid, signal) => { signals.push(signal); alive = false; },
+    });
+    expect(await coordinator.statusRun(runId)).toMatchObject({
+      ok: status === RUN_STATUS.STOPPED, status: status === RUN_STATUS.STOPPED ? 'cancelled' : 'cancelling',
+      observation: { schedulerAlive: true },
+    });
+    expect(signals).toEqual([]);
+    expect(await coordinator.cancelRun(runId)).toMatchObject({ ok: true, preservedRunStatus: status, observation: { schedulerAlive: false } });
+    expect(signals).toEqual(['SIGTERM']);
+    expect(alive).toBe(false);
+    expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(archived);
+  });
+
   it('stops execution but preserves an unrecognized archived lifecycle value explicitly', async () => {
     const runId = 'cancel-future-status';
-    writeRun(runId, 'future_archived_state');
+    const directory = writeRun(runId, 'future_archived_state');
+    const archived = readFileSync(join(directory, 'run.json'), 'utf8');
     const coordinator = new RunCancellationCoordinator({
       registry,
       units: new FakeSystemd(),
@@ -495,8 +524,9 @@ describe('cancel-and-confirm coordinator', () => {
       runId,
       preservedRunStatus: 'future_archived_state',
     });
-    expect(result.message).toContain('run lifecycle was preserved because Unrecognized archived run status');
+    expect(result.message).toContain('archived run lifecycle was preserved');
     expect(readRunState(projectDir, runId).status).toBe('future_archived_state');
+    expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(archived);
   });
 
   it('exposes before/during/after truth and joins concurrent task/run callers', async () => {
@@ -550,7 +580,7 @@ describe('cancel-and-confirm coordinator', () => {
       unit: systemd.state,
       registry: registry.get(task.id)?.status,
       run: readRunState(projectDir, runId).status,
-    }).toEqual({ process: true, unit: { kind: 'deactivating' }, registry: 'cancelling', run: 'running' });
+    }).toEqual({ process: true, unit: { kind: 'deactivating' }, registry: 'cancelling', run: 'stopped' });
 
     releaseStop();
     const result = await byTask;
@@ -575,7 +605,7 @@ describe('cancel-and-confirm coordinator', () => {
     expect(state.stages.later.status).toBe(STAGE_STATUS.SKIPPED);
   });
 
-  it('times out without writing false terminal state and leaves catch-up-visible evidence', async () => {
+  it('closes cancellation at the cleanup timeout and retains live process evidence', async () => {
     const runId = 'cancel-timeout';
     writeRun(runId, RUN_STATUS.RUNNING, LIVE_FIXTURE_PID);
     const task = registry.create({
@@ -588,6 +618,7 @@ describe('cancel-and-confirm coordinator', () => {
     const systemd = new FakeSystemd();
     systemd.state = { kind: 'active' };
     systemd.stopGate = new Promise<void>(() => {});
+    const signalScheduler = vi.fn();
     const coordinator = new RunCancellationCoordinator({
       registry,
       units: systemd,
@@ -596,17 +627,23 @@ describe('cancel-and-confirm coordinator', () => {
       signalGraceMs: 1,
       isSchedulerPidAlive: () => true,
       canSignalScheduler: () => true,
-      signalScheduler: () => undefined,
+      signalScheduler,
     });
 
     const result = await coordinator.cancelTask(task.id);
 
-    expect(result).toMatchObject({ ok: false, status: 'cancelling' });
+    expect(result).toMatchObject({ ok: true, status: 'cancelled' });
+    expect(result.observation).toEqual({
+      unit: task.systemd_unit, unitState: { kind: 'deactivating' }, runReadable: true,
+      schedulerPid: LIVE_FIXTURE_PID, schedulerAlive: true, launchInFlight: false,
+    });
     expect(result.message).toContain('unit=deactivating');
     expect(result.message).toContain(`scheduler pid=${LIVE_FIXTURE_PID} alive=true`);
-    expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLING });
-    expect(readRunState(projectDir, runId)).toMatchObject({ status: RUN_STATUS.RUNNING });
-    expect(registry.readRecentTicks(task.id).at(-1)).toContain('status=cancelling');
+    expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLED });
+    expect(readRunState(projectDir, runId)).toMatchObject({ status: RUN_STATUS.STOPPED });
+    expect(registry.readRecentTicks(task.id).at(-1)).toContain('status=cancelled');
+    expect(systemd.stopCalls).toBe(1);
+    expect(signalScheduler).not.toHaveBeenCalled();
   });
 
   it('cancels an unregistered run through the same coordinator when its unit is known', async () => {
@@ -682,7 +719,10 @@ describe('cancel-and-confirm coordinator', () => {
     const result = await coordinator.cancelTask(task.id);
     await launchSettled;
 
-    expect(result).toMatchObject({ ok: true, status: 'cancelled' });
+    expect(result).toMatchObject({
+      ok: true, status: 'cancelled',
+      observation: { unitState: { kind: 'terminal', exitCode: 0 }, schedulerAlive: false, launchInFlight: false },
+    });
     expect(systemd.stopCalls).toBe(2);
     expect(systemd.state).toEqual({ kind: 'terminal', exitCode: 0 });
     expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.STOPPED);

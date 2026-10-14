@@ -1,22 +1,14 @@
-import { mkdirSync, existsSync, writeFileSync, appendFileSync } from 'node:fs';
+import { writeFileSync, appendFileSync, mkdirSync } from '../engine-fs.js';
+
+
+
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
-import { execWithTimeout, execWithStdin } from './base.js';
+import { execWithStdin } from './base.js';
 import { classifyAdapterFailure } from './failure.js';
-import { CommandActivityTracker } from '../command-activity.js';
-
-/** Parse token usage from claude output */
-function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
-  const m = output.match(/[Tt]okens[^:]*:\s*([\d,]+)\s*(?:in(?:put)?)\s*[/,]\s*([\d,]+)\s*(?:out(?:put)?)/);
-  if (m) return { tokens_in: parseInt(m[1].replace(/,/g, ''), 10), tokens_out: parseInt(m[2].replace(/,/g, ''), 10) };
-  const inM = output.match(/input_tokens\s*[:=]\s*([\d,]+)/);
-  const outM = output.match(/output_tokens\s*[:=]\s*([\d,]+)/);
-  if (inM || outM) return {
-    tokens_in: inM ? parseInt(inM[1].replace(/,/g, ''), 10) : undefined,
-    tokens_out: outM ? parseInt(outM[1].replace(/,/g, ''), 10) : undefined,
-  };
-  return {};
-}
+import { providerFailureFromEvent, type ProviderFailure } from '../provider-result.js';
+import type { CommandActivityTracker } from '../command-activity.js';
+import { parsePrintedTokenUsage } from '../invocation-usage.js';
 
 /**
  * Anthropic Claude Code CLI adapter.
@@ -39,6 +31,7 @@ function parseTokens(output: string): { tokens_in?: number; tokens_out?: number 
  *   --max-turns N: limit agentic turns
  */
 export class ClaudeAdapter implements Adapter {
+  readonly capturesInvocationInput = true;
 
   async run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
     const args = [
@@ -47,6 +40,8 @@ export class ClaudeAdapter implements Adapter {
       '--output-format', 'stream-json',
       '--verbose',
     ];
+    // Closed role tools keep race judgments limited to supplied text; deleting CLI plumbing cannot enforce this.
+    if (role.tools.length === 0) args.push('--tools', '');
     if (role.model && role.model !== 'default') args.push('--model', role.model);
     if (role.reasoning_effort && role.reasoning_effort !== 'default') args.push('--effort', role.reasoning_effort);
 
@@ -65,6 +60,7 @@ export class ClaudeAdapter implements Adapter {
 
     let lineBuf = '';
     let extractedText = '';
+    let terminalText: string | undefined;
     // Track whether the `claude` CLI has emitted its terminal {"type":"result"}
     // event. Upstream the CLI sometimes fails to close its stdio pipes after
     // emitting this, which would leave our scheduler awaiting the child
@@ -73,99 +69,104 @@ export class ClaudeAdapter implements Adapter {
     let resultReceived = false;
     let resultIsSuccess = false;
     let adapterDiagnostic: string | undefined;
+    let providerFailure: ProviderFailure | undefined;
     let childKill: (() => void) | null = null;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
     const POST_RESULT_GRACE_MS = 5000;
-    const commandActivity = opts.attemptIndex !== undefined && opts.attemptStartedAt
-      ? new CommandActivityTracker({
-          runDir: opts.runDir,
-          stageId: opts.stageId,
-          attemptIndex: opts.attemptIndex,
-          attemptStartedAt: opts.attemptStartedAt,
-          onLifecycle: opts.onCommandLifecycle,
-        })
-      : undefined;
+    const consumeLine = (line: string, commandActivity?: CommandActivityTracker): void => {
+      if (!line.trim()) return;
+      try {
+        const parsed = JSON.parse(line);
+        let text = '';
+        // Claude Code stream-json emits assistant text as message.content[] blocks
+        // (the canonical shape — same as the dashboard's parser). The legacy
+        // top-level-string / content_block_delta forms are kept as fallbacks.
+        if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
+          for (const block of parsed.message.content) {
+            if (block?.type === 'text' && typeof block.text === 'string') text += block.text;
+            if (block?.type === 'tool_use' && typeof block.id === 'string'
+              && /^(?:bash|shell|exec)$/i.test(String(block.name ?? ''))) {
+              const command = typeof block.input?.command === 'string'
+                ? block.input.command
+                : typeof block.input?.cmd === 'string' ? block.input.cmd : undefined;
+              commandActivity?.started(block.id, command);
+            }
+          }
+        } else if (parsed.type === 'user' && Array.isArray(parsed.message?.content)) {
+          for (const block of parsed.message.content) {
+            if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+              commandActivity?.completed(block.tool_use_id);
+            }
+          }
+        } else if (parsed.type === 'assistant' && typeof parsed.content === 'string') {
+          text = parsed.content;
+        } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+          text = parsed.delta.text;
+        } else if (parsed.type === 'result' && typeof parsed.result === 'string') {
+          text = parsed.result;
+          terminalText = parsed.result;
+        }
+        // Detect terminal result event: schedule a force-kill if the CLI
+        // doesn't exit gracefully within the grace period.
+        if (parsed.type === 'result' && !resultReceived) {
+          resultReceived = true;
+          resultIsSuccess = parsed.is_error !== true && parsed.subtype !== 'error';
+          if (resultIsSuccess) {
+            adapterDiagnostic = undefined;
+            providerFailure = undefined;
+          }
+          else adapterDiagnostic = typeof parsed.error?.message === 'string'
+            ? parsed.error.message
+            : typeof parsed.result === 'string' ? parsed.result : adapterDiagnostic;
+          if (!resultIsSuccess) providerFailure = providerFailureFromEvent('claude', parsed);
+          if (!killTimer) {
+            killTimer = setTimeout(() => {
+              if (childKill) childKill();
+            }, POST_RESULT_GRACE_MS);
+          }
+        }
+        if (parsed.type === 'error') {
+          adapterDiagnostic = typeof parsed.message === 'string'
+            ? parsed.message
+            : typeof parsed.error?.message === 'string' ? parsed.error.message : adapterDiagnostic;
+          providerFailure = providerFailureFromEvent('claude', parsed);
+        }
+        if (text) {
+          extractedText += text;
+          try { appendFileSync(liveLogPath + '.txt', text); } catch { /* non-critical */ }
+        }
+      } catch { /* non-JSON line, skip */ }
+    };
     let result: RunResult;
     try {
+      opts.onInvocationInput?.({
+        systemPrompt: role.prompt,
+        userPrompt: prompt,
+        model: role.model,
+        transport: { kind: 'request', payload: JSON.stringify({ executable: 'claude', argv: args, stdin: prompt, appendedSystemPrompt: role.prompt }) },
+      });
       result = await execWithStdin('claude', args, prompt, {
       cwd: opts.workDir,
       timeout_ms: opts.timeout_ms,
       liveLogPath, // raw stream-json goes to live.log for debugging
+      execution: opts,
       onChild: ({ kill }) => { childKill = kill; },
       abortSignal: opts.abortSignal,
-      onStdout: (chunk: string) => {
-        // Parse stream-json lines and extract text content for clean live output
+      onStdout: (chunk: string, activity?: CommandActivityTracker) => {
         lineBuf += chunk;
         const lines = lineBuf.split('\n');
         lineBuf = lines.pop()!;
-        for (const line of lines) {
-          if (!line) continue;
-          try {
-            const parsed = JSON.parse(line);
-            let text = '';
-            // Claude Code stream-json emits assistant text as message.content[] blocks
-            // (the canonical shape — same as the dashboard's parser). The legacy
-            // top-level-string / content_block_delta forms are kept as fallbacks.
-            if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
-              for (const block of parsed.message.content) {
-                if (block?.type === 'text' && typeof block.text === 'string') text += block.text;
-                if (block?.type === 'tool_use' && typeof block.id === 'string'
-                  && /^(?:bash|shell|exec)$/i.test(String(block.name ?? ''))) {
-                  const command = typeof block.input?.command === 'string'
-                    ? block.input.command
-                    : typeof block.input?.cmd === 'string' ? block.input.cmd : undefined;
-                  commandActivity?.started(block.id, command);
-                }
-              }
-            } else if (parsed.type === 'user' && Array.isArray(parsed.message?.content)) {
-              for (const block of parsed.message.content) {
-                if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-                  commandActivity?.completed(block.tool_use_id);
-                }
-              }
-            } else if (parsed.type === 'assistant' && typeof parsed.content === 'string') {
-              text = parsed.content;
-            } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-              text = parsed.delta.text;
-            } else if (parsed.type === 'result' && typeof parsed.result === 'string') {
-              text = parsed.result;
-            }
-            // Detect terminal result event: schedule a force-kill if the CLI
-            // doesn't exit gracefully within the grace period.
-            if (parsed.type === 'result' && !resultReceived) {
-              resultReceived = true;
-              resultIsSuccess = parsed.is_error !== true && parsed.subtype !== 'error';
-              if (resultIsSuccess) adapterDiagnostic = undefined;
-              else adapterDiagnostic = typeof parsed.error?.message === 'string'
-                ? parsed.error.message
-                : typeof parsed.result === 'string' ? parsed.result : adapterDiagnostic;
-              if (!killTimer) {
-                killTimer = setTimeout(() => {
-                  if (childKill) childKill();
-                }, POST_RESULT_GRACE_MS);
-              }
-            }
-            if (parsed.type === 'error') {
-              adapterDiagnostic = typeof parsed.message === 'string'
-                ? parsed.message
-                : typeof parsed.error?.message === 'string' ? parsed.error.message : adapterDiagnostic;
-            }
-            if (text) {
-              extractedText += text;
-              try { appendFileSync(liveLogPath + '.txt', text); } catch { /* non-critical */ }
-            }
-          } catch { /* non-JSON line, skip */ }
-        }
-        },
+        for (const line of lines) consumeLine(line, activity);
+      },
       });
+      if (lineBuf.trim()) consumeLine(lineBuf);
     } finally {
-      commandActivity?.close();
+      if (killTimer) clearTimeout(killTimer);
     }
-    if (killTimer) clearTimeout(killTimer);
 
-    // Use extracted text as the output (clean, no JSON wrappers)
-    const finalOutput = extractedText || result.output;
-    const tokens = parseTokens(result.output);
+    // Progress remains in the live carrier; settlement consumes the terminal record.
+    const finalOutput = terminalText ?? (extractedText || result.output);
+    const tokens = parsePrintedTokenUsage(result.output);
     // Override exit code when the CLI emitted a successful result event but we
     // had to force-kill its hung process to recover. The actual work succeeded;
     // the non-zero code is just a stdio-cleanup artifact upstream.
@@ -180,6 +181,7 @@ export class ClaudeAdapter implements Adapter {
       exitCode: finalExitCode,
       adapterError: adapterFailureKind !== undefined,
       adapterFailureKind,
+      ...(finalExitCode !== 0 && ![124, 125, 137].includes(finalExitCode) && !result.spawnError && providerFailure ? { providerFailure } : {}),
       tokens_in: tokens.tokens_in,
       tokens_out: tokens.tokens_out,
     };

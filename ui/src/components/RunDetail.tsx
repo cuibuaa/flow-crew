@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { fetchRunDetail, fetchRunStageOutput, fetchRunSummary, type StageOutputResponse } from "../api";
+import { cancelTask, fetchRunDetail, fetchRunStageOutput, fetchRunSummary, resumeTask, type StageOutputResponse } from "../api";
 import type { RealityGateCheckDiagnostic, RealityGateOutputTail, RunDetailData, RunStage } from "../types";
 import ActivityFeed from "./ActivityFeed";
 import {
   formatDuration,
+  historicalRunStages,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
   parseRunSummary,
@@ -161,16 +162,16 @@ function RealityGateDiagnostics({ run }: { run: RunDetailData }) {
   );
 }
 
-function StageAttemptHistory({ stages, nowMs }: { stages: RunStage[]; nowMs: number }) {
+function StageAttemptHistory({ stages, nowMs }: { stages: Array<RunStage & { historyIteration?: number }>; nowMs: number }) {
   if (stages.length === 0) return <div className="empty-state">No workflow stages were recorded.</div>;
   return (
     <div className="attempt-history-list">
       {stages.map((stage) => {
         const ledger = stageAttemptLedger(stage, nowMs);
         return (
-          <article className="attempt-history-stage" key={stage.id} data-testid={`attempt-ledger-${stage.id}`}>
+          <article className="attempt-history-stage" key={JSON.stringify([stage.historyIteration, stage.id])} data-testid={`attempt-ledger-${stage.id}${stage.historyIteration === undefined ? '' : `-iteration-${stage.historyIteration}`}`}>
             <header>
-              <strong>{stage.id}</strong>
+              <strong>{stage.id}{stage.historyIteration === undefined ? '' : ` [iteration ${stage.historyIteration}, archived]`}</strong>
               <span className={`outcome-badge ${stageStatusTone(stage.status)}`}>{stage.status}</span>
               <span>{ledger.executions} {ledger.executions === 1 ? "execution" : "executions"} · {ledger.failedAttemptsExact ? ledger.failedAttempts : `at least ${ledger.failedAttempts}`} failed</span>
             </header>
@@ -178,9 +179,9 @@ function StageAttemptHistory({ stages, nowMs }: { stages: RunStage[]; nowMs: num
               <ol className="attempt-ledger">
                 {ledger.rows.map((attempt) => (
                   <li key={attempt.key} className={attempt.status === "failed" ? "failed" : ""}>
-                    <span>Execution {attempt.index}{attempt.current ? " · current" : ""}</span>
+                    <span>Execution {attempt.index}{attempt.current ? stage.historyIteration === undefined ? " · current" : " · running at retirement" : ""}</span>
                     <code>{attempt.status}</code>
-                    <span>{formatDuration(attempt.durationMs)}</span>
+                    <span>{formatDuration(attempt.current && stage.historyIteration !== undefined ? null : attempt.durationMs)}</span>
                     {attempt.current && !attempt.recorded ? <span className="run-muted">start time unavailable in this view</span> : null}
                     {attempt.error ? <span className="attempt-error">{attempt.error}</span> : null}
                   </li>
@@ -213,6 +214,17 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
   const [liveConnection, setLiveConnection] = useState<LiveConnection>("idle");
   const [liveError, setLiveError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [controlBusy, setControlBusy] = useState(false);
+  const [controlError, setControlError] = useState<string | null>(null);
+  const [resumeQueued, setResumeQueued] = useState(false);
+  const controlTarget = useRef(id ?? providedRun?.runId);
+  controlTarget.current = id ?? providedRun?.runId;
+
+  useEffect(() => {
+    setControlBusy(false);
+    setControlError(null);
+    setResumeQueued(false);
+  }, [id, providedRun?.runId]);
 
   useEffect(() => {
     if (providedRun || !id) return;
@@ -254,11 +266,12 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
   }, [run?.status]);
 
   useEffect(() => {
-    if (providedRun || !id || !run || isTerminalRunStatus(run.status)) return;
+    if (providedRun || !id || !run || (isTerminalRunStatus(run.status) && !resumeQueued)) return;
     let cancelled = false;
     const timer = window.setInterval(() => {
       void fetchRunDetail(id).then((next) => {
         if (cancelled) return;
+        if (next.status !== run.status || next.completedAt !== run.completedAt) setResumeQueued(false);
         setRun(next);
         setRefreshError(null);
       }).catch((error: unknown) => {
@@ -269,7 +282,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [providedRun, id, run?.status]);
+  }, [providedRun, id, run?.status, resumeQueued]);
 
   const stages = realRunStages(run?.stages);
   const terminalRun = run ? isTerminalRunStatus(run.status) : false;
@@ -382,6 +395,30 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
     }
   };
 
+  const controlRun = async (action: "cancel" | "resume") => {
+    if (!run || controlTarget.current !== run.runId) return;
+    const currentRequest = () => controlTarget.current === run.runId;
+    setControlBusy(true);
+    setControlError(null);
+    try {
+      await (action === "resume" ? resumeTask(run.runId) : cancelTask(run.runId));
+      if (!currentRequest()) return;
+      setResumeQueued(action === "resume");
+      showToast(action === "resume" ? "Resume queued" : "Cancellation settled", "success");
+      void fetchRunDetail(run.runId).then(next => {
+        if (!currentRequest()) return;
+        if (next.status !== run.status || next.completedAt !== run.completedAt) setResumeQueued(false);
+        setRun(next);
+      }).catch((error: unknown) => {
+        if (currentRequest()) setRefreshError(error instanceof Error ? error.message : String(error));
+      });
+    } catch (error) {
+      if (currentRequest()) setControlError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (currentRequest()) setControlBusy(false);
+    }
+  };
+
   if (pageError) {
     return <div className="empty-state error-state" role="alert">Run detail is unavailable: {pageError}. <Link to="/campaign">Return to Workspaces</Link></div>;
   }
@@ -389,7 +426,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
 
   const campaignId = run.campaignId ?? "";
   const runningStages = stages.filter((stage) => stage.status === "running");
-  const failures = runFailureHistory(stages);
+  const failures = runFailureHistory(stages, historicalRunStages(run));
   const usage = runUsageTotal(run);
   const elapsed = runElapsedMs(run, nowMs);
   const failedChecks = run.realityGate?.results?.filter((check) => !check.pass) ?? [];
@@ -466,6 +503,10 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
           <h1 className="run-title">{terminalRun ? "Run result" : run.status === "running" ? "Run in progress" : "Run status"}</h1>
           <div className="run-context"><code>{run.runId}</code> · workflow <code>{run.workflowName || "unknown"}</code> · project <code>{(run.projectDir ?? "unknown").split(/[\\/]/).filter(Boolean).at(-1) ?? "unknown"}</code></div>
         </div>
+        <div className="header-actions" aria-label="Run controls">
+          <button className="btn danger" type="button" disabled={controlBusy || terminalRun} onClick={() => void controlRun("cancel")}>Cancel</button>
+          <button className="btn" type="button" disabled={controlBusy || resumeQueued || !["stopped", "failed", "incomplete"].includes(run.status)} onClick={() => void controlRun("resume")}>Resume</button>
+        </div>
         {failures.failedStageIds.length > 0 ? (
           <div className="header-actions" aria-label="Failure inspection actions">
             <button className="btn" type="button" onClick={() => selectStage(failures.failedStageIds[0], true)}>Inspect failed stage</button>
@@ -473,6 +514,9 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
           </div>
         ) : null}
       </header>
+
+      {resumeQueued ? <div className="run-local-alert" role="status">Resume queued; waiting for this run to continue.</div> : null}
+      {controlError ? <div className="run-local-alert error" role="alert">{controlError}</div> : null}
 
       <section className="run-status-strip" aria-labelledby="run-status-heading" data-answers={terminalRun ? "Q3 Q4 Q5" : "Q2 Q4 Q5"}>
         <div className={`run-status-answer ${statusTone}`}>
@@ -488,7 +532,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
         <div className="run-total-answer" data-testid="run-cost-summary">
           <span>{usage.complete ? "Total recorded usage" : "Known recorded usage"}</span>
           <strong>{fmtInteger(usage.tokens)} tokens</strong>
-          <p>{usage.complete ? "Complete run total, including supervisor." : "Known portion only, including recorded supervisor usage; unsettled or unavailable fields are not treated as zero."}</p>
+          <p>{usage.complete ? "Complete run total." : "Known portion only; unsettled or unavailable fields are not treated as zero."}</p>
         </div>
       </section>
 
@@ -658,6 +702,10 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
           <section aria-labelledby="attempt-history-title">
             <h2 id="attempt-history-title">Stage execution history</h2>
             <StageAttemptHistory stages={stages} nowMs={nowMs} />
+            {run.stageHistory?.length ? <>
+              <h3>Archived iterations</h3>
+              <StageAttemptHistory stages={historicalRunStages(run)} nowMs={nowMs} />
+            </> : null}
           </section>
           <section aria-labelledby="execution-structure-title">
             <h2 id="execution-structure-title">Execution structure</h2>

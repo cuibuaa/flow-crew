@@ -52,6 +52,7 @@ function writeExecCheck(runId: string, name: string, command: string): void {
     'checks:',
     `  - name: ${name}`,
     '    type: exec-script-exit-zero',
+    '    reads: []',
     '    params:',
     '      script: |-',
     ...indentedCommand,
@@ -154,9 +155,6 @@ describe('failure evidence transport', () => {
       command: expect.stringContaining('rm -f "$private_root/check.log"'),
       stdout: failureStdout,
       stderr: failureStderr,
-      code: 23,
-      signal: null,
-      timedOut: false,
       exit: failureExit,
     });
     expect(replayedFailure.evidence).not.toHaveProperty('env');
@@ -328,7 +326,7 @@ describe('failure evidence transport', () => {
           command: 'exit 9',
           stdout: 'M4-FINAL-VERDICT: FAIL\n',
           stderr: '',
-          code: 9,
+          code: 0,
           signal: null,
           timedOut: false,
           exit: { code: 9, signal: null, timedOut: false },

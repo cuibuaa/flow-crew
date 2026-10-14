@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { fixtureResult, fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
   mkdirSync,
@@ -13,13 +15,14 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { stringify } from 'yaml';
 import type { Adapter } from '../src/adapters/base.js';
-import {
-  LiveConstraintGuard,
-  acquireAttributableWriterLease,
-} from '../src/live-constraint-guard.js';
-import { loadProjectDefaults } from '../src/config.js';
-import { scopePathDigest } from '../src/runtime-negotiation.js';
+import { LiveConstraintGuard } from '../src/live-constraint-guard.js';
+import { loadEngineDefaults } from '../src/config.js';
+import { runProjectValidationBaseline } from '../src/project-validation.js';
+import { publishConstraintDecision, scopePathDigest, type ScopeRevisionRequestV1 } from '../src/runtime-negotiation.js';
+import { decideScopeRevision } from '../src/scheduler/sched_scope/scope-revisions.js';
+import { readmitScopeContinuation } from '../src/scheduler/sched_scope/stage-group.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import {
   createRun,
@@ -29,7 +32,9 @@ import {
   setFcGlobalDir,
   writeRunState,
 } from '../src/store.js';
-import { loadClosedLoopEngineEvidence } from './test-support/closed-loop-engine-evidence.js';
+import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
+import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
+import { createLiveGuardFactory } from '../src/scheduler/sched_scope/write-enforcement.js';
 
 let projectDir: string;
 let stateDir: string;
@@ -52,7 +57,7 @@ function seedProject(): string {
   mkdirSync(join(projectDir, 'src'), { recursive: true });
   mkdirSync(join(projectDir, 'spec'), { recursive: true });
   mkdirSync(join(projectDir, 'config', 'agents'), { recursive: true });
-  writeFileSync(join(projectDir, 'config', 'defaults.yaml'), 'default_timeout_ms: 60000\n');
+  setEngineDefaults({ timeout_ms: 60000 });
   writeFileSync(join(projectDir, 'config', 'agents', 'coder.yaml'), [
     'name: coder',
     'description: live guard fixture',
@@ -71,7 +76,7 @@ function workflowFixture(scope: string[] = ['src/allowed.ts']): { config: Workfl
   const config: WorkflowConfig = {
     name: `closed-loop-live-guard-${scope.length > 0 ? 'nonempty' : 'empty'}`,
     defaults: { max_iterations: 1, max_retries: 0 },
-    stages: [{
+    stages: [{ artifact_contract: fixtureArtifactContract('writer', false),
       id: 'writer', role: 'coder', scope, depends_on: [],
       prompt_template: 'Write only the declared source path.', skills: [],
       dynamic_dispatch: false, is_gate: false,
@@ -146,25 +151,106 @@ function seedInitializedGitlink(): string {
 }
 
 describe('portable live constraint guard', () => {
-  it('keeps the historical violation byte anchor self-contained', () => {
-    const evidence = loadClosedLoopEngineEvidence();
-    expect(evidence.baseFailures.behavior1).toEqual({
-      exitCode: 1,
-      logBytes: 1711,
-      logSha256: 'b4f439f6d985f43e98381a8bd3936ce2b08091bba1046346dc669c726e82c1d5',
-    });
-    expect(evidence.anchors.historicalConstraintAudit).toMatchObject({
-      bytes: 3086,
-      sha256: 'b848c74719dd4b4c2a829f246e04e63fad24d81deb3bf69cac9b3a7a788deb44',
-      unauthorizedPath: 'tests/test_happymj_explore7_round02_verification.py',
-      recordedElapsedMs: 5741999,
-      childCloseToAuditCompleteMs: 29023,
-      slice: {
-        byteStart: 1283,
-        byteEndExclusive: 2593,
-        sha256: '9a69e752a6f1bb04b4448b97c813aab8df1d9e40e6488c0bd14c36c98a7963dd',
-      },
-    });
+
+  it.each([
+    { label: 'nested hidden dependency copy', scope: ['**', 'node_modules' + '/', '.venv/'], parent: ['docs', '.comparison', '.venv'].join('/') },
+    { label: 'root dependency dotfiles', scope: ['**'], parent: '.venv' },
+    { label: 'narrow capability', scope: ['src/allowed.ts'], parent: ['docs', '.comparison', '.venv'].join('/') },
+  ])('recovers $label through scope readmission, cleanup and independent gated repair', { timeout: 30_000 }, async ({ scope, parent }) => {
+    seedProject();
+    mkdirSync(join(projectDir, parent), { recursive: true });
+    writeFileSync(join(projectDir, parent, 'operator-owned.txt'), 'pre-existing dependency\n');
+    writeFileSync(join(projectDir, 'package.json'), JSON.stringify({ name: 'scope-recovery-fixture', private: true, packageManager: 'npm@10.0.0',
+      scripts: { test: 'node -e "process.exit(0)"' } }));
+    const { config } = workflowFixture(scope);
+    config.defaults.max_retries = 1;
+    config.stages.push({ ...config.stages[0], id: 'review', scope: [], is_gate: true,
+      depends_on: ['writer'], artifact_contract: fixtureArtifactContract('review', true) },
+    { ...config.stages[0], id: 'repair', depends_on: ['review'], retry_to: ['review'] });
+    config.dispatch = config.stages;
+    config.stages = [{ ...config.stages[0], id: 'plan', scope: [], dynamic_dispatch: true,
+      artifact_contract: fixtureArtifactContract('plan') }];
+    const yaml = stringify(config);
+    const created = createRun(projectDir, config.name, yaml, config.stages.map(stage => stage.id));
+    const baseline = await runProjectValidationBaseline(projectDir);
+    expect(baseline.results.find(result => result.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
+    writeFileSync(join(created.runDirPath, 'validation_baseline.json'), JSON.stringify({
+      version: 1, capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline,
+    }));
+    const state = readRunState(projectDir, created.runId);
+    state.maxRetries = 1;
+    state.autoApprove = true;
+    writeRunState(projectDir, created.runId, state);
+    const paths = [`${parent}/.package-lock.json`, `${parent}/.bin/tool`];
+    const calls: string[] = [];
+    let writerCalls = 0, reviews = 0;
+    let denied = false;
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
+      calls.push(opts.stageId);
+      if (opts.stageId === 'review') {
+        reviews++;
+        const pass = !denied && reviews > 1;
+        writeFileSync(join(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ pass,
+          reason: denied ? 'cleanup authority denied' : pass ? 'repair verified' : 'technical defect reproduced',
+          ...(!pass ? { repairability: { version: 1, disposition: denied ? 'irreparable' : 'repairable',
+            evidence: denied ? 'durable scope denial' : 'source still needs repair' } } : {}),
+        }));
+        return fixtureResult({ output: 'independent review', exitCode: 0, duration_ms: 1 }, opts);
+      }
+      if (opts.stageId === 'repair') {
+        writeFileSync(join(projectDir, 'src/allowed.ts'), 'repaired\n');
+        return fixtureResult({ output: 'repaired technical defect', exitCode: 0, duration_ms: 1,
+          writes: ['src/allowed.ts'], writeAttribution: 'structured' }, opts);
+      }
+      writerCalls++;
+      if (writerCalls === 1) {
+        mkdirSync(join(projectDir, parent, '.bin'), { recursive: true });
+        writeFileSync(join(projectDir, paths[0]), 'temporary dependency metadata\n');
+        symlinkSync('../.package-lock.json', join(projectDir, paths[1]));
+        return fixtureResult({ output: 'temporary comparison created', exitCode: 0, duration_ms: 1,
+          writes: paths, writeAttribution: 'structured' }, opts);
+      }
+      if (writerCalls === 2) {
+        expect(prompt).toContain('Do not rewrite those paths unless a scope revision is accepted');
+        const directory = join(opts.runDir, 'stages', opts.stageId);
+        const requestId = 'recover-comparison';
+        writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({ version: 1,
+          kind: 'scope_revision', requestId, runId: created.runId, stageId: opts.stageId,
+          attemptIndex: opts.attemptIndex, requestedPaths: paths, pathDigest: scopePathDigest(paths),
+          reason: 'remove the temporary comparison artifacts recorded by the failed rollback' }));
+        const decision = await waitForDecision(directory, requestId);
+        denied = decision.accepted !== true;
+        return fixtureResult({ output: denied ? JSON.stringify({ status: 'blocked', summary: 'cleanup authority denied',
+          files_modified: [], checks: [], caveats: ['Failed rollback requires accepted cleanup authority'] })
+          : 'authority accepted; await readmission', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
+      }
+      expect(prompt).toContain('# Accepted scope revision');
+      for (const path of paths) rmSync(join(projectDir, path));
+      writeFileSync(join(projectDir, 'src/allowed.ts'), 'technical defect\n');
+      return fixtureResult({ output: 'comparison removed', exitCode: 0, duration_ms: 1,
+        writes: [...paths, 'src/allowed.ts'], writeAttribution: 'structured' }, opts);
+    } };
+    const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined,
+      join(projectDir, 'config/agents'), created.runId, 'Recover temporary comparison and deliver reviewed source.', true);
+    const deltas = readdirSync(created.runDirPath).filter(name => /^validation_delta_review.*\.json$/.test(name));
+    expect(deltas.length).toBeGreaterThan(0);
+    for (const name of deltas) expect(JSON.parse(readFileSync(join(created.runDirPath, name), 'utf8')).pass).toBe(true);
+    expect(final.status).toBe('complete');
+    expect(denied).toBe(false);
+    expect(writerCalls).toBe(3);
+    expect(calls.slice(-3)).toEqual(['review', 'repair', 'review']);
+    for (const path of paths) expect(existsSync(join(projectDir, path))).toBe(false);
+    expect(readFileSync(join(projectDir, parent, 'operator-owned.txt'), 'utf8')).toBe('pre-existing dependency\n');
+    expect(readFileSync(join(projectDir, 'operator-note.txt'), 'utf8')).toContain('pre-existing dirt');
+    const directory = join(created.runDirPath, 'stages/writer');
+    const audits = readdirSync(directory).filter(name => /^constraint_audit_attempt_\d+\.json$/.test(name))
+      .map(name => JSON.parse(readFileSync(join(directory, name), 'utf8')));
+    expect(audits[0].liveIncidents).toEqual(expect.arrayContaining(paths.map(path => expect.objectContaining({
+      path, restored: false, rollbackFailure: expect.stringContaining('preimage absence was not observed'),
+    }))));
+    expect(audits.at(-1).liveIncidents).toEqual([]);
+    expect(readFileSync(join(projectDir, 'src/allowed.ts'), 'utf8')).toBe('repaired\n');
   });
 
   it.each([
@@ -184,7 +270,7 @@ describe('portable live constraint guard', () => {
     let correctionBytes: Buffer | undefined;
 
     const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       invocationCount++;
       if (invocationCount === 1) {
         if (scope.length > 0) writeFileSync(join(projectDir, 'src', 'allowed.ts'), 'authorized change survives\n');
@@ -195,18 +281,20 @@ describe('portable live constraint guard', () => {
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
         }
         if (readFileSync(testPath, 'utf-8') === preimage) restoreLatencyMs = performance.now() - writtenAt;
-        return {
+        return fixtureResult({
           output: 'first invocation wrote an unlisted existing test', exitCode: 0,
           duration_ms: performance.now() - writtenAt,
           writes: [...(scope.length > 0 ? ['src/allowed.ts'] : []), 'spec/existing.test.ts'], writeAttribution: 'structured',
-        };
+        }, opts);
       }
 
       if (invocationCount === 2) {
         const marker = '# Live constraint correction\n';
         const markerAt = prompt.indexOf(marker);
         expect(markerAt).toBeGreaterThanOrEqual(0);
-        correctionBytes = Buffer.from(prompt.slice(markerAt + marker.length), 'utf-8');
+        const instruction = prompt.slice(markerAt + marker.length).split('\n\n# Execution clock\n')[0].trimEnd();
+        correctionBytes = Buffer.from(instruction, 'utf-8');
+        expect(prompt).toContain('absolute deadline');
         const directory = join(opts.runDir, 'stages', opts.stageId);
         const requestedPaths = ['spec/existing.test.ts'];
         const requestId = 'authorize-existing-test';
@@ -221,24 +309,33 @@ describe('portable live constraint guard', () => {
           pathDigest: scopePathDigest(requestedPaths),
           reason: 'the corrected fixture explicitly needs this existing test',
         }));
-        expect(await waitForDecision(directory, requestId)).toMatchObject({ accepted: true });
-        return {
+        expect(await waitForDecision(directory, requestId)).toMatchObject({
+          accepted: true, requestId, authorizedPaths: requestedPaths,
+          pathDigest: scopePathDigest(requestedPaths),
+        });
+        return fixtureResult({
           output: 'scope accepted; stop at the control boundary', exitCode: 0,
           duration_ms: 2, writes: [], writeAttribution: 'structured',
-        };
+        }, opts);
       }
 
-      expect(prompt).toContain('Scope revision authorize-existing-test was accepted');
+      expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
+      expect(prompt).toContain(`Continue the stage work in execution ${opts.attemptIndex}`);
+      expect(prompt).toContain('Newly admitted paths: ["spec/existing.test.ts"]');
+      const decisionName = readdirSync(join(opts.runDir, 'stages', opts.stageId))
+        .find((name) => name.startsWith('scope_revision_decision_attempt_'));
+      expect(prompt).toContain(`stages/${opts.stageId}/${decisionName}`);
+      expect(prompt).not.toContain('This attempt stops at the control boundary');
       writeFileSync(testPath, 'export const invariant = "authorized-after-revision";\n');
-      return {
+      return fixtureResult({
         output: 'corrected after scope re-dispatch', exitCode: 0, duration_ms: 2,
         writes: ['spec/existing.test.ts'], writeAttribution: 'structured',
-      };
+      }, opts);
     } };
 
     const final = await runWorkflow(
       config, yaml, projectDir, adapter, new Map(), undefined,
-      join(projectDir, 'config', 'agents'), created.runId, 'live guard replay', true, false,
+      join(projectDir, 'config', 'agents'), created.runId, 'live guard replay', true,
     );
     expect(final.status).toBe('complete');
     expect(invocationCount).toBe(3);
@@ -266,6 +363,84 @@ describe('portable live constraint guard', () => {
     expect(existsSync(join(created.runDirPath, 'stages', 'writer', 'constraint_audit_attempt_1.json'))).toBe(true);
   });
 
+  it('delivers restored writes to every batch member once and still restores a new write after readmission', async () => {
+    const path = seedProject();
+    const preimage = readFileSync(path, 'utf-8');
+    const writer = StageConfigSchema.parse(workflowFixture([]).config.stages[0]);
+    const peer = { ...writer, id: 'peer' };
+    const created = createRun(projectDir, 'incident-delivery', '', ['writer', 'peer']);
+    const context = createScopeBatchContext(projectDir, [writer, peer], undefined, created.runId);
+    const { createSchedulerLiveConstraintGuardFactory } = createLiveGuardFactory();
+    const scan = async (stage: typeof writer, attemptIndex: number) => {
+      const factory = createSchedulerLiveConstraintGuardFactory({ stage, projectDir, runId: created.runId, context })!;
+      const guard = factory({ attemptIndex, attemptStartedAt: new Date().toISOString() });
+      const monitor = guard.beginInvocation(1, () => {});
+      return monitor.finish();
+    };
+
+    writeFileSync(path, 'first unauthorized write\n');
+    expect((await scan(writer, 1)).incidents).toHaveLength(1);
+    expect(readFileSync(path, 'utf-8')).toBe(preimage);
+    // The peer has not yet observed the batch fact, even though bytes are restored.
+    expect((await scan(peer, 1)).incidents).toHaveLength(1);
+    expect((await scan(writer, 2)).incidents).toHaveLength(0);
+    expect((await scan(peer, 2)).incidents).toHaveLength(0);
+
+    writeFileSync(path, 'another unauthorized write after readmission\n');
+    expect((await scan(writer, 2)).incidents).toHaveLength(1);
+    expect(readFileSync(path, 'utf-8')).toBe(preimage);
+    expect((await scan(peer, 2)).incidents).toHaveLength(1);
+
+    // A durable rollback failure cannot be consumed as though it were settled.
+    context.recordViolation({
+      path: 'unrestored.txt', reason: 'rollback failed',
+      restored: false, rollbackFailure: 'unavailable preimage', entryKind: 'untracked',
+      comparisonOutcome: 'different', changeObserved: true, rollbackAttempted: true,
+    });
+    for (const attemptIndex of [3, 4]) {
+      for (const stage of [writer, peer]) {
+        expect((await scan(stage, attemptIndex)).incidents).toContainEqual(expect.objectContaining({
+          path: 'unrestored.txt', restored: false,
+        }));
+      }
+    }
+  });
+
+  it('retains a failed rollback as history instead of aborting its admitted recovery in the same batch', async () => {
+    seedProject();
+    const writer = StageConfigSchema.parse(workflowFixture([]).config.stages[0]);
+    const created = createRun(projectDir, 'scope-recovery', '', ['writer']);
+    const context = createScopeBatchContext(projectDir, [writer], undefined, created.runId);
+    const parent = join(projectDir, 'docs', '.comparison', '.venv');
+    const path = ['docs', '.comparison', '.venv', 'file.txt'].join('/');
+    mkdirSync(parent, { recursive: true });
+    writeFileSync(join(projectDir, path), 'temporary comparison');
+    const { createSchedulerLiveConstraintGuardFactory } = createLiveGuardFactory();
+    const scan = (stage: typeof writer, attemptIndex: number) => {
+      const guard = createSchedulerLiveConstraintGuardFactory({ stage, projectDir, runId: created.runId, context })!({
+        attemptIndex, attemptStartedAt: new Date().toISOString() });
+      const monitor = guard.beginInvocation(1, () => {});
+      monitor.observePaths([path]);
+      return monitor;
+    };
+    expect((await scan(writer, 1).finish()).incidents).toContainEqual(expect.objectContaining({
+      path, restored: false, unrestoredContent: expect.objectContaining({ state: 'present', type: 'file' }),
+    }));
+    const request: ScopeRevisionRequestV1 = { version: 1, kind: 'scope_revision', requestId: 'recover',
+      requestedBy: 'stage', runId: created.runId, stageId: 'writer', attemptIndex: 1,
+      requestedPaths: [path], pathDigest: scopePathDigest([path]), reason: 'clean up the recorded comparison' };
+    const decision = decideScopeRevision({ request, stage: writer, priorScope: [], activePeers: [],
+      projectDir, runId: created.runId, attemptIndex: 1, snapshot: context.snapshot });
+    expect(decision.accepted).toBe(true);
+    publishConstraintDecision({ stagePath: join(created.runDirPath, 'stages/writer'), request,
+      decidedBy: 'scheduler-policy', decision: decision as Parameters<typeof publishConstraintDecision>[0]['decision'] });
+    const revised = readmitScopeContinuation(writer, [writer], context.activeStageIds, created.runDirPath, context)!;
+    const monitor = scan(revised, 2);
+    rmSync(join(projectDir, path));
+    expect((await monitor.finish()).incidents).toEqual([]);
+    expect(context.violationHistory[0]).toMatchObject({ path, restored: false });
+  });
+
   it('keeps a clean initialized gitlink intact during an explicit read-only stage', { timeout: 20_000 }, async () => {
     const child = seedInitializedGitlink();
 
@@ -276,14 +451,14 @@ describe('portable live constraint guard', () => {
     writeRunState(projectDir, created.runId, state);
     let invocationCount = 0;
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       invocationCount++;
-      return { output: 'read-only', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'read-only', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
 
     const final = await runWorkflow(
       config, yaml, projectDir, adapter, new Map(), undefined,
-      join(projectDir, 'config', 'agents'), created.runId, 'initialized gitlink replay', true, false,
+      join(projectDir, 'config', 'agents'), created.runId, 'initialized gitlink replay', true,
     );
     expect(final.status).toBe('complete');
     expect(invocationCount).toBe(1);
@@ -306,18 +481,18 @@ describe('portable live constraint guard', () => {
     writeRunState(projectDir, created.runId, state);
     let invocationCount = 0;
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       invocationCount++;
       writeFileSync(child, 'changed child content\n');
-      return {
+      return fixtureResult({
         output: 'changed nested content', exitCode: 0, duration_ms: 1,
         writes: ['submodule-dir/tracked.txt'], writeAttribution: 'structured',
-      };
+      }, opts);
     } };
 
     const final = await runWorkflow(
       config, yaml, projectDir, adapter, new Map(), undefined,
-      join(projectDir, 'config', 'agents'), created.runId, 'changed initialized gitlink replay', true, false,
+      join(projectDir, 'config', 'agents'), created.runId, 'changed initialized gitlink replay', true,
     );
     expect(final.status).toBe('failed');
     expect(invocationCount).toBe(1);
@@ -456,14 +631,61 @@ describe('portable live constraint guard', () => {
     expect(deadlineAborts).toContain('live_constraint_monitor_failure');
   });
 
+  it.each(['not-started', 'hung'] as const)('one deadline owner aborts a %s scan exactly once', async (shape) => {
+    vi.useFakeTimers();
+    try {
+      const aborts: string[] = [];
+      const failures: unknown[] = [];
+      const scan = vi.fn(() => new Promise<never>(() => undefined));
+      const guard = new LiveConstraintGuard({
+        projectDir, runDir: stateDir, stageId: 'writer', attemptIndex: 1,
+        effectiveScope: () => [], fallbackScanMs: 100, monitorDeadlineMs: 20,
+        watchProject: () => undefined, scanAndRestore: scan,
+        scopeRevisionInstruction: () => 'request scope', onMonitorFailure: failure => failures.push(failure),
+      });
+      const monitor = guard.beginInvocation(1, reason => aborts.push(reason));
+      if (shape === 'hung') await vi.advanceTimersByTimeAsync(0);
+      vi.advanceTimersByTime(20);
+      const result = await monitor.finish();
+      await monitor.finish();
+      expect(scan).toHaveBeenCalledTimes(shape === 'hung' ? 1 : 0);
+      expect(result.monitorFailure?.reason).toContain('no clean scan within 20ms');
+      expect(aborts).toEqual(['live_constraint_monitor_failure']);
+      expect(failures).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('caps idle fallback gaps and measures a hung scan from the last clean scan', async () => {
+    vi.useFakeTimers();
+    try {
+      let hung = false;
+      let scans = 0;
+      const aborts: string[] = [];
+      const guard = new LiveConstraintGuard({
+        projectDir, runDir: stateDir, stageId: 'writer', attemptIndex: 1,
+        effectiveScope: () => [], fallbackScanMs: 100, monitorDeadlineMs: 20,
+        watchProject: () => undefined,
+        scanAndRestore: () => { scans++; return hung ? new Promise<never>(() => undefined) : { scannedPaths: 1, violations: [] }; },
+        scopeRevisionInstruction: () => 'request scope',
+      });
+      const monitor = guard.beginInvocation(1, reason => aborts.push(reason));
+      await vi.advanceTimersByTimeAsync(30);
+      expect(scans).toBe(4);
+      expect(aborts).toEqual([]);
+      hung = true;
+      await vi.advanceTimersByTimeAsync(19);
+      expect(aborts).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await monitor.finish();
+      expect(aborts).toEqual(['live_constraint_monitor_failure']);
+      expect(result.monitorFailure).toMatchObject({ lastScanFileCount: 1 });
+    } finally { vi.useRealTimers(); }
+  });
+
   it('H2 uses configured monitor timing and reports the last completed scan', async () => {
     mkdirSync(join(projectDir, 'config'), { recursive: true });
-    writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
-      'default_timeout_ms: 60000',
-      'live_constraint_fallback_scan_ms: 5',
-      'live_constraint_monitor_deadline_ms: 35',
-    ].join('\n') + '\n');
-    const defaults = loadProjectDefaults(projectDir);
+    setEngineDefaults({ timeout_ms: 60000, live_constraint_fallback_scan_ms: 5, live_constraint_monitor_deadline_ms: 35 });
+    const defaults = loadEngineDefaults();
     expect(defaults.live_constraint_fallback_scan_ms).toBe(5);
     expect(defaults.live_constraint_monitor_deadline_ms).toBe(35);
 
@@ -506,11 +728,7 @@ describe('portable live constraint guard', () => {
 
   it('H2 fallback scanning does not descend a symlinked input directory', { timeout: 10_000 }, async () => {
     seedProject();
-    writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
-      'default_timeout_ms: 60000',
-      'live_constraint_fallback_scan_ms: 5',
-      'live_constraint_monitor_deadline_ms: 500',
-    ].join('\n') + '\n');
+    setEngineDefaults({ timeout_ms: 60000, live_constraint_fallback_scan_ms: 5, live_constraint_monitor_deadline_ms: 500 });
     const external = join(stateDir, 'large-input');
     mkdirSync(external, { recursive: true });
     const externalFile = join(external, 'checkpoint.bin');
@@ -522,37 +740,20 @@ describe('portable live constraint guard', () => {
     state.autoApprove = true;
     writeRunState(projectDir, created.runId, state);
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       writeFileSync(externalFile, 'updated outside the project tree\n');
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-      return { output: 'read-only project stage', exitCode: 0, duration_ms: 50, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'read-only project stage', exitCode: 0, duration_ms: 50, writes: [], writeAttribution: 'structured' }, opts);
     } };
 
     const final = await runWorkflow(
       config, yaml, projectDir, adapter, new Map(), undefined,
-      join(projectDir, 'config', 'agents'), created.runId, 'symlink fallback replay', true, false,
+      join(projectDir, 'config', 'agents'), created.runId, 'symlink fallback replay', true,
     );
 
     expect(final.status).toBe('complete');
     expect(readFileSync(externalFile, 'utf-8')).toBe('updated outside the project tree\n');
     expect(readStageStatus(projectDir, created.runId, 'writer').attempts?.at(-1)?.constraintAudit)
       .toMatchObject({ liveViolationCount: 0 });
-  });
-
-  it('serializes attributable writers while leaving an explicitly read-only lease free', async () => {
-    const releaseFirst = await acquireAttributableWriterLease(projectDir, true);
-    let secondAcquired = false;
-    const second = acquireAttributableWriterLease(projectDir, true).then((release) => {
-      secondAcquired = true;
-      return release;
-    });
-    const releaseReadOnly = await acquireAttributableWriterLease(projectDir, false);
-    releaseReadOnly();
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-    expect(secondAcquired).toBe(false);
-    releaseFirst();
-    const releaseSecond = await second;
-    expect(secondAcquired).toBe(true);
-    releaseSecond();
   });
 });

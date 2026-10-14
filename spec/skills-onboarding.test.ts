@@ -6,18 +6,24 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const installerPath = join(repositoryRoot, 'skills', 'install.sh');
 const fixtureRoots: string[] = [];
+
+function installedSkillSource(name: string): string {
+  return readFileSync(join(repositoryRoot, 'skills', `${name}.md`), 'utf8')
+    .replaceAll('](../guide/', '](references/');
+}
 
 interface OnboardingFixture {
   root: string;
@@ -90,6 +96,7 @@ function onboardingFixture(): OnboardingFixture {
     fixture.project,
     fixture.bin,
   ]) mkdirSync(path, { recursive: true });
+  writeFileSync(join(fixture.bin, 'package.json'), JSON.stringify({ type: 'module' }));
   createToolbox(fixture);
   executable(fixture.runner, [
     `#!${process.execPath}`,
@@ -254,14 +261,14 @@ describe('FlowCrew skill installer', () => {
 
       const codexShip = join(fixture.home, '.agents', 'skills', 'ship', 'SKILL.md');
       const codexStatus = join(fixture.home, '.agents', 'skills', 'fc-status', 'SKILL.md');
-      const claudeShip = join(fixture.home, '.claude', 'commands', 'ship.md');
-      const claudeStatus = join(fixture.home, '.claude', 'commands', 'fc-status.md');
+      const claudeShip = join(fixture.home, '.claude', 'skills', 'ship', 'SKILL.md');
+      const claudeStatus = join(fixture.home, '.claude', 'skills', 'fc-status', 'SKILL.md');
       if (setup.codex) {
         expect(output).toContain('Codex skills/list enumerated ship and fc-status');
         expect(output).toContain('✓ Codex skills installed and enumerated');
         expect(output).toContain('$ship');
-        expect(readFileSync(codexShip, 'utf-8')).toBe(readFileSync(join(repositoryRoot, 'skills', 'ship.md'), 'utf-8'));
-        expect(readFileSync(codexStatus, 'utf-8')).toBe(readFileSync(join(repositoryRoot, 'skills', 'fc-status.md'), 'utf-8'));
+        expect(readFileSync(codexShip, 'utf-8')).toBe(installedSkillSource('ship'));
+        expect(readFileSync(codexStatus, 'utf-8')).toBe(installedSkillSource('fc-status'));
       } else {
         expect(output).toContain('Codex CLI not found; skipped');
         expect(output).not.toContain('✓ Codex skills installed');
@@ -269,8 +276,8 @@ describe('FlowCrew skill installer', () => {
       }
       if (setup.claude) {
         expect(output).toContain('✓ Claude Code skills installed and byte-verified');
-        expect(readFileSync(claudeShip, 'utf-8')).toBe(readFileSync(join(repositoryRoot, 'skills', 'ship.md'), 'utf-8'));
-        expect(readFileSync(claudeStatus, 'utf-8')).toBe(readFileSync(join(repositoryRoot, 'skills', 'fc-status.md'), 'utf-8'));
+        expect(readFileSync(claudeShip, 'utf-8')).toBe(installedSkillSource('ship'));
+        expect(readFileSync(claudeStatus, 'utf-8')).toBe(installedSkillSource('fc-status'));
       } else {
         expect(output).toContain('Claude Code CLI not found; skipped');
         expect(output).not.toContain('✓ Claude Code skills installed');
@@ -352,9 +359,76 @@ describe('FlowCrew skill installer', () => {
 
     expect(result.status, output).toBe(0);
     expect(existsSync(join(fixture.project, '.agents', 'skills', 'ship', 'SKILL.md'))).toBe(true);
-    expect(existsSync(join(fixture.project, '.claude', 'commands', 'ship.md'))).toBe(true);
+    expect(existsSync(join(fixture.project, '.claude', 'skills', 'ship', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(fixture.home, '.agents'))).toBe(false);
     expect(existsSync(join(fixture.home, '.claude'))).toBe(false);
+  });
+
+  it('installs self-contained bundles with every relative link resolving and idempotently retires legacy Claude commands', () => {
+    const fixture = onboardingFixture();
+    installFakeClaude(fixture);
+    installFakeCodex(fixture);
+    const commands = join(fixture.home, '.claude', 'commands');
+    mkdirSync(commands, { recursive: true });
+    for (const name of ['ship', 'fc-status']) writeFileSync(join(commands, `${name}.md`), 'legacy command\n');
+
+    const install = () => {
+      const result = runInstaller(fixture, ['--claude', '--codex', '--global']);
+      expect(result.error).toBeUndefined();
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+    };
+    const snapshot = () => {
+      const files = new Map<string, string>();
+      for (const agent of ['.claude', '.agents']) {
+        for (const name of ['ship', 'fc-status']) {
+          const root = join(fixture.home, agent, 'skills', name);
+          const paths = readdirSync(root, { recursive: true, withFileTypes: true })
+            .filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name));
+          expect(paths).toContain(join(root, 'SKILL.md'));
+          const sourceSkill = readFileSync(join(repositoryRoot, 'skills', `${name}.md`), 'utf8');
+          for (const [, guide] of sourceSkill.matchAll(/\]\(\.\.\/guide\/([^#)]+)/g)) {
+            expect(paths).toContain(join(root, 'references', guide));
+          }
+          for (const path of paths) {
+            const content = readFileSync(path, 'utf8');
+            files.set(relative(fixture.home, path), content);
+            // These documents use inline links; include reference-style destinations too.
+            const destinations = [
+              ...[...content.matchAll(/\[[^\]]+\]\(([^\s)]+)\)/g)].map((match) => match[1]),
+              ...[...content.matchAll(/^\s*\[[^\]]+\]:\s*(\S+)/gm)].map((match) => match[1]),
+            ];
+            if (path === join(root, 'SKILL.md')) expect(destinations.length, path).toBeGreaterThan(0);
+            for (const href of destinations) {
+              if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href)) continue;
+              const [file, anchor] = href.split('#');
+              const target = file ? resolve(dirname(path), file) : path;
+              expect(target.startsWith(root + sep), `${path}: ${href}`).toBe(true);
+              expect(existsSync(target), `${path}: ${href}`).toBe(true);
+              if (anchor) {
+                const headings = [...readFileSync(target, 'utf8').matchAll(/^#{1,6} (.+)$/gm)]
+                  .map(([, heading]) => heading.toLowerCase().replace(/[^a-z0-9 -]/g, '').trim().replace(/\s+/g, '-'));
+                expect(headings, `${path}: ${href}`).toContain(anchor);
+              }
+            }
+          }
+        }
+      }
+      return files;
+    };
+    install();
+    for (const name of ['ship', 'fc-status']) expect(existsSync(join(commands, `${name}.md`))).toBe(false);
+    const first = snapshot();
+    install();
+    expect(snapshot()).toEqual(first);
+    for (const name of ['ship', 'fc-status']) expect(existsSync(join(commands, `${name}.md`))).toBe(false);
+    const reference = join(fixture.home, '.claude', 'skills', 'ship', 'references', 'brief-contract.md');
+    for (const corrupt of [() => writeFileSync(reference, 'locally changed\n'), () => rmSync(reference)]) {
+      corrupt();
+      const doctor = runDoctor(fixture);
+      expect(`${doctor.stdout}${doctor.stderr}`).toContain('ship (global) is outdated or locally changed');
+      install();
+      expect(snapshot()).toEqual(first);
+    }
   });
 });
 
@@ -378,18 +452,22 @@ describe('skill manifests and doctor freshness', () => {
   });
 
   it('uses the real invocation syntax for both agents wherever onboarding first asks users to ship', () => {
-    const readme = readFileSync(join(repositoryRoot, 'README.md'), 'utf8');
-    const firstExample = readme.slice(0, readme.indexOf('**Most AI agents'));
-    expect(firstExample).toContain('/ship');
-    expect(firstExample).toContain('$ship');
-
+    const onboarding = readFileSync(join(repositoryRoot, 'guide', 'getting-started.md'), 'utf8');
     const ship = readFileSync(join(repositoryRoot, 'skills', 'ship.md'), 'utf8');
-    expect(ship).toContain('`/ship <flag>` in Claude Code or `$ship <flag>` in Codex');
+    for (const document of [onboarding, ship]) {
+      expect(document).toContain('`/ship`');
+      expect(document).toContain('`$ship`');
+    }
     expect(ship).not.toContain('If the user said `/ship');
     expect(ship).not.toMatch(/^- `\/ship --/m);
     expect(ship).not.toContain('npx flowcrew');
     expect(ship).not.toContain("npm install --global 'git+https://github.com/cuibuaa/flow-crew.git'");
-    expect(ship).toContain('git clone https://github.com/cuibuaa/flow-crew.git && cd flow-crew && npm install && npm link');
+    expect(onboarding).toContain('git clone https://github.com/cuibuaa/flow-crew.git');
+    expect(onboarding).toContain('npm ci --ignore-scripts');
+    expect(onboarding).toContain('npm ci --ignore-scripts --prefix ui');
+    expect(onboarding).toContain('node dist/cli.js --help');
+    expect(onboarding).toContain('`npm link` changes the global command link');
+    expect(onboarding).toContain('`which flowcrew`');
   });
 
   it('warns for missing skills only when that agent is installed and gives a pasteable repair command', () => {

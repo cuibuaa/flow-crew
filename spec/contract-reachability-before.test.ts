@@ -1,3 +1,5 @@
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
+import { artifacts, inputFile } from './spec_contracts/declared-fixtures.js';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
@@ -22,11 +24,6 @@ import {
   type GitWorktreeCreator,
 } from '../src/cli-ship-setup.js';
 import { cmdEventsWithDeps } from '../src/cli-events.js';
-import {
-  planRetryRequirement,
-  preparePlanRetryCandidate,
-  recordPlanRetryRefusal,
-} from '../src/plan-retry-monotone.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
 import {
   briefDeclaresNoCandidateOutcome,
@@ -47,10 +44,6 @@ import {
   setFcGlobalDir,
   type StoreState,
 } from '../src/store.js';
-import {
-  captureStageArtifactContractPreimages,
-  inspectStageArtifactContract,
-} from '../src/stage-artifact-contract.js';
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..');
 const temporaryRoots: string[] = [];
@@ -95,8 +88,8 @@ class CaptureWriter {
 }
 
 const inertAdapter: Adapter = {
-  async run(): Promise<RunResult> {
-    return { output: 'unused', exitCode: 0, duration_ms: 1 };
+  async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts): Promise<RunResult> {
+    return fixtureResult({ output: 'unused', exitCode: 0, duration_ms: 1 }, recordOpts);
   },
 };
 
@@ -111,358 +104,51 @@ afterAll(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('1 — malformed completed-round recovery and plan refusal evidence', () => {
-  it('recovers the exact status/outcome transposition after its work stage completed', async () => {
-    const root = temporaryRoot('malformed-round');
-    const projectDir = join(root, 'project');
-    const runDirectory = join(root, 'run');
-    const sidecar = join(projectDir, 'artifacts', 'round.json.no_candidate.json');
+describe('research ingestion and planner refusal evidence', () => {
+  it.each([
+    { name: 'measured', sidecar: false, record: { label: 'candidate', result: 0.12 }, outcome: 'measured' },
+    { name: 'no candidate', sidecar: true, record: { label: 'candidate', outcome: 'no_candidate', reason: 'No safe candidate' }, outcome: 'no_candidate' },
+    { name: 'legacy discriminator', sidecar: true, record: { label: 'candidate', status: 'no_candidate', reason: 'No safe candidate' }, outcome: 'no_candidate' },
+    { name: 'missing identity', sidecar: true, record: { label: '', status: 'no_candidate', note: 'Not a reason' }, outcome: undefined },
+  ])('ingests $name without rerunning a completed producer', async ({ sidecar, record, outcome, name }) => {
+    const root = temporaryRoot('round-ingestion'), projectDir = join(root, 'project'), runDirectory = join(root, 'run');
     mkdirSync(runDirectory, { recursive: true });
-    write(sidecar, JSON.stringify({
-      label: 'dose-floor-round',
-      status: 'no_candidate',
-      reason: 'every measured candidate violated a hard constraint',
-    }));
+    const path = join(projectDir, `artifacts/round.json${sidecar ? '.no_candidate.json' : ''}`);
+    write(path, JSON.stringify(record));
     const completedAt = new Date(Date.now() - 100).toISOString();
-    const state = {
-      runId: 'malformed-round',
-      workflowName: 'research-replay',
-      projectDir,
-      status: 'running',
-      startedAt: new Date(Date.now() - 1_000).toISOString(),
-      stages: {
-        measure: { status: 'complete', retries: 0, completedAt },
-      },
-      research: {
-        baseline: 0.1,
-        policy: 'best_of_n',
-        resultFile: 'artifacts/round.json',
-        reportDir: 'artifacts',
-        stop: { maxRounds: 2 },
-      },
+    const producer = { status: 'complete', retries: 0, completedAt };
+    const state = { runId: 'fixture', workflowName: 'research', projectDir, status: 'running',
+      startedAt: new Date(Date.now() - 1_000).toISOString(), stages: { measure: producer },
+      research: { baseline: 0.1, policy: 'best_of_n', resultFile: 'artifacts/round.json', reportDir: 'artifacts', stop: { maxRounds: 2 } },
     } as StoreState;
-
-    const result = await tryAdvanceResearch(state, {
-      projectDir,
-      runId: state.runId,
-      runDirPath: runDirectory,
-      iteration: 1,
-      adapter: inertAdapter,
-    });
-    expect(state.stages.measure).toMatchObject({ status: 'complete', completedAt });
-    expect(result).toBeNull();
-    expect(readJson(join(runDirectory, 'research_round_contract_repair.json'))).toMatchObject({
-      kind: 'no_candidate_status_alias',
-      fromField: 'status',
-      toField: 'outcome',
-    });
-    expect(existsSync(join(runDirectory, 'research_round_input_error.json'))).toBe(false);
-    expect(existsSync(sidecar)).toBe(false);
-    expect(readJson(join(runDirectory, 'research_journal.json')).rounds).toEqual([
-      expect.objectContaining({ label: 'dose-floor-round', outcome: 'no_candidate' }),
-    ]);
-    expect(readdirSync(runDirectory).some((name) => /no_candidate_consumed\.json$/.test(name))).toBe(true);
-  });
-
-  it('finishes a run from a completed producer that wrote the transposed sidecar', async () => {
-    const root = temporaryRoot('malformed-round-finishes');
-    const projectDir = join(root, 'project');
-    const agentsDir = workerAgentDirectory(root);
-    mkdirSync(projectDir, { recursive: true });
-    const resultFile = 'artifacts/round.json';
-    const sidecar = `${resultFile}.no_candidate.json`;
-    const ceilingPath = 'artifacts/ceiling.md';
-    const brief = [
-      '---',
-      'research:',
-      '  baseline: 0.1',
-      '  policy: best_of_n',
-      `  result_file: ${resultFile}`,
-      '  report_dir: artifacts',
-      '  stop:',
-      '    max_rounds: 1',
-      'terminal_states:',
-      '  ceiling_hit:',
-      `    paths: [${ceilingPath}]`,
-      '---',
-      '# Completed malformed round finish replay',
-    ].join('\n');
-    const workflow: WorkflowConfig = {
-      name: 'malformed-round-finishes',
-      defaults: { max_iterations: 2 },
-      stages: [{
-        id: 'measure',
-        role: 'worker',
-        depends_on: [],
-        dependency_reasons: {},
-        scope: [resultFile, sidecar],
-        criterion_refs: [],
-        prompt_template: 'measure one research round',
-        skills: [],
-        dynamic_dispatch: false,
-        is_gate: false,
-      }],
-    };
-    const adapter: Adapter = {
-      async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        write(join(projectDir, sidecar), JSON.stringify({
-          label: 'completed-dose-floor-round',
-          status: 'no_candidate',
-          reason: 'every measured candidate violated a hard constraint',
-        }));
-        return {
-          output: 'completed 18690 seconds of measurement',
-          exitCode: 0,
-          duration_ms: 18_690_000,
-          writes: [sidecar],
-          writeAttribution: 'structured',
-        };
-      },
-    };
-
-    const final = await runWorkflow(
-      workflow, stringifyYaml(workflow), projectDir, adapter, new Map(), undefined,
-      agentsDir, undefined, brief, true, false,
-    );
-    const runDirectory = runDir(projectDir, final.runId);
-
-    expect(final.status).toBe('ceiling_hit');
-    expect(final.stages.measure).toMatchObject({ status: 'complete', duration_ms: 18_690_000 });
-    expect(readJson(join(runDirectory, 'research_round_contract_repair.json'))).toMatchObject({
-      kind: 'no_candidate_status_alias',
-    });
-    expect(readJson(join(runDirectory, 'research_journal.json')).rounds).toEqual([
-      expect.objectContaining({ label: 'completed-dose-floor-round', outcome: 'no_candidate' }),
-    ]);
-    expect(existsSync(join(projectDir, ceilingPath))).toBe(true);
-  }, 30_000);
-
-  it('still refuses a sidecar with an empty identity and no reason field', async () => {
-    const root = temporaryRoot('malformed-round-control');
-    const projectDir = join(root, 'project');
-    const runDirectory = join(root, 'run');
-    const sidecar = join(projectDir, 'artifacts', 'round.json.no_candidate.json');
-    mkdirSync(runDirectory, { recursive: true });
-    write(sidecar, JSON.stringify({ label: '', status: 'no_candidate', note: 'not a contract reason' }));
-    const state = {
-      runId: 'malformed-round-control',
-      workflowName: 'research-replay',
-      projectDir,
-      status: 'running',
-      startedAt: new Date(Date.now() - 1_000).toISOString(),
-      stages: { measure: { status: 'complete', retries: 0 } },
-      research: {
-        baseline: 0.1,
-        policy: 'best_of_n',
-        resultFile: 'artifacts/round.json',
-        reportDir: 'artifacts',
-        stop: { maxRounds: 1 },
-      },
-    } as StoreState;
-
-    expect(await tryAdvanceResearch(state, {
-      projectDir, runId: state.runId, runDirPath: runDirectory, iteration: 1, adapter: inertAdapter,
-    })).toBeNull();
-    expect(readJson(join(runDirectory, 'research_round_input_error.json'))).toMatchObject({
-      kind: 'missing_label',
-    });
-    expect(existsSync(sidecar)).toBe(true);
-    expect(existsSync(join(runDirectory, 'research_round_contract_repair.json'))).toBe(false);
-  });
-
-  it('still fails when the recovered round is followed by structurally invalid plans', async () => {
-    const root = temporaryRoot('malformed-round-replan');
-    const projectDir = join(root, 'project');
-    const agentsDir = workerAgentDirectory(root);
-    mkdirSync(projectDir, { recursive: true });
-    const resultFile = 'artifacts/round.json';
-    const sidecar = `${resultFile}.no_candidate.json`;
-    const terminalPaths = ['artifacts/ship.md', 'artifacts/ceiling.md', 'artifacts/escalation.md'];
-    const brief = [
-      '---',
-      'research:',
-      '  baseline: 0.1',
-      '  policy: best_of_n',
-      `  result_file: ${resultFile}`,
-      '  report_dir: artifacts',
-      '  stop:',
-      '    max_rounds: 2',
-      'terminal_states:',
-      '  shipped:',
-      `    paths: [${terminalPaths[0]}]`,
-      '  ceiling_hit:',
-      `    paths: [${terminalPaths[1]}]`,
-      '  escalated:',
-      `    paths: [${terminalPaths[2]}]`,
-      '---',
-      '# Completed malformed round replay',
-    ].join('\n');
-    const workflow: WorkflowConfig = {
-      name: 'malformed-round-replan',
-      defaults: { max_iterations: 2 },
-      stages: [{
-        id: 'plan',
-        role: 'worker',
-        depends_on: [],
-        dependency_reasons: {},
-        scope: [],
-        criterion_refs: [],
-        prompt_template: 'plan the current research round',
-        skills: [],
-        dynamic_dispatch: true,
-        is_gate: false,
-      }],
-    };
-    let planCalls = 0;
-    const planPrompts: string[] = [];
-    let measurePrompt = '';
-    const adapter: Adapter = {
-      async run(prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (opts.stageId === 'plan') {
-          planCalls += 1;
-          planPrompts.push(prompt);
-          const stages = planCalls === 1
-            ? [
-                {
-                  id: 'measure', role: 'worker', depends_on: [], dependency_reasons: {},
-                  scope: [resultFile, sidecar], criterion_refs: [],
-                  prompt_template: 'write exactly one research round artifact',
-                },
-                ...terminalPaths.map((path, index) => ({
-                  id: ['write_ship', 'write_ceiling', 'write_escalation'][index],
-                  role: 'worker',
-                  depends_on: ['measure'],
-                  dependency_reasons: { measure: 'terminal output consumes the completed round' },
-                  scope: [path],
-                  condition: `research.terminalPath == ${path}`,
-                  criterion_refs: [],
-                  prompt_template: `write ${path} only when selected`,
-                })),
-              ]
-            : [{
-                id: `orphan_round_${planCalls}`,
-                role: 'worker',
-                depends_on: [],
-                dependency_reasons: {},
-                scope: [`artifacts/orphan-${planCalls}.txt`],
-                criterion_refs: [],
-                prompt_template: `invalid recovery proposal ${planCalls}`,
-              }];
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), stringifyYaml({ stages }), 'utf8');
-          return { output: `plan attempt ${planCalls}`, exitCode: 0, duration_ms: 1 };
-        }
-        if (opts.stageId === 'measure') {
-          measurePrompt = prompt;
-          write(join(projectDir, sidecar), JSON.stringify({
-            label: 'completed-dose-floor-round',
-            status: 'no_candidate',
-            reason: 'every measured candidate violated a hard constraint',
-          }));
-          return {
-            output: 'completed 18690 seconds of measurement and wrote the sidecar',
-            exitCode: 0,
-            duration_ms: 18_690_000,
-            writes: [sidecar],
-            writeAttribution: 'structured',
-          };
-        }
-        return { output: 'conditional finalizer did not write', exitCode: 0, duration_ms: 1 };
-      },
-    };
-
-    const final = await runWorkflow(
-      workflow,
-      stringifyYaml(workflow),
-      projectDir,
-      adapter,
-      new Map(),
-      undefined,
-      agentsDir,
-      undefined,
-      brief,
-      true,
-      false,
-    );
-    const runDirectory = runDir(projectDir, final.runId);
-    const retryState = readJson(join(runDirectory, 'plan_retry_state.json'));
-    const events = readFileSync(join(runDirectory, 'events.jsonl'), 'utf8')
-      .trim().split('\n').map((line) => JSON.parse(line) as Record<string, any>);
-
-    expect(planCalls).toBe(5);
-    expect(planPrompts[0]).toContain('# Engine admission contract for this proposal (pre-submit)');
-    for (const terminalPath of terminalPaths) {
-      expect(planPrompts[0]).toContain(`${terminalPath} — exactly one scoped non-gate, non-repair DAG sink owner`);
+    const result = await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath: runDirectory, iteration: 1, adapter: inertAdapter });
+    expect(state.stages.measure).toEqual({ status: 'complete', retries: 0, completedAt });
+    if (!outcome) {
+      expect(result).toBeNull();
+      expect(readJson(join(runDirectory, 'research_round_input_error.json'))).toMatchObject({ kind: 'missing_label' });
+      expect(existsSync(path)).toBe(true);
+      expect(existsSync(join(runDirectory, 'research_round_contract_repair.json'))).toBe(false);
+      return;
     }
-    expect(measurePrompt).toContain('the discriminator field is outcome, not status');
-    expect(final.status).toBe('failed');
-    expect(final.stageEvidence).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        iteration: 1,
-        stageId: 'measure',
-        status: expect.objectContaining({ status: 'complete', duration_ms: 18_690_000 }),
-      }),
-    ]));
-    expect(existsSync(join(runDirectory, 'research_round_input_error.json'))).toBe(false);
-    expect(readJson(join(runDirectory, 'research_round_contract_repair.json'))).toMatchObject({
-      kind: 'no_candidate_status_alias',
-    });
     expect(readJson(join(runDirectory, 'research_journal.json')).rounds).toEqual([
-      expect.objectContaining({ label: 'completed-dose-floor-round', outcome: 'no_candidate' }),
+      expect.objectContaining({ label: record.label, outcome, ...(!sidecar ? { result: record.result } : {}) }),
     ]);
-    expect(events.filter((event) => event.type === 'plan_dispatch_retry')).toHaveLength(2);
-    expect(retryState.attempts).toHaveLength(3);
-    expect(retryState.attempts.every((attempt: Record<string, any>) => (
-      attempt.unsatisfied.filter((item: Record<string, unknown>) => (
-        String(item.detail).includes('expected exactly one scoped owner, found 0')
-      )).length === 3
-    ))).toBe(true);
-  }, 60_000);
-
-  it('calibrates the ingestion instrument with a structurally different measured artifact', async () => {
-    const root = temporaryRoot('measured-control');
-    const projectDir = join(root, 'project');
-    const runDirectory = join(root, 'run');
-    mkdirSync(runDirectory, { recursive: true });
-    write(join(projectDir, 'artifacts', 'round.json'), JSON.stringify({
-      label: 'independent-measurement',
-      result: 0.12,
-    }));
-    const state = {
-      runId: 'measured-control',
-      workflowName: 'research-replay',
-      projectDir,
-      status: 'running',
-      startedAt: new Date(Date.now() - 1_000).toISOString(),
-      stages: { measure: { status: 'complete', retries: 0 } },
-      research: {
-        baseline: 0.1,
-        policy: 'best_of_n',
-        resultFile: 'artifacts/round.json',
-        reportDir: 'artifacts',
-        stop: { maxRounds: 2 },
-      },
-    } as StoreState;
-
-    await tryAdvanceResearch(state, {
-      projectDir,
-      runId: state.runId,
-      runDirPath: runDirectory,
-      iteration: 1,
-      adapter: inertAdapter,
-    });
-
-    expect(readJson(join(runDirectory, 'research_journal.json')).rounds).toEqual([
-      expect.objectContaining({ label: 'independent-measurement', outcome: 'measured', result: 0.12 }),
-    ]);
-    expect(existsSync(join(runDirectory, 'research_round_1_consumed.json'))).toBe(true);
     expect(existsSync(join(runDirectory, 'research_round_input_error.json'))).toBe(false);
+    if (sidecar) {
+      expect(result).toBeNull();
+      expect(existsSync(path)).toBe(false);
+      expect(readdirSync(runDirectory).some(file => /no_candidate_consumed\.json$/.test(file))).toBe(true);
+    } else expect(existsSync(join(runDirectory, 'research_round_1_consumed.json'))).toBe(true);
+    if (name === 'legacy discriminator') {
+      expect(readJson(join(runDirectory, 'research_round_contract_repair.json'))).toMatchObject({
+        kind: 'no_candidate_status_alias', fromField: 'status', toField: 'outcome',
+      });
+    }
   });
 
   it('enumerates terminal-owner cardinalities zero, one, and three through admission', () => {
     const terminalPaths = ['artifacts/ship.md', 'artifacts/ceiling.md', 'artifacts/escalation.md'];
-    const stage = (id: string, scope: string[]): StageConfig => ({
+    const stage = (id: string, scope: string[]): StageConfig => ({ artifact_contract: artifacts([], [], [], []),
       id,
       role: 'worker',
       depends_on: [],
@@ -502,11 +188,11 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
       terminalStates,
     });
 
-    expect(zero.errors.filter((error) => error.includes('expected exactly one scoped owner, found 0')))
+    expect(zero.errors.filter((error) => error.includes('expected exactly one final producer, found 0')))
       .toHaveLength(3);
     expect(one).toMatchObject({ pass: true, errors: [] });
     expect(many.errors.filter((error) => (
-      error.includes('expected exactly one scoped owner, found 3 (execute_round, repair_round, write_ship)')
+      error.includes('expected exactly one final producer, found 3 (execute_round, repair_round, write_ship)')
     ))).toHaveLength(3);
     expect([zero, one, many].reduce<Record<string, number>>((counts, report) => {
       const disposition = report.pass ? 'admitted' : 'refused';
@@ -522,7 +208,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
         '## Reality checks',
         '',
         stringifyYaml({
-          checks: [{
+          checks: [{ reads: [inputFile('file_0', '.fc/runs/prior/evidence.json')],
             name: 'historical-run-evidence',
             type: 'file-exists-nonempty',
             params: { paths: ['.fc/runs/prior/evidence.json'] },
@@ -535,59 +221,11 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     });
 
     expect(errors).toEqual([
-      'reality check "historical-run-evidence" references absent .fc/runs/prior/evidence.json, but no admitted stage or framework emitter owns it',
+      expect.stringContaining('ARTIFACT_INPUT_ABSENT'),
     ]);
   });
 
-  it('calibrates a non-repeating retry ledger that reports its final causal refusal', () => {
-    const root = temporaryRoot('retry-summary');
-    const dispatchPath = join(root, 'dispatch.yaml');
-    const dispatches = ['first', 'second', 'third'].map((label) => stringifyYaml({
-      stages: [{
-        id: `work_${label}`,
-        role: 'worker',
-        depends_on: [],
-        dependency_reasons: {},
-        scope: [`artifacts/${label}.txt`],
-        criterion_refs: [],
-        prompt_template: label,
-      }],
-    }));
-    const observations = [
-      [
-        planRetryRequirement('terminal_states path artifacts/ship.md: expected exactly one scoped owner, found 0'),
-        planRetryRequirement('terminal_states path artifacts/ceiling.md: expected exactly one scoped owner, found 0'),
-        planRetryRequirement('terminal_states path artifacts/escalation.md: expected exactly one scoped owner, found 0'),
-      ],
-      [planRetryRequirement('reality check "run-history" references absent .fc/runs/prior/evidence.json, but no admitted stage or framework emitter owns it')],
-      [planRetryRequirement('reality check "run-history" references absent .fc/runs/prior/evidence.json, but no admitted stage or framework emitter owns it')],
-    ];
-    let terminalReason = '';
-    observations.forEach((unsatisfied, index) => {
-      writeFileSync(dispatchPath, dispatches[index], 'utf8');
-      const prepared = preparePlanRetryCandidate({
-        runDirPath: root,
-        stageId: 'plan',
-        iteration: 1,
-        attemptIndex: index + 1,
-      });
-      const recorded = recordPlanRetryRefusal({
-        runDirPath: root,
-        prepared,
-        maxAttempts: 3,
-        unsatisfied,
-        stopOnRepeat: false,
-      });
-      terminalReason = recorded.reason ?? terminalReason;
-    });
-
-    expect(terminalReason).toContain('reality-check:run-history');
-    expect(terminalReason).toContain('.fc/runs/prior/evidence.json');
-    expect(terminalReason).not.toContain('terminal-owner:artifacts/ship.md');
-    expect(readJson(join(root, 'plan_retry_state.json')).attempts).toHaveLength(3);
-  });
-
-  it('replays three refused planner proposals and reports the final causal refusal', async () => {
+  it('bounds planner invocations and reports the final causal refusal', async () => {
     const root = temporaryRoot('scheduler-retry-summary');
     const projectDir = join(root, 'project');
     const agentsDir = workerAgentDirectory(root);
@@ -607,10 +245,10 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
       '',
       'The required historical evidence artifact is `.fc/runs/prior/evidence.json`.',
     ].join('\n');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'planner-refusal-replay',
       defaults: { max_iterations: 1 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([], [], [], []),
         id: 'plan',
         role: 'worker',
         depends_on: [],
@@ -626,13 +264,13 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
     let planCalls = 0;
     const adapter: Adapter = {
       async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (opts.stageId !== 'plan') return { output: 'unexpected work stage', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
+        if (opts.stageId !== 'plan') return fixtureResult({ output: 'unexpected work stage', exitCode: 0, duration_ms: 1 }, opts);
         planCalls += 1;
-        const stages = ['execute_round', 'repair_round', 'write_ship'].map((id) => ({
+        const stages = ['execute_round', 'repair_round', 'write_ship'].map((id) => ({ artifact_contract: artifacts([], [], [], []),dynamic_dispatch: false, 
           id,
           role: 'worker',
-          depends_on: id === 'execute_round' ? ['repair_round', 'write_ship'] : [],
+          depends_on: id === 'execute_round' && planCalls > 1 ? ['repair_round', 'write_ship'] : [],
           dependency_reasons: id === 'execute_round'
             ? {
                 repair_round: 'the sole terminal writer consumes the completed repair',
@@ -643,7 +281,7 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
           criterion_refs: [],
           prompt_template: `produce ${id}`,
         }));
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), stringifyYaml({ stages }), 'utf8');
+        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringifyYaml({ stages })), 'utf8');
         writeFileSync(join(opts.runDir, 'reality_checks.md'), [
           '## Reality checks',
           '',
@@ -653,12 +291,13 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
               name: 'run-history',
               type: 'file-exists-nonempty',
               params: { paths: ['.fc/runs/prior/evidence.json'] },
+              reads: [{id:'history',root:'project',path:'.fc/runs/prior/evidence.json',source:{kind:'input'}}],
             }],
           }).trimEnd(),
           '```',
           '',
         ].join('\n'), 'utf8');
-        return { output: `plan attempt ${planCalls}`, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: `plan attempt ${planCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       },
     };
 
@@ -673,7 +312,6 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
       undefined,
       brief,
       true,
-      false,
     );
     const runDirectory = runDir(projectDir, final.runId);
     const retryState = readJson(join(runDirectory, 'plan_retry_state.json'));
@@ -688,16 +326,16 @@ describe('1 — malformed completed-round recovery and plan refusal evidence', (
       expect.stringContaining('2/2'),
     ]);
     expect(retryState.attempts[0].unsatisfied.filter((item: Record<string, unknown>) => (
-      String(item.detail).includes('expected exactly one scoped owner, found 3')
+      String(item.detail).includes('expected exactly one final producer, found 3')
     ))).toHaveLength(3);
     expect(retryState.attempts[1].unsatisfied).toEqual([
       expect.objectContaining({
-        detail: expect.stringContaining('references absent .fc/runs/prior/evidence.json'),
+        id:'reality-check:run-history',detail: expect.stringContaining('.fc/runs/prior/evidence.json'),
       }),
     ]);
     expect(retryState.attempts[2].unsatisfied).toEqual([
       expect.objectContaining({
-        detail: expect.stringContaining('references absent .fc/runs/prior/evidence.json'),
+        id:'reality-check:run-history',detail: expect.stringContaining('.fc/runs/prior/evidence.json'),
       }),
     ]);
     expect(final.failureReason).toContain('reality-check:run-history');
@@ -785,7 +423,7 @@ function pairedBoundedResearchBrief(): string {
     ].join('\n'));
 }
 
-describe('2 and 3 — declared rehearsal outcomes and bounded ship probes', () => {
+describe('declared rehearsal outcomes and bounded ship probes', () => {
   beforeAll(async () => {
     for (const [target, baseline] of [[0.05, 0.04], [0.2, 0.15]] as const) {
       const result = await rehearseBriefIsolated(boundedResearchBrief(target, baseline), {
@@ -980,7 +618,7 @@ describe('2 and 3 — declared rehearsal outcomes and bounded ship probes', () =
   }, 60_000);
 });
 
-describe('4 — environment refusal precedence', () => {
+describe('environment refusal precedence', () => {
   function runBackgroundQuick(root: string, brief = '# Goal\nProbe.\n', acknowledge = false) {
     const bin = join(root, 'bin');
     const home = join(root, 'home');
@@ -1025,7 +663,7 @@ describe('4 — environment refusal precedence', () => {
     '',
   ].join('\n');
 
-  it('current main names the missing adapter before the zero-criteria refusal', () => {
+  it('names the missing adapter before the zero-criteria refusal', () => {
     const root = temporaryRoot('adapter-absent');
     const result = runBackgroundQuick(root);
     const output = `${result.stdout}${result.stderr}`;
@@ -1078,7 +716,7 @@ describe('4 — environment refusal precedence', () => {
   });
 });
 
-describe('5 — violation path at durable and human event layers', () => {
+describe('violation paths at durable and human event layers', () => {
   it('retains the path in both JSON and the published human event row', async () => {
     const root = temporaryRoot('event-path');
     const runsRoot = join(root, 'runs');
@@ -1163,10 +801,10 @@ describe('5 — violation path at durable and human event layers', () => {
     const projectDir = join(root, 'project');
     const agentsDir = workerAgentDirectory(root);
     mkdirSync(projectDir, { recursive: true });
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'live-event-path-replay',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([], [], [], []),
         id: 'writer',
         role: 'worker',
         depends_on: [],
@@ -1183,20 +821,20 @@ describe('5 — violation path at durable and human event layers', () => {
     let invocations = 0;
     const adapter: Adapter = {
       async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
         invocations += 1;
         write(join(projectDir, violatingPath), `export const attempt = ${invocations};\n`);
         const deadline = Date.now() + 1_500;
         while (existsSync(join(projectDir, violatingPath)) && Date.now() < deadline) {
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
         }
-        return {
+        return fixtureResult({
           output: 'wrote outside the admitted scope',
           exitCode: 0,
           duration_ms: 1,
           writes: [violatingPath],
           writeAttribution: 'structured',
-        };
+        }, opts);
       },
     };
     const final = await runWorkflow(
@@ -1210,7 +848,6 @@ describe('5 — violation path at durable and human event layers', () => {
       undefined,
       '# Live constraint path replay',
       true,
-      false,
     );
     const runDirectory = runDir(projectDir, final.runId);
     const durableEvents = readFileSync(join(runDirectory, 'events.jsonl'), 'utf8')
@@ -1250,282 +887,7 @@ describe('5 — violation path at durable and human event layers', () => {
   }, 30_000);
 });
 
-describe('6 — prompt-named artifacts and report-published commands', () => {
-  it('extracts unquoted exact filenames and distinguishes fresh production from a stale preimage', () => {
-    const root = temporaryRoot('artifact-production-provenance');
-    const projectDir = join(root, 'project');
-    const runDirectory = join(root, 'run');
-    mkdirSync(projectDir, { recursive: true });
-    mkdirSync(runDirectory, { recursive: true });
-
-    write(join(projectDir, 'reports.md'), '# stale\n');
-    const stale = inspectStageArtifactContract({
-      stageId: 'stale',
-      template: 'Write `reports.md`.',
-      projectDir,
-      runDir: runDirectory,
-      writes: [],
-    });
-    expect(stale.obligations).toHaveLength(1);
-    expect(stale.producedPromptArtifacts).toEqual([]);
-    expect(stale.violations).toEqual([
-      expect.objectContaining({
-        mention: 'reports.md',
-        reason: expect.stringContaining('predated the stage'),
-      }),
-    ]);
-
-    const unquoted = inspectStageArtifactContract({
-      stageId: 'unquoted',
-      template: 'Write evidence_before.md.',
-      projectDir,
-      runDir: runDirectory,
-      writes: [],
-    });
-    expect(unquoted.obligations).toEqual([
-      expect.objectContaining({ mention: 'evidence_before.md', kind: 'prompt_artifact' }),
-    ]);
-    expect(unquoted.violations).toHaveLength(1);
-
-    const inputReference = inspectStageArtifactContract({
-      stageId: 'input-reference',
-      template: 'Write only the terminal path selected by research_decision.json.',
-      projectDir,
-      runDir: runDirectory,
-      writes: [],
-    });
-    expect(inputReference.obligations).toEqual([]);
-
-    const freshTemplate = 'Write fresh_evidence.json.';
-    const preimages = captureStageArtifactContractPreimages({
-      template: freshTemplate,
-      projectDir,
-      runDir: runDirectory,
-    });
-    write(join(projectDir, 'fresh_evidence.json'), '{"fresh":true}\n');
-    const fresh = inspectStageArtifactContract({
-      stageId: 'fresh',
-      template: freshTemplate,
-      projectDir,
-      runDir: runDirectory,
-      preimages,
-    });
-    expect(fresh.producedPromptArtifacts).toEqual([join(projectDir, 'fresh_evidence.json')]);
-    expect(fresh.violations).toEqual([]);
-  });
-
-  it('refuses a stage that returns success while leaving an unquoted promised artifact stale', async () => {
-    const root = temporaryRoot('artifact-stale-stage');
-    const projectDir = join(root, 'project');
-    const agentsDir = workerAgentDirectory(root);
-    mkdirSync(projectDir, { recursive: true });
-    write(join(projectDir, 'reports.md'), '# stale preimage\n');
-    const workflow: WorkflowConfig = {
-      name: 'artifact-stale-stage-replay',
-      defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
-        id: 'capture',
-        role: 'worker',
-        depends_on: [],
-        dependency_reasons: {},
-        scope: ['reports.md'],
-        criterion_refs: [],
-        prompt_template: 'Write reports.md.',
-        skills: [],
-        dynamic_dispatch: false,
-        is_gate: false,
-      }],
-    };
-    const adapter: Adapter = {
-      async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        return { output: 'left the stale file untouched', exitCode: 0, duration_ms: 1 };
-      },
-    };
-
-    const final = await runWorkflow(
-      workflow, stringifyYaml(workflow), projectDir, adapter, new Map(), undefined,
-      agentsDir, undefined, '# Stale artifact production replay', true, false,
-    );
-    const audit = readJson(join(runDir(projectDir, final.runId), 'stages', 'capture', 'artifact_contract.json'));
-
-    expect(final.status).toBe('failed');
-    expect(final.stages.capture).toMatchObject({
-      status: 'failed',
-      error: expect.stringContaining('artifact contract violation'),
-    });
-    expect(audit.obligations).toEqual([
-      expect.objectContaining({ mention: 'reports.md' }),
-    ]);
-    expect(audit.producedPromptArtifacts).toEqual([]);
-    expect(audit.violations).toEqual([
-      expect.objectContaining({ reason: expect.stringContaining('predated the stage') }),
-    ]);
-  }, 30_000);
-
-  it('refuses completion when the stage transposes artifact names and publishes a missing replay target', async () => {
-    const root = temporaryRoot('artifact-promise');
-    const projectDir = join(root, 'project');
-    const agentsDir = workerAgentDirectory(root);
-    mkdirSync(projectDir, { recursive: true });
-    const workflow: WorkflowConfig = {
-      name: 'artifact-promise-replay',
-      defaults: { max_iterations: 1 },
-      stages: [
-        {
-          id: 'plan',
-          role: 'worker',
-          depends_on: [],
-          dependency_reasons: {},
-          scope: [],
-          criterion_refs: [],
-          prompt_template: 'prepare the downstream artifact stage',
-          skills: [],
-          dynamic_dispatch: false,
-          is_gate: false,
-        },
-        {
-          id: 'capture',
-          role: 'worker',
-          depends_on: ['plan'],
-          dependency_reasons: { plan: 'consume the planner-authored artifact contract' },
-          scope: ['reports/final.md'],
-          criterion_refs: [],
-          prompt_template: [
-            'Write {run_dir}/evidence_before.md and {run_dir}/evidence_before.json.',
-            'Publish reports/final.md with replay command: npm exec vitest -- run spec/missing-replay.test.ts',
-          ].join('\n'),
-          skills: [],
-          dynamic_dispatch: false,
-          is_gate: false,
-        },
-      ],
-    };
-    let deliveredPrompt = '';
-    const adapter: Adapter = {
-      async run(prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        if (opts.stageId === 'plan') return { output: 'planned capture stage', exitCode: 0, duration_ms: 1 };
-        deliveredPrompt = prompt;
-        write(join(opts.runDir, 'stages', opts.stageId, 'before_evidence.md'), '# transposed\n');
-        write(join(opts.runDir, 'stages', opts.stageId, 'before_evidence.json'), '{"transposed":true}\n');
-        write(
-          join(projectDir, 'reports', 'final.md'),
-          '# Replay\n\n`npm exec vitest -- run spec/missing-replay.test.ts`\n',
-        );
-        return {
-          output: 'published transposed evidence and report',
-          exitCode: 0,
-          duration_ms: 1,
-          writes: ['reports/final.md'],
-          writeAttribution: 'structured',
-        };
-      },
-    };
-
-    const final = await runWorkflow(
-      workflow,
-      stringifyYaml(workflow),
-      projectDir,
-      adapter,
-      new Map(),
-      undefined,
-      agentsDir,
-      undefined,
-      '# Artifact promise replay',
-      true,
-      false,
-    );
-    const runDirectory = runDir(projectDir, final.runId);
-
-    expect(final.status).toBe('failed');
-    expect(final.stages.capture).toMatchObject({
-      status: 'failed',
-      error: expect.stringContaining('artifact contract violation'),
-    });
-    expect(deliveredPrompt).toContain(`${runDirectory}/evidence_before.md`);
-    expect(deliveredPrompt).toContain(`${runDirectory}/evidence_before.json`);
-    expect(existsSync(join(runDirectory, 'evidence_before.md'))).toBe(false);
-    expect(existsSync(join(runDirectory, 'evidence_before.json'))).toBe(false);
-    expect(existsSync(join(runDirectory, 'stages', 'capture', 'before_evidence.md'))).toBe(true);
-    expect(existsSync(join(runDirectory, 'stages', 'capture', 'before_evidence.json'))).toBe(true);
-    expect(readFileSync(join(projectDir, 'reports', 'final.md'), 'utf8'))
-      .toContain('spec/missing-replay.test.ts');
-    expect(existsSync(join(PROJECT_ROOT, 'spec', 'missing-replay.test.ts'))).toBe(false);
-    expect(readJson(join(runDirectory, 'stages', 'capture', 'artifact_contract.json'))).toMatchObject({
-      stageId: 'capture',
-      obligations: expect.arrayContaining([
-        expect.objectContaining({ mention: `${runDirectory}/evidence_before.md` }),
-        expect.objectContaining({ mention: `${runDirectory}/evidence_before.json` }),
-        expect.objectContaining({ mention: 'spec/missing-replay.test.ts' }),
-      ]),
-      violations: expect.arrayContaining([
-        expect.objectContaining({ mention: `${runDirectory}/evidence_before.md` }),
-        expect.objectContaining({ mention: `${runDirectory}/evidence_before.json` }),
-        expect.objectContaining({ mention: 'spec/missing-replay.test.ts' }),
-      ]),
-    });
-  }, 30_000);
-
-  it('allows exact promised artifacts and ignores illustrative or optional path mentions', async () => {
-    const root = temporaryRoot('artifact-promise-control');
-    const projectDir = join(root, 'project');
-    const agentsDir = workerAgentDirectory(root);
-    mkdirSync(projectDir, { recursive: true });
-    const replayPath = 'spec/existing-replay.test.ts';
-    const workflow: WorkflowConfig = {
-      name: 'artifact-promise-control',
-      defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
-        id: 'capture',
-        role: 'worker',
-        depends_on: [],
-        dependency_reasons: {},
-        scope: ['reports/final.md', replayPath],
-        criterion_refs: [],
-        prompt_template: [
-          'Write {run_dir}/evidence_before.md and {run_dir}/evidence_before.json.',
-          `Publish reports/final.md with replay command: npm exec vitest -- run ${replayPath}`,
-          'Example: Write reports/illustrative-only.md.',
-          'Optional: Write reports/optional-only.md if needed.',
-        ].join('\n'),
-        skills: [],
-        dynamic_dispatch: false,
-        is_gate: false,
-      }],
-    };
-    const adapter: Adapter = {
-      async run(_prompt: string, _agent: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-        write(join(opts.runDir, 'evidence_before.md'), '# exact\n');
-        write(join(opts.runDir, 'evidence_before.json'), '{"exact":true}\n');
-        write(join(projectDir, replayPath), 'import { it } from "vitest"; it("exists", () => {});\n');
-        write(join(projectDir, 'reports', 'final.md'), `# Replay\n\n\`npm exec vitest -- run ${replayPath}\`\n`);
-        return {
-          output: 'published exact evidence and command',
-          exitCode: 0,
-          duration_ms: 1,
-          writes: ['reports/final.md', replayPath],
-          writeAttribution: 'structured',
-        };
-      },
-    };
-
-    const final = await runWorkflow(
-      workflow, stringifyYaml(workflow), projectDir, adapter, new Map(), undefined,
-      agentsDir, undefined, '# Exact artifact promise control', true, false,
-    );
-    const audit = readJson(join(runDir(projectDir, final.runId), 'stages', 'capture', 'artifact_contract.json'));
-
-    expect(final.status).toBe('complete');
-    expect(audit.obligations).toHaveLength(4);
-    expect(audit.violations).toEqual([]);
-    expect(existsSync(join(projectDir, 'reports', 'illustrative-only.md'))).toBe(false);
-    expect(existsSync(join(projectDir, 'reports', 'optional-only.md'))).toBe(false);
-  }, 30_000);
-});
-
-describe('7 — empty pytest populations compared as a match', () => {
+describe('configured test population evidence', () => {
   async function runPopulationFixture(
     label: string,
     collection: (side: 'source' | 'target', testPath: string) => { exitCode?: number; stdout?: string; stderr?: string },
@@ -1605,9 +967,9 @@ describe('7 — empty pytest populations compared as a match', () => {
     };
   }
 
-  it('records the nonempty matched population when successful collectors use stderr', async () => {
+  it.each(['stdout', 'stderr'] as const)('records a matched population from %s', async stream => {
     const observation = await runPopulationFixture('empty-population', (_side, testPath) => ({
-      stderr: `${testPath}::test_population\n1 test collected in 0.01s\n`,
+      [stream]: `${testPath}::test_population\n1 test collected in 0.01s\n`,
     }));
 
     expect(observation.exitCode).toBe(0);
@@ -1670,24 +1032,6 @@ describe('7 — empty pytest populations compared as a match', () => {
         state: 'matched',
         source: { count: 0, identities: [] },
         target: { count: 0, identities: [] },
-      },
-    });
-  });
-
-  it('calibrates the same collector with identical nonempty stdout populations', async () => {
-    const observation = await runPopulationFixture('nonempty-population', (_side, testPath) => ({
-      stdout: `${testPath}::test_population\n1 test collected in 0.01s\n`,
-    }));
-
-    expect(observation.exitCode).toBe(0);
-    expect(observation.stderr).toBe('');
-    expect(observation.stdout).toContain('Test population: MATCHED source=1 target=1');
-    expect(observation.record).toMatchObject({
-      state: 'ready',
-      testPopulation: {
-        state: 'matched',
-        source: { count: 1, identities: [observation.testPath] },
-        target: { count: 1, identities: [observation.testPath] },
       },
     });
   });

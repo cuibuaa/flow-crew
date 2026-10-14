@@ -1,3 +1,5 @@
+import '../test-support/policy-runtime.js';
+import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * Phase-0 safety net — loop-engine behavior (mock-adapter driven, no LLM).
  *
@@ -22,8 +24,8 @@ beforeEach(() => { projectDir = join(tmpdir(), 'fc-loop-' + randomBytes(6).toStr
 afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
-  yaml: ['name: research', 'defaults:', '  max_iterations: 12', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: { name: 'research', defaults: { max_iterations: 12 }, stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  yaml: ['name: research', 'defaults:', '  max_iterations: 12', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}'].join('\n'),
+  config: {description: '',  name: 'research', defaults: { max_iterations: 12 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } }] },
 };
 
 function writeRoles(): string {
@@ -64,13 +66,14 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
   const adapter = {
     async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]',
           '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
           '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
           '    task: measure this round',
-        ].join('\n'));
-        return ok('planned a round');
+          '    artifact_contract: {version: 1, produces: [{id: result, root: project, path: docs/research_round_result.json}, {id: sidecar, root: project, path: docs/research_round_result.json.no_candidate.json}], reads: [], replays: [], groups: [{id: outcome, mode: exactly_one, members: [result, sidecar]}]}',
+        ].join('\n')));
+        return fixtureResult(ok('planned a round'), opts);
       }
       if (opts.stageId === 'measure') {
         const result = results[Math.min(i, results.length - 1)];
@@ -79,9 +82,9 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
         const file = join(projectDir, 'docs', 'research_round_result.json');
         mkdirSync(join(file, '..'), { recursive: true });
         writeFileSync(file, JSON.stringify({ label, result, evidence: { independentMeasurement: i } }));
-        return ok(`measured ${label}=${result}`);
+        return fixtureResult(ok(`measured ${label}=${result}`), opts);
       }
-      return ok(`noop ${opts.stageId}`);
+      return fixtureResult(ok(`noop ${opts.stageId}`), opts);
     },
     async discuss(): Promise<RunResult> { return ok(''); },
     spawnDiscuss() { throw new Error('unused'); },
@@ -128,6 +131,9 @@ describe('loop engine — research behavior (mock-driven)', () => {
   // here = min(max_rounds 8, halt_after_no_improvement 2) = 2; banked = 0 < 2 → incomplete.
   it('does NOT complete via a gate-pass bypass when the policy has never shipped/ceilinged', async () => {
     const runId = setupRun({ beat: 99, max_rounds: 8, halt_after_no_improvement: 2 });
+    // Two iterations prove both re-planning and exhaustion with zero banked
+    // rounds. Ten more identical gate passes add only host-dependent work.
+    const config = { ...researchWorkflow.config, defaults: { max_iterations: 2 } };
     const agentsDir = writeRoles();
     // Adapter that passes a gate every iteration but NEVER writes a round_result (0 rounds).
     let plans = 0;
@@ -135,27 +141,33 @@ describe('loop engine — research behavior (mock-driven)', () => {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           plans++;
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:', '  - id: closeout', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "audit only after this iteration is planned"}',
             '    is_gate: true', '    task: close out',
-          ].join('\n'));
-          return ok('planned (no round)');
+            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_closeout.json}], reads: [], replays: []}',
+            '  - id: repair_closeout', '    role: researcher', '    depends_on: [closeout]', '    scope: []',
+            '    dependency_reasons: {closeout: "repair only an explicit closeout rejection"}',
+            '    retry_to: [closeout]', '    task: repair the rejected closeout evidence',
+            '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
+          ].join('\n')));
+          return fixtureResult(ok('planned (no round)'), opts);
         }
         if (opts.stageId === 'closeout') {
-          writeFileSync(join(opts.runDir, 'verdict_closeout.json'), JSON.stringify({ pass: true, reason: 'looks done' }));
-          return ok('gate passed');
+          writeFileSync(join(opts.runDir, 'fixture_verdict_closeout.json'), JSON.stringify({ pass: true, reason: 'looks done' }));
+          return fixtureResult(ok('gate passed'), opts);
         }
-        return ok(`noop ${opts.stageId}`);
+        return fixtureResult(ok(`noop ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
       async spawnInteractive() { throw new Error('unused'); },
     } as unknown as Adapter;
-    const final = await runWorkflow(researchWorkflow.config, researchWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
+    const final = await runWorkflow(config, researchWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
     expect(final.status).not.toBe('complete');   // the bypass must be closed
     expect(final.status).toBe('incomplete');     // FIX A: 0 banked rounds < required → incomplete, not a false ceiling
-    expect(plans).toBeGreaterThan(1);            // it re-planned rather than completing on iteration 1
+    expect(plans).toBe(2);
+    expect(final.currentIteration).toBe(2);
   });
 
   // A+(a) CONFIRM GATE (verify-before-trust): a candidate that would ship is only accepted
@@ -166,7 +178,7 @@ describe('loop engine — research behavior (mock-driven)', () => {
     const agentsDir = writeRoles();
     const { adapter } = loopAdapter([2.0]); // beats 1.5 → would ship
     const final = await runWorkflow(researchWorkflow.config, researchWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-    expect(final.status).toBe('shipped'); // confirm passed → ship stands
+    expect(final.status, final.failureReason).toBe('shipped'); // confirm passed → ship stands
   });
 
   it('DOWNGRADES ship → ceiling_hit when the confirm gate fails (non-zero exit)', async () => {

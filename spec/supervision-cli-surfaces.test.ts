@@ -19,13 +19,13 @@ import {
   writeFileSync,
 } from 'node:fs';
 import type { Server } from 'node:net';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { findExecutableOnPath } from '../src/adapters/availability.js';
 import { mergeTaskWithRunState } from '../src/cli-daemon.js';
 import { detectSupervisorBackend } from '../src/cli-doctor.js';
-import { hasLiveDirectRunner } from '../src/dashboard.js';
 import {
   startRpcServer,
   type RpcRequest,
@@ -46,6 +46,7 @@ interface Fixture {
   project: string;
   bin: string;
   socketPath: string;
+  doctorPort?: number;
 }
 
 interface CliCapture {
@@ -157,6 +158,7 @@ describe('supervision CLI surface invariants', () => {
     symlinkSync(distCli, join(fixture.bin, 'flowcrew'));
     expect(existsSync(join(fixture.bin, 'which'))).toBe(false);
 
+    await attachPrivateDoctorPort(fixture);
     const cli = spawnRealCli(fixture, ['doctor']);
     const result = await waitForExit(cli.child, 10_000);
     const combined = `${cli.output()}${cli.errorOutput()}`;
@@ -181,36 +183,6 @@ describe('supervision CLI surface invariants', () => {
     expect(findExecutableOnPath('claude', fixture.bin)).toBeUndefined();
   });
 
-  it('treats EPERM as live when procfs is unavailable', () => {
-    const fixture = createFixture();
-    const runId = 'supervision-eperm-runner';
-    const markerDir = join(fixture.project, '.fc');
-    mkdirSync(markerDir, { recursive: true });
-    writeFileSync(join(markerDir, `direct-resume-${runId}.pid`), '321', 'utf-8');
-
-    const live = hasLiveDirectRunner(fixture.project, runId, {
-      procRoot: join(fixture.root, 'missing-proc'),
-      killProcess: () => { throw Object.assign(new Error('not permitted'), { code: 'EPERM' }); },
-    });
-
-    expect(live).toBe(true);
-  });
-
-  it('treats ESRCH as dead when procfs is unavailable', () => {
-    const fixture = createFixture();
-    const runId = 'supervision-esrch-runner';
-    const markerDir = join(fixture.project, '.fc');
-    mkdirSync(markerDir, { recursive: true });
-    writeFileSync(join(markerDir, `direct-rerun-${runId}.pid`), '654', 'utf-8');
-
-    const live = hasLiveDirectRunner(fixture.project, runId, {
-      procRoot: join(fixture.root, 'missing-proc'),
-      killProcess: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
-    });
-
-    expect(live).toBe(false);
-  });
-
   it('does not advertise a systemd cgroup wrapper when systemd-run is absent', async () => {
     const fixture = createFixture();
     symlinkSync(distCli, join(fixture.bin, 'flowcrew'));
@@ -227,6 +199,7 @@ describe('supervision CLI surface invariants', () => {
       },
       runCommand: () => { /* the injected user-manager probe succeeds */ },
     });
+    await attachPrivateDoctorPort(fixture);
     const cli = spawnRealCli(fixture, ['doctor']);
     const result = await waitForExit(cli.child, 10_000);
     const combined = `${cli.output()}${cli.errorOutput()}`;
@@ -264,6 +237,20 @@ function createFixture(): Fixture {
   return { root, home, fcHome, project, bin, socketPath };
 }
 
+// The diagnostic's optional HTTP probe must contact a listener owned by this test.
+async function attachPrivateDoctorPort(fixture: Fixture): Promise<void> {
+  const server = createServer((_request, response) => {
+    response.writeHead(503);
+    response.end('private diagnostic probe');
+  });
+  servers.push(server);
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, '127.0.0.1', resolveListen);
+  });
+  fixture.doctorPort = (server.address() as { port: number }).port;
+}
+
 function spawnRealCli(fixture: Fixture, args: string[]): CliCapture {
   let stdout = '';
   let stderr = '';
@@ -277,6 +264,7 @@ function spawnRealCli(fixture: Fixture, args: string[]): CliCapture {
         HOME: fixture.home,
         FC_HOME: fixture.fcHome,
         PROJECT_DIR: fixture.project,
+        PORT: String(fixture.doctorPort ?? 0),
         PATH: fixture.bin,
         FLOWCREW_DAEMON_SOCKET: fixture.socketPath,
         NO_COLOR: '1',

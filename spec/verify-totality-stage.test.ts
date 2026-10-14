@@ -1,8 +1,8 @@
+import { sourceFiles } from './test-support/engine-fixtures.js';
 import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -24,13 +24,7 @@ import {
 const PROJECT_ROOT = resolve(import.meta.dirname, '..');
 const SOURCE_ROOT = join(PROJECT_ROOT, 'src');
 
-function sourceFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) return sourceFiles(path);
-    return entry.isFile() && path.endsWith('.ts') ? [path] : [];
-  });
-}
+
 
 function isRunStatusMember(node: ts.Node): boolean {
   return ts.isPropertyAccessExpression(node)

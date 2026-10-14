@@ -8,7 +8,7 @@ checks:
       script: |
         set -eu
         count=0
-        for f in docs/happymj_incumbent/ship_report.md docs/happymj_incumbent/ceiling_report.md docs/happymj_incumbent/escalation_note.md; do
+        for f in docs/example_incumbent/ship_report.md docs/example_incumbent/ceiling_report.md docs/example_incumbent/escalation_note.md; do
           if test -e "$f"; then
             count=$((count + 1))
           fi
@@ -24,7 +24,7 @@ checks:
       timeout_seconds: 30
       script: |
         set -eu
-        manifest=docs/happymj_incumbent/run_manifest.json
+        manifest=docs/example_incumbent/run_manifest.json
         if ! test -f "$manifest"; then
           exit 0
         fi

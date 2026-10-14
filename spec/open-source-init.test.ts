@@ -1,9 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parse as parseYaml } from 'yaml';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ensureProjectDefaultsFile } from '../src/config.js';
+import { loadEngineDefaults } from '../src/config.js';
 
 let projectDir: string | undefined;
 
@@ -12,14 +11,20 @@ afterEach(() => {
   projectDir = undefined;
 });
 
-describe('public project initialization', () => {
-  it('does not copy this repository operator campaign into a stranger project', () => {
-    projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-public-init-'));
-    const defaultsPath = ensureProjectDefaultsFile(projectDir);
-    const defaults = parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown>;
-
+describe('public engine defaults', () => {
+  it('retains deterministic idle monitoring and automatic adapter resolution', () => {
+    const defaults = loadEngineDefaults();
+    expect(defaults.stage_idle_timeout_ms).toBe(600000);
     expect(defaults.adapter).toBe('auto');
-    expect(defaults.paths).toMatchObject({ agents: 'config/agents', workflows: 'config/workflows' });
+    expect(defaults).not.toHaveProperty('supervisor');
     expect(defaults).not.toHaveProperty('campaign');
+    expect(defaults).not.toHaveProperty('planner_policies');
+  });
+
+  it('loads defaults without writing into the working project', () => {
+    projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-public-read-'));
+    loadEngineDefaults();
+    expect(existsSync(join(projectDir, 'config'))).toBe(false);
+    expect(readdirSync(projectDir)).toEqual([]);
   });
 });

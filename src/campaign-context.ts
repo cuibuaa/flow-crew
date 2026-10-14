@@ -1,5 +1,4 @@
 import {
-  collapseEntriesForHealth,
   summarizeCampaignPhaseProgress,
   type CampaignHistoryEntry,
 } from './campaigns.js';
@@ -10,7 +9,6 @@ export const CAMPAIGN_CONTEXT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export interface CampaignContextSelection {
   /** Fresh, non-terminal entries after completed-phase details are removed. */
   entries: CampaignHistoryEntry[];
-  scoredEntries: CampaignHistoryEntry[];
   phaseEntries: CampaignHistoryEntry[];
   latestPhaseEntry?: CampaignHistoryEntry;
   recommendedPhase?: string;
@@ -48,7 +46,7 @@ function isPhaseEntry(entry: CampaignHistoryEntry): boolean {
  * Select the campaign narrative that is still relevant to a new planner turn.
  *
  * This deliberately does not touch the compact campaign ledger: tried directions
- * and KG dead ends have a separate, durable retention policy.
+ * have a separate, durable retention policy.
  */
 export function selectRelevantCampaignContext(
   entries: CampaignHistoryEntry[],
@@ -75,7 +73,6 @@ export function selectRelevantCampaignContext(
     return !phase || !completedPhases.has(phase);
   });
 
-  const scoredEntries = collapseEntriesForHealth(activeEntries);
   const phaseEntries = activeEntries.filter(isPhaseEntry).sort(compareEntries);
   const phaseProgress = summarizeCampaignPhaseProgress(phaseEntries);
   const latestCompletion = completions[completions.length - 1];
@@ -84,12 +81,11 @@ export function selectRelevantCampaignContext(
   const latestHandoff = cleanPhase(latestCompletion?.nextPhase);
   const recommendedPhase = cleanPhase(phaseProgress.currentPhase) ?? latestHandoff;
   const summaryRunIds = [...new Set(
-    [...scoredEntries, ...phaseEntries].map((entry) => entry.runId),
+    activeEntries.map((entry) => entry.runId),
   )];
 
   return {
     entries: activeEntries,
-    scoredEntries,
     phaseEntries,
     latestPhaseEntry: phaseProgress.latest,
     recommendedPhase,
@@ -107,18 +103,11 @@ export function formatCampaignContextBlock(options: {
   const { selection, alert } = options;
   const summaryPaths = [...new Set((options.summaryPaths ?? []).filter(Boolean))];
   const hasPhaseProgress = selection.phaseEntries.length > 0 || Boolean(selection.recommendedPhase);
-  if (selection.scoredEntries.length === 0 && !hasPhaseProgress && summaryPaths.length === 0 && !alert) {
+  if (!hasPhaseProgress && summaryPaths.length === 0 && !alert) {
     return '';
   }
 
   let context = `=== CAMPAIGN: ${options.campaignLabel} ===\n`;
-  if (selection.scoredEntries.length > 0) {
-    const rows = selection.scoredEntries
-      .map((entry) => `| ${entry.seq} | ${entry.iteration ?? 1} | ${entry.score ?? '-'} | ${entry.metric ?? '-'} | ${entry.gate ?? '-'} | ${entry.pass ? 'pass' : 'fail'} |`)
-      .join('\n');
-    const best = Math.max(...selection.scoredEntries.map((entry) => entry.score as number));
-    context += `| # | Iteration | Score | Metric | Gate | Status |\n|---|-----------|-------|--------|------|--------|\n${rows}\n\nBest ever: ${best}\n`;
-  }
   if (hasPhaseProgress) {
     context += '\nPhase progress:\n';
     context += `- Current recommended phase: ${selection.recommendedPhase ?? 'not specified'}\n`;
@@ -128,13 +117,12 @@ export function formatCampaignContextBlock(options: {
       if (latest.artifactSummary) context += `- Latest artifact summary: ${latest.artifactSummary}\n`;
       if (latest.reason) context += `- Latest reason: ${latest.reason}\n`;
     }
-    context += 'Planner rule: for multi-phase tasks, dispatch only the current recommended phase unless the task explicitly asks to restart from phase 0. Do not pack all future phases into one dispatch.\n';
   }
   if (summaryPaths.length > 0) {
     context += `\nPrevious run summaries:\n${summaryPaths.map((path) => `- ${path}`).join('\n')}\n`;
   }
   if (alert) {
-    context += `\n⚠️ CAMPAIGN ALERT: ${alert.type} — ${alert.message}\nDO NOT retry approaches from failed runs. Propose a fundamentally different approach.\n`;
+    context += `\n⚠️ CAMPAIGN ALERT: ${alert.type} — ${alert.message}\nAvoid repeating mechanisms disproven by measurements without new evidence. Technical recovery and justified reproduction remain valid; use the recorded failure evidence to choose the next approach.\n`;
   }
   return context + '=== END CAMPAIGN ===\n\n';
 }

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from '../engine-fs.js';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TaskRegistry, type TaskEntry } from '../task-registry.js';
 import { runsRoot } from '../store.js';

@@ -3,7 +3,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
-import type { AddressInfo } from 'node:net';
+import { createServer, type AddressInfo } from 'node:net';
+// @ts-expect-error Test-only helper is shared with native Node child fixtures.
+import { loopbackListenRequests } from './test-support/loopback-listen.mjs';
 import type { FastifyInstance } from 'fastify';
 import type { PoolOptions, PoolWorker, WorkerRequest } from 'vitest/node';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
@@ -20,6 +22,7 @@ import vitestConfig, {
 
 interface VitestIsolationRegistry {
   roots: Set<string>;
+  environments: Map<string, NodeJS.ProcessEnv>;
   cleanupRoot: (root: string) => void;
   cleanupAll: () => void;
 }
@@ -104,10 +107,36 @@ afterAll(() => {
 });
 
 describe('root-suite file isolation', () => {
+  it('refuses unknown wildcard and omitted-host listeners before binding', () => {
+    for (const options of [{ port: 0, host: '0.0.0.0' }, { port: 0 }, { port: 0, host: '192.0.2.1' }]) {
+      const server = createServer();
+      expect(() => server.listen(options)).toThrow('Test listener policy refuses non-loopback');
+      expect(server.listening).toBe(false);
+    }
+  });
+
   it('points business modules at an explicit disposable FC root', () => {
     expect(existsSync(explicitRoot)).toBe(true);
     expect(fcGlobalDir()).toBe(join(explicitRoot, 'fc-home'));
     expectInside(fcGlobalDir(), explicitRoot);
+  });
+
+  it('keeps an inherited daemon socket inside the disposable test root', () => {
+    const root = process.env.FLOWCREW_VITEST_ROOT!;
+    const socket = process.env.FLOWCREW_DAEMON_SOCKET!;
+    expectInside(socket, root);
+    expect(existsSync(socket)).toBe(false);
+  });
+
+  it('isolates adapter and runtime homes before engine imports', () => {
+    const root = process.env.FLOWCREW_VITEST_ROOT!;
+    const registry = Reflect.get(process, Symbol.for('flowcrew.vitest.file-isolation.registry')) as VitestIsolationRegistry;
+    const environment = registry.environments.get(root)!;
+    expect(environment).toBeDefined();
+    expectInside(environment.CODEX_HOME!, root);
+    expectInside(environment.XDG_RUNTIME_DIR!, root);
+    expect(environment.FLOWCREW_LAUNCH_RESULT_PATH).toBeUndefined();
+    expect(environment.DBUS_SESSION_BUS_ADDRESS).toBeUndefined();
   });
 
   it('keeps file isolation and three-worker concurrency without suite retry', () => {
@@ -174,7 +203,7 @@ describe('root-suite file isolation', () => {
     expect(existsSync(secondRoot)).toBe(false);
   });
 
-  it('uses a random nonzero port and removes both timers and signal listeners on close', async () => {
+  it('uses a random nonzero port, starts no recovery timers, and removes signal listeners on close', async () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-dashboard-lifecycle-'));
     mkdirSync(join(projectDir, 'config', 'workflows'), { recursive: true });
     mkdirSync(join(projectDir, 'config', 'agents'), { recursive: true });
@@ -195,13 +224,17 @@ describe('root-suite file isolation', () => {
       expect(address).not.toBeNull();
       expect(address?.port).toBeGreaterThan(0);
       expect(address?.port).not.toBe(3000);
+      expect(address?.address).toBe('127.0.0.1');
+      expect(loopbackListenRequests()).toContainEqual(expect.objectContaining({
+        requestedHost: expect.any(String), actualHost: '127.0.0.1', refused: false,
+      }));
       expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore + 1);
       expect(process.listenerCount('SIGINT')).toBe(sigintBefore + 1);
 
       const dashboardTimers = setIntervalSpy.mock.calls
         .map((args, index) => ({ delay: args[1], handle: setIntervalSpy.mock.results[index]?.value }))
         .filter(({ delay }) => delay === 60_000 || delay === 5 * 60_000);
-      expect(dashboardTimers).toHaveLength(2);
+      expect(dashboardTimers).toHaveLength(0);
 
       await app.close();
       await app.close();

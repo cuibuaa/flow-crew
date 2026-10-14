@@ -80,25 +80,6 @@ afterEach(async () => {
 });
 
 describe('dashboard campaign API', () => {
-  it('GET /api/campaigns lists fixture campaigns under the temp home root', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/campaigns' });
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-    expect(body.map((campaign: { id: string }) => campaign.id).sort()).toEqual(['no-log', 'test-campaign']);
-    expect(body.find((campaign: { id: string }) => campaign.id === 'test-campaign')).toMatchObject({
-      status: 'running',
-      latest_outcome: 'valid_ship',
-    });
-  });
-
-  it('GET /api/campaigns/:id/iterations returns parsed iteration log entries', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/campaigns/test-campaign/iterations' });
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject([
-      { iter: 1, run_id: 'run-1', outcome: 'invalid_ship', brief_version: 'v1' },
-      { iter: 2, run_id: 'run-2', outcome: 'valid_ship', brief_version: 'v2' },
-    ]);
-  });
 
   it('GET /api/campaigns/:id/brief-diff returns unified diff text', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/campaigns/test-campaign/brief-diff?from=v1&to=v2' });
@@ -112,59 +93,6 @@ describe('dashboard campaign API', () => {
   it('returns 404 for a missing campaign id', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/campaigns/missing-campaign' });
     expect(res.statusCode).toBe(404);
-  });
-
-  it('uses 200 empty for known pending-review collections and 404 only for an unknown campaign', async () => {
-    const historyPath = join(homeDir, '.fc', 'campaigns', 'history-only.jsonl');
-    writeJsonl(historyPath, [{
-      ts: '2026-05-24T16:14:00.000Z',
-      kind: 'task_started',
-      runId: 'history-run',
-      campaignId: 'history-only',
-      status: 'running',
-    }]);
-
-    const canonical = await app.inject({ method: 'GET', url: '/api/campaigns/no-log/pending-review' });
-    const historyOnly = await app.inject({ method: 'GET', url: '/api/campaigns/history-only/pending-review' });
-    const unknown = await app.inject({ method: 'GET', url: '/api/campaigns/truly-unknown/pending-review' });
-
-    expect(canonical.statusCode).toBe(200);
-    expect(canonical.json()).toEqual([]);
-    expect(historyOnly.statusCode).toBe(200);
-    expect(historyOnly.json()).toEqual([]);
-    expect(unknown.statusCode).toBe(404);
-  });
-
-  it('returns an empty array when iteration_log.jsonl is missing', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/campaigns/no-log/iterations' });
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual([]);
-  });
-
-  it('GET /api/campaigns includes a completed campaign envelope run', async () => {
-    mkdirSync(join(homeDir, '.fc', 'campaigns'), { recursive: true });
-    writeJsonl(join(homeDir, '.fc', 'campaigns', 'ui-test.jsonl'), [
-      {
-        ts: '2026-05-24T16:14:00.000Z',
-        kind: 'task_started',
-        runId: 'run-ui-test',
-        campaignId: 'ui-test',
-        workflow: 'default',
-        status: 'running',
-      },
-      {
-        ts: '2026-05-24T16:15:00.000Z',
-        kind: 'task_ended',
-        runId: 'run-ui-test',
-        campaignId: 'ui-test',
-        workflow: 'default',
-        status: 'complete',
-      },
-    ]);
-
-    const res = await app.inject({ method: 'GET', url: '/api/campaigns' });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().map((campaign: { id: string }) => campaign.id)).toContain('ui-test');
   });
 
   it('DELETE /api/run-campaigns/:id removes campaign history and orphans matching runs', async () => {
@@ -218,10 +146,6 @@ describe('dashboard campaign API', () => {
     });
     expect(overview.json().campaignCount).toBeGreaterThanOrEqual(2);
 
-    const list = await app.inject({ method: 'GET', url: '/api/campaigns/test-campaign/pending-review' });
-    expect(list.statusCode).toBe(200);
-    expect(list.json()).toMatchObject([{ index: 0, reason: 'operator should review' }]);
-
     const accept = await app.inject({
       method: 'POST',
       url: '/api/campaigns/test-campaign/review/0',
@@ -235,96 +159,5 @@ describe('dashboard campaign API', () => {
       payload: { decision: 'accept' },
     });
     expect(conflict.statusCode).toBe(409);
-  });
-
-  it('returns KG hints and queues suggested patches for review', async () => {
-    const campaignDir = join(homeDir, '.fc', 'campaigns', 'test-campaign');
-    writeFileSync(join(campaignDir, 'kg_hints.json'), JSON.stringify([
-      {
-        symptomNode: {
-          id: 'symptom-a',
-          type: 'symptom',
-          campaignId: 'prior-campaign',
-          metadata: { kind: 'rejection', counts: { unstable_seeds: 4 } },
-        },
-        suggestedPatch: {
-          id: 'patch-a',
-          type: 'patch',
-          campaignId: 'prior-campaign',
-          metadata: { section: '# Brief', op: 'append', value: 'review KG hint' },
-        },
-        outcomeNode: {
-          id: 'outcome-a',
-          type: 'outcome',
-          campaignId: 'prior-campaign',
-          metadata: { kind: 'valid_ship', iterations_used: 2 },
-        },
-        similarity: 0.8,
-        reason: 'same projectDir + same brief metric',
-      },
-    ], null, 2), 'utf-8');
-
-    const list = await app.inject({ method: 'GET', url: '/api/campaigns/test-campaign/kg-hints' });
-    expect(list.statusCode).toBe(200);
-    expect(list.json()).toMatchObject([{ similarity: 0.8, symptomNode: { campaignId: 'prior-campaign' } }]);
-
-    const review = await app.inject({ method: 'POST', url: '/api/campaigns/test-campaign/kg-hints/0/review' });
-    expect(review.statusCode).toBe(200);
-    const pending = readFileSync(join(campaignDir, 'pending_review.jsonl'), 'utf-8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
-    expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatchObject({
-      campaignId: 'test-campaign',
-      reason: 'Cross-campaign KG suggestion from prior-campaign',
-      source: 'cross_campaign_kg',
-      patch: { type: 'brief_patch', section: '# Brief', op: 'append', value: 'review KG hint' },
-    });
-  });
-
-  it('summarizes the cross-campaign KG store', async () => {
-    const kgRoot = join(homeDir, '.fc', 'cross-campaign-kg');
-    mkdirSync(kgRoot, { recursive: true });
-    writeJsonl(join(kgRoot, 'nodes.jsonl'), [
-      {
-        id: 'symptom-a',
-        type: 'symptom',
-        campaignId: 'prior-a',
-        campaignStartedAt: '2026-05-23T10:00:00.000Z',
-        metadata: { kind: 'rejection', counts: { unstable_seeds: 5 } },
-      },
-      {
-        id: 'symptom-b',
-        type: 'symptom',
-        campaignId: 'prior-b',
-        campaignStartedAt: '2026-05-23T10:01:00.000Z',
-        metadata: { kind: 'rejection', counts: { unstable_seeds: 2 } },
-      },
-      {
-        id: 'patch-a',
-        type: 'patch',
-        campaignId: 'prior-a',
-        campaignStartedAt: '2026-05-23T10:00:00.000Z',
-        metadata: { section: '# Brief', op: 'append' },
-      },
-    ]);
-    writeJsonl(join(kgRoot, 'edges.jsonl'), [
-      { from: 'symptom-a', to: 'patch-a', relation: 'fixed_by', weight: 1 },
-    ]);
-
-    const res = await app.inject({ method: 'GET', url: '/api/cross-campaign-kg/summary' });
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({
-      total_nodes: 3,
-      total_edges: 1,
-      top_symptoms: [{ key: 'rejection:unstable_seeds', count: 2 }],
-      top_patches: [{ key: '# Brief:append', count: 1 }],
-    });
-  });
-
-  it('UI smoke fixture: /campaign/test-campaign should render timeline cards and the heatmap from this fixture', async () => {
-    const res = await app.inject({ method: 'GET', url: '/campaign/test-campaign' });
-    expect([200, 404]).toContain(res.statusCode);
   });
 });

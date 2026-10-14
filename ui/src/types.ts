@@ -20,15 +20,9 @@ export interface SettingsData {
   reasoning_effort?: string;
   campaign_triggers?: {
     enabled?: boolean;
-    regression_after?: number;
-    plateau_after?: number;
-    plateau_threshold?: number;
     repeated_failure_after?: number;
   };
-  supervisor?: {
-    enabled?: boolean;
-    escalation_threshold?: number;
-  };
+
 }
 
 export type MetricFormat = "currency_usd" | "rating_0_to_10" | "pct" | "count" | "duration_min" | "raw";
@@ -143,7 +137,6 @@ export interface InboxItem {
     reason: string;
     scheduler?: { kind: string; pid?: number; detail?: string };
   };
-  standingRuleEligible: { ok: boolean; reason?: string };
   campaignId?: string;
   campaignName?: string;
 }
@@ -152,7 +145,7 @@ export interface InboxResolveResult {
   ok: boolean;
   won: boolean;
   item?: InboxItem;
-  resumed?: boolean;
+  resumeRegistered?: boolean;
   error?: string;
   winner?: {
     decision: InboxDecision;
@@ -240,32 +233,6 @@ export interface InboxOverview {
   campaignCount: number | null;
 }
 
-export interface CampaignKGNode {
-  id: string;
-  type: string;
-  label?: string;
-  text?: string;
-  score?: number;
-  timestamp?: string;
-  meta?: string;
-  source?: string;
-  runId?: string;
-  campaign?: string;
-  campaignId?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface CampaignKGEdge {
-  id?: string;
-  source?: string;
-  target?: string;
-  from?: string;
-  to?: string;
-  kind?: string;
-  relation?: string;
-  type?: string;
-}
-
 export interface RunStage {
   id: string;
   role: string;
@@ -294,6 +261,12 @@ export interface RunStageAttempt {
   error?: string;
   writes?: string[];
   writeAttribution?: "structured" | "snapshot" | "unknown";
+}
+
+export interface RunStageHistory {
+  stageId: string;
+  iteration: number;
+  status: Pick<RunStage, 'status' | 'duration_ms' | 'retries' | 'reruns' | 'attempts' | 'tokens_in' | 'tokens_out'>;
 }
 
 export interface SupervisorAttempt {
@@ -375,8 +348,11 @@ export interface RunDetailData {
   taskDescriptionPreview?: string;
   campaignId?: string;
   stages: RunStage[];
+  stageHistory?: RunStageHistory[];
+  budget?: { tokens: { knownInputTokens: number; knownOutputTokens: number; complete: boolean } };
+  /** Archived runs may have configured a model supervisor. */
+  supervise?: boolean;
   supervisor?: SupervisorUsage;
-  kg: { nodes: CampaignKGNode[]; edges: CampaignKGEdge[] };
   events: RunEvent[];
   operational?: OperationalProjection;
   stage_outputs: Record<string, string>;
@@ -428,7 +404,7 @@ export interface BriefPreflightFinding {
   fingerprint: string;
   level: "ok" | "warn" | "fail";
   message: string;
-  acknowledgementRequired: boolean;
+  consequential: boolean;
   line?: number;
   excerpt?: string;
   risk?: string;
@@ -442,7 +418,6 @@ export interface BriefPreflightReport {
   frontmatter: { status: "absent" | "valid" | "invalid"; error?: string };
   contractReady: boolean;
   findings: BriefPreflightFinding[];
-  requiresAcknowledgement: boolean;
 }
 
 export interface BriefPreflightResponse {
@@ -453,5 +428,4 @@ export interface BriefPreflightResponse {
 export interface BriefAdmissionSubmission {
   briefPreflightDigest: string;
   briefPreflightReceipt: string;
-  acknowledgeBriefWarnings?: boolean;
 }

@@ -1,16 +1,7 @@
-import {
-  closeSync,
-  existsSync,
-  fsyncSync,
-  linkSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { closeSync, linkSync, mkdirSync, openSync, unlinkSync, writeFileSync } from './engine-fs.js';
+import { existsSync, fsyncSync, readFileSync, readdirSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, posix } from 'node:path';
 
 export const RUNTIME_NEGOTIATION_VERSION = 1 as const;
 
@@ -163,6 +154,7 @@ export function buildScopeNegotiationTrace(input: {
   scopePresence: ScopePresence;
   declaredScope: string[];
   requestedPaths: string[];
+  authorizedPaths?: string[];
   decision: 'accepted' | 'rejected';
   effectiveScope: string[];
   durableWrites: string[];
@@ -170,7 +162,7 @@ export function buildScopeNegotiationTrace(input: {
   const initialCapability = input.scopePresence === 'present' ? [...input.declaredScope] : [];
   const accepted = input.decision === 'accepted';
   const decisionCapability = accepted ? [...input.effectiveScope] : initialCapability;
-  const authorizedRequestPaths = accepted ? [...input.requestedPaths] : [];
+  const authorizedRequestPaths = accepted ? [...(input.authorizedPaths ?? input.requestedPaths)] : [];
   return {
     version: RUNTIME_NEGOTIATION_VERSION,
     stageKind: input.stageKind,
@@ -212,7 +204,7 @@ function parseCommonRequest(
   if (typeof candidate.requestId !== 'string' || !candidate.requestId.trim()) return { ok: false, error: 'requestId must be non-empty' };
   if (typeof candidate.stageId !== 'string' || !candidate.stageId.trim()) return { ok: false, error: 'stageId must be non-empty' };
   if (!Number.isSafeInteger(candidate.attemptIndex) || Number(candidate.attemptIndex) < 1) return { ok: false, error: 'attemptIndex must be a positive safe integer' };
-  if (typeof candidate.reason !== 'string') return { ok: false, error: 'reason must be a string' };
+  if (typeof candidate.reason !== 'string' && !(kind === 'scope_revision' && candidate.reason === undefined)) return { ok: false, error: 'reason must be a string' };
   if (
     candidate.requestedAt !== undefined
     && (
@@ -233,7 +225,7 @@ function parseCommonRequest(
       stageId: candidate.stageId.trim(),
       attemptIndex: Number(candidate.attemptIndex),
       requestedBy,
-      reason: candidate.reason.trim(),
+      reason: typeof candidate.reason === 'string' ? candidate.reason.trim() : '',
       ...(typeof candidate.requestedAt === 'string' ? { requestedAt: candidate.requestedAt.trim() } : {}),
     },
   };
@@ -255,31 +247,10 @@ export function parseScopeRevisionRequest(
   }
   const runId = typeof proposedRunId === 'string' ? proposedRunId.trim() : binding?.runId.trim();
   if (!runId) return { ok: false, error: 'runId binding is required' };
-  const proposedPathDigest = common.raw.pathDigest;
-  if (proposedPathDigest !== undefined && (typeof proposedPathDigest !== 'string' || !proposedPathDigest.trim())) {
-    return { ok: false, error: 'pathDigest must be a non-empty string when provided' };
-  }
-  const pathDigest = typeof proposedPathDigest === 'string' ? proposedPathDigest.trim() : scopePathDigest(requestedPaths);
+  const pathDigest = scopePathDigest(requestedPaths);
   return {
     ok: true,
     request: { ...common.common, kind: 'scope_revision', runId, requestedPaths, pathDigest },
-  };
-}
-
-export function parseTimeoutExtensionRequest(
-  raw: unknown,
-  requestedBy: NegotiationRequester,
-): { ok: true; request: TimeoutExtensionRequestV1 } | { ok: false; error: string } {
-  const common = parseCommonRequest(raw, 'timeout_extension', requestedBy);
-  if (!common.ok) return common;
-  if (typeof common.raw.requestedExtensionMs !== 'number') return { ok: false, error: 'requestedExtensionMs must be a number' };
-  return {
-    ok: true,
-    request: {
-      ...common.common,
-      kind: 'timeout_extension',
-      requestedExtensionMs: common.raw.requestedExtensionMs,
-    },
   };
 }
 
@@ -332,6 +303,42 @@ export function readConstraintDecision(path: string): RuntimeConstraintDecisionV
   } catch {
     return undefined;
   }
+}
+
+/** Read only scheduler-owned, identity-bound grants. Control and inherited
+ * capability use the same projection; guidance prose never grants or stops work. */
+export function readAcceptedScopeRevisionDecisions(
+  stagePath: string,
+  binding: { runId: string; stageId: string; attemptIndex?: number },
+): Array<{ path: string; decision: RuntimeConstraintDecisionV1; authorizedPaths: string[] }> {
+  let files: string[];
+  try { files = readdirSync(stagePath); } catch { return []; }
+  return files.filter((file) => /^scope_revision_decision_.*\.json$/.test(file)).sort().flatMap((file) => {
+    const path = join(stagePath, file);
+    const decision = readConstraintDecision(path);
+    if (!decision || decision.kind !== 'scope_revision' || decision.accepted !== true
+      || decision.decision !== 'accepted' || decision.decidedBy !== 'scheduler-policy'
+      || decision.stageId !== binding.stageId || decision.runId !== binding.runId
+      || binding.attemptIndex !== undefined && decision.attemptIndex !== binding.attemptIndex) return [];
+    const requestedPaths = Array.isArray(decision.requestedPaths)
+      ? decision.requestedPaths.filter((value): value is string => typeof value === 'string') : [];
+    if (requestedPaths.length === 0 || decision.pathDigest !== scopePathDigest(requestedPaths)) return [];
+    if ((decision.requestedBy !== 'stage' && decision.requestedBy !== 'operator' && decision.requestedBy !== 'supervisor')
+      || !Number.isSafeInteger(decision.attemptIndex) || typeof decision.reason !== 'string') return [];
+    const persistedRequest: ScopeRevisionRequestV1 = {
+      version: 1, kind: 'scope_revision', requestId: decision.requestId,
+      runId: decision.runId, stageId: decision.stageId, attemptIndex: decision.attemptIndex,
+      requestedBy: decision.requestedBy, reason: decision.reason,
+      requestedPaths, pathDigest: decision.pathDigest!,
+    };
+    if (decision.identityDigest !== negotiationIdentity(persistedRequest)) return [];
+    const authorizedPaths = Array.isArray(decision.authorizedPaths)
+      ? decision.authorizedPaths.filter((value): value is string => typeof value === 'string') : requestedPaths;
+    const normalized = authorizedPaths.map((value) => posix.normalize(normalizedRequestPath(value)));
+    if (normalized.some((value) => !value || value === '.' || value === '..' || value.startsWith('../')
+      || isAbsolute(value) || /^[A-Za-z]:\//.test(value) || !requestedPaths.includes(value))) return [];
+    return [{ path, decision, authorizedPaths: normalized }];
+  });
 }
 
 function replayComparableDecision(decision: RuntimeConstraintDecisionV1): Record<string, unknown> {

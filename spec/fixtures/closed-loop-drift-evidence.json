@@ -1,7 +1,7 @@
 {
   "version": 1,
   "kind": "closed_loop_drift_evidence",
-  "evidenceRunId": "2026-09-03T17-09-17-3c94c0",
+  "evidenceRunId": "example-run-1",
   "baseFailure": {
     "exitCode": 1,
     "logBytes": 988,
@@ -23,7 +23,7 @@
     "serviceLogBytes": 168000000
   },
   "runState": {
-    "runId": "2026-09-03T17-09-17-3c94c0",
+    "runId": "example-run-1",
     "workflowName": "closed-loop drift replay",
     "projectDir": "__PROJECT_DIR__",
     "taskDescription": "# Serve all four seats inside the batched engine, then dose",
@@ -134,19 +134,19 @@
     ]
   },
   "events": [
-    {"type": "admission_rejected", "runId": "2026-09-03T17-09-17-3c94c0", "timestamp": "2026-09-03T17:14:10.031Z", "stageId": "plan", "attemptIndex": 1, "detail": "first plan rejected"},
-    {"type": "supervisor_reject", "runId": "2026-09-03T17-09-17-3c94c0", "timestamp": "2026-09-03T19:11:33.703Z", "iteration": 1, "stageId": "run_round", "detail": "reject 1/2: audit contradiction"},
-    {"type": "stage_complete", "runId": "2026-09-03T17-09-17-3c94c0", "timestamp": "2026-09-03T20:12:24.800Z", "iteration": 1, "stageId": "run_round"},
-    {"type": "supervisor_reject", "runId": "2026-09-03T17-09-17-3c94c0", "timestamp": "2026-09-03T23:18:45.044Z", "iteration": 2, "stageId": "run_round2", "detail": "reject 1/2: missing supplied-quantity dependencies"},
-    {"type": "stage_complete", "runId": "2026-09-03T17-09-17-3c94c0", "timestamp": "2026-09-03T23:46:24.216Z", "iteration": 2, "stageId": "run_round2"}
+    {"type": "admission_rejected", "runId": "example-run-1", "timestamp": "2026-09-03T17:14:10.031Z", "stageId": "plan", "attemptIndex": 1, "detail": "first plan rejected"},
+    {"type": "supervisor_reject", "runId": "example-run-1", "timestamp": "2026-09-03T19:11:33.703Z", "iteration": 1, "stageId": "run_round", "detail": "reject 1/2: audit contradiction"},
+    {"type": "stage_complete", "runId": "example-run-1", "timestamp": "2026-09-03T20:12:24.800Z", "iteration": 1, "stageId": "run_round"},
+    {"type": "supervisor_reject", "runId": "example-run-1", "timestamp": "2026-09-03T23:18:45.044Z", "iteration": 2, "stageId": "run_round2", "detail": "reject 1/2: missing supplied-quantity dependencies"},
+    {"type": "stage_complete", "runId": "example-run-1", "timestamp": "2026-09-03T23:46:24.216Z", "iteration": 2, "stageId": "run_round2"}
   ],
   "anchors": [
-    {"label":"b3-warn-flood-observation","sourcePath":"/home/qian/flow-crew-closed-loop/docs/review_2026_09_03/cli_tui_ux.md","byteStart":440,"byteEndExclusive":1310,"sha256":"35de3a538ebc4685f8439e332505682620feb9eabe91beaf6a5959db2b4503f3"},
-    {"label":"b3-registry-growth-observation","sourcePath":"/home/qian/flow-crew-closed-loop/docs/review_2026_09_03/engine_performance.md","byteStart":6913,"byteEndExclusive":7531,"sha256":"8617c93be8fe42fcca33b78a4c8635bab58c8c5c1c667b83e6352d95df69f961"},
-    {"label":"b3-first-plan-admission-reason","sourcePath":"/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/dispatch_rejections/attempt_1/rejection.json","byteStart":0,"byteEndExclusive":598,"sha256":"18e3e20237193d15bdb478d3cda2bdfdf6f2c8dbf52a9ba68de042402f5a0e98"},
-    {"label":"b3-supervisor-rejection-1","sourcePath":"/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/events.jsonl","byteStart":3675,"byteEndExclusive":4045,"sha256":"8361d22d9f99aca249a8cef9d9bda1e12753b30b7538630133b5d2925ca2392e"},
-    {"label":"b3-supervisor-rejection-2","sourcePath":"/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/events.jsonl","byteStart":7466,"byteEndExclusive":7901,"sha256":"51372022ca0496d7fd415bf183e35871ecbd031de4f6fbed714f0f4ee076f6d7"},
-    {"label":"b4-dose-series","sourcePath":"/mnt/d/Work/Code/Python/tb/poker/daqing_mahjong/docs/happymj_explore8b/rounds/round_03/report.md","byteStart":4196,"byteEndExclusive":4812,"sha256":"1b8b7ff0cc8e0ce21044d9dd9efb84f45811c20e87fe70b3c2a930fa559cc254"},
-    {"label":"b3-overhead-run-state","sourcePath":"/home/qian/.fc/runs/2026-09-03T17-09-17-3c94c0/run.json","bytes":221958,"sha256":"d0056ac0e01a107a78795a92e8dc88a761fd67c87cca9f782c21f74f835c309e"}
+    {"label":"b3-warn-flood-observation","sourcePath":"/workspace/project/docs/review_2026_09_03/cli_tui_ux.md","byteStart":440,"byteEndExclusive":1310,"sha256":"35de3a538ebc4685f8439e332505682620feb9eabe91beaf6a5959db2b4503f3"},
+    {"label":"b3-registry-growth-observation","sourcePath":"/workspace/project/docs/review_2026_09_03/engine_performance.md","byteStart":6913,"byteEndExclusive":7531,"sha256":"8617c93be8fe42fcca33b78a4c8635bab58c8c5c1c667b83e6352d95df69f961"},
+    {"label":"b3-first-plan-admission-reason","sourcePath":"/workspace/state/runs/example-run-1/dispatch_rejections/attempt_1/rejection.json","byteStart":0,"byteEndExclusive":598,"sha256":"18e3e20237193d15bdb478d3cda2bdfdf6f2c8dbf52a9ba68de042402f5a0e98"},
+    {"label":"b3-supervisor-rejection-1","sourcePath":"/workspace/state/runs/example-run-1/events.jsonl","byteStart":3675,"byteEndExclusive":4045,"sha256":"8361d22d9f99aca249a8cef9d9bda1e12753b30b7538630133b5d2925ca2392e"},
+    {"label":"b3-supervisor-rejection-2","sourcePath":"/workspace/state/runs/example-run-1/events.jsonl","byteStart":7466,"byteEndExclusive":7901,"sha256":"51372022ca0496d7fd415bf183e35871ecbd031de4f6fbed714f0f4ee076f6d7"},
+    {"label":"b4-dose-series","sourcePath":"/workspace/example-project/docs/example-project_explore8b/rounds/round_03/report.md","byteStart":4196,"byteEndExclusive":4812,"sha256":"1b8b7ff0cc8e0ce21044d9dd9efb84f45811c20e87fe70b3c2a930fa559cc254"},
+    {"label":"b3-overhead-run-state","sourcePath":"/workspace/state/runs/example-run-1/run.json","bytes":221958,"sha256":"d0056ac0e01a107a78795a92e8dc88a761fd67c87cca9f782c21f74f835c309e"}
   ]
 }

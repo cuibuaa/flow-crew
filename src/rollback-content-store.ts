@@ -1,17 +1,5 @@
-import {
-  closeSync,
-  copyFileSync,
-  createReadStream,
-  existsSync,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  openSync,
-  readSync,
-  rmSync,
-  unlinkSync,
-} from 'node:fs';
+import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync } from './engine-fs.js';
+import { createReadStream, existsSync, fstatSync, lstatSync, readSync } from 'node:fs';
 import { constants as fsConstants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';

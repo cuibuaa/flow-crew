@@ -1,5 +1,7 @@
+import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import { createHash } from 'node:crypto';
 import { parseBriefFrontmatter } from './scheduler.js';
+import { autoSelectedWorkflow } from './scheduler/sched_admission/brief-contract.js';
 import { RUN_STATUS } from './store.js';
 import { hasRealityChecksHeading, parseChecksFromMarkdown } from './reality-gate/index.js';
 import {
@@ -27,7 +29,7 @@ export interface BriefPreflightFinding {
   fingerprint: string;
   level: 'ok' | 'warn' | 'fail';
   message: string;
-  acknowledgementRequired: boolean;
+  consequential: boolean;
   line?: number;
   excerpt?: string;
   risk?: string;
@@ -45,7 +47,6 @@ export interface BriefPreflightReport {
   contractReady: boolean;
   researchFeasibility?: ResearchFeasibilityEvaluation[];
   findings: BriefPreflightFinding[];
-  requiresAcknowledgement: boolean;
 }
 
 export interface BriefPreflightContext {
@@ -59,13 +60,6 @@ export type BriefAdmissionAcknowledgement =
       kind: 'explicit';
       source: 'cli_current_input_flag' | 'cli_digest_flag' | 'dashboard_receipt';
       at: string;
-    }
-  | {
-      kind: 'derived';
-      source: 'campaign_loop';
-      at: string;
-      parentDigest: string;
-      transformation: 'outer_loop_directive_v1';
     };
 
 export interface BriefAdmissionRecord {
@@ -78,7 +72,7 @@ export interface BriefAdmissionRecord {
 
 export interface BriefAdmissionVerification {
   report: BriefPreflightReport;
-  status: 'valid' | 'missing' | 'digest_mismatch' | 'acknowledgement_missing';
+  status: 'valid' | 'missing' | 'digest_mismatch' | 'findings_mismatch';
 }
 
 const INSTRUMENT_DIRECTIVE = /(?:源码.{0,16}(?:必须|务必).{0,16}(?:有|出现|包含|调用|导入|引入|实例化|构造|使用))|(?:(?:必须|务必|应当|需要).{0,28}?(?:出现|含有|包含|调用|导入|引入|实例化|构造|使用))|(?:\b(?:must|shall|required\s+to)\s+(?:directly\s+)?(?:contain|include|import|call|invoke|instantiate|construct|use)\b)/i;
@@ -205,10 +199,10 @@ export function lintInstrumentCriteria(text: string): CriterionLintWarning[] {
       || EXACT_MEANS_MARKER.test(normalized)
       || OBSERVABLE_PLACEMENT.test(normalized)
     ) continue;
-    if (
-      !INSTRUMENT_DIRECTIVE.test(normalized)
-      || !(CODE_SHAPED_TARGET.test(normalized) || BARE_MODULE_TARGET.test(normalized))
-    ) continue;
+    if (!normalized.split(/(?:[;；]+|(?<=[.!?。！？])\s+)/).some(sentence =>
+      INSTRUMENT_DIRECTIVE.test(sentence)
+      && (CODE_SHAPED_TARGET.test(sentence) || BARE_MODULE_TARGET.test(sentence))
+    )) continue;
 
     warnings.push({
       line: unit.line,
@@ -315,9 +309,7 @@ function bodyLineOffset(brief: string): number {
 
 /** The brief minus a leading YAML frontmatter block, if present. */
 function briefBody(brief: string): string {
-  if (!brief.startsWith('---\n') && !brief.startsWith('---\r\n')) return brief;
-  const end = brief.indexOf('\n---', brief.indexOf('\n') + 1);
-  return end === -1 ? brief : brief.slice(brief.indexOf('\n', end + 1) + 1);
+  return splitBriefFrontmatter(brief)?.body ?? brief;
 }
 
 const HEADLINE_USAGE = /\b(?:headline|quoted?|quotable)\b/i;
@@ -395,19 +387,13 @@ function hasPositiveDecisionFieldRequirement(brief: string, field: string): bool
   });
 }
 
-function firstEvidenceLine(brief: string, pattern: RegExp): { line: number; excerpt: string } | undefined {
-  const unit = foldedDecisionRequirementUnits(brief).find(({ text }) => pattern.test(text));
-  return unit ? { line: unit.line, excerpt: unit.text.trim() } : undefined;
-}
-
 /**
  * Deliberately broad textual property: explicit “headline”/“quoted” language
  * plus a numeric-result noun means the value is intended for prominent reuse.
  */
 function headlineStatisticEvidence(brief: string): { line: number; excerpt: string } | undefined {
-  const body = foldedDecisionRequirementUnits(brief).map(({ text }) => text).join('\n');
-  if (!HEADLINE_USAGE.test(body) || !NUMERIC_RESULT.test(body)) return undefined;
-  return firstEvidenceLine(brief, HEADLINE_USAGE) ?? firstEvidenceLine(brief, NUMERIC_RESULT);
+  const unit = foldedDecisionRequirementUnits(brief).find(({ text }) => HEADLINE_USAGE.test(text) && NUMERIC_RESULT.test(text));
+  return unit ? { line: unit.line, excerpt: unit.text.trim() } : undefined;
 }
 
 function hasHeadlineDistribution(brief: string): boolean {
@@ -685,13 +671,19 @@ export function inspectBrief(
       : { status: 'absent' };
   const findings: BriefPreflightFinding[] = [];
   const add = (finding: Omit<BriefPreflightFinding, 'fingerprint'>) => findings.push(makeFinding(finding));
+  const route = autoSelectedWorkflow(parsed);
+  add({
+    code: 'brief_workflow', level: route.error ? 'fail' : 'ok',
+    message: `Workflow without --workflow: ${route.workflow} (${route.reason})${route.error ? `; refused: ${route.error}` : ''}`,
+    consequential: false,
+  });
 
   if (inputKind === 'plain_text') {
     add({
       code: 'plain_text_input',
       level: 'warn',
       message: 'This is a single-line plain-text request, so no structured brief contract was available to validate. Use `/ship` to author a guarded brief or run `flowcrew rehearse <brief.md>` before launch.',
-      acknowledgementRequired: true,
+      consequential: true,
       risk: 'An ad-hoc request can omit boundaries, success criteria, or a safe terminal contract.',
       suggestion: 'Author a structured brief with headings or YAML frontmatter, then rehearse it.',
     });
@@ -700,7 +692,7 @@ export function inspectBrief(
       code: 'structured_input',
       level: 'ok',
       message: 'Structured brief shape detected',
-      acknowledgementRequired: false,
+      consequential: false,
     });
   }
 
@@ -712,7 +704,7 @@ export function inspectBrief(
       // Launch/certification consumers promote this explicit code to refusal.
       level: 'ok',
       message: 'No structurally extractable criterion was found under an explicit criteria/requirements/report contract heading.',
-      acknowledgementRequired: false,
+      consequential: false,
       risk: 'Planning and dispatch would otherwise iterate over an empty proof obligation and report readiness.',
       suggestion: 'Add at least one numbered criterion under an explicit contract heading.',
     });
@@ -721,7 +713,7 @@ export function inspectBrief(
       code: 'brief_criteria_extracted',
       level: 'ok',
       message: `${extractedCriteria.criteria.length} structurally extractable criterion/criteria found`,
-      acknowledgementRequired: false,
+      consequential: false,
     });
   }
 
@@ -730,7 +722,7 @@ export function inspectBrief(
       code: 'criterion_instrument_wording',
       level: 'warn',
       message: `Criteria lint at line ${warning.line}: “${warning.excerpt}”`,
-      acknowledgementRequired: true,
+      consequential: true,
       ...warning,
     });
   }
@@ -740,7 +732,7 @@ export function inspectBrief(
       code: 'frontmatter_invalid',
       level: 'fail',
       message: `Frontmatter parsing failed: ${frontmatter.error}`,
-      acknowledgementRequired: true,
+      consequential: true,
       risk: 'Malformed frontmatter leaves machine-enforced inputs, validation, and terminal contracts unavailable.',
       suggestion: 'Fix the reported YAML syntax and rerun brief preflight before launch.',
     });
@@ -749,7 +741,7 @@ export function inspectBrief(
       code: frontmatter.status === 'valid' ? 'frontmatter_valid' : 'frontmatter_absent',
       level: 'ok',
       message: frontmatter.status === 'valid' ? 'Frontmatter parsed successfully' : 'No YAML frontmatter declared',
-      acknowledgementRequired: false,
+      consequential: false,
     });
   }
 
@@ -759,7 +751,7 @@ export function inspectBrief(
       code: 'headline_distribution_missing',
       level: 'fail',
       message: 'A headline or quoted statistic must require the mean, median, and where the reported value sits in its own distribution.',
-      acknowledgementRequired: true,
+      consequential: true,
       ...headline,
       risk: 'A plausible tail value can be reported as representative even when the distribution has a different center or sign.',
       suggestion: 'Require the result to report its mean, median, and percentile, quantile, rank, or equivalent location in the same distribution.',
@@ -774,7 +766,7 @@ export function inspectBrief(
       code: 'research_policy_invalid',
       level: 'fail',
       message: `research.policy is invalid: ${parsed.researchPolicyError}`,
-      acknowledgementRequired: true,
+      consequential: true,
       ...(preregistration ?? {}),
       risk: 'An unrecognised policy silently becomes greedy_stack, whose keep/drop rule is measured against research.baseline; a brief that meant a different rule gets one it never chose and only finds out from the campaign\'s terminal decision.',
       suggestion: 'Set research.policy to greedy_stack, best_of_n, or replace_if_better, or omit it to take greedy_stack deliberately.',
@@ -785,7 +777,7 @@ export function inspectBrief(
       code: 'research_feasibility_invalid',
       level: 'fail',
       message: `The declared research.feasibility contract is invalid: ${parsed.researchFeasibilityError}`,
-      acknowledgementRequired: true,
+      consequential: true,
       ...(preregistration ?? {}),
       risk: 'A malformed structural model cannot support a pre-run feasibility decision and must not be silently ignored.',
       suggestion: 'Use one documented research.feasibility model with finite structural inputs, a positive hard_floor, and unique labelled rules.',
@@ -799,7 +791,7 @@ export function inspectBrief(
           code: 'research_feasibility_not_computable',
           level: 'warn',
           message: `Research feasibility “${evaluation.label}” cannot be computed from pre-run structural quantities: ${evaluation.reason} No qualifying-member count was synthesized.`,
-          acknowledgementRequired: true,
+          consequential: true,
           ...(preregistration ?? {}),
           risk: 'The run may still discover that the rule is empty, but inventing an expectation would be less honest than carrying the uncertainty explicitly.',
           suggestion: 'Measure the named structural distribution before a later run, then replace not_computable with a computable model.',
@@ -809,7 +801,7 @@ export function inspectBrief(
           code: 'research_feasibility_below_floor',
           level: 'fail',
           message: `Research feasibility “${evaluation.label}” is ${evaluation.displayQualifyingMemberCount}, below hard_floor=${evaluation.hardFloor}.${distribution}`,
-          acknowledgementRequired: true,
+          consequential: true,
           ...(preregistration ?? {}),
           risk: 'The pre-registered selection rule is structurally infeasible before any outcome is measured.',
           suggestion: 'Revise or drop the rule before opening outcomes; do not tune it after measurement starts.',
@@ -819,7 +811,7 @@ export function inspectBrief(
           code: 'research_feasibility_tight',
           level: 'warn',
           message: `Research feasibility “${evaluation.label}” is ${evaluation.displayQualifyingMemberCount}: it meets hard_floor=${evaluation.hardFloor} but is below warn_below=${evaluation.warnBelow}.${distribution}`,
-          acknowledgementRequired: true,
+          consequential: true,
           ...(preregistration ?? {}),
           risk: 'The rule is feasible on its declared hard floor but has little structural margin.',
           suggestion: 'Proceed only if the tight rule is intentional; otherwise revise it before outcomes are opened.',
@@ -829,7 +821,7 @@ export function inspectBrief(
           code: 'research_feasibility_ok',
           level: 'ok',
           message: `Research feasibility “${evaluation.label}” is ${evaluation.displayQualifyingMemberCount}, meeting hard_floor=${evaluation.hardFloor}${evaluation.warnBelow === undefined ? '' : ` and warn_below=${evaluation.warnBelow}`}.${distribution}`,
-          acknowledgementRequired: false,
+          consequential: false,
           ...(preregistration ?? {}),
         });
       }
@@ -839,7 +831,7 @@ export function inspectBrief(
       code: 'preregistration_feasibility_missing',
       level: 'fail',
       message: 'A rule frozen before outcome measurement must declare a machine-readable research.feasibility model that computes its expected qualifying-member count or explicitly states why the structural quantity is not computable.',
-      acknowledgementRequired: true,
+      consequential: true,
       ...preregistration,
       risk: 'A prose promise to calculate later can let a structurally empty rule consume a full measurement round.',
       suggestion: 'Declare research.feasibility with a numeric minimum in positive hard_floor and labelled rules using a computable structural model or an honest not_computable reason.',
@@ -854,7 +846,7 @@ export function inspectBrief(
       code: 'operator_figure_anti_anchoring_missing',
       level: 'fail',
       message: 'A supplied operator expectation must require both `within_expected_range` and `method_was_not_adjusted_to_match_expectation`.',
-      acknowledgementRequired: true,
+      consequential: true,
       ...operatorFigure,
       risk: 'Agreement with a supplied number is indistinguishable from a method adjusted to reproduce that number.',
       suggestion: 'Add both exact anti-anchoring fields to the result contract and require independent computation before comparison.',
@@ -873,7 +865,7 @@ export function inspectBrief(
         code: 'gitignored_input_undeclared',
         level: 'warn',
         message: `Gitignored path \`${mention.path}\` is referenced but not declared in the leading frontmatter \`inputs:\` block.`,
-        acknowledgementRequired: true,
+        consequential: true,
         ...mention,
         risk: 'Prose and table references do not make an ignored source reachable in a new worktree, so setup can report zero checked inputs.',
         suggestion: `Declare \`${mention.path}\` under leading frontmatter \`inputs:\`; keep any explanatory prose in addition to that declaration.`,
@@ -889,7 +881,7 @@ export function inspectBrief(
         code: 'reality_checks_empty_or_invalid',
         level: 'fail',
         message: `A \`## Reality checks\` section was declared but produced no valid checks${parserDiagnostic ? `: ${parserDiagnostic}` : '. Declare at least one valid check under `checks:`.'}`,
-        acknowledgementRequired: true,
+        consequential: true,
         risk: 'A declared but empty or malformed check block provides no deterministic evidence at the terminal gate.',
         suggestion: 'Fix the reported YAML declaration and add at least one valid item under `checks:`, or remove the section if no deterministic check is warranted.',
       });
@@ -901,7 +893,7 @@ export function inspectBrief(
       code: 'research_absent',
       level: 'warn',
       message: 'No `research:` block (engineering brief) — static contract checks only; the research loop was not simulated',
-      acknowledgementRequired: false,
+      consequential: false,
       suggestion: 'Add a numeric-baseline `research:` block only when this task needs the metric loop; otherwise keep the engineering brief and rely on its static contract checks.',
     });
   } else {
@@ -909,7 +901,7 @@ export function inspectBrief(
       code: 'research_valid',
       level: 'ok',
       message: `research: policy=${rc.policy} baseline=${rc.baseline} result_file=${rc.resultFile ?? '(default)'}`,
-      acknowledgementRequired: false,
+      consequential: false,
     });
     const targetAssessment = assessResearchShipTarget(rc);
     if (targetAssessment.status === 'already_crossed') {
@@ -917,7 +909,7 @@ export function inspectBrief(
         code: 'research_ship_target_already_crossed',
         level: 'fail',
         message: `The declared ship target is already crossed: ${targetAssessment.reason}.`,
-        acknowledgementRequired: true,
+        consequential: true,
         risk: 'The first later round that is kept becomes ship-eligible even though it did not establish the intended target gain.',
         suggestion: `Choose a target strictly ${targetAssessment.bindings.higherIsBetter ? 'above' : 'below'} the baseline, or remove stop.beat for an explicit ceiling-only contract.`,
       });
@@ -926,7 +918,7 @@ export function inspectBrief(
         code: 'research_ship_target_unreachable',
         level: 'fail',
         message: `The declared ship target cannot be exercised: ${targetAssessment.reason}.`,
-        acknowledgementRequired: true,
+        consequential: true,
         risk: 'Every schema-valid round is prevented from reaching ship, so the campaign can consume its full ceiling without a keepable shipping candidate.',
         suggestion: 'Bring stop.beat inside the declared result_schema and integrity bounds, or remove stop.beat for an explicit ceiling-only contract.',
       });
@@ -936,7 +928,7 @@ export function inspectBrief(
         code: 'research_confirm_missing',
         level: 'warn',
         message: 'No `research.confirm` declared — a ship decision would be accepted without a data check',
-        acknowledgementRequired: true,
+        consequential: true,
         risk: 'A metric improvement could be shipped without an independent data-level confirmation.',
         suggestion: 'Declare `research.confirm.command` and its required evidence, or remove research shipping as an allowed outcome.',
       });
@@ -945,7 +937,7 @@ export function inspectBrief(
         code: 'research_confirm_valid',
         level: 'ok',
         message: `Confirm command declared: ${rc.confirm.command}`,
-        acknowledgementRequired: false,
+        consequential: false,
       });
     }
     if (rc.stop?.beat === undefined) {
@@ -953,7 +945,7 @@ export function inspectBrief(
         code: 'research_ship_target_missing',
         level: 'warn',
         message: 'No `stop.beat` declared — a ship decision will never be proposed (ceiling-only exploration)',
-        acknowledgementRequired: true,
+        consequential: true,
         risk: 'The loop can explore and terminate at its ceiling but has no numeric target that authorizes shipping.',
         suggestion: 'Declare a finite `research.stop.beat` target, or explicitly choose a ceiling-only exploration contract.',
       });
@@ -963,7 +955,7 @@ export function inspectBrief(
         code: 'research_stop_rule_missing',
         level: 'warn',
         message: 'No stop rule declared — the loop is limited only by `max_iterations`',
-        acknowledgementRequired: true,
+        consequential: true,
         risk: 'The research loop has no task-owned round, wall-time, or stagnation boundary.',
         suggestion: 'Add at least one of `stop.max_rounds`, `stop.max_wall_hours`, or `stop.halt_after_no_improvement`.',
       });
@@ -976,7 +968,7 @@ export function inspectBrief(
       code: 'terminal_states_missing',
       level: 'warn',
       message: 'No `terminal_states` declared — terminal artifact paths have no contract',
-      acknowledgementRequired: true,
+      consequential: true,
       risk: 'The scheduler cannot tie a successful terminal status to a named, inspectable artifact.',
       suggestion: 'Declare each allowed status under `terminal_states` with one or more project-relative artifact paths.',
     });
@@ -990,14 +982,14 @@ export function inspectBrief(
         code: `terminal_state_${status}`,
         level: 'ok',
         message: `terminal ${status}: paths=[${entry.paths.join(', ')}]${floorParts.length ? ` floor(${floorParts.join(', ')})` : ''}`,
-        acknowledgementRequired: false,
+        consequential: false,
       });
       if (entry.floor?.minWallMinutes !== undefined && entry.floor.minWallMinutes > 10) {
         add({
           code: `terminal_wall_floor_too_high_${status}`,
           level: 'warn',
           message: `Terminal ${status} sets min_wall_minutes=${entry.floor.minWallMinutes}. Wall time is a clock gate, not evidence that enough work happened, so reuse of existing machinery can finish correctly and still be forced to wait or miss the terminal.`,
-          acknowledgementRequired: true,
+          consequential: true,
           risk: 'A correct efficient run can be mislabeled or held solely because it completed faster than the author estimated.',
           suggestion: 'Use at most 10 minutes as an anti-instant-quit guard and name the evidence that proves work coverage instead of encoding an expected duration.',
         });
@@ -1026,7 +1018,7 @@ export function inspectBrief(
         message: configured
           ? `terminal ${status} floor counts fresh files matching stage_glob \`${glob}\`, but this brief never asks any stage to write such a file. Nothing in the engine writes them, so the count stays at 0 and \`${status}\` is unreachable.`
           : `terminal ${status} sets min_attempted_stages without an explicit stage_glob. The engine would infer \`${glob}\`${inferredButMentioned ? ', and the brief mentions a matching write' : ''}, but the counted evidence contract must be explicit and assigned to a stage so it cannot drift or remain unreachable.`,
-        acknowledgementRequired: true,
+        consequential: true,
         risk: configured
           ? 'The evidence count remains zero, so the declared terminal status cannot be reached even after the substantive work is complete.'
           : 'An implicit counting pattern can diverge from the files stages actually own, making the terminal status miscount evidence or become unreachable.',
@@ -1040,7 +1032,7 @@ export function inspectBrief(
         code: 'terminal_floor_unreachable',
         level: 'fail',
         message: `Ceiling floor is unreachable: it requires at least ${floor.minAttemptedStages} rounds, but stop.max_rounds=${rc.stop.maxRounds}; termination could only force a floor-unmet submission`,
-        acknowledgementRequired: true,
+        consequential: true,
         risk: 'No execution can both obey the maximum round count and satisfy the declared ceiling floor.',
         suggestion: 'Lower `terminal_states.ceiling_hit.floor.min_attempted_stages`, raise `research.stop.max_rounds`, or remove the conflicting floor.',
       });
@@ -1051,7 +1043,7 @@ export function inspectBrief(
         code: 'terminal_floor_defers_early_stop',
         level: 'ok',
         message: `floor(${floor.minAttemptedStages}) > halt_after_no_improvement(${rc.stop.haltAfterNoImprovement}): an early ceiling decision will be deferred as intended`,
-        acknowledgementRequired: false,
+        consequential: false,
       });
     }
   }
@@ -1062,7 +1054,7 @@ export function inspectBrief(
       code: 'stage_writable_paths_missing',
       level: 'warn',
       message: `Named implementation/gate stages are assigned, but the brief has no explicit per-stage writable-path mapping (first assignment at line ${stageAssignment.line}).`,
-      acknowledgementRequired: true,
+      consequential: true,
       ...stageAssignment,
       risk: 'Without stage-specific write boundaries, an earlier stage can create a later or terminal artifact and silently skip required work.',
       suggestion: 'Add an explicit “Writable paths, by stage” mapping; a generic statement that stages may write files is not a scope declaration.',
@@ -1077,13 +1069,12 @@ export function inspectBrief(
     contractReady: !findings.some((finding) => finding.level === 'fail'),
     ...(researchFeasibility === undefined ? {} : { researchFeasibility }),
     findings,
-    requiresAcknowledgement: findings.some((finding) => finding.acknowledgementRequired),
   };
 }
 
 function consequentialFingerprints(report: BriefPreflightReport): string[] {
   return report.findings
-    .filter((finding) => finding.acknowledgementRequired)
+    .filter((finding) => finding.consequential)
     .map((finding) => finding.fingerprint)
     .sort();
 }
@@ -1092,9 +1083,6 @@ export function createBriefAdmission(
   report: BriefPreflightReport,
   acknowledgement: BriefAdmissionAcknowledgement,
 ): BriefAdmissionRecord {
-  if (report.requiresAcknowledgement && acknowledgement.kind === 'not_required') {
-    throw new Error('The brief report requires explicit acknowledgement');
-  }
   return {
     version: 1,
     reportVersion: report.version,
@@ -1120,14 +1108,13 @@ function admissionStatusForReport(
   if (!record || record.version !== 1 || record.reportVersion !== report.version) return 'missing';
   if (record.digest !== report.digest) return 'digest_mismatch';
   const expectedFingerprints = consequentialFingerprints(report);
-  const recordedFingerprints = Array.isArray(record.findingFingerprints)
-    && record.findingFingerprints.every((fingerprint) => typeof fingerprint === 'string')
-    ? [...record.findingFingerprints].sort()
-    : [];
+  if (!Array.isArray(record.findingFingerprints)
+    || record.findingFingerprints.some((fingerprint) => typeof fingerprint !== 'string')) return 'findings_mismatch';
+  const recordedFingerprints = [...record.findingFingerprints].sort();
   // A project-aware caller can record contextual findings (for example, a path
   // ignored in that exact repository) that a later scheduler-level verifier
   // cannot re-derive without project context. Every finding visible to the
-  // current verifier must still be covered; an already acknowledged superset
+  // current verifier must still be covered; a recorded superset
   // remains valid for project-agnostic replay of the same exact brief bytes.
   const recordedCounts = new Map<string, number>();
   for (const fingerprint of recordedFingerprints) {
@@ -1139,42 +1126,8 @@ function admissionStatusForReport(
     recordedCounts.set(fingerprint, remaining - 1);
     return true;
   });
-  if (!findingsMatch || !validAcknowledgement(record.acknowledgement, report.requiresAcknowledgement)) {
-    return 'acknowledgement_missing';
-  }
+  if (!findingsMatch) return 'findings_mismatch';
   return 'valid';
-}
-
-function validAcknowledgement(
-  acknowledgement: BriefAdmissionAcknowledgement | undefined,
-  required: boolean,
-): boolean {
-  if (!acknowledgement || typeof acknowledgement !== 'object') return false;
-  if (acknowledgement.kind === 'not_required') return !required;
-  if (acknowledgement.kind === 'explicit') {
-    return (acknowledgement.source === 'cli_current_input_flag'
-      || acknowledgement.source === 'cli_digest_flag'
-      || acknowledgement.source === 'dashboard_receipt')
-      && typeof acknowledgement.at === 'string'
-      && acknowledgement.at.length > 0;
-  }
-  return acknowledgement.kind === 'derived'
-    && acknowledgement.source === 'campaign_loop'
-    && typeof acknowledgement.at === 'string'
-    && acknowledgement.at.length > 0
-    && /^[0-9a-f]{64}$/.test(acknowledgement.parentDigest)
-    && acknowledgement.transformation === 'outer_loop_directive_v1';
-}
-
-export function canDeriveBriefAdmission(
-  parent: BriefAdmissionRecord,
-  parentReport: BriefPreflightReport,
-  childReport: BriefPreflightReport,
-): boolean {
-  if (admissionStatusForReport(parent, parentReport) !== 'valid') return false;
-  if (parentReport.contractReady && !childReport.contractReady) return false;
-  const parentConsequential = new Set(parent.findingFingerprints);
-  return consequentialFingerprints(childReport).every((fingerprint) => parentConsequential.has(fingerprint));
 }
 
 export function formatBriefPreflightReport(report: BriefPreflightReport): string {
@@ -1192,8 +1145,6 @@ export function formatBriefPreflightReport(report: BriefPreflightReport): string
     if (finding.risk) lines.push(`  Risk: ${finding.risk}`);
     if (finding.suggestion) lines.push(`  Suggestion: ${finding.suggestion}`);
   }
-  lines.push('', report.requiresAcknowledgement
-    ? 'Review required: this exact brief has consequential warnings or contract problems.'
-    : 'No consequential findings require acknowledgement.');
+  lines.push('', 'Preflight findings are advisory; launch binds this exact brief digest.');
   return lines.join('\n');
 }

@@ -1,0 +1,184 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="title description">
+  <title id="title">FlowCrew Architecture</title>
+  <desc id="description">The ship skill prepares a brief and isolated setup. Foreground quick or the background daemon launches the scheduler. Admitted author work passes engine validation and independent gates, with bounded repair. Declared reality checks guard successful settlement. Codex and Claude execute configured roles. The dashboard observes persistent evidence and resolves approvals; campaigns group run history and supply planner context. Shown files are representative; optional receipts exist only when their path runs.</desc>
+  <defs>
+    <style>
+      text { font-family: Arial, "Liberation Sans", sans-serif; fill: #102638; }
+      .heading { font-size: 30px; font-weight: 700; }
+      .card-title { font-size: 28px; font-weight: 700; }
+      .small-title { font-size: 26px; font-weight: 700; }
+      .subtitle { font-size: 22px; fill: #566576; }
+      .label { font-size: 22px; font-weight: 700; }
+      .control-text { fill: #487fb5; }
+      .adapter-text { fill: #8870bb; }
+      .enforce-text { fill: #ce5257; }
+      .observe-text { fill: #748ba5; }
+      .control { fill: none; stroke: #5c8cb9; stroke-width: 3; stroke-linejoin: round; }
+      .adapter { fill: none; stroke: #9680c5; stroke-width: 3; }
+      .enforce { fill: none; stroke: #d36368; stroke-width: 3; stroke-linejoin: round; }
+      .observe { fill: none; stroke: #8aa4bf; stroke-width: 3; stroke-dasharray: 7 6; }
+      .shadow { fill: #dce3ed; opacity: .38; }
+      .core-card { fill: #fff; stroke: #acc8e8; stroke-width: 1.5; }
+      .agent-card { fill: #f0edf9; stroke: #a58acb; stroke-width: 1.5; }
+      .file { font-family: "DejaVu Sans Mono", monospace; font-size: 22px; fill: #785023; }
+    </style>
+    <marker id="blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0 10 5 0 10Z" fill="#5c8cb9"/></marker>
+    <marker id="purple" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0 10 5 0 10Z" fill="#9680c5"/></marker>
+    <marker id="red" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0 10 5 0 10Z" fill="#d36368"/></marker>
+    <marker id="grey" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 10 5 0 10Z" fill="#8aa4bf"/></marker>
+  </defs>
+
+  <rect width="1920" height="1080" fill="#fbfcfe"/>
+  <text x="960" y="61" text-anchor="middle" font-size="48" font-weight="700">FlowCrew Architecture</text>
+  <text x="960" y="96" text-anchor="middle" font-size="26" fill="#566576">Brief → reviewed work → recorded outcome</text>
+
+  <!-- Soft grouped panels; connectors stay in the gutters. -->
+  <rect id="core-panel" x="36" y="120" width="1252" height="640" rx="18" fill="#f1f7fd" stroke="#7ca4cf" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="64" y="159" class="heading">Core (runtime)</text>
+  <rect id="agents-panel" x="1352" y="120" width="532" height="402" rx="18" fill="#f7f3fd" stroke="#a38ac8" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="1376" y="159" class="heading" fill="#584080">Agents</text>
+  <rect id="dashboard-panel" x="1352" y="546" width="532" height="184" rx="18" fill="#f1f7fd" stroke="#7ca4cf" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="1376" y="584" class="heading">Dashboard + campaigns</text>
+  <rect id="storage-panel" x="36" y="816" width="1848" height="224" rx="18" fill="#fff8ed" stroke="#d6a55c" stroke-width="1.5"/>
+  <text x="64" y="853" class="heading" fill="#785023">Persistent state + evidence</text>
+  <text x="1856" y="852" text-anchor="end" class="subtitle">Representative files; receipts depend on the run</text>
+
+  <!-- Entry and launch. The ship chain is a skill procedure. -->
+  <rect class="shadow" x="64" y="183" width="600" height="112" rx="16"/>
+  <rect id="ship" class="core-card" x="64" y="180" width="600" height="112" rx="16"/>
+  <text x="86" y="212" class="card-title">/ship · $ship</text>
+  <text x="86" y="245" font-size="26">ship-preflight → rehearse → ship-setup</text>
+  <text x="86" y="275" class="subtitle">Skill procedure · confirmed brief · isolated worktree</text>
+  <path id="ready-launch" class="control" d="M664 234H964" marker-end="url(#blue)"/>
+  <text x="814" y="219" text-anchor="middle" class="label control-text">ready → launch</text>
+  <rect class="shadow" x="964" y="183" width="244" height="112" rx="16"/>
+  <rect id="launch" class="core-card" x="964" y="180" width="244" height="112" rx="16"/>
+  <text x="984" y="214" class="card-title">quick / daemon</text>
+  <text x="984" y="246" class="subtitle">Foreground /</text>
+  <text x="984" y="275" class="subtitle">background queue</text>
+  <text x="64" y="329" class="small-title">Scheduler — admission, scoped writes + bounded execution</text>
+  <path id="schedule" class="control" d="M1086 292V350H184V374" marker-end="url(#blue)"/>
+  <text x="1104" y="334" class="label control-text">schedule</text>
+
+  <!-- Review path. Gates remain independent of author sessions. -->
+  <rect class="shadow" x="64" y="377" width="240" height="112" rx="16"/>
+  <rect id="plan" class="core-card" x="64" y="374" width="240" height="112" rx="16"/>
+  <text x="84" y="411" class="card-title">Plan</text>
+  <text x="84" y="442" class="subtitle">Admitted graph</text>
+  <text x="76" y="471" class="subtitle">Roles · scope · criteria</text>
+  <path id="dispatch" class="control" d="M304 430H364" marker-end="url(#blue)"/>
+  <text x="334" y="514" text-anchor="middle" class="label control-text">DAG</text>
+  <rect class="shadow" x="364" y="377" width="244" height="112" rx="16"/>
+  <rect id="author" class="core-card" x="364" y="374" width="244" height="112" rx="16"/>
+  <text x="384" y="411" class="card-title">Author</text>
+  <text x="384" y="444" class="subtitle">Optional race</text>
+  <text x="384" y="472" class="subtitle" style="font-size:20px">A → gated fallback B</text>
+  <path id="check" class="control" d="M608 430H664" marker-end="url(#blue)"/>
+  <text x="636" y="514" text-anchor="middle" font-size="20" font-weight="700" class="control-text">check</text>
+  <rect class="shadow" x="664" y="377" width="244" height="112" rx="16"/>
+  <rect id="validation" class="core-card" x="664" y="374" width="244" height="112" rx="16"/>
+  <text x="684" y="411" class="small-title">Engine validation</text>
+  <text x="684" y="442" class="subtitle">Setup baseline</text>
+  <text x="684" y="471" class="subtitle">comparison</text>
+  <path id="validation-pass" class="control" d="M908 430H964" marker-end="url(#blue)"/>
+  <text x="936" y="514" text-anchor="middle" class="label control-text">pass</text>
+  <rect class="shadow" x="964" y="377" width="244" height="112" rx="16"/>
+  <rect id="gate" class="core-card" x="964" y="374" width="244" height="112" rx="16"/>
+  <text x="984" y="411" class="small-title">Independent gate</text>
+  <text x="984" y="444" class="subtitle">Evidence + verdict</text>
+  <text x="984" y="472" class="subtitle">Own review session</text>
+
+  <!-- Regressions and repairable rejections use the same admitted repair. -->
+  <path id="validation-regression" class="enforce" d="M744 486V553" marker-end="url(#red)"/>
+  <text x="762" y="518" class="label enforce-text">regression</text>
+  <path id="gate-rejection" class="enforce" d="M1004 486V529H886V553" marker-end="url(#red)"/>
+  <text x="1015" y="518" class="label enforce-text">repairable</text>
+  <rect class="shadow" x="514" y="556" width="394" height="90" rx="16"/>
+  <rect id="repair" class="core-card" x="514" y="553" width="394" height="90" rx="16"/>
+  <text x="536" y="590" class="card-title">Bounded repair</text>
+  <text x="536" y="625" class="subtitle">Admitted patch → same gate</text>
+  <path id="recheck" class="control" d="M514 597H480V529H700V486" marker-end="url(#blue)"/>
+  <text x="464" y="576" text-anchor="end" class="label control-text">recheck</text>
+  <path id="stop" class="enforce" d="M710 643V678" marker-end="url(#red)"/>
+  <text x="496" y="634" text-anchor="end" font-size="21" font-weight="700" class="enforce-text">repair exhausted → stop</text>
+
+  <!-- Reality checks guard successful settlement; failures also settle honestly. -->
+  <path id="gate-pass" class="control" d="M1130 486V646" marker-end="url(#blue)"/>
+  <text x="1148" y="588" class="label control-text">pass</text>
+  <rect class="shadow" x="964" y="649" width="244" height="94" rx="16"/>
+  <rect id="reality" x="964" y="646" width="244" height="94" rx="16" fill="#fdeff0" stroke="#d36368" stroke-width="2"/>
+  <text x="938" y="632" class="small-title">Reality checks</text>
+  <text x="984" y="684" class="subtitle">Files · JSON · scripts</text>
+  <text x="984" y="713" class="subtitle" style="font-size:20px">Declared checks only</text>
+  <rect class="shadow" x="64" y="681" width="844" height="62" rx="16"/>
+  <rect id="terminal" class="core-card" x="64" y="678" width="844" height="62" rx="16"/>
+  <text x="84" y="669" class="card-title">Honest terminal status</text>
+  <text x="84" y="715" class="subtitle">complete · shipped · ceiling_hit · incomplete · failed · escalated · stopped</text>
+  <path id="settle" class="enforce" d="M964 704H908" marker-end="url(#red)"/>
+  <text x="929" y="668" text-anchor="middle" font-size="20" font-weight="700" class="enforce-text">settle</text>
+
+  <!-- One bidirectional stage channel, with configured role policy. -->
+  <rect class="shadow" x="1376" y="183" width="484" height="84" rx="16"/>
+  <rect id="adapters" class="agent-card" x="1376" y="180" width="484" height="84" rx="16"/>
+  <text x="1396" y="215" class="card-title">Adapters — codex · claude</text>
+  <text x="1396" y="246" class="subtitle">Worker stage I/O · CLI execution</text>
+  <path id="stage-io" class="adapter" d="M1288 230H1376" marker-start="url(#purple)" marker-end="url(#purple)"/>
+  <text x="1530" y="159" text-anchor="middle" font-size="20" font-weight="700" class="adapter-text">stage I/O</text>
+  <path id="role-config" class="adapter" d="M1618 292V264" marker-end="url(#purple)"/>
+  <rect class="shadow" x="1376" y="295" width="484" height="204" rx="16"/>
+  <rect id="roles" class="agent-card" x="1376" y="292" width="484" height="204" rx="16"/>
+  <text x="1636" y="319" font-size="20" class="adapter-text">role config</text>
+  <text x="1396" y="325" class="card-title">Configured roles</text>
+  <text x="1396" y="355" class="subtitle">Prompts · tools · role registry</text>
+  <text x="1396" y="390" font-size="24">planner · coder · qa</text>
+  <text x="1396" y="420" font-size="24">doc_writer · doc_reviewer</text>
+  <text x="1396" y="450" font-size="24">researcher · ai_detector</text>
+  <text x="1396" y="480" font-size="24">paper_writer · paper_reviewer</text>
+
+  <!-- Read surfaces and approval decisions share the existing control plane. -->
+  <rect class="shadow" x="1376" y="604" width="244" height="107" rx="16"/>
+  <rect id="dashboard" class="core-card" x="1376" y="601" width="244" height="107" rx="16"/>
+  <text x="1396" y="635" class="small-title">Dashboard</text>
+  <text x="1396" y="664" class="subtitle">Inbox · Workspaces</text>
+  <text x="1396" y="693" class="subtitle">Agents · approvals</text>
+  <rect class="shadow" x="1640" y="604" width="220" height="107" rx="16"/>
+  <rect id="campaigns" class="core-card" x="1640" y="601" width="220" height="107" rx="16"/>
+  <text x="1660" y="635" class="small-title">Campaigns</text>
+  <text x="1660" y="665" class="subtitle">Grouped runs</text>
+  <text x="1660" y="694" class="subtitle">Planner context</text>
+  <path id="decisions" class="control" d="M1376 682H1288" marker-end="url(#blue)"/>
+  <text x="1320" y="708" text-anchor="middle" font-size="16" font-weight="700" class="control-text">decide</text>
+  <path id="persist" class="control" d="M710 740V816" marker-end="url(#blue)"/>
+  <text x="728" y="790" class="label control-text">persist</text>
+  <path id="observe" class="observe" d="M1498 816V708" marker-end="url(#grey)"/>
+  <text x="1516" y="790" class="label observe-text">observe</text>
+  <path id="campaign-history" class="observe" d="M1750 816V708" marker-end="url(#grey)"/>
+  <text x="1768" y="790" class="label observe-text">history</text>
+
+  <!-- Engine-written filenames. No invocation identifiers or machine paths. -->
+  <g id="files">
+    <g><rect x="313" y="874" width="134" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="327" y="903" class="file">run.json</text></g>
+    <g><rect x="463" y="874" width="200" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="477" y="902" class="file">task_brief.md</text></g>
+    <g><rect x="679" y="874" width="200" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="693" y="903" class="file">workflow.yaml</text></g>
+    <g><rect x="895" y="874" width="200" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="909" y="903" class="file">dispatch.yaml</text></g>
+    <g><rect x="1111" y="874" width="293" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="1125" y="902" class="file">verdict_&lt;stage&gt;.json</text></g>
+    <g><rect x="1420" y="874" width="187" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="1434" y="903" class="file">events.jsonl</text></g>
+    <g><rect x="242" y="927" width="293" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="256" y="956" class="file">run-history.jsonl</text></g>
+    <g><rect x="551" y="927" width="160" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="565" y="956" class="file">summary.md</text></g>
+    <g><rect x="727" y="927" width="174" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="741" y="956" class="file">progress.md</text></g>
+    <g><rect x="917" y="927" width="346" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="931" y="955" class="file">validation_baseline.json</text></g>
+    <g><rect x="1279" y="927" width="399" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="1293" y="955" class="file">validation_delta_&lt;gate&gt;.json</text></g>
+    <g><rect x="162" y="980" width="266" height="42" rx="9" fill="#fff3f3" stroke="#d36368"/><text x="176" y="1009" class="file" style="fill:#b3444b">.reality-gate.json</text></g>
+    <g><rect x="444" y="980" width="306" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="458" y="1008" class="file">research_journal.json</text></g>
+    <g><rect x="766" y="980" width="320" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="780" y="1008" class="file">research_decision.json</text></g>
+    <g><rect x="1102" y="980" width="333" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="1116" y="1009" class="file">stages/&lt;id&gt;/status.json</text></g>
+    <g><rect x="1451" y="980" width="306" height="42" rx="9" fill="#fff" stroke="#ddb980"/><text x="1465" y="1009" class="file">campaigns/&lt;key&gt;.jsonl</text></g>
+  </g>
+
+  <g id="legend" font-size="22">
+    <path class="control" d="M518 1065H556" marker-end="url(#blue)"/><text x="570" y="1072" class="control-text">Control</text>
+    <path class="adapter" d="M714 1065H752" marker-end="url(#purple)"/><text x="766" y="1072" class="adapter-text">Adapter I/O</text>
+    <path class="enforce" d="M950 1065H988" marker-end="url(#red)"/><text x="1002" y="1072" class="enforce-text">Enforcement</text>
+    <path class="observe" d="M1218 1065H1256" marker-end="url(#grey)"/><text x="1270" y="1072" class="observe-text">Observe</text>
+  </g>
+</svg>

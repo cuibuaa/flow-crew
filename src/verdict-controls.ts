@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
-import { parse as parseYaml } from 'yaml';
-import { loadProjectDefaults } from './config.js';
-import { readOperatorCriterionRulings, type GuidanceEnvelope } from './guidance.js';
+import { readDispatchDocument } from './dispatch-document.js';
+import { loadEngineDefaults } from './config.js';
+import { readOperatorCriterionRulings } from './guidance.js';
 import { STAGE_STATUS } from './store.js';
 
 export interface StageAuthoredCheck {
@@ -48,10 +48,8 @@ function strings(value: unknown): string[] {
 
 function readDispatchStages(runDir: string): DispatchStageShape[] {
   try {
-    const parsed = parseYaml(readFileSync(join(runDir, 'dispatch.yaml'), 'utf-8')) as {
-      stages?: unknown;
-    };
-    return Array.isArray(parsed?.stages) ? parsed.stages as DispatchStageShape[] : [];
+    return readDispatchDocument(readFileSync(join(runDir, 'dispatch.yaml'), 'utf-8')).stages
+      .filter((stage): stage is DispatchStageShape => Boolean(stage) && typeof stage === 'object');
   } catch {
     return [];
   }
@@ -146,7 +144,7 @@ export function renderGateControlContract(input: {
   const candidates = collectStageAuthoredChecks(input.runDir, input.gateStageId, input.criterionRefs);
   const recordedCosts = collectExplicitUnitCosts(input.projectDir, input.runDir);
   let defaultBudget = 'unknown';
-  try { defaultBudget = String(loadProjectDefaults(input.projectDir).timeout_ms); } catch { /* explicit unknown */ }
+  try { defaultBudget = String(loadEngineDefaults().timeout_ms); } catch { /* explicit unknown */ }
   const recordedBudgets: string[] = [];
   try {
     for (const stageId of readdirSync(join(input.runDir, 'stages'))) {
@@ -163,7 +161,7 @@ export function renderGateControlContract(input: {
     'If a rejecting reason or failed criterion prescribes a sample, block, or iteration quantity, add a matching remedyFeasibility entry.',
     'Known cost shape: {"criterionId":"...","targetStageId":"...","targetQuantity":10000,"unit":"blocks","cost":{"status":"known","unitCostMs":839,"costedQuantity":10000,"unit":"blocks","source":{"stageId":"measure","attemptIndex":1,"path":"docs/measurement.json","elapsedPath":"repair_measurement.measurement_summary.elapsed_seconds","quantityPath":"repair_measurement.measurement_summary.new_records","elapsedUnit":"seconds"}},"impliedWallTimeMs":8390000,"stageBudgetMs":3600000,"fitsStageBudget":false,"disposition":"infeasible","statement":"The 10000-block target implies 8390000ms and is infeasible within the 3600000ms stage budget."}. Put the same feasibility statement in the verdict reason or matching criterion evidence; do not leave an infeasible target as an imperative remedy.',
     'Unknown cost shape: use cost.status="unknown" with a non-empty reason, impliedWallTimeMs=null, fitsStageBudget=null, disposition="unknown", and a statement explicitly saying the cost is unknown. Do not invent unit conversions.',
-    'A known source must be attributed to the named completed attempt. targetStageId must name an admitted run stage; an admitted stage with no attempt yet uses the project default budget. Arithmetic, budget, fit, and disposition are checked by the scheduler.',
+    'A known source must be attributed to the named completed attempt. targetStageId must name an admitted run stage; an admitted stage with no attempt yet uses the engine default budget. Arithmetic, budget, fit, and disposition are checked by the scheduler.',
     'The feasibility statement must include the computed implied wall-time value with a time unit, not only a qualitative feasible/infeasible conclusion.',
     recordedCosts.length > 0
       ? `Recorded attributable unit costs: ${recordedCosts.map((cost) => `${cost.stageId}/${cost.attemptIndex} ${cost.path}#${cost.unitCostPath} = ${cost.unitCostMs} ms/${cost.unit}`).join('; ')}.`
@@ -411,7 +409,7 @@ function verdictNarrative(verdict: Record<string, unknown>, criterionId?: string
   return parts.join('\n');
 }
 
-const STAGE_ID_PATTERN = /^[a-z][a-z0-9_]{0,19}$/;
+const STAGE_ID_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 
 function runNamesStage(runDir: string, stageId: string): boolean {
   if (!STAGE_ID_PATTERN.test(stageId)) return false;
@@ -427,7 +425,7 @@ function resolveStageBudgetMs(projectDir: string, runDir: string, stageId: strin
   const status = readStatus(runDir, stageId);
   const budget = status?.attempts?.at(-1)?.timeout?.budgetMs ?? status?.timeout?.budgetMs;
   if (typeof budget === 'number' && Number.isFinite(budget) && budget > 0) return budget;
-  try { return loadProjectDefaults(projectDir).timeout_ms; } catch { return undefined; }
+  try { return loadEngineDefaults().timeout_ms; } catch { return undefined; }
 }
 
 function statementIncludesDurationMs(statement: string, expectedMs: number): boolean {
@@ -664,11 +662,4 @@ export function validateGateControls(input: {
   const rulingViolation = validateRulingTreatments(input.runDir, input.criterionRefs, input.verdict);
   if (rulingViolation) return { violation: rulingViolation, conflicts: [] };
   return validateCheckAssessments(input.runDir, input.gateStageId, input.criterionRefs, input.verdict);
-}
-
-export function criterionRulingsFor(
-  runDir: string,
-  criterionRefs: readonly string[],
-): GuidanceEnvelope[] {
-  return readOperatorCriterionRulings(runDir, criterionRefs);
 }

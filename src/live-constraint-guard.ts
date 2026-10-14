@@ -1,26 +1,14 @@
+import { writeFileSync, appendFileSync, closeSync, mkdirSync, openSync } from './engine-fs.js';
+
+
 import { createHash } from 'node:crypto';
-import {
-  appendFileSync,
-  closeSync,
-  existsSync,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readlinkSync,
-  readSync,
-  watch,
-  writeFileSync,
-  type FSWatcher,
-} from 'node:fs';
-import { join, resolve } from 'node:path';
-import { scopePathDigest } from './runtime-negotiation.js';
+import { constants, existsSync, fstatSync, lstatSync, readFileSync, readlinkSync, readSync, watch, type FSWatcher } from 'node:fs';
+import { join } from 'node:path';
 import { stableGeneratedScope } from './generated-path-policy.js';
+import { normalizedProjectContentPath } from './scheduler/sched_admission/scope-services.js';
 
 export const LIVE_CONSTRAINT_FALLBACK_SCAN_MS = 30_000;
 export const LIVE_CONSTRAINT_MONITOR_DEADLINE_MS = 600_000;
-export const LIVE_CONSTRAINT_MAX_REINVOCATIONS = 1;
 export const SCOPE_REVISION_REQUEST_FILE = 'scope_revision_request.json';
 
 export interface ScopeRevisionContractInput {
@@ -45,21 +33,26 @@ export function scopeRevisionPathsForViolations(paths: readonly string[]): strin
   }))].sort();
 }
 
+function scopeDecisionWaitInstruction(attemptIndex: ScopeRevisionContractInput['attemptIndex']): string {
+  return `Wait without hot-polling: continue independent work, use scheduler notifications, or inspect scope_revision_decision_attempt_${attemptIndex}_*.json in this stage directory at a low rate, bounded by the remaining execution deadline. `
+    + 'Match the decision runId, stageId, attemptIndex, requestId and canonical requestedPaths to your exact request; the scheduler derives pathDigest, publishes one durable decision and watches the directory. '
+    + 'An accepted decision ends the current execution at a command completion after child closure; only a later re-admitted execution may write newly authorizedPaths. Denied paths remain outside your authority. ';
+}
+
 /** One byte-stable source for the ordinary prompt and live/post-audit guidance. */
 export function scopeRevisionContract(input: ScopeRevisionContractInput): string {
   const gateIsolation = input.gate
-    ? ' Gate project writes remain subject to isolation policy; if rejected, use a planner-predeclared path in a later iteration or an OS temporary probe lane.'
+    ? ' Gate project writes remain subject to isolation policy; if rejected, use a planner-predeclared path in a later iteration or the private temporary directory.'
     : '';
   return `Declared project-write scope: ${JSON.stringify(input.scope)} (declaration ${input.scopePresence}). `
-    + `A missing declaration is closed, never allow-all. Before any project write outside this initial capability, produce `
+    + `Every invocation, including a read-only stage, has writable private scratch at $TMPDIR (also $TMP and $TEMP), separate from project and run storage and removed when the invocation closes. `
+    + `Use mktemp -d "$TMPDIR/probe-XXXXXX" for temporary copies and probes; shared /tmp is outside this grant. Check creation succeeded before copying. `
+    + `An explicit empty declaration grants no project writes; an omitted legacy declaration has no live scope guard. Before any project write outside admitted capability, produce `
     + `exactly one JSON request to ${join(input.runDir, 'stages', input.stageId, SCOPE_REVISION_REQUEST_FILE)} `
     + `with {"version":1,"kind":"scope_revision","requestId":"<unique id>","runId":"${input.runId}","stageId":"${input.stageId}",`
-    + `"attemptIndex":${input.attemptIndex === '<current execution index>' ? '<current execution index>' : input.attemptIndex},"requestedPaths":["path"],"pathDigest":"<sha256 of the canonical requestedPaths set>",`
-    + `"reason":"<why the declared work requires it>"}. The scheduler canonicalizes and verifies the run/stage/execution/path binding. `
+    + `"attemptIndex":${input.attemptIndex === '<current execution index>' ? '<current execution index>' : input.attemptIndex},"requestedPaths":["path"]}. Optional reason text is telemetry; the scheduler derives pathDigest and verifies the run/stage/execution/path binding. `
     + `Accepted paths from an earlier execution of this same stage remain in the effective scope after the scheduler revalidates them against the current batch. `
-    + `Wait without hot-polling: continue independent work, or check for scope_revision_decision_<requestId>.json at most once per second, bounded by the remaining execution deadline; the scheduler also watches the directory and publishes one durable decision. `
-    + `Write the new path only when accepted; `
-    + `a rejection is an auditable request to stop or re-plan, not permission to bypass scope with casts or indirection.`
+    + scopeDecisionWaitInstruction(input.attemptIndex)
     + gateIsolation;
 }
 
@@ -68,7 +61,6 @@ export function scopeRevisionInstruction(input: ScopeRevisionContractInput & {
 }): string {
   const paths = [...new Set(input.violatingPaths.map((path) => path.replace(/\\/g, '/')))].sort();
   const requestedPaths = scopeRevisionPathsForViolations(paths);
-  const digest = scopePathDigest(requestedPaths);
   const stableScopeDetail = requestedPaths.some((path, index) => path !== paths[index])
     ? ` The refused member belongs to a recognized content-addressed generated tree, so the complete stable parent scope is ${JSON.stringify(requestedPaths)}.`
     : '';
@@ -78,8 +70,9 @@ export function scopeRevisionInstruction(input: ScopeRevisionContractInput & {
     + stableScopeDetail + ' '
     + `If the declared work requires ${paths.length === 1 ? 'it' : 'them'}, write exactly one request to ${join(input.runDir, 'stages', input.stageId, SCOPE_REVISION_REQUEST_FILE)} `
     + `with {"version":1,"kind":"scope_revision","requestId":"<unique id>","runId":"${input.runId}","stageId":"${input.stageId}",`
-    + `"attemptIndex":${input.attemptIndex},"requestedPaths":${JSON.stringify(requestedPaths)},"pathDigest":"${digest}",`
-    + `"reason":"<why the declared work requires it>"}. Wait without hot-polling for scope_revision_decision_<requestId>.json and write only after acceptance. `
+    + `"attemptIndex":${input.attemptIndex},"requestedPaths":${JSON.stringify(requestedPaths)},`
+    + `"reason":"<optional explanation>"}. `
+    + scopeDecisionWaitInstruction(input.attemptIndex)
     + `This is the same instruction recorded by the post-attempt constraint audit, which remains the backstop.`;
 }
 
@@ -88,7 +81,7 @@ export type LiveConstraintContentIdentity =
   | { state: 'unavailable'; reason: string }
   | {
       state: 'present';
-      type: 'file' | 'symlink';
+      type: 'file' | 'symlink' | 'directory';
       byteLength: number;
       sha256: string;
     };
@@ -160,7 +153,9 @@ function hashRegularFile(path: string): LiveConstraintContentIdentity {
   for (let attempt = 0; attempt < 2; attempt++) {
     let descriptor: number | undefined;
     try {
-      descriptor = openSync(path, 'r');
+      // A pathname can become a link or FIFO after lstat. Never follow the
+      // replacement or block waiting for a writer before verifying its type.
+      descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const before = fstatSync(descriptor);
       if (!before.isFile()) return { state: 'unavailable', reason: 'path changed type while its content was read' };
       const hash = createHash('sha256');
@@ -232,145 +227,6 @@ export function compareLiveConstraintContentIdentities(
     : 'different';
 }
 
-export interface WriterLeaseBinding {
-  /** One scheduler-selected batch whose members were checked pairwise. */
-  batchId: string;
-  /** One scope partition within that batch. Equal partitions remain serial. */
-  partitionId: string;
-  ownerStageId: string;
-}
-
-export interface WriterLeaseWaitObservation {
-  phase: 'started' | 'finished';
-  blockedByOwnerStageId?: string;
-  partitionId: string;
-  waitStartedAt: string;
-  waitedMs?: number;
-}
-
-export interface WriterLeaseOptions extends Partial<WriterLeaseBinding> {
-  onWait?: (observation: WriterLeaseWaitObservation) => void;
-  now?: () => number;
-}
-
-interface WriterLeaseRequest {
-  token: symbol;
-  cohortId: string;
-  partitionId: string;
-  ownerStageId?: string;
-  exclusive: boolean;
-}
-
-type WriterLeaseHolder = WriterLeaseRequest;
-
-interface WriterLeaseWaiter {
-  request: WriterLeaseRequest;
-  ready: () => void;
-}
-
-interface WriterLeaseState {
-  cohortId?: string;
-  holders: Map<string, WriterLeaseHolder>;
-  waiters: WriterLeaseWaiter[];
-}
-
-const writerLeases = new Map<string, WriterLeaseState>();
-
-/**
- * One adapter invocation with project-write capability owns the portable
- * attribution boundary. Explicitly read-only invocations do not take the lease
- * and may continue concurrently.
- */
-export async function acquireAttributableWriterLease(
-  projectDir: string,
-  writeCapable: boolean,
-  options: WriterLeaseOptions = {},
-): Promise<() => void> {
-  if (!writeCapable) return () => undefined;
-  const key = resolve(projectDir);
-  const batchId = options.batchId?.trim();
-  const requestedPartition = options.partitionId?.trim();
-  const partitioned = Boolean(batchId && requestedPartition);
-  const request: WriterLeaseRequest = {
-    token: Symbol('writer-lease'),
-    cohortId: partitioned ? `batch:${batchId}` : 'project-wide',
-    partitionId: partitioned ? requestedPartition! : 'project-wide',
-    ...(options.ownerStageId ? { ownerStageId: options.ownerStageId } : {}),
-    exclusive: !partitioned,
-  };
-  const state: WriterLeaseState = writerLeases.get(key) ?? {
-    holders: new Map<string, WriterLeaseHolder>(),
-    waiters: [],
-  };
-  writerLeases.set(key, state);
-
-  const canGrant = (candidate: WriterLeaseRequest): boolean => {
-    if (state.holders.size === 0) return true;
-    if (state.cohortId !== candidate.cohortId || candidate.exclusive) return false;
-    const active = state.holders.values().next().value as WriterLeaseHolder | undefined;
-    if (active?.exclusive) return false;
-    return !state.holders.has(candidate.partitionId);
-  };
-  const grant = (candidate: WriterLeaseRequest): void => {
-    if (state.holders.size === 0) state.cohortId = candidate.cohortId;
-    state.holders.set(candidate.partitionId, candidate);
-  };
-  const safelyObserve = (observation: WriterLeaseWaitObservation): void => {
-    try { options.onWait?.(observation); } catch { /* lease ownership must not be stranded by telemetry */ }
-  };
-
-  let waitStartedMs: number | undefined;
-  let waitStartedAt: string | undefined;
-  let blockedByOwnerStageId: string | undefined;
-  if (state.waiters.length === 0 && canGrant(request)) {
-    grant(request);
-  } else {
-    const blocker = state.holders.get(request.partitionId)
-      ?? state.holders.values().next().value as WriterLeaseHolder | undefined;
-    blockedByOwnerStageId = blocker?.ownerStageId;
-    const now = options.now ?? Date.now;
-    waitStartedMs = now();
-    waitStartedAt = new Date(waitStartedMs).toISOString();
-    safelyObserve({
-      phase: 'started',
-      ...(blockedByOwnerStageId ? { blockedByOwnerStageId } : {}),
-      partitionId: request.partitionId,
-      waitStartedAt,
-    });
-    await new Promise<void>((ready) => state.waiters.push({ request, ready }));
-    const waitedMs = Math.max(0, now() - waitStartedMs);
-    safelyObserve({
-      phase: 'finished',
-      ...(blockedByOwnerStageId ? { blockedByOwnerStageId } : {}),
-      partitionId: request.partitionId,
-      waitStartedAt,
-      waitedMs,
-    });
-  }
-
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    const holder = state.holders.get(request.partitionId);
-    if (holder?.token !== request.token) return;
-    state.holders.delete(request.partitionId);
-    if (state.holders.size === 0) state.cohortId = undefined;
-
-    // Preserve FIFO at the batch boundary. Once the oldest waiter establishes
-    // a cohort, immediately admit only subsequent disjoint partitions from
-    // that same scheduler-proven batch.
-    while (state.waiters.length > 0) {
-      const next = state.waiters[0];
-      if (!canGrant(next.request)) break;
-      state.waiters.shift();
-      grant(next.request);
-      next.ready();
-    }
-    if (state.holders.size === 0 && state.waiters.length === 0) writerLeases.delete(key);
-  };
-}
-
 export type LiveConstraintScanTrigger = 'phase_start' | 'watch' | 'fallback' | 'phase_boundary';
 
 export interface LiveConstraintViolationDetection {
@@ -378,6 +234,8 @@ export interface LiveConstraintViolationDetection {
   reason: string;
   restored: boolean;
   rollbackFailure?: string;
+  /** Content left by an engine-observed failed rollback, for prospective recovery admission. */
+  unrestoredContent?: LiveConstraintContentIdentity;
   entryKind?: LiveConstraintGitIndexEntryKind | 'filesystem' | 'untracked';
   comparisonOutcome?: 'different' | 'unavailable';
   /** False records an unrepresentable comparison without claiming a write. */
@@ -390,7 +248,7 @@ export interface LiveConstraintScanResult {
   violations: LiveConstraintViolationDetection[];
   /** Unique untracked generated paths observed by this scan. */
   exemptedPaths?: string[];
-  /** Subset whose exemption was activated by a configured command lifecycle. */
+  /** Subset proven to be outputs of the admitted validation baseline. */
   validationGeneratedPaths?: string[];
 }
 
@@ -410,11 +268,44 @@ export interface LiveConstraintIncident {
   rollbackAttempted: boolean;
   restored: boolean;
   rollbackFailure?: string;
+  /** Content left by an engine-observed failed rollback, for prospective recovery admission. */
+  unrestoredContent?: LiveConstraintContentIdentity;
   writeObservedAt: string;
   detectedAt: string;
   detectionLatencyMs: number;
   effectiveScope: string[];
   scopeRevisionInstruction?: string;
+}
+
+export function readLiveConstraintIncidents(
+  runDirPath: string,
+  stageId: string,
+  attemptIndex: number,
+): LiveConstraintIncident[] {
+  const path = join(
+    runDirPath,
+    'stages',
+    stageId,
+    `live_constraint_incidents_attempt_${attemptIndex}.jsonl`,
+  );
+  try {
+    return readFileSync(path, 'utf-8').split(/\r?\n/).flatMap((line) => {
+      if (!line.trim()) return [];
+      try {
+        const incident = JSON.parse(line) as LiveConstraintIncident;
+        return incident.kind === 'live_constraint_incident'
+          && incident.stageId === stageId
+          && incident.attemptIndex === attemptIndex
+          && typeof incident.path === 'string'
+          ? [resolvePersistedLiveConstraintIncident(join(runDirPath, 'stages', stageId), incident)]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
 }
 
 /** Persisted reference to an instruction stored once beside the incident file. */
@@ -483,10 +374,8 @@ export interface LiveConstraintGuardOptions {
   scanAndRestore: (
     candidatePaths: readonly string[],
     trigger: LiveConstraintScanTrigger,
-    validationCommandActive: boolean,
+    attributedWrites: ReadonlySet<string>,
   ) => LiveConstraintScanResult | Promise<LiveConstraintScanResult>;
-  /** Adapter command lifecycle evidence, not prompt prose, activates generated-output policy. */
-  isValidationCommand?: (command: string) => boolean;
   scopeRevisionInstruction: (paths: readonly string[]) => string;
   onExemptions?: (summary: LiveConstraintExemptionSummary) => void;
   onMonitorFailure?: (failure: LiveConstraintMonitorFailure) => void;
@@ -496,7 +385,7 @@ export interface LiveConstraintGuardOptions {
   watchProject?: (
     listener: (path: string | undefined) => void,
     onError: (error: Error) => void,
-  ) => FSWatcher | undefined;
+  ) => Pick<FSWatcher, 'close'> | undefined;
 }
 
 export interface LiveConstraintGuardAttemptContext {
@@ -506,15 +395,13 @@ export interface LiveConstraintGuardAttemptContext {
 
 export interface LiveConstraintGuardFactory {
   (attempt: LiveConstraintGuardAttemptContext): LiveConstraintGuard;
-  /** Scheduler proof consumed by runStage before the attempt begins. */
-  writerLease?: WriterLeaseBinding;
+  /** Scheduler-owned wave context, observed afresh for every adapter invocation. */
+  parallelExecution?: () => boolean;
 }
 
 export interface LiveConstraintInvocationMonitor {
   /** Structured adapter attribution closes watcher gaps without changing enforcement authority. */
   observePaths(paths: readonly string[]): void;
-  commandStarted(id: string, command: string | undefined): void;
-  commandCompleted(id: string): void;
   finish(): Promise<LiveConstraintInvocationResult>;
 }
 
@@ -524,18 +411,17 @@ interface ActiveInvocation {
   incidents: LiveConstraintIncident[];
   firstObservedAt: Map<string, number>;
   pendingPaths: Set<string>;
+  attributedWrites: Set<string>;
   pendingTrigger?: LiveConstraintScanTrigger;
   scanPromise?: Promise<void>;
-  watcher?: FSWatcher;
+  watcher?: Pick<FSWatcher, 'close'>;
   fallbackTimer?: ReturnType<typeof setInterval>;
-  livenessTimer?: ReturnType<typeof setInterval>;
-  lastSuccessfulScanAt: number;
+  deadlineTimer?: ReturnType<typeof setTimeout>;
+  rejectScan?: (error: Error) => void;
   lastScanDurationMs: number;
   lastScanFileCount: number;
   exemptedPaths: Set<string>;
   validationGeneratedPaths: Set<string>;
-  validationCommandIds: Set<string>;
-  completingValidationCommandIds: Set<string>;
   monitorFailure?: LiveConstraintMonitorFailure;
   summaryReported: boolean;
   finished: boolean;
@@ -543,11 +429,6 @@ interface ActiveInvocation {
 
 function positiveInterval(value: number | undefined, fallback: number): number {
   return Number.isFinite(value) && Number(value) > 0 ? Math.floor(Number(value)) : fallback;
-}
-
-function normalizeCandidatePath(path: string | undefined): string | undefined {
-  const normalized = path?.replace(/\\/g, '/').replace(/^\.\//, '').trim();
-  return normalized || undefined;
 }
 
 const liveConstraintPatternCache = new Map<string, RegExp>();
@@ -638,7 +519,6 @@ export class LiveConstraintGuard {
   private readonly now: () => number;
   private readonly fallbackScanMs: number;
   private readonly monitorDeadlineMs: number;
-  private active?: ActiveInvocation;
 
   constructor(private readonly options: LiveConstraintGuardOptions) {
     this.now = options.now ?? Date.now;
@@ -647,27 +527,24 @@ export class LiveConstraintGuard {
   }
 
   beginInvocation(invocationIndex: number, abort: (reason: string) => void): LiveConstraintInvocationMonitor {
-    if (this.active && !this.active.finished) throw new Error('live constraint invocation monitor already active');
     const active: ActiveInvocation = {
       index: invocationIndex,
       abort,
       incidents: [],
       firstObservedAt: new Map(),
       pendingPaths: new Set(),
-      lastSuccessfulScanAt: this.now(),
+      attributedWrites: new Set(),
       lastScanDurationMs: 0,
       lastScanFileCount: 0,
       exemptedPaths: new Set(),
       validationGeneratedPaths: new Set(),
-      validationCommandIds: new Set(),
-      completingValidationCommandIds: new Set(),
       summaryReported: false,
       finished: false,
     };
-    this.active = active;
 
     const listener = (rawPath: string | undefined): void => {
-      const path = normalizeCandidatePath(rawPath);
+      const path = rawPath === undefined ? undefined : normalizedProjectContentPath(rawPath);
+      if (rawPath !== undefined && !path) return;
       if (path) {
         active.pendingPaths.add(path);
         if (!active.firstObservedAt.has(path)) active.firstObservedAt.set(path, this.now());
@@ -693,48 +570,45 @@ export class LiveConstraintGuard {
       // Unsupported recursive watching is expected on some adapters/filesystems.
       // The bounded scan below remains authoritative.
     }
-    active.fallbackTimer = setInterval(() => this.queueScan(active, 'fallback'), this.fallbackScanMs);
-    const livenessPollMs = Math.max(25, Math.min(this.fallbackScanMs, Math.ceil(this.monitorDeadlineMs / 4)));
-    active.livenessTimer = setInterval(() => {
-      if (active.finished || active.monitorFailure) return;
-      if (this.now() - active.lastSuccessfulScanAt < this.monitorDeadlineMs) return;
-      active.monitorFailure = {
-        kind: 'monitor_failure',
-        stageId: this.options.stageId,
-        attemptIndex: this.options.attemptIndex,
-        invocationIndex: active.index,
-        detectedAt: new Date(this.now()).toISOString(),
-        reason: `live constraint monitor completed no clean scan within ${this.monitorDeadlineMs}ms`,
-        lastScanDurationMs: active.lastScanDurationMs,
-        lastScanFileCount: active.lastScanFileCount,
-      };
-      active.abort('live_constraint_monitor_failure');
-    }, livenessPollMs);
+    active.fallbackTimer = setInterval(() => this.queueScan(active, 'fallback'), Math.min(this.fallbackScanMs, Math.max(1, Math.floor(this.monitorDeadlineMs / 2))));
+    this.armDeadline(active);
     this.queueScan(active, 'phase_start');
 
     return {
       observePaths: (paths) => {
         for (const rawPath of paths) {
-          const path = normalizeCandidatePath(rawPath);
+          const path = normalizedProjectContentPath(rawPath);
           if (!path) continue;
           active.pendingPaths.add(path);
+          active.attributedWrites.add(path);
           if (!active.firstObservedAt.has(path)) active.firstObservedAt.set(path, this.now());
         }
         if (paths.length > 0) this.queueScan(active, 'watch');
       },
-      commandStarted: (id, command) => {
-        if (!command || !this.options.isValidationCommand?.(command)) return;
-        active.validationCommandIds.add(id);
-      },
-      commandCompleted: (id) => {
-        if (!active.validationCommandIds.has(id)) return;
-        // Keep provenance active through a forced boundary scan. Filesystem
-        // notifications can arrive after the child reports completion.
-        active.completingValidationCommandIds.add(id);
-        this.queueScan(active, 'phase_boundary');
-      },
       finish: () => this.finishInvocation(active),
     };
+  }
+
+  private failMonitor(active: ActiveInvocation, reason: string): void {
+    if (active.finished || active.monitorFailure) return;
+    active.monitorFailure = {
+      kind: 'monitor_failure',
+      stageId: this.options.stageId,
+      attemptIndex: this.options.attemptIndex,
+      invocationIndex: active.index,
+      detectedAt: new Date(this.now()).toISOString(),
+      reason,
+      lastScanDurationMs: active.lastScanDurationMs,
+      lastScanFileCount: active.lastScanFileCount,
+    };
+    active.rejectScan?.(new Error(reason));
+    active.abort('live_constraint_monitor_failure');
+  }
+
+  private armDeadline(active: ActiveInvocation): void {
+    clearTimeout(active.deadlineTimer);
+    active.deadlineTimer = setTimeout(() => this.failMonitor(active,
+      `live constraint monitor completed no clean scan within ${this.monitorDeadlineMs}ms monitor deadline`), this.monitorDeadlineMs);
   }
 
   private queueScan(active: ActiveInvocation, trigger: LiveConstraintScanTrigger): void {
@@ -751,55 +625,25 @@ export class LiveConstraintGuard {
         let result: LiveConstraintScanResult;
         try {
           result = await new Promise<LiveConstraintScanResult>((resolvePromise, rejectPromise) => {
-            let settled = false;
-            const timer = setTimeout(() => {
-              if (settled) return;
-              settled = true;
-              rejectPromise(new Error(`scan exceeded ${this.monitorDeadlineMs}ms monitor deadline`));
-            }, this.monitorDeadlineMs);
-            Promise.resolve(this.options.scanAndRestore(
+            active.rejectScan = rejectPromise;
+            Promise.resolve().then(() => this.options.scanAndRestore(
               paths,
               nextTrigger,
-              active.validationCommandIds.size > 0,
-            )).then(
-              (value) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                resolvePromise(value);
-              },
-              (error) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                rejectPromise(error);
-              },
-            );
+              new Set(active.attributedWrites),
+            )).then(resolvePromise, rejectPromise);
           });
         } catch (error) {
-          active.monitorFailure = {
-            kind: 'monitor_failure',
-            stageId: this.options.stageId,
-            attemptIndex: this.options.attemptIndex,
-            invocationIndex: active.index,
-            detectedAt: new Date(this.now()).toISOString(),
-            reason: `live constraint scan failed closed: ${error instanceof Error ? error.message : String(error)}`,
-            lastScanDurationMs: active.lastScanDurationMs,
-            lastScanFileCount: active.lastScanFileCount,
-          };
-          active.abort('live_constraint_monitor_failure');
+          this.failMonitor(active, `live constraint scan failed closed: ${error instanceof Error ? error.message : String(error)}`);
           break;
+        } finally {
+          active.rejectScan = undefined;
         }
         const scanCompletedAt = this.now();
-        active.lastSuccessfulScanAt = scanCompletedAt;
+        this.armDeadline(active);
         active.lastScanDurationMs = Math.max(0, scanCompletedAt - scanStartedAt);
         active.lastScanFileCount = Math.max(0, Math.floor(result.scannedPaths));
         for (const path of result.exemptedPaths ?? []) active.exemptedPaths.add(path);
         for (const path of result.validationGeneratedPaths ?? []) active.validationGeneratedPaths.add(path);
-        if (nextTrigger === 'phase_boundary' && active.completingValidationCommandIds.size > 0) {
-          for (const id of active.completingValidationCommandIds) active.validationCommandIds.delete(id);
-          active.completingValidationCommandIds.clear();
-        }
         if (result.violations.length === 0) continue;
         const writeViolations = result.violations.filter((violation) => violation.changeObserved !== false);
         const pathsForInstruction = [...new Set(writeViolations.map((violation) => violation.path))].sort();
@@ -833,6 +677,7 @@ export class LiveConstraintGuard {
             rollbackAttempted: violation.rollbackAttempted ?? violation.changeObserved !== false,
             restored: violation.restored,
             ...(violation.rollbackFailure ? { rollbackFailure: violation.rollbackFailure } : {}),
+            ...(violation.unrestoredContent ? { unrestoredContent: violation.unrestoredContent } : {}),
             writeObservedAt: new Date(observedMs).toISOString(),
             detectedAt,
             detectionLatencyMs: Math.max(0, detectedMs - observedMs),
@@ -845,20 +690,10 @@ export class LiveConstraintGuard {
         // of them; persist the scan's incidents in a single write and the shared
         // instruction once, so record size does not grow with the path count.
         if (!this.appendIncidents(scanIncidents)) {
-          active.monitorFailure = {
-            kind: 'monitor_failure',
-            stageId: this.options.stageId,
-            attemptIndex: this.options.attemptIndex,
-            invocationIndex: active.index,
-            detectedAt,
-            reason: 'live constraint incident could not be persisted after restoration',
-            lastScanDurationMs: active.lastScanDurationMs,
-            lastScanFileCount: active.lastScanFileCount,
-          };
-          active.abort('live_constraint_monitor_failure');
+          this.failMonitor(active, 'live constraint incident could not be persisted after restoration');
           break;
         }
-        // Comparison-unavailable observations are durable audit evidence but
+        // Unattributed unavailable comparisons are durable audit evidence but
         // are not writes and therefore do not enter the worker's correction
         // loop or abort the invocation.
         for (const incident of scanIncidents) {
@@ -888,7 +723,6 @@ export class LiveConstraintGuard {
     };
     active.watcher?.close();
     if (active.fallbackTimer) clearInterval(active.fallbackTimer);
-    if (active.livenessTimer) clearInterval(active.livenessTimer);
     if (active.scanPromise) await active.scanPromise;
     if (!active.monitorFailure) {
       active.pendingTrigger = 'phase_boundary';
@@ -897,6 +731,7 @@ export class LiveConstraintGuard {
       if (active.scanPromise) await active.scanPromise;
     }
     active.finished = true;
+    clearTimeout(active.deadlineTimer);
     if (!active.summaryReported) {
       active.summaryReported = true;
       if (active.exemptedPaths.size > 0) {

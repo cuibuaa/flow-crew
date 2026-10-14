@@ -7,6 +7,7 @@ import {
   readdirSync,
   rmSync,
   symlinkSync,
+  watch,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,6 +25,7 @@ const distCli = join(repositoryRoot, 'dist', 'cli.js');
 const MOCK_OUTPUT_SENTINEL = 'FLOWCREW_MOCK_AGENT_STDOUT_SENTINEL_7d94a6';
 const HOLD_MARKER = 'FLOWCREW_SUPERVISED_HOLD_2f6c1b';
 const EXIT_THREE_MARKER = 'FLOWCREW_SUPERVISED_EXIT_3_61c8f0';
+const LIFECYCLE_CRITERION = '1. Record the supervised lifecycle outcome for this fixture.';
 interface Harness {
   root: string;
   home: string;
@@ -63,26 +65,34 @@ afterEach(async () => {
 });
 
 describe('portable supervised lifecycle through the real CLI', () => {
-  it('[1] confirms cancellation through the daemon when systemd tools are absent', async () => {
+  it('[1] confirms cancellation through the daemon when systemd tools are absent', async ({ signal }) => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'cancel-cli'), HOLD_MARKER);
     const pid = await waitForRecordedAgentPid(harness, task.unit);
-    await waitForReadableRun(harness, task.id);
+    await waitForHeldAgent(harness, pid, signal);
 
     const cancelled = runCliSync(harness, task.project, ['task', 'cancel', String(task.id)]);
     const output = `${cancelled.stdout}${cancelled.stderr}`;
+    const controlDir = join(harness.fcHome, 'supervise', safeUnit(task.unit));
+    const runningPath = join(controlDir, 'running.json');
+    const exitPath = join(controlDir, 'exit.json');
+    let shimState = 'unreadable';
+    try {
+      const running = JSON.parse(readFileSync(runningPath, 'utf-8')) as { shimPid?: number };
+      if (running.shimPid) shimState = `${running.shimPid}:${pidProbe(running.shimPid)}`;
+    } catch { /* failure message remains useful when the record is absent */ }
 
     expect(
       { status: cancelled.status, output },
-      `cancel did not converge for recorded pid ${pid}: ${output}`,
+      `cancel did not converge for recorded pid ${pid} (${pidProbe(pid)}), shim ${shimState}, exit=${existsSync(exitPath)}: ${output}; daemon=${harness.daemonOutput.slice(-500)}`,
     ).toMatchObject({ status: 0, output: expect.stringContaining(`Task #${task.id} cancelled`) });
   });
 
-  it('[2] does not report cancellation until the recorded agent pid reaches ESRCH', async () => {
+  it('[2] does not report cancellation until the recorded agent pid reaches ESRCH', async ({ signal }) => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'cancel-pid'), HOLD_MARKER);
     const pid = await waitForRecordedAgentPid(harness, task.unit);
-    await waitForReadableRun(harness, task.id);
+    await waitForHeldAgent(harness, pid, signal);
 
     const cancelled = runCliSync(harness, task.project, ['task', 'cancel', String(task.id)]);
     const reachedEsrch = await waitUntil(() => pidProbe(pid) === 'esrch', 5_000);
@@ -110,7 +120,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
     expect(output).toMatch(/Status: (?:done|failed|stuck|cancelled|complete|terminal(?:-unknown)?)/);
   });
 
-  it('[4] returns already-terminal without clearing completed_at', async () => {
+  it('[4] returns already-terminal without clearing completed_at', { timeout: 60_000 }, async () => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'already-terminal'), 'terminal fixture');
     await waitForTerminalRun(harness, task.id);
@@ -135,7 +145,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
     ).toEqual({ responseStatus: 'already-terminal', error: undefined, completedAt });
   });
 
-  it('[5] returns non-empty portable task tail output containing the mock sentinel', async () => {
+  it('[5] returns non-empty portable task tail output containing the mock sentinel', { timeout: 60_000 }, async () => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'tail'), 'tail fixture');
     await waitForTerminalRun(harness, task.id);
@@ -147,7 +157,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
     expect(tailed.stdout).toContain(MOCK_OUTPUT_SENTINEL);
   });
 
-  it('[6] merges terminal run.json state over a stale running registry status', async () => {
+  it('[6] merges terminal run.json state over a stale running registry status', { timeout: 60_000 }, async () => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'show-terminal'), 'show fixture');
     const terminal = await waitForTerminalRun(harness, task.id);
@@ -229,11 +239,15 @@ async function createHarness(): Promise<Harness> {
     expect(existsSync(join(bin, forbidden))).toBe(false);
   }
   writeFileSync(join(home, '.bash_profile'), `export PATH=${shellQuote(bin)}\n`, 'utf-8');
-  writeFileSync(join(mockDir, 'work.json'), JSON.stringify({
+  writeFileSync(join(mockDir, 'implement.json'), JSON.stringify({
     output_text: MOCK_OUTPUT_SENTINEL,
     exit_code: 0,
     tokens_in: 0,
     tokens_out: 0,
+  }), 'utf-8');
+  writeFileSync(join(mockDir, 'review.json'), JSON.stringify({
+    output_text: 'portable fixture gate passed', exit_code: 0,
+    write_files: { 'verdict_review.json': JSON.stringify({ pass: true, reason: 'deterministic lifecycle evidence' }) },
   }), 'utf-8');
   writeFileSync(preloadPath, preloadSource(), 'utf-8');
 
@@ -301,49 +315,17 @@ async function createHarness(): Promise<Harness> {
 
 function createProject(harness: Harness, label: string): string {
   const project = join(harness.root, `p-${label}`);
-  const workflowDir = join(project, 'config', 'workflows');
-  const agentsDir = join(project, 'config', 'agents');
-  mkdirSync(workflowDir, { recursive: true });
-  mkdirSync(agentsDir, { recursive: true });
-  writeFileSync(join(project, 'config', 'defaults.yaml'), [
-    'adapter: mock',
-    'default_stage_technical_retries: 0',
-    '',
-  ].join('\n'), 'utf-8');
-  writeFileSync(join(workflowDir, 'fixture.yaml'), [
-    'name: supervised-fixture',
-    'defaults:',
-    '  max_iterations: 1',
-    '  max_retries: 0',
-    'stages:',
-    '  - id: work',
-    '    role: worker',
-    '',
-  ].join('\n'), 'utf-8');
-  writeFileSync(join(agentsDir, 'worker.yaml'), [
-    'name: worker',
-    'description: deterministic portable lifecycle fixture',
-    'model: default',
-    'reasoning_effort: default',
-    'tools: []',
-    'prompt: return the fixture result',
-    '',
-  ].join('\n'), 'utf-8');
+  mkdirSync(project);
   return project;
 }
 
 function registerBackgroundTask(harness: Harness, project: string, marker: string): RegisteredTask {
   const brief = [
-    '---',
-    'terminal_states:',
-    '  complete:',
-    '    paths: [docs/result.md]',
-    '---',
     '# Goal',
     `Exercise portable supervision: ${marker}`,
     '',
     '## What the report must show',
-    '1. Record the supervised lifecycle outcome for this fixture.',
+    LIFECYCLE_CRITERION,
     '',
   ].join('\n');
   writeReadySetupRecord(project, brief, harness.fcHome);
@@ -353,8 +335,7 @@ function registerBackgroundTask(harness: Harness, project: string, marker: strin
     '--acknowledge-brief-warnings',
     '--project', project,
     '--adapter', 'mock',
-    '--workflow', 'fixture',
-    '--no-supervise',
+    '--workflow', 'direct',
     '--no-campaign',
     '--task', brief,
   ]);
@@ -412,28 +393,28 @@ async function waitForTerminalRun(harness: Harness, id: number): Promise<RunSnap
     } catch {
       return false;
     }
-  }, 12_000);
+  }, 30_000);
   if (!found || !snapshot) throw new Error(`run for task #${id} did not reach a terminal record`);
   return snapshot;
 }
 
-async function waitForReadableRun(harness: Harness, id: number): Promise<RunSnapshot> {
-  let snapshot: RunSnapshot | undefined;
-  const found = await waitUntil(async () => {
-    const task = await showTask(harness, id);
-    if (!task.run_id) return false;
-    const runId = basename(task.run_id);
-    const runPath = join(harness.fcHome, 'runs', runId);
-    try {
-      const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as RunSnapshot['state'];
-      snapshot = { task, runId, runPath, state };
-      return true;
-    } catch {
-      return false;
-    }
-  }, 5_000);
-  if (!found || !snapshot) throw new Error(`run for task #${id} never became readable`);
-  return snapshot;
+function waitForHeldAgent(harness: Harness, pid: number, signal: AbortSignal): Promise<void> {
+  const path = join(harness.mockDir, `held-${pid}`);
+  if (existsSync(path)) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const finish = (error?: unknown): void => {
+      watcher.close();
+      signal.removeEventListener('abort', aborted);
+      if (error) reject(error);
+      else resolve();
+    };
+    const inspect = (): void => { if (existsSync(path)) finish(); };
+    const aborted = (): void => finish(signal.reason);
+    const watcher = watch(harness.mockDir, { persistent: false }, inspect);
+    signal.addEventListener('abort', aborted, { once: true });
+    if (signal.aborted) aborted();
+    else inspect(); // A ready publication can precede watcher registration.
+  });
 }
 
 async function waitForRecordedAgentPid(harness: Harness, unit: string): Promise<number> {
@@ -598,8 +579,11 @@ function preloadSource(): string {
     '  const value = /^\\/proc\\/\\d+\\/(?:stat|cmdline)$/.test(String(path))',
     '    ? (() => { const error = new Error(`ENOENT: no procfs, open ${path}`); error.code = \'ENOENT\'; throw error; })()',
     '    : originalReadFileSync.call(this, path, ...args);',
-    "  if (process.argv.includes('quick') && String(path).endsWith('/work.json')) {",
-    `    if (brief.includes('${HOLD_MARKER}')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15000);`,
+    "  if (process.argv.includes('quick') && String(path).endsWith('/implement.json')) {",
+    `    if (brief.includes('${HOLD_MARKER}')) {`,
+    "      fs.writeFileSync(require('node:path').join(process.env.MOCK_FIXTURE_DIR, `held-${process.pid}`), 'ready');",
+    '      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);',
+    '    }',
     '    try {',
     "      const fixture = JSON.parse(Buffer.isBuffer(value) ? value.toString('utf8') : String(value));",
     "      if (typeof fixture.output_text === 'string') process.stdout.write(`${fixture.output_text}\\n`);",

@@ -1,6 +1,8 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from '../engine-fs.js';
+import { readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
+import { scriptedRecord } from './scripted.js';
 
 type MockFixture = {
   output_text?: unknown;
@@ -39,7 +41,12 @@ export class MockAdapter implements Adapter {
       };
       if (typeof fixture.tokens_in === 'number') result.tokens_in = fixture.tokens_in;
       if (typeof fixture.tokens_out === 'number') result.tokens_out = fixture.tokens_out;
-      writeFixtureFiles(opts.runDir, fixture.write_files);
+      const finalPath = `verdict_${opts.stageId}.json`;
+      const files = fixture.write_files && typeof fixture.write_files === 'object' && !Array.isArray(fixture.write_files)
+        ? fixture.write_files as Record<string, unknown> : {};
+      const finalRecord = typeof files[finalPath] === 'string' ? files[finalPath] as string : undefined;
+      writeFixtureFiles(opts.runDir, Object.fromEntries(Object.entries(files).filter(([path]) => !opts.outputSchema || path !== finalPath)));
+      if (result.exitCode === 0) result.output = scriptedRecord(result.output, opts, finalRecord);
       return result;
     } catch {
       return { output: '', exitCode: 1, duration_ms: 0 };

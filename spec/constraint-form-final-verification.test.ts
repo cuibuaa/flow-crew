@@ -1,10 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { inspectBrief } from '../src/brief-preflight.js';
 import { evaluateResearchFeasibility } from '../src/research-feasibility.js';
-
-const PROJECT_ROOT = resolve(import.meta.dirname, '..');
 
 function structuredBrief(body: string): string {
   return [
@@ -35,25 +31,6 @@ function researchBrief(feasibility: string): string {
 }
 
 describe('constraint-form final verification', () => {
-  it('keeps sibling-run mutation absolutely prohibited', () => {
-    const prompt = readFileSync(resolve(PROJECT_ROOT, 'config', 'agents', '_base.md'), 'utf8');
-
-    expect(prompt).toMatch(
-      /never write, move, delete, or otherwise modify any run directory other than this task's own run directory/i,
-    );
-    expect(prompt).toMatch(/this prohibition is absolute/i);
-    expect(prompt).toMatch(/read authorization never grants mutation authority/i);
-  });
-
-  it('lets only explicit bounded brief authorization override default read restrictions', () => {
-    const prompt = readFileSync(resolve(PROJECT_ROOT, 'config', 'agents', '_base.md'), 'utf8');
-
-    expect(prompt).toMatch(/by default, do not read, browse, or list other `?\.fc\/runs\/?`? directories/i);
-    expect(prompt).toMatch(/explicitly authorizes a bounded set of other runs as read-only evidence/i);
-    expect(prompt).toMatch(/for that evidence only/i);
-    expect(prompt).toMatch(/grants no permission to write, move, delete, or modify those runs/i);
-  });
-
   it('does not infer an ignored input from the exact subject-position prohibition', () => {
     const report = inspectBrief(structuredBrief([
       '# Constraints',

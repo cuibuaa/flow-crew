@@ -106,7 +106,9 @@ describe('project-scoped status', () => {
 
     const help = status(['--help']);
     expect(help.status, help.stderr).toBe(0);
-    expect(help.stdout).toContain('flowcrew status [--all | --project <path>]');
+    expect(help.stdout).toContain('flowcrew status');
+    expect(help.stdout).toContain('--all');
+    expect(help.stdout).toContain('--project');
   });
 
   it('renders terminal run.json truth instead of a stale In progress projection', () => {

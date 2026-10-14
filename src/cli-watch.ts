@@ -1,11 +1,10 @@
+import { errorMessage, optionValue } from './source_services/cli-inputs.js';
 import { createWatchState, pollWatch, type WatchAlert, type WatchPollDependencies, type WatchPollResult } from './watch.js';
 import { formatRunDriftRow } from './run-drift.js';
 
 type Writer = { write(chunk: string): unknown };
 
 export const DEFAULT_WATCH_POLL_MS = 45_000;
-export const MIN_WATCH_POLL_MS = 1_000;
-export const MAX_WATCH_POLL_MS = 3_600_000;
 
 interface ParsedWatchArgs {
   help: boolean;
@@ -18,19 +17,6 @@ export interface CliWatchDependencies extends WatchPollDependencies {
   stdout?: Writer;
   stderr?: Writer;
   sleep?: (milliseconds: number) => Promise<void>;
-}
-
-function optionValue(args: string[], index: number, option: string): { value: string; consumed: number } {
-  const current = args[index];
-  const inlinePrefix = `${option}=`;
-  if (current.startsWith(inlinePrefix)) {
-    const value = current.slice(inlinePrefix.length);
-    if (!value) throw new Error(`${option} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${option} requires a value`);
-  return { value, consumed: 2 };
 }
 
 export function parseWatchArgs(args: string[]): ParsedWatchArgs {
@@ -62,10 +48,8 @@ export function parseWatchArgs(args: string[]): ParsedWatchArgs {
         throw new Error('--poll must be a number of seconds');
       }
       pollMs = Number(parsed.value) * 1_000;
-      if (!Number.isFinite(pollMs)
-        || pollMs < MIN_WATCH_POLL_MS
-        || pollMs > MAX_WATCH_POLL_MS) {
-        throw new Error(`--poll must be between ${MIN_WATCH_POLL_MS / 1_000} and ${MAX_WATCH_POLL_MS / 1_000} seconds`);
+      if (!Number.isFinite(pollMs) || pollMs <= 0 || pollMs > 2_147_483_647) {
+        throw new Error('--poll must be positive and fit the Node timer range (at most 2147483.647 seconds)');
       }
       index += parsed.consumed;
       continue;
@@ -80,7 +64,7 @@ export function watchUsage(): string {
     'Usage: flowcrew watch [--once] [--poll <seconds>] [--all]',
     'Reports a first-pass drift snapshot plus edge-triggered drift crossings, stalls, evidence gaps, and status contradictions.',
     'The default scans indexed operational runs. --all audits every entry under the runs directory.',
-    `Poll interval must be between ${MIN_WATCH_POLL_MS / 1_000} and ${MAX_WATCH_POLL_MS / 1_000} seconds (default ${DEFAULT_WATCH_POLL_MS / 1_000}).`,
+    `Poll interval must be positive and fit the Node timer range (at most 2147483.647 seconds; default ${DEFAULT_WATCH_POLL_MS / 1_000}).`,
   ].join('\n');
 }
 
@@ -170,10 +154,6 @@ export function formatWatchPoll(result: WatchPollResult): string[] {
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export async function cmdWatchWithDeps(args: string[], overrides: CliWatchDependencies): Promise<number> {

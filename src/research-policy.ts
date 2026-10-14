@@ -78,7 +78,6 @@ export interface ResearchShipTargetBindings {
   target?: number;
   higherIsBetter: boolean;
   improvementMargin: number;
-  noOpTolerance: number;
   resultMinimum?: number;
   resultMaximum?: number;
   resultEnum?: number[];
@@ -87,7 +86,7 @@ export interface ResearchShipTargetBindings {
   rejectPositiveResult: boolean;
   outlierLimit?: number;
   resultStdCandidate?: number;
-  maxStdRatio: number;
+  maxStdRatio?: number;
 }
 
 export interface ResearchShipTargetAssessment {
@@ -225,23 +224,19 @@ export function assessResearchShipTarget(config: ResearchConfig): ResearchShipTa
     config.stop?.minImprovement ?? 0,
     resultStdCandidate === undefined ? 0 : Math.abs(resultStdCandidate) * seMultiple,
   );
-  const noOpTolerance = config.integrity?.noop === false
-    ? 0
-    : Math.max(1e-4, Math.abs(config.baseline) * 1e-5);
   const resultMinimum = typeof resultSchema.minimum === 'number' ? resultSchema.minimum : undefined;
   const resultMaximum = typeof resultSchema.maximum === 'number' ? resultSchema.maximum : undefined;
   const resultFieldFloor = config.integrity?.fieldFloors?.result;
   const rejectPositiveResult = (config.integrity?.rejectIfPositive ?? []).includes('result');
-  const outlierLimit = Math.abs(config.baseline) > 1e-9
-    ? Math.abs(config.baseline) * (config.integrity?.outlierFactor ?? 5)
+  const outlierLimit = config.integrity?.outlierFactor !== undefined && Math.abs(config.baseline) > 1e-9
+    ? Math.abs(config.baseline) * config.integrity.outlierFactor
     : undefined;
-  const maxStdRatio = config.integrity?.maxStdRatio ?? 0.30;
+  const maxStdRatio = config.integrity?.maxStdRatio;
   const bindings: ResearchShipTargetBindings = {
     baseline: config.baseline,
     ...(target === undefined ? {} : { target }),
     higherIsBetter,
     improvementMargin: margin,
-    noOpTolerance,
     ...(resultMinimum === undefined ? {} : { resultMinimum }),
     ...(resultMaximum === undefined ? {} : { resultMaximum }),
     ...(resultEnum === undefined ? {} : { resultEnum }),
@@ -250,7 +245,7 @@ export function assessResearchShipTarget(config: ResearchConfig): ResearchShipTa
     rejectPositiveResult,
     ...(outlierLimit === undefined ? {} : { outlierLimit }),
     ...(resultStdCandidate === undefined ? {} : { resultStdCandidate }),
-    maxStdRatio,
+    ...(maxStdRatio === undefined ? {} : { maxStdRatio }),
   };
 
   if (target === undefined) {
@@ -299,8 +294,8 @@ export function assessResearchShipTarget(config: ResearchConfig): ResearchShipTa
   else upper = Math.min(upper, target);
 
   const improvementBoundary = higherIsBetter
-    ? config.baseline + Math.max(margin, noOpTolerance)
-    : config.baseline - Math.max(margin, noOpTolerance);
+    ? config.baseline + margin
+    : config.baseline - margin;
   const boundaries = [
     lower,
     upper,
@@ -312,7 +307,7 @@ export function assessResearchShipTarget(config: ResearchConfig): ResearchShipTa
     1e-6,
     -1e-6,
   ];
-  if (resultStdCandidate !== undefined && maxStdRatio > 0) {
+  if (resultStdCandidate !== undefined && maxStdRatio !== undefined && maxStdRatio > 0) {
     const ratioBoundary = Math.abs(resultStdCandidate) / maxStdRatio;
     boundaries.push(ratioBoundary, -ratioBoundary);
   }
@@ -333,12 +328,9 @@ export function assessResearchShipTarget(config: ResearchConfig): ResearchShipTa
     if (value < lower || value > upper) return false;
     if (!schemaAllowsNumericValue(value, resultSchema, resultType)) return false;
     if (!isBetter(value, config.baseline, higherIsBetter, margin)) return false;
-    if (config.integrity?.noop !== false && Math.abs(value - config.baseline) <= noOpTolerance) return false;
     if (!targetIsMet(value, target, higherIsBetter)) return false;
-    if (resultStdCandidate !== undefined && Math.abs(value) > 1e-6) {
-      const ratio = Math.abs(resultStdCandidate) / Math.abs(value);
-      if (ratio > maxStdRatio) return false;
-    }
+    if (resultStdCandidate !== undefined && maxStdRatio !== undefined
+        && Math.abs(resultStdCandidate) > maxStdRatio * Math.abs(value)) return false;
     return true;
   };
   const ordered = [...candidates]

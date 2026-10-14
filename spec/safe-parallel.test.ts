@@ -1,5 +1,6 @@
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -22,11 +23,12 @@ import {
   type WriteAttribution,
 } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
+import { assertDistFresh, publishBuildGeneration } from '../src/build-manifest.js';
 
 let projectDir: string;
 
 function stage(input: Partial<StageConfig> & Pick<StageConfig, 'id'>): StageConfig {
-  return StageConfigSchema.parse({ role: 'coder', prompt_template: 'work', ...input });
+  return StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract(input.id, input.is_gate === true), role: 'coder', prompt_template: 'work', ...input });
 }
 
 function stateFor(stages: StageConfig[]): StoreState {
@@ -67,7 +69,8 @@ function writeAgent(): string {
 async function runStatic(
   scopes: [string[], string[]],
   reportedWrites: string[] | ((stageId: string) => string[]) = [],
-  mutate?: (stageId: string) => void,
+  mutate?: (stageId: string, opts: RunOpts) => void,
+  contracts: Parameters<typeof declaredDispatch>[1] = {},
 ) {
   const yaml = [
     'name: scope-test',
@@ -81,26 +84,26 @@ async function runStatic(
     '    role: coder',
     `    scope: ${JSON.stringify(scopes[1])}`,
   ].join('\n');
-  const workflow = WorkflowConfigSchema.parse(parseYaml(yaml));
+  const workflow = WorkflowConfigSchema.parse(parseYaml(declaredDispatch(yaml, contracts)));
   const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((item) => item.id));
   writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
   let active = 0;
   let maxActive = 0;
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-      if (opts.stageId === '_summary') return { output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 }, opts);
       active++;
       maxActive = Math.max(maxActive, active);
-      mutate?.(opts.stageId);
+      mutate?.(opts.stageId, opts);
       await new Promise((resolve) => setTimeout(resolve, 25));
       active--;
-      return {
+      return fixtureResult({
         output: opts.stageId,
         exitCode: 0,
         duration_ms: 25,
         writes: typeof reportedWrites === 'function' ? reportedWrites(opts.stageId) : reportedWrites,
         writeAttribution: 'structured',
-      };
+      }, opts);
     },
   };
   const final = await runWorkflow(workflow, yaml, projectDir, adapter, new Map(), undefined, writeAgent(), created.runId);
@@ -125,7 +128,7 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
     '    role: coder',
     `    scope: ${JSON.stringify(scopes[1])}`,
   ].join('\n');
-  const workflow = WorkflowConfigSchema.parse(parseYaml(yaml));
+  const workflow = WorkflowConfigSchema.parse(parseYaml(declaredDispatch(yaml)));
   const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((item) => item.id));
   writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
   mkdirSync(join(projectDir, 'src'), { recursive: true });
@@ -145,7 +148,7 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') {
-        return { output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 }, opts);
       }
       active++;
       maxActive = Math.max(maxActive, active);
@@ -156,18 +159,18 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
             writeFileSync(join(projectDir, sharedPath), 'export const source = "left";\n');
             markWriterDone();
             await observerDone;
-            return {
+            return fixtureResult({
               output: 'left wrote', exitCode: 0, duration_ms: 1,
               writes: [sharedPath], writeAttribution: 'structured',
-            };
+            }, opts);
           }
           await writerDone;
           observerSawWrite = existsSync(join(projectDir, sharedPath));
           markObserverDone();
-          return {
+          return fixtureResult({
             output: 'right observed without writing', exitCode: 0, duration_ms: 1,
             writeAttribution: 'unknown',
-          };
+          }, opts);
         }
 
         physicalWriteCalls[opts.stageId as 'left' | 'right']++;
@@ -177,10 +180,10 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
           await writersArrived;
         }
         writeFileSync(join(projectDir, sharedPath), `export const source = "${opts.stageId}";\n`);
-        return {
+        return fixtureResult({
           output: `${opts.stageId} wrote`, exitCode: 0, duration_ms: 1,
           writes: [sharedPath], writeAttribution: 'structured',
-        };
+        }, opts);
       } finally {
         active--;
       }
@@ -205,6 +208,44 @@ beforeEach(() => {
 afterEach(() => rmSync(projectDir, { recursive: true, force: true }));
 
 describe('safe scope batching', () => {
+  it('runs independent authors with private build outputs together while shared output scopes still serialize', async () => {
+    mkdirSync(join(projectDir, 'src'));
+    mkdirSync(join(projectDir, 'dist'));
+    writeFileSync(join(projectDir, 'tsconfig.json'), '{}');
+    writeFileSync(join(projectDir, 'dist/served.js'), 'serving generation');
+    for (const id of ['left', 'right']) writeFileSync(join(projectDir, `src/${id}.ts`), `export const ${id} = 0;`);
+    const destinations: string[] = [];
+    const contracts = Object.fromEntries(['left', 'right'].map(id => [id, {
+      version: 1 as const, produces: [{ id: 'build', root: 'run' as const, path: `stages/${id}/build`, kind: 'directory' as const }],
+      reads: [], replays: [],
+    }]));
+    const measured = await runStatic([['src/left.ts'], ['src/right.ts']], id => [`src/${id}.ts`], (id, opts) => {
+      writeFileSync(join(projectDir, `src/${id}.ts`), `export const ${id} = 1;`);
+      const outputRoot = join(opts.runDir, 'stages', id, 'build');
+      const stagedDistDir = join(outputRoot, 'staged');
+      mkdirSync(stagedDistDir, { recursive: true });
+      for (const name of ['left', 'right']) {
+        writeFileSync(join(stagedDistDir, `${name}.js`), readFileSync(join(projectDir, `src/${name}.ts`)));
+        writeFileSync(join(stagedDistDir, `${name}.d.ts`), `export declare const ${name}: number;`);
+      }
+      const distDir = join(outputRoot, 'dist');
+      publishBuildGeneration({ projectRoot: projectDir, stagedDistDir, distDir });
+      destinations.push(distDir);
+    }, contracts);
+    expect(measured.final.status).toBe('complete');
+    expect(measured.maxActive).toBe(2);
+    expect(new Set(destinations).size).toBe(2);
+    expect(readFileSync(join(destinations[0], 'left.js'), 'utf8')).toBe('export const left = 1;');
+    expect(readFileSync(join(destinations[1], 'right.js'), 'utf8')).toBe('export const right = 1;');
+    expect(assertDistFresh(projectDir, destinations[1]).outputs).toHaveLength(4);
+    expect(readFileSync(join(projectDir, 'dist/served.js'), 'utf8')).toBe('serving generation');
+    expect(measured.events.some(event => event.type === 'parallel_scope_serialized')).toBe(false);
+    expect(selectRunnableBatch([
+      stage({ id: 'left', scope: ['src/left.ts', 'dist/'] }),
+      stage({ id: 'right', scope: ['src/right.ts', 'dist/'] }),
+    ]).selected).toHaveLength(1);
+  });
+
   it('H3a runs later-literal-disjoint globs concurrently and serializes real overlap', async () => {
     const ownPath = 'a/round_1/control/owned.txt';
     const peerPath = 'a/round_1/arms/x/escaped.txt';
@@ -337,7 +378,7 @@ describe('safe scope batching', () => {
     expect(measured.final.status).toBe('complete');
   });
 
-  it('runs disjoint writer leases concurrently and retains conflict/audit backstops', async () => {
+  it('runs disjoint scheduler writers concurrently and retains conflict/audit backstops', async () => {
     const measured = await runPhysicalWriteScenario('two-writers');
     const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
 
@@ -359,8 +400,8 @@ describe('safe scope batching', () => {
   });
 
   it('preserves an identical ../ factual write in both the event and summary warning', async () => {
-    const reported = '../fc-home/runs/example/./knowledge_graph.json';
-    const canonical = '../fc-home/runs/example/knowledge_graph.json';
+    const reported = '../fc-home/runs/example/./notes.json';
+    const canonical = '../fc-home/runs/example/notes.json';
     const measured = await runStatic([['src/left.ts'], ['src/right.ts']], [reported]);
     const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
     expect(measured.maxActive).toBe(2);
@@ -375,7 +416,7 @@ describe('safe scope batching', () => {
   });
 
   it('requires structured evidence from both sides across every attribution pairing', () => {
-    const shared = '../fc-home/runs/example/knowledge_graph.json';
+    const shared = '../fc-home/runs/example/notes.json';
     const attributions: WriteAttribution[] = ['structured', 'snapshot', 'unknown'];
     const outcomes: Record<string, string[]> = {};
     for (const leftAttribution of attributions) {

@@ -1,6 +1,9 @@
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, renameSync } from './engine-fs.js';
+
+
 import { dirname, join } from 'node:path';
 import type { CommandLifecycleEvent } from './adapters/base.js';
+import { processGroupWork } from './process-liveness.js';
 
 export interface CommandActivityRecord {
   id: string;
@@ -17,6 +20,7 @@ export interface CommandActivitySnapshot {
   active: CommandActivityRecord[];
   completedCount: number;
   streamClosed: boolean;
+  process?: { pid: number; startTimeTicks: string; kind: 'command' | 'provider' };
 }
 
 export interface ExplicitCommandTimeout {
@@ -91,6 +95,7 @@ export class CommandActivityTracker {
   private streamClosed = false;
   private readonly startedIds = new Set<string>();
   private readonly completedIds = new Set<string>();
+  private process?: CommandActivitySnapshot['process'];
 
   constructor(private readonly input: {
     runDir: string;
@@ -109,6 +114,13 @@ export class CommandActivityTracker {
     const lines = this.carry.split(/\r?\n/);
     this.carry = lines.pop() ?? '';
     for (const line of lines) this.consumeLine(line);
+  }
+
+  bindProcess(pid: number | undefined, kind: 'command' | 'provider'): void {
+    const work = pid === undefined ? undefined : processGroupWork(pid);
+    if (!work) return;
+    this.process = { pid: pid!, startTimeTicks: work.startTimeTicks, kind };
+    this.persist();
   }
 
   close(): void {
@@ -181,6 +193,7 @@ export class CommandActivityTracker {
       active: [...this.active.values()],
       completedCount: this.completedCount,
       streamClosed: this.streamClosed,
+      ...(this.process ? { process: this.process } : {}),
     };
     mkdirSync(dirname(this.path), { recursive: true });
     const temp = `${this.path}.tmp-${process.pid}`;

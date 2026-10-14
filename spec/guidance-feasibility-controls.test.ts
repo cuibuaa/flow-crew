@@ -1,3 +1,4 @@
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
@@ -17,7 +18,8 @@ import type {
   RunResult,
 } from '../src/adapters/base.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
-import { loadProjectDefaults } from '../src/config.js';
+import { parseStageCommandInterrupt, requestStageCommandInterrupt } from '../src/command-interrupt.js';
+import { loadEngineDefaults } from '../src/config.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
 import { buildStagePrompt } from '../src/handoff.js';
 import { readGateVerdict } from '../src/scheduler.js';
@@ -75,6 +77,7 @@ function makeRun(stageIds: string[]) {
 
 function stageOptions(created: { runId: string; runDirPath: string }, stageId = 'work') {
   return {
+      artifactContract: fixtureArtifactContract(stageId),
     stageId,
     role,
     dependsOn: [],
@@ -275,7 +278,7 @@ describe('live guidance and feasibility controls', () => {
     expect(Number(projection?.shortfallMs)).toBeGreaterThanOrEqual(55_000);
   });
 
-  async function interruptScenario(repeatAfterInterrupt: boolean) {
+  async function interruptScenario(repeatAfterInterrupt: boolean, reason = 'The 10000-block job is infeasible; stop it and use the measured rate.') {
     const created = makeRun(['work']);
     const prompts: string[] = [];
     let cliExit: number | null = null;
@@ -316,7 +319,7 @@ describe('live guidance and feasibility controls', () => {
         const cli = spawnSync(process.execPath, [
           '--import', 'tsx', join(repositoryRoot, 'src', 'cli.ts'),
           'interrupt', '--run', created.runId, '--stage', 'work',
-          'The 10000-block job is infeasible; stop it and use the measured rate.',
+          ...(reason ? [reason] : []),
         ], {
           cwd: repositoryRoot,
           env: { ...process.env, HOME: stateRoot, FC_HOME: stateRoot },
@@ -378,6 +381,66 @@ describe('live guidance and feasibility controls', () => {
     ]));
   });
 
+  it('interrupts the bound command without a rationale and delivers an action description', async () => {
+    const scenario = await interruptScenario(false, '');
+    expect({ cliExit: scenario.cliExit, exitCode: scenario.result.exitCode, invocations: scenario.prompts.length })
+      .toEqual({ cliExit: 0, exitCode: 0, invocations: 2 });
+    expect(scenario.prompts[1]).toContain('Operator requested interruption of the active command.');
+    expect(scenario.ledger).toContainEqual(expect.objectContaining({
+      type: 'stage_command_interrupt_requested', detail: 'Operator requested interruption of the active command.',
+    }));
+  });
+
+  it('refuses an interrupt whose command lifecycle belongs to a stale attempt', () => {
+    const created = makeRun(['work']);
+    writeStageStatus(projectDir, created.runId, 'work', {
+      status: 'running', retries: 0,
+      attempts: [{ index: 2, status: 'running', startedAt: '2026-01-01T00:00:02Z' }],
+    });
+    mkdirSync(join(created.runDirPath, 'stages', 'work'), { recursive: true });
+    writeFileSync(join(created.runDirPath, 'stages', 'work', 'command_activity.json'), JSON.stringify({
+      version: 1, stageId: 'work', attemptIndex: 1, attemptStartedAt: '2026-01-01T00:00:01Z',
+      active: [{ id: 'command', command: 'node check.mjs' }], streamClosed: false,
+    }));
+    expect(() => requestStageCommandInterrupt({ runDir: created.runDirPath, stageId: 'work' })).toThrow('stale');
+  });
+
+  it('keeps command fingerprint validation when the interrupt rationale is omitted', () => {
+    expect(parseStageCommandInterrupt(JSON.stringify({
+      version: 1, requestId: 'request', stageId: 'work', attemptIndex: 1,
+      attemptStartedAt: '2026-01-01T00:00:01Z', commandId: 'command', command: 'node check.mjs',
+      commandFingerprint: 'incorrect', guidanceId: 'notice', requestedAt: '2026-01-01T00:00:02Z', source: 'operator',
+    }))).toEqual({ ok: false, error: 'command fingerprint mismatch' });
+  });
+
+  it.each(['first', 'passing', 'rejected'] as const)('frames a standalone review from %s history', async history => {
+    const created = makeRun(['qa']);
+    const archive = join(created.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+    if (history === 'rejected') {
+      mkdirSync(archive, { recursive: true });
+      writeFileSync(join(archive, 'rejected_verdict_qa.json'), '{"pass":false}');
+    } else if (history === 'passing') {
+      writeFileSync(join(created.runDirPath, 'verdict_qa.json'), '{"pass":true}');
+    }
+    const prompts: string[] = [];
+    const adapter: Adapter = { async run(prompt) {
+      prompts.push(prompt);
+      return { output: 'Captured review contract.', exitCode: 1, duration_ms: 1 };
+    } };
+    const result = await runStage(adapter, { ...stageOptions(created, 'qa'), isGate: true });
+    expect(result.exitCode).toBe(1);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain({ first: 'FIRST EVALUATION', passing: 'INITIAL EVALUATION', rejected: 'RE-EVALUATION' }[history]);
+    if (history === 'rejected') {
+      expect(prompts[0]).toContain(join(archive, 'rejected_verdict_qa.json'));
+      expect(prompts[0]).toContain('Reject again only for a rejected finding the repair did not resolve');
+      expect(prompts[0]).toContain('record any other difference you find as a stated limitation');
+    } else {
+      expect(prompts[0]).not.toContain('RE-EVALUATION');
+      if (history === 'passing') expect(prompts[0]).toContain('Run a complete initial evaluation');
+    }
+  });
+
   it('[J4] requires implied wall time for a quantified remedy with recorded unit cost', () => {
     const fixture = makeRemedyFixture();
     writeFileSync(fixture.verdictPath, JSON.stringify(fixture.baseVerdict), 'utf-8');
@@ -434,7 +497,7 @@ describe('live guidance and feasibility controls', () => {
 
   it('[J4 edge] rejects a nonexistent target stage instead of assigning it the default budget', () => {
     const fixture = makeRemedyFixture();
-    const defaultBudget = loadProjectDefaults(projectDir).timeout_ms;
+    const defaultBudget = loadEngineDefaults().timeout_ms;
     const fits = fixture.knownEntry.impliedWallTimeMs <= defaultBudget;
     const disposition = fits ? 'feasible' : 'infeasible';
     const statement = `The 40-block target implies 16000 ms and is ${disposition} within the ${defaultBudget} ms stage budget.`;
@@ -601,5 +664,52 @@ describe('live guidance and feasibility controls', () => {
         guidanceId: ruling.id,
       }),
     ]));
+  });
+});
+
+
+describe('continuation at closed tool boundaries', () => {
+  it('keeps the stage UUID and all delivered guidance, with complete duties for a fresh fallback', async () => {
+    const created = makeRun(['work']);
+    const uuid = '123e4567-e89b-42d3-a456-426614174000';
+    const calls: Array<{ prompt: string; resume?: string; fresh?: string }> = [];
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      calls.push({ prompt, resume: opts.resumeSessionId, fresh: opts.freshSessionPrompt });
+      if (calls.length < 3) {
+        const id = `tool-${calls.length}`;
+        opts.onCommandLifecycle?.({ phase: 'started', id, timestamp: new Date().toISOString() });
+        appendGuidanceEnvelope({ runDir: created.runDirPath, target: 'work', source: 'operator', body: `Keep correction ${calls.length}.`, knownStageIds: ['work'] });
+        opts.onCommandLifecycle?.({ phase: 'completed', id, timestamp: new Date().toISOString() });
+      }
+      return { output: 'done', exitCode: opts.abortSignal?.aborted ? 137 : 0, duration_ms: 1, sessionId: uuid };
+    } };
+    const result = await runStage(adapter, stageOptions(created));
+    expect(result.exitCode).toBe(0);
+    expect(calls.map((call) => call.resume)).toEqual([undefined, uuid, uuid]);
+    expect(calls[2].prompt).toContain('Keep correction 1.');
+    expect(calls[2].prompt).toContain('Keep correction 2.');
+    expect(calls[2].prompt).not.toContain('Do the fixture work.');
+    expect(calls[2].fresh).toContain('Do the fixture work.');
+    expect(calls[2].fresh).toContain('Keep correction 1.');
+    expect(calls[2].fresh).toContain('Keep correction 2.');
+    expect(calls[2].prompt).toContain('# Live guidance delivered at tool completion');
+    expect(calls[2].fresh).toContain('# Live guidance delivered at tool completion');
+    expect(calls[2].prompt).toContain('absolute deadline');
+  });
+
+  it('omits unchanged empty tool checks while retaining invocation checks and command lifecycle', async () => {
+    const created = makeRun(['work']);
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      for (let index = 0; index < 4; index++) {
+        const id = `tool-${index}`;
+        opts.onCommandLifecycle?.({ phase: 'started', id, timestamp: new Date().toISOString() });
+        opts.onCommandLifecycle?.({ phase: 'completed', id, timestamp: new Date().toISOString() });
+      }
+      return { output: 'done', exitCode: 0, duration_ms: 1 };
+    } };
+    expect((await runStage(adapter, stageOptions(created))).exitCode).toBe(0);
+    const ledger = events(created.runDirPath);
+    expect(ledger.filter((event) => event.type === 'guidance_delivery_checked').map((event) => event.boundary)).toEqual(['attempt_start', 'adapter_invocation']);
+    expect(ledger.filter((event) => event.type === 'stage_command_completed')).toHaveLength(4);
   });
 });

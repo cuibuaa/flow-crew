@@ -1,3 +1,4 @@
+import { fixtureResult, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -5,7 +6,6 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -16,20 +16,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Adapter } from '../src/adapters/base.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import * as codexModule from '../src/adapters/codex.js';
-import {
-  captureRepairRoundSnapshot,
-  consumeSupervisorReject,
-  inspectDispatchAdmission,
-  inspectRealityCheckReachability,
-  parseDispatchedStageConfig,
-  runWorkflow,
-  writeRepairRoundDiffArtifact,
-  type WorkflowConfig,
-} from '../src/scheduler.js';
+import { captureRepairRoundSnapshot, inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, runWorkflow, writeRepairRoundDiffArtifact, type WorkflowConfig } from '../src/scheduler.js';
 import * as schedulerModule from '../src/scheduler.js';
-import { Supervisor } from '../src/supervisor.js';
-import * as supervisorModule from '../src/supervisor.js';
-import { inspectTemporalResearchTests } from '../src/temporal-test-guard.js';
 import * as workerModule from '../src/worker.js';
 import {
   scopePathDigest,
@@ -40,7 +28,6 @@ import {
   fcGlobalDir,
   readRunState,
   setFcGlobalDir,
-  writeStageStatus,
   writeRunState,
   type StageStatus,
 } from '../src/store.js';
@@ -60,11 +47,8 @@ let priorEnvironment: Record<string, string | undefined> | undefined;
 const readCodexCapabilityMemory = codexModule.readCodexCapabilityMemory!;
 const rememberCodexUnsupportedEffort = codexModule.rememberCodexUnsupportedEffort!;
 const resolveCodexCapabilityIdentity = codexModule.resolveCodexCapabilityIdentity!;
-const appendResearchTemporalPathContract = schedulerModule.appendResearchTemporalPathContract!;
+const appendResearchPathContract = schedulerModule.appendResearchPathContract!;
 const stageWithInheritedScope = schedulerModule.stageWithInheritedScope!;
-const buildSupervisorRolePrompt = supervisorModule.buildSupervisorRolePrompt!;
-const computeSupervisorEvidenceBinding = supervisorModule.computeSupervisorEvidenceBinding!;
-const supervisorEvidenceDigest = supervisorModule.supervisorEvidenceDigest!;
 const beginAttemptEvidenceGeneration = workerModule.beginAttemptEvidenceGeneration!;
 
 function temporaryRoot(prefix = 'flowcrew-ux-loop-'): string {
@@ -111,182 +95,20 @@ afterEach(() => {
 
 function stage(raw: Record<string, unknown>) {
   return parseDispatchedStageConfig({
+    artifact_contract: fixtureArtifactContract(String(raw.id), raw.is_gate === true),
     prompt_template: 'bounded replay', skills: [], is_gate: false, criterion_refs: [],
     ...raw,
   });
 }
 
 describe('UX/performance engine-loop evidence replays', () => {
-  it('item 1: a stale log and engine placeholder cannot become current-attempt rejection evidence', () => {
-    const runDirectory = temporaryRoot();
-    const stagePath = join(runDirectory, 'stages', 'audit_round_02');
-    mkdirSync(stagePath, { recursive: true });
-    const stale = recordedEvidence('item1_attempt1_stale_output');
-    const placeholderEvent = JSON.parse(
-      recordedEvidence('item1_engine_placeholder_shape').toString('utf-8'),
-    ) as { item: { aggregated_output: string } };
-    const placeholderText = placeholderEvent.item.aggregated_output
-      .slice(placeholderEvent.item.aggregated_output.indexOf('\n') + 1);
-    const placeholderMetric = JSON.parse(placeholderText) as Record<string, unknown>;
-    writeFileSync(join(stagePath, 'live.log'), stale);
-    writeFileSync(join(runDirectory, 'verdict_audit_round_02.json'), '{"pass":false,"reason":"attempt 1"}\n');
-    const startedAt = '2026-09-02T11:40:00.000Z';
-    const generation = beginAttemptEvidenceGeneration(runDirectory, 'audit_round_02', 2, startedAt);
-    writeFileSync(join(stagePath, 'live.log'), Buffer.concat([
-      stale, recordedEvidence('item1_engine_placeholder_shape'),
-    ]));
-    writeFileSync(join(stagePath, 'metric.json'), JSON.stringify(placeholderMetric));
-    const status: StageStatus = {
-      status: 'complete', retries: 1,
-      attempts: [{ index: 2, status: 'complete', startedAt, completedAt: '2026-09-02T11:41:00.000Z' }],
-    };
-    expect(computeSupervisorEvidenceBinding(runDirectory, 'audit_round_02', status))
-      .toMatchObject({ attemptIndex: 2, emittedDeliverable: false });
+  
 
-    writeFileSync(join(stagePath, 'output_attempt_2.md'), 'attempt 2 correct output\n');
-    const bound = computeSupervisorEvidenceBinding(runDirectory, 'audit_round_02', status)!;
-    expect(bound.emittedDeliverable).toBe(true);
+  
 
-    // Changing bytes before the attempt boundary cannot change this generation.
-    const log = readFileSync(join(stagePath, 'live.log'));
-    const rewritten = Buffer.concat([Buffer.from('x'.repeat(stale.byteLength)), log.subarray(stale.byteLength)]);
-    writeFileSync(join(stagePath, 'live.log'), rewritten);
-    expect(computeSupervisorEvidenceBinding(runDirectory, 'audit_round_02', status)?.generation).toBe(bound.generation);
-    expect(generation.segmentStart).toBeGreaterThan(stale.byteLength);
+  
 
-    // Current-attempt output remains novelty-bearing.
-    writeFileSync(join(stagePath, 'live.log'), Buffer.concat([rewritten, Buffer.from('current attempt delta\n')]));
-    expect(computeSupervisorEvidenceBinding(runDirectory, 'audit_round_02', status)?.generation).not.toBe(bound.generation);
-  });
-
-  it('item 1: a rejection bound to an older evidence generation cannot re-pend the later correct output', () => {
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-reject-state-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const work = stage({ id: 'audit_round_02', role: 'qa', scope: [], depends_on: [], dependency_reasons: {} });
-    const created = createRun(projectDir, 'reject-generation-replay', 'fixture', [work.id]);
-    const startedAt = '2026-09-02T11:40:00.000Z';
-    beginAttemptEvidenceGeneration(created.runDirPath, work.id, 2, startedAt);
-    writeFileSync(join(created.runDirPath, 'stages', work.id, 'output_attempt_2.md'), 'correct later output\n');
-    writeFileSync(
-      join(created.runDirPath, 'stages', work.id, 'metric.json'),
-      recordedEvidence('item1_later_correct_metric'),
-    );
-    const status: StageStatus = {
-      status: 'complete', retries: 1, completedAt: '2026-09-02T11:41:00.000Z',
-      attempts: [{ index: 2, status: 'complete', startedAt, completedAt: '2026-09-02T11:41:00.000Z' }],
-    };
-    writeStageStatus(projectDir, created.runId, work.id, status);
-    const state = readRunState(projectDir, created.runId);
-    state.stages[work.id] = status;
-    writeRunState(projectDir, created.runId, state);
-    const current = computeSupervisorEvidenceBinding(created.runDirPath, work.id, status)!;
-    const signals = join(created.runDirPath, 'signals');
-    mkdirSync(signals, { recursive: true });
-    writeFileSync(join(signals, `reject_${work.id}.json`), JSON.stringify({
-      version: 2, stage: work.id, reason: 'recorded stale contradiction',
-      evidence: { ...current, generation: '0'.repeat(64) },
-    }));
-    expect(consumeSupervisorReject(state, [work], [work.id], {
-      projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 1,
-    })).toBe(false);
-    expect(state.stages[work.id].status).toBe('complete');
-    expect(readdirSync(join(created.runDirPath, 'supervisor_rejections', 'discarded'))).toHaveLength(1);
-    expect(readRunEvents(projectDir, created.runId).some((event) => event.type === 'supervisor_reject_discarded')).toBe(true);
-  });
-
-  it('unchanged-base seam item 1: an unprovable stale generation is never applied to the completed attempt', () => {
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-reject-base-seam-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const work = stage({ id: 'audit_round_02', role: 'qa', scope: [], depends_on: [], dependency_reasons: {} });
-    const created = createRun(projectDir, 'reject-base-seam', 'fixture', [work.id]);
-    const startedAt = '2026-09-02T11:40:52.000Z';
-    const status: StageStatus = {
-      status: 'complete', retries: 1, completedAt: '2026-09-02T12:11:23.000Z',
-      attempts: [{ index: 2, status: 'complete', startedAt, completedAt: '2026-09-02T12:11:23.000Z' }],
-    };
-    writeStageStatus(projectDir, created.runId, work.id, status);
-    const state = readRunState(projectDir, created.runId);
-    state.stages[work.id] = status;
-    writeRunState(projectDir, created.runId, state);
-    const stagePath = join(created.runDirPath, 'stages', work.id);
-    mkdirSync(stagePath, { recursive: true });
-    writeFileSync(join(stagePath, 'live.log'), 'attempt 1: I wrote the metric artifact\n');
-    writeFileSync(join(stagePath, 'metric.json'), JSON.stringify({
-      hasMetric: false, source: { kind: 'engine_attempt_default' },
-    }));
-    const signals = join(created.runDirPath, 'signals');
-    mkdirSync(signals, { recursive: true });
-    writeFileSync(join(signals, `reject_${work.id}.json`), JSON.stringify({
-      version: 2,
-      stage: work.id,
-      reason: 'stale log contradicted the placeholder metric',
-      evidence: {
-        version: 1,
-        stageId: work.id,
-        attemptIndex: 1,
-        attemptStartedAt: '2026-09-02T11:09:20.000Z',
-        generation: '1'.repeat(64),
-        emittedDeliverable: true,
-      },
-    }));
-
-    expect(consumeSupervisorReject(state, [work], [work.id], {
-      projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 2,
-    })).toBe(false);
-    expect(state.stages[work.id].status).toBe('complete');
-  });
-
-  it('item 1: output emitted during a supervisor call cannot be blamed for the evidence captured before that call', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-09-02T11:41:15.000Z'));
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-reject-observation-state-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const created = createRun(projectDir, 'reject-observation-race', 'fixture', ['audit_round_02']);
-    const stagePath = join(created.runDirPath, 'stages', 'audit_round_02');
-    mkdirSync(stagePath, { recursive: true });
-    writeFileSync(join(stagePath, 'live.log'), 'attempt 1: I wrote the metric artifact\n');
-    const attemptStartedAt = '2026-09-02T11:40:52.000Z';
-    const status: StageStatus = {
-      status: 'running', retries: 1, startedAt: '2026-09-02T11:09:20.000Z',
-      attempts: [{ index: 2, status: 'running', startedAt: attemptStartedAt }],
-    };
-    writeStageStatus(projectDir, created.runId, 'audit_round_02', status);
-    const state = readRunState(projectDir, created.runId);
-    state.status = 'running';
-    state.stages.audit_round_02 = status;
-    writeRunState(projectDir, created.runId, state);
-    beginAttemptEvidenceGeneration(created.runDirPath, 'audit_round_02', 2, attemptStartedAt);
-    writeFileSync(join(stagePath, 'metric.json'), JSON.stringify({
-      hasMetric: false, source: { kind: 'engine_attempt_default' },
-    }));
-    const adapter: Adapter = { async run() {
-      // This is the later attempt's correct deliverable, emitted after the
-      // assessment input was frozen but before the REJECT response arrived.
-      writeFileSync(join(stagePath, 'output_attempt_2.md'), 'correct attempt 2 output\n');
-      return {
-        output: '{"verdict":"REJECT","target_stage":"audit_round_02","reason":"stale log contradicts placeholder","guidance":null}',
-        exitCode: 0, duration_ms: 1,
-      };
-    } };
-    const supervisor = new Supervisor(projectDir, created.runId, adapter, {
-      enabled: true, adapter: 'mock', model: 'default', reasoningEffort: 'low',
-      pollIntervalMs: 10, routineAssessmentIntervalMs: 10, cooldownAfterActionMs: 0,
-      maxAssessmentsPerIteration: 20, tailBytes: 16_384, minDeltaBytes: 0,
-      stuckThresholdMs: 600_000,
-    }, 'reject only the exact observed deliverable');
-    supervisor.start();
-    await vi.advanceTimersByTimeAsync(15);
-    supervisor.stop();
-
-    expect(readdirSync(join(created.runDirPath, 'signals'))).not.toContain('reject_audit_round_02.json');
-    expect(readFileSync(join(stagePath, 'output_attempt_2.md'), 'utf-8')).toContain('correct attempt 2');
-  });
+  
 
   it('unchanged-base seam item 2: a mismatched attempt receives one durable rejection and actionable non-hot wait guidance', async () => {
     const requestBytes = recordedEvidence('item2_mismatched_request');
@@ -303,25 +125,24 @@ describe('UX/performance engine-loop evidence replays', () => {
     ].join('\n'));
     const config: WorkflowConfig = {
       name: 'mismatched-scope-replay', defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: fixtureArtifactContract(recordedRequest.stageId, false),
         id: recordedRequest.stageId, role: 'coder', depends_on: [], scope: ['src/declared.ts'],
         prompt_template: 'replay mismatch', skills: [], dynamic_dispatch: false,
         is_gate: false, criterion_refs: [],
       }],
     };
-    const allocated = createRun(projectDir, config.name, 'fixture', [recordedRequest.stageId]);
-    const exactRunDir = join(dirname(allocated.runDirPath), recordedRequest.runId);
-    renameSync(allocated.runDirPath, exactRunDir);
-    const created = { runId: recordedRequest.runId, runDirPath: exactRunDir };
+    const created = createRun(projectDir, config.name, 'fixture', [recordedRequest.stageId]);
+    // Bind only the fixture's run identity; preserve the recorded wrong attempt.
+    const currentRequestBytes = Buffer.from(JSON.stringify({ ...recordedRequest, runId: created.runId }));
     writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
     const initial = readRunState(projectDir, created.runId);
     initial.runId = created.runId;
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
     const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       const stageDirectory = join(opts.runDir, 'stages', opts.stageId);
-      writeFileSync(join(stageDirectory, 'scope_revision_request.json'), requestBytes);
+      writeFileSync(join(stageDirectory, 'scope_revision_request.json'), currentRequestBytes);
       const decision = await waitForPathEvent(stageDirectory, () => {
         const name = readdirSync(stageDirectory).find((file) => file.startsWith('scope_revision_decision_'));
         return name ? JSON.parse(readFileSync(join(stageDirectory, name), 'utf-8')) as Record<string, unknown> : undefined;
@@ -334,8 +155,9 @@ describe('UX/performance engine-loop evidence replays', () => {
       });
       expect(String(decision.rejectionReason)).toContain('does not match running attempt 1');
       expect(prompt).not.toContain('<current attempt>');
-      expect(prompt).toContain('at most once per second');
-      return { output: 'stale request settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      expect(prompt).toContain('use scheduler notifications');
+      expect(prompt).toContain('bounded by the remaining execution deadline');
+      return fixtureResult({ output: 'stale request settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
     const decisions = readdirSync(join(created.runDirPath, 'stages', recordedRequest.stageId))
@@ -390,7 +212,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     ].join('\n'));
     const config: WorkflowConfig = {
       name: 'inherited-scope-replay', defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [{
+      stages: [{ artifact_contract: fixtureArtifactContract('work', false),
         id: 'work', role: 'coder', depends_on: [], scope: ['src/declared.ts'],
         prompt_template: 'replay accepted scope', skills: [], dynamic_dispatch: false,
         is_gate: false, criterion_refs: [],
@@ -403,7 +225,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     let workCalls = 0;
     const added = 'src/inherited.ts';
     const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       workCalls++;
       const stageDirectory = join(opts.runDir, 'stages', opts.stageId);
       if (workCalls === 1) {
@@ -418,12 +240,19 @@ describe('UX/performance engine-loop evidence replays', () => {
           return name ? JSON.parse(readFileSync(join(stageDirectory, name), 'utf-8')) as Record<string, unknown> : undefined;
         });
         expect(decision).toMatchObject({ accepted: true, attemptIndex: 1 });
-        return { output: 'force technical retry', exitCode: 1, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'force technical retry', exitCode: 1, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       expect(prompt).toContain(JSON.stringify(['src/declared.ts', added]));
+      expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
+      expect(prompt).toContain(`Continue the stage work in execution ${opts.attemptIndex}`);
+      expect(prompt).toContain(`Newly admitted paths: ${JSON.stringify([added])}`);
+      const decisionName = readdirSync(stageDirectory)
+        .find((name) => name.startsWith('scope_revision_decision_attempt_'));
+      expect(prompt).toContain(`stages/${opts.stageId}/${decisionName}`);
+      expect(prompt).not.toContain('This attempt stops at the control boundary');
       mkdirSync(join(projectDir, 'src'), { recursive: true });
       writeFileSync(join(projectDir, added), 'inherited capability\n');
-      return { output: 'retry used inherited scope', exitCode: 0, duration_ms: 1, writes: [added], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'retry used inherited scope', exitCode: 0, duration_ms: 1, writes: [added], writeAttribution: 'structured' }, opts);
     } };
 
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
@@ -435,169 +264,46 @@ describe('UX/performance engine-loop evidence replays', () => {
     const events = readRunEvents(projectDir, created.runId);
     expect(events.filter((event) => event.type === 'scope_revision_requested')).toHaveLength(1);
     expect(events.filter((event) => event.type === 'scope_revision_decided')).toHaveLength(1);
+    // The durable decision stops the current attempt; only its next-execution
+    // continuation needs guidance, including when that execution is a retry.
     expect(events.filter((event) => event.type === 'guidance_written' && event.stageId === 'work')).toHaveLength(1);
   }, 15_000);
 
-  it('unchanged-base seam item 3: the recorded direct sidecar load and shared-slot existence assertion are rejected for every role', () => {
-    const recordedDiff = JSON.parse(
-      recordedEvidence('item3_exact_before_after_test').toString('utf-8'),
-    ) as { files: Array<{ path: string; before: { text?: string } }> };
-    const recordedTest = recordedDiff.files.find((file) => file.path.endsWith('_verification.py'));
-    expect(recordedTest?.before.text).toBeTruthy();
-    const projectDir = temporaryRoot();
-    const testPath = recordedTest!.path;
-    mkdirSync(join(projectDir, 'tests'), { recursive: true });
-    writeFileSync(join(projectDir, testPath), recordedTest!.before.text!);
-    const findings = inspectTemporalResearchTests({
-      projectDir,
-      writes: [testPath],
-      resultFile: 'docs/happymj_explore7/round_result.json',
-      terminalPaths: [],
-    });
-    expect(findings.map((finding) => finding.kind)).toContain('depends_on_shared_presence');
-  });
-
-  it('unchanged-base seam item 3: a non-planner test-writing stage is failed before its temporal test can be accepted', async () => {
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-temporal-stage-state-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const agentsDir = join(projectDir, 'config', 'agents');
-    mkdirSync(agentsDir, { recursive: true });
-    writeFileSync(join(agentsDir, 'qa.yaml'), [
-      'name: qa', 'description: replay', 'model: default', 'reasoning_effort: default',
-      'tools: []', 'prompt: replay',
-    ].join('\n'));
-    const testPath = 'tests/test_round_verification.py';
-    const config: WorkflowConfig = {
-      name: 'temporal-stage-replay', defaults: { max_iterations: 1, max_retries: 0 },
-      research: { baseline: 0, policy: 'best_of_n', resultFile: 'docs/happymj/round_result.json' },
-      stages: [{
-        id: 'audit_round', role: 'qa', depends_on: [], scope: [testPath],
-        prompt_template: 'write the verifier', skills: [], dynamic_dispatch: false,
-        is_gate: false, criterion_refs: [],
-      }],
-    };
-    const created = createRun(projectDir, config.name, 'fixture', ['audit_round']);
-    const initial = readRunState(projectDir, created.runId);
-    initial.autoApprove = true;
-    initial.research = config.research;
-    writeRunState(projectDir, created.runId, initial);
-    const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-      mkdirSync(join(projectDir, 'tests'), { recursive: true });
-      writeFileSync(join(projectDir, testPath), [
-        'from pathlib import Path',
-        'RESULT = Path("docs/happymj/round_result.json")',
-        'assert RESULT.exists()',
-      ].join('\n'));
-      return { output: 'verifier written', exitCode: 0, duration_ms: 1, writes: [testPath], writeAttribution: 'structured' };
-    } };
-
-    await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
-    const status = JSON.parse(readFileSync(join(created.runDirPath, 'stages', 'audit_round', 'status.json'), 'utf-8')) as StageStatus;
-    expect(status.status).toBe('failed');
-    expect(status.error).toContain('Temporal test contract rejected');
-  }, 15_000);
-
-  it('H6 fails only the stage that wrote a temporally invalid test', { timeout: 20_000 }, async () => {
-    const projectDir = temporaryRoot('flowcrew-temporal-attribution-project-');
-    const stateRoot = temporaryRoot('flowcrew-temporal-attribution-state-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const agentsDir = join(projectDir, 'config', 'agents');
-    mkdirSync(agentsDir, { recursive: true });
-    writeFileSync(join(agentsDir, 'qa.yaml'), [
-      'name: qa', 'description: attribution replay', 'model: default', 'reasoning_effort: default',
-      'tools: []', 'prompt: replay',
-    ].join('\n'));
-    const testPath = 'tests/test_round_attribution.py';
-    const stageIds = ['writer', 'peer_a', 'peer_b'];
-    const config: WorkflowConfig = {
-      name: 'temporal-attribution-replay', defaults: { max_iterations: 1, max_retries: 0 },
-      research: { baseline: 0, policy: 'best_of_n', resultFile: 'docs/happymj/round_result.json' },
-      stages: [
-        {
-          id: 'writer', role: 'qa', depends_on: [], scope: [testPath],
-          prompt_template: 'write the verifier', skills: [], dynamic_dispatch: false,
-          is_gate: false, criterion_refs: [],
-        },
-        ...['peer_a', 'peer_b'].map((id) => ({
-          id, role: 'qa', depends_on: [], scope: [`src/${id}.ts`],
-          prompt_template: 'perform unrelated work', skills: [], dynamic_dispatch: false,
-          is_gate: false, criterion_refs: [],
-        })),
-      ],
-    };
-    const created = createRun(projectDir, config.name, 'fixture', stageIds);
-    const initial = readRunState(projectDir, created.runId);
-    initial.autoApprove = true;
-    initial.research = config.research;
-    writeRunState(projectDir, created.runId, initial);
-    let arrivals = 0;
-    let releaseArrivals!: () => void;
-    const allArrived = new Promise<void>((resolvePromise) => { releaseArrivals = resolvePromise; });
-    let markWritten!: () => void;
-    const written = new Promise<void>((resolvePromise) => { markWritten = resolvePromise; });
-    const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
-      arrivals++;
-      if (arrivals === stageIds.length) releaseArrivals();
-      await allArrived;
-      if (opts.stageId === 'writer') {
-        mkdirSync(join(projectDir, 'tests'), { recursive: true });
-        writeFileSync(join(projectDir, testPath), [
-          'from pathlib import Path',
-          'RESULT = Path("docs/happymj/round_result.json")',
-          'assert RESULT.exists()',
-        ].join('\n'));
-        markWritten();
-        return {
-          output: 'invalid temporal verifier written', exitCode: 0, duration_ms: 1,
-          writes: [testPath], writeAttribution: 'structured',
-        };
-      }
-      await written;
-      return {
-        output: 'unrelated peer observed the batch snapshot', exitCode: 0, duration_ms: 1,
-        writes: [testPath], writeAttribution: 'snapshot',
-      };
-    } };
-
-    await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
-    const statuses = Object.fromEntries(stageIds.map((id) => [
-      id,
-      JSON.parse(readFileSync(join(created.runDirPath, 'stages', id, 'status.json'), 'utf-8')) as StageStatus,
-    ]));
-    expect(statuses.writer.status).toBe('failed');
-    expect(statuses.writer.error).toContain('Temporal test contract rejected');
-    expect(statuses.peer_a.status).toBe('complete');
-    expect(statuses.peer_b.status).toBe('complete');
-  });
-
   it('item 4: the first proposal remains fail-closed after exact path guidance is supplied', () => {
-    const markdown = recordedEvidence('item4_first_plan_proposal').toString('utf-8');
-    const guided = appendResearchTemporalPathContract('plan now', {
-      baseline: 0, policy: 'best_of_n', resultFile: 'docs/happymj_explore7/round_result.json',
-    }, { complete: { paths: ['docs/happymj_explore7/ship_report.md'] } });
-    expect(guided).toContain('docs/happymj_explore7/round_result.json.no_candidate.json');
-    expect(guided).toContain('docs/happymj_explore7/run_manifest.json');
-    expect(guided).toContain('hard check that references docs/happymj_explore7/round_result.json is still rejected');
+    const originalMarkdown = recordedEvidence('item4_first_plan_proposal').toString('utf-8');
+    // Authored declarations on a working copy; the recorded evidence remains byte-identical.
+    const inputs: Record<string, string[]> = {
+      terminal_artifacts_are_mutually_exclusive: ['ship_report.md', 'ceiling_report.md', 'escalation_note.md'],
+      round_result_and_no_candidate_are_mutually_exclusive: ['round_result.json', 'round_result.json.no_candidate.json'],
+      no_candidate_artifact_shape_when_present: ['round_result.json.no_candidate.json'],
+      shipped_result_survives_confirmation: ['ship_report.md', 'round_result.json'],
+    };
+    const markdown = originalMarkdown.replace(/(  - name: ([a-z_]+)\n    type: exec-script-exit-zero\n)/g,
+      (line, _prefix: string, name: string) => line + `    reads: ${JSON.stringify(inputs[name].map((path, index) => ({
+        id: `input_${index}`, root: 'project', path: `docs/example_explore7/${path}`, source: { kind: 'input' },
+      })))}\n`);
+
+    const guided = appendResearchPathContract('plan now', {
+      baseline: 0, policy: 'best_of_n', resultFile: 'docs/example_explore7/round_result.json',
+    }, { complete: { paths: ['docs/example_explore7/ship_report.md'] } });
+    expect(guided).toContain('docs/example_explore7/round_result.json.no_candidate.json');
+    expect(guided).toContain('docs/example_explore7/run_manifest.json');
+    expect(guided).toContain('hard check that references docs/example_explore7/round_result.json is still rejected');
 
     const errors = inspectRealityCheckReachability({
       markdown, projectDir: temporaryRoot(),
       stages: [stage({
-        id: 'measure', role: 'coder', scope: ['docs/happymj_explore7/round_result.json'],
+        id: 'measure', role: 'coder', scope: ['docs/example_explore7/round_result.json'],
         depends_on: [], dependency_reasons: {},
       })],
       research: {
         baseline: 0,
         policy: 'best_of_n',
-        resultFile: 'docs/happymj_explore7/round_result.json',
+        resultFile: 'docs/example_explore7/round_result.json',
       },
     });
-    expect(errors.join('\n')).toContain('writes only its sidecar docs/happymj_explore7/round_result.json.no_candidate.json');
-    expect(errors.join('\n')).not.toContain('framework manifest docs/happymj_explore7/run_manifest.json');
+    expect(errors.join('\n')).toContain('writes only its sidecar docs/example_explore7/round_result.json.no_candidate.json');
+    expect(errors.join('\n')).not.toContain('framework manifest docs/example_explore7/run_manifest.json');
   });
 
   it('unchanged-base seam item 4: the first research-stage call receives the resolved universal rule', async () => {
@@ -613,8 +319,8 @@ describe('UX/performance engine-loop evidence replays', () => {
     ].join('\n'));
     const config: WorkflowConfig = {
       name: 'first-research-prompt-replay', defaults: { max_iterations: 1, max_retries: 0 },
-      research: { baseline: 0, policy: 'best_of_n', resultFile: 'docs/happymj/round_result.json' },
-      stages: [{
+      research: { baseline: 0, policy: 'best_of_n', resultFile: 'docs/example/round_result.json' },
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),
         id: 'plan', role: 'planner', depends_on: [], scope: [],
         prompt_template: 'plan the first research round', skills: [], dynamic_dispatch: false,
         is_gate: false, criterion_refs: [],
@@ -627,15 +333,15 @@ describe('UX/performance engine-loop evidence replays', () => {
     writeRunState(projectDir, created.runId, initial);
     let firstPrompt = '';
     const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       firstPrompt ||= prompt;
-      return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
 
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
-    expect(firstPrompt).toContain('docs/happymj/round_result.json.no_candidate.json');
-    expect(firstPrompt).toContain('docs/happymj/run_manifest.json');
-    expect(firstPrompt).toContain('Every hard check and every test, regardless of author role or round');
+    expect(firstPrompt).toContain('docs/example/round_result.json.no_candidate.json');
+    expect(firstPrompt).toContain('docs/example/run_manifest.json');
+    expect(firstPrompt).toContain('Hard checks must declare inputs that are available');
   }, 15_000);
 
   it('unchanged-base seam item 6: copied research conditions are rejected at non-research admission with a remedy', () => {
@@ -665,7 +371,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     expect(report.errors.join('\n')).toContain('references framework research facts in a non-research run');
   });
 
-  it('canonical events: a scheduler-side stage exception still publishes one attributed attempt failure', async () => {
+  it('canonical events: an unknown role is refused before an attempt is admitted', async () => {
     const projectDir = temporaryRoot();
     const stateRoot = temporaryRoot('flowcrew-thrown-attempt-state-');
     priorStateRoot = fcGlobalDir();
@@ -674,7 +380,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     mkdirSync(agentsDir, { recursive: true });
     const config: WorkflowConfig = {
       name: 'thrown-attempt-event-replay', defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: fixtureArtifactContract('work', false),
         id: 'work', role: 'missing_role', depends_on: [], scope: [],
         prompt_template: 'this call must fail before the adapter starts', skills: [],
         dynamic_dispatch: false, is_gate: false, criterion_refs: [],
@@ -693,13 +399,40 @@ describe('UX/performance engine-loop evidence replays', () => {
       agentsDir, created.runId, 'replay', true,
     );
     expect(final.status).toBe('failed');
+    expect(final.failureReason).toContain('PLAN_REVISION_ROLE_UNKNOWN: work.role missing_role is not configured');
+    expect(final.stages.work.status).toBe('pending');
+    expect(readRunEvents(projectDir, created.runId).filter((event) => event.type === 'attempt_failed')).toEqual([]);
+  }, 15_000);
+
+  it('canonical events: an adapter exception still publishes one attributed attempt failure', async () => {
+    const projectDir = temporaryRoot();
+    const stateRoot = temporaryRoot('flowcrew-thrown-adapter-state-');
+    priorStateRoot = fcGlobalDir();
+    setFcGlobalDir(stateRoot);
+    const agentsDir = join(projectDir, 'config', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, 'coder.yaml'), [
+      'name: coder', 'description: synthetic exception control', 'model: default',
+      'reasoning_effort: default', 'tools: []', 'prompt: fixture',
+    ].join('\n'));
+    const config: WorkflowConfig = {
+      name: 'thrown-adapter-event-replay', description: 'synthetic attributed exception', defaults: { max_iterations: 1, max_retries: 0 },
+      stages: [stage({ id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: [], prompt_template: 'throw inside the admitted attempt' })],
+    };
+    const created = createRun(projectDir, config.name, 'fixture', ['work']);
+    const adapter: Adapter = { async run() { throw new Error('synthetic adapter settlement failure'); } };
+    const final = await runWorkflow(
+      config, 'fixture', projectDir, adapter, new Map(), undefined,
+      agentsDir, created.runId, 'replay', true,
+    );
+    expect(final.status).toBe('failed');
     const failureEvents = readRunEvents(projectDir, created.runId)
       .filter((event) => event.type === 'attempt_failed' && event.stageId === 'work');
     expect(failureEvents).toHaveLength(1);
     expect(failureEvents[0]).toMatchObject({
       attemptIndex: 1, source: 'scheduler', status: 'failed',
     });
-    expect(failureEvents[0].detail).toContain('No agent config for role "missing_role"');
+    expect(failureEvents[0].detail).toContain('synthetic adapter settlement failure');
   }, 15_000);
 
   it('item 11: warm attempt capture does not visit/read/hash 1,100 clean files outside one declared path', () => {
@@ -724,8 +457,8 @@ describe('UX/performance engine-loop evidence replays', () => {
       baselineFilesRead: 0, baselineFilesHashed: 0, baselineBytesRead: 0, baselineBytesHashed: 0,
     });
     expect(warm.measurement).toMatchObject({
-      baselineInitialized: false, scopedFilesVisited: 1, scopedFilesRead: 1, scopedFilesHashed: 1,
-      scopedBytesVisited: 6, scopedBytesRead: 6, scopedBytesHashed: 6,
+      baselineInitialized: false, scopedFilesVisited: 1, scopedFilesRead: 0, scopedFilesHashed: 0,
+      scopedBytesVisited: 6, scopedBytesRead: 0, scopedBytesHashed: 0,
       outsideScopeFilesVisited: 0, outsideScopeFilesRead: 0, outsideScopeFilesHashed: 0,
       outsideScopeBytesVisited: 0, outsideScopeBytesRead: 0, outsideScopeBytesHashed: 0,
       conservativeFallback: false,
@@ -789,7 +522,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     ].join('\n'));
     const config: WorkflowConfig = {
       name: 'rollback-shapes-replay', defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: fixtureArtifactContract('work', false),
         id: 'work', role: 'coder', depends_on: [], scope: [], prompt_template: 'mutate outside scope',
         skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [],
       }],
@@ -800,12 +533,12 @@ describe('UX/performance engine-loop evidence replays', () => {
     writeRunState(projectDir, created.runId, initial);
     const paths = ['src/clean.txt', 'src/dirty.txt', 'src/untracked.txt', 'src/deleted.txt', 'src/mode.txt', 'src/new.txt'];
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       for (const path of paths.slice(0, 3)) writeFileSync(join(projectDir, path), 'unauthorized\n');
       rmSync(join(projectDir, 'src', 'deleted.txt'));
       chmodSync(join(projectDir, 'src', 'mode.txt'), 0o755);
       writeFileSync(join(projectDir, 'src', 'new.txt'), 'unauthorized new\n');
-      return { output: 'mutated', exitCode: 0, duration_ms: 1, writes: paths, writeAttribution: 'structured' };
+      return fixtureResult({ output: 'mutated', exitCode: 0, duration_ms: 1, writes: paths, writeAttribution: 'structured' }, opts);
     } };
 
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
@@ -833,7 +566,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     ].join('\n'));
     const config: WorkflowConfig = {
       name: 'nongit-rollback-replay', defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: fixtureArtifactContract('work', false),
         id: 'work', role: 'coder', depends_on: [], scope: [], prompt_template: 'mutate outside scope',
         skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [],
       }],
@@ -843,12 +576,12 @@ describe('UX/performance engine-loop evidence replays', () => {
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
     const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       writeFileSync(join(projectDir, 'src', 'protected.txt'), 'unauthorized\n');
-      return {
+      return fixtureResult({
         output: 'mutated', exitCode: 0, duration_ms: 1,
         writes: ['src/protected.txt'], writeAttribution: 'structured',
-      };
+      }, opts);
     } };
     await runWorkflow(config, 'fixture', projectDir, adapter, new Map(), undefined, agentsDir, created.runId, 'replay', true);
     expect(readFileSync(join(projectDir, 'src', 'protected.txt'), 'utf-8')).toBe('operator preimage\n');
@@ -865,16 +598,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     expect(readCodexCapabilityMemory(runDirectory, identity)?.capability).toBe('reasoning_effort_unsupported');
     expect(readCodexCapabilityMemory(runDirectory, { ...identity, version: 'codex-cli 2.0.0' })).toBeUndefined();
 
-    const task = 'Keep this exact static goal across calls.';
-    expect(buildSupervisorRolePrompt(600_000, task)).toContain(`# Original Goal\n${task}`);
-    const common = {
-      tails: new Map([['work', 'new semantic output']]), artifacts: [], anomalySignals: [],
-      attemptKeys: ['work:2:2026-09-02T12:00:00.000Z'],
-    };
-    expect(supervisorEvidenceDigest(common)).toBe(supervisorEvidenceDigest({ ...common }));
-    expect(supervisorEvidenceDigest(common)).not.toBe(supervisorEvidenceDigest({
-      ...common, attemptKeys: ['work:3:2026-09-02T12:01:00.000Z'],
-    }));
+
   });
 
   it('unchanged-base seam item 13: one diagnosed effort rejection is reused by the next Codex stage in the same run', async () => {
@@ -923,59 +647,16 @@ describe('UX/performance engine-loop evidence replays', () => {
     expect(readFileSync(counter, 'utf-8').trim().split('\n')).toHaveLength(3);
   }, 15_000);
 
-  it('unchanged-base seam item 14: static goal is cacheable, elapsed is attempt-relative, and unchanged WAIT evidence is not resent', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-09-02T12:00:10.000Z'));
-    const projectDir = temporaryRoot();
-    const stateRoot = temporaryRoot('flowcrew-supervisor-novelty-state-');
-    priorStateRoot = fcGlobalDir();
-    setFcGlobalDir(stateRoot);
-    const created = createRun(projectDir, 'supervisor-novelty-replay', 'fixture', ['work']);
-    const attemptStartedAt = '2026-09-02T12:00:05.000Z';
-    const status: StageStatus = {
-      status: 'running', retries: 1, startedAt: '2026-09-02T11:00:00.000Z',
-      attempts: [{ index: 2, status: 'running', startedAt: attemptStartedAt }],
-    };
-    writeStageStatus(projectDir, created.runId, 'work', status);
-    const state = readRunState(projectDir, created.runId);
-    state.status = 'running';
-    state.stages.work = status;
-    writeRunState(projectDir, created.runId, state);
-    const calls: Array<{ prompt: string; rolePrompt: string }> = [];
-    const adapter: Adapter = { async run(prompt, role) {
-      calls.push({ prompt, rolePrompt: role.prompt });
-      return {
-        output: '{"verdict":"WAIT","target_stage":null,"reason":"no new evidence","guidance":null}',
-        exitCode: 0, duration_ms: 1,
-      };
-    } };
-    const goal = 'Keep this exact static goal across supervisor calls.';
-    const supervisor = new Supervisor(projectDir, created.runId, adapter, {
-      enabled: true, adapter: 'mock', model: 'default', reasoningEffort: 'low',
-      pollIntervalMs: 10, routineAssessmentIntervalMs: 10, cooldownAfterActionMs: 0,
-      maxAssessmentsPerIteration: 20, tailBytes: 16_384, minDeltaBytes: 0,
-      stuckThresholdMs: 600_000,
-    }, goal);
-    supervisor.start();
-    await vi.advanceTimersByTimeAsync(45);
-    supervisor.stop();
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0].rolePrompt).toContain(`# Original Goal\n${goal}`);
-    expect(calls[0].prompt).not.toContain(goal);
-    const elapsed = calls[0].prompt.match(/## work — (\d+)s elapsed/);
-    expect(elapsed).not.toBeNull();
-    expect(Number(elapsed![1])).toBeLessThan(30);
-  });
-
   it('unchanged-base seam item 16: request handling is watcher-driven with a slow fallback, never a 20 ms loop', () => {
     const worker = readFileSync(join(import.meta.dirname, '..', 'src', 'worker.ts'), 'utf-8');
-    const scheduler = readFileSync(join(import.meta.dirname, '..', 'src', 'scheduler.ts'), 'utf-8');
+    const scheduler = readFileSync(join(import.meta.dirname, '..', 'src', 'scheduler', 'sched_scope', 'revision-monitor.ts'), 'utf-8');
     expect(worker).toContain("watch(directory, { persistent: false }");
-    expect(worker).toContain('setInterval(pollTimeoutExtensionRequests, 1000)');
-    expect(worker).not.toMatch(/setInterval\(pollTimeoutExtensionRequests,\s*20\)/);
-    expect(scheduler).toContain('scope_revision_request.json');
-    expect(scheduler).not.toMatch(/setTimeout\(resolvePromise,\s*20\)/);
+    expect(worker).not.toContain('pollTimeoutExtensionRequests');
+    const requests = readFileSync(join(import.meta.dirname, '..', 'src', 'scheduler', 'sched_scope', 'scope-revisions.ts'), 'utf-8');
+    expect(requests).toContain('join(stagePath, SCOPE_REVISION_REQUEST_FILE)');
+    expect(scheduler).toContain('watch(stagePath, { persistent: false }');
+    expect(scheduler).toContain('setTimeout(finish, 1000)');
+    expect(scheduler).not.toMatch(/setTimeout\((?:resolvePromise|finish),\s*20\)/);
     expect(recordedEvidence('item2_mismatched_request')).toHaveLength(608);
   });
 });

@@ -2,463 +2,199 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 15 -->
+<!-- flowcrew-skill-revision: 29 -->
 
-# ship — Hand off a plan to FlowCrew
+# Ship a conversation to FlowCrew
 
-Use `/ship <flag>` in Claude Code or `$ship <flag>` in Codex. This skill authors and
-launches a brief; the public [CLI reference](https://github.com/cuibuaa/flow-crew/blob/main/guide/cli.md)
-owns the complete flag catalogue.
+This is a procedure for the coding agent, not an engine promise of model obedience.
+Use `/ship` in Claude Code or `$ship` in Codex. The repository's
+[brief contract](../guide/brief-contract.md), [CLI](../guide/cli.md) and
+[operations](../guide/operations.md) own detailed engine facts and travel with installed copies.
 
-## 1. Compose the handoff
+## Gather facts and author the brief
 
-Do not infer execution order from the heading order. Enforce each section's local precondition.
-Execute the procedure as `ship-preflight` → draft → saved-brief preflight and `rehearse` →
-digest-bound confirmation → `ship-setup` → `quick` → `watch`.
+Precondition: before drafting, run `flowcrew ship-preflight` from the source project. Before exact-digest
+confirmation, invoke FlowCrew only for preflight and rehearsal; do not probe setup/quick
+with help or launch options. Treat `--help`, `--version`, capability discovery and dry probes
+as invocations too. Exit zero means facts were gathered, not that they are favorable;
+collection failure exits nonzero. Preflight cannot decide what prior state means. It discovers
+validation commands but does not execute a baseline.
 
-**Command firewall:** Before digest-bound confirmation, invoke the FlowCrew executable only with
-`ship-preflight` or `rehearse`. Treat `--help`, `--version`, capability discovery, and dry probes as
-invocations: never call `ship-setup`, `quick`, or any other FlowCrew command in this phase.
+If a prior run is pending/running/parked/awaiting approval, show its identity and stop instead
+of duplicating it. For terminal failure/incomplete/ceiling/phase/stop, carry forward the
+relevant blocker and durable evidence. Unknown status needs inspection. Use prior reports
+as inputs, not paraphrased facts or a promise to repeat their outcome.
 
-### 1.1 `ship-preflight`: gather workspace facts
+Write a self-contained brief at `docs/task_brief.md` only after preflight facts are available. The run does not receive this
+conversation. Include outcome, evidence paths, real constraints, extractable numbered
+criteria, required human outputs and allowed stopping outcomes. State required observable
+properties; label example mechanisms explicitly. Declare every source input in a leading
+frontmatter `inputs:` block. A path in prose or a table is only a reference, not a declaration;
+preflight can still discover candidate requirements there. Declare gitignored inputs in the
+block and intentional reuse of existing outputs. Explain evidence gaps and dependencies of quantities.
 
-**Precondition — begin here:** Run this initial fact-gathering step from the source project before
-drafting, and do not draft until it has completed successfully.
+Choose engineering for a known pass/fail outcome and research for candidate search with an
+allowed supported ceiling. Propose the mode/workflow and explain it to the operator. Use
+`workflow: direct` for coherent author-plus-review work and `workflow: planner` for decomposable
+work or loops. Do not create an acceptance-only `objective.confirm` envelope. Map writable
+paths for authored stages; leave schema details in the canonical references.
 
-Run `flowcrew ship-preflight` from the source project before drafting, then run it again with
-`--brief docs/task_brief.md` once the draft exists. Add `--campaign <name>` only for an explicit
-campaign choice. It reports the canonical project, prior runs, campaign resolution and hygiene,
-daemon/build freshness, declared inputs and assertions, and the configuration-discovered build,
-test, and lint baseline. With `--brief`, it also inventories structured output paths, their current
-entry type/size/digest, and whether the brief explicitly authorizes use of existing content.
+Require the complete configured validation with direct exits/totals after the last relevant
+write. Separate an operator numeric expectation from measured evidence; use exact fields
+`within_expected_range` and `method_was_not_adjusted_to_match_expectation` where applicable.
+Use the [evidence authoring policy](../guide/brief-contract.md#evidence-authoring-policy) for
+judgments about statistics, recurrence, concentrated contributions and supplied mechanisms. Do not invent measurements
+or apply research-round rules to an ordinary engineering task.
+Apply the [authoring and verification principles](../guide/brief-contract.md#authoring-and-verification-principles) when drafting and accepting work.
 
-Exit 0 means those facts were gathered; it does not mean they are favorable. Invalid arguments,
-an unreadable requested brief, or a collection failure exit non-zero. Missing or unproven input
-evidence and stale code are launch blockers. An existing non-empty create-only output or any symlink
-at a declared output path is also a blocker; use a fresh path unless the brief explicitly declares
-the existing artifact as input or says `on_existing: update|append|replace`. Adverse history or a red baseline is information to
-understand and encode as a delta, not a result about the task's subject.
+### Minimal, modular rewrites
 
-The command cannot decide what prior state means. Route it deliberately:
+For “minimal, modular rewrite” or “simplify what actually runs” tasks, require a small core
+preserving the base commit's production behaviour. Name production entrypoints (services,
+timers, cron, CLIs); code they do not reach may be removed, with every removal inventoried.
+The design standard lives only in report criterion 3, as evidence the report must show; do not
+restate it as a requirement on how the code is structured (no shared skeleton, variant mechanism,
+or order of work), because the run chooses the means.
 
-- For `pending`, `running`, `parked`, or `awaiting_approval`, report the run id and stop instead
-  of re-shipping.
-- For `escalated`, `ceiling_hit`, `incomplete`, `phase_complete`, or `stopped`, carry forward the
-  blocker, evidence, unfinished obligation, or intentional cancellation decision.
-- For `failed` or `reality_gate_failed`, apply the independent acceptance procedure in §2.3.
-- For `complete`, `shipped`, or no prior run, continue; useful evidence may still be context.
-- Stop on an unknown lifecycle status until its meaning is established.
+Require discovery of production's interpreter/runtime from service and other entrypoint
+definitions and its use for parity and tests. Production processes, deploys and pushes are
+outside the run's authority: describe cutover, never perform it. Use shared production state
+(user data, caches) read-only via copies. A suspected behaviour bug is a finding left unchanged.
 
-If campaign resolution is unknown, ask. `--campaign-context=skip` omits verbose history without
-detaching ownership; use it only after the user chooses that tradeoff. Never rewrite runtime
-campaign ledgers to make their grouping look tidier.
+Give the brief numbered report criteria pinned to the base commit and final tree after the
+last write, with evidence locations:
 
-### 1.2 `ship-setup`: prove the launch workspace
+1. Reachability inventory from the named entrypoints at base: every module reached/unreached,
+   method and direct exit code; every removed module and test listed.
+2. Base/final behaviour parity: identical recorded inputs and clock/network stubs; decisions,
+   outputs, error/failure paths (alerts, error records, notifications), and old-format records
+   already on disk readable by every consumer (readers, dashboards, notifiers). Report harness
+   location, inputs, compared-item counts per entrypoint, mismatches and direct exit code;
+   demonstrate detection of an injected one-line change. Name existing parity/test facilities
+   and why they do or do not serve.
+3. Design account: final module map with responsibilities/interfaces; before/after `file:line`
+   for each removed patch, special case or duplicate; every place where variants of one flow still
+   carry duplicated execution code, with `file:line` and why; non-test line counts per module at
+   base/end and method; each added mechanism with what it replaced, and every unpaired addition
+   justified; any special case keyed on an error string or name; each retained restriction or
+   special case with the consumer or failure it protects.
+4. Full configured validation after the last write: direct exit codes and totals; direct
+   import check for every retained module and execution check for every CLI entrypoint under
+   the production runtime. List every removed test with the deleted code it exercised.
+5. Final report with criteria 1–4 evidence, behaviour findings left unchanged, ordered operator cutover and rollback.
 
-**Precondition — do not invoke setup yet:** Do not invoke `ship-setup` for any purpose—not even
-`--help`, capability inspection, or another probe—until §1.5 records a new confirmation of the
-unchanged brief digest and launch identity.
+## Rehearse and confirm exact bytes
 
-`flowcrew ship-setup --brief <path> --project <source> --target <target> --base <ref>
---branch <name>` answers whether the exact base, branch, target, ignored inputs, input assertions,
-and validation baseline can be established together. Introduce this boundary now, but run it only
-after §1.5 confirms an exact draft and launch identity.
-
-Exit 0 and `Ship setup: READY` mean the verified ready record was written. A non-zero refusal names
-the blocker and writes no ready record; an already-created target may remain for diagnosis. Do not
-replace a refusal with manual Git or link commands. Setup cannot choose the target identity, decide
-whether an input is the only durable copy, or judge the future result. Its baseline, not §1.1's, is
-what the gates enforce — preflight measures the source and setup the target — so never quote
-preflight's as a brief's permitted failure set.
-
-### 1.3 Draft a self-contained brief
-
-**Precondition — draft only after preflight:** Write the brief only after §1.1 has gathered the
-source-project facts and no active-run blocker requires stopping.
-
-**Scope by class before drafting.** Work of one kind belongs in one task, because the planner can
-decompose and parallelise inside it far better than a chain of tasks can be sequenced from outside.
-Split only when the kinds genuinely differ — and then launch the pieces in parallel rather than in
-series, since a queue of related tasks is the shape that looks organised and finishes last.
-
-The planner does not receive this conversation, so the brief has to stand alone — but standing alone
-means naming what the run must **find**, not supplying what you would have concluded. Write
-`docs/task_brief.md` so a capable practitioner who has never seen it knows the outcome that would end
-the task, where the evidence lives, which constraints are real, and what its report must show. Never
-refer to “above”, “as discussed”, or an unstated plan.
-
-**Leave the approach out.** FlowCrew scouts a frontier, decomposes work, and chooses mechanisms
-better than a brief can specify them; a brief that names an approach converts that capability into
-instruction-following. Where the exact means genuinely *is* the requirement, say so explicitly
-(§2.1) — that is a different case, not the default one. An `Out of scope` list is read as complete,
-so put real constraints in it and nothing else; a dimension left unmentioned is treated as closed
-whether or not you meant to close it.
-
-**A fact you supply is used exactly as far as you supplied it.** A run given a figure will honour it
-precisely — turning it into a checkable obligation, which is what you want — and will not supply the
-half of it you left out. A minimum update count was obeyed to the letter while the batch size it
-implicitly depended on went unmentioned and unchanged, so the budget was raised without the
-experience behind it changing at all. Prohibitions and constraints behave the same way: what the
-brief lists is treated as the whole list. Where the brief cannot be sure its own enumeration is
-complete, say so and make the gap findable rather than hoping it does not matter:
-
-> The constraints and quantities here are the ones I could see. Before acting on any of them, say
-> what each depends on that this brief did not state, and whether that changes what it is worth.
-
-**Point at the artifact; do not summarise it.** A summary you write is a claim you assert, and a
-brief's claims are treated as settled. Compressing a prior report into three sentences drops
-whatever you did not think mattered — a campaign told to read one log never read the modules sitting
-beside it, and a baseline carried forward as a number arrived without the fact that it scored worse
-than changing nothing. Give the path and require the run to read it. Where a figure must appear
-because a disagreement would matter, supply it as a cross-check with the anti-anchoring fields,
-never as a premise.
-
-**Assert how a result must be produced and shown, not what it must be.** A criterion that fixes the
-process — reproduced before it was fixed, compared against a control varying one condition, audited
-by something other than what produced it, reported with its distribution and its direct exit code —
-constrains rigour without constraining method. A criterion that fixes the finding constrains the
-answer, and a run that cannot meet it will either fail honestly or reshape the work until it can.
-Process assertions still have to bite: pin each to a moment and a form of evidence — *after the last
-write*, not “at some point”; the direct exit code and totals, not “green”. A stage once reported a
-suite passing, truthfully, and then wrote the artifact that broke it.
-
-A brief written this way usually fits on one page: the outcome that decides whether the task is
-done; where the evidence lives, as paths rather than as what they say; the constraints that are
-real; what the report must show, numbered, each pinned to its moment and its evidence; and which
-artifact each terminal outcome writes. A section outside that list — an approach, a problem
-decomposition, a survey of what has been tried, an account of what the evidence means — is the
-operator doing the run's work in advance, and it is where wrong context enters.
-
-**Write the property, not the answer you derived by hand.** A figure you measured is measured in
-your environment, not the run's, and a brief that states it converts a check the run could perform
-into a fact it must accept. State what must be true and require the run to establish it in the
-target. Supply your figure only as a cross-check, alongside the anti-anchoring fields, so a
-disagreement surfaces instead of being reconciled silently.
-
-This applies to configured values too, and there it is easier to miss, because a setting feels like
-a decision rather than a claim. A number the run will be judged against — a baseline, a floor, a
-threshold — asserts *this is what a result must beat*, and it can be wrong the way a measurement
-can. Ask the run to confirm it on the same scale as the candidates, against whatever "changing
-nothing" means for the task: the incumbent's own score, the unmodified input, a constant output. A
-campaign once anchored on the best result so far without checking that the best result so far was
-worse than leaving the system alone, so every later round was scored against a reference no
-candidate needed to beat.
-
-**Ask what already exists before a round builds its own.** A round that writes its own harness,
-collector, or evaluator measures the thing it just wrote. That is the right choice when isolation
-demands it and the wrong one when the project already ships the same capability — and the two are
-indistinguishable in the report unless the brief asks. Where a round may build its own execution or
-measurement path, require it to name what the project already provides and why that does not serve.
-"I wrote a minimal driver so the comparison varies one condition" is a good answer; the answer this
-prevents is silence.
-
-**Find which bound binds before tuning one.** A limit raised in the brief may sit behind another the
-brief does not mention, and the run then behaves as though the raise never happened — a research
-budget of fifteen rounds never bound because the engine's iteration cap of five was reached first.
-Where a brief sets a limit, identify every limit on that same quantity, confirm the one being set is
-the one that binds first, and say what the run should do when it is reached. A loop that must also
-audit and report its own last round needs budget beyond the work itself, or the stop preempts the
-reporting.
-
-Follow the [canonical brief and file contract](https://github.com/cuibuaa/flow-crew/blob/main/guide/brief-contract.md)
-for frontmatter, research/program loops, Reality checks, approvals, verdicts, and terminal artifacts.
-Do not duplicate those schemas here.
-
-Declare every source input in a leading frontmatter `inputs:` block. A path in prose or a table is
-only a reference, not a declaration; declare gitignored inputs there so setup can link and verify them.
-
-Declare concrete outputs structurally in frontmatter. They are create-only by default. When existing
-content is intentionally part of the task, put that path in `inputs:` or attach an explicit
-`on_existing: update`, `append`, or `replace` disposition. Preflight, rehearsal, and setup must agree
-on the inventory before launch; a large unrelated file is not made safe by being at the requested path.
-
-The planner owns planner-created stages. Its hard rules reserve every declared terminal path for the
-status-committing final stage and give any gate that may write tests, probes, snapshots, reports, or
-generated output a complete writable scope. Preflight/rehearsal still lint explicit writable mappings
-in an authored staged brief and countable `stage_glob` floors.
-
-Declare `terminal_states` only for an artifact whose appearance should end the entire run. Omit it
-for an intermediate or mid-pipeline output, because declaring that path terminal would skip pending
-verification and repair rather than preserve the intended pipeline.
-
-Treat `min_wall_minutes` at or below 10 as an anti-instant-quit guard only. To prove enough work
-happened, name substantive evidence files and their writers. A clock is not evidence, and a floor does
-not make an earlier terminal writer safe.
-
-For a survey or implementation, make every task-local criterion independent of a shared running total.
-Require the complete relevant validation set discovered from project configuration, with direct exit
-codes and totals; never read `$?` after a pipe.
-
-Choose loop mode by decision structure, not keywords. Convergence to a known pass/fail outcome is
-engineering; candidate generation where a supported ceiling is valid is research. Propose the mode and
-ask the user—do not silently choose. Research requires the canonical `research:` frontmatter.
-
-### 1.4 `rehearse`: exercise the exact contract
-
-**Precondition — save before rehearsing:** Rehearse only after `docs/task_brief.md` exists. Run both
-commands against those exact saved bytes, never against an unsaved draft or reconstructed text.
-
-Run both commands against the exact saved bytes:
+Precondition: `docs/task_brief.md` exists. Run these against its exact saved bytes:
 
 ```bash
 flowcrew ship-preflight --brief docs/task_brief.md
 flowcrew rehearse docs/task_brief.md
 ```
 
-Preflight exit 0 retains the fact-versus-judgment boundary from §1.1. Rehearsal exit 0 ending in
-`✅ Contract ready` means the static contract and scripted scheduler exercise have no failures;
-non-zero means fix the brief or environment and rerun. Rehearsal launches no model and does not prove
-implementation or research quality.
+Fix blocking findings; treat ambiguous criterion wording, unexplained authored writable maps
+and unassigned evidence floors as authoring problems. Review every retained warning and
+explain it. Rehearsal is mandatory for this skill, including an engineering brief's static
+pass. Exit zero ending in `✅ Contract ready` establishes wiring, not implementation or
+research quality. Nonzero means correct the brief/environment. It calls no model but can
+run declared shell confirmation; review that text first.
+If bytes change, repeat preflight and rehearsal.
 
-Treat criterion-wording warnings, wall floors above 10, unassigned `stage_glob` evidence, and missing
-writable mappings in an authored staged brief as blocking authoring errors. Review every other warning
-and state why it is intentional. Show the complete report and exact digest. If any byte changes, rerun
-both commands.
+Show the final brief, complete findings, exact 64-hex digest and launch identity: source,
+target, base, new branch, workflow/mode, adapter, foreground/background, campaign/context,
+iteration bound and stage deadline read from engine configuration (`default_max_iterations`
+and `default_timeout_ms`). Do not hardcode defaults.
+Explain unattended shell authority and the scope-versus-host-isolation boundary.
 
-### 1.5 Confirm the digest, identity, and authority
+Ask: “Start this exact brief digest `<digest>` with these settings?”
+Wait for a new explicit answer after the final bytes/settings were shown.
+Do not treat the original `/ship` request or an earlier “ship it” as approval of unseen
+bytes/findings. Any change returns to saved-byte preflight/rehearsal and confirmation.
 
-**Precondition — request confirmation only after proof:** Ask only after the brief file exists and
-successful rehearsal has emitted its exact digest. The human confirms the bytes identified by that
-digest, which is impossible before the file exists and rehearsal identifies it.
+## Set up and launch
 
-Show the final brief, complete preflight/rehearsal reports, and these exact choices:
+### Prepare the target
 
-- source project, target worktree, new branch, and base ref;
-- workflow/mode, adapter, supervision, foreground/background, campaign, and context policy;
-- max iterations from `config/defaults.yaml` `default_max_iterations` (currently 5);
-- stage timeout from `config/defaults.yaml` `default_timeout_ms` (currently 60 minutes);
-- every retained warning and its risk; and
-- execution authority: workers run unattended shell commands with normal approval, permission, and
-  sandbox prompts bypassed. The project is an intended work scope, not a host security boundary. Use
-  a dedicated workspace or isolated environment and do not expose unrelated credentials.
+Precondition: a new explicit answer confirmed the unchanged exact digest and launch identity.
+Do not invoke `ship-setup` for any purpose, including help or probes, before that confirmation.
+Setup cannot choose the target identity. Run it with the approved identity and absolute brief path:
 
-Then ask:
-
-> Rehearsal reported the findings above. Start this exact brief digest `<digest>` with these settings?
-
-Wait for a new explicit answer. Do not treat the original `/ship` request or an earlier “ship it” as
-this answer. If the user changes the brief or settings, update the file, rerun preflight/rehearsal,
-show the new digest, and ask again. Only the answer after the last content change authorizes launch
-and, when required, the digest-valued acknowledgement flag.
-
-### 1.6 `quick`: launch the approved bytes
-
-**Precondition — launch only after digest-bound confirmation:** Launch only after a new explicit
-confirmation given against the exact rehearsal digest and unchanged settings. If any brief byte or
-setting changes, return to saved-brief preflight, rehearsal, digest display, and confirmation.
-Do not invoke `quick` for any purpose—not even `--help`, capability inspection, or another probe—
-before that digest-bound confirmation.
-
-After confirmation, run setup with the approved identity and absolute brief path. Proceed only on
-`Ship setup: READY`. For the default background launch, `flowcrew daemon status` exits 0 when fresh,
-1 when no listener exists, and 2 when stale or unverified. Start the daemon after 1 and fall back to
-foreground only if that confirmed start fails; status 2 is an inspect/rebuild/restart blocker. An
-explicit `--foreground` selection skips the daemon probe.
-
-Launch by stdin so trailing newlines—and therefore the reviewed digest—are preserved:
-
-```bash
-flowcrew quick --background --project <target> --supervise - < docs/task_brief.md
-flowcrew quick --project <target> --supervise - < docs/task_brief.md
+```text
+flowcrew ship-setup --brief <brief-path> --project <source> --target <target> --base <ref> --branch <name>
 ```
 
-Add `--acknowledge-brief-warnings=<digest>` only after the consent in §1.5. Add the confirmed campaign,
-context, workflow, or adapter flags as needed. Keep project execution limits in `config/defaults.yaml`
-unless the user explicitly changes the shared configuration.
+Proceed only on exit zero and `Ship setup: READY`; nonzero is a refusal. Do not replace refusals with manual links/worktree
+creation. The target baseline and ready record govern later checks. Unsupported population
+comparison remains unverified; show that limitation rather than claiming source-suite parity.
 
-`quick` always re-inspects the submitted bytes. Consequential unacknowledged findings or a digest
-mismatch refuse before launch. A zero background exit means registration succeeded, not that the run
-passed; capture the `Task #<id> registered` id. A foreground command blocks and its run id, terminal
-status, and exit code must be reported. Any non-zero launch or run exit is evidence to inspect, not an
-acceptance verdict.
+### Register or run
 
-After any successful launch, create the persistent session entry through `fc_tasks` with
-`--flowcrew-task-id <id>`, or immediately add that verified link to an entry the front end already
-created:
+Precondition: exact-digest confirmation and successful setup remain valid. Do not invoke
+`quick`, even for help or a probe, before those conditions. For a background launch, inspect daemon status. Fresh verified status permits registration;
+no listener calls for an explicitly authorized daemon start. Stale/unverified/nonresponsive
+status requires reading identity/provenance, not assuming a hash difference names missing
+fixes. Do not restart a daemon serving other work. If a required fix cannot be proven loaded,
+stop or return for an explicit foreground choice. Foreground is absence of `--background`;
+there is no `--foreground` CLI flag. Do not silently change the approved launch mode.
 
-```bash
-flowcrew fc_tasks create --session <session-id> --flowcrew-task-id <id> --entry '<entry-json>'
-flowcrew fc_tasks update <entry-id> --session <session-id> --flowcrew-task-id <id> --entry '{}'
+Transport unchanged bytes through stdin:
+
+```text
+flowcrew quick --background --project <target> - < docs/task_brief.md
+flowcrew quick --project <target> - < docs/task_brief.md
 ```
 
-Keep both `<session-id>` and `<entry-id>` with the launch record, and retain the exact run id once
-the registered task binds one; wrap-up needs all three identities. The entry must
-record this exact sentence, replacing `<id>` with the registered task id:
-`FlowCrew task <id> is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.`
+Choose the approved one. Add only approved adapter/workflow/campaign/iteration flags and,
+for changed-run continuation, `--acknowledge-brief-warnings=<digest>`. Do not use command substitution to
+transport brief text or acknowledge a new digest automatically. A changed brief/settings
+requires returning to confirmation. A zero background exit means registration succeeded,
+not that the run passed. A nonzero launch/run exit needs diagnosis; neither proves the deliverable.
+Report the returned task/run identity. For a registered task, record this wrap-up obligation
+in existing conversation bookkeeping or the optional ledger:
+
+“FlowCrew task <id> is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.”
+
 After cancellation, update or remove that entry. After re-shipping, replace its id with the new one.
-Record the exact brief digest and the governing baseline's failing identities beside it, so a later
-failure can be attributed without re-deriving them. Creating the entry is prompted by the launch;
-keeping it true is carried by the retained identities into the ordinary landing step below. Close
-it when the wrap-up above is finished, not when the run reaches a terminal status — the run ending
-is what starts the work of accepting it. The verified explicit link is the normal path; the exact
-sentence remains required so legacy readers can recover the association.
 
-A launch you deliberately hold back has no launch to prompt the entry. When rehearsal has produced a
-digest you intend to use later — because a prerequisite round must land first, or because data must
-still accrue — record the entry at that point, carrying the digest, the precondition, and the
-baseline you measured, and mark it blocked by the task it waits on so the dependency is visible to
-the watcher rather than only to you. Work waiting on elapsed time needs this most, because no event
-will arrive to prompt it.
+### Observe
 
-Report the actual mode and settings. For background work, give `flowcrew task list`,
-`flowcrew task show <id>`, `flowcrew task cancel <id>`, and `flowcrew watch`; do not claim daemon
-ownership for a foreground run. `quick` starts work—it does not prove the deliverable.
-
-### 1.7 `watch`: observe stalls without changing state
-
-**Precondition — watch only after registration:** Start watching only after a successful launch has
-returned a `Task #<id> registered` identity; do not invent an id after a refusal or failed launch.
-
-Use `flowcrew watch` for a first-pass heartbeat and edge-triggered alerts, or `flowcrew watch --once`
-for one deterministic scan. `--once` exits 0 after a completed scan; invalid options exit 1. Continuous
-mode runs until stopped. The command is read-only: it does not write run or task status, decide whether
-human wrap-up is complete, or turn a terminal status into acceptance.
-
-## 2. Verification procedures and bars
-
-### 2.1 Write criteria a gate cannot misread
-
-- State the property to prove, not the instrument to use. Mark examples as examples, including a final
-  note that parenthetical material is illustrative rather than a criterion.
-- If an exact means really is required, say that the precise path/API/format is itself the criterion and
-  alternatives are not accepted. Otherwise avoid “must contain/call” wording.
-- Put boundaries, counter-examples, and unacceptable outcomes in the brief. `flowcrew guide` is for a
-  fact the executor cannot obtain or correction of the operator's error, not delayed scope. Repeated
-  engineering guidance is evidence the brief was incomplete; research loops are different because
-  steering on intermediate evidence is their purpose.
-- A prohibition written against an exact case is satisfied by the approximate one. A criterion barring
-  a result that is *identical* to some reference, or *exactly* some value, is obeyed truthfully by a
-  result that is neither quite identical nor quite that value and is substantively both. Where the
-  concern is that something did not really happen, pair the prohibition with a quantity that shows it
-  did — a count, a difference from the control, whether an interval excludes the null — so a report has
-  to exhibit the effect rather than only deny its absence.
-- Prose does not declare an input, but it is still read. §1.3's rule stands for setup, which links only
-  what the frontmatter declares; preflight is the other half — it collects path-shaped strings from the
-  body too and reports each as present or missing. So a sentence naming a path that was only ever an
-  idea makes preflight demand a file by that name, while setup, correctly, never links it. A mention
-  is exempt inside a fenced code block, under a heading whose words mark the section as output rather
-  than input, and when the reference is explicitly negated. An `Out of scope` heading is none of
-  those, so a path named there as excluded is collected as required — and if it exists, setup then
-  tries to overlay the working copy of it onto the worktree and refuses on any uncommitted
-  difference. Naming a path costs something whether the path exists or not: absent, preflight
-  demands it; present, setup wants to overwrite it. To refer to something that is not an input, use
-  one of the exemptions, or do not write it in the shape of a path.
-- Declaring more than the target lacks has its own cost. Setup overlays declared inputs onto the
-  worktree; naming something the worktree already carries asks it to overwrite that copy, which
-  refuses on any uncommitted difference and can pull unrelated local work into the run.
-
-Guidance is a targeted request, not an amendment to the admitted contract. It may supply a missing
-fact or explain how a brief property was violated, but it cannot replace a required property with a
-required result, invalidate a better brief-conforming result, erase a criterion, or widen scope. If
-the desired change would do any of those things, stop the run and revise/rehearse a new brief digest;
-do not smuggle the amendment through `flowcrew guide`. Guidance reaches only its named stage (or an
-explicit run-wide target) on the supervisor's next tick, which may be after that stage has acted.
-Check the addressed stage's `guidance_consumed.md` and the artifact you asked it to change rather than
-the fact that the message was sent.
-
-### 2.2 Demand decision-grade evidence
-
-- For a stateful defect, reproduce it on the unfixed code, then prove the fix changes the result. For a
-  probabilistic defect, compare a failure *rate* before and after. For a guard or mutation, isolate a case
-  where only that guard protects the behavior.
-- Name the repository's reproducible runtime selector. A failed launch, build, test, or lint is an
-  environment fact, never a domain finding.
-- Decide an input's lifetime before teardown. If it is the only copy of something a later consumer needs,
-  preserve it in a documented durable location and bind useful row-count, date-span, file-count, or hash
-  assertions for preflight/setup to verify.
-- When supplying an expected number, require both `within_expected_range` and
-  `method_was_not_adjusted_to_match_expectation`; without the second field, agreement may be anchoring.
-- Before freezing a pre-registered rule, compute its expected qualifying-member count from structural
-  quantities, set a numeric feasibility floor, and revise below that floor before outcomes are seen.
-- For a shared accumulating record, require append/no restructure and a line count to be non-decreasing.
-  Permit an in-place, visibly traced correction of the task's own bad claim.
-- For every census item, state its user-visible consequence. Classify entries with none as drift and say
-  why they are or are not worth fixing; do not automatically turn a count into a zero-target.
-- Every headline statistic must carry its mean, median, and location in its own distribution. Every
-  aggregate must also carry its distribution for both result and baseline: per-item contribution,
-  largest share, leave-one-out, and the smallest number of highest-contributing items whose removal flips
-  the conclusion.
-
-### 2.3 Accept a run independently
-
-The terminal status is **not** the acceptance verdict. Read the durable `<run dir>/.reality-gate.json`
-and the actual deliverables. Reproduce the failing declaration independently; for an executed script,
-rerun its recorded command verbatim with full stdout/stderr and its direct exit code.
-
-A green rerun only makes a false negative plausible. Repeat enough to characterize recurrence,
-identify the first failure's mechanism, and assess residual uncertainty against task risk. Distinguish
-an execution failure from a verdict: a near-instant, zero-token attempt calls for inspecting its
-`live.log` and adapter transition before treating it as substantive evidence.
-
-Before reporting a decision-changing number, ask what the probe returns when it is broken. If the answer
-is something plausible, verify it a second way. Prefer structured parsing to lossy shell pipelines.
-
-### 2.4 A conclusion you did not derive arrives without its evidence
-
-Relaying what a subagent, a report, or an earlier document concluded preserves its confident tone
-and drops the chain that earned it. State whose conclusion it is, or re-establish it yourself before
-adopting it — the version that collapses under one question was never yours to assert.
-
-The same discipline applies to explanations you reach for. **"Flaky" is an observation awaiting a
-cause, not a cause.** A second failure of the same family obliges you to look for a shared external
-variable rather than label it again; the fastest way to find one is a controlled comparison that
-changes a single condition. Three separate flaky labels in one session turned out to be one
-mechanism, and each label had ended the investigation that would have found it.
-
-### 2.5 Review the deciding artifact and mechanism
-
-For a UI, generated report, document, or CLI output, inspect the actual rendered, served, or readable
-artifact—not only source and metric totals. Match environment to property: use the real served path for
-latency, authentication, caching, and integration; deterministic headless rendering is enough only for
-rendering properties.
-
-When a result surprises you, inspect the deciding code, query, formula, protocol, instrument setting,
-rubric, predicate, or other mechanism before theorizing. Also prove an experiment actually varied the
-variable it claims to test.
-
-### 2.6 Divide ownership by whether failure announces itself
-
-FlowCrew's research loop explores within the question in the brief; the operator changes the question.
-The split is not mechanical work versus judgement. Ask whether the failure announces itself or returns
-a plausible value. Announcing failures—missing inputs, impossible counts, mismatched bytes, contradicted
-claims—belong in commands and gates. Plausible values can still answer the wrong framing, so the operator
-must expose assumptions, challenge the question, and judge the result independently. The boundary moves:
-after a check reliably forces an operator error into the open, that failure belongs on the machine side.
-
-### 2.7 Archive, reclaim, and stop safely
-
-Read and independently verify the result, archive unique output, stop any watcher you started, then
-ask `land` for its complete read-only inventory before removing a disposable worktree/branch:
+Precondition: successful background registration returned an exact task identity. Run the
+read-only watch command; `--once` exits 0, invalid options exit 1. It does not write run or task status:
 
 ```bash
-flowcrew land --run <run-id>
+flowcrew watch --once
 ```
 
-Review every tracked, untracked, ignored, at-risk, and regenerable item it reports. Archive failed
-or invalid results unchanged with an `INVALID.md` or `SUPERSEDED.md` marker explaining the defect.
-If the audit refuses or non-force removal would refuse, investigate; do not close the ledger.
+## Ownership and verification
 
-Once the result is accepted, independent verification and archival are complete, pass the retained
-entry/session/run identity into the same explicit reclaim request:
+As an instruction for this skill, keep the research loop within the question in the brief;
+the operator changes the question. The split is not mechanical work versus judgement: ask
+whether failure announces itself or returns a plausible value. A new reproducible failure
+belongs in a mechanical check when possible; the boundary moves as evidence improves.
+Human acceptance still needs a second way to verify plausible results, actual rendered/served
+artifacts when required, and inspection of the deciding code, query, formula or instrument.
+Reproduce a claimed defect independently, characterize recurrence and its first mechanism,
+and assess residual uncertainty. Archive failed or invalid results unchanged; preserve the
+only copy of unique work. The tracked specification suite expresses intended behavior;
+change it only for a task-authorized contradiction and explain which assertion and why.
+Keep environment-specific probes in the invocation's private temporary root or declared
+run files, outside the collected public specification directory.
 
-```bash
-flowcrew land --run <run-id> --remove --acknowledge-regenerable=<audited-count> \
-  --complete-fc-task <entry-id> --fc-task-session <session-id>
-```
+## Human wrap-up
 
-This is a human acceptance step, not an automatic reaction to terminal run status. `land` proves
-the exact entry/run/worktree binding before mutation and completes the entry only after worktree
-removal, prune, and non-force branch deletion all succeed. If any cleanup or wrap-up item remains,
-omit the closure identity and leave the entry open. A post-reclaim ledger failure exits nonzero and
-prints a guarded repair command; run it only after checking the reported exact identity. The durable
-`operator_wrap_up_required` event and the renderer's `wrap-up-overdue` row remain mechanical
-backstops, but neither has to be invoked or remembered for this normal path to keep the ledger true.
+When work ends, read the terminal report, durable rejection/repair evidence, configured
+validation delta and preservation inventory. Assess every criterion and unresolved limitation.
+A terminal status, exit zero or a model's summary alone does not establish acceptance.
+Do not discard a failed run's useful artifacts or infer that a ceiling is a metric win.
+Use `land` audit before any authorized removal; removal and optional ledger closure are
+explicit operator decisions. [Operations](../guide/operations.md#preserve-and-reclaim)
+defines the preservation boundary.
 
-Do not edit a project while its run is active; scope attribution can restore the edit as an unauthorized
-stage write. Permanent machine-independent tests belong in the tracked specification suite. One-off,
-networked, browser-dependent, or host-specific harnesses belong under the operating-system temporary
-root or the run directory. The scheduler owns one-active-run and scope behavior; status commands own
-freshness. The operator still owns acceptance and cleanup.
-
-If `flowcrew` is unavailable, stop and provide:
-`git clone https://github.com/cuibuaa/flow-crew.git && cd flow-crew && npm install && npm link`.
+Once the result is accepted and independent verification/archival are complete, use
+`flowcrew land --run <run-id>` to audit preservation. Removal remains an explicit authorized
+choice. If the operator retained an exact ledger closure identity, carry
+`--complete-fc-task <entry-id> --fc-task-session <session-id>` into that authorized removal;
+otherwise omit the closure identity and leave the entry open. Closure occurs only after
+worktree removal, prune and non-force branch deletion all succeed. It is not an automatic
+reaction to terminal status; [operations](../guide/operations.md#preserve-and-reclaim) owns
+the full removal and closure contract.

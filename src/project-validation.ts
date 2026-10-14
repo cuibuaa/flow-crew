@@ -1,8 +1,15 @@
-import { spawn } from 'node:child_process';
+import { errorMessage } from './source_services/cli-inputs.js';
+import { appendEngineFile, withEngineIntegrity } from './engine-integrity.js';
+import { CommandActivityTracker } from './command-activity.js';
+import { spawnOwnedCommand } from './adapters/base.js';
+import { mkdtempSync, rmSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { validationEnvironment } from './validation-environment.js';
 import { join, resolve } from 'node:path';
 import { parseTapOutput } from './tap-output.js';
-import { loadProjectDefaults } from './config.js';
+import { loadEngineDefaults } from './config.js';
+import { discoverConfiguredPackages } from './scheduler/sched_admission/project-capabilities.js';
 
 export type ValidationRole = 'build' | 'test' | 'lint';
 export type PackageRunner = 'npm' | 'pnpm' | 'yarn' | 'bun';
@@ -47,7 +54,19 @@ export interface ValidationDiscovery {
 }
 
 export interface ValidationRunRequest extends ValidationCommand {
+  /** Prepare current lockfiles before this validation batch's first command. */
+  prepareDependencies?: boolean;
+  /** An enclosing stage may narrow the configured command deadline. */
+  timeoutMs?: number;
+  abortSignal?: AbortSignal;
   cwd: string;
+  /** Parent-supplied run anchor; pre-admission validation uses a private one. */
+  runDir?: string;
+  /** Attempt whose pre-execution prerequisites this configured command serves. */
+  execution?: { stageId: string; attemptIndex: number; attemptStartedAt: string };
+  /** Ordinary project inputs and explicit home/config reads. Reserved control,
+   * credential and executable-injection settings are suppressed with a diagnostic. */
+  env?: NodeJS.ProcessEnv;
   observer?: ValidationProgressObserver;
 }
 
@@ -59,6 +78,7 @@ export interface ValidationProgressObserver {
 }
 
 export interface ValidationRunResponse {
+  dependencyPreparationFailed?: boolean;
   exitCode: number | null;
   stdout?: string;
   stderr?: string;
@@ -86,6 +106,7 @@ export interface ValidationCommandResult {
 
 export interface ValidationGateCriterion {
   role: ValidationRole;
+  display?: string;
   rule: 'must_remain_green' | 'no_regression_from_baseline' | 'baseline_unresolved' | 'not_configured';
   baselineFailureCount?: number;
   baselineFailureIdentifiers: string[];
@@ -103,6 +124,8 @@ export interface ProjectValidationBaseline {
 }
 
 export interface ProjectValidationDependencies {
+  remainingMs?: () => number;
+  abortSignal?: AbortSignal;
   fs?: ValidationFileSystem;
   runCommand?: ValidationCommandRunner;
   declaredCommands?: readonly BriefValidationCommand[];
@@ -116,6 +139,7 @@ export interface ProjectValidationDependencies {
 
 export interface ValidationDeltaResult {
   role: ValidationRole;
+  display?: string;
   state: 'pass' | 'regression' | 'unresolved';
   reason: string;
   newFailureIdentifiers: string[];
@@ -313,10 +337,6 @@ export function validationPathImpacts(
   )) === index);
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function packageRunnerFromField(value: unknown): PackageRunner | undefined {
   if (typeof value !== 'string') return undefined;
   const name = value.trim().split('@')[0];
@@ -335,12 +355,23 @@ function lockfileEvidence(projectDir: string, fs: ValidationFileSystem): Array<{
   return candidates.filter((candidate) => fs.exists(join(projectDir, candidate.path)));
 }
 
+function discoverPackageRunner(manifest: Record<string, unknown>, root: string, fs: ValidationFileSystem): Pick<ValidationDiscovery, 'runner' | 'runnerEvidence' | 'reason'> {
+  const declared = packageRunnerFromField(manifest.packageManager);
+  const locks = lockfileEvidence(root, fs);
+  const runners = [...new Set(locks.map(entry => entry.runner))];
+  if (declared) return { runner: declared, runnerEvidence: `package.json packageManager=${String(manifest.packageManager)}` };
+  if (runners.length === 1) return { runner: runners[0], runnerEvidence: locks.map(entry => entry.path).join(', ') };
+  return { reason: runners.length > 1
+    ? `Package-manager lockfiles disagree: ${locks.map(entry => entry.path).join(', ')}`
+    : 'No packageManager field or recognized lockfile identifies the package runner' };
+}
+
 function commandFor(role: ValidationRole, runner: PackageRunner): ValidationCommand {
   const args = ['run', role];
   return { role, command: runner, args, display: `${runner} ${args.join(' ')}` };
 }
 
-function inferredCommand(
+function configuredCommand(
   role: ValidationRole,
   command: string,
   args: string[],
@@ -492,6 +523,7 @@ function declaresPythonDependency(sections: Map<string, string[]>, packageName: 
 
 interface ValidationDiscoveryDetails {
   discovery: ValidationDiscovery;
+  projectDeclarations: Set<ValidationCommand>;
   unresolvedProjectRoles: ValidationRole[];
 }
 
@@ -503,8 +535,16 @@ function discoverProjectValidationDetails(
   const packagePath = join(root, 'package.json');
   const makefilePath = join(root, 'Makefile');
   const pyprojectPath = join(root, 'pyproject.toml');
-  const configPaths = [packagePath, makefilePath, pyprojectPath].filter((path) => fs.exists(path));
-  const commands = new Map<ValidationRole, ValidationCommand>();
+  const toxPath = join(root, 'tox.ini');
+  const pytestPath = join(root, 'pytest.ini');
+  const configPaths = [packagePath, makefilePath, pyprojectPath, toxPath, pytestPath].filter((path) => fs.exists(path));
+  const commands: ValidationCommand[] = [];
+  const projectDeclarations = new Set<ValidationCommand>();
+  const declareCommand = (command: ValidationCommand): void => {
+    commands.push(command);
+    projectDeclarations.add(command);
+  };
+  const hasRole = (role: ValidationRole): boolean => commands.some(command => command.role === role);
   const unresolvedProjectRoles = new Set<ValidationRole>();
   const diagnostics: string[] = [];
   let runner: PackageRunner | undefined;
@@ -519,23 +559,13 @@ function discoverProjectValidationDetails(
         ? manifest.scripts as Record<string, unknown>
         : {};
       const scriptRoles = ROLES.filter((role) => typeof scripts[role] === 'string' && Boolean((scripts[role] as string).trim()));
-      const declaredRunner = packageRunnerFromField(manifest.packageManager);
-      const locks = lockfileEvidence(root, fs);
-      const lockRunners = [...new Set(locks.map((entry) => entry.runner))];
-      if (declaredRunner) {
-        runner = declaredRunner;
-        runnerEvidence = `package.json packageManager=${String(manifest.packageManager)}`;
-      } else if (lockRunners.length === 1) {
-        runner = lockRunners[0];
-        runnerEvidence = locks.filter((entry) => entry.runner === runner).map((entry) => entry.path).join(', ');
-      } else {
-        diagnostics.push(lockRunners.length > 1
-          ? `Package-manager lockfiles disagree: ${locks.map((entry) => entry.path).join(', ')}`
-          : 'No packageManager field or recognized lockfile identifies the package runner');
-      }
+      const manager = discoverPackageRunner(manifest, root, fs);
+      runner = manager.runner;
+      runnerEvidence = manager.runnerEvidence;
+      if (manager.reason) diagnostics.push(manager.reason);
       if (runner) {
         for (const role of scriptRoles) {
-          commands.set(role, { ...commandFor(role, runner), evidencePath: packagePath });
+          declareCommand({ ...commandFor(role, runner), evidencePath: packagePath });
         }
       } else {
         scriptRoles.forEach((role) => unresolvedProjectRoles.add(role));
@@ -549,8 +579,8 @@ function discoverProjectValidationDetails(
     try {
       const makefile = fs.readText(makefilePath);
       for (const role of ROLES) {
-        if (commands.has(role) || !new RegExp(`^${role}\\s*:(?!=)`, 'm').test(makefile)) continue;
-        commands.set(role, inferredCommand(role, 'make', [role], makefilePath));
+        if (hasRole(role) || !new RegExp(`^${role}\\s*:(?!=)`, 'm').test(makefile)) continue;
+        declareCommand(configuredCommand(role, 'make', [role], makefilePath));
       }
     } catch (error) {
       diagnostics.push(`Cannot read Makefile: ${errorMessage(error)}`);
@@ -561,35 +591,43 @@ function discoverProjectValidationDetails(
     try {
       const pyproject = fs.readText(pyprojectPath);
       const sections = pyprojectSections(pyproject);
-      if (!commands.has('build') && sections.has('build-system')) {
-        commands.set('build', inferredCommand('build', 'python', ['-m', 'build'], pyprojectPath));
+      if (sections.has('build-system')) {
+        commands.push(configuredCommand('build', 'python', ['-m', 'build'], pyprojectPath));
       }
-      if (!commands.has('test')
-          && ([...sections.keys()].some((section) => /^tool\.pytest(?:\.|$)/.test(section))
+      if (([...sections.keys()].some((section) => /^tool\.pytest(?:\.|$)/.test(section))
             || declaresPythonDependency(sections, 'pytest'))) {
-        commands.set('test', inferredCommand('test', 'python', ['-m', 'pytest'], pyprojectPath));
+        commands.push(configuredCommand('test', 'python', ['-m', 'pytest'], pyprojectPath));
       }
-      if (!commands.has('lint')
-          && ([...sections.keys()].some((section) => /^tool\.ruff(?:\.|$)/.test(section))
+      if (([...sections.keys()].some((section) => /^tool\.ruff(?:\.|$)/.test(section))
             || declaresPythonDependency(sections, 'ruff'))) {
-        commands.set('lint', inferredCommand('lint', 'python', ['-m', 'ruff', 'check', '.'], pyprojectPath));
+        commands.push(configuredCommand('lint', 'python', ['-m', 'ruff', 'check', '.'], pyprojectPath));
       }
     } catch (error) {
       diagnostics.push(`Cannot read pyproject.toml: ${errorMessage(error)}`);
     }
   }
 
-  const discoveredCommands = ROLES.flatMap((role) => {
-    const command = commands.get(role);
-    return command ? [command] : [];
-  });
+  // Legacy Python projects declare the runner in INI files. setup.py alone
+  // describes packaging, not a test recipe; do not guess one from its presence.
+  for (const path of [toxPath, pytestPath]) {
+    if (!fs.exists(path)) continue;
+    try {
+      const text = fs.readText(path);
+      if (/^\s*\[testenv(?::[^\]]+)?\]/m.test(text) && /^\s*commands\s*=/m.test(text)) {
+        declareCommand(configuredCommand('test', 'tox', [], path));
+      } else if (/^\s*\[pytest\]/m.test(text) && !commands.some(command => command.command === 'python' && command.args.join(' ') === '-m pytest')) {
+        commands.push(configuredCommand('test', 'python', ['-m', 'pytest'], path));
+      }
+    } catch (error) { diagnostics.push(`Cannot read ${path}: ${errorMessage(error)}`); }
+  }
+  const discoveredCommands = ROLES.flatMap(role => commands.filter(command => command.role === role));
   const unresolvedRoles = ROLES.filter((role) => unresolvedProjectRoles.has(role));
-  const missingRoles = ROLES.filter((role) => !commands.has(role));
+  const missingRoles = ROLES.filter((role) => !hasRole(role));
   const state: ValidationDiscovery['state'] = discoveredCommands.length === 0
     ? 'unknown'
     : missingRoles.length === 0 ? 'configured' : 'partial';
   const defaultReason = configPaths.length === 0
-    ? 'No recognized package.json, Makefile, or pyproject.toml validation declarations were found'
+    ? 'No recognized Node, Make, or Python validation declarations were found'
     : 'Recognized project configuration declares no inferable build, test, or lint command';
   return {
     discovery: {
@@ -602,6 +640,7 @@ function discoverProjectValidationDetails(
       missingRoles,
       ...(state === 'unknown' ? { reason: [...diagnostics, defaultReason].join('; ') } : {}),
     },
+    projectDeclarations,
     unresolvedProjectRoles: unresolvedRoles,
   };
 }
@@ -639,8 +678,8 @@ function unknownReconciliation(discovery: ValidationDiscovery, reason: string): 
 
 /**
  * Reconcile operator knowledge with target-owned configuration role by role.
- * Project commands govern; brief commands fill gaps, exact overlap corroborates,
- * and disagreement makes the whole baseline unknown before anything executes.
+ * Project declarations govern; brief commands replace guesses and fill gaps.
+ * Exact overlap corroborates; conflicting declarations make the baseline unknown.
  */
 export function reconcileProjectValidation(
   projectDir: string,
@@ -677,47 +716,37 @@ export function reconcileProjectValidation(
     );
   }
 
-  const projectByRole = new Map(discovery.commands.map((command) => [command.role, command]));
   const commands: ValidationCommand[] = [];
   for (const role of ROLES) {
-    const projectCommand = projectByRole.get(role);
+    const projectCommands = discovery.commands.filter(command => command.role === role);
+    const projectCommand = projectCommands.find(command => details.projectDeclarations.has(command));
     const declaration = declaredByRole.get(role);
     if (projectCommand && declaration) {
-      if (!sameArgv(projectCommand, declaration)) {
+      const matching = projectCommands.find(command => details.projectDeclarations.has(command) && sameArgv(command, declaration));
+      if (!matching) {
         const projectEvidence = projectCommand.evidencePath ?? discovery.configPath;
         return unknownReconciliation(
           discovery,
           `Validation command conflict for ${role}: project declaration at ${projectEvidence} specifies ${JSON.stringify(argv(projectCommand))}, but brief declaration at ${declaration.evidencePath} specifies ${JSON.stringify(argv(declaration))}. Project configuration governs; remove the overlapping brief declaration or make its argv exactly agree.`,
         );
       }
-      const projectEvidence = projectCommand.evidencePath ?? discovery.configPath;
-      commands.push({
-        ...projectCommand,
-        provenance: {
-          source: 'project',
-          evidencePath: projectEvidence,
-          corroboratedBy: [declaration.evidencePath],
-        },
-      });
+      matching.provenance = { source: 'project', evidencePath: matching.evidencePath ?? discovery.configPath, corroboratedBy: [declaration.evidencePath] };
+    }
+    if (!declaration || projectCommand) {
+      commands.push(...projectCommands);
       continue;
     }
-    if (projectCommand) {
-      commands.push(projectCommand);
-      continue;
-    }
-    if (declaration) {
-      commands.push({
-        role,
-        command: declaration.command,
-        args: [...declaration.args],
-        display: argv(declaration).join(' '),
+    commands.push({
+      role,
+      command: declaration.command,
+      args: [...declaration.args],
+      display: argv(declaration).join(' '),
+      evidencePath: declaration.evidencePath,
+      provenance: {
+        source: 'brief',
         evidencePath: declaration.evidencePath,
-        provenance: {
-          source: 'brief',
-          evidencePath: declaration.evidencePath,
-        },
-      });
-    }
+      },
+    });
   }
 
   const missingRoles = ROLES.filter((role) => !commands.some((command) => command.role === role));
@@ -737,29 +766,49 @@ function boundedOutput(value: string, maxBytes: number): string {
   return `[... ${bytes.length - maxBytes} earlier bytes omitted ...]\n${bytes.subarray(bytes.length - maxBytes).toString('utf-8')}`;
 }
 
-export const runValidationCommand: ValidationCommandRunner = (request) => new Promise((resolveResult) => {
+const executeValidationCommand: ValidationCommandRunner = async (request) => {
+  if (request.abortSignal?.aborted || (request.timeoutMs !== undefined && request.timeoutMs <= 0)) return { exitCode: null, error: 'Validation refused: enclosing stage deadline or control abort', durationMs: 0 };
+  const environmentRoot = mkdtempSync(join(tmpdir(), 'flowcrew-validation-'));
+  try {
+  const environment = validationEnvironment(environmentRoot, process.env, request.env);
+  const launch = () => new Promise<ValidationRunResponse>((resolveResult) => {
   const started = Date.now();
-  const child = spawn(request.command, request.args, {
+  const { child, stop } = spawnOwnedCommand(request.command, request.args, {
     cwd: request.cwd,
-    env: process.env,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    env: environment.env,
   });
+  const activity = request.runDir && request.execution ? new CommandActivityTracker({
+    runDir: request.runDir, ...request.execution,
+  }) : undefined;
+  activity?.bindProcess(child.pid, 'command');
+  activity?.started(request.role, request.display);
+  const publishOutput = (chunk: string): void => {
+    if (request.runDir && request.execution) appendEngineFile(
+      join(request.runDir, 'stages', request.execution.stageId, 'live.log'), chunk,
+    );
+  };
   let stdout = '';
-  let stderr = '';
+  let stderr = environment.removed.length
+    ? `FlowCrew validation environment: suppressed engine/control or credential settings: ${environment.removed.join(', ')}. Supply ordinary project inputs through the command environment; reserved settings are isolated.\n`
+    : '';
   let settled = false;
   let timedOut = false;
+  let spawnError: string | undefined;
   // A project's suite grows as rounds add tests, and ship-setup runs it twice.
   // Hardcoding this meant the refusal named the timeout while the cause was the
   // suite's size plus whatever else the machine was doing.
   let timeoutMs = 45 * 60 * 1000;
   try {
-    const configured = loadProjectDefaults(request.cwd).validation_timeout_ms;
+    const configured = loadEngineDefaults().validation_timeout_ms;
     if (Number.isFinite(configured) && configured > 0) timeoutMs = configured;
-  } catch { /* fall back to the built-in when the project has no defaults file */ }
+  } catch { /* retain the built-in bound if engine configuration is unavailable */ }
+  if (request.timeoutMs !== undefined) timeoutMs = Math.min(timeoutMs, Math.max(1, request.timeoutMs));
+  const onAbort = () => stop();
+  request.abortSignal?.addEventListener('abort', onAbort, { once: true });
+  if (request.abortSignal?.aborted) onAbort();
   const timeout = setTimeout(() => {
     timedOut = true;
-    child.kill();
+    stop();
   }, timeoutMs);
   timeout.unref();
   const heartbeat = setInterval(() => {
@@ -769,32 +818,84 @@ export const runValidationCommand: ValidationCommandRunner = (request) => new Pr
   const settle = (exitCode: number | null, signal?: NodeJS.Signals | null, error?: string): void => {
     if (settled) return;
     settled = true;
+    activity?.close();
     clearTimeout(timeout);
     clearInterval(heartbeat);
+    request.abortSignal?.removeEventListener('abort', onAbort);
     resolveResult({
       exitCode,
       stdout,
       stderr,
       durationMs: Date.now() - started,
-      ...(error ? { error } : {}),
+      ...(error ? { error } : request.abortSignal?.aborted ? { error: 'Validation cancelled by enclosing stage' } : {}),
       ...(!error && timedOut ? { error: `Validation command timed out after ${timeoutMs}ms` } : {}),
       ...(!error && !timedOut && signal ? { error: `Validation process ended by signal ${signal}` } : {}),
     });
   };
   child.stdout?.on('data', (chunk: Buffer | string) => {
     const value = chunk.toString();
-    stdout = boundedOutput(stdout + value, 256 * 1024);
+    stdout += value;
+    publishOutput(value);
     try { request.observer?.onCommandOutput?.(request, 'stdout', value); } catch { /* display callbacks cannot change validation */ }
   });
   child.stderr?.on('data', (chunk: Buffer | string) => {
     const value = chunk.toString();
-    stderr = boundedOutput(stderr + value, 256 * 1024);
+    stderr += value;
+    publishOutput(value);
     try { request.observer?.onCommandOutput?.(request, 'stderr', value); } catch { /* display callbacks cannot change validation */ }
   });
-  child.once('error', (error) => { settle(null, null, error.message); });
+  child.once('error', (error) => { spawnError = error.message; });
   child.once('close', (code, signal) => {
-    settle(code, signal);
+    settle(code, signal, spawnError);
   });
+  });
+  return await launch();
+  } finally { rmSync(environmentRoot, { recursive: true, force: true }); }
+};
+
+/** This command boundary owns the dependency environment, using current project
+ * lockfiles even when validation commands come from the setup ready record.
+ * Never infer readiness from an existing dependency directory. */
+export const runValidationCommand: ValidationCommandRunner = (request) => withEngineIntegrity({
+  projectDir: request.cwd, runDir: request.runDir, stageId: '_validation',
+}, async () => {
+  const started = Date.now();
+  const remaining = () => request.timeoutMs === undefined ? undefined : request.timeoutMs - (Date.now() - started);
+  if (request.prepareDependencies) {
+    try {
+      for (const { root, manifest } of discoverConfiguredPackages(request.cwd)) {
+        if (!lockfileEvidence(root, nodeValidationFs).length) continue;
+        const manager = discoverPackageRunner(manifest, root, nodeValidationFs);
+        if (!manager.runner) {
+          return {
+            exitCode: null, dependencyPreparationFailed: true,
+            error: `Dependency preparation refused: ${manager.reason}`, durationMs: Date.now() - started,
+          };
+        }
+        const frozenArgs: Record<PackageRunner, string[]> = {
+          npm: ['ci'], pnpm: ['install', '--frozen-lockfile'],
+          yarn: ['install', manager.runner === 'yarn' && (manifest.packageManager
+            ? !/^yarn@1(?:\.|$)/.test(String(manifest.packageManager))
+            : /\b__metadata:/.test(nodeValidationFs.readText(join(root, 'yarn.lock'))))
+            ? '--immutable' : '--frozen-lockfile'],
+          bun: ['install', '--frozen-lockfile'],
+        };
+        const args = frozenArgs[manager.runner];
+        const display = [manager.runner, ...args].join(' ');
+        const response = await executeValidationCommand({ ...request, cwd: root,
+          command: manager.runner, args, display, timeoutMs: remaining() });
+        if (response.exitCode !== 0 || response.error) return {
+          ...response, dependencyPreparationFailed: true, durationMs: Date.now() - started,
+          stderr: `Dependency preparation failed: ${display} in ${root}\n${response.stderr ?? ''}`,
+        };
+      }
+    } catch (error) {
+      return { exitCode: null, dependencyPreparationFailed: true,
+        error: `Dependency preparation refused: ${errorMessage(error)}`, durationMs: Date.now() - started };
+    }
+  }
+  const response = await executeValidationCommand({ ...request, timeoutMs: remaining() });
+  return { ...response, durationMs: Date.now() - started };
 });
 
 interface FailureFacts {
@@ -912,7 +1013,7 @@ function criterionFor(result: ValidationCommandResult): ValidationGateCriterion 
         ? failureEvidence === 'partial'
           ? `${result.role} failed with partial evidence: retained failing identifiers are a lower bound and any observed count is not a proven whole-run count; a later failure remains unresolved because red-to-red comparisons require complete evidence. ${result.reason ?? 'Validation output was incomplete'}`
           : `${result.role} may improve, but may not add a failing identifier or exceed the baseline failure count${result.reason ? `. ${result.reason}` : ''}`
-        : `${result.role} failed at baseline, but its failing identity/count could not be parsed; a later failure is unresolved, never treated as zero. ${result.reason ?? 'Failure identification did not record a cause'}`,
+        : `${result.role} failed at baseline, but its failing identity/count could not be parsed; a later failure with identifiable failures is unresolved, never treated as zero, and one that again has none cannot show a regression. ${result.reason ?? 'Failure identification did not record a cause'}`,
     };
   }
   return {
@@ -945,17 +1046,25 @@ export async function runProjectValidationBaseline(
       ? discoverProjectValidation(root, fs)
       : reconcileProjectValidation(root, declaredCommands, fs);
   const results: ValidationCommandResult[] = [];
+  // Nothing discovered and nothing declared leaves the engine without validation for this project, recorded as not
+  // configured like a project without a lint command; only an operator declaration that cannot be honoured is unresolved.
+  const unresolved = discovery.state === 'unknown' && (declaredCommands?.length ?? 0) > 0;
+  let preparation: ValidationRunResponse | undefined;
+  let prepared = false;
 
-  for (const role of ROLES) {
-    const command = discovery.commands.find((candidate) => candidate.role === role);
-    if (!command) {
+  for (const command of ROLES.flatMap<ValidationCommand | Pick<ValidationCommand, 'role'>>(role => {
+    const configured = discovery.commands.filter(candidate => candidate.role === role);
+    return configured.length ? configured : [{ role }];
+  })) {
+    const role = command.role;
+    if (!('display' in command)) {
       results.push({
         role,
-        state: discovery.state === 'unknown' ? 'unresolved' : 'not_configured',
+        state: unresolved ? 'unresolved' : 'not_configured',
         durationMs: 0,
         output: '',
         failureIdentifiers: [],
-        failureIdentity: discovery.state === 'unknown' ? 'unknown' : 'none',
+        failureIdentity: unresolved ? 'unknown' : 'none',
         reason: discovery.state === 'unknown'
           ? discovery.reason ?? 'Validation baseline is unknown'
           : declaredCommands && declaredCommands.length > 0
@@ -981,10 +1090,16 @@ export async function runProjectValidationBaseline(
     let response: ValidationRunResponse;
     try { dependencies.observer?.onCommandStart?.(command); } catch { /* display callbacks cannot change validation */ }
     try {
-      response = await runner({ ...command, cwd: root, observer: dependencies.observer });
+      response = preparation ?? await runner({ ...command, cwd: root, observer: dependencies.observer,
+        prepareDependencies: !prepared,
+        ...(dependencies.remainingMs ? { timeoutMs: dependencies.remainingMs() } : {}),
+        ...(dependencies.abortSignal ? { abortSignal: dependencies.abortSignal } : {}) });
     } catch (error) {
       response = { exitCode: null, error: errorMessage(error) };
     }
+    // A failed preparation cannot fall through to later commands on stale deps.
+    if (response.dependencyPreparationFailed) preparation = response;
+    prepared = true;
     try { dependencies.observer?.onCommandFinish?.(command, response); } catch { /* display callbacks cannot change validation */ }
     const durationMs = response.durationMs ?? Math.max(0, now() - started);
     const rawOutput = [response.stdout, response.stderr]
@@ -1043,17 +1158,23 @@ export async function runProjectValidationBaseline(
     projectDir: root,
     discovery,
     results,
-    gateCriteria: results.map(criterionFor),
+    gateCriteria: results.map(result => ({ ...criterionFor(result), ...(result.display ? { display: result.display } : {}) })),
   };
 }
 
 /** Compare a later validation result with its recorded baseline, never assuming unknown means zero. */
+/** A run of a configured command that produced nothing to compare: it could not launch, or failed unidentifiably. */
+function unmeasured(result: ValidationCommandResult): boolean {
+  return (result.state === FAILED_VALIDATION_STATE || result.state === 'launch_error') && result.failureIdentity === 'unknown';
+}
+
 export function evaluateValidationDelta(
   baseline: ProjectValidationBaseline,
   current: ValidationCommandResult[],
 ): ValidationDeltaResult[] {
   return baseline.results.map((prior): ValidationDeltaResult => {
-    const next = current.find((result) => result.role === prior.role);
+    const siblings = baseline.results.filter(result => result.role === prior.role);
+    const next = current.find(result => result.role === prior.role && (siblings.length === 1 || result.display === prior.display));
     if (!next) return { role: prior.role, state: 'unresolved', reason: 'Current validation result is missing', newFailureIdentifiers: [] };
     if (prior.state === 'passed') {
       if (next.state === 'passed') {
@@ -1090,11 +1211,26 @@ export function evaluateValidationDelta(
         newFailureIdentifiers: next.failureIdentifiers,
       };
     }
-    if (prior.state !== FAILED_VALIDATION_STATE) {
-      return { role: prior.role, state: 'unresolved', reason: 'Baseline was not executable/configured', newFailureIdentifiers: [] };
+    if (prior.state === 'not_configured' && next.state === 'not_configured') {
+      // Nothing was ever measured for this role, so nothing can regress; treating it as
+      // unresolved made every gate on a build-less/lint-less project unpassable.
+      return { role: prior.role, state: 'pass', reason: 'Role is not configured in the baseline or now', newFailureIdentifiers: [] };
     }
     if (next.state === 'passed') {
       return { role: prior.role, state: 'pass', reason: 'The red baseline improved to green', newFailureIdentifiers: [] };
+    }
+    if (unmeasured(prior) && unmeasured(next)) {
+      // Neither run produced a comparable result, so nothing here can show a regression; treating it as unresolved
+      // parked every run whose environment cannot run the command at all, such as a browser suite without a browser.
+      return {
+        role: prior.role,
+        state: 'pass',
+        reason: 'Could not run or failed without identifiable failures at baseline and now, so this command cannot show a regression here; the gate judges the change by its own checks',
+        newFailureIdentifiers: [],
+      };
+    }
+    if (prior.state !== FAILED_VALIDATION_STATE) {
+      return { role: prior.role, state: 'unresolved', reason: 'Baseline was not executable/configured', newFailureIdentifiers: [] };
     }
     if (next.state !== FAILED_VALIDATION_STATE || next.failureIdentity === 'unknown') {
       return { role: prior.role, state: 'unresolved', reason: 'Current failure identity/count is unavailable', newFailureIdentifiers: [] };
@@ -1123,5 +1259,5 @@ export function evaluateValidationDelta(
           newFailureIdentifiers,
         }
       : { role: prior.role, state: 'pass', reason: 'No new failure and no known count increase', newFailureIdentifiers: [] };
-  });
+  }).map((result, index) => ({ ...result, ...(baseline.results[index].display ? { display: baseline.results[index].display } : {}) }));
 }

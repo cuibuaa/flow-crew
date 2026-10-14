@@ -44,7 +44,6 @@ interface CreateTaskRequest extends BriefAdmissionSubmission {
   brief: string;
   projectDir?: string;
   workflow: string;
-  supervise: boolean;
   maxIterations: number;
   noCampaign?: boolean;
   campaignId?: string;
@@ -96,6 +95,9 @@ export const createTask = (data: CreateTaskRequest) =>
 
 export const cancelTask = (id: string) =>
   post<{ ok: boolean }>(`${BASE}/tasks/${encodeURIComponent(id)}/cancel`, {});
+
+export const resumeTask = (id: string) =>
+  post<{ new_attempt: number; unit: string }>(`${BASE}/tasks/${encodeURIComponent(id)}/resume`, {});
 
 export const fetchAgents = () => json<Agent[]>(`${BASE}/agents`);
 
@@ -177,7 +179,7 @@ export const fetchInboxOverview = () => json<InboxOverview>(`${BASE}/inbox/overv
 export const resolveInboxItem = (
   runId: string,
   requestId: string,
-  body: { decision: InboxDecision; by?: string; reason?: string; always?: boolean }
+  body: { decision: InboxDecision; by?: string; reason?: string;  }
     & Partial<BriefAdmissionSubmission>,
 ) => postWithBriefAdmission<InboxResolveResult>(
   `${BASE}/inbox/${encodeURIComponent(runId)}/${encodeURIComponent(requestId)}/resolve`,

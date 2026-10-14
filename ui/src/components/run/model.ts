@@ -1,26 +1,7 @@
 import type { RunDetailData, RunEvent, RunStage, RunStageAttempt } from "../../types";
 
-export const NON_TERMINAL_RUN_STATUSES = [
-  "pending",
-  "running",
-  "parked",
-  "awaiting_approval",
-] as const;
-
-export const TERMINAL_RUN_STATUSES = [
-  "complete",
-  "failed",
-  "shipped",
-  "ceiling_hit",
-  "escalated",
-  "reality_gate_failed",
-  "phase_complete",
-  "stopped",
-  "incomplete",
-] as const;
-
-const SUCCESSFUL_RUN_STATUSES = new Set<string>(["complete", "shipped", "ceiling_hit"]);
-const TERMINAL_RUN_STATUS_SET = new Set<string>(TERMINAL_RUN_STATUSES);
+import { isTerminalRunStatus, isSuccessfulRunStatus } from "../../lib/run-status";
+export { NON_TERMINAL_RUN_STATUSES, TERMINAL_RUN_STATUSES, isTerminalRunStatus, isSuccessfulRunStatus } from "../../lib/run-status";
 
 const STATUS_DESCRIPTIONS: Record<string, string> = {
   pending: "Registered and waiting to start.",
@@ -38,20 +19,12 @@ const STATUS_DESCRIPTIONS: Record<string, string> = {
   incomplete: "The budget ended while useful work was still in progress.",
 };
 
-export function isTerminalRunStatus(status: string): boolean {
-  return TERMINAL_RUN_STATUS_SET.has(status);
-}
-
-export function isSuccessfulRunStatus(status: string): boolean {
-  return SUCCESSFUL_RUN_STATUSES.has(status);
-}
-
 export function runStatusDescription(status: string): string {
   return STATUS_DESCRIPTIONS[status] ?? "This lifecycle status is unknown to this dashboard build.";
 }
 
 export function runStatusTone(status: string): "success" | "error" | "warning" | "active" | "neutral" {
-  if (SUCCESSFUL_RUN_STATUSES.has(status)) return "success";
+  if (isSuccessfulRunStatus(status)) return "success";
   if (["failed", "reality_gate_failed", "incomplete", "escalated"].includes(status)) return "error";
   if (["parked", "awaiting_approval", "stopped", "ceiling_hit"].includes(status)) return "warning";
   if (status === "running") return "active";
@@ -60,6 +33,12 @@ export function runStatusTone(status: string): "success" | "error" | "warning" |
 
 export function realRunStages(stages: RunStage[] | null | undefined): RunStage[] {
   return Array.isArray(stages) ? stages.filter((stage) => stage?.id && stage.id !== "_supervisor") : [];
+}
+
+export function historicalRunStages(run: RunDetailData): Array<RunStage & { historyIteration: number }> {
+  return (run.stageHistory ?? []).map(({ stageId, iteration, status }) => ({
+    ...status, id: stageId, role: '', depends_on: [], historyIteration: iteration,
+  }));
 }
 
 function finiteNumber(value: unknown): number | null {
@@ -182,22 +161,31 @@ export interface FailureHistory {
   failedGateIds: string[];
 }
 
-export function runFailureHistory(stages: RunStage[]): FailureHistory {
+export function runFailureHistory(stages: RunStage[], historical: RunStage[] = []): FailureHistory {
   const realStages = realRunStages(stages);
   let failedAttempts = 0;
   let failedAttemptsExact = true;
   const stageIds: string[] = [];
   const failedStageIds: string[] = [];
   const failedGateIds: string[] = [];
-  for (const stage of realStages) {
+  const seen = new Set<string>();
+  for (const stage of [...realStages, ...historical]) {
     const ledger = stageAttemptLedger(stage, 0);
-    if (ledger.failedAttempts > 0) {
-      failedAttempts += ledger.failedAttempts;
-      stageIds.push(stage.id);
+    const failures = (stage.attempts ?? []).filter((attempt) => {
+      if (attempt.status !== 'failed') return false;
+      if (!attempt.startedAt) return true;
+      const key = JSON.stringify([stage.id, attempt.index, attempt.startedAt]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).length + (ledger.legacyAggregate && stage.status === 'failed' ? 1 : 0);
+    if (failures > 0) {
+      failedAttempts += failures;
+      if (!stageIds.includes(stage.id)) stageIds.push(stage.id);
     }
     if (!ledger.failedAttemptsExact) failedAttemptsExact = false;
-    if (stage.status === "failed") failedStageIds.push(stage.id);
-    if (stage.is_gate && stage.status === "failed") failedGateIds.push(stage.id);
+    if (realStages.includes(stage) && stage.status === "failed") failedStageIds.push(stage.id);
+    if (realStages.includes(stage) && stage.is_gate && stage.status === "failed") failedGateIds.push(stage.id);
   }
   return { failedAttempts, failedAttemptsExact, stageIds, failedStageIds, failedGateIds };
 }
@@ -240,6 +228,20 @@ export interface RunUsageTotal {
 }
 
 export function runUsageTotal(run: RunDetailData): RunUsageTotal {
+  // The state reader accounts for active, retired, evidence and auxiliary
+  // attempts once by execution identity. Summing display rows would count
+  // references twice and omit retired work on older dashboard surfaces.
+  if (run.budget) {
+    const settled = isTerminalRunStatus(run.status) && run.supervisor?.status !== 'running';
+    return {
+      tokens: run.budget.tokens.knownInputTokens + run.budget.tokens.knownOutputTokens,
+      complete: run.budget.tokens.complete && settled,
+      notes: [
+        ...(!run.budget.tokens.complete ? ['recorded attempt usage is incomplete'] : []),
+        ...(!settled ? ['the run or supervisor is still open'] : []),
+      ],
+    };
+  }
   const stages = realRunStages(run.stages);
   const executedStages = stages.filter(stageHasExecution);
   let tokens = 0;
@@ -262,7 +264,7 @@ export function runUsageTotal(run: RunDetailData): RunUsageTotal {
       complete = false;
       notes.push("supervisor usage is not settled");
     }
-  } else {
+  } else if (run.supervise === true) {
     complete = false;
     notes.push("supervisor usage is unavailable");
   }

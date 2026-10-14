@@ -104,19 +104,19 @@ const RULES: Rule[] = [
     all: ['model', 'not supported'],
     any: ATTESTED_MODEL_ERROR,
     fix: 'drop_model',
-    friendly: 'The pinned model is not available on this account. Retried once without the pin (the CLI default is used); set an available model in config/defaults.yaml to make it permanent.',
+    friendly: 'The pinned model is not available on this account. Retried once without the pin (the CLI default is used); set an available model in the engine config/defaults.yaml to make it permanent.',
   },
   {
     all: ['unsupported model'],
     any: ATTESTED_MODEL_ERROR,
     fix: 'drop_model',
-    friendly: 'The pinned model was rejected as unsupported. Retried once without the pin; set an available model in config/defaults.yaml.',
+    friendly: 'The pinned model was rejected as unsupported. Retried once without the pin; set an available model in the engine config/defaults.yaml.',
   },
   {
     all: ['model', 'does not exist'],
     any: ATTESTED_MODEL_ERROR,
     fix: 'drop_model',
-    friendly: 'The pinned model does not exist for this account. Retried once without the pin; fix the model in config/defaults.yaml.',
+    friendly: 'The pinned model does not exist for this account. Retried once without the pin; fix the model in the engine config/defaults.yaml.',
   },
   {
     all: ['unexpected argument'],
@@ -140,7 +140,7 @@ const RULES: Rule[] = [
 const TAIL_BYTES = 4096;
 
 export function diagnoseAdapterFailure(output: string, exitCode: number): Diagnosis {
-  // Timeouts (124) and supervisor aborts (137) are not parameter problems; the
+  // Timeouts (124) and engine aborts (137) are not parameter problems; the
   // caller already classifies them and a "fix" here would be wrong.
   if (exitCode === 0 || exitCode === 124 || exitCode === 137) {
     return { fix: 'none', friendly: '', matched: '' };

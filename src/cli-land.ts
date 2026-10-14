@@ -1,6 +1,7 @@
+import { errorMessage, within, optionValue } from './source_services/cli-inputs.js';
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import {
   createEngineTaskRunResolver,
   defaultFcTasksRoot,
@@ -14,6 +15,8 @@ import {
   fcGlobalDir,
   isTerminalRunStatus,
   resolveRunStatus,
+  terminalArtifactSnapshotName,
+  recordedTerminalArtifactSnapshotNames,
   type StoreState,
 } from './store.js';
 import { isPathSafelyArchived } from './declared-output-archive.js';
@@ -302,28 +305,6 @@ function resolveDependencies(overrides: LandDependencies): ResolvedLandDependenc
   };
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function within(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
-
-function optionValue(args: string[], index: number, option: string): { value: string; consumed: number } {
-  const argument = args[index];
-  const prefix = `${option}=`;
-  if (argument.startsWith(prefix)) {
-    const value = argument.slice(prefix.length);
-    if (!value) throw new Error(`${option} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${option} requires a value`);
-  return { value, consumed: 2 };
-}
-
 export function parseLandArgs(args: string[]): ParsedLandArgs {
   const parsed: ParsedLandArgs = { help: false, json: false, remove: false };
   let runSeen = false;
@@ -487,7 +468,10 @@ function terminalArtifacts(
       };
     }
     const projectPath = resolve(projectDir, path);
-    const snapshotPath = join(runDir, `terminal_${basename(path)}`);
+    const snapshots = state.terminalArtifact === basename(path)
+      ? recordedTerminalArtifactSnapshotNames(state.terminalArtifact)
+      : [terminalArtifactSnapshotName(path)];
+    const snapshotPath = snapshots.map((name) => join(runDir, name)).find((candidate) => fs.exists(candidate)) ?? join(runDir, snapshots[0]);
     const project = safeExistingPath(projectDir, projectPath, fs);
     const snapshot = safeExistingPath(runDir, snapshotPath, fs);
     const reasons = [project.reason, snapshot.reason].filter((item): item is string => Boolean(item));
@@ -970,7 +954,6 @@ export function parseWorktreePorcelain(raw: string): WorktreeRecord[] {
 
 function refusalReasons(
   terminal: boolean,
-  artifacts: LandTerminalArtifact[],
   inventory: LandInventory,
   issues: LandInspectionIssue[],
   removalRequested: boolean,
@@ -978,20 +961,12 @@ function refusalReasons(
 ): string[] {
   const reasons: string[] = [];
   if (!terminal) reasons.push('run has not reached a terminal status');
-  const missing = artifacts.filter((artifact) => !artifact.present);
-  if (missing.length > 0) reasons.push(`declared terminal artifacts are absent: ${missing.map((item) => item.path).join(', ')}`);
   if (issues.length > 0) reasons.push(`inventory inspection is incomplete (${issues.length} issue${issues.length === 1 ? '' : 's'})`);
-  if (inventory.tracked.length > 0) reasons.push(`${inventory.tracked.length} tracked worktree change${inventory.tracked.length === 1 ? ' remains' : 's remain'}`);
-  for (const origin of ['untracked', 'ignored'] as const) {
-    const count = inventory.enumerated.filter((item) => item.origin === origin).length;
-    if (count > 0) reasons.push(`${count} ${origin} ungraded path${count === 1 ? ' remains' : 's remain'}`);
-  }
-  if (inventory.atRiskCommits.length > 0) {
-    reasons.push(`${inventory.atRiskCommits.length} commit${inventory.atRiskCommits.length === 1 ? ' has' : 's have'} no ref that would survive worktree branch deletion`);
-  }
-  if (removalRequested && acknowledgement.suppliedRegenerableCount === undefined) {
+  const ignored = inventory.enumerated.filter((item) => item.origin === 'ignored').length;
+  if (ignored > 0) reasons.push(`${ignored} ignored ungraded path${ignored === 1 ? ' remains' : 's remain'}`);
+  if (removalRequested && acknowledgement.expectedRegenerableCount > 0 && acknowledgement.suppliedRegenerableCount === undefined) {
     reasons.push(`regenerable-path acknowledgement is required: expected ${acknowledgement.expectedRegenerableCount}`);
-  } else if (removalRequested && !acknowledgement.matches) {
+  } else if (removalRequested && acknowledgement.expectedRegenerableCount > 0 && !acknowledgement.matches) {
     reasons.push(`regenerable-path acknowledgement mismatch: received ${acknowledgement.suppliedRegenerableCount}, expected ${acknowledgement.expectedRegenerableCount}`);
   }
   return reasons;
@@ -1008,20 +983,11 @@ function repairsForRefusals(
     if (reason === 'run has not reached a terminal status') {
       return 'Let the run reach a declared terminal state, verify its verdict, then rerun the land audit.';
     }
-    if (reason.startsWith('declared terminal artifacts are absent:')) {
-      return `Restore or produce the named terminal artifact from preserved run evidence before requesting removal (${reason.slice(reason.indexOf(':') + 1).trim()}).`;
-    }
     if (reason.includes('inspection is incomplete')) {
       return 'Resolve every listed UNKNOWN inspection issue and rerun the read-only land audit before requesting removal.';
     }
-    if (reason.includes('tracked worktree change')) {
-      return 'Review each TRACKED path; commit or otherwise preserve intended work, or intentionally revert it outside land, then rerun the audit.';
-    }
-    if (/\b(?:untracked|ignored) ungraded path/.test(reason)) {
+    if (reason.includes('ignored ungraded path')) {
       return 'Review every listed ungraded path and preserve unique source/data/state outside the disposable worktree; only remove proven regenerable material, then rerun the audit.';
-    }
-    if (reason.includes('no ref that would survive')) {
-      return 'Preserve each AT_RISK commit on a surviving branch or remote ref, then rerun the audit.';
     }
     if (reason.startsWith('regenerable-path acknowledgement')) {
       return `After reviewing the regenerable inventory, rerun with --remove --acknowledge-regenerable=${acknowledgement.expectedRegenerableCount}.`;
@@ -1262,7 +1228,6 @@ export async function runLand(
   };
   let reasons = refusalReasons(
     terminal,
-    artifacts,
     inspected.inventory,
     inspectionIssues,
     parsed.remove,

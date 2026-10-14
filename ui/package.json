@@ -9,46 +9,35 @@
     "src",
     "test-support",
     "index.html",
-    "postcss.config.js",
-    "tailwind.config.d.ts",
-    "tailwind.config.js",
-    "tailwind.config.ts",
     "tsconfig.json",
     "tsconfig.node.json",
-    "vite.config.d.ts",
-    "vite.config.js",
     "vite.config.ts",
     "vitest.config.ts"
   ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "build": "node --import tsx ../scripts/build.ts",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tailwindcss/typography": "^0.5.19",
-    "@types/d3": "^7.4.3",
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/addon-web-links": "^0.12.0",
-    "ansi-to-html": "^0.7.2",
-    "d3": "^7.9.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.30.4",
-    "xterm": "^5.3.0"
+    "react-router-dom": "^7.18.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^4.3.4",
-    "autoprefixer": "^10.4.20",
     "jsdom": "^29.0.2",
-    "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.16",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.6.3",
     "vite": "^6.0.3",
     "vitest": "^4.1.4"
+  },
+  "overrides": {
+    "vite": "$vite"
   }
 }

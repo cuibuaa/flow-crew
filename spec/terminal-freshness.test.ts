@@ -1,3 +1,4 @@
+import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   existsSync,
@@ -13,6 +14,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { evaluateTerminalFloor } from '../src/scheduler/sched_admission/brief-contract.js';
+import { type StoreState } from '../src/store.js';
 
 let fcHome: string;
 let previousFcHome: string;
@@ -61,7 +64,7 @@ async function run(
   const state = await scheduler.runWorkflow(
     config, raw, projectDir, adapter, new Map(), undefined,
     join(PROJECT_ROOT, 'config', 'agents'), undefined, brief,
-    true, false, undefined, false,
+    true, undefined, false,
   );
   const runDir = join(fcHome, 'runs', state.runId!);
   let guidance = '';
@@ -74,16 +77,18 @@ async function run(
   return { state, guidance, adapter };
 }
 
-const dispatch = (id: string, scope = ['docs/task_summary.md']) => ({
+const dispatch = (id: string, scope = ['docs/task_summary.md'], outputs = ['docs/task_summary.md']) => ({
   runFiles: {
-    'dispatch.yaml': [
+    'tech_solution.md': '# Planner analysis\nExecute the declared terminal work and verify its freshness.\n',
+    'dispatch.yaml': declaredDispatch([
       `- id: ${id}`,
       '  role: coder',
       '  depends_on: [plan]',
       '  dependency_reasons: {plan: "execute the planned terminal work"}',
       `  scope: [${scope.join(', ')}]`,
       '  prompt_template: do the work',
-    ].join('\n') + '\n',
+      `  artifact_contract: ${JSON.stringify({ version: 1, produces: outputs.map((path, index) => ({ id: `output_${index}`, root: 'project', path })), reads: [], replays: [] })}`,
+    ].join('\n') + '\n'),
   },
 });
 
@@ -137,6 +142,44 @@ terminal_states:
     expect(guidance).toContain('requires at least one non-plan stage to complete during this run');
   }, 60_000);
 
+  it.each(['attempt', 'retired'] as const)('accepts a completed admitted owner write from %s evidence when its current stage is pending', async (kind) => {
+    const projectDir = project();
+    const path = 'docs/task_summary.md';
+    const created = store.createRun(projectDir, 'fixture', 'name: fixture', ['plan', 'finalize']);
+    mkdirSync(join(projectDir, 'docs'), { recursive: true });
+    writeFileSync(join(projectDir, path), '# attributed terminal result\n');
+    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+      pass: true, terminalOwners: { [path]: 'finalize' },
+    }));
+    const state: StoreState = {
+      runId: created.runId, workflowName: 'fixture', projectDir, status: 'running',
+      startedAt: new Date(Date.now() - 1000).toISOString(),
+      stages: { plan: { status: 'complete', retries: 0 }, finalize: { status: 'pending', retries: 0 } },
+      terminalStates: { shipped: { paths: [path] } },
+    };
+    const completedWrite = {
+      index: 1, status: 'complete' as const, startedAt: state.startedAt,
+      completedAt: new Date().toISOString(), writes: [path],
+      duration_ms: 1, exitCode: 0, tokenUsage: 'unknown' as const,
+    };
+    const evaluate = () => scheduler.tryTerminateOnTerminalState(state, {
+      projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 1,
+      adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) },
+    });
+
+    expect((await evaluate()).decision).toBe('deferred');
+    expect(state.status).toBe('running');
+    writeFileSync(join(projectDir, path), '# attributed terminal result\n');
+    if (kind === 'attempt') state.stages.finalize.attempts = [completedWrite];
+    else state.stageEvidence = [{
+      stageId: 'finalize', iteration: 1, status: { status: 'complete', retries: 0, attempts: [completedWrite] },
+      statusPath: 'iterations/1/stages/finalize/status.json', attemptOutputPaths: [],
+    }];
+
+    expect((await evaluate()).decision).toBe('matched');
+    expect(state.status).toBe('shipped');
+  });
+
   it.each([
     { label: 'inferred', stageGlobLine: '', verdictDir: 'docs', verdictName: (i: number) => `stage_${i}_verdict.md` },
     { label: 'configured', stageGlobLine: '    stage_glob: evidence/check_*_verdict.md\n', verdictDir: 'evidence', verdictName: (i: number) => `check_${i}_verdict.md` },
@@ -145,8 +188,8 @@ terminal_states:
     const verdicts: Record<string, string> = {};
     for (let i = 1; i <= 2; i += 1) {
       const relative = `${verdictDir}/${verdictName(i)}`;
-      const content = `# Verdict ${i}\n\nThis substantive verdict is longer than forty bytes and belongs to this run.\n`;
-      writeOld(join(projectDir, relative), content.replace('this run', 'an older run'));
+      const content = `Stage ${i}: pass\n`;
+      writeOld(join(projectDir, relative), content);
       verdicts[relative] = content;
     }
 
@@ -160,7 +203,7 @@ ${stageGlobLine}    floor:
 # Glob freshness fixture
 `, {
       plan: {
-        ...dispatch('refresh_verdicts', ['docs/task_summary.md', ...Object.keys(verdicts)]),
+        ...dispatch('refresh_verdicts', ['docs/task_summary.md', ...Object.keys(verdicts)], ['docs/task_summary.md', ...Object.keys(verdicts)]),
         projectFiles: { 'docs/task_summary.md': '# terminal artifact written by plan\n' },
       },
       refresh_verdicts: {
@@ -189,11 +232,11 @@ terminal_states:
 ---
 # Bug 7 regression fixture
 `, {
-      plan: dispatch('deliver', ['docs/task_summary.md', 'docs/stage_1_verdict.md']),
+      plan: dispatch('deliver', ['docs/task_summary.md', 'docs/stage_1_verdict.md'], ['docs/task_summary.md', 'docs/stage_1_verdict.md']),
       deliver: {
         projectFiles: {
           'docs/task_summary.md': '# legitimate terminal result\n',
-          'docs/stage_1_verdict.md': '# Verdict\n\nA real completed-stage verdict that is safely longer than forty bytes.\n',
+          'docs/stage_1_verdict.md': 'pass\n',
         },
       },
     });
@@ -203,6 +246,27 @@ terminal_states:
     expect(Date.parse(state.completedAt!) - Date.parse(state.startedAt)).toBeLessThan(60_000);
     expect(guidance).not.toContain('wall time');
   }, 60_000);
+
+  it.each(['missing', 'empty', 'directory'])('refuses a %s receipt and accepts concise declared stage evidence', (shape) => {
+    const projectDir = project();
+    const receipt = join(projectDir, 'evidence', 'check_1_verdict.md');
+    mkdirSync(resolve(receipt, '..'), { recursive: true });
+    const state: StoreState = {
+      runId: 'fixture', workflowName: 'fixture', projectDir, status: 'running', stages: {},
+      startedAt: new Date(Date.now() - 1000).toISOString(),
+    };
+    const entry = {
+      paths: ['docs/task_summary.md'], stageGlob: 'evidence/check_*_verdict.md',
+      floor: { minAttemptedStages: 1 },
+    };
+    if (shape === 'empty') writeFileSync(receipt, '');
+    if (shape === 'directory') mkdirSync(receipt);
+    expect(evaluateTerminalFloor(state, entry, projectDir).passed).toBe(false);
+
+    if (shape === 'directory') rmSync(receipt, { recursive: true });
+    writeFileSync(receipt, 'pass\n');
+    expect(evaluateTerminalFloor(state, entry, projectDir).passed).toBe(true);
+  });
 
   it('rejects a stale terminal artifact after a completed non-writing stage', async () => {
     const projectDir = project();
@@ -215,7 +279,7 @@ terminal_states:
 ---
 # Isolated freshness guard fixture
 `, {
-      plan: dispatch('implement'),
+      plan: dispatch('implement', ['docs/task_summary.md'], []),
       implement: { output: 'completed real work without touching the stale artifact' },
     });
 

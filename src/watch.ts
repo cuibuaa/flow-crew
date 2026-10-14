@@ -194,6 +194,7 @@ const QUIESCENT_STAGE_STATUSES = new Set<string>([
 const TOP_LEVEL_ACTIVITY_FILES = [
   'events.jsonl',
   'progress.md',
+  'stage_watchdog.json',
   'supervisor_log.md',
   'supervisor_state.json',
 ] as const;

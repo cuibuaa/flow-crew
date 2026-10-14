@@ -1,3 +1,5 @@
+import { buildGateReevaluationPreamble } from './test-support/gate-reevaluation.js';
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -5,15 +7,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { buildCodexExecArgs } from '../src/adapters/codex.js';
+import { parse } from 'yaml';
+import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
+import { applyBasePrompt } from '../src/scheduler/sched_admission/dispatch.js';
+import { buildGateDispatchPreamble } from '../src/scheduler/sched_settlement/gate-archives.js';
 import {
-  buildGateReevaluationPreamble,
   canResumeOwnGateSession,
   gateVerdictCorrectionPath,
   GATE_VERDICT_CORRECTION_VERSION,
   runWorkflow,
   type WorkflowConfig,
 } from '../src/scheduler.js';
-import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
+import { atomicWrite, fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 const GATE_ID = 'release_gate';
@@ -56,10 +61,10 @@ function workflow(maxIterations = 1): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'e7-acceptance-loop',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{ id: 'plan', role: 'planner', scope: [], depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],  id: 'plan', role: 'planner', scope: [], depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
     },
   };
 }
@@ -88,7 +93,7 @@ function dispatchYaml(): string {
 function writeSession(runDirPath: string, stageId: string, sessionId: string, ownerStageId = stageId): void {
   const dir = join(runDirPath, 'stages', stageId);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'session.json'), JSON.stringify({
+  atomicWrite(join(dir, 'session.json'), JSON.stringify({
     version: 1,
     sessionId,
     ownerStageId,
@@ -132,11 +137,11 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
 
   const adapter: Adapter = {
     async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-      if (opts.stageId === '_summary') return { output: '## What was done\n- E7 fixture complete', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- E7 fixture complete', exitCode: 0, duration_ms: 1 }, opts);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), dispatchYaml());
+        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(dispatchYaml()));
         writeSession(opts.runDir, 'plan', BUILDER_UUID, 'plan');
-        return { output: 'planned', exitCode: 0, duration_ms: 2, sessionId: BUILDER_UUID };
+        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 2, sessionId: BUILDER_UUID }, opts);
       }
       if (opts.stageId === GATE_ID) {
         gateCalls++;
@@ -144,7 +149,7 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
         gatePrompts.push(prompt);
         const fixtureIteration = options.twoIterations ? Math.ceil(gateCalls / 2) : 1;
         const pass = options.firstGatePass === true || (options.twoIterations ? gateCalls % 2 === 0 : gateCalls > 1);
-        writeFileSync(join(opts.runDir, `verdict_${GATE_ID}.json`), JSON.stringify({
+        writeFileSync(join(opts.runDir, `fixture_verdict_${GATE_ID}.json`), JSON.stringify({
           pass,
           reason: pass ? 'fixture fixed' : 'fixture still contains BROKEN',
           findings: pass ? [] : [{ id: 'broken-marker', path: 'src/checked.ts' }],
@@ -160,7 +165,7 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
         } else {
           options.onSecondGatePrompt?.(prompt);
         }
-        return {
+        return fixtureResult({
           output: pass
             ? `All rejected items reproduced and fixed for iteration ${fixtureIteration}.\n\nCoverage Map\n- fixture marker: pass`
             : `iteration-${fixtureIteration}-round-1-output\n\nRejected broken marker.\n\nCoverage Map\n- fixture marker: fail via exact file read\n- session isolation: pass`,
@@ -169,7 +174,7 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
           tokens_in: gateCalls === 1 ? 100 : 30,
           tokens_out: gateCalls === 1 ? 40 : 15,
           sessionId: GATE_UUID,
-        };
+        }, opts);
       }
       if (opts.stageId === FIX_ID) {
         fixPrompts.push(prompt);
@@ -202,15 +207,15 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
             evidence: 'node probe.js -> current source was already FIXED',
           }, null, 2) + '\n');
         }
-        return {
+        return fixtureResult({
           output: 'fixed the rejected marker',
           exitCode: 0,
           duration_ms: 5,
           writes: options.writeOutsideScope ? ['src/checked.ts', 'src/outside.ts', 'src/outside.bin'] : ['src/checked.ts'],
           writeAttribution: 'structured',
-        };
+        }, opts);
       }
-      return { output: `unexpected stage ${opts.stageId}`, exitCode: 1, duration_ms: 1 };
+      return fixtureResult({ output: `unexpected stage ${opts.stageId}`, exitCode: 1, duration_ms: 1 }, opts);
     },
   };
 
@@ -281,7 +286,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts[0].resumeSessionId).toBeUndefined();
     expect(result.gateOpts[0].sessionOwnerStageId).toBeUndefined();
     expect(result.gateOpts[0].resumeSessionId).not.toBe(BUILDER_UUID);
-    expect(canResumeOwnGateSession({
+    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false, 
       id: GATE_ID, role: 'qa', depends_on: ['plan'], prompt_template: '', is_gate: true, skills: [],
     }, {
       version: 1, sessionId: BUILDER_UUID, ownerStageId: 'plan', capturedAt: '2026-08-01T00:00:00.000Z',
@@ -294,7 +299,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gateOpts).toHaveLength(2);
     expect(result.gateOpts[1].resumeSessionId).toBeUndefined();
     expect(existsSync(gateVerdictCorrectionPath(result.runDirPath, GATE_ID))).toBe(false);
-    expect(canResumeOwnGateSession({
+    expect(canResumeOwnGateSession({ artifact_contract: fixtureArtifactContract(GATE_ID, true),criterion_refs: [], dynamic_dispatch: false, 
       id: GATE_ID, role: 'qa', depends_on: [], prompt_template: '', is_gate: true, skills: [],
     }, {
       version: 1, sessionId: GATE_UUID, ownerStageId: GATE_ID, capturedAt: '2026-08-01T00:00:00.000Z',
@@ -328,8 +333,8 @@ describe('compressed acceptance loop', () => {
     });
     expect(result.finalStatus).toBe('complete');
     expect(touchedCheckProbe).toHaveBeenCalledExactlyOnceWith('fixture-marker-check');
-    expect(result.gatePrompts[1]).toContain('re-run every check from the prior Coverage Map');
-    expect(result.gatePrompts[1]).toContain('full mechanical regression suites');
+    expect(result.gatePrompts[1]).toContain('re-check earlier conclusions only where the diff touches them');
+    expect(result.gatePrompts[1]).toContain('The engine re-runs the configured validation for this gate');
   });
 
   it('keeps round evidence distinct while carrying same-gate rejection history across outer iterations', { timeout: 20_000 }, async () => {
@@ -356,9 +361,9 @@ describe('compressed acceptance loop', () => {
       const evaluatedInputPath = join(roundDir, `evaluated_input_${GATE_ID}.md`);
       const evaluatedInput = readFileSync(evaluatedInputPath, 'utf-8');
       expect(verdict).toContain(`iteration-${iteration}-round-1-verdict`);
-      expect(output).toContain(`iteration-${iteration}-round-1-output`);
+      expect(JSON.parse(output)).toMatchObject({ pass: false, marker: `iteration-${iteration}-round-1-verdict` });
       expect(verdict).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-verdict`);
-      expect(output).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-output`);
+      expect(output).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-verdict`);
       expect(evaluatedInput).toBe(result.gatePrompts[iteration === 1 ? 0 : 2]);
       expect(evaluatedInput).not.toBe(result.gatePrompts[iteration === 1 ? 1 : 3]);
       expect(JSON.parse(readFileSync(join(roundDir, 'repair_diff.json'), 'utf-8'))).toMatchObject({
@@ -389,6 +394,38 @@ describe('compressed acceptance loop', () => {
     expect(existsSync(join(archiveRoot, 'round_1'))).toBe(false);
   });
 
+  it('treats a gate attempt without a verdict as interrupted while retaining its available input', () => {
+      const runDirPath = join(root, 'interrupted-gate');
+      const roundDir = join(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+      mkdirSync(roundDir, { recursive: true });
+      const inputPath = join(roundDir, 'evaluated_input_review.md');
+      writeFileSync(inputPath, 'first exact gate prompt\n', 'utf8');
+      const present = buildGateReevaluationPreamble({
+        evaluationRound: 2,
+        iteration: 1,
+        repairRound: 1,
+        runDirPath,
+        gateId: 'review',
+        fixStageIds: ['repair'],
+        roundDiffPath: join(roundDir, 'repair_diff.json'),
+      });
+      rmSync(inputPath);
+      const legacy = buildGateReevaluationPreamble({
+        evaluationRound: 2,
+        iteration: 1,
+        repairRound: 1,
+        runDirPath,
+        gateId: 'review',
+        fixStageIds: ['repair'],
+        roundDiffPath: join(roundDir, 'repair_diff.json'),
+      });
+      expect(present).toContain('INTERRUPTED EVALUATION (round 2)');
+      expect(present).toContain(`Exact input seen by the interrupted gate: ${inputPath}`);
+      expect(present).toContain('No rejected verdict was recorded');
+      expect(legacy).toContain('INTERRUPTED EVALUATION (round 2)');
+      expect(legacy).toContain('Exact input seen by the interrupted gate: unavailable');
+    });
+
   it('reads a pure round-only archive without mutating it', () => {
     const legacyRunDir = join(root, 'legacy-run');
     const legacyRoundDir = join(legacyRunDir, 'gate_reevaluation', 'round_1');
@@ -410,7 +447,7 @@ describe('compressed acceptance loop', () => {
     });
 
     expect(legacyPreamble).toContain(`Rejected verdict: ${legacyVerdict}`);
-    expect(legacyPreamble).toContain(`Original first-pass validator-owned Coverage Map: ${legacyOutput}`);
+    expect(legacyPreamble).toContain(`Original first-pass gate output: ${legacyOutput}`);
     expect(legacyPreamble).toContain('Exact input evaluated by the rejected gate: unavailable');
     expect(legacyPreamble).not.toContain(`evaluated_input_${GATE_ID}.md`);
     expect(readFileSync(legacyVerdict, 'utf-8')).toBe(verdictContents);
@@ -444,7 +481,7 @@ describe('compressed acceptance loop', () => {
 
     expect(mixedPreamble).toContain('RE-EVALUATION (round 2)');
     expect(mixedPreamble).toContain(`Rejected verdict: ${staleLegacyVerdict}`);
-    expect(mixedPreamble).toContain(`Original first-pass validator-owned Coverage Map: ${staleLegacyOutput}`);
+    expect(mixedPreamble).toContain(`Original first-pass gate output: ${staleLegacyOutput}`);
     expect(mixedPreamble).not.toContain(canonicalVerdict);
     expect(mixedPreamble).not.toContain(canonicalOutput);
     expect(mixedPreamble).not.toContain(otherIterationRound);
@@ -477,7 +514,7 @@ describe('compressed acceptance loop', () => {
     });
 
     expect(preamble).toContain(`Rejected verdict: ${canonicalVerdict}`);
-    expect(preamble).toContain(`Original first-pass validator-owned Coverage Map: ${canonicalOutput}`);
+    expect(preamble).toContain(`Original first-pass gate output: ${canonicalOutput}`);
     expect(preamble).not.toContain(legacyVerdict);
     expect(preamble).not.toContain(legacyOutput);
   });
@@ -499,11 +536,11 @@ describe('compressed acceptance loop', () => {
     })).toThrow(`Gate archive ${component} must be a positive integer`);
   });
 
-  it('locks the first-pass coverage map and bounded re-evaluation contracts in every prompt source', () => {
-    const base = readFileSync(join(process.cwd(), 'config', 'agents', '_base.md'), 'utf-8');
+  it('preserves review acceptance and bounds reevaluation through the gate contract', () => {
+    const baseText = readFileSync(join(process.cwd(), 'config', 'agents', '_base.md'), 'utf-8');
     const planner = readFileSync(join(process.cwd(), 'config', 'agents', 'planner.yaml'), 'utf-8');
     const qa = readFileSync(join(process.cwd(), 'config', 'agents', 'qa.yaml'), 'utf-8');
-    const source = readFileSync(join(process.cwd(), 'src', 'scheduler.ts'), 'utf-8');
+    const base = applyBasePrompt(parseAgent(parse(qa)), baseText).prompt;
     const runDirPath = join(root, 'prompt-contract-run');
     const roundDir = join(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
     mkdirSync(roundDir, { recursive: true });
@@ -518,16 +555,17 @@ describe('compressed acceptance loop', () => {
       roundDiffPath: join(roundDir, 'repair_diff.json'),
     });
 
-    expect(base).toContain('validator-owned Coverage Map');
-    expect(planner).toContain("validator's output");
-    expect(planner).toContain('Do NOT turn the brief into a finite planner-owned checklist');
-    expect(qa).toContain('do not invent unrelated probes');
-    expect(qa).toContain('complete repair diff');
-    expect(qa).not.toContain('write NEW tests');
-    expect(preamble).toContain('Reproduce every rejected finding');
-    expect(preamble).toContain('full mechanical regression suites');
-    expect(preamble).toContain('complete repair diff');
-    expect(preamble).not.toContain('Write NEW and DIFFERENT tests');
-    expect(source).not.toContain('Write NEW and DIFFERENT tests');
+    expect(buildGateDispatchPreamble({ runDirPath, gateId: 'initial_review', evaluationRound: 1, priorAttemptCount: 0 }))
+      .toContain('Check every assigned criterion');
+    expect(base).toContain('Say briefly what you did not examine and why');
+    expect(preamble).toContain('record any other difference you find as a stated limitation');
+    expect(preamble).toContain('a failure that a user of the outcome the brief describes would meet');
+    expect(planner).toContain('returns concrete repairable findings');
+    expect(planner).toContain('judgement with its own finite checklist');
+    expect(qa).toContain('brief\'s intended outcome');
+    expect(preamble).toContain('Check each rejected finding against the repair diff');
+    expect(preamble).toContain('Reject again only for a rejected finding the repair did not resolve');
+    expect(preamble).toContain('The engine re-runs the configured validation for this gate');
+    expect(preamble).toContain('untruncated repair-round diff');
   });
 });

@@ -38,7 +38,8 @@ one tracked TypeScript file.
 
 ## Round contract
 
-- Try one read-only counting method per round; do not change project files.
+- Try one read-only counting method per round; do not change source files. Write only the declared research round slot and
+  evidence required by the admitted plan.
 - Record the method in `label` and the number of tracked `.ts` files in
   `result`.
 - Write exactly one JSON object to
@@ -49,7 +50,8 @@ one tracked TypeScript file.
 ```
 
 The framework owns the ship or ceiling report. Do not create either terminal
-artifact yourself.
+artifact yourself. This brief is a scripted rehearsal example, not evidence of a
+measured improvement. See [examples](README.md) for the runnable recipe.
 
 ## What each round's report must show
 

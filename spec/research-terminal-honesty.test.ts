@@ -1,6 +1,6 @@
 /**
  * Regression tests for the three engine bugs found auditing the event-drift
- * research run (2026-07-29T01-29-31): a confirm-gate failure on a would-ship
+ * research run: a confirm-gate failure on a would-ship
  * round used to (1) terminate the run as ceiling_hit ignoring the brief's
  * declared ceiling floor (4 rounds/32 min vs a declared 5 stages/180 min),
  * (2) leave the declared terminal artifact path unwritten, and (3) freeze

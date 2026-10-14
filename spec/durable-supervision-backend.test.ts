@@ -70,7 +70,7 @@ check('atomic same-directory records and exit precedence', async () => {
   });
 });
 
-check('launch timeout and stale running evidence stay terminal-unknown', async () => {
+check('launch timeout retains unknown liveness while proven stopped work retains an unknown verdict', async () => {
   await withFixture('stale', async ({ root, bin }) => {
     process.env.PATH = bin;
     const recent = supervisionPaths(root, 'recent.service');
@@ -84,7 +84,7 @@ check('launch timeout and stale running evidence stay terminal-unknown', async (
     atomicWriteJson(old.launch, launchRecord(root, 'old.service', new Date(10_000).toISOString()));
     assert.deepEqual(
       observePortableUnit(root, 'old.service', { nowMs: 20_000, startupGraceMs: 1_000 }).status,
-      { kind: 'terminal-unknown', reason: 'never-started' },
+      { kind: 'unobservable', reason: 'launch has no published process identity or exit status' },
     );
 
     seedStaleRunning(root, 'stale.service', new Date(10_000).toISOString());
@@ -217,15 +217,17 @@ check('early shim exit cannot certify an orphaned agent as stopped', async () =>
     ].join('\n'), 'utf-8');
     const backend = new NodeSystemd(root, { shimPath: fakeShim, shellPath: '/bin/sh', startupGraceMs: 100 });
     await backend.runUnit({ unit, workingDirectory: root, command: shellJoin([process.execPath, '-e', '']) });
-    assert.equal(await waitUntil(() => existsSync(orphanPidPath)), true);
-    const orphanPid = Number.parseInt(readFileSync(orphanPidPath, 'utf-8'), 10);
-    assert.ok(Number.isSafeInteger(orphanPid) && orphanPid > 1);
+    // writeFileSync creates the file before it writes the pid, so existence alone can be observed with no content.
+    const readOrphanPid = () => existsSync(orphanPidPath) ? Number.parseInt(readFileSync(orphanPidPath, 'utf-8'), 10) : NaN;
+    assert.equal(await waitUntil(() => Number.isSafeInteger(readOrphanPid())), true);
+    const orphanPid = readOrphanPid();
+    assert.ok(orphanPid > 1);
     own(orphanPid, true);
     assert.equal(processIsAlive(orphanPid), true);
     const status = await waitForSettledStatus(backend, unit);
     assert.equal(
       status.kind,
-      'terminal-unknown',
+      'unobservable',
       `an early shim exit left agent ${orphanPid} alive but was reported as ${JSON.stringify(status)}`,
     );
     assert.equal(existsSync(supervisionPaths(root, unit).exit), false);

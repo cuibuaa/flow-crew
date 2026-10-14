@@ -102,7 +102,8 @@ function validBaseline(value: unknown, canonicalTarget: string): value is Projec
   const discovery = record(baseline?.discovery);
   if (!baseline || baseline.version !== 1 || !sameResolvedPath(baseline.projectDir, canonicalTarget)) return false;
   if (!discovery
-      || !['configured', 'partial', 'unknown'].includes(String(discovery.state))
+      || typeof discovery.state !== 'string'
+      || !['configured', 'partial', 'unknown'].includes(discovery.state)
       || typeof discovery.configPath !== 'string'
       || !Array.isArray(discovery.commands)
       || !discovery.commands.every(validCommand)
@@ -115,7 +116,7 @@ function validBaseline(value: unknown, canonicalTarget: string): value is Projec
   const criteria = rawCriteria.filter(validCriterion);
   if (results.length !== rawResults.length || criteria.length !== rawCriteria.length) return false;
   return results.every((result) => {
-    const criterion = criteria.find((candidate) => candidate.role === result.role);
+    const criterion = criteria.find(candidate => candidate.role === result.role && (candidate.display === undefined || candidate.display === result.display));
     if (result.failureEvidence === undefined && criterion?.baselineFailureEvidence === undefined) return true;
     return result.failureEvidence === criterion?.baselineFailureEvidence;
   });
@@ -151,23 +152,8 @@ export function readShipSetupReadyValidationBaseline(
   exactBrief: string,
   globalRoot = fcGlobalDir(),
 ): ProjectValidationBaseline | undefined {
-  try {
-    const canonicalTarget = realpathSync.native(resolve(targetDir));
-    const briefDigest = shipSetupBriefDigest(exactBrief);
-    const expectedPath = shipSetupReadyRecordPath(canonicalTarget, briefDigest, globalRoot);
-    const parsed = record(JSON.parse(readFileSync(expectedPath, 'utf-8')) as unknown);
-    if (!parsed
-        || parsed.version !== 1
-        || parsed.state !== 'ready'
-        || parsed.ready !== true
-        || parsed.briefDigest !== briefDigest
-        || !sameResolvedPath(parsed.targetCanonicalDir, canonicalTarget)
-        || !sameResolvedPath(parsed.readyRecordPath, expectedPath)
-        || !validBaseline(parsed.validationBaseline, canonicalTarget)) return undefined;
-    return parsed.validationBaseline;
-  } catch {
-    return undefined;
-  }
+  const inspection = inspectShipSetupRecord(targetDir, exactBrief, globalRoot);
+  return inspection.state === 'ready' ? inspection.validationBaseline : undefined;
 }
 
 export type ShipSetupRecordInspection =

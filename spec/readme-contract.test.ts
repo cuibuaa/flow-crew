@@ -1,153 +1,99 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { RUN_STATUS } from '../src/lifecycle-status.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
-const readme = readFileSync(join(repositoryRoot, 'README.md'), 'utf-8');
-const architecture = readFileSync(join(repositoryRoot, 'guide', 'architecture.md'), 'utf-8');
-
-function withoutFencedCode(markdown: string): string {
-  const kept: string[] = [];
-  let fence: { character: string; length: number } | undefined;
-
-  for (const line of markdown.split('\n')) {
-    if (fence) {
-      const closing = new RegExp(
-        `^ {0,3}${fence.character}{${fence.length},}\\s*$`,
-      );
-      if (closing.test(line)) fence = undefined;
-      continue;
-    }
-
-    const opening = line.match(/^ {0,3}(`{3,}|~{3,})/);
-    if (opening) {
-      fence = { character: opening[1][0], length: opening[1].length };
-      kept.push('');
-      continue;
-    }
-    kept.push(line);
-  }
-
-  return kept.join('\n');
-}
-
-function proseBlocks(markdown: string): string[] {
-  return withoutFencedCode(markdown)
-    .split(/\n[ \t]*\n|\n(?=[*-] )|\n(?=#{1,6} )/)
-    .map((block) => block
-      .split('\n')
-      .map((line) => line.replace(/^> ?/, ''))
-      .join('\n')
-      .trim())
-    .filter(Boolean)
-    .filter((block) => !/^[*-] \[[^\]]+\]\([^)]+\)(?::|$)/.test(block));
-}
-
-function rehearsalClaims(markdown: string): string[] {
-  return proseBlocks(markdown).filter((block) => {
-    const namesRehearsal = /\brehears(?:e|es|ed|al|ing)\b/i.test(block);
-    const namesZeroExecution = /\bzero[- ]token\b|\bno (?:agent|model)(?: process)?(?: or model)?(?: runs?)?\b|\bno tokens?\b|\bspends? no tokens?\b|\bfor free\b/i.test(block);
-    return namesRehearsal && namesZeroExecution;
-  });
-}
-
-function shipSyntaxExplanations(markdown: string): string[] {
-  return proseBlocks(markdown).filter(
-    (block) => /\/ship\b/.test(block) && /\$ship\b/.test(block),
-  );
-}
-
-function independentShippingClaims(markdown: string): string[] {
-  return proseBlocks(markdown).filter((block) => {
-    const namesIndependentCheck = /\bindependent\b|\bre-?check\b/i.test(block);
-    const namesTerminalDecision = /\bshipp?ed\b|\bends? a run successfully\b/i.test(block);
-    const namesControl = /\bdecid|\bmay be called\b|\bbefore\b|\bwhat ends\b|\bre-?confirm/i.test(block);
-    return namesIndependentCheck && namesTerminalDecision && namesControl;
-  });
-}
+const read = (path: string) => readFileSync(join(repositoryRoot, path), 'utf-8');
+const readme = read('README.md');
+const architecture = read('guide/architecture.md');
+const operations = read('guide/operations.md');
+const configuration = read('guide/configuration.md');
+const onboarding = read('guide/getting-started.md');
+const compact = (text: string) => text.replace(/\s+/g, ' ');
 
 function warningBlock(markdown: string): string {
   const lines = markdown.split('\n');
   const start = lines.findIndex((line) => line.trim() === '> [!WARNING]');
   if (start < 0) return '';
-
   const warning: string[] = [];
-  for (let index = start; index < lines.length && lines[index].startsWith('>'); index += 1) {
-    warning.push(lines[index]);
-  }
+  for (let index = start; index < lines.length && lines[index].startsWith('>'); index += 1) warning.push(lines[index]);
   return warning.join('\n');
 }
 
 describe('G5 stop command in the warning', () => {
   it('keeps flowcrew task cancel inside the contiguous WARNING block', () => {
-    const warning = warningBlock(readme);
-    expect(warning).toContain('flowcrew task cancel <id>');
+    expect(warningBlock(readme)).toContain('flowcrew task cancel <id>');
+    expect(warningBlock(readme)).toContain('inspect settlement');
   });
 });
 
 describe('G6 dashboard launch details', () => {
-  it('documents the command, default port, and URL', () => {
-    expect(readme).toContain('flowcrew start');
-    expect(readme).toMatch(/default port `3000`/);
-    expect(readme).toContain('http://localhost:3000/');
+  it('documents the command, configured default port and local URL at canonical homes', () => {
+    const cli = read('guide/cli.md');
+    expect(cli).toContain('`start`');
+    expect(configuration).toContain('`PORT` | Dashboard port, default 3000');
+    expect(cli).toContain('http://localhost:<PORT>/');
+    expect(read('src/cli.ts')).toContain("process.env.PORT || '3000'");
   });
 });
 
-describe('G7 protected README character', () => {
-  it('preserves the anti-pitch verbatim', () => {
-    expect(readme).toContain(
-      `**You probably don't need FlowCrew** if you want one agent to do one bounded task — use
-Codex or Claude Code directly. The gates, supervisor and retry loops only pay for
-themselves once the work runs longer than you are willing to sit and watch it.`,
-    );
+describe('G7 bounded README and canonical reference contract', () => {
+  it('orients each audience without an unsupported comparative-benefit promise', () => {
+    for (const path of ['guide/getting-started.md', 'guide/operations.md', 'CONTRIBUTING.md', 'AGENTS.md']) expect(readme).toContain(path);
+    expect(readme).toContain('A new user');
+    expect(readme).toContain('An operator or brief author');
+    expect(readme).toContain('A contributor');
+    expect(readme).not.toContain('only pay for themselves');
   });
 
-  it('preserves the inert source row verbatim', () => {
-    expect(readme).toContain('| `source` | an external reference cited during research | **nothing yet** — it is captured and stored, but no engine path or view reads it back |');
+  it('bounds model and deterministic-check authority instead of promising independent truth', () => {
+    expect(compact(readme)).toContain("not a guarantee that a model's claims are true");
+    expect(compact(readme)).toContain('Checks and their inputs need to express the outcome');
+    expect(read('guide/agent-protocol.md')).toContain('independent gates');
+    expect(compact(read('guide/brief-contract.md'))).toContain('This limits what a passing Reality Gate proves');
+    expect(readme).not.toContain('Nothing in the crew can lower it');
   });
 
-  it('preserves the crew-authority paragraph verbatim', () => {
-    expect(readme).toContain(
-      `**The same population of models writes the work,
-measures the work, and judges the measurement**, so a natural-language opinion that the bar was
-met is not independent evidence. What ends a run successfully is the **Reality Gate**: the
-checks the work declared for itself, executed as scripts. Only success is gated — a failure
-needs no proving. The crew can raise this bar on itself, because the planner may add checks for
-constraints it derives from the goal. Nothing in the crew can lower it.`,
-    );
+  it('preserves the global-link footgun and command-selection check at onboarding', () => {
+    expect(onboarding).toContain('`npm link` changes the global command link');
+    expect(onboarding).toContain('`which flowcrew`');
+    expect(compact(onboarding)).toContain('Neither operation is necessary for the local commands');
   });
 
-  it('preserves the npm-link footgun and which check verbatim', () => {
-    expect(readme).toContain('- ⚠️ `npm link` silently repoints an existing global `flowcrew` at this clone, with no warning — check with `which flowcrew`.');
+  it('preserves opt-in session reuse and compatible predecessor requirements at configuration', () => {
+    expect(configuration).toMatch(/`session_reuse` \| `false` \| Opt into compatible/);
+    expect(compact(architecture)).toContain('explicit compatible UUID binding and never grants scope');
   });
 
-  it('preserves the measured session-reuse line verbatim', () => {
-    expect(readme).toContain('session_reuse: false                   # measured benefit was ~9% wall clock; off by default');
+  it('documents the complete source-defined outcome vocabulary without universal success promises', () => {
+    for (const status of Object.values(RUN_STATUS)) expect(operations, status).toContain('`' + status + '`');
+    expect(operations).toContain('not a metric win');
+    expect(operations).toContain('Unknown archived status values remain unknown');
+    expect(readme).not.toContain('never faked progress');
   });
 
-  it('preserves the outcome vocabulary verbatim', () => {
-    expect(readme).toContain('- **Honest by construction.** "Found nothing" (**ceiling**), "ran out of budget mid-search" (**incomplete**), and "it worked" (**shipped**) are distinct, first-class outcomes — never a crash dressed up as a win, never faked progress.');
+  it('preserves verifiable macOS CI and weaker process-identity calibration', () => {
+    expect(read('.github/workflows/ci.yml')).toContain('runs-on: macos-15');
+    expect(onboarding).toContain('macOS');
+    expect(compact(architecture)).toContain('second-resolution');
+    expect(compact(architecture)).toContain('a weaker identity');
+    expect(readme).not.toContain('not daily-driven');
   });
 
-  // Pins the CLAIM, not the prose. Verbatim pinning would mean every rewording
-  // of this paragraph has to edit a test, which is the documentation churn this
-  // suite exists to reduce — and it would not actually protect anything the
-  // three assertions below miss. Deleting the calibration still fails.
-  it('preserves the macOS calibration', () => {
-    expect(readme).toContain('macOS is CI-tested, not daily-driven');
-    expect(readme).toMatch(/identity there is strong but not exact|identity on macOS is strong but not exact/);
-    expect(readme).toContain('https://github.com/cuibuaa/flow-crew/issues');
-  });
-
-  it('preserves the live-run WARNING paragraph verbatim', () => {
-    expect(readme).toContain('> **Live runs receive unattended shell access.** The Codex and Claude adapters bypass their normal approval, permission, and sandbox prompts. Starting a live run — from the `ship` skill, from the Dashboard, or with `flowcrew quick` — can therefore give an agent full shell access to the selected project for hours. Use a dedicated workspace or suitably isolated Linux container, and review the task before launch.');
+  it('preserves the unattended-shell and host-isolation warning', () => {
+    const warning = compact(warningBlock(readme).replace(/^> ?/gm, ''));
+    expect(warning).toContain('Live runs receive unattended shell access');
+    expect(warning).toContain('bypass modes');
+    expect(warning).toContain('not an operating-system sandbox');
+    expect(warning).toContain('dedicated workspace');
+    expect(warning).toContain('review its evidence');
   });
 
   it.each([
-    ['node:sqlite', readme],
+    ['node:sqlite', onboarding],
     ['ps -o lstart=', architecture],
-    ['0.815', readme],
-  ])('preserves the concrete marker %s', (marker, document) => {
+  ])('preserves the concrete marker %s at its canonical home', (marker, document) => {
     expect(document).toContain(marker);
   });
 });

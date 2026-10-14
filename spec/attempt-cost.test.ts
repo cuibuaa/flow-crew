@@ -1,3 +1,4 @@
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
 import { deriveRunTokenCost } from '../src/campaign-page.js';
 import {
+  atomicWrite,
   beginStageAttempt,
   completeStageAttempt,
   createRun,
@@ -43,6 +45,19 @@ afterEach(() => {
 });
 
 describe('attempt token evidence', () => {
+  it('retains partial lower bounds without reporting a complete budget or campaign cost', () => {
+    const created = createRun(projectDir, 'partial-cost', 'name: partial-cost', ['work']);
+    beginStageAttempt(projectDir, created.runId, 'work', 0, '2026-08-02T12:00:00.000Z');
+    completeStageAttempt(projectDir, created.runId, 'work', 0, {
+      exitCode: 137, duration_ms: 500, tokens_in: 20, tokens_out: 3, tokenUsage: 'partial', tokens_cached: 10,
+      completedAt: '2026-08-02T12:00:00.500Z',
+    });
+    const state = readRunState(projectDir, created.runId);
+    state.stages.work = readStageStatus(projectDir, created.runId, 'work');
+    state.supervise = false;
+    expect(state.stages.work.attempts?.[0]).toMatchObject({ tokenUsage: 'partial', tokens_cached: 10 });
+    expect(deriveRunTokenCost(state)).toMatchObject({tokens:23,complete:false,attemptEvidence:{known:0,recordedUnknown:1}});
+  });
   it.each([
     { label: 'supervisor abort', exitCode: 137 },
     { label: 'timeout', exitCode: 124 },
@@ -101,7 +116,7 @@ describe('attempt token evidence', () => {
     const adapter: Adapter = {
       async run(_prompt, _agent, opts): Promise<RunResult> {
         const signalPath = join(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
-        writeFileSync(signalPath, JSON.stringify({
+        atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId: opts.stageId,
           attemptIndex: 1,
@@ -121,6 +136,7 @@ describe('attempt token evidence', () => {
       role,
       dependsOn: [],
       promptTemplate: 'fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: 10_000,
       projectDir,
       runId: created.runId,

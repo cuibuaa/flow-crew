@@ -1,117 +1,88 @@
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
-import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdirSync, rmSync, unlinkSync, renameSync, openSync, readSync, closeSync } from "node:fs";
-import { join, extname, dirname, resolve } from "node:path";
-import { spawn } from "node:child_process";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { fileURLToPath } from "node:url";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from './engine-fs.js';
+import { readFileSync, readdirSync, existsSync, statSync, readSync } from 'node:fs';
+import { join,extname,dirname,resolve } from "node:path";
+import { createHmac,randomBytes,timingSafeEqual } from "node:crypto";
+import { createServer, type Server } from 'node:http';
+import { homedir, networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
+import { parse as parseYaml } from "yaml";
 import {
-  campaignsRoot,
-  createRun,
-  extractTaskTitle,
-  isAwaitingApprovalRunStatus,
-  isPausedRunStatus,
-  isPendingRunStatus,
-  isPendingStageStatus,
-  isRunMutationBlockedStatus,
-  isRunningRunStatus,
-  isRunningStageStatus,
-  isTerminalRunStatus,
-  listRuns,
-  readRunState,
-  readStageInput,
-  readStageStatus,
-  rependStageStatus,
-  resolveRunStatus,
-  runDir,
-  RUN_STATUS,
-  runsRoot,
-  STAGE_STATUS,
-  writeRunState,
+campaignsRoot,extractTaskTitle,
+isAwaitingApprovalRunStatus,
+isPausedRunStatus,isTerminalRunStatus,isRunningStageStatus,isPendingStageStatus,
+listRuns,
+readRunState,readStageStatus,resolveRunStatus,updateRunState,
+runDir,
+RUN_STATUS,
+runsRoot,
+fcGlobalDir,
+STAGE_STATUS
 } from "./store.js";
-import type { RunStatus, StageAttempt, StoreState, SupervisorAttempt } from "./store.js";
-import { countStandaloneRunsFromIndex, deleteRunIndex, readRunIndexRecordsByCampaign, readRunIndexRecords, listStandaloneRunIdsFromIndex, listRunningRunIdsFromIndex, getMaxUpdatedAt } from './run-index.js';
+import type { RunStatus,StoreState } from "./store.js";
+import { budgetView, projectRunStageHistory } from './run-state-view.js';
+import { countStandaloneRunsFromIndex,readRunIndexRecordsByCampaign,readRunIndexRecords,listStandaloneRunIdsFromIndex,getMaxUpdatedAt } from './run-index.js';
 import {
-  listCampaigns,
-  nextCampaignSeq,
-  readCampaignEntries,
-  readAllCampaignEntries,
-  resolveCampaignSelection,
+listCampaigns,readCampaignEntries,
+readAllCampaignEntries
 } from "./campaigns.js";
 import type { CampaignHistoryEntry } from "./campaigns.js";
-import { loadWorkflow, runWorkflow, WorkflowConfigSchema, findDownstream, StageConfigSchema } from "./scheduler.js";
-import type { StageConfig } from "./scheduler.js";
-import { loadProjectDefaults as loadCanonicalProjectDefaults } from './config.js';
-import type { AgentConfig, Adapter } from "./adapters/base.js";
-import { loadAdapterByName } from './adapters/loader.js';
-import { resolveAdapterChoice } from './adapters/availability.js';
-import { readAttemptSummaryRefreshState } from "./run-events.js";
+import { engineConfigDir, loadEngineDefaults } from './config.js';
 import { readActiveSchedulerLoopStall } from './scheduler-heartbeat.js';
 import {
-  claimLaunchIntent,
-  describeLiveRunOwner,
-  findLiveRunOwnerForProject,
-  invalidateRunLockCache,
-  isLiveFlowcrewSchedulerForRun,
-  isProjectBusy,
-  parseSchedulerPidMarker,
-  releaseLaunchIntent,
+describeLiveRunOwner,
+findLiveRunOwnerForProject,
+invalidateRunLockCache,
+isLiveFlowcrewSchedulerForRun,
+inspectRunScheduler,
+isProjectBusy,
+parseSchedulerPidMarker
 } from "./run-lock.js";
 import {
-  defaultSocketPath,
-  RpcOutcomeUnknownError,
-  sendRpc,
-  type RegisterRpcResponse,
-  type TaskListRpcResponse,
-  type TaskShowEntry,
+defaultSocketPath,
+RpcOutcomeUnknownError,
+sendRpc,
+type RegisterRpcResponse,
+type TaskListRpcResponse,
+type TaskShowEntry,
 } from './orchestrator-rpc.js';
 import type { CancellationResult } from './run-control.js';
 import {
-  cancelRunThroughControlPlane,
-  type CancellationClientOptions,
+cancelRunThroughControlPlane,
+type CancellationClientOptions,
 } from './cancellation-client.js';
 import {
-  TASK_STATUS,
-  type TaskCreateInput,
-  type TaskListFilter,
+TASK_STATUS,
+type TaskCreateInput,
+type TaskListFilter,
 } from './task-registry.js';
-import { readKG, readKGSafe, addNode, updateNode, removeNode, addEdge, summarizeKG } from './knowledge-graph.js';
-import { readTraceEvents, readAllTraceEvents, summarizeTrace } from './trace.js';
-import { appendPendingReview, consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } from './campaign-review.js';
+import { consumePendingReview,readPendingReviews,ReviewConflictError,summarizePatch } from './campaign-review.js';
 import type { PendingReviewEntry } from './campaign-review.js';
-import { readOperatorEvents, readOperationalProjection, type EventLike } from './cli-events.js';
-import { getEdges as getCrossCampaignEdges, getNodes as getCrossCampaignNodes } from './cross-campaign-kg.js';
-import { approvalArtifactPath, isValidApprovalRequestId } from './approval-artifacts.js';
+import { readOperatorEvents,readOperationalProjection,type EventLike } from './cli-events.js';
+import { approvalResumeArgs,isValidApprovalRequestId } from './approval-artifacts.js';
 import {
-  getItem as getInboxItem,
-  INBOX_FILTER_STATE,
-  listAll as listInboxItems,
-  resolveRequest,
-  standingRuleEligible,
-  type InboxFilterState,
-  type InboxItem,
+getItem as getInboxItem,
+INBOX_FILTER_STATE,
+listAll as listInboxItems,
+resolveRequest,type InboxItem
 } from './inbox.js';
 import { inspectApprovalRunStanding } from './run-standing.js';
-import { readJsonlFile as readTolerantJsonlFile } from './jsonl.js';
+import { readOptionalJsonlFile as readJsonlFile } from './jsonl.js';
 import { z } from "zod";
 import pino from "pino";
-import type { KGNodeType, KGEdgeType } from './knowledge-graph.js';
-import { computeBuildFingerprint, type DaemonBuildFingerprint } from './daemon-identity.js';
+import { computeBuildFingerprint,isOperatorStateRoot,type DaemonBuildFingerprint } from './daemon-identity.js';
 import {
-  CampaignNotFoundError,
-  deriveRunTokenCost,
-  readCampaignOperatorIndex,
-  readCampaignOperatorView,
-  readCampaignRunPage,
-  type CampaignPageSources,
+CampaignNotFoundError,readCampaignOperatorIndex,
+readCampaignOperatorView,
+readCampaignRunPage,
+type CampaignPageSources
 } from './campaign-page.js';
 import {
-  createBriefAdmission,
-  inspectBrief,
-  verifyBriefAdmission,
-  type BriefAdmissionRecord,
-  type BriefPreflightReport,
+createBriefAdmission,
+inspectBrief,
+verifyBriefAdmission,
+type BriefAdmissionRecord,
+type BriefPreflightReport,
 } from './brief-preflight.js';
 
 const log = pino({ name: 'dashboard' });
@@ -209,90 +180,22 @@ function dashboardRunPresentation(status: unknown): DashboardRunPresentation {
   const unrecognized = `unrecognized ${resolution.display}`;
   return { campaignOutcome: unrecognized, taskStatus: unrecognized };
 }
-const INBOX_FILTER_STATES = new Set<string>(Object.values(INBOX_FILTER_STATE));
-const COMPLETE_METRIC_NAME_FRAGMENT = 'complete';
-
-// --- Dynamic adapter loading ---
-async function resolveAdapter(configDir: string): Promise<Adapter> {
-  const defaultsPath = join(configDir, "defaults.yaml");
-  const defaults = existsSync(defaultsPath) ? parseYaml(readFileSync(defaultsPath, "utf-8")) as Record<string, unknown> : {};
-  const configured = typeof defaults.adapter === 'string' && defaults.adapter.trim()
-    ? defaults.adapter.trim()
-    : 'auto';
-  if (configured === 'mock') return loadAdapterByName('mock');
-
-  const resolution = resolveAdapterChoice({ configured });
-  if (!resolution.ok) throw new Error(resolution.hint);
-  if (configured !== 'auto' && configured !== resolution.adapter) {
-    log.warn({ configured, selected: resolution.adapter }, resolution.reason);
-  }
-  return loadAdapterByName(resolution.adapter);
-}
-
-// --- Project defaults for agent config fallback ---
-function loadAgentDefaults(configDir: string): { model: string; reasoning_effort: string } {
-  try {
-    const raw = readFileSync(join(configDir, 'defaults.yaml'), 'utf-8');
-    const parsed = parseYaml(raw) as Record<string, unknown>;
-    return {
-      model: typeof parsed.model === 'string' ? parsed.model : 'default',
-      reasoning_effort: typeof parsed.reasoning_effort === 'string' ? parsed.reasoning_effort : 'default',
-    };
-  } catch { return { model: 'default', reasoning_effort: 'default' }; }
-}
-
-const DashboardAgentSchema = z.object({ name: z.string(), description: z.string().default(''), model: z.string().default('default'), reasoning_effort: z.string().default('default'), tools: z.array(z.string()).default([]), prompt: z.string(), adapter: z.string().optional(), handoff_visibility: z.enum(['full', 'minimal', 'none']).optional() });
-
-function parseAgentConfig(raw: unknown, configDir?: string): AgentConfig {
-  const defaults = loadAgentDefaults(configDir ?? join(process.cwd(), 'config'));
-  const agent = DashboardAgentSchema.parse(raw);
-  if (agent.model === 'default') agent.model = defaults.model;
-  if (agent.reasoning_effort === 'default') agent.reasoning_effort = defaults.reasoning_effort;
-  return agent;
-}
-
 // --- Shared helpers ---
 
 const _stageRolesCache = new Map<string, { mtime: number; roles: Record<string, { role: string; dependsOn: string[]; isGate?: boolean }> }>();
-const DEFAULT_STAGE_OUTPUT_TAIL_BYTES = 200 * 1024;
-
-// --- Performance: task list cache (P0) ---
-let _taskListCache: { data: unknown[]; timestamp: number; runsDir: string; dirMtime: number; projectDir: string; maxUpdatedAt: number } | null = null;
-const TASK_LIST_CACHE_TTL_MS = 5_000; // 5s TTL
+const DEFAULT_STAGE_OUTPUT_TAIL_BYTES = 200 * 1024; // 5s TTL
 
 function invalidateTaskListCache(): void {
-  _taskListCache = null;
   _campaignListCache = null;
 }
 
 // --- Performance: campaign list cache ---
-// Building the campaign list reads every campaign's state + iteration log and
-// joins in run summaries; it's the heaviest dashboard query and gets polled
-// every 15s by the UI. Cache it per projectDir with a short TTL, and bust it
-// whenever a run/task changes (shared invalidation with the task-list cache).
+// Inbox attention reads campaign state/history and run liveness. Cache these
+// facts briefly per project and invalidate them when a run/task changes.
 let _campaignListCache: { projectDir: string; data: WorkspaceCampaign[]; timestamp: number; maxUpdatedAt: number } | null = null;
 // Above the UI's 15s poll interval so a steady poll usually hits the cache;
 // real changes still bust it immediately via the shared invalidation hook.
 const CAMPAIGN_LIST_CACHE_TTL_MS = 20_000;
-
-function isTaskListCacheValid(runsDir: string): boolean {
-  if (!_taskListCache || _taskListCache.runsDir !== runsDir) return false;
-  if ((Date.now() - _taskListCache.timestamp) >= TASK_LIST_CACHE_TTL_MS) return false;
-  // Also check if any run.json was modified since cache was built. On drvfs the
-  // subdir-file change may not bump the runs/ dir mtime and other processes don't
-  // call our invalidator, so ALSO compare the index's MAX(updated_at) — any
-  // upsert by any process busts the cache.
-  try {
-    const dirMtime = statSync(runsDir).mtimeMs;
-    if (dirMtime !== _taskListCache.dirMtime) return false;
-  } catch { /* non-critical */ return false; }
-  const maxUpdatedAt = getMaxUpdatedAt(_taskListCache.projectDir);
-  if (maxUpdatedAt !== null && maxUpdatedAt !== _taskListCache.maxUpdatedAt) return false;
-  return true;
-}
-
-// --- Performance: SSE mtime tracking (P0) ---
-const _sseRunMtimes = new Map<string, number>();
 
 function parseTailBytes(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return DEFAULT_STAGE_OUTPUT_TAIL_BYTES;
@@ -300,46 +203,6 @@ function parseTailBytes(value: unknown): number | undefined {
   const n = Number(Array.isArray(value) ? value[0] : value);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_STAGE_OUTPUT_TAIL_BYTES;
   return Math.min(Math.floor(n), 5 * 1024 * 1024);
-}
-
-// Parse Claude stream-json into human-readable output for live display.
-// Falls through to raw text for non-JSON lines (codex stdout) or JSON lines
-// that don't match a known Claude stream-json type — so any adapter's
-// live.log is renderable without a per-adapter parser.
-function parseStreamJsonToText(raw: string, state?: { lineBuf: string }): string {
-  const buf = state || { lineBuf: '' };
-  buf.lineBuf += raw;
-  const lines = buf.lineBuf.split('\n');
-  buf.lineBuf = lines.pop()!; // keep incomplete last line
-  const output: string[] = [];
-  for (const line of lines) {
-    if (!line.trim()) { output.push('\n'); continue; }
-    let handled = false;
-    try {
-      const parsed = JSON.parse(line);
-      // Text content from assistant
-      if (parsed.type === 'assistant' && parsed.message?.content) {
-        for (const block of parsed.message.content) {
-          if (block.type === 'text' && block.text) output.push(block.text);
-          if (block.type === 'tool_use') {
-            const name = block.name || 'tool';
-            const desc = block.input?.description || block.input?.command || block.input?.file_path || '';
-            output.push(`\n[${name}] ${typeof desc === 'string' ? desc.slice(0, 100) : ''}\n`);
-          }
-        }
-        handled = true;
-      }
-      // Tool results
-      if (parsed.type === 'tool_result' || parsed.type === 'system') {
-        if (parsed.subtype === 'task_started') {
-          output.push(`\n[Agent] ${parsed.description || 'subtask started'}\n`);
-        }
-        handled = true;
-      }
-    } catch { /* not JSON */ }
-    if (!handled) output.push(line + '\n');
-  }
-  return output.join('');
 }
 
 function readTextTail(filePath: string, tailBytes?: number): { content: string; totalBytes: number; truncated: boolean; tailBytes?: number } {
@@ -370,237 +233,6 @@ function sendStageOutput(
   return reply.type("text/markdown").send(result.content);
 }
 
-export interface DirectRunnerLivenessOptions {
-  procRoot?: string;
-  killProcess?: (pid: number, signal: 0) => void;
-}
-
-export function hasLiveDirectRunner(
-  projectDir: string,
-  runId: string,
-  options: DirectRunnerLivenessOptions = {},
-): boolean {
-  const procRoot = options.procRoot ?? '/proc';
-  const killProcess = options.killProcess ?? ((pid, signal) => process.kill(pid, signal));
-  for (const prefix of ['direct-resume', 'direct-rerun']) {
-    try {
-      const pidPath = join(projectDir, '.fc', `${prefix}-${runId}.pid`);
-      if (!existsSync(pidPath)) continue;
-      const rawPid = readFileSync(pidPath, 'utf-8').trim();
-      if (!/^\d+$/.test(rawPid)) continue;
-      const pid = Number(rawPid);
-      // PID 0 targets the caller's process group on POSIX and is never a
-      // process identity. Reject it before the signal-0 liveness probe.
-      if (!Number.isSafeInteger(pid) || pid <= 0) continue;
-      try {
-        killProcess(pid, 0);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EPERM') continue;
-      }
-
-      // Signal 0 is the portable liveness proof. On Linux, readable procfs
-      // metadata additionally rejects a recycled pid; missing or inaccessible
-      // procfs must not turn a proven-live process into a dead one on macOS or
-      // in a Linux container without procfs.
-      if (process.platform !== 'linux') return true;
-      const cmdlinePath = join(procRoot, rawPid, 'cmdline');
-      const environPath = join(procRoot, rawPid, 'environ');
-      if (!existsSync(cmdlinePath) || !existsSync(environPath)) return true;
-      try {
-        const cmdline = readFileSync(cmdlinePath, 'utf-8');
-        const environ = readFileSync(environPath, 'utf-8');
-        if (cmdline.includes('.fc/direct-') && environ.split('\0').includes(`RUN_ID=${runId}`)) {
-          return true;
-        }
-      } catch {
-        return true;
-      }
-    } catch { /* non-critical */
-      // A malformed marker is not liveness evidence; inaccessible procfs is
-      // handled above only after signal 0 has established that the pid exists.
-    }
-  }
-  return false;
-}
-
-/**
- * Checks whether the scheduler subprocess for a run is still alive by validating
- * the scheduler.pid file written by runWorkflow. Survives dashboard restarts so
- * the startup-recovery sweep doesn't mislabel live runs as failed.
- */
-export function hasLiveScheduler(_projectDir: string, runId: string): boolean {
-  try {
-    const pidPath = join(runsRoot(), runId, 'scheduler.pid');
-    if (!existsSync(pidPath)) return false;
-    const pid = readFileSync(pidPath, 'utf-8').trim();
-    if (!/^\d+$/.test(pid)) return false;
-    // Signal 0 is the portable liveness probe and is what run-lock.ts:189 and
-    // task-registry.ts already use. Reading /proc/<pid> here meant that on any
-    // platform without procfs this returned false for a provably live scheduler,
-    // and performStartupRecovery then rewrote the healthy run to `failed`.
-    try {
-      process.kill(Number(pid), 0);
-      return true;
-    } catch (error) {
-      // EPERM means the process exists but belongs to another user — still alive.
-      return (error as NodeJS.ErrnoException)?.code === 'EPERM';
-    }
-  } catch { /* non-critical */
-    return false;
-  }
-}
-
-function markDetachedRunFailed(projectDir: string, runId: string, reason: string): void {
-  try {
-    const state = readRunState(projectDir, runId);
-    if (!isRunningRunStatus(state.status)) return;
-    state.status = RUN_STATUS.FAILED;
-    state.failureReason = reason;
-    state.completedAt = new Date().toISOString();
-    for (const [, stage] of Object.entries(state.stages)) {
-      if (isRunningStageStatus(stage.status)) stage.status = STAGE_STATUS.FAILED;
-    }
-    writeRunState(projectDir, runId, state);
-  } catch (err) {
-    log.warn({ err, runId, reason }, 'Could not mark detached scheduler run failed');
-  }
-}
-
-/**
- * Spawn a fully-detached `flowcrew quick --existing-run-id <id>` child process
- * for a dashboard-initiated execute/rerun/approve. The scheduler then lives
- * outside the daemon's process, so daemon restarts no longer kill in-flight
- * runs. The child writes scheduler.pid, captures its own logs, and `unref()`
- * lets the daemon exit independently if needed.
- */
-interface DetachedRunOptions {
-  runId: string;
-  projectDir: string;
-  exactBrief: string;
-  briefAdmission: BriefAdmissionRecord;
-  campaignId?: string | undefined;
-  supervise?: boolean | undefined;
-  workflow?: string | undefined;
-  maxIterations?: number | undefined;
-  adapter?: string | undefined;
-}
-
-type DetachedRunStarter = () => void;
-type DetachedRunSpawner = (opts: DetachedRunOptions) => DetachedRunStarter | void;
-
-function spawnDetachedRun(opts: DetachedRunOptions): DetachedRunStarter {
-  const verification = verifyBriefAdmission(opts.exactBrief, opts.briefAdmission);
-  if (verification.status !== 'valid') {
-    throw new Error(
-      `Brief admission ${verification.status}; detached run ${opts.runId} was not spawned `
-      + `(current digest ${verification.report.digest.slice(0, 12)}).`,
-    );
-  }
-  const cliPath = fileURLToPath(new URL('./cli.js', import.meta.url));
-  const encodedAdmission = Buffer.from(JSON.stringify(opts.briefAdmission), 'utf8').toString('base64url');
-  const args: string[] = [
-    'quick',
-    '--task', opts.exactBrief,
-    '--brief-admission-record', encodedAdmission,
-    '--existing-run-id', opts.runId,
-    '--project', opts.projectDir,
-  ];
-  if (opts.workflow) args.push('--workflow', opts.workflow);
-  if (typeof opts.maxIterations === 'number') args.push('--max-iterations', String(opts.maxIterations));
-  if (opts.adapter) args.push('--adapter', opts.adapter);
-  if (opts.supervise === false) args.push('--no-supervise');
-  if (opts.campaignId) args.push('--campaign', opts.campaignId);
-  return () => {
-    const claim = claimLaunchIntent(opts.projectDir, opts.runId);
-    if (!claim.claimed) {
-      throw new Error(`Project launch already in progress (${claim.blockingOwnerRunId ?? 'unknown'})`);
-    }
-    const logDir = join(opts.projectDir, '.fc', 'logs');
-    try { mkdirSync(logDir, { recursive: true }); } catch { /* non-critical */ }
-    const logPath = join(logDir, `run-${opts.runId}.log`);
-    let logFd = -1;
-    try {
-      logFd = openSync(logPath, 'a');
-    } catch {
-      logFd = -1;
-    }
-    let child;
-    try {
-      child = spawn(process.execPath, [cliPath, ...args], {
-        detached: true,
-        stdio: ['ignore', logFd >= 0 ? logFd : 'ignore', logFd >= 0 ? logFd : 'ignore'],
-        cwd: opts.projectDir,
-        env: { ...process.env },
-      });
-    } catch (err) {
-      releaseLaunchIntent(opts.projectDir, opts.runId);
-      if (logFd >= 0) try { closeSync(logFd); } catch { /* ignore */ }
-      const reason = `Detached scheduler failed to spawn: ${err instanceof Error ? err.message : String(err)}`;
-      markDetachedRunFailed(opts.projectDir, opts.runId, reason);
-      throw err;
-    }
-    if (logFd >= 0) try { closeSync(logFd); } catch { /* ignore */ }
-    child.once('error', (err) => {
-      releaseLaunchIntent(opts.projectDir, opts.runId);
-      markDetachedRunFailed(opts.projectDir, opts.runId, `Detached scheduler failed: ${err.message}`);
-    });
-    child.once('exit', (code, signal) => {
-      if ((code ?? 0) !== 0 || signal) {
-        markDetachedRunFailed(opts.projectDir, opts.runId, `Detached scheduler exited early: code=${code ?? 'null'} signal=${signal ?? 'null'}`);
-      }
-    });
-    const watchdog = setTimeout(() => {
-      if (!hasLiveScheduler(opts.projectDir, opts.runId)) {
-        markDetachedRunFailed(opts.projectDir, opts.runId, 'Detached scheduler did not start within 10s');
-      }
-    }, 10_000);
-    watchdog.unref?.();
-    child.unref();
-    log.info({ runId: opts.runId, pid: child.pid, logPath }, 'Spawned detached scheduler');
-  };
-}
-
-function listRecentRunIdsForStartup(projectDir: string, limit = 50): string[] {
-  try {
-    const root = runsRoot();
-    if (!existsSync(root)) return [];
-    return readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .filter((name) => /^\d{4}-\d{2}-\d{2}T/.test(name))
-      .sort()
-      .slice(-limit);
-  } catch { /* non-critical */
-    return [];
-  }
-}
-
-export function performStartupRecovery(projectDir: string, limit = 50): void {
-  try {
-    // Prefer the index: it lets us reconcile EVERY orphaned 'running' run cheaply,
-    // not just the most-recent `limit`. Fall back to the recent-N fs scan only when
-    // the index is unavailable. This is also safe to call periodically (not just at
-    // startup) so a run whose scheduler died mid-flight self-heals without a restart.
-    const runningIds = listRunningRunIdsFromIndex(projectDir);
-    const runIds = runningIds ?? (Number.isFinite(limit) && limit > 0 ? listRecentRunIdsForStartup(projectDir, limit) : []);
-    for (const id of runIds) {
-      try {
-        const state = readRunState(projectDir, id);
-        if (isRunningRunStatus(state.status)) {
-          if (hasLiveDirectRunner(projectDir, id)) continue;
-          if (hasLiveScheduler(projectDir, id)) continue;
-          state.status = RUN_STATUS.FAILED;
-          state.failureReason = 'Scheduler process gone while task was running (orphan reconciled)';
-          state.completedAt = new Date().toISOString();
-          for (const [, s] of Object.entries(state.stages)) {
-            if (isRunningStageStatus(s.status)) s.status = STAGE_STATUS.FAILED;
-          }
-          writeRunState(projectDir, id, state);
-        }
-      } catch { /* skip unreadable runs (e.g. dir deleted) */ }
-    }
-  } catch { /* no runs dir */ }
-}
 
 function loadStageRoles(projectDir: string, runId: string): Record<string, { role: string; dependsOn: string[]; isGate?: boolean }> {
   try {
@@ -626,319 +258,24 @@ function loadStageRoles(projectDir: string, runId: string): Record<string, { rol
   }
 }
 
-const _bestScoreCache = new Map<string, { mtime: number; bestScore?: number; metricName?: string }>();
-
-function readBestScore(projectDir: string, runId: string): { bestScore?: number; metricName?: string } {
-  const runPath = join(runsRoot(), runId);
-  // Use run.json mtime as cache key — it changes whenever the run state updates
-  try {
-    const mtime = statSync(join(runPath, 'run.json')).mtimeMs;
-    const cached = _bestScoreCache.get(runId);
-    if (cached && cached.mtime === mtime) return { bestScore: cached.bestScore, metricName: cached.metricName };
-  } catch { /* no run.json */ }
-
-  let best: number | undefined;
-  let name: string | undefined;
-  try {
-    // Check legacy metrics_*.json files at run root
-    const files = readdirSync(runPath).filter(f => f.startsWith('metrics_') && f.endsWith('.json'));
-    for (const f of files) {
-      try {
-        const m = JSON.parse(readFileSync(join(runPath, f), 'utf-8'));
-        if (typeof m.score === 'number' && (best === undefined || m.score > best)) {
-          best = m.score;
-          name = m.metric_name;
-        }
-      } catch { /* skip */ }
-    }
-    // Check per-stage metric.json files (written by gate agents)
-    const stagesPath = join(runPath, 'stages');
-    try {
-      for (const sid of readdirSync(stagesPath)) {
-        const mp = join(stagesPath, sid, 'metric.json');
-        try {
-          const m = JSON.parse(readFileSync(mp, 'utf-8'));
-          if (m.hasMetric && typeof m.value === 'number' && (best === undefined || m.value > best)) {
-            best = m.value;
-            name = m.metric;
-          }
-        } catch { /* skip */ }
-      }
-    } catch { /* no stages dir */ }
-    // Fallback: check verdict files for scores (legacy format)
-    if (best === undefined) {
-      const verdictFiles = readdirSync(runPath).filter(f => f.startsWith('verdict_') && f.endsWith('.json'));
-      for (const f of verdictFiles) {
-        try {
-          const v = JSON.parse(readFileSync(join(runPath, f), 'utf-8'));
-          if (typeof v.score === 'number' && (best === undefined || v.score > best)) {
-            best = v.score;
-            name = typeof v.metric === 'string' ? v.metric : undefined;
-          }
-        } catch { /* skip */ }
-      }
-    }
-    // Check knowledge graph bestScore
-    try {
-      const kgPath = join(runPath, 'knowledge_graph.json');
-      const kgData = JSON.parse(readFileSync(kgPath, 'utf-8'));
-      if (typeof kgData?.metadata?.bestScore === 'number' && (best === undefined || kgData.metadata.bestScore > best)) {
-        best = kgData.metadata.bestScore;
-        name = kgData.metadata.metricName ?? name;
-      }
-    } catch { /* no KG or parse error */ }
-    // Cache result
-    try {
-      const mtime = statSync(join(runPath, 'run.json')).mtimeMs;
-      if (_bestScoreCache.size >= 200) {
-        const first = _bestScoreCache.keys().next().value;
-        if (first !== undefined) _bestScoreCache.delete(first);
-      }
-      _bestScoreCache.set(runId, { mtime, bestScore: best, metricName: name });
-    } catch { /* ignore */ }
-    return { bestScore: best, metricName: name };
-  } catch { return {}; }
-}
-
-interface RunApiShape {
-  runId: string;
-  workflowName: string;
-  status: string;
-  startedAt: string;
-  stages: { id: string; role: string; status: string; duration_ms?: number; retries: number; reruns?: number; attempts?: StageAttempt[] | SupervisorAttempt[]; dependsOn: string[] }[];
-  stageEvidence?: StoreState['stageEvidence'];
-}
-
-function stateToApi(state: StoreState, projectDir: string): RunApiShape {
-  const roles = loadStageRoles(projectDir, state.runId);
-  return {
-    runId: state.runId,
-    workflowName: state.workflowName,
-    status: state.status,
-    startedAt: state.startedAt,
-    ...(state.stageEvidence ? { stageEvidence: state.stageEvidence } : {}),
-    stages: [
-      ...Object.entries(state.stages).map(([id, s]) => ({
-      id,
-      role: roles[id]?.role ?? "",
-      status: s.status,
-      duration_ms: s.duration_ms,
-      retries: s.retries,
-      reruns: s.reruns,
-      attempts: s.attempts,
-      dependsOn: roles[id]?.dependsOn ?? [],
-      })),
-      ...(state.supervisor ? [{
-        id: '_supervisor', role: 'supervisor', status: state.supervisor.status,
-        duration_ms: state.supervisor.duration_ms, retries: 0,
-        reruns: Math.max(0, state.supervisor.calls - 1), attempts: state.supervisor.attempts,
-        dependsOn: [],
-      }] : []),
-    ],
-  };
-}
-
-interface TaskShape {
-  id: string;
-  name: string;
-  type: string;
-  workflow: string;
-  status: string;
-  stages: { id: string; role: string; status: string; duration_ms?: number; retries: number; reruns?: number; attempts?: StageAttempt[] | SupervisorAttempt[]; artifacts?: string[]; dependsOn: string[]; dispatched: boolean; startedAt?: string; completedAt?: string; isGate?: boolean; tokens_in?: number; tokens_out?: number; error?: string; kgChanged?: boolean; calls?: number }[];
-  startedAt: string;
-  elapsed_ms: number;
-  tokens: number;
-  bestScore?: number;
-  metricName?: string;
-  plan: unknown[];
-  dispatchedStages?: unknown[];
-  currentIteration: number;
-  maxIterations: number;
-  maxRetries: number;
-  autoApproveRetries: boolean;
-  timeoutMs?: number;
-  campaignTriggers?: StoreState['campaignTriggers'];
-  iterationLog: string | null;
-  campaignId?: string;
-  campaignStorageKey?: string;
-  campaignName?: string;
-  campaignSeq?: number;
-  campaignIteration?: number;
-  failureReason?: string;
-  completedAt?: string;
-  campaignAlert?: StoreState['campaignAlert'];
-  researchInjection?: StoreState['researchInjection'];
-  parentTaskId?: string;
-  budget?: StoreState['budget'];
-  attemptSummaryRefresh?: ReturnType<typeof readAttemptSummaryRefreshState>;
-  supervisor?: StoreState['supervisor'];
-  stageEvidence?: StoreState['stageEvidence'];
-}
-
-type MetricFormat = 'currency_usd' | 'rating_0_to_10' | 'pct' | 'count' | 'duration_min' | 'raw';
-
-interface WorkspaceMetric {
-  name: string;
-  value: number | null;
-  format: MetricFormat;
-  target?: { min: number; max?: number } | null;
-  sublabel?: string;
-}
-
+/** Only the facts consumed by inbox attention. Campaign presentation belongs to campaign-page. */
 interface WorkspaceCampaign {
   id: string;
   name: string;
   status: string;
-  badges: { text: string; kind: string }[];
-  metric: WorkspaceMetric | null;
-  iterations: { label: string; value: number; verdict: string }[] | null;
-  phases: { name: string; status?: string; elapsed_min?: number; attempt?: number; commit?: string; commit_chain: string[]; notes?: string | null; direction?: string | null; result?: number | null; runId?: string | null }[] | null;
-  brief_revisions: { version: string; reason: string; shipped?: boolean }[] | null;
-  runs: { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string }[];
-  runs_total: number;
-  latest_outcome?: string | null;
-  latestOutcome?: string | null;
+  brief_revisions: { version: string }[] | null;
   started_at?: string;
-  projectDir?: string | null;
-  briefDir?: string | null;
-  goal?: unknown;
-  budget?: unknown;
-  /** Underlying run to inspect/mark failed when the synthesized campaign status is stale. */
   staleRunId?: string;
 }
 
-function normalizeCampaignTriggers(value: unknown): StoreState['campaignTriggers'] | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const input = value as Record<string, unknown>;
-  const triggers: StoreState['campaignTriggers'] = {};
-  if (typeof input.enabled === 'boolean') triggers.enabled = input.enabled;
-  for (const key of ['regressionAfter', 'plateauAfter', 'plateauThreshold', 'repeatedFailureAfter'] as const) {
-    if (input[key] === undefined) continue;
-    const parsed = Number(input[key]);
-    if (Number.isFinite(parsed) && parsed >= 0) triggers[key] = parsed;
-  }
-  return triggers;
-}
-
-export function readExecutionDefaults(configDir?: string): { timeoutMs: number; maxIterations: number; gateRetryLoops: number; stageTechnicalRetries: number } {
-  const projectDir = dirname(configDir ?? join(process.cwd(), 'config'));
-  const defaults = loadCanonicalProjectDefaults(projectDir);
+export function readExecutionDefaults(): { timeoutMs: number; maxIterations: number; gateRetryLoops: number; stageTechnicalRetries: number } {
+  const defaults = loadEngineDefaults();
   return {
     timeoutMs: defaults.timeout_ms,
     maxIterations: defaults.max_iterations,
     gateRetryLoops: defaults.gate_retry_loops,
     stageTechnicalRetries: defaults.stage_technical_retries,
   };
-}
-
-
-function stateToTask(state: StoreState, projectDir: string, configDir?: string, opts?: { includeIterationLog?: boolean }): TaskShape {
-  const defaults = readExecutionDefaults(configDir);
-  const runPresentation = dashboardRunPresentation(state.status);
-  // Fast path: use stored campaign fields directly to avoid O(n) listCampaigns scan per task
-  const campaign = state.campaignStorageKey
-    ? { id: state.campaignId ?? state.campaignStorageKey, name: extractTaskTitle(state.campaignName) || state.campaignId || state.campaignStorageKey, storageKey: state.campaignStorageKey }
-    : state.campaignId || state.campaignName
-      ? resolveCampaignSelection(projectDir, { campaignId: state.campaignId, campaignStorageKey: state.campaignStorageKey, campaignName: state.campaignName })
-      : undefined;
-  const roles = loadStageRoles(projectDir, state.runId);
-  const dsArr = Array.isArray(state.dispatchedStages) ? (state.dispatchedStages as { id?: string; is_gate?: boolean }[]).filter(Boolean) : [];
-  const dispatchedIds = new Set(
-    dsArr.map((s) => s.id).filter(Boolean),
-  );
-  const dispatchedGates = new Map(dsArr.filter(s => s.id).map(s => [s.id!, s.is_gate]));
-  const stages: TaskShape['stages'] = Object.entries(state.stages).map(([id, s]) => ({
-    id,
-    role: roles[id]?.role ?? "",
-    status: s.status,
-    duration_ms: s.duration_ms,
-    retries: s.retries,
-    reruns: s.reruns,
-    attempts: s.attempts,
-    artifacts: s.artifacts ?? [],
-    dependsOn: roles[id]?.dependsOn ?? [],
-    dispatched: dispatchedIds.has(id),
-    startedAt: s.startedAt,
-    completedAt: s.completedAt,
-    isGate: dispatchedGates.get(id) ?? roles[id]?.isGate,
-    tokens_in: s.tokens_in,
-    tokens_out: s.tokens_out,
-    error: s.error,
-    kgChanged: s.kgChanged,
-  }));
-  if (state.supervisor) {
-    stages.push({
-      id: '_supervisor',
-      role: 'supervisor',
-      status: state.supervisor.status,
-      duration_ms: state.supervisor.duration_ms,
-      retries: 0,
-      reruns: Math.max(0, state.supervisor.calls - 1),
-      attempts: state.supervisor.attempts,
-      artifacts: [],
-      dependsOn: [],
-      dispatched: false,
-      startedAt: state.supervisor.startedAt,
-      completedAt: state.supervisor.completedAt,
-      tokens_in: state.supervisor.tokens_in,
-      tokens_out: state.supervisor.tokens_out,
-      calls: state.supervisor.calls,
-    });
-  }
-  // A parked run is waiting on a human: freeze its clock at the park instant so a
-  // day-long approval wait does not render as a 24-hour hang.
-  const parkedElapsed = isPausedRunStatus(state.status) && state.startedAt && state.parked?.pausedAt
-    ? Math.max(0, Date.parse(state.parked.pausedAt) - Date.parse(state.startedAt)) || 0
-    : undefined;
-  const elapsed_ms = parkedElapsed !== undefined ? parkedElapsed
-    : isRunningRunStatus(state.status) || isAwaitingApprovalRunStatus(state.status)
-    ? Math.max(0, Date.now() - Date.parse(state.startedAt)) || 0
-    : state.completedAt
-      ? Math.max(0, Date.parse(state.completedAt) - Date.parse(state.startedAt)) || 0
-      : stages.reduce((sum, s) => sum + (s.duration_ms ?? 0), 0);
-  const totalTokens = deriveRunTokenCost(state).tokens;
-  const { bestScore, metricName } = readBestScore(projectDir, state.runId);
-  const task: TaskShape = {
-    id: state.runId,
-    name: extractTaskTitle(state.taskDescription) || state.workflowName,
-    type: '',
-    workflow: state.workflowName,
-    status: runPresentation.taskStatus,
-    stages,
-    startedAt: state.startedAt,
-    elapsed_ms,
-    tokens: totalTokens,
-    bestScore,
-    metricName,
-    plan: state.plan ?? [],
-    currentIteration: state.currentIteration ?? 1,
-    maxIterations: state.maxIterations ?? defaults.maxIterations,
-    maxRetries: state.maxRetries ?? defaults.gateRetryLoops,
-    autoApproveRetries: state.autoApproveRetries ?? true,
-    timeoutMs: state.timeoutMs ?? defaults.timeoutMs,
-    campaignTriggers: state.campaignTriggers,
-    iterationLog: null,
-    campaignId: campaign?.id,
-    campaignStorageKey: campaign?.storageKey,
-    campaignName: campaign?.name,
-    campaignSeq: state.campaignSeq,
-    campaignIteration: state.campaignIteration ?? state.currentIteration,
-    failureReason: state.failureReason,
-    completedAt: state.completedAt,
-    campaignAlert: state.campaignAlert,
-    researchInjection: state.researchInjection,
-    parentTaskId: state.parentTaskId,
-    budget: state.budget,
-    attemptSummaryRefresh: readAttemptSummaryRefreshState(projectDir, state.runId),
-    supervisor: state.supervisor,
-    ...(state.stageEvidence ? { stageEvidence: state.stageEvidence } : {}),
-  };
-  if (state.dispatchedStages) task.dispatchedStages = state.dispatchedStages;
-  if (opts?.includeIterationLog) {
-    const logPath = join(runsRoot(), state.runId, 'iteration_log.md');
-    try { task.iterationLog = readFileSync(logPath, 'utf-8'); } catch { /* not found */ }
-  }
-  return task;
 }
 
 function isSafeId(id: string): boolean {
@@ -961,11 +298,6 @@ function readJsonFile(filePath: string): Record<string, unknown> | null {
   }
 }
 
-function readJsonlFile(filePath: string): unknown[] {
-  if (!existsSync(filePath)) return [];
-  return readTolerantJsonlFile<unknown>(filePath);
-}
-
 function formatDuration(startIso?: string, endIso?: string): string {
   if (!startIso) return '';
   const start = Date.parse(startIso);
@@ -974,118 +306,6 @@ function formatDuration(startIso?: string, endIso?: string): string {
   const minutes = Math.max(0, Math.floor((end - start) / 60000));
   if (minutes < 60) return `${minutes}m`;
   return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
-}
-
-/** Parse the "5m" / "1h2m" duration string back into minutes for the phase timeline bar. */
-function parseDurationMin(duration?: string): number | undefined {
-  if (!duration) return undefined;
-  const h = /(\d+)h/.exec(duration);
-  const m = /(\d+)m/.exec(duration);
-  if (!h && !m) return undefined;
-  return (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0);
-}
-
-/**
- * The winning research direction for a run: the round (label + result) from its
- * research_journal that the run treated as best. Prefers the round whose result equals the
- * canonical bestScore; otherwise the max-result round (higher-is-better default). Detail-view
- * only — returns null with no journal so the caller falls back to the cheap run summary.
- */
-function bestRoundForRun(runId: string, prefer?: number | null): { label: string; result: number | null } | null {
-  try {
-    const path = join(runsRoot(), runId, 'research_journal.json');
-    if (!existsSync(path)) return null;
-    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { rounds?: { label?: unknown; result?: unknown }[] };
-    const rounds = (parsed.rounds ?? []).filter(
-      (round): round is { label: string; result: number } => typeof round?.label === 'string' && typeof round?.result === 'number',
-    );
-    if (!rounds.length) return null;
-    if (typeof prefer === 'number') {
-      const hit = rounds.find((round) => round.result === prefer);
-      if (hit) return { label: hit.label, result: hit.result };
-    }
-    const best = rounds.reduce((a, c) => (c.result > a.result ? c : a));
-    return { label: best.label, result: best.result };
-  } catch {
-    return null;
-  }
-}
-
-interface KgRawNode { id?: string; type?: string; label?: string; text?: string; details?: string; source?: string; score?: number }
-interface KgRawEdge { from?: string; to?: string; source?: string; target?: string; type?: string }
-
-/**
- * Campaign-level knowledge graph: the union of the campaign's per-run KGs. Per-run KGs are rich
- * but isolated (and shown on the run detail page); this synthesizes them so the campaign panel is
- * not empty. Nodes are deduped by (type + substance) so the shared goal and repeated findings
- * collapse, namespaced by run so ids never collide across runs, and capped newest-run-first so the
- * mini graph stays legible. Each node is tagged with the campaign id to satisfy the panel's filter.
- */
-function aggregateCampaignKG(projectDir: string, id: string): { nodes: Record<string, unknown>[]; edges: Record<string, unknown>[] } {
-  const runIds = readCampaignRuns(projectDir, id).runs.map((run) => run.id).filter((value): value is string => !!value);
-  const ordered = [...new Set(runIds)].sort().reverse(); // newest run first → it wins the node budget
-  // The consumer is the campaign knowledge digest (ranked text lists), not a force graph, so the
-  // legibility cap can be high: include every run's learnings, just bound payload for huge campaigns.
-  const NODE_CAP = 500;
-  const canonicalByKey = new Map<string, string>(); // (type+substance) → the node id that represents it
-  const nodes: Record<string, unknown>[] = [];
-  const edges: Record<string, unknown>[] = [];
-  const seenEdge = new Set<string>();
-  for (const runId of ordered) {
-    let graph: { nodes?: KgRawNode[]; edges?: KgRawEdge[] };
-    try {
-      const path = join(runsRoot(), runId, 'knowledge_graph.json');
-      if (!existsSync(path)) continue;
-      graph = JSON.parse(readFileSync(path, 'utf-8')) as { nodes?: KgRawNode[]; edges?: KgRawEdge[] };
-    } catch {
-      continue;
-    }
-    const localToCanon = new Map<string, string>(); // this run's local id → the canonical id in `nodes`
-    for (const node of graph.nodes ?? []) {
-      const localId = String(node.id ?? '');
-      if (!localId) continue;
-      const nsId = `${runId}::${localId}`;
-      const substance = String(node.text ?? node.label ?? '').trim().toLowerCase();
-      const key = `${String(node.type)}::${substance}`;
-      if (substance && canonicalByKey.has(key)) { localToCanon.set(localId, canonicalByKey.get(key)!); continue; }
-      if (nodes.length >= NODE_CAP) continue; // over budget: drop (its edges get pruned below)
-      if (substance) canonicalByKey.set(key, nsId);
-      localToCanon.set(localId, nsId);
-      nodes.push({ id: nsId, type: node.type, label: node.label, text: node.text, details: node.details, source: node.source, score: node.score, runId, meta: runId.slice(0, 16), campaign: id });
-    }
-    for (const edge of graph.edges ?? []) {
-      const source = localToCanon.get(String(edge.from ?? edge.source ?? ''));
-      const target = localToCanon.get(String(edge.to ?? edge.target ?? ''));
-      if (!source || !target || source === target) continue;
-      const edgeKey = `${source}->${target}::${String(edge.type ?? '')}`;
-      if (seenEdge.has(edgeKey)) continue;
-      seenEdge.add(edgeKey);
-      edges.push({ id: edgeKey, source, target, kind: edge.type });
-    }
-  }
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  return { nodes, edges: edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)) };
-}
-
-function deriveMetricFormat(metricName?: string, score?: number | null, _threshold?: number | null): MetricFormat {
-  const name = (metricName ?? '').toLowerCase();
-  if ((name.includes('audience') || name.includes('rating') || name.includes('gate'))
-    && score != null && score >= -1 && score <= 10) {
-    return 'rating_0_to_10';
-  }
-  if (name.includes('pct') || name.includes('percent')) return 'pct';
-  if (name.includes('count') || name.includes(COMPLETE_METRIC_NAME_FRAGMENT) || name.endsWith('_n')) return 'count';
-  if (name.includes('duration') || name.includes('minute') || name.endsWith('_min')) return 'duration_min';
-  if (name.includes('pnl') || name.includes('usd') || name.includes('oos')) return 'currency_usd';
-  if (score != null && Number.isFinite(score)) {
-    if (score > 100) return 'currency_usd';
-    if (score >= 0 && score <= 10) return 'rating_0_to_10';
-  }
-  return 'raw';
-}
-
-function numericValue(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -1112,13 +332,6 @@ function readRunStateSafe(projectDir: string, runId: string): StoreState | null 
  * which is why the run-bound check is used rather than bare PID liveness — a
  * recycled PID must not keep a dead run looking alive.
  *
- * Deliberately NOT hasLiveScheduler(), and the two must not be merged: they
- * fail safe in opposite directions because they guard opposite actions.
- * hasLiveScheduler decides whether performStartupRecovery may rewrite a run to
- * `failed` — destroying state — so it must over-report liveness; tightening it
- * once already caused healthy runs to be marked failed (see the note at its
- * definition). This one only decides whether to suppress a warning, where
- * over-reporting liveness hides a genuinely lost run, so it must under-report.
  */
 export function schedulerIsAliveForRun(projectDir: string, runId: string): boolean {
   if (!projectDir || !runId) return false;
@@ -1152,6 +365,27 @@ function runMatchesCampaign(state: StoreState, id: string): boolean {
     .some((value) => aliases.has(value) || aliases.has(value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')));
 }
 
+/** Operator publications must not replace records owned by a live scheduler. */
+function assertRunEditable(runId: string): void {
+  const scheduler = inspectRunScheduler(runId, join(runsRoot(), runId));
+  if (scheduler.kind === 'live' || scheduler.kind === 'corrupt' || scheduler.kind === 'unverifiable') {
+    throw new Error(`Cannot edit run ${runId} with ${scheduler.kind} scheduler ownership`);
+  }
+}
+
+function editableCampaignRuns(projectDir: string, campaignId: string): { runId: string; state: StoreState }[] {
+  const root = runsRoot();
+  if (!existsSync(root)) return [];
+  const runs: { runId: string; state: StoreState }[] = [];
+  for (const runId of readdirSync(root)) {
+    const state = readRunStateSafe(projectDir, runId);
+    if (!state || !runMatchesCampaign(state, campaignId)) continue;
+    assertRunEditable(runId);
+    runs.push({ runId, state });
+  }
+  return runs;
+}
+
 function summarizeRunOutcome(status?: string): string {
   return status === undefined ? 'unknown' : dashboardRunPresentation(status).campaignOutcome;
 }
@@ -1161,20 +395,11 @@ function runHasSummary(runId: string): boolean {
   return existsSync(join(runsRoot(), runId, 'summary.md'));
 }
 
-function runSummaryFromState(state: StoreState, metric?: number | null): CampaignRunSummary {
-  const best = readBestScore(state.projectDir, state.runId).bestScore;
-  return {
-    id: state.runId,
-    iter: state.campaignIteration != null || state.currentIteration != null ? `iter ${state.campaignIteration ?? state.currentIteration}` : '',
-    metric: metric ?? best ?? null,
-    summary: (extractTaskTitle(state.taskDescription) || state.workflowName || '').slice(0, 90),
-    duration: formatDuration(state.startedAt, state.completedAt),
-    outcome: summarizeRunOutcome(state.status),
-    hasSummary: runHasSummary(state.runId),
-  };
+function runSummaryFromState(state: StoreState): CampaignRunSummary {
+  return { id: state.runId, outcome: summarizeRunOutcome(state.status) };
 }
 
-type CampaignRunSummary = { id: string; iter: string; metric: number | null; summary: string; duration: string; outcome: string; hasSummary: boolean };
+type CampaignRunSummary = { id: string; outcome: string };
 type CampaignRunSlice = { runs: CampaignRunSummary[]; total: number };
 type StandaloneRunSummary = { id: string; projectDir: string; summary: string; duration: string; outcome: string; hasSummary: boolean };
 
@@ -1347,8 +572,9 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
       tokens_out: state.supervisor.tokens_out,
     });
   }
-  const kg = readKGSafe(projectDir, state.runId);
   const runDirectory = join(runsRoot(), state.runId);
+  const stageHistoryDiagnostics: Array<{ code: string; path?: string; detail: string }> = [];
+  const stageHistory = projectRunStageHistory(state, diagnostic => stageHistoryDiagnostics.push(diagnostic));
   return {
     runId: state.runId,
     workflowName: state.workflowName,
@@ -1368,55 +594,16 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     campaignId: state.campaignId ?? state.campaignStorageKey,
     failureReason: state.failureReason,
     realityGate: state.realityGate,
+    supervise: state.supervise,
     supervisor: state.supervisor,
     stages,
     stageEvidence: state.stageEvidence ?? [],
-    kg: { nodes: kg.nodes ?? [], edges: kg.edges ?? [] },
+    stageHistory,
+    stageHistoryDiagnostics,
+    budget: budgetView(state, new Date().toISOString()),
     events: readRunEvents(state.runId),
     operational: readOperationalProjection(runDirectory, { state }),
     stage_outputs: readStageOutputPreviews(state.runId),
-  };
-}
-
-function adaptCrossCampaignNode(node: ReturnType<typeof getCrossCampaignNodes>[number]) {
-  const metadata = node.metadata ?? {};
-  const type = node.type;
-  const countsTotal = metadata.counts && typeof metadata.counts === 'object'
-    ? Object.values(metadata.counts).reduce<number>((sum, value) => sum + (typeof value === 'number' ? value : 0), 0)
-    : undefined;
-  const label = type === 'symptom'
-    ? (countsTotal !== undefined ? `x${countsTotal}` : stringValue(metadata.kind) ?? 'symptom')
-    : type === 'diagnosis'
-      ? (stringValue(metadata.rule_signal)?.split('.').at(-1)?.slice(0, 12) ?? 'diagnosis')
-      : type === 'patch'
-        ? `${metadata.brief_version_before ?? '?'}->${metadata.brief_version_after ?? '?'}`
-        : stringValue(metadata.kind)?.slice(0, 10) ?? type;
-  return {
-    id: node.id,
-    type,
-    label,
-    meta: JSON.stringify(metadata).slice(0, 120),
-    campaign: node.campaignId,
-    campaignId: node.campaignId,
-    metadata,
-  };
-}
-
-function adaptCrossCampaignEdge(edge: ReturnType<typeof getCrossCampaignEdges>[number]) {
-  const relToKind: Record<string, string> = {
-    caused_by: 'causal',
-    fixed_by: 'causal',
-    resulted_in: 'causal',
-    related_to: 'similarity',
-  };
-  return {
-    source: edge.from,
-    target: edge.to,
-    from: edge.from,
-    to: edge.to,
-    kind: relToKind[edge.relation] ?? 'causal',
-    relation: edge.relation,
-    weight: edge.weight,
   };
 }
 
@@ -1437,15 +624,6 @@ function getStringAt(obj: unknown, path: string[]): string | undefined {
     cursor = (cursor as Record<string, unknown>)[key];
   }
   return typeof cursor === 'string' && cursor.trim() ? cursor : undefined;
-}
-
-function getNumberAt(obj: unknown, path: string[]): number | undefined {
-  let cursor: unknown = obj;
-  for (const key of path) {
-    if (!cursor || typeof cursor !== 'object' || !(key in cursor)) return undefined;
-    cursor = (cursor as Record<string, unknown>)[key];
-  }
-  return typeof cursor === 'number' && Number.isFinite(cursor) ? cursor : undefined;
 }
 
 function resolveBriefDir(state: Record<string, unknown> | null): string | undefined {
@@ -1516,100 +694,22 @@ export function campaignSummary(id: string, dir: string): WorkspaceCampaign {
           : CAMPAIGN_PRESENTATION_STATUS.STALE;
     }
   }
-  const latestScore = numericValue(latest?.score);
-  const latestMetric = stringValue(latest?.metric)
-    ?? getStringAt(state, ['goal', 'metric'])
-    ?? getStringAt(state, ['config', 'goal', 'metric']);
-  const threshold = numericValue(latest?.threshold)
-    ?? getNumberAt(state, ['goal', 'threshold'])
-    ?? getNumberAt(state, ['threshold']);
-  const formattedIterations = iterations
-    .map((entry, index) => {
-      if (!entry || typeof entry !== 'object') return null;
-      const row = entry as Record<string, unknown>;
-      const value = numericValue(row.score) ?? numericValue(row.value);
-      if (value == null) return null;
-      const iter = row.iter ?? row.iteration ?? index + 1;
-      const passed = row.pass === true
-        || row.outcome === CAMPAIGN_PRESENTATION_STATUS.VALID_SHIP
-        || row.outcome === CAMPAIGN_PRESENTATION_STATUS.SHIPPED;
-      return {
-        label: `iter ${iter}`,
-        value,
-        verdict: passed ? CAMPAIGN_PRESENTATION_STATUS.SHIPPED : threshold != null && value >= threshold ? 'unstable' : 'interim',
-      };
-    })
-    .filter((entry): entry is { label: string; value: number; verdict: string } => entry !== null);
   const revisionsRaw = readJsonlFile(join(resolveBriefDir(state) ?? '', 'revisions.jsonl'));
   const briefRevisions = revisionsRaw
     .map((entry, index) => {
       if (!entry || typeof entry !== 'object') return null;
       const row = entry as Record<string, unknown>;
       const to = stringValue(row.to_version) ?? stringValue(row.version) ?? `v${index + 2}`;
-      const reason = stringValue(row.rule) ?? stringValue(row.reason) ?? (row.patch ? JSON.stringify(row.patch).slice(0, 120) : 'revision');
-      return { version: to, reason };
+      return { version: to };
     })
-    .filter((entry): entry is { version: string; reason: string } => entry !== null);
-  const phaseEntries: { name: string; status?: string; elapsed_min?: number; attempt?: number; commit?: string; commit_chain: string[]; notes?: string }[] = [];
-  for (const entry of iterations) {
-    if (!entry || typeof entry !== 'object') continue;
-    const row = entry as Record<string, unknown>;
-    const phase = stringValue(row.phase) ?? stringValue(row.nextPhase);
-    if (!phase) continue;
-    const phaseEntry: { name: string; status?: string; elapsed_min?: number; attempt?: number; commit?: string; commit_chain: string[]; notes?: string } = {
-      name: phase,
-      commit_chain: Array.isArray(row.commit_chain) ? row.commit_chain.filter((v): v is string => typeof v === 'string') : [],
-    };
-    const phaseStatus = row.phaseComplete === true ? 'complete' : stringValue(row.outcome) ?? stringValue(row.status);
-    const elapsed = numericValue(row.elapsed_min);
-    const attempt = numericValue(row.iteration) ?? numericValue(row.iter);
-    const commit = stringValue(row.completing_commit);
-    const notes = stringValue(row.reason) ?? stringValue(row.artifactSummary);
-    if (phaseStatus !== undefined) phaseEntry.status = phaseStatus;
-    if (elapsed !== undefined) phaseEntry.elapsed_min = elapsed;
-    if (attempt !== undefined) phaseEntry.attempt = attempt;
-    if (commit !== undefined) phaseEntry.commit = commit;
-    if (notes !== undefined) phaseEntry.notes = notes;
-    phaseEntries.push(phaseEntry);
-  }
-  const latestOutcome = latestIterationOutcome(iterations) ?? null;
-  const staleRunId = status === CAMPAIGN_PRESENTATION_STATUS.STALE
-    ? latestRunId
-    : undefined;
-  const metric = latestMetric && latestScore != null
-    ? {
-      name: latestMetric,
-      value: latestScore,
-      format: deriveMetricFormat(latestMetric, latestScore, threshold),
-      target: threshold != null ? { min: threshold } : null,
-      sublabel: threshold != null ? `threshold ${threshold}` : undefined,
-    }
-    : null;
+    .filter((entry): entry is { version: string } => entry !== null);
   return {
     id,
     name: getStringAt(state, ['name']) ?? id,
     status,
-    badges: [
-      { text: `${iterations.length} runs`, kind: 'default' },
-      status === CAMPAIGN_PRESENTATION_STATUS.RUNNING ? { text: 'RUNNING', kind: 'accent' } : null,
-      status === CAMPAIGN_PRESENTATION_STATUS.SHIPPED || status === CAMPAIGN_PRESENTATION_STATUS.VALID_SHIP ? { text: 'SHIPPED', kind: 'success' } : null,
-    ].filter((badge): badge is { text: string; kind: string } => badge !== null),
-    metric,
-    iterations: formattedIterations.length ? formattedIterations : null,
-    phases: phaseEntries.length ? phaseEntries : null,
     brief_revisions: briefRevisions.length ? briefRevisions : null,
-    runs: [],
-    runs_total: 0,
     started_at: getStringAt(state, ['started_at']) ?? getStringAt(state, ['startedAt']) ?? stat.birthtime.toISOString(),
-    latest_outcome: latestOutcome,
-    latestOutcome,
-    projectDir: getStringAt(state, ['projectDir']) ?? getStringAt(state, ['project_dir']) ?? getStringAt(state, ['config', 'projectDir']) ?? null,
-    briefDir: resolveBriefDir(state) ?? null,
-    goal: (state?.goal ?? (state?.config as Record<string, unknown> | undefined)?.goal ?? null) as unknown,
-    budget: state?.budget ?? (state?.config as Record<string, unknown> | undefined)?.budget ?? {
-      max_iters: getNumberAt(state, ['max_iters']) ?? getNumberAt(state, ['maxIterations']) ?? null,
-    },
-    ...(staleRunId ? { staleRunId } : {}),
+    ...(status === CAMPAIGN_PRESENTATION_STATUS.STALE && latestRunId ? { staleRunId: latestRunId } : {}),
   };
 }
 
@@ -1619,63 +719,12 @@ function campaignFromHistory(
   name?: string,
   prefetchedEntries?: CampaignHistoryEntry[],
   prefetchedRuns?: CampaignRunSlice,
-  // detailed=true is the single-campaign detail view (/api/campaigns/:id): it may read each
-  // phase-run's research_journal to surface the winning direction. The campaign LIST keeps
-  // detailed=false so it never pays O(campaigns × runs) journal reads.
-  detailed = false,
 ): WorkspaceCampaign | null {
   const entries = prefetchedEntries ?? readCampaignEntries(projectDir, id);
   const runSlice = prefetchedRuns ?? readCampaignRuns(projectDir, id);
   const runs = runSlice.runs;
   if (!entries.length && runSlice.total === 0) return null;
   const latest = entries.at(-1);
-  const scoreEntries = entries.filter((entry) => typeof entry.score === 'number');
-  const latestScore = [...scoreEntries].at(-1);
-  const threshold = undefined;
-  const metric = latestScore?.metric && latestScore.score != null
-    ? {
-      name: latestScore.metric,
-      value: latestScore.score,
-      format: deriveMetricFormat(latestScore.metric, latestScore.score, threshold),
-      target: null,
-      sublabel: undefined,
-    }
-    : null;
-  const iterations = scoreEntries.map((entry) => ({
-    label: `r${entry.seq} i${entry.iteration ?? 1}`,
-    value: entry.score as number,
-    verdict: entry.pass ? 'shipped' : 'interim',
-  }));
-  const phaseEntries = entries.filter((entry) => entry.phase || entry.nextPhase || entry.outcome);
-  // Each phase row is one research attempt (a run). Enrich it from the run summary (duration +
-  // best score — both already loaded, no extra IO) and, on the detail view only, the winning
-  // direction (round label) from that run's research_journal. This turns an opaque
-  // "seq N · ?m · att K · failed" row into "round23_bao_owner_split → 0.31 · 18m".
-  const runById = new Map((runs ?? []).map((run) => [run.id, run] as const));
-  const directionByRun = new Map<string, { label: string; result: number | null }>();
-  if (detailed) {
-    for (const runId of new Set(phaseEntries.map((entry) => entry.runId).filter((v): v is string => !!v))) {
-      const best = bestRoundForRun(runId, runById.get(runId)?.metric ?? null);
-      if (best) directionByRun.set(runId, best);
-    }
-  }
-  const phases = phaseEntries.map((entry) => {
-    const run = entry.runId ? runById.get(entry.runId) : undefined;
-    const direction = entry.runId ? directionByRun.get(entry.runId) : undefined;
-    const result = direction?.result ?? run?.metric ?? (typeof entry.score === 'number' ? entry.score : null);
-    return {
-      name: entry.phase ?? entry.nextPhase ?? `seq ${entry.seq}`,
-      status: entry.phaseComplete ? STAGE_STATUS.COMPLETE : entry.status ?? entry.outcome,
-      elapsed_min: parseDurationMin(run?.duration),
-      attempt: entry.iteration,
-      commit: undefined,
-      commit_chain: [],
-      notes: entry.reason || entry.artifactSummary || entry.outcome || null,
-      direction: direction?.label ?? null,
-      result,
-      runId: entry.runId ?? null,
-    };
-  });
   // Stale-detect "running" outcome: if last iteration entry is >30min old,
   // the daemon likely exited without terminal status (framework bug).
   let rawStatus = entries.some((entry) => entry.pass)
@@ -1707,23 +756,8 @@ function campaignFromHistory(
     id,
     name: name ?? latest?.campaignName ?? id,
     status,
-    badges: [
-      { text: `${runSlice.total} runs`, kind: 'default' },
-      status === CAMPAIGN_PRESENTATION_STATUS.SHIPPED ? { text: 'SHIPPED', kind: 'success' } : null,
-    ].filter((badge): badge is { text: string; kind: string } => badge !== null),
-    metric,
-    iterations: iterations.length ? iterations : null,
-    phases: phases.length ? phases : null,
     brief_revisions: null,
-    runs,
-    runs_total: runSlice.total,
-    latest_outcome: latest?.outcome ?? null,
-    latestOutcome: latest?.outcome ?? null,
     started_at: latest?.timestamp,
-    projectDir: projectDir,
-    briefDir: null,
-    goal: null,
-    budget: null,
     ...(staleRunId ? { staleRunId } : {}),
   };
 }
@@ -1753,10 +787,6 @@ function computeWorkspaceCampaigns(projectDir: string): WorkspaceCampaign[] {
       try {
         if (!statSync(dir).isDirectory()) continue;
         const campaign = campaignSummary(id, dir);
-        const runSlice = readCampaignRuns(projectDir, id);
-        campaign.runs = runSlice.runs;
-        campaign.runs_total = runSlice.total;
-        campaign.badges[0] = { text: `${runSlice.total} runs`, kind: 'default' };
         campaigns.set(id, campaign);
       } catch { /* skip */ }
     }
@@ -1821,58 +851,6 @@ function readAllCampaignRunsByKey(projectDir: string): Map<string, CampaignRunSl
   return out;
 }
 
-function getWorkspaceCampaign(projectDir: string, id: string): WorkspaceCampaign | null {
-  const dir = campaignDirOr404(id);
-  if (dir) {
-    const campaign = campaignSummary(id, dir);
-    const runSlice = readCampaignRuns(projectDir, id);
-    campaign.runs = runSlice.runs;
-    campaign.runs_total = runSlice.total;
-    campaign.badges[0] = { text: `${runSlice.total} runs`, kind: 'default' };
-    if (campaign.status === CAMPAIGN_PRESENTATION_STATUS.STALE && !campaign.staleRunId) {
-      campaign.staleRunId = runSlice.runs.find((run) => run.outcome === RUN_STATUS.RUNNING)?.id;
-    }
-    return campaign;
-  }
-  return campaignFromHistory(projectDir, id, undefined, undefined, undefined, true);
-}
-
-function listM3Campaigns(projectDir?: string) {
-  return projectDir ? listWorkspaceCampaigns(projectDir) : [];
-}
-
-function countBy(items: string[]): { key: string; count: number }[] {
-  const counts = new Map<string, number>();
-  for (const item of items) counts.set(item, (counts.get(item) ?? 0) + 1);
-  return Array.from(counts, ([key, count]) => ({ key, count }))
-    .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
-    .slice(0, 10);
-}
-
-function crossCampaignSummary() {
-  const nodes = getCrossCampaignNodes();
-  const edges = getCrossCampaignEdges();
-  const symptomLabels = nodes
-    .filter((node) => node.type === 'symptom')
-    .map((node) => {
-      const topCount = node.metadata?.counts && typeof node.metadata.counts === 'object'
-        ? Object.entries(node.metadata.counts as Record<string, unknown>)
-          .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
-          .sort((a, b) => b[1] - a[1])[0]?.[0]
-        : undefined;
-      return [node.metadata?.kind, topCount].filter(Boolean).join(':') || 'unknown';
-    });
-  const patchLabels = nodes
-    .filter((node) => node.type === 'patch')
-    .map((node) => [node.metadata?.section, node.metadata?.op].filter(Boolean).join(':') || 'unknown');
-  return {
-    total_nodes: nodes.length,
-    total_edges: edges.length,
-    top_symptoms: countBy(symptomLabels),
-    top_patches: countBy(patchLabels),
-  };
-}
-
 function readBriefFileForCampaign(dir: string, version: string): string | null {
   if (!isSafeCampaignVersion(version)) return null;
   const state = readJsonFile(join(dir, 'state.json'));
@@ -1910,9 +888,10 @@ function unifiedDiff(fromName: string, fromText: string, toName: string, toText:
 type DashboardTaskRegistrar = (task: TaskCreateInput) => Promise<RegisterRpcResponse>;
 type DashboardTaskLister = (filter: TaskListFilter) => Promise<TaskShowEntry[]>;
 type DashboardRunCanceller = (runId: string) => Promise<CancellationResult>;
+type DashboardTaskResumer = (id: number) => Promise<{ new_attempt: number; unit: string }>;
 
 async function registerTaskWithDaemon(task: TaskCreateInput): Promise<RegisterRpcResponse> {
-  return sendRpc<RegisterRpcResponse>(defaultSocketPath(), { cmd: 'register', task });
+  return sendRpc<RegisterRpcResponse>(defaultSocketPath(), { cmd: 'register', task, ...(task.run_id ? {} : { acknowledgement: 'persisted' as const }) });
 }
 
 async function listTasksFromDaemon(filter: TaskListFilter): Promise<TaskShowEntry[]> {
@@ -1951,17 +930,11 @@ function projectBusyMessage(blockingRunId: string): string {
 }
 
 export interface DashboardOptions {
-  adapter?: Adapter;
-  agentConfig?: AgentConfig;
-  skillContent?: string;
-  onPlanPollingStart?: (taskId: string) => void;
-  /** Launch seams cover every dashboard path that can start existing-run work. */
-  spawnDetachedRun?: DetachedRunSpawner;
-  runWorkflow?: typeof runWorkflow;
   /** Control-plane seams keep tests away from the real daemon and run probe. */
   registerTask?: DashboardTaskRegistrar;
   listTasks?: DashboardTaskLister;
   cancelRun?: DashboardRunCanceller;
+  resumeTask?: DashboardTaskResumer;
   isProjectBusy?: typeof isProjectBusy;
   /** Inbox read seams let source-failure tests stay isolated from real operator data. */
   inboxSources?: {
@@ -1976,18 +949,10 @@ export interface DashboardOptions {
   distDir?: string;
 }
 
-const DASHBOARD_TIMEOUT_MIGRATION = 'Stage timeout overrides were removed; edit config/defaults.yaml::default_timeout_ms instead.';
+const DASHBOARD_TIMEOUT_MIGRATION = 'Stage timeout overrides were removed; edit the engine config/defaults.yaml::default_timeout_ms instead.';
 const RemovedDashboardTimeoutSchema = z.unknown().refine(() => false, {
   message: DASHBOARD_TIMEOUT_MIGRATION,
 });
-
-function containsRemovedStageTimeout(input: unknown): boolean {
-  if (Array.isArray(input)) return input.some(containsRemovedStageTimeout);
-  if (!input || typeof input !== 'object') return false;
-  const record = input as Record<string, unknown>;
-  if (Object.hasOwn(record, 'timeoutMs') || Object.hasOwn(record, 'timeout_ms') || Object.hasOwn(record, 'timeout_total_ms')) return true;
-  return Object.values(record).some(containsRemovedStageTimeout);
-}
 
 const DashboardTaskCreateSchema = z.object({
   name: z.string().refine((value) => value.trim().length > 0, 'name must not be blank').optional(),
@@ -1996,7 +961,6 @@ const DashboardTaskCreateSchema = z.object({
   planFile: z.string().refine((value) => value.trim().length > 0, 'planFile must not be blank').optional(),
   projectDir: z.string().trim().min(1).optional(),
   workflow: z.string().trim().min(1).optional(),
-  supervise: z.boolean().optional(),
   maxIterations: z.number().int().min(1).optional(),
   maxIter: z.number().int().min(1).optional(),
   timeoutMs: RemovedDashboardTimeoutSchema.optional(),
@@ -2008,7 +972,6 @@ const DashboardTaskCreateSchema = z.object({
   campaignName: z.string().trim().min(1).optional(),
   briefPreflightDigest: z.string().optional(),
   briefPreflightReceipt: z.string().optional(),
-  acknowledgeBriefWarnings: z.boolean().optional(),
 }).refine((body) => Boolean(body.brief ?? body.planFile ?? body.name), {
   message: 'brief is required',
 });
@@ -2017,16 +980,14 @@ const InboxResolveBodySchema = z.object({
   decision: z.enum(['approve', 'deny']),
   by: z.string().trim().min(1).optional(),
   reason: z.string().optional(),
-  always: z.boolean().optional(),
+  always: z.never({ error: 'Standing approval rules were retired; approve this request once.' }).optional(),
   briefPreflightDigest: z.string().optional(),
   briefPreflightReceipt: z.string().optional(),
-  acknowledgeBriefWarnings: z.boolean().optional(),
 });
 
 interface DashboardBriefAdmissionFields {
   briefPreflightDigest?: string;
   briefPreflightReceipt?: string;
-  acknowledgeBriefWarnings?: boolean;
 }
 
 interface DashboardBriefAdmissionResult {
@@ -2044,7 +1005,6 @@ function dashboardInboxItem(item: InboxItem) {
   return {
     ...item,
     runStanding: inspectApprovalRunStanding(item.projectDir, item.runId),
-    standingRuleEligible: standingRuleEligible(item),
     ...(state?.campaignId || state?.campaignStorageKey
       ? { campaignId: state.campaignId ?? state.campaignStorageKey }
       : {}),
@@ -2245,6 +1205,68 @@ async function inboxOverview(
   return { approvals, deferred, stale, patches, campaignCount: campaigns.length };
 }
 
+function parseStreamJsonToText(raw: string, state?: { lineBuf: string }): string {
+  const buf = state || { lineBuf: '' };
+  buf.lineBuf += raw;
+  const lines = buf.lineBuf.split('\n');
+  buf.lineBuf = lines.pop()!; // keep incomplete last line
+  const output: string[] = [];
+  for (const line of lines) {
+    if (!line.trim()) { output.push('\n'); continue; }
+    let handled = false;
+    try {
+      const parsed = JSON.parse(line);
+      // Text content from assistant
+      if (parsed.type === 'assistant' && parsed.message?.content) {
+        for (const block of parsed.message.content) {
+          if (block.type === 'text' && block.text) output.push(block.text);
+          if (block.type === 'tool_use') {
+            const name = block.name || 'tool';
+            const desc = block.input?.description || block.input?.command || block.input?.file_path || '';
+            output.push(`\n[${name}] ${typeof desc === 'string' ? desc.slice(0, 100) : ''}\n`);
+          }
+        }
+        handled = true;
+      }
+      // Tool results
+      if (parsed.type === 'tool_result' || parsed.type === 'system') {
+        if (parsed.subtype === 'task_started') {
+          output.push(`\n[Agent] ${parsed.description || 'subtask started'}\n`);
+        }
+        handled = true;
+      }
+    } catch { /* not JSON */ }
+    if (!handled) output.push(line + '\n');
+  }
+  return output.join('');
+}
+
+/** Private dashboards have loopback authority only. The operator's dashboard
+ * also serves addresses on a named Tailscale interface, never a LAN/wildcard
+ * listener. Interface names are essential: CGNAT address space alone does not
+ * prove a route is Tailscale. No external command or new CLI setting is needed. */
+export function dashboardListenHosts(input: {
+  home?: string;
+  store?: string;
+  loginHome?: string;
+  interfaces?: NodeJS.Dict<NetworkInterfaceInfo[]>;
+} = {}): string[] {
+  const hosts = ['127.0.0.1'];
+  if (!isOperatorStateRoot(input.home ?? homedir(), input.store ?? fcGlobalDir(), input.loginHome)) return hosts;
+  for (const [name, addresses] of Object.entries(input.interfaces ?? networkInterfaces())) {
+    if (!/^tailscale\d+$/.test(name)) continue;
+    for (const entry of addresses ?? []) {
+      const octets = entry.address.split('.').map(Number);
+      const tailscaleV4 = entry.family === 'IPv4' && octets.length === 4
+        && octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127
+        && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255);
+      const tailscaleV6 = entry.family === 'IPv6' && /^fd7a:115c:a1e0:/i.test(entry.address);
+      if (!entry.internal && (tailscaleV4 || tailscaleV6)) hosts.push(entry.address);
+    }
+  }
+  return [...new Set(hosts)];
+}
+
 export async function startDashboard(projectDir: string, port = 3000, options: DashboardOptions = {}) {
   const runtimeDistDir = resolve(options.distDir ?? join(import.meta.dirname ?? '.', '..', 'dist'));
   let loadedBuild: DaemonBuildFingerprint | null = null;
@@ -2260,65 +1282,33 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     loadedBuild,
     fingerprintError,
   };
-  const configDir = join(projectDir, 'config');
+  const configDir = engineConfigDir;
   const agentsDir = join(configDir, 'agents');
 
-  // Migration: rename .omx to .fc if needed
-  const oldDir = join(projectDir, '.omx');
-  const newDir = join(projectDir, '.fc');
-  if (existsSync(oldDir) && !existsSync(newDir)) {
-    renameSync(oldDir, newDir);
-  }
-
-  // Track tasks with active runWorkflow background loops so we can detect
-  // orphaned awaiting_approval tasks after a server restart.
-  const activeExecutions = new Set<string>();
-
-  // Startup recovery: mark stale running tasks as failed
-  // Tasks awaiting_approval are preserved — they're waiting for user input, not actively running
-  performStartupRecovery(projectDir, Number(process.env.FLOWCREW_STARTUP_RECOVERY_LIMIT ?? 50));
-
-  // Runtime stale task recovery: periodically check active executions for tasks stuck in "running"
-  // with no run.json updates for longer than the configured timeout + buffer.
-  // Only checks tasks tracked in activeExecutions — startup recovery already handles server restarts.
-  const staleCheckMs = 60_000; // check every 60s
-  const staleTimer = setInterval(() => {
-    for (const id of activeExecutions) {
-      try {
-        const runJsonPath = join(runsRoot(), id, 'run.json');
-        const mtime = statSync(runJsonPath).mtimeMs;
-        const age = Date.now() - mtime;
-        if (age < 5 * 60_000) continue;
-        const state = readRunState(projectDir, id);
-        if (!isRunningRunStatus(state.status)) continue;
-        const taskTimeout = state.timeoutMs ?? readExecutionDefaults(configDir).timeoutMs;
-        const staleThreshold = taskTimeout + 5 * 60_000;
-        if (age < staleThreshold) continue;
-        // Staleness is not stop authority. A live scheduler may be in a long
-        // adapter call; only reconcile after both known runner probes are dead.
-        if (hasLiveDirectRunner(projectDir, id) || hasLiveScheduler(projectDir, id)) continue;
-        state.status = RUN_STATUS.FAILED;
-        state.failureReason = `Task appears stale (no progress for ${Math.round(staleThreshold / 60_000)}+ minutes). It may have crashed.`;
-        state.completedAt = new Date().toISOString();
-        for (const [, s] of Object.entries(state.stages)) {
-          if (isRunningStageStatus(s.status)) s.status = STAGE_STATUS.FAILED;
-        }
-        writeRunState(projectDir, id, state);
-        activeExecutions.delete(id);
-      } catch { /* skip */ }
-    }
-  }, staleCheckMs);
-
-  // Orphan reconciliation: the staleTimer above only covers runs THIS process
-  // launched (activeExecutions). Runs launched by other processes (e.g. the
-  // daemons) whose scheduler died leave run.json='running' forever and were only
-  // healed at dashboard startup. Periodically reconcile ALL 'running' runs via the
-  // index + pid-liveness so cross-process orphans self-heal without a restart.
-  const orphanReconcileTimer = setInterval(() => {
-    try { performStartupRecovery(projectDir, Number(process.env.FLOWCREW_STARTUP_RECOVERY_LIMIT ?? 50)); } catch { /* non-critical */ }
-  }, 5 * 60_000);
-
-  const app = Fastify({ logger: false });
+  // One Fastify router owns all listeners and hooks. Separate server instances
+  // are necessary to bind explicit addresses without a wildcard socket.
+  let createListener: () => Server;
+  const extraListeners: Server[] = [];
+  const app = Fastify({ logger: false, serverFactory: (handler, options) => {
+    // A serverFactory bypasses Fastify's HTTP defaults; keep those settings on
+    // every explicit listener rather than reverting to Node's different ones.
+    createListener = () => {
+      const server = createServer(options.http ?? {}, handler);
+      if (typeof options.keepAliveTimeout === 'number') server.keepAliveTimeout = options.keepAliveTimeout;
+      if (typeof options.requestTimeout === 'number') server.requestTimeout = options.requestTimeout;
+      if (typeof options.connectionTimeout === 'number') server.setTimeout(options.connectionTimeout);
+      if (typeof options.maxRequestsPerSocket === 'number' && options.maxRequestsPerSocket > 0) server.maxRequestsPerSocket = options.maxRequestsPerSocket;
+      return server;
+    };
+    return createListener();
+  } });
+  app.addHook('onClose', async () => {
+    await Promise.all(extraListeners.map((server) => new Promise<void>((resolveClose, rejectClose) => {
+      if (!server.listening) { resolveClose(); return; }
+      server.close((error) => error ? rejectClose(error) : resolveClose());
+      server.closeAllConnections();
+    })));
+  });
   const briefReceiptSecret = randomBytes(32);
   const issueBriefReceipt = (report: BriefPreflightReport): string => createHmac('sha256', briefReceiptSecret)
     .update(`flowcrew-dashboard-brief-preflight:v${report.version}:${report.digest}`, 'utf8')
@@ -2349,9 +1339,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (!receiptMatches(report, fields.briefPreflightReceipt)) {
       return { ok: false, exactBrief, report, receipt, error: 'The brief preflight receipt is missing, invalid, or from an earlier dashboard process.' };
     }
-    if (report.requiresAcknowledgement && fields.acknowledgeBriefWarnings !== true) {
-      return { ok: false, exactBrief, report, receipt, error: 'Review and acknowledge the reported warnings or contract problems before starting.' };
-    }
     return {
       ok: true,
       exactBrief,
@@ -2359,9 +1346,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       receipt,
       admission: createBriefAdmission(
         report,
-        report.requiresAcknowledgement
-          ? { kind: 'explicit', source: 'dashboard_receipt', at: new Date().toISOString() }
-          : { kind: 'not_required' },
+        { kind: 'explicit', source: 'dashboard_receipt', at: new Date().toISOString() },
       ),
     };
   };
@@ -2392,25 +1377,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
     return { ...admitDashboardBrief(exactBrief, fields), hasBriefSidecar };
   };
-  type DetachedRunPreparation =
-    | { ok: true; launch?: DetachedRunStarter }
-    | { ok: false; conflict: DashboardBriefAdmissionResult };
-  const prepareDetachedRun = (opts: DetachedRunOptions): DetachedRunPreparation => {
-    try {
-      const launch = (options.spawnDetachedRun ?? spawnDetachedRun)(opts);
-      return launch ? { ok: true, launch } : { ok: true };
-    } catch (error) {
-      // A test seam or future preparer can expose a last-moment sidecar edit.
-      // Re-report that exact current input while every durable mutation is still
-      // pending. Production launchers consume opts.exactBrief and never reread.
-      const latest = readRunStateSafe(opts.projectDir, opts.runId);
-      if (latest) {
-        const current = admitExistingRunBrief(latest, opts.runId, {});
-        if (!current.ok) return { ok: false, conflict: current };
-      }
-      throw error;
-    }
-  };
   let cleanupComplete = false;
   let signalShutdownStarted = false;
   const shutdownFromSignal = () => {
@@ -2427,8 +1393,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   const cleanup = () => {
     if (cleanupComplete) return;
     cleanupComplete = true;
-    clearInterval(staleTimer);
-    clearInterval(orphanReconcileTimer);
     process.off('SIGTERM', shutdownFromSignal);
     process.off('SIGINT', shutdownFromSignal);
   };
@@ -2509,15 +1473,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     reply.code(404).send({ error: 'not found' });
   });
 
-  // ===================== Existing /api/runs endpoints =====================
-
-  app.get("/api/runs", async () => {
-    const ids = listRuns(projectDir);
-    return ids.map((id) => {
-      try { return stateToApi(readRunState(projectDir, id), projectDir); } catch { return null; }
-    }).filter(Boolean);
-  });
-
   app.get<{ Params: { runId: string } }>("/api/runs/:runId", async (req, reply) => {
     try {
       return stateToRunDetail(readRunState(projectDir, req.params.runId), projectDir);
@@ -2526,29 +1481,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
   });
 
-  // ===================== Durable approval inbox =====================
-
-  app.get<{ Querystring: { state?: string; runId?: string } }>("/api/inbox", async (req, reply) => {
-    const state = req.query.state ?? INBOX_FILTER_STATE.PENDING;
-    if (!INBOX_FILTER_STATES.has(state)) {
-      return reply.code(400).send({ error: 'state must be pending, resolved, or all' });
-    }
-    if (req.query.runId !== undefined && (!req.query.runId || !isSafeId(req.query.runId))) {
-      return reply.code(400).send({ error: 'invalid runId' });
-    }
-    return listInboxItems({ state: state as InboxFilterState, runId: req.query.runId }).map(dashboardInboxItem);
-  });
-
   app.get("/api/inbox/overview", async () => inboxOverview(projectDir, options));
-
-  app.get("/api/inbox/deferred", async (_req, reply) => {
-    try {
-      return await deferredInboxItems(options.listTasks ?? listTasksFromDaemon);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      return reply.code(503).send({ error: `could not load deferred tasks: ${detail}` });
-    }
-  });
 
   app.post<{
     Params: { runId: string; requestId: string };
@@ -2561,10 +1494,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
     const body = InboxResolveBodySchema.safeParse(req.body);
     if (!body.success) {
-      return reply.code(400).send({ ok: false, won: false, error: 'decision must be approve or deny' });
-    }
-    if (body.data.always && body.data.decision !== 'approve') {
-      return reply.code(400).send({ ok: false, won: false, error: 'always is only valid with approve' });
+      return reply.code(400).send({ ok: false, won: false, error: body.error.issues[0]?.message ?? 'decision must be approve or deny' });
     }
     const existing = getInboxItem(runId, requestId);
     if (!existing || typeof existing.projectDir !== 'string' || !existing.projectDir) {
@@ -2582,19 +1512,11 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         },
       };
     }
-    if (body.data.always) {
-      const eligibility = standingRuleEligible(existing);
-      if (!eligibility.ok) {
-        return reply.code(400).send({ ok: false, won: false, error: eligibility.reason });
-      }
-    }
-
     // Resolving a parked request normally resumes that same run (approve and
     // deny both need the agent to consume the decision). Admission therefore
     // precedes resolveRequest: a 409 must not secretly consume the request.
     const parkedState = readRunStateSafe(existing.projectDir, runId);
-    let resumePrepared = false;
-    let launchPreparedResume: DetachedRunStarter | undefined;
+    let resumeTask: TaskCreateInput | undefined;
     if (parkedState && isPausedRunStatus(parkedState.status)) {
       const targetProjectDir = parkedState.projectDir || existing.projectDir;
       const blocker = projectAdmissionBlocker(
@@ -2619,39 +1541,19 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
           receipt: briefAdmission.receipt,
         });
       }
-      const adapter = (parkedState as StoreState & { adapter?: unknown }).adapter;
-      const preparation = prepareDetachedRun({
-        runId,
-        projectDir: parkedState.projectDir || existing.projectDir,
-        exactBrief: briefAdmission.exactBrief,
-        briefAdmission: briefAdmission.admission,
-        campaignId: parkedState.campaignId ?? parkedState.campaignStorageKey,
-        supervise: parkedState.supervise ?? true,
-        workflow: parkedState.workflowName || 'default',
-        maxIterations: parkedState.maxIterations,
-        adapter: typeof adapter === 'string' ? adapter : undefined,
-      });
-      if (!preparation.ok) {
-        return reply.code(409).send({
-          ok: false,
-          won: false,
-          error: preparation.conflict.error,
-          report: preparation.conflict.report,
-          receipt: preparation.conflict.receipt,
-        });
-      }
-      resumePrepared = true;
-      launchPreparedResume = preparation.launch;
-      if (parkedState.briefAdmission !== briefAdmission.admission) {
-        parkedState.briefAdmission = briefAdmission.admission;
-        writeRunState(existing.projectDir, runId, parkedState);
-      }
+      resumeTask = {
+        kind: 'quick',
+        run_id: runId,
+        projectDir: targetProjectDir,
+        brief_text: briefAdmission.exactBrief,
+        brief_admission: briefAdmission.admission,
+        launch_args: approvalResumeArgs(parkedState),
+      };
     }
 
     const result = resolveRequest(existing.projectDir, runId, requestId, body.data.decision, {
       by: body.data.by,
       reason: body.data.reason,
-      always: body.data.always,
     });
     const item = result.item ? dashboardInboxItem(result.item) : undefined;
     if (result.won || result.item?.resolution) invalidateTaskListCache();
@@ -2681,35 +1583,31 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (!resolution) {
       return reply.code(500).send({ ok: false, won: true, error: 'winning resolution is missing' });
     }
-    const runDir = join(runsRoot(), runId);
-    const decisionPath = approvalArtifactPath(runDir, requestId, 'decision');
-    mkdirSync(dirname(decisionPath), { recursive: true });
-    writeFileSync(decisionPath, JSON.stringify({
-      requestId,
-      decision: resolution.decision,
-      by: resolution.by,
-      reason: resolution.reason ?? '',
-      at: resolution.at,
-    }, null, 2) + '\n', 'utf-8');
-
-    let resumed = false;
+    let resumeRegistered = false;
     const runState = readRunStateSafe(existing.projectDir, runId);
-    if (resumePrepared && runState && isPausedRunStatus(runState.status)) {
-      launchPreparedResume?.();
-      resumed = true;
+    if (resumeTask && runState && isPausedRunStatus(runState.status)) {
+      try {
+        // Preserve the operator's reviewed admission on the bound run before
+        // the daemon verifies its task/run agreement. The daemon owns launch.
+        if (JSON.stringify(runState.briefAdmission) !== JSON.stringify(resumeTask.brief_admission)) {
+          updateRunState(existing.projectDir, runId, current => {
+            assertRunEditable(runId);
+            current.briefAdmission = resumeTask!.brief_admission;
+          });
+        }
+        await (options.registerTask ?? registerTaskWithDaemon)(resumeTask);
+        resumeRegistered = true;
+      } catch (error) {
+        const unknown = error instanceof RpcOutcomeUnknownError;
+        return reply.code(unknown ? 502 : 503).send({
+          ok: false, won: true, item, resumeRegistered: false,
+          error: `Approval was recorded; resume ${unknown ? 'outcome is unknown' : 'registration failed'}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
     }
 
-    return { ok: true, won: true, item, resumed };
+    return { ok: true, won: true, item, resumeRegistered };
   });
-
-  app.get<{ Params: { runId: string; stageId: string } }>(
-    "/api/runs/:runId/stages/:stageId/input",
-    async (req, reply) => {
-      const p = join(runsRoot(), req.params.runId, 'stages', req.params.stageId, 'input.md');
-      if (!existsSync(p)) return reply.code(404).send("not found");
-      reply.type("text/markdown").send(readStageInput(projectDir, req.params.runId, req.params.stageId));
-    },
-  );
 
   app.get<{ Params: { runId: string; stageId: string }; Querystring: { tailBytes?: string } }>(
     "/api/runs/:runId/stages/:stageId/output",
@@ -2719,26 +1617,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       return sendStageOutput(reply, p, parseTailBytes(req.query.tailBytes));
     },
   );
-
-  // ===================== Task endpoints =====================
-
-  // 1. GET /api/tasks (cached for performance — avoids re-reading all run.json files)
-  app.get<{ Querystring: { limit?: string } }>("/api/tasks", async (req) => {
-    const limit = Math.max(1, Math.min(1000, parseInt(req.query.limit ?? '50', 10) || 50));
-    const runsDir = runsRoot();
-    if (isTaskListCacheValid(runsDir)) {
-      return _taskListCache!.data.slice(0, limit);
-    }
-    const ids = listRuns(projectDir);
-    const recent = ids.reverse().slice(0, limit);
-    const data = recent.map((id) => {
-      try { return stateToTask(readRunState(projectDir, id), projectDir, configDir); } catch { /* non-critical */ return null; }
-    }).filter(Boolean);
-    let dirMtime = 0;
-    try { dirMtime = statSync(runsDir).mtimeMs; } catch { /* non-critical */ }
-    _taskListCache = { data, timestamp: Date.now(), runsDir, dirMtime, projectDir, maxUpdatedAt: getMaxUpdatedAt(projectDir) ?? 0 };
-    return data;
-  });
 
   // 2. POST /api/tasks — the dashboard is an RPC client, not a second
   // orchestrator. Registration is the same control-plane path as
@@ -2767,7 +1645,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     const maxIterations = body.maxIterations ?? body.maxIter;
     const launchArgs: string[] = ['--workflow', workflowName];
     if (maxIterations !== undefined) launchArgs.push('--max-iterations', String(maxIterations));
-    if (body.supervise === false) launchArgs.push('--no-supervise');
 
     const requestedCampaign = body.campaignId
       ?? (body.campaign !== 'standalone' && body.campaign !== 'new' ? body.campaign : undefined)
@@ -2795,397 +1672,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     }
   });
 
-  // 3. GET /api/tasks/:id
-  app.get<{ Params: { id: string } }>("/api/tasks/:id", async (req, reply) => {
-    try {
-      return stateToTask(readRunState(projectDir, req.params.id), projectDir, configDir, { includeIterationLog: true });
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: "not found" });
-    }
-  });
-
-  // GET /api/tasks/:id/iteration-log
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/iteration-log", async (req, reply) => {
-    const logPath = join(runsRoot(), req.params.id, 'iteration_log.md');
-    if (!existsSync(logPath)) return reply.code(404).send({ error: 'not found' });
-    reply.type('text/markdown').send(readFileSync(logPath, 'utf-8'));
-  });
-
-  // 3b. PUT /api/tasks/:id
-  app.put<{ Params: { id: string }; Body: { plan?: unknown[]; name?: string; workflow?: string } }>("/api/tasks/:id", async (req, reply) => {
-    let state: StoreState;
-    try {
-      state = readRunState(projectDir, req.params.id);
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: "not found" });
-    }
-    const { plan, name, workflow } = req.body ?? {};
-    if (plan !== undefined && containsRemovedStageTimeout(plan)) {
-      return reply.code(400).send({ error: DASHBOARD_TIMEOUT_MIGRATION });
-    }
-    if (plan !== undefined) state.plan = plan;
-    if (name !== undefined) {
-      const nextDescription = typeof name === 'string' ? name : String(name);
-      if (nextDescription !== state.taskDescription) state.briefAdmission = undefined;
-      state.taskDescription = nextDescription;
-    }
-    if (workflow && isSafeId(workflow)) state.workflowName = workflow;
-    writeRunState(projectDir, req.params.id, state);
-    return { ok: true };
-  });
-
-  // PATCH /api/tasks/:id — update task settings
-  app.patch<{ Params: { id: string }; Body: { name?: string; timeoutMs?: number; maxIterations?: number; maxRetries?: number; autoApproveRetries?: boolean; campaignTriggers?: unknown; campaignId?: string; campaignName?: string; campaignSeq?: number } }>("/api/tasks/:id", async (req, reply) => {
-    let state: StoreState;
-    try {
-      state = readRunState(projectDir, req.params.id);
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: "not found" });
-    }
-    const body = req.body ?? {};
-    if (Object.hasOwn(body, 'timeoutMs')) {
-      return reply.code(400).send({ error: DASHBOARD_TIMEOUT_MIGRATION });
-    }
-    if (body.name !== undefined) {
-      const nextDescription = body.name != null ? String(body.name) : undefined;
-      if (nextDescription !== state.taskDescription) state.briefAdmission = undefined;
-      state.taskDescription = nextDescription;
-    }
-    if (body.maxIterations !== undefined) {
-      const m = Number(body.maxIterations);
-      if (isFinite(m) && m >= 0) state.maxIterations = m;
-    }
-    if (body.maxRetries !== undefined) {
-      const r = Number(body.maxRetries);
-      if (isFinite(r) && r >= 0) state.maxRetries = r;
-    }
-    if (body.autoApproveRetries !== undefined) state.autoApproveRetries = !!body.autoApproveRetries;
-    if (body.campaignTriggers !== undefined) state.campaignTriggers = normalizeCampaignTriggers(body.campaignTriggers);
-    if (body.campaignId !== undefined || body.campaignName !== undefined) {
-      const campaign = resolveCampaignSelection(projectDir, { campaignId: body.campaignId, campaignName: body.campaignName });
-      if (campaign) {
-        state.campaignId = campaign.id;
-        state.campaignStorageKey = campaign.storageKey;
-        state.campaignName = campaign.name;
-        state.campaignSeq = typeof state.campaignSeq === 'number' ? state.campaignSeq : nextCampaignSeq(projectDir, campaign.storageKey);
-        state.campaignIteration = state.currentIteration ?? state.campaignIteration ?? 1;
-      } else {
-        state.campaignId = undefined;
-        state.campaignStorageKey = undefined;
-        state.campaignName = undefined;
-        state.campaignSeq = undefined;
-        state.campaignIteration = undefined;
-      }
-    } else if (body.campaignSeq !== undefined) {
-      state.campaignSeq = body.campaignSeq;
-    }
-    writeRunState(projectDir, req.params.id, state);
-    return { ok: true };
-  });
-
-  // GET /api/tasks/:id/dispatch
-  // GET /api/tasks/:id/supervisor — returns supervisor activity (or null if no supervisor)
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/supervisor", async (req, reply) => {
-    const p = join(runsRoot(), req.params.id, 'supervisor_state.json');
-    if (!existsSync(p)) return reply.send({ enabled: false });
-    try {
-      const data = JSON.parse(readFileSync(p, 'utf-8'));
-      return reply.send({ enabled: true, ...data });
-    } catch {
-      return reply.send({ enabled: false });
-    }
-  });
-
-  app.get<{ Params: { id: string } }>("/api/tasks/:id/dispatch", async (req, reply) => {
-    let state: StoreState;
-    try {
-      state = readRunState(projectDir, req.params.id);
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: "not found" });
-    }
-    if (isAwaitingApprovalRunStatus(state.status) && state.dispatchedStages) {
-      return { stages: state.dispatchedStages, status: state.status };
-    }
-    // Also try reading dispatch.yaml file directly
-    const dispatchPath = join(runsRoot(), req.params.id, 'dispatch.yaml');
-    if (existsSync(dispatchPath)) {
-      try {
-        let items = parseYaml(readFileSync(dispatchPath, 'utf-8'));
-        // Accept both bare list and {stages: [...]} wrapper
-        if (!Array.isArray(items) && items && typeof items === 'object' && Array.isArray((items as Record<string, unknown>).stages)) {
-          items = (items as Record<string, unknown>).stages;
-        }
-        if (Array.isArray(items)) {
-          // Normalize task: → prompt_template: for UI consistency
-          for (const item of items) {
-            if (item && typeof item === 'object' && item.task && !item.prompt_template) {
-              item.prompt_template = item.task;
-            }
-          }
-          return { stages: items, status: state.status };
-        }
-      } catch { /* ignore */ }
-    }
-    return { stages: [], status: state.status };
-  });
-
-  // POST /api/tasks/:id/approve
-  app.post<{
-    Params: { id: string };
-    Body: DashboardBriefAdmissionFields & { autoApproveRetries?: boolean; maxIterations?: number; timeoutMs?: number };
-  }>("/api/tasks/:id/approve", async (req, reply) => {
-    let state: StoreState;
-    try {
-      state = readRunState(projectDir, req.params.id);
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: "not found" });
-    }
-    if (!isAwaitingApprovalRunStatus(state.status)) {
-      return reply.code(400).send({ error: 'not awaiting approval' });
-    }
-    if (Object.hasOwn(req.body ?? {}, 'timeoutMs')) {
-      return reply.code(400).send({ error: DASHBOARD_TIMEOUT_MIGRATION });
-    }
-    const shouldSpawn = !activeExecutions.has(req.params.id);
-    if (shouldSpawn) {
-      const targetProjectDir = state.projectDir ?? projectDir;
-      const blocker = projectAdmissionBlocker(
-        targetProjectDir,
-        req.params.id,
-        options.isProjectBusy ?? isProjectBusy,
-      );
-      if (blocker) return reply.code(409).send({ error: projectBusyMessage(blocker) });
-    }
-    const briefAdmission = admitExistingRunBrief(state, req.params.id, req.body ?? {});
-    if (!briefAdmission.ok || !briefAdmission.admission) {
-      return reply.code(409).send({
-        error: briefAdmission.error,
-        report: briefAdmission.report,
-        receipt: briefAdmission.receipt,
-      });
-    }
-    let launchApprovedRun: DetachedRunStarter | undefined;
-    if (shouldSpawn) {
-      const preparation = prepareDetachedRun({
-        runId: req.params.id,
-        projectDir: state.projectDir ?? projectDir,
-        exactBrief: briefAdmission.exactBrief,
-        briefAdmission: briefAdmission.admission,
-        campaignId: state.campaignId,
-        supervise: state.supervise ?? true,
-        workflow: state.workflowName || 'default',
-      });
-      if (!preparation.ok) {
-        return reply.code(409).send({
-          error: preparation.conflict.error,
-          report: preparation.conflict.report,
-          receipt: preparation.conflict.receipt,
-        });
-      }
-      launchApprovedRun = preparation.launch;
-    }
-    state.briefAdmission = briefAdmission.admission;
-    if (req.body?.autoApproveRetries !== undefined) state.autoApproveRetries = !!req.body.autoApproveRetries;
-    if (req.body?.maxIterations !== undefined) {
-      const m = Number(req.body.maxIterations);
-      if (isFinite(m) && m >= 0) state.maxIterations = m;
-    }
-    state.status = RUN_STATUS.RUNNING;
-    writeRunState(projectDir, req.params.id, state);
-
-    // If no active execution loop (e.g. server restarted while awaiting approval),
-    // resume workflow execution so the task doesn't get stuck.
-    if (shouldSpawn) {
-      launchApprovedRun?.();
-    }
-
-    return { ok: true };
-  });
-
-  // GET /api/tasks/:id/stages/:stageId/output
-  app.get<{ Params: { id: string; stageId: string }; Querystring: { tailBytes?: string } }>(
-    "/api/tasks/:id/stages/:stageId/output",
-    async (req, reply) => {
-      const p = join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'output.md');
-      if (!existsSync(p)) return reply.code(404).send("not found");
-      return sendStageOutput(reply, p, parseTailBytes(req.query.tailBytes));
-    },
-  );
-
-  // 4. POST /api/tasks/:id/execute
-  app.post<{ Params: { id: string }; Body: DashboardBriefAdmissionFields }>("/api/tasks/:id/execute", async (req, reply) => {
-    let state: StoreState;
-    try {
-      state = readRunState(projectDir, req.params.id);
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: "not found" });
-    }
-    if (isRunningRunStatus(state.status)) {
-      return reply.code(409).send({ error: 'task is already running' });
-    }
-    if (isPausedRunStatus(state.status)) {
-      return reply.code(409).send({ error: 'task is awaiting approval — resolve the inbox request before executing it' });
-    }
-    if (isTerminalRunStatus(state.status)) {
-      return reply.code(409).send({ error: 'task already finished — use rerun instead' });
-    }
-    if (activeExecutions.has(req.params.id)) {
-      return reply.code(409).send({ error: 'task is already running' });
-    }
-    // Validate every non-mutating prerequisite before admission and cleanup.
-    const briefPath = join(runsRoot(), req.params.id, 'task_brief.md');
-    if (!state.taskDescription?.trim() && !existsSync(briefPath)) {
-      return reply.code(400).send({ error: 'No task description or task brief found.' });
-    }
-    const workflowName = state.workflowName || 'default';
-    const yamlPath = join(configDir, 'workflows', `${workflowName}.yaml`);
-    if (!existsSync(yamlPath)) {
-      return reply.code(404).send({ error: `workflow not found: ${workflowName}` });
-    }
-    const targetProjectDir = state.projectDir ?? projectDir;
-    const blocker = projectAdmissionBlocker(
-      targetProjectDir,
-      req.params.id,
-      options.isProjectBusy ?? isProjectBusy,
-    );
-    if (blocker) return reply.code(409).send({ error: projectBusyMessage(blocker) });
-
-    const briefAdmission = admitExistingRunBrief(state, req.params.id, req.body ?? {});
-    if (!briefAdmission.ok || !briefAdmission.admission) {
-      return reply.code(409).send({
-        error: briefAdmission.error,
-        report: briefAdmission.report,
-        receipt: briefAdmission.receipt,
-      });
-    }
-    const executionPreparation = prepareDetachedRun({
-      runId: req.params.id,
-      projectDir: targetProjectDir,
-      exactBrief: briefAdmission.exactBrief,
-      briefAdmission: briefAdmission.admission,
-      campaignId: state.campaignId,
-      supervise: state.supervise ?? true,
-      workflow: workflowName,
-    });
-    if (!executionPreparation.ok) {
-      return reply.code(409).send({
-        error: executionPreparation.conflict.error,
-        report: executionPreparation.conflict.report,
-        receipt: executionPreparation.conflict.receipt,
-      });
-    }
-    state.briefAdmission = briefAdmission.admission;
-
-    // Allow re-execute from awaiting_approval: user refined the brief and
-    // wants a fresh plan. Reset dispatched stages.
-    if (isAwaitingApprovalRunStatus(state.status)) {
-      const dispatchedIds = new Set(
-        (Array.isArray(state.dispatchedStages) ? state.dispatchedStages as { id?: string }[] : []).map(s => s.id).filter((x): x is string => !!x),
-      );
-      for (const sid of dispatchedIds) {
-        delete state.stages[sid];
-        const stageDir = join(runsRoot(), req.params.id, 'stages', sid);
-        if (existsSync(stageDir)) rmSync(stageDir, { recursive: true, force: true });
-      }
-      state.dispatchedStages = undefined;
-      for (const [, s] of Object.entries(state.stages)) {
-        s.status = STAGE_STATUS.PENDING;
-        s.retries = 0;
-        s.duration_ms = undefined;
-        s.error = undefined;
-        s.exitCode = undefined;
-        s.artifacts = undefined;
-        s.startedAt = undefined;
-        s.completedAt = undefined;
-        s.tokens_in = undefined;
-        s.tokens_out = undefined;
-        s.attempts = undefined;
-        s.reruns = undefined;
-        s.writes = undefined;
-        s.writeAttribution = undefined;
-      }
-      state.supervisor = undefined;
-      state.status = 'pending';
-      state.completedAt = undefined;
-      state.failureReason = undefined;
-      state.campaignAlert = undefined;
-      state.researchInjection = undefined;
-      state.currentIteration = 1;
-      state.startedAt = new Date().toISOString();
-      state.campaignIteration = state.campaignId || state.campaignStorageKey ? 1 : undefined;
-      // Clean stale artifacts
-      const runPath = join(runsRoot(), req.params.id);
-      const dp = join(runPath, 'dispatch.yaml');
-      if (existsSync(dp)) unlinkSync(dp);
-      const ts = join(runPath, 'tech_solution.md');
-      if (existsSync(ts)) unlinkSync(ts);
-      const iterLog = join(runPath, 'iteration_log.md');
-      if (existsSync(iterLog)) unlinkSync(iterLog);
-      const eventsLog = join(runPath, 'events.jsonl');
-      if (existsSync(eventsLog)) unlinkSync(eventsLog);
-      const refreshJson = join(runPath, 'attempt_summary_refresh.json');
-      if (existsSync(refreshJson)) unlinkSync(refreshJson);
-      try { for (const f of readdirSync(runPath)) { if (f.startsWith('verdict') && f.endsWith('.json')) unlinkSync(join(runPath, f)); } } catch { /* ignore */ }
-      // Clean stale base stage files so re-plan starts fresh
-      for (const sid of Object.keys(state.stages)) {
-        for (const fname of ['status.json', 'metric.json', 'live.log', 'output.md', 'input.md']) {
-          const fp = join(runPath, 'stages', sid, fname);
-          if (existsSync(fp)) unlinkSync(fp);
-        }
-      }
-      // Reset workflow.yaml to base stages only (remove stale dispatched entries)
-      const wfPath = join(runPath, 'workflow.yaml');
-      if (dispatchedIds.size > 0) {
-        try {
-          const wf = parseYaml(readFileSync(wfPath, 'utf-8')) as { stages?: unknown[] };
-          if (Array.isArray(wf.stages)) {
-            wf.stages = wf.stages.filter((item: any) => {
-              try { return !dispatchedIds.has(StageConfigSchema.parse(item).id); } catch { return true; }
-            });
-            writeFileSync(wfPath, stringifyYaml(wf), 'utf-8');
-          }
-        } catch { /* best effort */ }
-      }
-      writeRunState(projectDir, req.params.id, state);
-    }
-    state.status = RUN_STATUS.RUNNING;
-    state.completedAt = undefined;
-    state.failureReason = undefined;
-    state.startedAt = state.startedAt ?? new Date().toISOString();
-    writeRunState(projectDir, req.params.id, state);
-    executionPreparation.launch?.();
-    return { ok: true };
-  });
-
-  // 5. POST /api/tasks/:id/stop — removed (use cancel instead)
-
-  // DELETE /api/tasks/:id
-  app.delete<{ Params: { id: string } }>("/api/tasks/:id", async (req, reply) => {
-    const { id } = req.params;
-    if (!isSafeId(id)) return reply.code(400).send({ error: 'invalid task id' });
-    const runPath = join(runsRoot(), id);
-    // A live/nonterminal run must complete the shared stop-and-confirm path
-    // before any durable history is removed.
-    if (existsSync(runPath)) {
-      try {
-        readRunState(projectDir, id);
-        const cancellation = await (options.cancelRun ?? cancelRunWithControlPlane)(id);
-        if (!cancellation.ok) {
-          return reply.code(409).send({ error: cancellation.message, cancellation });
-        }
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        return reply.code(503).send({ error: `could not confirm cancellation; run was preserved: ${detail}` });
-      }
-    }
-    _stageRolesCache.delete(id);
-    _bestScoreCache.delete(id);
-    activeExecutions.delete(id);
-    try { rmSync(runPath, { recursive: true, force: true }); } catch { /* ignore */ }
-    try { deleteRunIndex(projectDir, id); } catch { /* index is best-effort */ }
-    return { ok: true };
-  });
-
   // POST /api/tasks/:id/cancel
   app.post<{ Params: { id: string } }>("/api/tasks/:id/cancel", async (req, reply) => {
     const { id } = req.params;
@@ -3202,552 +1688,184 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (!cancellation.ok) {
       return reply.code(409).send({ error: cancellation.message, cancellation });
     }
-    activeExecutions.delete(id);
     return cancellation;
   });
 
-  // POST /api/tasks/:id/rerun
-  app.post<{ Params: { id: string }; Body: DashboardBriefAdmissionFields }>("/api/tasks/:id/rerun", async (req, reply) => {
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/resume", async (req, reply) => {
     const { id } = req.params;
+    if (!isSafeId(id)) return reply.code(400).send({ error: 'invalid task id' });
     let state: StoreState;
     try { state = readRunState(projectDir, id); } catch { return reply.code(404).send({ error: 'not found' }); }
-
-    // Reject rerun if task is still actively running
-    if (isRunMutationBlockedStatus(state.status)) {
-      return reply.code(409).send({ error: 'Cancel the task before rerunning' });
+    if (state.status !== RUN_STATUS.STOPPED && state.status !== RUN_STATUS.FAILED && state.status !== RUN_STATUS.INCOMPLETE) {
+      return reply.code(409).send({ error: 'only stopped, failed or incomplete runs can be resumed' });
     }
-    if (activeExecutions.has(id)) {
-      return reply.code(409).send({ error: 'Cancel the task before rerunning' });
-    }
-    if (isPendingRunStatus(state.status)) {
-      return reply.code(400).send({ error: 'Task has not been executed yet — use execute instead' });
-    }
-    const targetProjectDir = state.projectDir ?? projectDir;
-    const blocker = projectAdmissionBlocker(
-      targetProjectDir,
-      id,
-      options.isProjectBusy ?? isProjectBusy,
-    );
-    if (blocker) return reply.code(409).send({ error: projectBusyMessage(blocker) });
-
-    const briefAdmission = admitExistingRunBrief(state, id, req.body ?? {});
-    if (!briefAdmission.ok || !briefAdmission.admission) {
-      return reply.code(409).send({
-        error: briefAdmission.error,
-        report: briefAdmission.report,
-        receipt: briefAdmission.receipt,
-      });
-    }
-    const rerunHasBriefSidecar = briefAdmission.hasBriefSidecar === true;
-    const rerunWorkflowName = state.workflowName || 'default';
-    let rerunPreparation: DetachedRunPreparation | undefined;
-    if (rerunHasBriefSidecar) {
-      const yamlPath = join(configDir, 'workflows', `${rerunWorkflowName}.yaml`);
-      if (!existsSync(yamlPath)) {
-        return reply.code(400).send({ error: `workflow not found: ${rerunWorkflowName}` });
-      }
-      rerunPreparation = prepareDetachedRun({
-        runId: id,
-        projectDir: targetProjectDir,
-        exactBrief: briefAdmission.exactBrief,
-        briefAdmission: briefAdmission.admission,
-        campaignId: state.campaignId,
-        supervise: state.supervise ?? true,
-        workflow: rerunWorkflowName,
-      });
-      if (!rerunPreparation.ok) {
-        return reply.code(409).send({
-          error: rerunPreparation.conflict.error,
-          report: rerunPreparation.conflict.report,
-          receipt: rerunPreparation.conflict.receipt,
-        });
-      }
-    }
-    state.briefAdmission = briefAdmission.admission;
-
-    for (const [, s] of Object.entries(state.stages)) {
-      s.status = STAGE_STATUS.PENDING;
-      s.duration_ms = undefined;
-      s.error = undefined;
-      s.retries = 0;
-      s.exitCode = undefined;
-      s.artifacts = undefined;
-      s.startedAt = undefined;
-      s.completedAt = undefined;
-      s.tokens_in = undefined;
-      s.tokens_out = undefined;
-      s.attempts = undefined;
-      s.reruns = undefined;
-      s.writes = undefined;
-      s.writeAttribution = undefined;
-    }
-    state.supervisor = undefined;
-    state.completedAt = undefined;
-    state.startedAt = new Date().toISOString();
-
-    // Reset iteration state on rerun
-    state.currentIteration = 1;
-    state.campaignIteration = state.campaignId || state.campaignStorageKey ? 1 : undefined;
-    state.failureReason = undefined;
-    state.campaignAlert = undefined;
-    state.researchInjection = undefined;
-
-    // Issue 61: clean up orphaned dispatched stages
-    // First, remove any stages listed in dispatchedStages (these were dynamically added)
-    const dispatchedIds = new Set<string>(
-      (Array.isArray(state.dispatchedStages) ? state.dispatchedStages as { id?: string }[] : []).map(s => s.id).filter((x): x is string => !!x),
-    );
-    for (const sid of dispatchedIds) {
-      delete state.stages[sid];
-    }
-    // Then, also remove stages not in workflow.yaml base stages
-    // (exclude dispatched IDs from the base set since workflow.yaml may include them)
-    const baseStageIds = new Set<string>();
-    const wfPath = join(runsRoot(), id, 'workflow.yaml');
     try {
-      const wf = parseYaml(readFileSync(wfPath, 'utf-8')) as { stages?: unknown[] };
-      if (Array.isArray(wf.stages)) {
-        for (const item of wf.stages) {
-          try {
-            const sc = StageConfigSchema.parse(item);
-            if (!dispatchedIds.has(sc.id)) baseStageIds.add(sc.id);
-          } catch { /* skip */ }
-        }
-        // Reset workflow.yaml to base stages only
-        wf.stages = wf.stages.filter((item: any) => {
-          try { return !dispatchedIds.has(StageConfigSchema.parse(item).id); } catch { return true; }
-        });
-        writeFileSync(wfPath, stringifyYaml(wf), 'utf-8');
-      }
-    } catch { /* no workflow */ }
-    if (baseStageIds.size > 0) {
-      for (const sid of Object.keys(state.stages)) {
-        if (!baseStageIds.has(sid)) delete state.stages[sid];
-      }
-    }
-    state.dispatchedStages = undefined;
-
-    // Clear stale artifacts from previous run
-    const runPath = join(runsRoot(), id);
-    const supervisorStagePath = join(runPath, 'stages', '_supervisor');
-    if (existsSync(supervisorStagePath)) rmSync(supervisorStagePath, { recursive: true, force: true });
-    for (const fname of ['supervisor_state.json', 'supervisor_log.md']) {
-      const path = join(runPath, fname);
-      if (existsSync(path)) unlinkSync(path);
-    }
-    // Remove dispatched stage directories entirely
-    for (const sid of dispatchedIds) {
-      const stageDir = join(runPath, 'stages', sid);
-      if (existsSync(stageDir)) rmSync(stageDir, { recursive: true, force: true });
-    }
-    // Clear stale stage files so they don't leak into API responses or agent context
-    for (const sid of Object.keys(state.stages)) {
-      for (const fname of ['status.json', 'metric.json', 'live.log', 'output.md', 'input.md']) {
-        const p = join(runPath, 'stages', sid, fname);
-        if (existsSync(p)) unlinkSync(p);
-      }
-    }
-    const iterLogPath = join(runPath, 'iteration_log.md');
-    if (existsSync(iterLogPath)) unlinkSync(iterLogPath);
-    const dispatchPath = join(runPath, 'dispatch.yaml');
-    if (existsSync(dispatchPath)) unlinkSync(dispatchPath);
-    const refreshPath = join(runPath, 'attempt_summary_refresh.json');
-    if (existsSync(refreshPath)) unlinkSync(refreshPath);
-    // Clean stale events log so the events feed starts fresh on rerun
-    const eventsPath = join(runPath, 'events.jsonl');
-    if (existsSync(eventsPath)) unlinkSync(eventsPath);
-    // Clean stale planner artifacts so re-plan starts fresh
-    const techSolPath = join(runPath, 'tech_solution.md');
-    if (existsSync(techSolPath)) unlinkSync(techSolPath);
-    try {
-      for (const f of readdirSync(runPath)) {
-        if (f.startsWith('verdict') && f.endsWith('.json')) unlinkSync(join(runPath, f));
-      }
-    } catch { /* ignore */ }
-
-    // Preserve the source decision captured with the exact admitted bytes.
-    if (rerunHasBriefSidecar) {
-      // Trigger workflow (same pattern as stage-level rerun)
-      state.status = 'running';
-      writeRunState(projectDir, id, state);
-      if (rerunPreparation?.ok) rerunPreparation.launch?.();
-      return { ok: true, route: 'monitor' };
-    } else {
-      state.status = 'pending';
-      writeRunState(projectDir, id, state);
-      return { ok: true, route: 'pending' };
+      const tasks = await (options.listTasks ?? listTasksFromDaemon)({ status: 'all' });
+      const task = tasks.sort((left, right) => right.id - left.id).find(task => task.run_id === id && resolve(task.projectDir) === resolve(state.projectDir));
+      if (!task) return reply.code(409).send({ error: 'run has no registered task to resume' });
+      const resumed = await (options.resumeTask ?? (taskId => sendRpc<{ new_attempt: number; unit: string }>(defaultSocketPath(), { cmd: 'resume', id: taskId })))(task.id);
+      invalidateTaskListCache();
+      return resumed;
+    } catch (error) {
+      return reply.code(error instanceof RpcOutcomeUnknownError ? 502 : 503).send({ error: `could not request resume: ${error instanceof Error ? error.message : String(error)}` });
     }
   });
 
-  // POST /api/tasks/:id/stages/:stageId/rerun — stage-level rerun
-  app.post<{ Params: { id: string; stageId: string }; Body: DashboardBriefAdmissionFields }>("/api/tasks/:id/stages/:stageId/rerun", async (req, reply) => {
-    const { id, stageId } = req.params;
-    let state: StoreState;
-    try { state = readRunState(projectDir, id); } catch { return reply.code(404).send({ error: 'not found' }); }
-    if (!state.stages[stageId]) return reply.code(404).send({ error: 'stage not found' });
-    if (isRunMutationBlockedStatus(state.status)) {
-      return reply.code(409).send({ error: 'task is still running' });
-    }
-    if (activeExecutions.has(id)) {
-      return reply.code(409).send({ error: 'task is still running' });
-    }
-    const targetProjectDir = state.projectDir ?? projectDir;
-    const blocker = projectAdmissionBlocker(
-      targetProjectDir,
-      id,
-      options.isProjectBusy ?? isProjectBusy,
-    );
-    if (blocker) return reply.code(409).send({ error: projectBusyMessage(blocker) });
-    const briefAdmission = admitExistingRunBrief(state, id, req.body ?? {});
-    if (!briefAdmission.ok || !briefAdmission.admission) {
-      return reply.code(409).send({
-        error: briefAdmission.error,
-        report: briefAdmission.report,
-        receipt: briefAdmission.receipt,
-      });
-    }
-    state.briefAdmission = briefAdmission.admission;
-    const exactBrief = briefAdmission.exactBrief;
-    const workflowName = state.workflowName || 'default';
-    const yamlPath = join(configDir, 'workflows', `${workflowName}.yaml`);
-    if (!existsSync(yamlPath)) {
-      return reply.code(400).send({ error: `workflow not found: ${workflowName}` });
-    }
-    const inProcessWorkflow = options.runWorkflow;
-    let launchStageRerun: DetachedRunStarter | undefined;
-    if (!inProcessWorkflow) {
-      const preparation = prepareDetachedRun({
-        runId: id,
-        projectDir: targetProjectDir,
-        exactBrief,
-        briefAdmission: briefAdmission.admission,
-        campaignId: state.campaignId,
-        supervise: state.supervise ?? true,
-        workflow: workflowName,
-      });
-      if (!preparation.ok) {
-        return reply.code(409).send({
-          error: preparation.conflict.error,
-          report: preparation.conflict.report,
-          receipt: preparation.conflict.receipt,
+  app.post<{ Body: { campaignId: string; name: string } }>("/api/run-campaigns/rename", async (req, reply) => {
+    const campaignId = req.body?.campaignId;
+    const newName = req.body?.name;
+    if (!campaignId || !newName) return reply.code(400).send({ error: 'campaignId and name are required' });
+    let runs: { runId: string; state: StoreState }[];
+    try { runs = editableCampaignRuns(projectDir, campaignId); }
+    catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
+    let updated = 0;
+    try {
+      for (const { runId, state } of runs) {
+        updateRunState(state.projectDir || projectDir, runId, current => {
+          assertRunEditable(runId);
+          current.campaignName = newName;
         });
+        updated++;
       }
-      launchStageRerun = preparation.launch;
-    }
+    } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
+    invalidateTaskListCache();
+    return { ok: true, updated, name: newName };
+  });
 
-    // Build StageConfig[] from workflow.yaml for dependency graph
-    const wfPath = join(runsRoot(), id, 'workflow.yaml');
-    let stages: StageConfig[] = [];
+  app.delete<{ Params: { id: string } }>("/api/run-campaigns/:id", async (req, reply) => {
+    const campaignId = req.params.id;
+    if (!isSafeId(campaignId)) return reply.code(404).send({ error: 'not found' });
+    let runs: { runId: string; state: StoreState }[];
+    try { runs = editableCampaignRuns(projectDir, campaignId); }
+    catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
+    let orphaned = 0;
     try {
-      const wf = parseYaml(readFileSync(wfPath, 'utf-8')) as { stages?: unknown[] };
-      if (Array.isArray(wf.stages)) {
-        for (const item of wf.stages) {
-          try { stages.push(StageConfigSchema.parse(item)); } catch { /* skip */ }
-        }
+      for (const { runId, state } of runs) {
+        updateRunState(state.projectDir || projectDir, runId, current => {
+          assertRunEditable(runId);
+          current.campaignId = '';
+          current.campaign_id = '';
+          current.campaignStorageKey = '';
+          current.campaignName = '';
+        });
+        orphaned++;
       }
-    } catch { /* no workflow */ }
-
-    const downstream = findDownstream(stageId, stages);
-    const resetIds = [stageId, ...downstream];
-
-    // If rerunning a dynamic_dispatch stage (e.g. plan), clean up old dispatched stages
-    const targetStage = stages.find(s => s.id === stageId);
-    if (targetStage?.dynamic_dispatch) {
-      const dispatchedIds = new Set(
-        (Array.isArray(state.dispatchedStages) ? state.dispatchedStages as { id?: string }[] : [])
-          .map(s => s.id).filter((x): x is string => !!x),
-      );
-      // Remove dispatched stages from state and clean up their directories
-      for (const sid of dispatchedIds) {
-        delete state.stages[sid];
-        const stageDir = join(runsRoot(), id, 'stages', sid);
-        if (existsSync(stageDir)) rmSync(stageDir, { recursive: true, force: true });
-        const vp = join(runsRoot(), id, `verdict_${sid}.json`);
-        if (existsSync(vp)) unlinkSync(vp);
+    } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
+    const historyPath = join(campaignFsRoot(), `${campaignId}.jsonl`);
+    let removedHistory = false;
+    try {
+      if (existsSync(historyPath)) {
+        unlinkSync(historyPath);
+        removedHistory = true;
       }
-      state.dispatchedStages = undefined;
-      // Clear dispatch.yaml so planner starts fresh
-      const dp = join(runsRoot(), id, 'dispatch.yaml');
-      if (existsSync(dp)) unlinkSync(dp);
-      // Clear planner artifacts so it starts fresh
-      const techSolPath = join(runsRoot(), id, 'tech_solution.md');
-      if (existsSync(techSolPath)) unlinkSync(techSolPath);
-      const iterLogPath = join(runsRoot(), id, 'iteration_log.md');
-      if (existsSync(iterLogPath)) unlinkSync(iterLogPath);
-      // Reset iteration state so planner and auto-approve logic start fresh
-      state.currentIteration = 1;
-      state.campaignIteration = state.campaignId || state.campaignStorageKey ? 1 : undefined;
-      // Reset workflow.yaml to base stages only
-      try {
-        const wf = parseYaml(readFileSync(wfPath, 'utf-8')) as { stages?: unknown[] };
-        if (Array.isArray(wf.stages)) {
-          wf.stages = wf.stages.filter((item: any) => {
-            try { return !dispatchedIds.has(StageConfigSchema.parse(item).id); } catch { return true; }
-          });
-          writeFileSync(wfPath, stringifyYaml(wf), 'utf-8');
-        }
-      } catch { /* best effort */ }
+    } catch {
+      return reply.code(500).send({ error: 'failed to remove campaign history' });
     }
+    invalidateTaskListCache();
+    return { ok: true, orphaned, removedHistory };
+  });
 
-    // Reset target + downstream
-    const runPath = join(runsRoot(), id);
-    for (const sid of resetIds) {
-      if (!state.stages[sid]) continue; // already removed (dispatched stage cleanup above)
-      state.stages[sid] = rependStageStatus(state.stages[sid], 0);
-      // Clear verdict files for gate stages
-      const vp = join(runPath, `verdict_${sid}.json`);
-      if (existsSync(vp)) unlinkSync(vp);
-      // Clear stale stage files so they don't leak into API or agent context
-      for (const fname of ['metric.json', 'live.log', 'output.md', 'input.md', 'session.json']) {
-        const fp = join(runPath, 'stages', sid, fname);
-        if (existsSync(fp)) unlinkSync(fp);
-      }
+  const campaignPageSources: Partial<CampaignPageSources> = {
+    readInbox: () => inboxOverview(projectDir, options),
+    readTasks: () => (options.listTasks ?? listTasksFromDaemon)({}),
+    hasLiveWorker: (runProjectDir, runId) => schedulerIsAliveForRun(runProjectDir, runId),
+    ...options.campaignPageSources,
+  };
+
+  app.get('/api/campaigns/operator-index', async () => {
+    return readCampaignOperatorIndex(projectDir, campaignPageSources);
+  });
+
+  app.get<{ Params: { id: string } }>('/api/campaigns/:id/operator-view', async (req, reply) => {
+    if (!isSafeId(req.params.id)) return reply.code(404).send({ error: 'not found' });
+    try {
+      return await readCampaignOperatorView(projectDir, req.params.id, campaignPageSources);
+    } catch (error) {
+      if (error instanceof CampaignNotFoundError) return reply.code(404).send({ error: 'not found' });
+      throw error;
     }
-    // Clear shared verdict.json (legacy fallback)
-    const svp = join(runPath, 'verdict.json');
-    if (existsSync(svp)) unlinkSync(svp);
-    // Clean stale events so the events feed starts fresh for the rerun
-    const stageRerunEventsPath = join(runPath, 'events.jsonl');
-    if (existsSync(stageRerunEventsPath)) unlinkSync(stageRerunEventsPath);
-    const stageRerunRefreshPath = join(runPath, 'attempt_summary_refresh.json');
-    if (existsSync(stageRerunRefreshPath)) unlinkSync(stageRerunRefreshPath);
-    state.status = 'running';
-    state.completedAt = undefined;
-    state.failureReason = undefined;
-    state.campaignAlert = undefined;
-    state.researchInjection = undefined;
-    state.startedAt = new Date().toISOString();
-    writeRunState(projectDir, id, state);
+  });
 
-    // Resume execution
-    if (!inProcessWorkflow) {
-      launchStageRerun?.();
-      return { ok: true, reset: resetIds };
+  app.get<{ Params: { id: string }; Querystring: { cursor?: string; limit?: string } }>('/api/campaigns/:id/operator-runs', async (req, reply) => {
+    if (!isSafeId(req.params.id)) return reply.code(404).send({ error: 'not found' });
+    const cursor = req.query.cursor === undefined ? 0 : Number(req.query.cursor);
+    const limit = req.query.limit === undefined ? 12 : Number(req.query.limit);
+    if (!Number.isInteger(cursor) || cursor < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+      return reply.code(400).send({ error: 'cursor must be a non-negative integer and limit must be between 1 and 100' });
     }
     try {
-      const { config, raw } = loadWorkflow(yamlPath);
-      const agents = new Map<string, AgentConfig>();
-      try {
-        const allFiles = readdirSync(agentsDir).filter(f => f.endsWith('.yaml'));
-        for (const f of allFiles) {
-          const parsed = parseYaml(readFileSync(join(agentsDir, f), 'utf-8'));
-          agents.set(f.replace('.yaml', ''), parseAgentConfig(parsed, configDir));
-        }
-      } catch { /* ignore */ }
-      const adapter = options.adapter ?? await resolveAdapter(configDir);
-      activeExecutions.add(id);
-      inProcessWorkflow(
-        config, raw, targetProjectDir, adapter, agents, undefined, agentsDir, id,
-        exactBrief, true, state.supervise ?? true, undefined, true, state.briefAdmission,
-      )
-        .catch((err) => {
-          log.error({ err }, 'Workflow failed');
-          try {
-            const s = readRunState(projectDir, id);
-            if (isRunningRunStatus(s.status)) {
-              s.status = RUN_STATUS.FAILED;
-              s.failureReason = `Workflow error: ${err instanceof Error ? err.message : String(err)}`;
-              s.completedAt = new Date().toISOString();
-              writeRunState(projectDir, id, s);
-            }
-          } catch { /* run may have been removed */ }
-        })
-        .finally(() => activeExecutions.delete(id));
+      return await readCampaignRunPage(projectDir, req.params.id, cursor, limit, campaignPageSources);
+    } catch (error) {
+      if (error instanceof CampaignNotFoundError) return reply.code(404).send({ error: 'not found' });
+      throw error;
+    }
+  });
+
+  app.get<{ Params: { id: string; version: string } }>("/api/campaigns/:id/brief/:version", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    const text = readBriefFileForCampaign(dir, req.params.version);
+    if (text === null) return reply.code(404).send({ error: 'not found' });
+    return reply.type('text/markdown').send(text);
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string } }>("/api/campaigns/:id/brief-diff", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    const from = req.query.from;
+    const to = req.query.to;
+    if (!from || !to || !isSafeCampaignVersion(from) || !isSafeCampaignVersion(to)) {
+      return reply.code(400).send({ error: 'from and to must be vN versions' });
+    }
+    const fromText = readBriefFileForCampaign(dir, from);
+    const toText = readBriefFileForCampaign(dir, to);
+    if (fromText === null || toText === null) return reply.code(404).send({ error: 'not found' });
+    return reply.type('text/plain').send(unifiedDiff(from, fromText, to, toText));
+  });
+
+  app.post<{ Params: { id: string; index: string }; Body: { decision?: string } }>("/api/campaigns/:id/review/:index", async (req, reply) => {
+    const dir = campaignDirOr404(req.params.id);
+    if (!dir) return reply.code(404).send({ error: 'not found' });
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0) return reply.code(400).send({ error: 'index must be a non-negative integer' });
+    const decision = req.body?.decision;
+    if (decision !== 'accept' && decision !== 'reject') return reply.code(400).send({ error: 'decision must be accept or reject' });
+    try {
+      return await consumePendingReview(req.params.id, index, decision);
     } catch (err) {
-      state.status = 'failed';
-      state.failureReason = `Workflow load error: ${err instanceof Error ? err.message : String(err)}`;
-      state.completedAt = new Date().toISOString();
-      writeRunState(projectDir, id, state);
+      if (err instanceof ReviewConflictError) return reply.code(409).send({ error: err.message });
+      throw err;
     }
-
-    return { ok: true, reset: resetIds };
   });
 
-  // POST /api/tasks/:id/stages/:stageId/reeval — gate re-evaluation only
-  app.post<{ Params: { id: string; stageId: string }; Body: DashboardBriefAdmissionFields }>("/api/tasks/:id/stages/:stageId/reeval", async (req, reply) => {
-    const { id, stageId } = req.params;
-    let state: StoreState;
-    try { state = readRunState(projectDir, id); } catch { return reply.code(404).send({ error: 'not found' }); }
-    if (!state.stages[stageId]) return reply.code(404).send({ error: 'stage not found' });
-    if (isRunMutationBlockedStatus(state.status) || activeExecutions.has(id)) {
-      return reply.code(409).send({ error: 'task is still running' });
-    }
-    // Validate the stage is actually a gate — reeval only makes sense for gate stages
-    const roles = loadStageRoles(projectDir, id);
-    if (!roles[stageId]?.isGate) {
-      return reply.code(400).send({ error: 'stage is not a gate — use rerun instead' });
-    }
-    const targetProjectDir = state.projectDir ?? projectDir;
-    const blocker = projectAdmissionBlocker(
-      targetProjectDir,
-      id,
-      options.isProjectBusy ?? isProjectBusy,
-    );
-    if (blocker) return reply.code(409).send({ error: projectBusyMessage(blocker) });
-    const briefAdmission = admitExistingRunBrief(state, id, req.body ?? {});
-    if (!briefAdmission.ok || !briefAdmission.admission) {
-      return reply.code(409).send({
-        error: briefAdmission.error,
-        report: briefAdmission.report,
-        receipt: briefAdmission.receipt,
-      });
-    }
-    state.briefAdmission = briefAdmission.admission;
-    const exactBrief = briefAdmission.exactBrief;
-    const workflowName = state.workflowName || 'default';
-    const yamlPath = join(configDir, 'workflows', `${workflowName}.yaml`);
-    if (!existsSync(yamlPath)) {
-      return reply.code(400).send({ error: `workflow not found: ${workflowName}` });
-    }
-    const inProcessWorkflow = options.runWorkflow;
-    let launchReevaluation: DetachedRunStarter | undefined;
-    if (!inProcessWorkflow) {
-      const preparation = prepareDetachedRun({
-        runId: id,
-        projectDir: targetProjectDir,
-        exactBrief,
-        briefAdmission: briefAdmission.admission,
-        campaignId: state.campaignId,
-        supervise: state.supervise ?? true,
-        workflow: workflowName,
-      });
-      if (!preparation.ok) {
-        return reply.code(409).send({
-          error: preparation.conflict.error,
-          report: preparation.conflict.report,
-          receipt: preparation.conflict.receipt,
-        });
-      }
-      launchReevaluation = preparation.launch;
-    }
+  app.get("/api/standalone-runs", async (_req, reply) => {
+    const result = readStandaloneRuns(projectDir);
+    reply.header('X-Total-Count', String(result.total));
+    return result.runs;
+  });
 
-    const runPath = join(runsRoot(), id);
-    // Clear verdict
-    const vp = join(runPath, `verdict_${stageId}.json`);
-    if (existsSync(vp)) unlinkSync(vp);
-    // Clear shared verdict.json (legacy fallback)
-    const svp = join(runPath, 'verdict.json');
-    if (existsSync(svp)) unlinkSync(svp);
-    // Clear stale stage files so they don't leak into API or agent context
-    for (const fname of ['metric.json', 'live.log', 'output.md', 'input.md', 'session.json']) {
-      const fp = join(runPath, 'stages', stageId, fname);
-      if (existsSync(fp)) unlinkSync(fp);
-    }
+  // ===================== Agent endpoints =====================
 
-    // Reset just this stage
-    state.stages[stageId] = rependStageStatus(state.stages[stageId], 0);
-    // Clean stale events so the events feed starts fresh for the re-evaluation
-    const reevalEventsPath = join(runPath, 'events.jsonl');
-    if (existsSync(reevalEventsPath)) unlinkSync(reevalEventsPath);
-    const reevalRefreshPath = join(runPath, 'attempt_summary_refresh.json');
-    if (existsSync(reevalRefreshPath)) unlinkSync(reevalRefreshPath);
-    state.status = 'running';
-    state.completedAt = undefined;
-    state.failureReason = undefined;
-    state.campaignAlert = undefined;
-    state.researchInjection = undefined;
-    state.startedAt = new Date().toISOString();
-    writeRunState(projectDir, id, state);
-
-    // Resume execution
-    if (!inProcessWorkflow) {
-      launchReevaluation?.();
-      return { ok: true };
-    }
+  // 8. GET /api/agents
+  app.get("/api/agents", async () => {
     try {
-      const { config, raw } = loadWorkflow(yamlPath);
-      const agents = new Map<string, AgentConfig>();
-      try {
-        const allFiles = readdirSync(agentsDir).filter(f => f.endsWith('.yaml'));
-        for (const f of allFiles) {
-          const parsed = parseYaml(readFileSync(join(agentsDir, f), 'utf-8'));
-          agents.set(f.replace('.yaml', ''), parseAgentConfig(parsed, configDir));
-        }
-      } catch { /* ignore */ }
-      const adapter = options.adapter ?? await resolveAdapter(configDir);
-      activeExecutions.add(id);
-      inProcessWorkflow(
-        config, raw, targetProjectDir, adapter, agents, undefined, agentsDir, id,
-        exactBrief, true, state.supervise ?? true, undefined, true, state.briefAdmission,
-      )
-        .catch((err) => {
-          log.error({ err }, 'Workflow failed');
-          try {
-            const s = readRunState(projectDir, id);
-            if (isRunningRunStatus(s.status)) {
-              s.status = RUN_STATUS.FAILED;
-              s.failureReason = `Workflow error: ${err instanceof Error ? err.message : String(err)}`;
-              s.completedAt = new Date().toISOString();
-              writeRunState(projectDir, id, s);
-            }
-          } catch { /* run may have been removed */ }
-        })
-        .finally(() => activeExecutions.delete(id));
-    } catch (err) {
-      state.status = 'failed';
-      state.failureReason = `Workflow load error: ${err instanceof Error ? err.message : String(err)}`;
-      state.completedAt = new Date().toISOString();
-      writeRunState(projectDir, id, state);
-    }
-
-    return { ok: true };
-  });
-
-  // 6. GET /api/tasks/:id/stages/:stageId
-  app.get<{ Params: { id: string; stageId: string } }>(
-    "/api/tasks/:id/stages/:stageId",
-    async (req, reply) => {
-      try {
-        const state = readRunState(projectDir, req.params.id);
-        if (req.params.stageId === '_supervisor' && state.supervisor) {
-          return {
-            id: '_supervisor',
-            role: 'supervisor',
-            status: state.supervisor.status,
-            duration_ms: state.supervisor.duration_ms,
-            retries: 0,
-            reruns: Math.max(0, state.supervisor.calls - 1),
-            attempts: state.supervisor.attempts,
-            artifacts: [],
-            dependsOn: [],
-            input: '',
-            output: '',
-            tokens_in: state.supervisor.tokens_in,
-            tokens_out: state.supervisor.tokens_out,
-            calls: state.supervisor.calls,
-          };
-        }
-        const s = state.stages[req.params.stageId];
-        if (!s) return reply.code(404).send({ error: "stage not found" });
-        const roles = loadStageRoles(projectDir, req.params.id);
-        const input = readStageInput(projectDir, req.params.id, req.params.stageId);
-        // Merge detailed fields from status.json but keep run.json status as authoritative
-        let detailed = s;
+      const files = readdirSync(agentsDir).filter((f) => f.endsWith('.yaml'));
+      return files.map((f) => {
         try {
-          const fromDisk = JSON.parse(readFileSync(join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'status.json'), 'utf-8'));
-          detailed = { ...s, ...fromDisk, status: s.status };
-        } catch { /* use run state */ }
-        return {
-          id: req.params.stageId,
-          role: roles[req.params.stageId]?.role ?? "",
-          status: detailed.status,
-          duration_ms: detailed.duration_ms,
-          retries: detailed.retries,
-          reruns: detailed.reruns ?? 0,
-          attempts: detailed.attempts ?? [],
-          artifacts: detailed.artifacts ?? [],
-          dependsOn: roles[req.params.stageId]?.dependsOn ?? [],
-          input,
-          output: '',
-          tokens_in: detailed.tokens_in ?? 0,
-          tokens_out: detailed.tokens_out ?? 0,
-          error: detailed.error,
-        };
-      } catch { /* non-critical */
-        return reply.code(404).send({ error: "not found" });
-      }
-    },
-  );
+          const raw = readFileSync(join(agentsDir, f), 'utf-8');
+          const parsed = parseYaml(raw) as Record<string, unknown>;
+          return {
+            name: parsed.name ?? f.replace('.yaml', ''),
+            description: parsed.description ?? '',
+            tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+            adapter: typeof parsed.adapter === 'string' ? parsed.adapter : undefined,
+          };
+        } catch { return null; }
+      }).filter(Boolean);
+    } catch { return []; }
+  });
+
+
 
   // 7. GET /api/tasks/:id/stages/:stageId/live — SSE
   app.get<{ Params: { id: string; stageId: string } }>(
@@ -3850,546 +1968,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     },
   );
 
-  app.get<{ Params: { id: string } }>(
-    "/api/tasks/:id/events",
-    async (req, reply) => {
-      const runPath = join(runsRoot(), req.params.id, 'run.json');
-      if (!existsSync(runPath)) return reply.code(404).send({ error: 'not found' });
-
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-      });
-
-      let lastPayload = '';
-      let terminalSent = false;
-      let lastMtime = 0;
-      const send = () => {
-        if (terminalSent) return;
-        try {
-          // P0: Check mtime before expensive full read
-          const mtime = statSync(runPath).mtimeMs;
-          if (mtime === lastMtime && lastPayload) return; // no change since last check
-          lastMtime = mtime;
-          const state = readRunState(projectDir, req.params.id);
-          const payload = JSON.stringify(stateToTask(state, projectDir, configDir));
-          if (payload === lastPayload) return;
-          lastPayload = payload;
-          invalidateTaskListCache(); // task changed, bust list cache
-          reply.raw.write(`data: ${payload}\n\n`);
-          if (isTerminalRunStatus(state.status)) {
-            terminalSent = true;
-            clearInterval(interval);
-            if (!reply.raw.writableEnded) reply.raw.end();
-          }
-        } catch { /* non-critical */
-          // Task disappeared (deleted) — stop polling to avoid resource leak
-          terminalSent = true;
-          clearInterval(interval);
-        }
-      };
-
-      send();
-      const interval = setInterval(send, 1000);
-
-      req.raw.on('close', () => {
-        clearInterval(interval);
-        if (!reply.raw.writableEnded) reply.raw.end();
-      });
-    },
-  );
-
-  // ===================== Campaign endpoints =====================
-
-  // Legacy run-campaign endpoints back existing task import/dashboard controls.
-  // M3 owns /api/campaigns for filesystem campaign inspection.
-  app.get("/api/run-campaigns", async () => {
-    return listCampaigns(projectDir).map(({ id, name, runCount, bestScore, latestRun }) => ({
-      id,
-      name,
-      runCount,
-      bestScore,
-      latestRun,
-    }));
-  });
-
-  app.get<{ Params: { id: string } }>("/api/run-campaigns/:id", async (req, reply) => {
-    if (!isSafeId(req.params.id)) return reply.code(404).send({ error: 'not found' });
-    const entries = readCampaignEntries(projectDir, req.params.id);
-    if (entries.length === 0) return reply.code(404).send({ error: 'not found' });
-    return entries;
-  });
-
-  app.post<{ Body: { campaignId: string; name: string } }>("/api/run-campaigns/rename", async (req, reply) => {
-    const campaignId = req.body?.campaignId;
-    const newName = req.body?.name;
-    if (!campaignId || !newName) return reply.code(400).send({ error: 'campaignId and name are required' });
-    const root = runsRoot();
-    let updated = 0;
-    try {
-      for (const runId of readdirSync(root)) {
-        const runJsonPath = join(root, runId, 'run.json');
-        if (!existsSync(runJsonPath)) continue;
-        try {
-          const state = JSON.parse(readFileSync(runJsonPath, 'utf-8'));
-          if (state.campaignId === campaignId || state.campaignStorageKey === campaignId) {
-            state.campaignName = newName;
-            writeFileSync(runJsonPath, JSON.stringify(state, null, 2), 'utf-8');
-            updated++;
-          }
-        } catch { /* non-critical */ }
-      }
-    } catch { /* non-critical */ }
-    invalidateTaskListCache();
-    return { ok: true, updated, name: newName };
-  });
-
-  app.delete<{ Params: { id: string } }>("/api/run-campaigns/:id", async (req, reply) => {
-    const campaignId = req.params.id;
-    if (!isSafeId(campaignId)) return reply.code(404).send({ error: 'not found' });
-    const historyPath = join(campaignFsRoot(), `${campaignId}.jsonl`);
-    let removedHistory = false;
-    try {
-      if (existsSync(historyPath)) {
-        unlinkSync(historyPath);
-        removedHistory = true;
-      }
-    } catch {
-      return reply.code(500).send({ error: 'failed to remove campaign history' });
-    }
-
-    let orphaned = 0;
-    const root = runsRoot();
-    try {
-      for (const runId of readdirSync(root)) {
-        const runJsonPath = join(root, runId, 'run.json');
-        if (!existsSync(runJsonPath)) continue;
-        try {
-          const state = JSON.parse(readFileSync(runJsonPath, 'utf-8')) as StoreState;
-          if (!runMatchesCampaign(state, campaignId)) continue;
-          state.campaignId = '';
-          state.campaign_id = '';
-          state.campaignStorageKey = '';
-          state.campaignName = '';
-          writeFileSync(runJsonPath, JSON.stringify(state, null, 2), 'utf-8');
-          orphaned++;
-        } catch { /* non-critical */ }
-      }
-    } catch { /* no run root */ }
-    invalidateTaskListCache();
-    return { ok: true, orphaned, removedHistory };
-  });
-
-  // GET /api/campaigns
-  app.get("/api/campaigns", async () => {
-    return listM3Campaigns(projectDir);
-  });
-
-  const campaignPageSources: Partial<CampaignPageSources> = {
-    readInbox: () => inboxOverview(projectDir, options),
-    readTasks: () => (options.listTasks ?? listTasksFromDaemon)({}),
-    hasLiveWorker: (runProjectDir, runId) => hasLiveScheduler(runProjectDir, runId) || hasLiveDirectRunner(runProjectDir, runId),
-    ...options.campaignPageSources,
-  };
-
-  app.get('/api/campaigns/operator-index', async () => {
-    return readCampaignOperatorIndex(projectDir, campaignPageSources);
-  });
-
-  app.get<{ Params: { id: string } }>('/api/campaigns/:id/operator-view', async (req, reply) => {
-    if (!isSafeId(req.params.id)) return reply.code(404).send({ error: 'not found' });
-    try {
-      return await readCampaignOperatorView(projectDir, req.params.id, campaignPageSources);
-    } catch (error) {
-      if (error instanceof CampaignNotFoundError) return reply.code(404).send({ error: 'not found' });
-      throw error;
-    }
-  });
-
-  app.get<{ Params: { id: string }; Querystring: { cursor?: string; limit?: string } }>('/api/campaigns/:id/operator-runs', async (req, reply) => {
-    if (!isSafeId(req.params.id)) return reply.code(404).send({ error: 'not found' });
-    const cursor = req.query.cursor === undefined ? 0 : Number(req.query.cursor);
-    const limit = req.query.limit === undefined ? 12 : Number(req.query.limit);
-    if (!Number.isInteger(cursor) || cursor < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
-      return reply.code(400).send({ error: 'cursor must be a non-negative integer and limit must be between 1 and 100' });
-    }
-    try {
-      return await readCampaignRunPage(projectDir, req.params.id, cursor, limit, campaignPageSources);
-    } catch (error) {
-      if (error instanceof CampaignNotFoundError) return reply.code(404).send({ error: 'not found' });
-      throw error;
-    }
-  });
-
-  // GET /api/campaigns/:id
-  app.get<{ Params: { id: string } }>("/api/campaigns/:id", async (req, reply) => {
-    const campaign = getWorkspaceCampaign(projectDir, req.params.id);
-    if (!campaign) return reply.code(404).send({ error: 'not found' });
-    return campaign;
-  });
-
-  // GET /api/campaigns/:id/kg — campaign-level KG synthesized from the campaign's per-run graphs.
-  app.get<{ Params: { id: string } }>("/api/campaigns/:id/kg", async (req) => {
-    return aggregateCampaignKG(projectDir, req.params.id);
-  });
-
-  app.get<{ Params: { id: string } }>("/api/campaigns/:id/iterations", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    return readJsonlFile(join(dir, 'iteration_log.jsonl'));
-  });
-
-  app.get<{ Params: { id: string; version: string } }>("/api/campaigns/:id/brief/:version", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    const text = readBriefFileForCampaign(dir, req.params.version);
-    if (text === null) return reply.code(404).send({ error: 'not found' });
-    return reply.type('text/markdown').send(text);
-  });
-
-  app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string } }>("/api/campaigns/:id/brief-diff", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    const from = req.query.from;
-    const to = req.query.to;
-    if (!from || !to || !isSafeCampaignVersion(from) || !isSafeCampaignVersion(to)) {
-      return reply.code(400).send({ error: 'from and to must be vN versions' });
-    }
-    const fromText = readBriefFileForCampaign(dir, from);
-    const toText = readBriefFileForCampaign(dir, to);
-    if (fromText === null || toText === null) return reply.code(404).send({ error: 'not found' });
-    return reply.type('text/plain').send(unifiedDiff(from, fromText, to, toText));
-  });
-
-  app.get<{ Params: { id: string } }>("/api/campaigns/:id/revisions", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    const state = readJsonFile(join(dir, 'state.json'));
-    const briefDir = resolveBriefDir(state);
-    return briefDir ? readJsonlFile(join(briefDir, 'revisions.jsonl')) : [];
-  });
-
-  app.get<{ Params: { id: string } }>("/api/campaigns/:id/pending-review", async (req, reply) => {
-    if (!isSafeId(req.params.id)) return reply.code(404).send({ error: 'not found' });
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir && !getWorkspaceCampaign(projectDir, req.params.id)) {
-      return reply.code(404).send({ error: 'not found' });
-    }
-    return readPendingReviews(req.params.id).map((entry, index) => ({
-      ...entry,
-      index,
-      patchSummary: summarizePatch(entry.patch),
-    }));
-  });
-
-  app.get<{ Params: { id: string } }>("/api/campaigns/:id/kg-hints", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    const hints = readJsonFile(join(dir, 'kg_hints.json'));
-    return Array.isArray(hints) ? hints : [];
-  });
-
-  app.post<{ Params: { id: string; index: string } }>("/api/campaigns/:id/kg-hints/:index/review", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    const index = Number(req.params.index);
-    if (!Number.isInteger(index) || index < 0) return reply.code(400).send({ error: 'index must be a non-negative integer' });
-    const hints = readJsonFile(join(dir, 'kg_hints.json'));
-    if (!Array.isArray(hints) || index >= hints.length) return reply.code(404).send({ error: 'hint not found' });
-    const hint = hints[index] as Record<string, unknown>;
-    const suggestedPatch = hint.suggestedPatch && typeof hint.suggestedPatch === 'object'
-      ? (hint.suggestedPatch as Record<string, unknown>)
-      : undefined;
-    const metadata = suggestedPatch?.metadata && typeof suggestedPatch.metadata === 'object'
-      ? suggestedPatch.metadata as Record<string, unknown>
-      : undefined;
-    const patch = metadata
-      ? { type: 'brief_patch', section: metadata.section, op: metadata.op, value: metadata.value }
-      : undefined;
-    const parsedPatch = z.object({
-      type: z.literal('brief_patch'),
-      section: z.string().min(1),
-      op: z.enum(['append', 'replace_value', 'edit']),
-      value: z.string(),
-    }).safeParse(patch);
-    if (!parsedPatch.success) return reply.code(400).send({ error: 'hint does not contain an applicable brief patch' });
-    const state = readJsonFile(join(dir, 'state.json'));
-    appendPendingReview(req.params.id, {
-      reason: `Cross-campaign KG suggestion from ${typeof (hint.symptomNode as Record<string, unknown> | undefined)?.campaignId === 'string' ? (hint.symptomNode as Record<string, unknown>).campaignId : 'prior campaign'}`,
-      severity: 'medium',
-      patch: parsedPatch.data,
-      source: 'cross_campaign_kg',
-      briefDir: resolveBriefDir(state),
-      briefVersion: getStringAt(state, ['briefVersion']) ?? getStringAt(state, ['initialBriefVersion']),
-      rule: typeof hint.reason === 'string' ? hint.reason : undefined,
-    });
-    return { ok: true };
-  });
-
-  app.post<{ Params: { id: string; index: string }; Body: { decision?: string } }>("/api/campaigns/:id/review/:index", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    const index = Number(req.params.index);
-    if (!Number.isInteger(index) || index < 0) return reply.code(400).send({ error: 'index must be a non-negative integer' });
-    const decision = req.body?.decision;
-    if (decision !== 'accept' && decision !== 'reject') return reply.code(400).send({ error: 'decision must be accept or reject' });
-    try {
-      return await consumePendingReview(req.params.id, index, decision);
-    } catch (err) {
-      if (err instanceof ReviewConflictError) return reply.code(409).send({ error: err.message });
-      throw err;
-    }
-  });
-
-  app.get("/api/cross-campaign-kg/summary", async () => {
-    return crossCampaignSummary();
-  });
-
-  app.get("/api/cross-campaign-kg/nodes", async () => {
-    return getCrossCampaignNodes().map(adaptCrossCampaignNode);
-  });
-
-  app.get("/api/cross-campaign-kg/edges", async () => {
-    return getCrossCampaignEdges().map(adaptCrossCampaignEdge);
-  });
-
-  app.get("/api/standalone-runs", async (_req, reply) => {
-    const result = readStandaloneRuns(projectDir);
-    reply.header('X-Total-Count', String(result.total));
-    return result.runs;
-  });
-
-  // ===================== Agent endpoints =====================
-
-  // 8. GET /api/agents
-  app.get("/api/agents", async () => {
-    try {
-      const files = readdirSync(agentsDir).filter((f) => f.endsWith('.yaml'));
-      return files.map((f) => {
-        try {
-          const raw = readFileSync(join(agentsDir, f), 'utf-8');
-          const parsed = parseYaml(raw) as Record<string, unknown>;
-          return {
-            name: parsed.name ?? f.replace('.yaml', ''),
-            description: parsed.description ?? '',
-            tools: Array.isArray(parsed.tools) ? parsed.tools : [],
-            adapter: typeof parsed.adapter === 'string' ? parsed.adapter : undefined,
-          };
-        } catch { return null; }
-      }).filter(Boolean);
-    } catch { return []; }
-  });
-
-  // 9. GET /api/agents/:name
-  app.get<{ Params: { name: string } }>("/api/agents/:name", async (req, reply) => {
-    if (req.params.name.includes('..') || req.params.name.includes('/')) return reply.code(400).send({ error: 'invalid name' });
-    const filePath = join(agentsDir, `${req.params.name}.yaml`);
-    try {
-      reply.type('text/yaml').send(readFileSync(filePath, 'utf-8'));
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: 'not found' });
-    }
-  });
-
-  // --- Knowledge Graph API ---
-
-  // GET /api/tasks/:id/knowledge-graph
-  app.get<{ Params: { id: string } }>('/api/tasks/:id/knowledge-graph', async (req, reply) => {
-    try {
-      return readKG(projectDir, req.params.id);
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: 'not found' });
-    }
-  });
-
-  // POST /api/tasks/:id/knowledge-graph/nodes
-  app.post<{ Params: { id: string }; Body: { type: string; label: string; details?: string; source?: string; score?: number } }>('/api/tasks/:id/knowledge-graph/nodes', async (req, reply) => {
-    try {
-      const { type, label, details, source, score } = req.body;
-      if (!type || !label) return reply.code(400).send({ error: 'type and label required' });
-      const node = addNode(projectDir, req.params.id, { type: type as KGNodeType, label, details, source, score });
-      return node;
-    } catch { /* non-critical */
-      return reply.code(500).send({ error: 'failed to add node' });
-    }
-  });
-
-  // PATCH /api/tasks/:id/knowledge-graph/nodes/:nodeId
-  app.patch<{ Params: { id: string; nodeId: string }; Body: { type?: string; label?: string; details?: string; score?: number } }>('/api/tasks/:id/knowledge-graph/nodes/:nodeId', async (req, reply) => {
-    try {
-      const updates: any = {};
-      const body = req.body;
-      if (body.type !== undefined) updates.type = body.type;
-      if (body.label !== undefined) updates.label = body.label;
-      if (body.details !== undefined) updates.details = body.details;
-      if (body.score !== undefined) updates.score = body.score;
-      const node = updateNode(projectDir, req.params.id, req.params.nodeId, updates);
-      if (!node) return reply.code(404).send({ error: 'node not found' });
-      return node;
-    } catch { /* non-critical */
-      return reply.code(500).send({ error: 'failed to update node' });
-    }
-  });
-
-  // DELETE /api/tasks/:id/knowledge-graph/nodes/:nodeId
-  app.delete<{ Params: { id: string; nodeId: string } }>('/api/tasks/:id/knowledge-graph/nodes/:nodeId', async (req, reply) => {
-    try {
-      const removed = removeNode(projectDir, req.params.id, req.params.nodeId);
-      if (!removed) return reply.code(404).send({ error: 'node not found' });
-      return { ok: true };
-    } catch { /* non-critical */
-      return reply.code(500).send({ error: 'failed to remove node' });
-    }
-  });
-
-  // POST /api/tasks/:id/knowledge-graph/edges
-  app.post<{ Params: { id: string }; Body: { from: string; to: string; type: string; label?: string } }>('/api/tasks/:id/knowledge-graph/edges', async (req, reply) => {
-    try {
-      const { from, to, type, label } = req.body;
-      if (!from || !to || !type) return reply.code(400).send({ error: 'from, to, and type required' });
-      const edge = addEdge(projectDir, req.params.id, { from, to, type: type as KGEdgeType, label });
-      return edge;
-    } catch { /* non-critical */
-      return reply.code(500).send({ error: 'failed to add edge' });
-    }
-  });
-
-  // --- Execution Trace API ---
-
-  // GET /api/tasks/:id/trace — all trace events for a run
-  app.get<{ Params: { id: string } }>('/api/tasks/:id/trace', async (req, reply) => {
-    try {
-      const events = readAllTraceEvents(projectDir, req.params.id);
-      const summary = summarizeTrace(events);
-      return { events, summary };
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: 'not found' });
-    }
-  });
-
-  // GET /api/tasks/:id/stages/:stageId/trace — trace events for a specific stage
-  app.get<{ Params: { id: string; stageId: string } }>('/api/tasks/:id/stages/:stageId/trace', async (req, reply) => {
-    try {
-      const events = readTraceEvents(projectDir, req.params.id, req.params.stageId);
-      return { events, summary: summarizeTrace(events) };
-    } catch { /* non-critical */
-      return reply.code(404).send({ error: 'not found' });
-    }
-  });
-
-  // ===================== Sub-task endpoints =====================
-
-  // POST /api/tasks/:id/subtasks — spawn a sub-task
-  app.post<{
-    Params: { id: string };
-    Body: DashboardBriefAdmissionFields & {
-      name?: string;
-      brief?: string;
-      workflow?: string;
-      budget?: { totalTokens?: number; totalTimeMs?: number };
-    };
-  }>('/api/tasks/:id/subtasks', async (req, reply) => {
-    try {
-      const parentState = readRunState(projectDir, req.params.id);
-      const { name, brief, workflow, budget } = req.body ?? {};
-      const exactBrief = brief ?? name ?? '';
-      if (!exactBrief.trim()) return reply.code(400).send({ error: 'brief or name required' });
-      const admission = admitDashboardBrief(exactBrief, req.body ?? {});
-      if (!admission.ok || !admission.admission) {
-        return reply.code(409).send({ error: admission.error, report: admission.report, receipt: admission.receipt });
-      }
-      const workflowName = workflow || parentState.workflowName || 'default';
-      const wfPath = join(configDir, 'workflows', `${workflowName}.yaml`);
-      if (!existsSync(wfPath)) return reply.code(400).send({ error: `workflow not found: ${workflowName}` });
-      const displayName = name?.trim() || exactBrief.split(/\r?\n/)[0]?.replace(/^#+\s*/, '').slice(0, 80) || 'Sub-task';
-      const minimalYaml = stringifyYaml({ name: displayName, stages: [] });
-      const { runId } = createRun(projectDir, workflowName, minimalYaml, []);
-      const state = readRunState(projectDir, runId);
-      state.status = 'pending';
-      state.taskDescription = exactBrief;
-      state.briefAdmission = admission.admission;
-      state.parentTaskId = req.params.id;
-      writeFileSync(join(runsRoot(), runId, 'task_brief.md'), exactBrief, 'utf-8');
-      // Inherit budget from parent, split if specified
-      if (budget) {
-        state.budget = {
-          totalTokens: budget.totalTokens,
-          totalTimeMs: budget.totalTimeMs,
-          usedTokens: 0,
-          usedTimeMs: 0,
-        };
-      } else if (parentState.budget) {
-        // Default: give child half of parent's remaining budget
-        const remainingTokens = (parentState.budget.totalTokens ?? 0) - (parentState.budget.usedTokens ?? 0);
-        const remainingTime = (parentState.budget.totalTimeMs ?? 0) - (parentState.budget.usedTimeMs ?? 0);
-        state.budget = {
-          totalTokens: Math.max(0, Math.floor(remainingTokens / 2)),
-          totalTimeMs: Math.max(0, Math.floor(remainingTime / 2)),
-          usedTokens: 0,
-          usedTimeMs: 0,
-        };
-      }
-      // Inherit campaign from parent
-      if (parentState.campaignId) {
-        state.campaignId = parentState.campaignId;
-        state.campaignStorageKey = parentState.campaignStorageKey;
-        state.campaignName = parentState.campaignName;
-      }
-      writeRunState(projectDir, runId, state);
-      return { id: runId, parentTaskId: req.params.id };
-    } catch { /* non-critical */
-      return reply.code(500).send({ error: 'failed to create sub-task' });
-    }
-  });
-
-  // GET /api/tasks/:id/subtasks — list sub-tasks
-  app.get<{ Params: { id: string } }>('/api/tasks/:id/subtasks', async (req) => {
-    const parentId = req.params.id;
-    const ids = listRuns(projectDir);
-    const subtasks: { id: string; name?: string; status: string }[] = [];
-    for (const id of ids) {
-      try {
-        const state = readRunState(projectDir, id);
-        if (state.parentTaskId === parentId) {
-          subtasks.push({ id: state.runId, name: state.taskDescription, status: state.status });
-        }
-      } catch { /* skip */ }
-    }
-    return subtasks;
-  });
-
-  // ===================== Mock endpoints =====================
-
-
-  // 12. POST /api/plan
-  app.post<{ Body: { taskId: string; workflow?: string } }>("/api/plan", async (req, reply) => {
-    const workflow = req.body?.workflow || 'default';
-    if (!isSafeId(workflow)) {
-      return reply.code(400).send({ error: 'invalid workflow name' });
-    }
-    const yamlPath = join(configDir, 'workflows', `${workflow}.yaml`);
-    try {
-      const defaults = readExecutionDefaults(configDir);
-      const raw = readFileSync(yamlPath, 'utf-8');
-      const parsed = parseYaml(raw);
-      const config = WorkflowConfigSchema.parse(parsed);
-      return config.stages.map((s) => ({
-        id: s.id,
-        role: s.role,
-        prompt_template: s.prompt_template,
-        depends_on: s.depends_on,
-        attempt_budget_ms: defaults.timeoutMs,
-        max_retries: s.max_retries ?? config.defaults.max_retries ?? defaults.stageTechnicalRetries,
-      }));
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      return reply.code(404).send({ error: `workflow not found or invalid: ${workflow}: ${detail}` });
-    }
-  });
-
   // 12b. GET /api/tasks/:id/summary
   app.get<{ Params: { id: string } }>("/api/tasks/:id/summary", async (req, reply) => {
     const summaryPath = join(runsRoot(), req.params.id, 'summary.md');
@@ -4406,33 +1984,31 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     const defaultsPath = join(configDir, 'defaults.yaml');
     const defaults = existsSync(defaultsPath) ? parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown> : {};
     const workflowsDir = join(configDir, 'workflows');
-    const skillsDir = join(configDir, 'skills');
+    const skillsDir = join(projectDir, 'config', 'skills');
     const workflows = existsSync(workflowsDir) ? readdirSync(workflowsDir).filter((f) => f.endsWith('.yaml')) : [];
     const skills = existsSync(skillsDir) ? readdirSync(skillsDir).filter((f) => f.endsWith('.md')) : [];
     return { projectDir, adapter: defaults.adapter ?? 'auto', workflows, skills, port, ...defaults };
   });
 
-  // 13b. PATCH /api/settings — persist settings changes to defaults.yaml
-  app.patch<{ Body: Record<string, unknown> }>("/api/settings", async (req, reply) => {
-    const defaultsPath = join(configDir, 'defaults.yaml');
-    let existing: Record<string, unknown> = {};
-    if (existsSync(defaultsPath)) {
-      try { existing = parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown>; } catch { /* non-critical */ }
-    }
-    const updates = req.body ?? {};
-    const allowedKeys = ['adapter', 'model', 'reasoning_effort', 'default_timeout_ms', 'default_max_iterations', 'default_gate_retry_loops', 'default_stage_technical_retries'];
-    for (const key of allowedKeys) {
-      if (key in updates) existing[key] = updates[key];
-    }
-    const { stringify } = await import('yaml');
-    writeFileSync(defaultsPath, stringify(existing), 'utf-8');
-    log.info({ keys: Object.keys(updates).filter(k => allowedKeys.includes(k)) }, 'Settings updated');
-    return { ok: true };
-  });
-
   try {
-    await app.listen({ port, host: "0.0.0.0" });
+    const [localHost, ...remoteHosts] = dashboardListenHosts();
+    await app.listen({ port, host: localHost });
+    const address = app.server.address();
+    const sharedPort = typeof address === 'object' && address ? address.port : port;
+    for (const host of remoteHosts) {
+      const server = createListener!();
+      for (const handler of app.server.listeners('clientError')) server.on('clientError', handler);
+      extraListeners.push(server);
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once('error', rejectListen);
+        server.listen(sharedPort, host, () => {
+          server.off('error', rejectListen);
+          resolveListen();
+        });
+      });
+    }
   } catch (err: unknown) {
+    await app.close();
     cleanup();
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('EADDRINUSE')) {

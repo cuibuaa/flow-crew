@@ -699,6 +699,109 @@ describe('session ledger input and CLI regressions', () => {
     expect(child.stdout).toMatch(/degraded|oversized|too large|stale/iu);
   });
 
+  it('resolves large run history without materializing unrelated fields', { timeout: 20_000 }, () => {
+    const engineRoot = join(root, 'large-history');
+    const directory = join(engineRoot, 'runs', 'run-1');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(engineRoot, 'tasks.jsonl'), JSON.stringify({
+      id: 1, status: 'running', projectDir: root, run_id: 'run-1',
+    }) + '\n');
+    const record = join(directory, 'run.json');
+    writeFileSync(record, '{"history":"');
+    const chunk = 'x'.repeat(1024 * 1024);
+    for (let index = 0; index < 80; index++) appendFileSync(record, chunk);
+    appendFileSync(record, `","runId":"run-1","status":"complete","projectDir":${JSON.stringify(root)}}`);
+    const child = runInline(`
+      const { createEngineTaskRunResolver } = await import(process.argv[1]);
+      const result = createEngineTaskRunResolver({ engineRoot: process.argv[2] }).resolve({
+        id: '1', subject: '', description: '', activeForm: '', status: 'in_progress',
+        blocks: [], blockedBy: [], flowcrewTaskId: 1,
+      });
+      process.stdout.write(JSON.stringify(result));
+    `, [fcTasksModuleUrl, engineRoot], 32);
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout)).toMatchObject({ state: 'resolved', runStatus: 'complete' });
+  });
+
+  it('validates skipped JSON and trailing data while retaining escaped and last duplicate binding keys', () => {
+    const engineRoot = join(root, 'binding-grammar');
+    const directory = join(engineRoot, 'runs', 'run-1');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(engineRoot, 'tasks.jsonl'), JSON.stringify({
+      id: 1, status: 'running', projectDir: root, run_id: 'run-1',
+    }) + '\n');
+    const resolver = createEngineTaskRunResolver({ engineRoot });
+    const entry = { ...task('1'), flowcrewTaskId: 1 };
+    const prefix = `{"runId":"run-1","status":"failed","sta\\u0074us":"complete","projectDir":${JSON.stringify(root)},"skipped":`;
+    for (const skipped of ['null', 'true', 'false', '-0.2e+3', '[1,{"a":[null,false,"\\uD800"]}]']) {
+      writeFileSync(join(directory, 'run.json'), prefix + skipped + '}');
+      expect(resolver.resolve(entry)).toMatchObject({ state: 'resolved', runStatus: 'complete' });
+    }
+    for (const suffix of ['[1,]}', '{"a":true,}}', '01}', '1e}', '"\\q"}', '"bad\nstring"}', 'true} trailing']) {
+      writeFileSync(join(directory, 'run.json'), prefix + suffix);
+      expect(resolver.resolve(entry)).toMatchObject({ state: 'stale' });
+    }
+  });
+
+  it.each(['before-open', 'file-replaced', 'directory-replaced', 'in-place', 'removed'] as const)(
+    'refuses a bound run %s mutation across its descriptor read', (mode) => {
+      const engineRoot = join(root, 'changing-run');
+      const directory = join(engineRoot, 'runs', 'run-1');
+      mkdirSync(directory, { recursive: true });
+      const state = JSON.stringify({ runId: 'run-1', status: 'complete', projectDir: root });
+      writeFileSync(join(directory, 'run.json'), state);
+      writeFileSync(join(directory, '.run-reservation.json'), JSON.stringify({
+        version: 1, runId: 'run-1', projectDir: root, reservedAt: '2020-01-01T00:00:00Z',
+      }));
+      writeFileSync(join(engineRoot, 'tasks.jsonl'), JSON.stringify({
+        id: 1, status: 'running', projectDir: root, run_id: 'run-1',
+      }) + '\n');
+      const child = runInline(`
+        import fs from 'node:fs';
+        import { syncBuiltinESMExports } from 'node:module';
+        const directory = process.argv[3] + '/runs/run-1';
+        const record = directory + '/run.json';
+        const mode = process.argv[2];
+        const bytes = fs.readFileSync(record);
+        const originalOpen = fs.openSync, originalRead = fs.readSync;
+        let selected, changed = false;
+        const change = () => {
+          if (changed) return;
+          changed = true;
+          if (mode === 'directory-replaced') {
+            fs.renameSync(directory, directory + '.old');
+            fs.mkdirSync(directory); fs.writeFileSync(record, bytes);
+          } else if (mode === 'in-place') {
+            const before = fs.statSync(record);
+            fs.writeFileSync(record, bytes);
+            fs.utimesSync(record, before.atime, new Date(before.mtimeMs + 2000));
+          } else if (mode === 'removed') fs.unlinkSync(record);
+          else { fs.renameSync(record, record + '.old'); fs.writeFileSync(record, bytes); }
+        };
+        fs.openSync = (...args) => {
+          if (args[0] === record && mode === 'before-open') change();
+          const fd = originalOpen(...args);
+          if (args[0] === record) selected = fd;
+          return fd;
+        };
+        fs.readSync = (...args) => {
+          const n = originalRead(...args);
+          if (args[0] === selected && mode !== 'before-open') change();
+          return n;
+        };
+        syncBuiltinESMExports();
+        const { createEngineTaskRunResolver } = await import(process.argv[1]);
+        const result = createEngineTaskRunResolver({ engineRoot: process.argv[3] }).resolve({
+          id: '1', subject: '', description: '', activeForm: '', status: 'pending',
+          blocks: [], blockedBy: [], flowcrewTaskId: 1,
+        });
+        process.stdout.write(JSON.stringify({ changed, result }));
+      `, [fcTasksModuleUrl, mode, engineRoot]);
+      expect(child.status, child.stderr).toBe(0);
+      expect(JSON.parse(child.stdout)).toMatchObject({ changed: true, result: { state: 'stale' } });
+    },
+  );
+
   it('QA14 refuses a linked run directory symlink that escapes the configured archive', () => {
     const engineRoot = join(root, 'engine-symlink');
     const outside = join(root, 'outside-run');

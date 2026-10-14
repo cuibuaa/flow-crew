@@ -16,7 +16,8 @@ import { CodexAdapter } from '../src/adapters/codex.js';
 import { AVAILABLE_ADAPTER_NAMES } from '../src/adapters/loader.js';
 import { MockAdapter } from '../src/adapters/mock.js';
 import type { AgentConfig, RunOpts } from '../src/adapters/base.js';
-import { buildStagePrompt, MAX_PREDECESSOR_CONTEXT_BYTES } from '../src/handoff.js';
+import { buildStagePrompt, MAX_PREDECESSOR_CONTEXT_BYTES, HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
+import { generationCompatibleSchema } from '../src/reality-gate/checks/json-schema-match.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 const SESSION_UUID = '123e4567-e89b-42d3-a456-426614174000';
@@ -51,7 +52,14 @@ afterEach(() => {
 });
 
 describe('size-independent adapter prompt delivery', () => {
-  it('preserves missing-CLI diagnostics when the stdin-backed Codex spawn fails', async () => {
+  it('refuses incomplete handoffs and verdicts using the same schema sent to generation', () => {
+    expect(generationCompatibleSchema(HANDOFF_SCHEMA)).toBe(true);
+    expect(() => parseStageRecord('{"status":"delivered"}', HANDOFF_SCHEMA)).toThrow('required');
+    const verdict = stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] });
+    expect(() => parseStageRecord('{"pass":true,"reason":"accepted"}', verdict)).toThrow('anyOf');
+    expect(() => parseStageRecord(JSON.stringify({ pass: false, reason: 'rejected', criteria: { criterion: { status: 'fail', evidence: 'spec/proof.test.ts' } }, audit_findings: { version: 1, findings: [] } }), verdict)).toThrow('anyOf');
+  });
+  it('preserves launch provenance when the stdin-backed Codex spawn fails', async () => {
     const root = temporaryRoot('flowcrew-prompt-missing-codex-');
     const emptyPath = join(root, 'empty-path');
     const runDir = join(root, 'run');
@@ -79,9 +87,11 @@ describe('size-independent adapter prompt delivery', () => {
 
     expect(result).toMatchObject({
       exitCode: 1,
-      output: 'Command not found: codex. Install the adapter CLI and try again.',
-      friendlyError: 'The adapter CLI is not installed or not on PATH. Run `flowcrew doctor`.',
+      spawnError: { code: 'ENOENT', syscall: 'spawn codex', path: 'codex', cwd: root },
     });
+    expect(result.output).toContain('spawn codex ENOENT');
+    expect(result.output).toContain(root);
+    expect(result.friendlyError).toContain('executable, its interpreter and working directory');
   });
 
   it('delivers a prompt above the OS single-argument limit through every shipped adapter', async () => {
@@ -214,7 +224,6 @@ function contextFixture(): ContextFixture {
   const depDir = join(runDir, 'stages', 'upstream');
   mkdirSync(join(projectDir, 'config'), { recursive: true });
   mkdirSync(depDir, { recursive: true });
-  writeFileSync(join(projectDir, 'config', 'defaults.yaml'), 'default_timeout_ms: 1000\n');
   setFcGlobalDir(fcHome);
   return { depDir, projectDir, runDir, runId };
 }

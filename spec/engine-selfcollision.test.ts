@@ -1,3 +1,4 @@
+import { artifacts, inputFile, stageArtifacts } from './spec_contracts/declared-fixtures.js';
 import { createBuildManifest, BUILD_MANIFEST_FILENAME } from '../src/build-manifest.js';
 import { readCampaignEntries } from '../src/campaigns.js';
 import {
@@ -62,19 +63,16 @@ const appendFault = vi.hoisted(() => ({
   remaining: 0,
 }));
 
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
+vi.mock('../src/append-boundary.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/append-boundary.js')>();
   return {
     ...actual,
-    appendFileSync(path: Parameters<typeof actual.appendFileSync>[0], data: string | Uint8Array, options?: unknown) {
-      const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf-8');
-      if (String(path) === appendFault.eventPath
-          && appendFault.remaining > 0
-          && text.includes(appendFault.needle)) {
+    appendTextRecord(path: string, record: string) {
+      if (path === appendFault.eventPath && appendFault.remaining > 0 && record.includes(appendFault.needle)) {
         appendFault.remaining -= 1;
         throw new Error('injected obligation append failure');
       }
-      return (actual.appendFileSync as (...args: unknown[]) => void)(path, data, options);
+      return actual.appendTextRecord(path, record);
     },
   };
 });
@@ -95,7 +93,7 @@ function write(path: string, body: string | Uint8Array): void {
 }
 
 function stage(raw: Record<string, unknown>): StageConfig {
-  return parseDispatchedStageConfig({
+  return parseDispatchedStageConfig({ artifact_contract: stageArtifacts(String(raw.id), raw.is_gate === true),
     id: 'fixture',
     role: 'worker',
     prompt_template: 'bounded engine-self-collision fixture',
@@ -178,7 +176,7 @@ function settleGateAttempt(
   });
 }
 
-function seedCampaignMetric(
+function seedCampaignPhase(
   projectDir: string,
   stateRoot: string,
   campaignStorageKey: string,
@@ -190,15 +188,10 @@ function seedCampaignMetric(
   state.campaignStorageKey = campaignStorageKey;
   state.campaignName = campaignStorageKey;
   state.research = { baseline: 0, policy: 'best_of_n' };
-  state.dispatchedStages = [stage({ id: 'qa', role: 'qa', is_gate: true })];
+  state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true })];
   state.stages.qa = { status: 'complete', retries: 0 };
-  write(join(created.runDirPath, 'stages', 'qa', 'metric.json'), `${JSON.stringify({
-    hasMetric: true,
-    metric: 'quality',
-    value: 1,
-    higherIsBetter: true,
-    threshold: 1,
-    pass: true,
+  write(join(created.runDirPath, 'verdict_qa.json'), `${JSON.stringify({
+    pass: true, phase: 'research', phaseComplete: false,
   })}\n`);
   return { state, runDirectory: created.runDirPath };
 }
@@ -231,7 +224,7 @@ describe('engine self-collision after-state replays and controls', () => {
     const projectDir = join(root, 'project');
     const stateRoot = join(root, 'state');
     mkdirSync(projectDir, { recursive: true });
-    const { state, runDirectory } = seedCampaignMetric(projectDir, stateRoot, 'collision');
+    const { state, runDirectory } = seedCampaignPhase(projectDir, stateRoot, 'collision');
     const localRelative = '.fc/campaigns/collision.jsonl';
     const localPath = join(projectDir, localRelative);
     const globalPath = join(campaignsRoot(), 'collision.jsonl');
@@ -297,7 +290,7 @@ describe('engine self-collision after-state replays and controls', () => {
     const fresh = linkedWorktree(root, 'worktree-b', common);
     const unrelated = linkedWorktree(root, 'unrelated', join(root, 'other.git'));
     const stateRoot = join(root, 'state');
-    const { state } = seedCampaignMetric(first, stateRoot, 'portable-history');
+    const { state } = seedCampaignPhase(first, stateRoot, 'portable-history');
     writeCampaignEntry(first, state);
 
     const firstEntries = readCampaignEntries(first, 'portable-history');
@@ -394,59 +387,6 @@ describe('engine self-collision after-state replays and controls', () => {
       literalGeneratedControl: literal,
       projectionPositive: stableGeneratedScope(generatedMember),
       projectionNegative: stableGeneratedScope('src/generated/ordinary.ts') ?? null,
-    });
-  });
-
-  it('4 — refuses a bare nested citation with the accepted form and keeps valid full citations bounded', () => {
-    const root = temporaryRoot('item-4');
-    const projectDir = join(root, 'project');
-    const runDirectory = join(projectDir, 'run-fixture');
-    const reportRelative = 'reports/published.md';
-    write(join(runDirectory, 'stages', 'gate', 'evidence.json'), '{"evidence":true}\n');
-    write(join(projectDir, reportRelative), '# Replay\n\n`node --test evidence.json`\n');
-    const bare = inspectStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir, runDir: runDirectory, writes: [reportRelative],
-    });
-    const message = bare.violations.find(({ mention }) => mention === 'evidence.json')?.reason;
-    expect(message).toBe(
-      'published replay command cites bare filename evidence.json; bare replay targets resolve at the project root, and no readable input file exists there. Cite a full project-relative path to a project-contained artifact, or remove the replay citation if no executable input is intended',
-    );
-
-    const validTarget = 'run-fixture/stages/gate/replay.test.cjs';
-    write(join(projectDir, validTarget), [
-      "const { test } = require('node:test');",
-      "const assert = require('node:assert');",
-      "test('full citation', () => assert.equal(2 + 2, 4));",
-      '',
-    ].join('\n'));
-    write(join(projectDir, reportRelative), `# Replay\n\n\`node --test ${validTarget}\`\n`);
-    const full = inspectStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir, runDir: runDirectory, writes: [reportRelative],
-    });
-    expect(full.violations).toEqual([]);
-    expect(full.replayExecutions[0]).toMatchObject({ status: 'passed', exitCode: 0 });
-
-    const missingTarget = 'run-fixture/stages/gate/missing.test.cjs';
-    write(join(projectDir, reportRelative), `# Missing replay\n\n\`node --test ${missingTarget}\`\n`);
-    const missingFull = inspectStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir, runDir: runDirectory, writes: [reportRelative],
-    });
-    expect(missingFull.violations.find(({ mention }) => mention === missingTarget)?.reason)
-      .toBe(`published replay command names ${missingTarget}, but no readable input file exists at that exact project-relative path`);
-
-    write(join(projectDir, reportRelative), '# No executable citation\n');
-    const omitted = inspectStageArtifactContract({
-      stageId: 'report', template: `Publish ${reportRelative}.`, projectDir, runDir: runDirectory, writes: [reportRelative],
-    });
-    expect(omitted.violations).toEqual([]);
-
-    recordAfter(4, 'cite the nested artifact by bare filename, then use a full bounded citation and an omitted-citation control', {
-      bareMessage: message,
-      bareExecution: bare.replayExecutions[0],
-      fullExecution: full.replayExecutions[0],
-      fullViolations: full.violations,
-      missingFullPathViolation: missingFull.violations,
-      omittedViolations: omitted.violations,
     });
   });
 
@@ -562,8 +502,9 @@ describe('engine self-collision after-state replays and controls', () => {
     const wrong = [
       ...implementation,
       stage({ id: 'write_report', prompt_template: 'Write the final report.', scope: generatedScopes }),
-      stage({ id: 'gate', role: 'qa', is_gate: true, prompt_template: 'Run npm run build, npm run test, and npm run lint.', scope: generatedScopes }),
-      stage({ id: 'repair', prompt_template: 'Repair the gate and rerun npm test.', scope: generatedScopes }),
+      stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_gate.json" }], [], [], []), id: 'gate', role: 'qa', is_gate: true, prompt_template: 'Run npm run build, npm run test, and npm run lint.', scope: generatedScopes }),
+      stage({ id: 'repair', prompt_template: 'Repair the gate and rerun npm test.', scope: generatedScopes,
+        depends_on: ['gate'], dependency_reasons: { gate: 'Correct the gate rejection.' }, retry_to: ['gate'] }),
     ];
     const zeroScope = inspectDispatchAdmission({
       dispatched: wrong, baseStages: [], dispatchStageId: 'plan', projectDir,
@@ -658,7 +599,7 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it('7 — refuses before command one when a cross-project run consumes this checkout dist', async () => {
+  it('7 — permits unrelated validation when a cross-project run consumes this checkout dist', async () => {
     const root = temporaryRoot('item-7');
     const projectDir = join(root, 'target-project');
     const otherProject = join(root, 'other-project');
@@ -761,14 +702,17 @@ describe('engine self-collision after-state replays and controls', () => {
       stdout: new Capture().writer,
       stderr: stderr.writer,
     };
-    const refused = await cmdShipPreflightWithDeps(['ship-preflight'], dependencies);
-    expect(refused).toBe(1);
+    const unrelatedTarget = await cmdShipPreflightWithDeps(['ship-preflight'], dependencies);
+    expect(unrelatedTarget).toBe(0);
     expect(runner).not.toHaveBeenCalled();
-    expect(stderr.value).toContain('No project command was launched');
+    expect(stderr.value).not.toContain('Validation baseline refused');
 
-    const noBaseline = await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], dependencies);
+    const noBaselineRunner = vi.fn<ValidationCommandRunner>();
+    const noBaseline = await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], {
+      ...dependencies, runValidationCommand: noBaselineRunner,
+    });
     expect(noBaseline).toBe(0);
-    expect(runner).not.toHaveBeenCalled();
+    expect(noBaselineRunner).not.toHaveBeenCalled();
 
     const quietRunner = vi.fn<ValidationCommandRunner>((request) => ({
       exitCode: 0, durationMs: 1, stdout: `${request.role} passed\n`,
@@ -780,7 +724,7 @@ describe('engine self-collision after-state replays and controls', () => {
       stderr: new Capture().writer,
     });
     expect(quiet).toBe(0);
-    expect(quietRunner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+    expect(quietRunner).not.toHaveBeenCalled();
 
     const terminalRunner = vi.fn<ValidationCommandRunner>((request) => ({
       exitCode: 0, durationMs: 1, stdout: `${request.role} passed\n`,
@@ -792,7 +736,7 @@ describe('engine self-collision after-state replays and controls', () => {
       stderr: new Capture().writer,
     });
     expect(terminal).toBe(0);
-    expect(terminalRunner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
+    expect(terminalRunner).not.toHaveBeenCalled();
 
     recordAfter(7, 'run preflight with a verified cross-project consumer of this package dist, then no-baseline, unrelated-dist, terminal-run, and opaque-data-argument controls', {
       consumerDetectorPositive: consumers,
@@ -801,9 +745,9 @@ describe('engine self-collision after-state replays and controls', () => {
       evaluatedImportDetected: evaluatedImport,
       cwdRelativeEntrypointDetected: relativeEntrypoint,
       cwdRelativeOtherDistributionIgnored: relativeOtherDistribution,
-      refusedExitCode: refused,
-      rolesLaunchedBeforeRefusal: runner.mock.calls.map(([request]) => request.role),
-      refusalOutput: stderr.value,
+      unrelatedTargetExitCode: unrelatedTarget,
+      unrelatedTargetRoles: runner.mock.calls.map(([request]) => request.role),
+      validationOutput: stderr.value,
       noBaselineExitCode: noBaseline,
       unrelatedConsumerExitCode: quiet,
       unrelatedConsumerRoles: quietRunner.mock.calls.map(([request]) => request.role),

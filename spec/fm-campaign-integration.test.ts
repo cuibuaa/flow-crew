@@ -1,10 +1,12 @@
+import { readDispatchDocument } from '../src/dispatch-document.js';
+import { fixtureArtifactContract, declaredDispatch } from './test-support/declared-dispatch.js';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { parseYaml, stringifyYaml } from '../src/yaml-util.js';
-import { findAllReady, parseDispatchBlock, StageConfigSchema, checkCampaignHealth } from '../src/scheduler.js';
-import { summarizeCampaignPhaseProgress, readCampaignEntries, collapseEntriesForHealth } from '../src/campaigns.js';
+import { findAllReady, parseDispatchedStageConfig, StageConfigSchema, checkCampaignHealth } from '../src/scheduler.js';
+import { createReadyFinder } from '../src/scheduler/sched_admission/frontier.js';
+import { summarizeCampaignPhaseProgress, readCampaignEntries } from '../src/campaigns.js';
 import type { StoreState, StageStatus } from '../src/store.js';
 
 /**
@@ -57,6 +59,14 @@ function makeRegistry(roles: string[]): Map<string, { name: string; description:
   return m;
 }
 
+function declaredPlannerOutput(output: string, phaseOneReport = false): string {
+  const yaml = /```yaml\n([\s\S]*?)```/.exec(output)?.[1];
+  if (!yaml) throw new Error('fixture has no authored dispatch');
+  return declaredDispatch(yaml, phaseOneReport ? {
+    research_report: { version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/phase1_research.md' }], reads: [], replays: [] },
+  } : {});
+}
+
 const TASK_DESCRIPTION = `Foundation Model for Anomaly Detection (inspired by Chronos for forecasting)
 
 Phase 1: Research Exploration
@@ -82,8 +92,10 @@ describe('FM Anomaly Detection Campaign — Multi-Phase Orchestration', () => {
   describe('Phase 1: First iteration — planner should dispatch only research', () => {
     it('planner prompt contains phase discipline instructions', () => {
       const plannerYaml = readFileSync(join(process.cwd(), 'config', 'agents', 'planner.yaml'), 'utf-8');
-      expect(plannerYaml).toContain('NEVER dispatch stages for multiple phases in a single dispatch.yaml');
-      expect(plannerYaml).toContain('dispatch ONLY the first phase');
+      expect(plannerYaml).toContain('Respect phase prerequisites');
+      expect(plannerYaml).toContain('Dispatch one phase when campaign history must record every phase');
+      expect(plannerYaml).toContain('otherwise retain intermediate receipts and let only the final gate emit the next-phase handoff');
+      expect(plannerYaml).toContain('Revisit mechanisms when the goal or evidence calls for replication or retuning');
     });
 
     it('with no campaign history, phase progress shows nothing — planner must self-constrain', () => {
@@ -127,7 +139,8 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 \`\`\``;
 
       const registry = makeRegistry(['researcher', 'coder', 'qa']);
-      const stages = parseDispatchBlock(plannerOutput, registry);
+      const stages = readDispatchDocument(declaredPlannerOutput(plannerOutput, true)).stages.map(parseDispatchedStageConfig);
+      expect(stages.every(stage => registry.has(stage.role))).toBe(true);
       expect(stages).toHaveLength(3);
       expect(stages[0].role).toBe('researcher');
       expect(stages[2].is_gate).toBe(true);
@@ -138,9 +151,9 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 
     it('findAllReady correctly sequences Phase 1 stages', () => {
       const stages = [
-        StageConfigSchema.parse({ id: 'literature_survey', role: 'researcher', prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'research_report', role: 'coder', depends_on: ['literature_survey'], prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'phase1_gate', role: 'qa', depends_on: ['research_report'], is_gate: true, prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('literature_survey', false), id: 'literature_survey', role: 'researcher', prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('research_report', false), id: 'research_report', role: 'coder', depends_on: ['literature_survey'], prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('phase1_gate', true), id: 'phase1_gate', role: 'qa', depends_on: ['research_report'], is_gate: true, prompt_template: 'x' }),
       ];
 
       const state = makeRunState({ stages: {
@@ -162,6 +175,27 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
       state.stages.research_report = { status: 'complete', retries: 0 };
       ready = findAllReady(stages, state);
       expect(ready.map(s => s.id)).toEqual(['phase1_gate']);
+    });
+
+    it('orders multiple phases in one dispatch when intermediate receipts suffice', () => {
+      const stages = [
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('survey', false), id: 'survey', role: 'researcher' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('phase1_gate', true), id: 'phase1_gate', role: 'qa', depends_on: ['survey'], is_gate: true }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('benchmark', false), id: 'benchmark', role: 'coder', depends_on: ['phase1_gate'] }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('phase2_gate', true), id: 'phase2_gate', role: 'qa', depends_on: ['benchmark'], is_gate: true }),
+      ];
+      let phaseAccepted = false;
+      const ready = createReadyFinder({ loadGateContract: () => null, readGateVerdict: () => ({ pass: phaseAccepted }) });
+      const state = makeRunState({ projectDir: TEST_DIR, runId: 'phase-order', stages: Object.fromEntries(stages.map(stage => [stage.id, { status: 'pending', retries: 0 }])) });
+      expect(ready(stages, state).map(stage => stage.id)).toEqual(['survey']);
+      state.stages.survey.status = 'complete';
+      expect(ready(stages, state).map(stage => stage.id)).toEqual(['phase1_gate']);
+      state.stages.phase1_gate.status = 'complete';
+      expect(ready(stages, state)).toEqual([]);
+      phaseAccepted = true;
+      expect(ready(stages, state).map(stage => stage.id)).toEqual(['benchmark']);
+      state.stages.benchmark.status = 'complete';
+      expect(ready(stages, state).map(stage => stage.id)).toEqual(['phase2_gate']);
     });
   });
 
@@ -239,7 +273,8 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
 \`\`\``;
 
       const registry = makeRegistry(['researcher', 'coder', 'qa']);
-      const stages = parseDispatchBlock(plannerOutput, registry);
+      const stages = readDispatchDocument(declaredPlannerOutput(plannerOutput, true)).stages.map(parseDispatchedStageConfig);
+      expect(stages.every(stage => registry.has(stage.role))).toBe(true);
       expect(stages).toHaveLength(3);
       expect(stages[0].id).toBe('implement_fm');
       // No research stages
@@ -321,7 +356,8 @@ Injecting research to explore alternative approaches.
 \`\`\``;
 
       const registry = makeRegistry(['researcher', 'coder', 'qa']);
-      const stages = parseDispatchBlock(plannerOutputAfterPivot, registry);
+      const stages = readDispatchDocument(declaredPlannerOutput(plannerOutputAfterPivot)).stages.map(parseDispatchedStageConfig);
+      expect(stages.every(stage => registry.has(stage.role))).toBe(true);
       expect(stages).toHaveLength(3);
       expect(stages[0].role).toBe('researcher');
       expect(stages[0].id).toBe('pivot_research');
@@ -331,10 +367,10 @@ Injecting research to explore alternative approaches.
   describe('Resume behavior within campaign iterations', () => {
     it('resume after implement_fm fails — keeps plan, retries from implement', () => {
       const stages = [
-        StageConfigSchema.parse({ id: 'plan', role: 'planner', dynamic_dispatch: true, prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'implement_fm', role: 'coder', depends_on: ['plan'], prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'run_benchmarks', role: 'coder', depends_on: ['implement_fm'], prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'phase2_gate', role: 'qa', depends_on: ['run_benchmarks'], is_gate: true, prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('plan', false), id: 'plan', role: 'planner', dynamic_dispatch: true, prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('implement_fm', false), id: 'implement_fm', role: 'coder', depends_on: ['plan'], prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('run_benchmarks', false), id: 'run_benchmarks', role: 'coder', depends_on: ['implement_fm'], prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('phase2_gate', true), id: 'phase2_gate', role: 'qa', depends_on: ['run_benchmarks'], is_gate: true, prompt_template: 'x' }),
       ];
 
       // State after implement_fm fails
@@ -362,9 +398,9 @@ Injecting research to explore alternative approaches.
 
     it('resume after gate fails — retries gate only (no re-implementation)', () => {
       const stages = [
-        StageConfigSchema.parse({ id: 'implement_fm', role: 'coder', prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'run_benchmarks', role: 'coder', depends_on: ['implement_fm'], prompt_template: 'x' }),
-        StageConfigSchema.parse({ id: 'phase2_gate', role: 'qa', depends_on: ['run_benchmarks'], is_gate: true, prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('implement_fm', false), id: 'implement_fm', role: 'coder', prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('run_benchmarks', false), id: 'run_benchmarks', role: 'coder', depends_on: ['implement_fm'], prompt_template: 'x' }),
+        StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('phase2_gate', true), id: 'phase2_gate', role: 'qa', depends_on: ['run_benchmarks'], is_gate: true, prompt_template: 'x' }),
       ];
 
       const state = makeRunState({ stages: {
@@ -448,7 +484,7 @@ Injecting research to explore alternative approaches.
       writeCampaignEntry({ runId: 'r5', seq: 5, gate: 'g', pass: true, score: 4, metric: 'categories_beaten', threshold: 3 });
 
       const entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      const scored = collapseEntriesForHealth(entries);
+      const scored = entries;
 
       // Score progression: 3, 1, 2, 2, 4
       const scores = scored.map((e: { score?: number }) => e.score).filter((s: unknown): s is number => typeof s === 'number');

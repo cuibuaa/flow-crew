@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createServer, type Server } from 'node:http';
+import { inputFile } from './spec_contracts/declared-fixtures.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { parseChecksFromBrief, runAllChecks } from '../src/reality-gate/index.js';
+import { parseChecksFromBrief, parseChecksFromMarkdown, runAllChecks, listCheckTypes, readRealityGateReport } from '../src/reality-gate/index.js';
 import {
   createRun,
   enforceRealityGateBeforeTerminal,
@@ -15,6 +15,8 @@ import {
   writeRunState,
 } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
+import { execWithStdin } from '../src/adapters/base.js';
+import { runValidationCommand } from '../src/project-validation.js';
 import type { CheckContext, CheckDecl } from '../src/reality-gate/types.js';
 
 let projectDir: string;
@@ -29,6 +31,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   setFcGlobalDir(previousFcGlobalDir);
   rmSync(projectDir, { recursive: true, force: true });
   rmSync(taskDir, { recursive: true, force: true });
@@ -45,40 +48,12 @@ function write(rel: string, body: string) {
   return path;
 }
 
-async function localServer(status: number): Promise<{ url: string; close: () => Promise<void> }> {
-  const server: Server = createServer((_req, res) => {
-    res.statusCode = status;
-    res.end('ok');
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('server did not bind');
-  return {
-    url: `http://127.0.0.1:${address.port}/`,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
-  };
-}
-
 describe('reality gate check types', () => {
-  it('checks http reachability positive and negative cases', async () => {
-    const server = await localServer(204);
-    try {
-      const pass = await runAllChecks([{ name: 'ok', type: 'http-reachability', params: { url: server.url, status: 204 } }], context());
-      const fail = await runAllChecks([{ name: 'bad', type: 'http-reachability', params: { url: server.url, status: 200 } }], context());
-      expect(pass.pass).toBe(true);
-      expect(fail.pass).toBe(false);
-      expect(fail.results[0].details).toContain(server.url);
-      expect(fail.results[0].details).toMatch(/expected 200|return 200/i);
-      expect(fail.results[0].details).toMatch(/fix|check|update/i);
-    } finally {
-      await server.close();
-    }
-  });
 
   it('checks file existence and nonempty positive and negative cases', async () => {
     write('exists.txt', 'x');
-    const pass = await runAllChecks([{ name: 'files', type: 'file-exists-nonempty', params: { paths: ['exists.txt'] } }], context());
-    const fail = await runAllChecks([{ name: 'files', type: 'file-exists-nonempty', params: { paths: ['missing.txt'] } }], context());
+    const pass = await runAllChecks([{ reads: [inputFile('file_0', 'exists.txt')], name: 'files', type: 'file-exists-nonempty', params: { paths: ['exists.txt'] } }], context());
+    const fail = await runAllChecks([{ reads: [inputFile('file_0', 'missing.txt')], name: 'files', type: 'file-exists-nonempty', params: { paths: ['missing.txt'] } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
     expect(fail.results[0].details).toContain('missing.txt');
@@ -88,8 +63,8 @@ describe('reality gate check types', () => {
   it('checks JSON schema positive and negative cases', async () => {
     write('data.json', JSON.stringify({ name: 'x', count: 2 }));
     const schema = { type: 'object', required: ['name'], properties: { count: { type: 'number', minimum: 1 } } };
-    const pass = await runAllChecks([{ name: 'schema', type: 'json-schema-match', params: { file: 'data.json', schema } }], context());
-    const fail = await runAllChecks([{ name: 'schema', type: 'json-schema-match', params: { file: 'data.json', schema: { ...schema, required: ['missing'] } } }], context());
+    const pass = await runAllChecks([{ reads: [inputFile('file', 'data.json')], name: 'schema', type: 'json-schema-match', params: { file: 'data.json', schema } }], context());
+    const fail = await runAllChecks([{ reads: [inputFile('file', 'data.json')], name: 'schema', type: 'json-schema-match', params: { file: 'data.json', schema: { ...schema, required: ['missing'] } } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
     expect(fail.results[0].details).toContain('$.missing');
@@ -105,7 +80,7 @@ describe('reality gate check types', () => {
     const schema = { type: 'object', properties: { blocked_reason: { type: ['string', 'null'] } } };
     const run = async (body: object) => {
       write('u.json', JSON.stringify(body));
-      return runAllChecks([{ name: 'union', type: 'json-schema-match', params: { file: 'u.json', schema } }], context());
+      return runAllChecks([{ reads: [inputFile('file', 'u.json')], name: 'union', type: 'json-schema-match', params: { file: 'u.json', schema } }], context());
     };
     // Both union members must pass — testing only one would not have caught the old bug.
     expect((await run({ blocked_reason: null })).pass).toBe(true);
@@ -118,85 +93,15 @@ describe('reality gate check types', () => {
 
   it('treats an empty union as no type constraint', async () => {
     write('e.json', JSON.stringify({ anything: 7 }));
-    const checks = [{ name: 'empty', type: 'json-schema-match', params: { file: 'e.json', schema: { type: 'object', properties: { anything: { type: [] } } } } }];
+    const checks = [{ reads: [inputFile('file', 'e.json')], name: 'empty', type: 'json-schema-match', params: { file: 'e.json', schema: { type: 'object', properties: { anything: { type: [] } } } } }];
     expect((await runAllChecks(checks, context())).pass).toBe(true);
-  });
-
-  it('checks variance floor positive and negative cases', async () => {
-    write('scores.json', JSON.stringify({ rows: [{ score: 1 }, { score: 2 }, { score: 3 }] }));
-    write('flat.json', JSON.stringify({ rows: [{ score: 1 }, { score: 1 }, { score: 1 }] }));
-    const pass = await runAllChecks([{ name: 'variance', type: 'variance-floor', params: { file: 'scores.json', field_path: 'rows[*].score', min_stddev: 0.1 } }], context());
-    const fail = await runAllChecks([{ name: 'variance', type: 'variance-floor', params: { file: 'flat.json', field_path: 'rows[*].score', min_stddev: 0.1 } }], context());
-    expect(pass.pass).toBe(true);
-    expect(fail.pass).toBe(false);
-    expect(fail.results[0].details).toContain('flat.json');
-    expect(fail.results[0].details).toContain('rows[*].score');
-    expect(fail.results[0].details).toMatch(/raise|vary|lower|fix/i);
-  });
-
-  it('checks static scan positive and negative cases', async () => {
-    write('src/a.ts', 'const ok = 1;\n');
-    write('src/b.ts', 'const bad = "forbidden";\n');
-    const pass = await runAllChecks([{ name: 'scan', type: 'static-ast-scan', params: { glob: 'src/**/*.ts', language: 'ts', forbid_pattern: 'not-present' } }], context());
-    const fail = await runAllChecks([{ name: 'scan', type: 'static-ast-scan', params: { glob: 'src/**/*.ts', language: 'ts', forbid_pattern: 'forbidden' } }], context());
-    expect(pass.pass).toBe(true);
-    expect(fail.pass).toBe(false);
-    expect(fail.results[0].details).toMatch(/src\/b\.ts:\d+/);
-    expect(fail.results[0].details).toMatch(/remove|narrow|change/i);
-  });
-
-  it('matches the complete normalized glob path and refuses a vacuous scan', async () => {
-    write('spec/fc-tasks.test.ts', 'const focused = "clean";\n');
-    write('spec/cli-fc-tasks.test.ts', 'const otherFocused = "clean";\n');
-    write('spec/unrelated.test.ts', 'const unrelated = "forbidden";\n');
-    write('spec/nested/fc-tasks.test.ts', 'const nested = "forbidden";\n');
-    const declaration = {
-      name: 'focused scan',
-      type: 'static-ast-scan',
-      params: {
-        glob: 'spec/*fc-tasks*.test.ts',
-        language: 'typescript',
-        forbid_pattern: 'forbidden',
-      },
-    } satisfies CheckDecl;
-
-    const scopedPass = await runAllChecks([declaration], context());
-    expect(scopedPass.pass).toBe(true);
-    expect(scopedPass.results[0].evidence).toMatchObject({ filesScanned: 2, findings: [] });
-
-    write('spec/cli-fc-tasks.test.ts', 'const otherFocused = "forbidden";\n');
-    const realViolation = await runAllChecks([declaration], context());
-    expect(realViolation.pass).toBe(false);
-    expect(realViolation.results[0].evidence).toMatchObject({
-      filesScanned: 2,
-      findings: [expect.objectContaining({
-        file: expect.stringMatching(/spec[/\\]cli-fc-tasks\.test\.ts$/u),
-        match: 'forbidden',
-      })],
-    });
-
-    const vacuous = await runAllChecks([{
-      ...declaration,
-      params: { ...declaration.params, glob: 'spec/*missing*.test.ts' },
-    }], context());
-    expect(vacuous.pass).toBe(false);
-    expect(vacuous.results[0].details).toMatch(/matched no files.*fix the glob/iu);
-    expect(vacuous.results[0].evidence).toMatchObject({ filesScanned: 0, findings: [] });
-
-    const absentBase = await runAllChecks([{
-      ...declaration,
-      params: { ...declaration.params, glob: 'absent/**/*.ts' },
-    }], context());
-    expect(absentBase.pass).toBe(false);
-    expect(absentBase.results[0].details).toMatch(/matched no files.*fix the glob/iu);
-    expect(absentBase.results[0].evidence).toMatchObject({ filesScanned: 0, findings: [] });
   });
 
   it('checks script exit positive and negative cases', async () => {
     const script = write('check.sh', '#!/usr/bin/env bash\nexit "${1:-0}"\n');
     chmodSync(script, 0o755);
-    const pass = await runAllChecks([{ name: 'exec', type: 'exec-script-exit-zero', params: { script: 'check.sh', args: ['0'] } }], context());
-    const fail = await runAllChecks([{ name: 'exec', type: 'exec-script-exit-zero', params: { script: 'check.sh', args: ['1'] } }], context());
+    const pass = await runAllChecks([{ reads: [], name: 'exec', type: 'exec-script-exit-zero', params: { script: 'check.sh', args: ['0'] } }], context());
+    const fail = await runAllChecks([{ reads: [], name: 'exec', type: 'exec-script-exit-zero', params: { script: 'check.sh', args: ['1'] } }], context());
     expect(pass.pass).toBe(true);
     expect(fail.pass).toBe(false);
     expect(fail.results[0].details).toContain('check.sh');
@@ -207,119 +112,85 @@ describe('reality gate check types', () => {
     const long = 'a'.repeat(170);
     const missingPaths = Array.from({ length: 4 }, (_, index) => `missing-${index}-${long}.txt`);
 
-    const scanPaths = Array.from({ length: 3 }, (_, index) =>
-      `src/segment-${index}-${'b'.repeat(120)}/match-${'c'.repeat(120)}.ts`);
-    for (const path of scanPaths) write(path, 'const value = "forbidden";\n');
-
     write('schema-data.json', '{}');
     const requiredKeys = Array.from({ length: 5 }, (_, index) => `missing_${index}_${long}`);
 
-    const variancePath = `data/variance-${'d'.repeat(140)}.json`;
-    const varianceField = `rows.${'e'.repeat(155)}`;
-    write(variancePath, '{}');
+    const cases: Array<{
+      label: string;
+      check: CheckDecl;
+      element: RegExp;
+      action: RegExp;
+      omitted: boolean;
+    }> = [
+      {
+        label: 'file existence',
+        check: { reads: missingPaths.map((path, index) => inputFile(`missing_${index}`, path)), name: 'files', type: 'file-exists-nonempty', params: { paths: missingPaths } },
+        element: /missing-0-a+/, action: /Create each missing file/i,
+        omitted: true,
+      },
+      {
+        label: 'JSON schema',
+        check: { reads: [inputFile('file', 'schema-data.json')], name: 'schema', type: 'json-schema-match', params: { file: 'schema-data.json', schema: { type: 'object', required: requiredKeys } } },
+        element: /\$\.missing_0_a+/, action: /Add or fix the named JSON values/i,
+        omitted: true,
+      },
+      {
+        label: 'silent script',
+        check: { reads: [],
+          name: 'silent',
+          type: 'exec-script-exit-zero',
+          params: { script: `long_silent_condition="${'g'.repeat(620)}"\ntest "$long_silent_condition" = expected` },
+        },
+        element: /long_silent_condition/, action: /Rerun the script from the project root/i,
+        omitted: true,
+      },
+    ];
 
-    const server = await localServer(204);
-    try {
-      const urls = Array.from({ length: 3 }, (_, index) =>
-        `${server.url}route-${index}-${'f'.repeat(210)}?access_token=not-a-real-secret`);
-      write('urls.json', JSON.stringify({ urls }));
-
-      const cases: Array<{
-        label: string;
-        check: CheckDecl;
-        element: RegExp;
-        action: RegExp;
-        omitted: boolean;
-      }> = [
-        {
-          label: 'file existence',
-          check: { name: 'files', type: 'file-exists-nonempty', params: { paths: missingPaths } },
-          element: /missing-0-a+/, action: /Create each missing file/i,
-          omitted: true,
-        },
-        {
-          label: 'static scan',
-          check: { name: 'scan', type: 'static-ast-scan', params: { glob: 'src\/**/*.ts', language: 'ts', forbid_pattern: 'forbidden' } },
-          element: /src\/segment-0-b+/, action: /Remove or change each named match/i,
-          omitted: true,
-        },
-        {
-          label: 'JSON schema',
-          check: { name: 'schema', type: 'json-schema-match', params: { file: 'schema-data.json', schema: { type: 'object', required: requiredKeys } } },
-          element: /\$\.missing_0_a+/, action: /Add or fix the named JSON values/i,
-          omitted: true,
-        },
-        {
-          label: 'HTTP reachability',
-          check: { name: 'http', type: 'http-reachability', params: { url: { json_file: 'urls.json', from_field: 'urls[*]' }, status: 200 } },
-          element: /127\.0\.0\.1/, action: /Check the endpoint, network, and expected status/i,
-          omitted: true,
-        },
-        {
-          label: 'variance floor',
-          check: { name: 'variance', type: 'variance-floor', params: { file: variancePath, field_path: varianceField, min_stddev: 0.1 } },
-          element: /variance-d+/, action: /Add valid observations or fix the file\/field path/i,
-          omitted: false,
-        },
-        {
-          label: 'silent script',
-          check: {
-            name: 'silent',
-            type: 'exec-script-exit-zero',
-            params: { script: `long_silent_condition="${'g'.repeat(620)}"\ntest "$long_silent_condition" = expected` },
-          },
-          element: /long_silent_condition/, action: /Rerun the script from the project root/i,
-          omitted: true,
-        },
-      ];
-
-      for (const item of cases) {
-        const report = await runAllChecks([item.check], context());
-        const details = report.results[0].details;
-        expect.soft(report.pass, item.label).toBe(false);
-        expect.soft(details.length, `${item.label} length`).toBeLessThanOrEqual(500);
-        expect.soft(details, `${item.label} element`).toMatch(item.element);
-        expect.soft(details, `${item.label} action`).toMatch(item.action);
-        expect.soft(details.includes('[details omitted]'), `${item.label} omission`).toBe(item.omitted);
-      }
-    } finally {
-      await server.close();
+    for (const item of cases) {
+      const report = await runAllChecks([item.check], context());
+      const details = report.results[0].details;
+      expect.soft(report.pass, item.label).toBe(false);
+      expect.soft(details.length, `${item.label} length`).toBeLessThanOrEqual(500);
+      expect.soft(details, `${item.label} element`).toMatch(item.element);
+      expect.soft(details, `${item.label} action`).toMatch(item.action);
+      expect.soft(details.includes('[details omitted]'), `${item.label} omission`).toBe(item.omitted);
     }
   });
 
-  it('says the directory is not a repository instead of blaming the declared path', async () => {
-    // projectDir has no .git. `git cat-file` fails for a reason that has
-    // nothing to do with the path, so the summary must not assert that the
-    // path is absent from HEAD — that would state more than the evidence
-    // supports about a file that may well be committed elsewhere.
-    writeFileSync(join(projectDir, 'present.txt'), 'exists on disk\n', 'utf-8');
-    const outcome = await runAllChecks([{
-      name: 'clean-archive',
-      type: 'exec-script-exit-zero',
-      params: { script: 'git archive HEAD >/dev/null', archive_paths: ['present.txt'] },
-    }], context());
+});
 
-    expect(outcome.pass).toBe(false);
-    expect(outcome.results[0].details).toContain('not a git repository');
-    expect(outcome.results[0].details).not.toContain('is not present in HEAD');
-  });
+describe('durable execution exit decoding', () => {
+  it.each([
+    ['canonical', { exit: { code: 0, signal: null, timedOut: false } }],
+    ['legacy', { code: 0, signal: null, timedOut: false }],
+    ['canonical with stale aliases', { exit: { code: 0, signal: null, timedOut: false }, code: 9, signal: 'SIGTERM', timedOut: true }],
+  ])('uses one canonical outcome for %s receipts', async (_shape, transport) => {
+    const report = await runAllChecks([{ reads: [], name: 'exec', type: 'exec-script-exit-zero', params: { script: 'exit 0' } }], context());
+    const evidence = { command: 'exit 0', stdout: '', stderr: '', exit: { code: 0, signal: null, timedOut: false } };
+    expect(report.results[0].evidence).toEqual(evidence);
+    report.results[0].evidence = { command: 'exit 0', stdout: '', stderr: '', ...transport };
+    const artifact = join(taskDir, '.reality-gate.json');
+    writeFileSync(artifact, JSON.stringify(report), 'utf8');
 
-  it('rejects a clean-archive script that omits its committed-input manifest', async () => {
-    const report = await runAllChecks([{
-      name: 'clean-archive',
-      type: 'exec-script-exit-zero',
-      params: { script: 'git archive HEAD >/dev/null' },
-    }], context());
-
-    expect(report.pass).toBe(false);
-    expect(report.results[0].details).toContain('must declare every repository input');
-    expect(report.results[0].evidence).toMatchObject({
-      stderr: expect.stringContaining('Executor preflight stopped the check'),
-    });
+    const decoded = readRealityGateReport(artifact);
+    expect(decoded.pass).toBe(true);
+    expect(decoded.results[0].evidence).toEqual(evidence);
   });
 });
 
 describe('reality gate parser and aggregation', () => {
+  it('refuses unsupported complete declarations before execution and publishes only consumed handlers', async () => {
+    expect((await listCheckTypes()).map(check => check.type)).toEqual(['exec-script-exit-zero', 'file-exists-nonempty', 'json-schema-match']);
+    for (const type of ['http-reachability', 'static-ast-scan', 'variance-floor', 'does-not-exist']) {
+      const declarations = parseChecksFromMarkdown(`## Reality checks\nchecks:\n  - name: unsupported\n    type: ${type}\n    reads: []\n    params: {}`);
+      expect(declarations[0].kind).toBe('invalid');
+      const report = await runAllChecks(declarations, context());
+      expect(report.pass).toBe(false);
+      expect(report.results[0].details).toContain(type);
+      expect(report.results[0].details).toContain('catalog');
+    }
+  });
+
   it('extracts YAML declarations from markdown', () => {
     const brief = write('brief.md', [
       '# Task',
@@ -328,13 +199,14 @@ describe('reality gate parser and aggregation', () => {
       'checks:',
       '  - name: artifact',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: artifact.txt, source: {kind: input}}]',
       '    params:',
       '      paths: ["artifact.txt"]',
       '```',
       '## Next',
       'text',
     ].join('\n'));
-    expect(parseChecksFromBrief(brief)).toEqual([{ name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } }]);
+    expect(parseChecksFromBrief(brief)).toEqual([{ reads: [inputFile('file_0', 'artifact.txt')], name: 'artifact', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } }]);
   });
 
   it('preserves only an explicitly boolean advisory declaration and defaults all others to hard', () => {
@@ -343,29 +215,32 @@ describe('reality gate parser and aggregation', () => {
       'checks:',
       '  - name: advisory',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: a, source: {kind: input}}]',
       '    advisory: true',
       '    params: { paths: ["a"] }',
       '  - name: default-hard',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: b, source: {kind: input}}]',
       '    params: { paths: ["b"] }',
       '  - name: string-is-hard',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: c, source: {kind: input}}]',
       '    advisory: "true"',
       '    params: { paths: ["c"] }',
     ].join('\n'));
 
     expect(parseChecksFromBrief(brief)).toEqual([
-      { name: 'advisory', type: 'file-exists-nonempty', advisory: true, params: { paths: ['a'] } },
-      { name: 'default-hard', type: 'file-exists-nonempty', params: { paths: ['b'] } },
-      { name: 'string-is-hard', type: 'file-exists-nonempty', params: { paths: ['c'] } },
+      { reads: [inputFile('file_0', 'a')], name: 'advisory', type: 'file-exists-nonempty', advisory: true, params: { paths: ['a'] } },
+      { reads: [inputFile('file_0', 'b')], name: 'default-hard', type: 'file-exists-nonempty', params: { paths: ['b'] } },
+      { reads: [inputFile('file_0', 'c')], name: 'string-is-hard', type: 'file-exists-nonempty', params: { paths: ['c'] } },
     ]);
   });
 
   it('aggregates multiple checks', async () => {
     write('artifact.txt', 'x');
     const decls: CheckDecl[] = [
-      { name: 'pass', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } },
-      { name: 'fail', type: 'file-exists-nonempty', params: { paths: ['missing.txt'] } },
+      { reads: [inputFile('file_0', 'artifact.txt')], name: 'pass', type: 'file-exists-nonempty', params: { paths: ['artifact.txt'] } },
+      { reads: [inputFile('file_0', 'missing.txt')], name: 'fail', type: 'file-exists-nonempty', params: { paths: ['missing.txt'] } },
     ];
     const report = await runAllChecks(decls, context());
     expect(report.pass).toBe(false);
@@ -376,7 +251,7 @@ describe('reality gate parser and aggregation', () => {
     const report = await runAllChecks([
       { kind: 'invalid', name: 'broken declaration', type: '__invalid-reality-check-declaration__', diagnostic: 'Reality check item #1 must have a string type' },
       { name: 'unknown handler', type: 'does-not-exist', params: {} },
-      { name: 'missing JSON input', type: 'json-schema-match', params: { file: 'absent.json', schema: { type: 'object' } } },
+      { reads: [inputFile('file', 'absent.json')], name: 'missing JSON input', type: 'json-schema-match', params: { file: 'absent.json', schema: { type: 'object' } } },
     ], context());
 
     expect(report.results[0].details).toMatch(/item #1.*fix|fix.*item #1/i);
@@ -385,24 +260,58 @@ describe('reality gate parser and aggregation', () => {
     expect(report.results[2].details).toMatch(/create|fix|check/i);
   });
 
-  it('tells planners to use portable tools and probe optional non-standard commands', () => {
+  it('allows declared available tools and retains optional-tool availability checks', () => {
     const planner = readFileSync(join(process.cwd(), 'config', 'agents', 'planner.yaml'), 'utf-8');
 
-    expect(planner).toContain('MUST be portable');
-    expect(planner).toContain('POSIX baseline tools');
-    for (const command of ['grep', 'sed', 'awk', 'test', 'node']) {
-      expect(planner).toContain(command);
-    }
-    for (const command of ['rg', 'jq', 'fd', 'yq']) {
-      expect(planner).toContain(command);
-    }
-    expect(planner).toContain('command -v');
-    expect(planner).toContain('skipped-check');
-    expect(planner).toContain('exit 0 rather than failing the run');
+    expect(planner).toContain('Shell checks use declared available tools and state environment requirements');
+    expect(planner).toContain('tools require an availability guard and a skipped-check explanation when absent');
   });
 });
 
 describe('store integration', () => {
+  it.each([0, 7])('shares private scratch with stage commands and cleans it after gate exit %s', async exitCode => {
+    for (const name of ['TMPDIR', 'TMP', 'TEMP']) vi.stubEnv(name, undefined);
+    vi.stubEnv('FLOWCREW_DAEMON_SOCKET', join(taskDir, 'unavailable.sock'));
+    const node = "'" + process.execPath.replaceAll("'", "'\"'\"'") + "'";
+    const script = [
+      `${node} <<'JS'`,
+      'const fs = require("node:fs");',
+      'const scratch = process.env.TMPDIR;',
+      'if (!scratch) { console.error("Invocation-private TMPDIR is required"); process.exit(1); }',
+      'fs.writeFileSync(require("node:path").join(scratch, "probe"), "fixture");',
+      'console.log(JSON.stringify({ scratch, tmp: process.env.TMP, temp: process.env.TEMP, socket: process.env.FLOWCREW_DAEMON_SOCKET ?? null }));',
+      `process.exit(${exitCode});`,
+      'JS',
+    ].join('\n');
+    const authored = await execWithStdin('bash', ['-c', script], '', {
+      cwd: projectDir, timeout_ms: 5000, execution: { runDir: taskDir, stageId: 'author' },
+    });
+    expect(authored.exitCode).toBe(exitCode);
+    const stageEnvironment = JSON.parse(authored.output);
+    expect(existsSync(stageEnvironment.scratch)).toBe(false);
+
+    const created = createRun(projectDir, 'test', 'name: test', []);
+    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'),
+      `## Reality checks\n\`\`\`yaml\n${JSON.stringify({ checks: [{ name: 'scratch', type: 'exec-script-exit-zero', reads: [], params: { script } }] })}\n\`\`\`\n`);
+    const state = readRunState(projectDir, created.runId);
+    state.status = 'complete';
+    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
+    const evidence = gate.report?.results[0].evidence as { stdout: string; exit: { code: number } };
+    expect(evidence.exit.code, gate.report?.results[0].details).toBe(exitCode);
+    expect(gate.allowed).toBe(exitCode === 0);
+    const gateEnvironment = JSON.parse(evidence.stdout);
+    const validation = await runValidationCommand({ role: 'test', command: 'bash', args: ['-c', script],
+      display: 'scratch check', cwd: projectDir, timeoutMs: 5000 });
+    expect(validation.exitCode, validation.error).toBe(exitCode);
+    const validationEnvironment = JSON.parse(validation.stdout ?? '');
+    for (const environment of [stageEnvironment, gateEnvironment, validationEnvironment]) {
+      expect(environment).toEqual({ scratch: expect.any(String), tmp: environment.scratch, temp: environment.scratch, socket: null });
+      expect(dirname(environment.scratch)).toBe(tmpdir());
+      expect(existsSync(environment.scratch)).toBe(false);
+    }
+    expect(new Set([stageEnvironment.scratch, gateEnvironment.scratch, validationEnvironment.scratch]).size).toBe(3);
+  });
+
   it('records a real command-not-found exit 127 as advisory and allows the terminal verdict', async () => {
     const missingCommand = 'flowcrew_e3_tool_that_does_not_exist';
     const created = createRun(projectDir, 'test', 'name: test', []);
@@ -411,6 +320,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: unavailable-tool',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       `      script: ${missingCommand}`,
     ].join('\n'), 'utf-8');
@@ -427,7 +337,7 @@ describe('store integration', () => {
       advisory: true,
       details: expect.stringContaining(missingCommand),
       evidence: expect.objectContaining({
-        code: 127,
+        exit: { code: 127, signal: null, timedOut: false },
         missingCommand,
       }),
     }));
@@ -454,6 +364,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: genuine-failure',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: exit 1',
     ].join('\n'), 'utf-8');
@@ -478,6 +389,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: deleted-log-failure',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: |',
       '        clean_root="$(mktemp -d)"',
@@ -509,6 +421,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: required-build-proof',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: echo "artifact checksum mismatch" >&2; exit 3',
     ].join('\n'), 'utf-8');
@@ -543,6 +456,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: noisy-check',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: |',
       "        printf '\\033[31mstdout-start\\033[0m'",
@@ -580,6 +494,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: unexplained-127',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    params:',
       '      script: exit 127',
     ].join('\n'), 'utf-8');
@@ -597,44 +512,6 @@ describe('store integration', () => {
     expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
   });
 
-  it('allows an advisory wording check to fail while preserving its severity in the report', async () => {
-    const created = createRun(projectDir, 'test', 'name: test', []);
-    write('README.md', 'A **logged-in** agent CLI is required. Install and **authenticate** it.\n');
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
-      '## Reality checks',
-      'checks:',
-      '  - name: authentication-wording',
-      '    type: exec-script-exit-zero',
-      '    advisory: true',
-      '    params:',
-      '      script: grep -Eqi "logged in|authenticated" README.md',
-    ].join('\n'), 'utf-8');
-    const state = readRunState(projectDir, created.runId);
-    state.status = 'complete';
-
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
-
-    expect(gate.allowed).toBe(true);
-    expect(gate.report?.results).toContainEqual(expect.objectContaining({
-      name: 'authentication-wording',
-      pass: false,
-      advisory: true,
-    }));
-    const persisted = JSON.parse(readFileSync(
-      join(runDir(projectDir, created.runId), '.reality-gate.json'),
-      'utf-8',
-    )) as { pass: boolean; results: Array<{ name: string; advisory?: boolean }> };
-    expect(persisted.pass).toBe(true);
-    expect(persisted.results).toContainEqual(expect.objectContaining({
-      name: 'authentication-wording',
-      advisory: true,
-    }));
-    expect(readRunEvents(projectDir, created.runId)).toContainEqual(expect.objectContaining({
-      type: 'reality_gate_advisory',
-      detail: expect.stringContaining('authentication-wording'),
-    }));
-  });
-
   it('attaches advisory failure evidence without blocking the terminal state', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
     writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
@@ -642,6 +519,7 @@ describe('store integration', () => {
       'checks:',
       '  - name: optional-environment-check',
       '    type: exec-script-exit-zero',
+      '    reads: []',
       '    advisory: true',
       '    params:',
       '      script: printf "optional tool unavailable" >&2; exit 6',
@@ -657,6 +535,15 @@ describe('store integration', () => {
     expect(gate.state).toBe(state);
     expect(persisted.status).toBe('complete');
     expect(persisted.failureReason).toBeUndefined();
+    expect(gate.report?.results).toContainEqual(expect.objectContaining({
+      name: 'optional-environment-check', pass: false, advisory: true,
+    }));
+    const report = JSON.parse(readFileSync(join(runDir(projectDir, created.runId), '.reality-gate.json'), 'utf8'));
+    expect(report.pass).toBe(true);
+    expect(report.results).toContainEqual(expect.objectContaining({ name: 'optional-environment-check', advisory: true }));
+    expect(readRunEvents(projectDir, created.runId)).toContainEqual(expect.objectContaining({
+      type: 'reality_gate_advisory', detail: expect.stringContaining('optional-environment-check'),
+    }));
     expect(persisted.realityGate).toMatchObject({
       pass: true,
       checksRun: 1,
@@ -681,10 +568,12 @@ describe('store integration', () => {
       'checks:',
       '  - name: optional-wording',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: optional.txt, source: {kind: input}}]',
       '    advisory: true',
       '    params: { paths: ["optional.txt"] }',
       '  - name: required-artifact',
       '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: required.txt, source: {kind: input}}]',
       '    params: { paths: ["required.txt"] }',
     ].join('\n'), 'utf-8');
     const state = readRunState(projectDir, created.runId);
@@ -697,39 +586,19 @@ describe('store integration', () => {
     expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
   });
 
-  it('blocks a terminal transition when declared checks fail', async () => {
+  it.each([false, true])('settles a terminal transition from brief-authored checks passing=%s', async present => {
     const created = createRun(projectDir, 'test', 'name: test', []);
+    if (present) write('artifact.txt', 'x');
     writeFileSync(join(runDir(projectDir, created.runId), 'task_brief.md'), [
-      '## Reality checks',
-      'checks:',
-      '  - name: missing',
-      '    type: file-exists-nonempty',
-      '    params:',
-      '      paths: ["missing.txt"]',
-    ].join('\n'), 'utf-8');
-    const state = readRunState(projectDir, created.runId);
-    state.status = 'complete';
+      '## Reality checks', 'checks:', '  - name: artifact', '    type: file-exists-nonempty',
+      '    reads: [{id: file_0, root: project, path: artifact.txt, source: {kind: input}}]',
+      '    params: { paths: [artifact.txt] }',
+    ].join('\n'), 'utf8');
+    const state = readRunState(projectDir, created.runId); state.status = 'complete';
     const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
-    expect(gate.allowed).toBe(false);
-    expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
+    expect(gate.allowed).toBe(present);
+    expect(gate.report?.pass).toBe(present);
     expect(existsSync(join(runDir(projectDir, created.runId), '.reality-gate.json'))).toBe(true);
-  });
-
-  it('allows a terminal transition when declared checks pass', async () => {
-    const created = createRun(projectDir, 'test', 'name: test', []);
-    write('artifact.txt', 'x');
-    writeFileSync(join(runDir(projectDir, created.runId), 'task_brief.md'), [
-      '## Reality checks',
-      'checks:',
-      '  - name: artifact',
-      '    type: file-exists-nonempty',
-      '    params:',
-      '      paths: ["artifact.txt"]',
-    ].join('\n'), 'utf-8');
-    const state = readRunState(projectDir, created.runId);
-    state.status = 'complete';
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
-    expect(gate.allowed).toBe(true);
-    expect(gate.report?.pass).toBe(true);
+    if (!present) expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
   });
 });

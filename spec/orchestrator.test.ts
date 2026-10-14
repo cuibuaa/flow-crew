@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -84,7 +84,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await orchestrator.stop();
   invalidateRunLockCache();
   rmSync(tempDir, { recursive: true, force: true });
 });
@@ -472,11 +473,84 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(0);
   });
 
+  it.each([
+    CLEAN_UNIT_EXIT,
+    FAILED_UNIT_EXIT,
+    { kind: 'terminal-unknown', reason: 'exit status unavailable' },
+    { kind: 'absent' },
+  ] satisfies UnitStatus[])('completes a clean read-only bound run with run-root deliverables ($kind)', async unit => {
+    const runId = 'read-only-audit';
+    const runPath = writeRun(runId, 'complete');
+    writeFileSync(join(runPath, 'report.md'), '# Audit\n\nThe declared inputs passed inspection.\n');
+    const task = registry.create({
+      ...admittedBrief('# Audit\nRead the project without changing it and deliver report.md in the run root.'),
+      projectDir: tempDir,
+      status: 'running',
+      run_id: runId,
+    });
+    registry.update(task.id, { started_at: new Date(clock).toISOString() });
+    systemd.states.set(task.systemd_unit, unit);
+    const prefix = vi.spyOn(git, 'findCommitByPrefix');
+    const recent = vi.spyOn(git, 'findCommitSince');
+    const dirty = vi.spyOn(git, 'hasUncommittedChanges');
+
+    await orchestrator.tickOnce();
+
+    expect(registry.get(task.id)).toMatchObject({ status: 'done', run_id: runId, attempt: 1 });
+    expect(registry.get(task.id)?.completing_commit).toBeUndefined();
+    expect(readFileSync(join(runPath, 'report.md'), 'utf8')).toContain('passed inspection');
+    expect(prefix).not.toHaveBeenCalled();
+    expect(recent).not.toHaveBeenCalled();
+    expect(dirty).not.toHaveBeenCalled();
+    expect(systemd.runs).toHaveLength(0);
+  });
+
+  it('keeps a successful bound run stuck when its explicit completing commit is missing', async () => {
+    const runId = 'commit-required';
+    writeRun(runId, 'complete');
+    const task = registry.create({
+      brief_text: 'Deliver the change with the declared commit prefix.',
+      projectDir: tempDir,
+      status: 'running',
+      run_id: runId,
+      commit_prefix: 'fix(delivery)',
+    });
+    registry.update(task.id, { started_at: new Date(clock).toISOString() });
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
+    vi.spyOn(git, 'findCommitSince').mockResolvedValue({ sha: 'unrelated', subject: 'unrelated work' });
+
+    await orchestrator.tickOnce();
+
+    expect(registry.get(task.id)).toMatchObject({ status: 'stuck', run_id: runId, attempt: 1 });
+    expect(registry.get(task.id)?.notes).toContain('fix(delivery)');
+    expect(systemd.runs).toHaveLength(0);
+  });
+
+  it('keeps a successful bound run stuck when an explicit task artifact is missing', async () => {
+    const runId = 'artifact-required';
+    writeRun(runId, 'complete');
+    const task = registry.create({
+      brief_text: 'Deliver the declared artifact.',
+      projectDir: tempDir,
+      status: 'running',
+      run_id: runId,
+      expected_artifacts: ['report.md'],
+    });
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
+
+    await orchestrator.tickOnce();
+
+    expect(registry.get(task.id)).toMatchObject({ status: 'stuck', run_id: runId });
+    expect(registry.get(task.id)?.notes).toContain('missing artifacts: report.md');
+    expect(systemd.runs).toHaveLength(0);
+  });
+
   // Stable item-17 workload IDs. The running fixture now proves live process
   // ownership; the missing/dead-owner behavior is covered by the replay suite.
   it.each(['running', 'parked'])('waits for a readable %s bound run when its unit reports failed', async (runStatus) => {
     const runId = `bound-${runStatus}`;
-    const runPath = writeRun(runId, runStatus);
+    const runPath = writeRun(runId, runStatus, runStatus === 'parked' ? { requestId: 'bound-request', pausedAt: new Date(clock).toISOString() } : undefined);
+    if (runStatus === 'parked') addPendingApproval(runId, 'bound-request');
     if (runStatus === 'running') {
       writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
       writeSchedulerProcessIdentity(runPath, runId);
@@ -492,6 +566,38 @@ describe('Orchestrator', () => {
     await orchestrator.tickOnce();
 
     expect(registry.get(task.id)).toMatchObject({ status: 'deferred', attempt: 1, run_id: runId });
+    expect(systemd.runs).toHaveLength(0);
+  });
+
+  it.each(['unit-exit', 'queued-retry', 'manual-retry'])('reports a parked recovery without approval at %s', async path => {
+    const runId = `recovery-${path}`;
+    const runPath = writeRun(runId, 'parked', undefined, 'RECOVERY_FATE_UNKNOWN: consumers may still be alive');
+    const before = readFileSync(join(runPath, 'run.json'), 'utf8');
+    const task = registry.create({ brief_text: 'must not replay', projectDir: tempDir,
+      status: path === 'unit-exit' ? 'running' : path === 'manual-retry' ? 'stuck' : 'deferred', run_id: runId });
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
+    if (path === 'manual-retry') {
+      expect(await orchestrator.retry(task.id)).toMatchObject({ status: 'deferred', defer_kind: 'retry', run_id: runId, attempt: 1 });
+      advance(31_000);
+    }
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'stuck', run_id: runId, attempt: 1 });
+    expect(registry.get(task.id)?.notes).toContain('RECOVERY_FATE_UNKNOWN');
+    expect(registry.get(task.id)?.notes).toContain('no pending approval');
+    advance(120_000);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)?.status).toBe('stuck');
+    expect(readFileSync(join(runPath, 'run.json'), 'utf8')).toBe(before);
+    expect(systemd.runs).toHaveLength(0);
+  });
+
+  it('does not let an unrelated pending approval justify a bound run wait', async () => {
+    writeRun('actual-bound', 'parked', { requestId: 'other-request', pausedAt: new Date(clock).toISOString() });
+    writeRun('other-run', 'parked', { requestId: 'other-request', pausedAt: new Date(clock).toISOString() });
+    addPendingApproval('other-run', 'other-request');
+    const task = registry.create({ brief_text: 'must not replay', projectDir: tempDir, status: 'deferred', run_id: 'actual-bound' });
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)?.status).toBe('stuck');
     expect(systemd.runs).toHaveLength(0);
   });
 
@@ -552,9 +658,9 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(0);
   });
 
-  it('manual retry of a failed terminal run queues and then launches a fresh run', async () => {
-    const runId = 'failed-plan-run';
-    writeRun(runId, 'failed');
+  it.each(['failed', 'stopped', 'incomplete', 'complete'])('manual retry of a %s terminal run launches a fresh run', async status => {
+    const runId = 'terminal-retry';
+    writeRun(runId, status);
     const task = registry.create({
       ...admittedBrief('manual retry fixture'), projectDir: tempDir,
       status: 'failed', run_id: runId, max_retries: 2,
@@ -572,6 +678,237 @@ describe('Orchestrator', () => {
     expect(registry.get(task.id)).toMatchObject({ status: 'running', attempt: 2 });
     expect(registry.get(task.id)?.run_id).not.toBe(runId);
     expect(registry.get(task.id)?.systemd_unit).toBe(`flowcrew-task-${task.id}-attempt-2.service`);
+  });
+
+  it.each(['stopped', 'failed', 'incomplete'])('resumes a registered %s run through the existing durable launch queue', async status => {
+    const runId = 'registered-continuation';
+    const admitted = admittedBrief('Continue the admitted work.');
+    const runPath = writeRun(runId, status);
+    const runJson = join(runPath, 'run.json');
+    writeFileSync(runJson, JSON.stringify({
+      ...JSON.parse(readFileSync(runJson, 'utf8')),
+      taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission,
+      currentIteration: 2, maxIterations: 3, maxRetries: 1,
+      stages: { done: { status: 'complete', retries: 0, attempts: [{ status: 'complete' }] },
+        work: { status: 'failed', retries: 1, attempts: [{ status: 'failed' }] } },
+      planControl: { version: 1, revision: 1, stages: [] },
+    }));
+    const before = readFileSync(runJson, 'utf8');
+    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId,
+      status: status === 'stopped' ? 'cancelled' : 'failed', attempt: 3, max_retries: 3 });
+    registry.update(task.id, { started_at: new Date(clock).toISOString(), completed_at: new Date(clock).toISOString(),
+      summary_verdict: 'FAIL', summary_full: 'Previous outcome' });
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
+
+    await orchestrator.tickOnce();
+    expect(systemd.runs).toHaveLength(0);
+    expect(await orchestrator.resume(task.id)).toMatchObject({ status: 'pending', attempt: 3, run_id: runId });
+    expect(registry.get(task.id)?.started_at).toBeUndefined();
+    expect(registry.get(task.id)?.summary_verdict).toBeUndefined();
+    await orchestrator.stop();
+    // Recreate both registry and queue owner to prove the explicit launch survives restart.
+    registry = new TaskRegistry({ baseDir: tempDir, now: () => new Date(clock) });
+    orchestrator = new Orchestrator({ registry, systemd, git, cliPath: '/tmp/flowcrew-cli.js',
+      now: () => new Date(clock), isProjectBusy: () => busyProject ? 'other-owner' : null });
+    busyProject = tempDir;
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'deferred', attempt: 3, run_id: runId });
+    expect(readFileSync(runJson, 'utf8')).toBe(before);
+    busyProject = null;
+    advance(121_000);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', attempt: 4, run_id: runId });
+    expect(systemd.runs).toHaveLength(1);
+    expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
+    expect(JSON.parse(readFileSync(runJson, 'utf8'))).toMatchObject(JSON.parse(before));
+    writeRun(runId, 'complete');
+    systemd.states.set(registry.get(task.id)!.systemd_unit, CLEAN_UNIT_EXIT);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'done', attempt: 4, run_id: runId });
+    expect(systemd.runs).toHaveLength(1);
+  });
+
+  it.each(['stopped', 'failed', 'incomplete'].flatMap(status => (
+    ['pending', 'deferred', 'cancelling'].map(queued => ({ status, queued }))
+  )))('holds a $queued continuation of a $status run when cancelled before launch', async ({ status, queued }) => {
+    const runId = 'queued-cancellation';
+    const admitted = admittedBrief('Continue the admitted work.');
+    const runPath = writeRun(runId, status);
+    const runJson = join(runPath, 'run.json');
+    writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
+      taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission }));
+    const archived = readFileSync(runJson, 'utf8');
+    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId,
+      status: 'cancelled', attempt: 2 });
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
+    await orchestrator.resume(task.id);
+    if (queued === 'deferred') {
+      busyProject = tempDir;
+      await orchestrator.tickOnce();
+      expect(registry.get(task.id)?.status).toBe('deferred');
+    } else if (queued === 'cancelling') {
+      // Restart can interrupt cancellation after its durable transition.
+      registry.update(task.id, { status: 'cancelling' });
+    }
+
+    expect(await orchestrator.cancel(task.id)).toMatchObject({ ok: true, status: 'cancelled', preservedRunStatus: status });
+    expect(registry.get(task.id)).toMatchObject({ status: 'cancelled', attempt: 2, run_id: runId });
+    expect(registry.get(task.id)?.not_before).toBeUndefined();
+    expect(registry.get(task.id)?.defer_kind).toBeUndefined();
+    expect(readFileSync(runJson, 'utf8')).toBe(archived);
+    await orchestrator.stop();
+    registry = new TaskRegistry({ baseDir: tempDir, now: () => new Date(clock) });
+    orchestrator = new Orchestrator({ registry, systemd, git,
+      now: () => new Date(clock), isProjectBusy: () => null });
+    advance(600_000);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)?.status).toBe('cancelled');
+    expect(systemd.runs).toHaveLength(0);
+    expect(readFileSync(runJson, 'utf8')).toBe(archived);
+  });
+
+  it('stops the latest unit when a continuation launches during the first cancellation probe', async () => {
+    const runId = 'continuation-probe-race';
+    const admitted = admittedBrief('Continue the admitted work.');
+    const runPath = writeRun(runId, 'stopped');
+    const runJson = join(runPath, 'run.json');
+    writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
+      taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission }));
+    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'cancelled' });
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
+    await orchestrator.resume(task.id);
+    let finishProbe!: () => void;
+    const probeGate = new Promise<void>(resolveProbe => { finishProbe = resolveProbe; });
+    vi.spyOn(systemd, 'isActive').mockImplementationOnce(async () => {
+      await probeGate;
+      return FAILED_UNIT_EXIT;
+    });
+
+    const cancellation = orchestrator.cancel(task.id);
+    await orchestrator.tickOnce();
+    const launchedUnit = registry.get(task.id)!.systemd_unit;
+    expect(launchedUnit).not.toBe(task.systemd_unit);
+    finishProbe();
+    expect(await cancellation).toMatchObject({ ok: true, status: 'cancelled' });
+    expect(systemd.stopped).toContain(launchedUnit);
+    expect(systemd.states.get(launchedUnit)).toEqual(CLEAN_UNIT_EXIT);
+    expect(registry.get(task.id)?.status).toBe('cancelled');
+    expect(JSON.parse(readFileSync(runJson, 'utf8')).status).toBe('stopped');
+    await orchestrator.tickOnce();
+    expect(systemd.runs).toHaveLength(1);
+  });
+
+  it('preserves a resumed task binding while another project run is parked on approval', async () => {
+    const runId = 'bound-continuation';
+    const parkedId = 'unrelated-approval';
+    const admitted = admittedBrief('Continue the admitted work.');
+    const runPath = writeRun(runId, 'stopped');
+    const runJson = join(runPath, 'run.json');
+    writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
+      taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission }));
+    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'cancelled' });
+    advance(1_000);
+    const parkedPath = writeRun(parkedId, 'parked', { requestId: 'pending-action', pausedAt: new Date(clock).toISOString() });
+    addPendingApproval(parkedId, 'pending-action');
+    const parkedJson = join(parkedPath, 'run.json');
+    const archived = readFileSync(parkedJson, 'utf8');
+
+    await orchestrator.resume(task.id);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId });
+    expect(systemd.runs).toHaveLength(1);
+    expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
+    // Running-unit polling must respect the same durable run association.
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId });
+    expect(readFileSync(parkedJson, 'utf8')).toBe(archived);
+    expect(systemd.runs).toHaveLength(1);
+  });
+
+  it.each(['running', 'parked', 'complete', 'unknown'])('refuses task resume of a %s run without changing its task', async status => {
+    const runId = 'ineligible-continuation';
+    writeRun(runId, status);
+    const task = registry.create({ ...admittedBrief('Continue work.'), projectDir: tempDir, run_id: runId, status: 'stuck' });
+    await expect(orchestrator.resume(task.id)).rejects.toThrow('resume requires stopped, failed or incomplete');
+    expect(registry.get(task.id)).toEqual(task);
+    expect(systemd.runs).toHaveLength(0);
+  });
+
+  it.each(['unbound', 'unreadable', 'wrong-project', 'wrong-admission', 'cancelling', 'live-owner'])('refuses %s task continuation before queueing', async kind => {
+    const runId = 'invalid-continuation';
+    const admitted = admittedBrief('Continue work.');
+    const runPath = writeRun(runId, 'stopped');
+    const runJson = join(runPath, 'run.json');
+    writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
+      projectDir: kind === 'wrong-project' ? join(tempDir, 'other') : tempDir,
+      taskDescription: admitted.brief_text,
+      briefAdmission: kind === 'wrong-admission' ? admittedBrief('Other work.').brief_admission : admitted.brief_admission,
+    }));
+    if (kind === 'live-owner') {
+      writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid));
+      writeSchedulerProcessIdentity(runPath, runId);
+    }
+    const task = registry.create({ ...admitted, projectDir: tempDir,
+      ...(kind !== 'unbound' ? { run_id: kind === 'unreadable' ? 'missing-run' : runId } : {}),
+      status: kind === 'cancelling' ? 'cancelling' : 'cancelled' });
+    await expect(orchestrator.resume(task.id)).rejects.toThrow();
+    expect(registry.get(task.id)).toEqual(task);
+    expect(systemd.runs).toHaveLength(0);
+  });
+
+  it.each(['running', 'deferred', 'cancelled'])('never automatically resumes a stopped run from a %s task after restart', async status => {
+    const runId = 'held-work';
+    const runPath = writeRun(runId, 'stopped');
+    const before = readFileSync(join(runPath, 'run.json'), 'utf8');
+    const task = registry.create({ ...admittedBrief('Held work.'), projectDir: tempDir,
+      run_id: runId, status: status as 'running' | 'deferred' | 'cancelled' });
+    registry.update(task.id, { started_at: new Date(clock).toISOString(), defer_kind: 'retry' });
+    systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
+    await orchestrator.stop();
+    orchestrator = new Orchestrator({ registry: new TaskRegistry({ baseDir: tempDir }), systemd, git, isProjectBusy: () => null });
+    await orchestrator.tickOnce();
+    advance(600_000);
+    await orchestrator.tickOnce();
+    expect(readFileSync(join(runPath, 'run.json'), 'utf8')).toBe(before);
+    expect(systemd.runs).toHaveLength(0);
+  });
+
+  it.each(['failed', 'incomplete', 'complete'])('launches an explicit queued continuation of a %s run before reconciling its outcome', async status => {
+    const runId = 'queued-continuation';
+    const admitted = admittedBrief('Continue the admitted work.');
+    const runPath = writeRun(runId, status);
+    const runJson = join(runPath, 'run.json');
+    writeFileSync(runJson, JSON.stringify({
+      ...JSON.parse(readFileSync(runJson, 'utf8')),
+      stages: {},
+      taskDescription: admitted.brief_text,
+      briefAdmission: admitted.brief_admission,
+    }));
+    const before = JSON.parse(readFileSync(runJson, 'utf8'));
+    const task = orchestrator.enqueue({ ...admitted, projectDir: tempDir, run_id: runId });
+
+    // Waiting for another project owner must not turn the previous run's
+    // terminal verdict into the result of this still-unlaunched request.
+    busyProject = tempDir;
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'deferred', attempt: 1, run_id: runId });
+    expect(systemd.runs).toHaveLength(0);
+
+    busyProject = null;
+    advance(31_000);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id), registry.get(task.id)?.notes).toMatchObject({ status: 'running', attempt: 1, run_id: runId });
+    expect(systemd.runs).toHaveLength(1);
+    expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
+    expect(JSON.parse(readFileSync(runJson, 'utf8'))).toMatchObject(before);
+
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)?.status).toBe('running');
+    writeRun(runId, 'complete');
+    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'done', attempt: 1, run_id: runId });
+    expect(systemd.runs).toHaveLength(1);
   });
 
   it('keeps a nonterminal bound run attached when a manual retry is queued', async () => {
@@ -890,6 +1227,30 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     expect(systemd.runs.length).toBe(0);                       // no second spawn
     expect(registry.get(task.id)?.status).toBe('running');
     expect(registry.readRecentTicks(task.id).some((l) => l.includes('adopted live unit'))).toBe(true);
+  });
+
+  it('joins an owned backend sweep before stop resolves, so teardown has no late writer', async () => {
+    const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir });
+    let entered!: () => void, release!: () => void;
+    const entering = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let first = true;
+    systemd.isActive = async () => {
+      if (first) { first = false; entered(); await gate; }
+      return ACTIVE_UNIT;
+    };
+    const tick = orchestrator.tickOnce();
+    await entering;
+    let stopped = false;
+    const stopping = orchestrator.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    release();
+    await Promise.all([tick, stopping]);
+    expect(registry.get(task.id)?.status).toBe('running');
+    const settled = readFileSync(registry.registryPath);
+    await Promise.resolve();
+    expect(readFileSync(registry.registryPath)).toEqual(settled);
   });
 
   it('is reentrancy-guarded: an overlapping sweep cannot double-launch', async () => {

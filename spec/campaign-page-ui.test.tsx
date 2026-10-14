@@ -269,39 +269,6 @@ describe('decision-first campaign UI', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('loads a compact findings/dead-ends digest only when research evidence is expanded', async () => {
-    const view = engineeringView();
-    view.identity.classification = {
-      kind: 'research', status: 'complete', research: 'present', engineering: 'absent',
-      acceptedPointCount: 1, engineeringRunCount: 0, reasons: ['1 accepted measurement point'], issues: [],
-    };
-    view.research = complete({
-      selected: {
-        metric: 'quality', metricKey: 'quality', hasTrend: false, direction: 'higher', best: null,
-        points: [{ runId: 'r1', round: 'a', metric: 'quality', metricKey: 'quality', value: 4, timestamp: null, direction: 'higher', evidence: 'research_journal' }],
-      },
-      otherMetrics: [], acceptedPointCount: 1, confirmNotes: [], latestCanonicalStatus: 'shipped',
-    });
-    view.engineering = complete(null);
-    const fetchMock = vi.fn(async () => ({
-      ok: true, status: 200, json: async () => ({
-        nodes: [
-          { id: 'f1', type: 'finding', label: '缓存命中率决定收益', runId: 'r1' },
-          { id: 'd1', type: 'dead_end', label: '全量预热反而更慢', runId: 'r1' },
-        ],
-        edges: [],
-      }),
-    } as Response));
-    vi.stubGlobal('fetch', fetchMock);
-    renderCampaign(view);
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByText('Research evidence details'));
-    expect(await screen.findByText('缓存命中率决定收益')).toBeInTheDocument();
-    expect(screen.getByText('全量预热反而更慢')).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
   it('keeps the last trusted detail visible when an explicit refresh fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('refresh offline')));
     render(

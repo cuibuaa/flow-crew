@@ -183,7 +183,7 @@ describe('fc_tasks CLI front-end adapters', () => {
 });
 
 describe('fc_tasks CLI detail and write paths', () => {
-  it('lists the complete validated entry as JSON for details omitted by the status rows', () => {
+  it.each([{ flags: [] }, { flags: ['--json'] }])('lists complete validated entry JSON with output flags $flags', ({ flags }) => {
     const entry = task('detail', 'in_progress');
     seed('detail-session', entry);
     const capture = new Capture();
@@ -191,7 +191,7 @@ describe('fc_tasks CLI detail and write paths', () => {
     const code = cmdFcTasks([
       'fc_tasks',
       'list',
-      '--json',
+      ...flags,
       '--session',
       'detail-session',
       '--store-root',
@@ -214,6 +214,17 @@ describe('fc_tasks CLI detail and write paths', () => {
       'status',
       'subject',
     ]);
+  });
+
+  it.each([
+    ['--session', 'first', '--session', 'second'],
+    ['--unknown'],
+    ['unexpected'],
+  ])('refuses ambiguous or invalid list arguments %j', (...tokens) => {
+    const capture = new Capture();
+    expect(cmdFcTasks(['fc_tasks', 'list', ...tokens], dependencies(capture))).toBe(2);
+    expect(capture.output).toContain('fc_tasks: usage error');
+    expect(capture.error).toBe('');
   });
 
   it('creates and closes an entry through validated commands', () => {

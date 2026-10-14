@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import {
   mkdirSync,
+  existsSync,
   mkdtempSync,
+  linkSync,
   realpathSync,
   readFileSync,
   readdirSync,
@@ -12,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BUILD_MANIFEST_FILENAME, createBuildManifest } from '../src/build-manifest.js';
 import {
@@ -26,9 +28,10 @@ import {
   extractBriefPathMentions,
   extractDeclaredBriefInputPaths,
   parseBriefInputs,
-  verifyBriefInputs,
+  verifyDeclaredBriefInputs,
 } from '../src/ship-inputs.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { runValidationCommand, runProjectValidationBaseline, type ValidationCommandRunner } from '../src/project-validation.js';
 
 class Capture {
   value = '';
@@ -102,6 +105,20 @@ function commonDeps(overrides: ShipPreflightDependencies = {}): ShipPreflightDep
   };
 }
 
+it('reports the authored workflow and refuses an impossible direct loop', async () => {
+  const path = join(fixture.project, 'brief.md');
+  const output = new Capture();
+  const args = ['ship-preflight', '--brief', 'brief.md'];
+  const deps = commonDeps({ stdout: output.writer });
+  const brief = '---\nworkflow: direct\n---\n# Goal\n\n## Acceptance criteria\n1. Deliver the coherent change.\n';
+  writeFileSync(path, brief);
+  expect(await cmdShipPreflightWithDeps(args, deps)).toBe(0);
+  expect(output.value).toContain('Workflow without --workflow: direct (brief declares workflow: direct)');
+  writeFileSync(path, brief.replace('workflow: direct', 'workflow: direct\nresearch:\n  baseline: 0.5'));
+  expect(await cmdShipPreflightWithDeps(args, deps)).toBe(2);
+  expect(output.value).toContain('direct cannot run the research loop');
+});
+
 function writeRun(id: string, state: Record<string, unknown>, mtime: number): string {
   const runPath = join(fixture.stateRoot, 'runs', id);
   mkdirSync(runPath, { recursive: true });
@@ -111,6 +128,150 @@ function writeRun(id: string, state: Record<string, unknown>, mtime: number): st
   utimesSync(statePath, timestamp, timestamp);
   return runPath;
 }
+
+describe('live engine distribution validation boundary', () => {
+  const consumers = [{ pid: 4242, kind: 'process' as const, label: 'fixture live engine process' }];
+
+  function configureValidation(project: string): void {
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, 'package.json'), JSON.stringify({
+      scripts: { build: 'node build-dist.mjs', test: 'node check.mjs', lint: 'node style.mjs' },
+    }));
+    writeFileSync(join(project, 'package-lock.json'), '{}\n');
+    // The guard must stop this real dist-writing recipe before command one.
+    writeFileSync(join(project, 'build-dist.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync("dist/probe.js", "replacement engine build");\n');
+  }
+
+  it('keeps consumers visible while validating an independent Python project', async () => {
+    writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tpython3 -m compileall -q package\ntest:\n\tpython3 -m pytest tests -q\nlint:\n\tpython3 -m compileall -q tests\n');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, durationMs: 1, stdout: 'fixture passed\n' }));
+    const result = await collectShipPreflight(['ship-preflight'], commonDeps({
+      findDistConsumers: () => consumers, runValidationCommand: runner,
+    }));
+    expect(result.report.liveDistConsumers).toEqual(consumers);
+    expect(runner).not.toHaveBeenCalled();
+    expect(result.report.validationBaseline.execution).toBe('skipped');
+  });
+
+  it('keeps unrelated validation independent when the consumed dist directory is absent', async () => {
+    rmSync(join(fixture.packageRoot, 'dist'), { recursive: true });
+    writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tpython3 -m compileall -q package\ntest:\n\tpython3 -m pytest tests -q\nlint:\n\tpython3 -m compileall -q tests\n');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'passed' }));
+    const result = await collectShipPreflight(['ship-preflight'], commonDeps({
+      findDistConsumers: () => consumers, runValidationCommand: runner,
+    }));
+    expect(result.report.liveDistConsumers).toEqual(consumers);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it.each(['absolute', 'relative', 'alias', 'make-cd', 'output-alias', 'quoted-shell'])(
+    'collects separate-project %s delegation facts without launching a command', async (form) => {
+      configureValidation(fixture.packageRoot);
+      let build = `npm --prefix "${fixture.packageRoot}" run build`;
+      if (form === 'quoted-shell') build = `sh -c 'npm --prefix ${fixture.packageRoot} run build'`;
+      if (form === 'relative') build = 'npm --prefix=../package run build';
+      if (form === 'alias') {
+        const alias = join(fixture.root, 'linked-engine');
+        symlinkSync(fixture.packageRoot, alias, 'dir');
+        build = `npm --prefix "${alias}" run build`;
+      }
+      if (form === 'output-alias') {
+        symlinkSync(join(fixture.packageRoot, 'dist'), join(fixture.project, 'generated'), 'dir');
+        build = 'tsc --outDir=generated/new-build';
+      }
+      if (form === 'make-cd') {
+        writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tcd ../package && npm run build\ntest:\n\tpython3 -m pytest tests -q\nlint:\n\tpython3 -m compileall -q tests\n');
+      } else {
+        writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
+          scripts: { build, test: 'node check.mjs', lint: 'node style.mjs' },
+        }));
+        writeFileSync(join(fixture.project, 'package-lock.json'), '{}\n');
+      }
+      const before = readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8');
+      const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
+      const stderr = new Capture();
+      const deps = commonDeps({
+        findDistConsumers: () => consumers, runValidationCommand: runner,
+        stdout: new Capture().writer, stderr: stderr.writer,
+      });
+      expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
+      expect(stderr.value).toContain('No project command was launched');
+      expect(runner).not.toHaveBeenCalled();
+      expect(readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8')).toBe(before);
+      expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
+      expect(runner).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['own', 'ancestor', 'nested', 'project-alias', 'package-alias', 'dist-alias', 'unknown-project', 'unknown-package'])(
+    'collects %s identity with live consumers without invoking a dist-writing build', async (relation) => {
+      configureValidation(fixture.packageRoot);
+      let project = fixture.packageRoot;
+      let packageRoot = fixture.packageRoot;
+      if (relation === 'ancestor') project = fixture.root;
+      if (relation === 'nested') project = join(fixture.packageRoot, 'nested-project');
+      if (relation === 'project-alias') {
+        project = join(fixture.root, 'linked-engine');
+        symlinkSync(fixture.packageRoot, project, 'dir');
+      }
+      if (relation === 'package-alias') {
+        packageRoot = join(fixture.root, 'linked-package');
+        symlinkSync(fixture.packageRoot, packageRoot, 'dir');
+      }
+      if (relation === 'dist-alias') {
+        project = fixture.project;
+        symlinkSync(join(fixture.packageRoot, 'dist'), join(project, 'dist'), 'dir');
+      }
+      if (relation === 'unknown-project' || relation === 'unknown-package') project = fixture.project;
+      if (relation !== 'own' && relation !== 'project-alias' && relation !== 'package-alias') configureValidation(project);
+      const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
+      const stderr = new Capture();
+      const realpath = (path: string): string => {
+        if ((relation === 'unknown-project' && path === resolve(project))
+          || (relation === 'unknown-package' && path === resolve(packageRoot))) throw new Error('identity unavailable');
+        return realpathSync.native(path);
+      };
+      const code = await cmdShipPreflightWithDeps(['ship-preflight', '--project', project], commonDeps({
+        packageRoot, realpath, findDistConsumers: () => consumers, runValidationCommand: runner,
+        stdout: new Capture().writer, stderr: stderr.writer,
+      }));
+      expect(code).toBe(0);
+      expect(runner).not.toHaveBeenCalled();
+      expect(stderr.value).toContain('No project command was launched');
+    },
+  );
+
+  it('collects an independent target shared by a verified live run without executing validation', async () => {
+    configureValidation(fixture.project);
+    writeRun('live-target', { projectDir: fixture.project, status: 'running' }, 3_000);
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
+    const stderr = new Capture();
+    const deps = commonDeps({
+      inspectLiveRun: () => true, findDistConsumers: () => consumers, runValidationCommand: runner,
+      stdout: new Capture().writer, stderr: stderr.writer,
+    });
+    expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
+    expect(stderr.value).toContain('live FlowCrew run(s): live-target');
+    expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('does not prepare command confinement when collecting facts', async () => {
+    configureValidation(fixture.project);
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
+    const stderr = new Capture();
+    const deps = commonDeps({
+      findDistConsumers: () => consumers, runValidationCommand: runner,
+      stdout: new Capture().writer, stderr: stderr.writer,
+    });
+    expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
+    expect(stderr.value).toContain('No project command was launched');
+    expect(runner).not.toHaveBeenCalled();
+    expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+});
 
 describe('ship-preflight previous-run fact', () => {
   it('matches canonical project paths in one runs-root pass and exposes non-clean evidence', async () => {
@@ -219,7 +380,6 @@ describe('ship-preflight previous-run fact', () => {
 
 describe('ship-preflight campaign hygiene fact', () => {
   it('honours explicit precedence and suggests a context reset after three adverse recent endings', async () => {
-    writeFileSync(join(fixture.project, 'config', 'defaults.yaml'), 'campaign: configured line\n', 'utf-8');
     const reader = vi.fn(() => [
       { seq: 1, runId: 'one', kind: 'task_started', pass: false, timestamp: 'a' },
       { seq: 2, runId: 'one', kind: 'task_ended', status: 'failed', pass: false, timestamp: 'b' },
@@ -246,8 +406,7 @@ describe('ship-preflight campaign hygiene fact', () => {
     });
   });
 
-  it('does not suggest a reset for clean history and reports malformed defaults as unknown without guessing', async () => {
-    writeFileSync(join(fixture.project, 'config', 'defaults.yaml'), 'campaign: stable line\n', 'utf-8');
+  it('does not suggest a reset for clean repository history', async () => {
     const clean = await collectShipPreflight(['ship-preflight'], commonDeps({
       readCampaignEntries: () => [
         { seq: 1, runId: 'one', kind: 'task_ended', status: 'complete', pass: true, timestamp: 'a' },
@@ -255,17 +414,8 @@ describe('ship-preflight campaign hygiene fact', () => {
       ],
     }));
     expect(clean.report.campaign).toMatchObject({
-      state: 'resolved', storageKey: 'stable-line', recentAdverse: 0, suggestContextSkip: false,
+      state: 'resolved', source: 'repository', storageKey: 'project', recentAdverse: 0, suggestContextSkip: false,
     });
-
-    writeFileSync(join(fixture.project, 'config', 'defaults.yaml'), 'campaign: [unterminated\n', 'utf-8');
-    const forbiddenReader = vi.fn(() => []);
-    const unknown = await collectShipPreflight(['ship-preflight'], commonDeps({
-      readCampaignEntries: forbiddenReader,
-    }));
-    expect(unknown.report.campaign.state).toBe('unknown');
-    expect(unknown.report.campaign.reason).toContain('Cannot resolve campaign');
-    expect(forbiddenReader).not.toHaveBeenCalled();
   });
 
   it('derives the fallback campaign from the repository main worktree', async () => {
@@ -282,15 +432,14 @@ describe('ship-preflight campaign hygiene fact', () => {
     expect(reader).toHaveBeenCalledWith(fixture.project, 'main-repository');
   });
 
-  it('treats a null defaults campaign as unset and reads the repository campaign', async () => {
-    writeFileSync(join(fixture.project, 'config', 'defaults.yaml'), 'campaign: null\n', 'utf-8');
+  it.each(['campaign: legacy-name', 'campaign: null', 'campaign: 42', 'campaign: [unterminated'])('ignores project campaign configuration %s', async content => {
+    writeFileSync(join(fixture.project, 'config', 'defaults.yaml'), `${content}\n`, 'utf-8');
     const mainWorktree = join(fixture.root, 'main-repository');
     const reader = vi.fn(() => []);
     const result = await collectShipPreflight(['ship-preflight'], commonDeps({
       readGitCommonDir: () => join(mainWorktree, '.git'),
       readCampaignEntries: reader,
     }));
-
     expect(result.report.campaign).toMatchObject({
       state: 'resolved', source: 'repository', storageKey: 'main-repository',
     });
@@ -306,15 +455,6 @@ describe('ship-preflight campaign hygiene fact', () => {
 
     expect(result.report.campaign).toMatchObject({
       state: 'unknown', reason: expect.stringContaining('Cannot resolve a repository campaign'),
-    });
-    expect(reader).not.toHaveBeenCalled();
-
-    writeFileSync(join(fixture.project, 'config', 'defaults.yaml'), 'campaign: 42\n', 'utf-8');
-    const malformedDefault = await collectShipPreflight(['ship-preflight'], commonDeps({
-      readCampaignEntries: reader,
-    }));
-    expect(malformedDefault.report.campaign).toMatchObject({
-      state: 'unknown', reason: expect.stringContaining('non-empty string or null'),
     });
     expect(reader).not.toHaveBeenCalled();
   });
@@ -357,7 +497,7 @@ describe('ship-preflight daemon and build freshness fact', () => {
 });
 
 describe('ship-preflight validation baseline fact', () => {
-  it('runs the configuration-discovered validation set and reports delta criteria', async () => {
+  it('discovers validation commands without executing them or manufacturing delta criteria', async () => {
     writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
       scripts: { build: 'compile', test: 'check', lint: 'lint' },
     }), 'utf-8');
@@ -371,16 +511,11 @@ describe('ship-preflight validation baseline fact', () => {
       runValidationCommand: runner,
     }));
 
-    expect(runner.mock.calls.map(([request]) => request.role)).toEqual(['build', 'test', 'lint']);
-    expect(result.report.validationBaseline.results).toContainEqual(expect.objectContaining({
-      role: 'test', state: 'failed', failureCount: 2,
-    }));
-    expect(result.report.validationBaseline.gateCriteria).toContainEqual(expect.objectContaining({
-      role: 'test', rule: 'no_regression_from_baseline', baselineFailureCount: 2,
-    }));
-    expect(result.report.validationBaseline.gateCriteria).toContainEqual(expect.objectContaining({
-      role: 'build', rule: 'must_remain_green',
-    }));
+    expect(runner).not.toHaveBeenCalled();
+    expect(result.report.validationBaseline.execution).toBe('skipped');
+    expect(result.report.validationBaseline.discovery.commands.map(command => command.role)).toEqual(['build', 'test', 'lint']);
+    expect(result.report.validationBaseline.results.every(result => result.state === 'unresolved')).toBe(true);
+    expect(result.report.validationBaseline.gateCriteria.every(criterion => criterion.rule === 'baseline_unresolved')).toBe(true);
   });
 });
 
@@ -412,6 +547,38 @@ describe('ship-preflight declared brief inputs fact', () => {
         })],
       },
     });
+  });
+
+  it.each([false, true])('reports external directory capability admission (forbidden=%s) without scanning it', async forbidden => {
+    const path = join(forbidden ? fixture.stateRoot : fixture.root, 'durable-results');
+    writeFileSync(join(fixture.project, 'brief.md'), `---\noutputs:\n  - path: ${path}\n    type: directory\n---\n# Goal\nRetain per-item results.\n`);
+    const result = await collectShipPreflight(['ship-preflight', '--brief', 'brief.md'], commonDeps());
+    expect(result.report.outputInventory.inventory.entries).toMatchObject([{
+      path, blocking: forbidden, reason: expect.stringContaining(forbidden ? 'FC_HOME/run storage' : 'not inventoried or archived'),
+    }]);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it.each(['unknown', 'in-place', 'project', 'worktree', 'target-overlap'])('judges source-overlapping output against the launch project (%s)', async launch => {
+    const target = join(fixture.root, 'worktree');
+    const path = join(launch === 'target-overlap' ? target : fixture.project, 'runs', 'results');
+    writeFileSync(join(fixture.project, '.gitignore'), 'runs/\n');
+    writeFileSync(join(fixture.project, 'brief.md'), `---\noutputs:\n  - path: ${path}\n    type: directory\n---\n# Goal\nRetain results.\n\n## Acceptance criteria\n1. Retain results in the declared directory.\n`);
+    const args = ['ship-preflight', '--brief', 'brief.md'];
+    if (launch === 'project') args.push('--project', fixture.project);
+    else if (launch !== 'unknown') args.push('--target', launch === 'in-place' ? fixture.project : target);
+    const stdout = new Capture();
+    const deps = commonDeps({ stdout: stdout.writer });
+    const result = await collectShipPreflight(args, deps);
+    const inventory = result.report.outputInventory.inventory;
+    expect(inventory.blocking).toHaveLength(['in-place', 'project', 'target-overlap'].includes(launch) ? 1 : 0);
+    if (launch === 'unknown') {
+      expect(inventory.entries[0].warning).toMatch(/worktree launch.*blocks if launched in place/);
+      expect(await cmdShipPreflightWithDeps(args, deps)).toBe(0);
+      expect(stdout.value).toContain('WARNING');
+      expect(stdout.value).toContain('blocks if launched in place');
+    }
+    expect(existsSync(path)).toBe(false);
   });
 
   it('keeps leading declarations distinct from neutral path mentions', () => {
@@ -466,7 +633,7 @@ describe('ship-preflight declared brief inputs fact', () => {
     ].join('\n');
 
     expect(extractDeclaredBriefInputPaths(brief)).toEqual(['dependency_cache']);
-    const verification = verifyBriefInputs(brief, fixture.project);
+    const verification = verifyDeclaredBriefInputs(brief, fixture.project);
     expect(verification.inputs).toEqual([
       expect.objectContaining({ path: 'dependency_cache', exists: true, readable: true }),
     ]);
@@ -668,8 +835,8 @@ describe('ship-preflight declared brief inputs fact', () => {
     writeFileSync(path, content, 'utf-8');
     const digest = createHash('sha256').update(content).digest('hex');
 
-    const confirmed = verifyBriefInputs(
-      `# Inputs\nRead \`data/prices.csv\`; it has 2 rows, spans 2022-01-01 .. 2022-01-03, sha256: ${digest}.`,
+    const confirmed = verifyDeclaredBriefInputs(
+      `---\ninputs: [data/prices.csv]\n---\n# Inputs\nRead \`data/prices.csv\`; it has 2 rows, spans 2022-01-01 .. 2022-01-03, sha256: ${digest}.`,
       fixture.project,
     ).inputs[0];
     expect(confirmed.assertions.map(({ kind, state }) => ({ kind, state }))).toEqual([
@@ -678,8 +845,8 @@ describe('ship-preflight declared brief inputs fact', () => {
       { kind: 'sha256', state: 'confirmed' },
     ]);
 
-    const refuted = verifyBriefInputs(
-      `# Inputs\nRead \`data/prices.csv\`; it has 3 rows, spans 2022-01-02 .. 2022-01-04, sha256: ${'0'.repeat(64)}.`,
+    const refuted = verifyDeclaredBriefInputs(
+      `---\ninputs: [data/prices.csv]\n---\n# Inputs\nRead \`data/prices.csv\`; it has 3 rows, spans 2022-01-02 .. 2022-01-04, sha256: ${'0'.repeat(64)}.`,
       fixture.project,
     ).inputs[0];
     expect(refuted.assertions.every((assertion) => assertion.state === 'refuted')).toBe(true);
@@ -695,12 +862,12 @@ describe('ship-preflight declared brief inputs fact', () => {
     const content = 'id,value\n1,a\n2,b\n';
     writeFileSync(join(fixture.project, 'data', 'manifest.csv'), content, 'utf-8');
     const digest = createHash('sha256').update(content).digest('hex');
-    const verification = verifyBriefInputs([
+    const verification = verifyDeclaredBriefInputs([
       '---',
-      'input_manifest:',
-      '  path: data/manifest.csv',
-      '  rows: 2',
-      `  sha256: ${digest}`,
+      'inputs:',
+      '  - path: data/manifest.csv',
+      '    rows: 2',
+      `    sha256: ${digest}`,
       'terminal_states:',
       '  complete:',
       '    paths: [docs/result.md]',
@@ -721,12 +888,12 @@ describe('ship-preflight declared brief inputs fact', () => {
     mkdirSync(join(fixture.project, 'archive', 'nested'), { recursive: true });
     writeFileSync(join(fixture.project, 'archive', 'one.txt'), 'one', 'utf-8');
     writeFileSync(join(fixture.project, 'archive', 'nested', 'two.txt'), 'two', 'utf-8');
-    const confirmed = verifyBriefInputs(
-      '# Inputs\nConsume `archive/`; it contains 2 files.',
+    const confirmed = verifyDeclaredBriefInputs(
+      '---\ninputs: [archive/]\n---\n# Inputs\nConsume `archive/`; it contains 2 files.',
       fixture.project,
     ).inputs[0].assertions[0];
-    const refuted = verifyBriefInputs(
-      '# Inputs\nConsume `archive/`; it contains 3 files.',
+    const refuted = verifyDeclaredBriefInputs(
+      '---\ninputs: [archive/]\n---\n# Inputs\nConsume `archive/`; it contains 3 files.',
       fixture.project,
     ).inputs[0].assertions[0];
     expect(confirmed).toMatchObject({ kind: 'file_count', state: 'confirmed', observed: 2 });
@@ -737,8 +904,8 @@ describe('ship-preflight declared brief inputs fact', () => {
       'start_date,end_date\n2022-01-01,2022-01-02\n',
       'utf-8',
     );
-    const ambiguous = verifyBriefInputs(
-      '# Inputs\nRead `ambiguous.csv`; it spans 2022-01-01 .. 2022-01-02.',
+    const ambiguous = verifyDeclaredBriefInputs(
+      '---\ninputs: [ambiguous.csv]\n---\n# Inputs\nRead `ambiguous.csv`; it spans 2022-01-01 .. 2022-01-02.',
       fixture.project,
     ).inputs[0].assertions[0];
     expect(ambiguous).toMatchObject({
@@ -747,8 +914,8 @@ describe('ship-preflight declared brief inputs fact', () => {
       reason: expect.stringContaining('unambiguous'),
     });
 
-    const unbound = verifyBriefInputs(
-      '# Inputs\nRead `first.csv` and `second.csv`; together they contain 2 rows.',
+    const unbound = verifyDeclaredBriefInputs(
+      '---\ninputs:\n  - paths: [first.csv, second.csv]\n    rows: 2\n---',
       fixture.project,
     );
     expect(unbound.inputs.every((input) => input.assertions.length === 0)).toBe(true);

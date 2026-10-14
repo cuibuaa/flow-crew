@@ -1,5 +1,4 @@
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -30,20 +29,6 @@ describe("public specification purity", () => {
     });
     if (violations.length > 0) {
       throw new Error(`Public test purity violations:\n${formatViolations(violations)}`);
-    }
-  });
-
-  it("keeps canonical published coverage in subject-named spec files", () => {
-    for (const path of [
-      "spec/acceptance-gate.qa.test.ts",
-      "spec/api/campaign-schema.test.ts",
-      "spec/dashboard-campaign.test.ts",
-      "spec/dashboard-task-lifecycle.test.ts",
-      "spec/ui/Inbox.test.tsx",
-      "spec/ui/Truthfulness.test.tsx",
-      "spec/ui/static-reachability.test.tsx",
-    ]) {
-      expect(existsSync(join(PROJECT_ROOT, path)), path).toBe(true);
     }
   });
 

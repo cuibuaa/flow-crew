@@ -6,7 +6,29 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRun, fcGlobalDir, setFcGlobalDir, writeStageOutput } from '../src/store.js';
+import { createRun, fcGlobalDir, requireRunArtifactDirectory, setFcGlobalDir, writeStageOutput } from '../src/store.js';
+import { requireSafeRunId } from '../src/cancellation-policy.js';
+
+describe('run path segment identity', () => {
+  it.each(['', '.', '..', '../escape', 'nested/run', 'nested\\run', 'run\0candidate'])('refuses unsafe identity %j before artifact paths are derived', (runId) => {
+    expect(() => requireSafeRunId(runId)).toThrow('RUN_IDENTITY_INVALID');
+    expect(() => requireRunArtifactDirectory('', runId)).toThrow('RUN_IDENTITY_INVALID');
+  });
+
+  it('uses a safe segment containing consecutive dots for control and artifact publication', () => {
+    const project = mkdtempSync(join(tmpdir(), 'run-segment-'));
+    const previous = fcGlobalDir();
+    setFcGlobalDir(join(project, 'state'));
+    try {
+      const runId = 'run..candidate';
+      expect(() => requireSafeRunId(runId)).not.toThrow();
+      expect(requireRunArtifactDirectory(project, runId)).toBe(join(fcGlobalDir(), 'runs', runId));
+    } finally {
+      setFcGlobalDir(previous);
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+});
 describe('R02 stage output keeps the attempt it belongs to', () => {
   it('writes an attempt-scoped copy alongside the latest output', () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'r02-'));

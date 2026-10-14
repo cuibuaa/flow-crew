@@ -1,15 +1,17 @@
+import { fixtureResult } from './test-support/declared-dispatch.js';
+import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { mergePlanRetryPair } from '../src/plan-retry-monotone.js';
-import { captureStageArtifactContractPreimages, inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { findAllReady, inspectRealityCheckReachability, runWorkflow, selectRunnableBatch, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { readRunEvents } from '../src/run-events.js';
 import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { artifacts, producedRead } from './spec_contracts/declared-fixtures.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 const writerCase = (gateNeedsReport = true) => {
@@ -51,9 +53,9 @@ const writerCase = (gateNeedsReport = true) => {
     id: 'reality-check:report-exists', source: 'admission' as const,
     detail: 'reality check "report-exists" references absent docs/report.md, but every producer is conditional or repair-only',
   }];
-  const merged = mergePlanRetryPair(incumbent, proposed, refusal).pair.dispatch;
+  const merged = proposed.dispatch;
   const entries = (parseYaml(merged) as { stages: Array<Record<string, unknown>> }).stages;
-  const stages = entries.map((entry): StageConfig => ({
+  const stages = entries.map((entry): StageConfig => ({ criterion_refs: [], artifact_contract: artifacts(entry.is_gate === true ? [{ id: 'verdict', root: 'run', path: `verdict_${String(entry.id)}.json` }] : entry.id === 'write_report' ? [{ id: 'report', root: 'project', path: 'docs/report.md' }] : [], [], [], []),
     id: String(entry.id), role: String(entry.role),
     scope: entry.scope as string[],
     depends_on: (entry.depends_on as string[] | undefined) ?? [],
@@ -74,10 +76,9 @@ describe('engine boundary audit probes', () => {
       const projectDir = join(root, 'project');
       mkdirSync(join(projectDir, 'config', 'agents'), { recursive: true });
       mkdirSync(join(projectDir, 'docs'), { recursive: true });
-      writeFileSync(join(projectDir, 'config', 'defaults.yaml'), 'default_timeout_ms: 10000\n');
       writeFileSync(join(projectDir, 'config', 'agents', 'coder.yaml'),
         'name: coder\ndescription: fixture\nmodel: default\nreasoning_effort: low\ntools: []\nprompt: fixture\n');
-      const stage: StageConfig = {
+      const stage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([{ id: 'report', root: 'project', path: 'docs/report.md' }], [], [], []),
         id: 'writer', role: 'coder', scope: ['docs/report.md'], depends_on: [],
         prompt_template: 'Write docs/report.md.', skills: [], dynamic_dispatch: false, is_gate: false,
       };
@@ -98,7 +99,7 @@ describe('engine boundary audit probes', () => {
           phase: 'started' | 'completed'; id: string; command: string; timestamp: string;
         }) => void;
       }) {
-        if (opts.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
         calls.push(opts.attemptIndex);
         const reportPath = join(projectDir, 'docs', 'report.md');
         if (calls.length === 1) {
@@ -119,14 +120,14 @@ describe('engine boundary audit probes', () => {
           const event = { id: 'tool_1', command: 'read report', timestamp: new Date().toISOString() };
           opts.onCommandLifecycle?.({ ...event, phase: 'started' });
           opts.onCommandLifecycle?.({ ...event, phase: 'completed' });
-          return { output: 'boundary', exitCode: 137, duration_ms: 1,
-            writes: ['docs/report.md'], writeAttribution: 'structured' as const };
+          return fixtureResult({ output: 'boundary', exitCode: 137, duration_ms: 1,
+            writes: ['docs/report.md'], writeAttribution: 'structured' as const }, opts);
         }
         expect(readFileSync(reportPath, 'utf8')).toBe('completed before acceptance\n');
         mkdirSync(join(projectDir, 'src'), { recursive: true });
         writeFileSync(join(projectDir, 'src', 'extra.ts'), 'export const extra = true;\n');
-        return { output: 'reused report', exitCode: 0, duration_ms: 1,
-          writes: ['src/extra.ts'], writeAttribution: 'structured' as const };
+        return fixtureResult({ output: 'reused report', exitCode: 0, duration_ms: 1,
+          writes: ['src/extra.ts'], writeAttribution: 'structured' as const }, opts);
       } };
       const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined,
         join(projectDir, 'config', 'agents'), created.runId, 'reuse fixture', true);
@@ -148,7 +149,8 @@ describe('engine boundary audit probes', () => {
       const projectDir = join(root, 'project');
       mkdirSync(projectDir, { recursive: true });
       const { stages } = writerCase();
-      const markdown = '```yaml\nchecks:\n  - name: report-exists\n    type: file-exists-nonempty\n    params:\n      paths: [docs/report.md]\n```\n';
+      const markdown = '## Reality checks\n```yaml\nchecks:\n  - name: report-exists\n    type: file-exists-nonempty\n    reads: [{id: report, root: project, path: docs/report.md, source: {kind: stage, stage: write_report, artifact: report}}]\n    params:\n      paths: [docs/report.md]\n```\n';
+      expect(parseChecksFromMarkdown(markdown)).toHaveLength(1);
       expect(inspectRealityCheckReachability({ markdown, projectDir, stages })).toEqual([]);
 
       const runId = 'failed-gate-fixture';
@@ -165,6 +167,41 @@ describe('engine boundary audit probes', () => {
       };
       expect(findAllReady(stages, state as Parameters<typeof findAllReady>[1])
         .map((stage) => stage.id)).toContain('write_report');
+    } finally {
+      setFcGlobalDir(previousHome);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('lets a non-gate qa stage with a passing verdict release its dependents without a validation delta', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fc-audit-b-nongate-'));
+    const previousHome = fcGlobalDir();
+    try {
+      setFcGlobalDir(join(root, 'home'));
+      const projectDir = join(root, 'project');
+      mkdirSync(projectDir, { recursive: true });
+      const runId = 'nongate-verdict-fixture';
+      const dir = runDir(projectDir, runId);
+      mkdirSync(dir, { recursive: true });
+      // A run-local validation baseline exists, but no delta: deltas are recorded
+      // only when a declared gate completes.
+      writeFileSync(join(dir, 'validation_baseline.json'), '{"version":1}\n');
+      writeFileSync(join(dir, 'verdict_baseline.json'), '{"pass":true,"reason":"baseline captured"}\n');
+      const stage = (id: string, extra: Record<string, unknown>) => ({ artifact_contract: artifacts([], [], [], []),
+        id, role: 'coder', depends_on: [], dependency_reasons: {}, scope: [], criterion_refs: [],
+        skills: [], prompt_template: id, is_gate: false, ...extra,
+      });
+      const work = stage('work', { depends_on: ['baseline'], dependency_reasons: { baseline: 'needs the baseline' } });
+      const state = {
+        projectDir, runId,
+        stages: { baseline: { status: 'complete' }, work: { status: 'pending' } },
+      };
+      const asStages = (items: unknown[]) => items as Parameters<typeof findAllReady>[0];
+      const nonGate = asStages([stage('baseline', { role: 'qa' }), work]);
+      expect(findAllReady(nonGate, state as Parameters<typeof findAllReady>[1]).map((s) => s.id)).toContain('work');
+      // Control: a declared gate with the same verdict still needs its bound delta.
+      const declaredGate = asStages([stage('baseline', { role: 'qa', is_gate: true }), work]);
+      expect(findAllReady(declaredGate, state as Parameters<typeof findAllReady>[1]).map((s) => s.id)).not.toContain('work');
     } finally {
       setFcGlobalDir(previousHome);
       rmSync(root, { recursive: true, force: true });
@@ -228,41 +265,5 @@ describe('engine boundary audit probes', () => {
       setFcGlobalDir(previousHome);
       rmSync(root, { recursive: true, force: true });
     }
-  });
-
-  it('accepts a changed run-local file without adapter write attribution', () => {
-    const root = mkdtempSync(join(tmpdir(), 'fc-audit-c-'));
-    try {
-      const projectDir = join(root, 'project');
-      const runDirectory = join(root, 'run');
-      mkdirSync(runDirectory, { recursive: true });
-      const template = "Write this run's validation_final.json.";
-      const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir: runDirectory });
-      writeFileSync(join(runDirectory, 'validation_final.json'), '{"passed":true}\n');
-      const result = inspectStageArtifactContract({
-        stageId: 'write_report', template, projectDir, runDir: runDirectory,
-        preimages, writes: [],
-      });
-      expect(result.violations).toEqual([]);
-    } finally { rmSync(root, { recursive: true, force: true }); }
-  });
-
-  it('does not credit an unchanged preexisting run file to a new attempt', () => {
-    const root = mkdtempSync(join(tmpdir(), 'fc-audit-c-control-'));
-    try {
-      const projectDir = join(root, 'project');
-      const runDirectory = join(root, 'run');
-      mkdirSync(runDirectory, { recursive: true });
-      writeFileSync(join(runDirectory, 'validation_final.json'), '{"old":true}\n');
-      const template = "Write this run's validation_final.json.";
-      const preimages = captureStageArtifactContractPreimages({ template, projectDir, runDir: runDirectory });
-      const result = inspectStageArtifactContract({
-        stageId: 'write_report', template, projectDir, runDir: runDirectory,
-        preimages, writes: [],
-      });
-      expect(result.violations).toEqual([expect.objectContaining({
-        reason: expect.stringContaining('no attributable stage write'),
-      })]);
-    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

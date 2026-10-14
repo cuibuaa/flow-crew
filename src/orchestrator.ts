@@ -1,11 +1,8 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { mkdirSync, writeFileSync } from './engine-fs.js';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
+import { homedir, userInfo } from 'node:os';
+import { isOperatorStateRoot, resolveControlPath } from './daemon-identity.js';
 import { spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
@@ -37,12 +34,17 @@ import {
   isSuccessfulRunStatus,
   isTerminalRunStatus,
   readRunReservation,
+  readRunState,
   resolveRunStatus,
   reserveRun,
   RUN_STATUS,
   runsRoot,
 } from './store.js';
 import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
+import { reconcileHostInterruptedRun } from './restart-recovery.js';
+import { resolveRunIdentity } from './cancellation-policy.js';
+import { workflowContinuation } from './scheduler/sched_loop/launch.js';
+import { getItem, isPendingInboxItemState } from './inbox.js';
 import {
   RunCancellationCoordinator,
   type CancellationResult,
@@ -57,6 +59,7 @@ import {
   readSupervisionRunning,
   runningRecordBindingStatus,
   supervisionPaths,
+  supervisionEnvironment,
   type SupervisorBackend,
   type SupervisorLogSource,
   type SupervisorTailSnapshot,
@@ -80,6 +83,8 @@ interface BoundRun {
   path: string;
   status: string;
   failureReason?: string;
+  pendingApprovalId?: string;
+  resumeAuthorized?: boolean;
 }
 
 export interface GitAdapter {
@@ -105,6 +110,8 @@ export interface OrchestratorOptions {
     RunCancellationOptions,
     'registry' | 'units' | 'now' | 'isLaunchInFlight'
   >>;
+  /** Supplied only by daemon serve; local cancellation/read constructors never sweep runs. */
+  reconcileOrphanRuns?: () => void;
   /** Durable daemon-log sink for automatic registry maintenance. */
   onMaintenanceEvent?: (event: RegistryMaintenanceEvent) => void;
 }
@@ -130,15 +137,17 @@ export class Orchestrator {
   private readonly allocateRun: typeof reserveRun;
   private readonly onMaintenanceEvent: (event: RegistryMaintenanceEvent) => void;
   private readonly cancellations: RunCancellationCoordinator;
+  private readonly reconcileOrphanRuns?: () => void;
   /** Tasks currently awaiting runUnit(). A tick must not interpret their unit
    *  as inactive and launch or reconcile them a second time. */
   private launchingTaskIds = new Set<number>();
   private timer?: NodeJS.Timeout;
-  private ticking = false;
+  private activeTick?: Promise<void>;
   private startedAt = Date.now();
   private lastRegistryCompactionAttempt?: string;
 
   constructor(opts: OrchestratorOptions = {}) {
+    this.reconcileOrphanRuns = opts.reconcileOrphanRuns;
     this.registry = opts.registry ?? new TaskRegistry();
     this.systemd = opts.systemd ?? new NodeSystemd(this.registry.baseDir);
     this.git = opts.git ?? new NodeGit();
@@ -185,7 +194,6 @@ export class Orchestrator {
    * an uninitialized id is accepted only when its reservation marker validates.
    */
   private prepareRunBinding(task: TaskEntry): TaskEntry | undefined {
-    if (task.kind === 'campaign') return task;
     try {
       assertTaskBriefAdmission(task);
     } catch (err) {
@@ -206,7 +214,6 @@ export class Orchestrator {
   }
 
   private claimTaskLaunch(task: TaskEntry): boolean {
-    if (task.kind === 'campaign') return true;
     if (!task.run_id) return false;
     try {
       return claimLaunchIntent(task.projectDir, task.run_id, this.now().getTime()).claimed;
@@ -226,26 +233,49 @@ export class Orchestrator {
     this.timer = setInterval(() => void this.tickOnce(), this.intervalMs);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    // Clearing the producer timer does not close a sweep already awaiting a
+    // backend. Its owner must join that sweep before removing durable state.
+    await this.activeTick;
+  }
+
+  /** Persist admission before launch work. The daemon queue resumes after a restart. */
+  enqueue(input: TaskCreateInput): TaskEntry {
+    if (input.run_id) {
+      try {
+        const identity = resolveRunIdentity(this.boundRunPath(input.run_id), runsRoot(input.projectDir));
+        const state = readRunState(input.projectDir, identity.runId);
+        if (state.runId !== identity.runId || resolve(state.projectDir) !== resolve(input.projectDir)) throw new Error('run/project binding mismatch');
+        input = { ...input, run_id: identity.runId };
+      } catch (error) {
+        throw new Error(`Invalid existing-run resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+    }
+    return this.createAdmittedTask({ ...input, status: TASK_STATUS.PENDING });
+  }
+
+  private createAdmittedTask(input: TaskCreateInput): TaskEntry {
+    if ((input.kind !== undefined && input.kind !== 'quick') || input.config_path !== undefined) {
+      throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
+    }
+    const brief = input.brief_text ?? (input.brief_path ? readFileSync(input.brief_path, 'utf-8') : input.name ?? '');
+    const verification = verifyBriefAdmission(brief, input.brief_admission);
+    if (verification.status !== 'valid') {
+      throw new Error(admissionFailureMessage(verification.status, verification.report.digest));
+    }
+    return this.registry.create(input);
   }
 
   async register(input: TaskCreateInput): Promise<TaskEntry> {
-    if ((input.kind ?? (input.config_path ? 'campaign' : 'quick')) !== 'campaign') {
-      const brief = input.brief_text ?? (input.brief_path ? readFileSync(input.brief_path, 'utf-8') : input.name ?? '');
-      const verification = verifyBriefAdmission(brief, input.brief_admission);
-      if (verification.status !== 'valid') {
-        throw new Error(admissionFailureMessage(verification.status, verification.report.digest));
-      }
-    }
-    let task = this.registry.create(input);
+    let task = this.createAdmittedTask(input);
     // Admission control (skip-on-overlap): single-in-flight per project used to
     // be enforced only INSIDE the launched run — the daemon spawned a second
     // unit anyway, the child killed itself on the conflict, systemd reported
     // the unit failed, and that counted as a crash worth retrying. A task could
     // burn its whole retry budget in seconds on a conflict it only had to wait
-    // out (task #1817, live). Defer instead of launching into a busy project.
+    // out (observed in a live run). Defer instead of launching into a busy project.
     invalidateRunLockCache();
     const busy = this.busyFor(task.projectDir, task.run_id);
     if (busy) return this.defer(task, `project busy (run ${busy})`, 'wait');
@@ -302,7 +332,7 @@ export class Orchestrator {
   async retry(id: number): Promise<TaskEntry> {
     let task = this.mustGet(id);
     const bound = this.readBoundRun(task);
-    if (task.kind !== 'campaign' && task.status !== TASK_STATUS.RUNNING
+    if (task.status !== TASK_STATUS.RUNNING
         && bound && isTerminalRunStatus(bound.status)) {
       // A manual retry explicitly asks for a fresh execution of the brief.
       // Keeping the terminal binding makes the queue drain reconcile that old
@@ -310,6 +340,31 @@ export class Orchestrator {
       task = this.registry.update(id, { run_id: undefined });
     }
     return this.relaunch(task, 'manual retry');
+  }
+
+  async resume(id: number): Promise<TaskEntry> {
+    const task = this.mustGet(id);
+    const bound = this.readBoundRun(task);
+    if (!bound) throw new Error('Task has no readable bound run to resume');
+    if (![RUN_STATUS.STOPPED, RUN_STATUS.FAILED, RUN_STATUS.INCOMPLETE].some(status => status === bound.status)) {
+      throw new Error(`Cannot resume a ${bound.status} run; resume requires stopped, failed or incomplete work`);
+    }
+    if (task.status === TASK_STATUS.CANCELLING || this.launchingTaskIds.has(id)
+        || inspectRunScheduler(bound.runId, bound.path).kind === 'live') {
+      throw new Error('Task is still stopping or launching; wait for settlement before resuming');
+    }
+    buildCommand(task, this.cliPath); // Verify the original admission before queuing any work.
+    workflowContinuation(readRunState(task.projectDir, bound.runId), task.projectDir, bound.runId);
+    // An explicit continuation is a launch that has not happened yet, exactly
+    // like enqueue(existing run). Clearing started_at keeps the queue from
+    // reconciling the previous terminal outcome before this launch occurs.
+    return this.registry.update(id, {
+      status: TASK_STATUS.PENDING, started_at: undefined, completed_at: undefined,
+      not_before: undefined, defer_reason: undefined, defer_kind: 'retry',
+      notes: undefined, completing_commit: undefined,
+      summary_verdict: undefined, summary_one_liner: undefined, summary_full: undefined,
+      summary_source: undefined, summary_parsed_at: undefined,
+    });
   }
 
   async tail(id: number, lines = 100, _follow = false): Promise<string> {
@@ -364,15 +419,12 @@ export class Orchestrator {
     };
   }
 
-  async tickOnce(): Promise<void> {
-    // Reentrancy guard: setInterval does not wait for the previous sweep. Once
-    // per-task work (systemctl, git, project probes) pushes a sweep past the
-    // interval, overlapping sweeps would relaunch the same task twice under the
-    // same unit name — and the second systemd-run failure silently degrades to
-    // a detached bash child, i.e. two live agent processes for one task.
-    if (this.ticking) return;
-    this.ticking = true;
-    try {
+  tickOnce(): Promise<void> {
+    if (this.activeTick) return this.activeTick;
+    // Publish ownership before the sweep executes, including reentrant calls
+    // from injected backends. Concurrent callers join the same owned work.
+    this.activeTick = Promise.resolve().then(async () => {
+      this.reconcileOrphanRuns?.();
       this.compactRegistryIfNeeded();
       const tasks = this.registry.list({ status: TASK_LIST_STATUS.ACTIVE });
       // Pass 1 (serial, cheap): drain the launch queue. Serial on purpose —
@@ -392,9 +444,8 @@ export class Orchestrator {
           ? this.cancellations.cancelTask(task.id)
           : this.tickTask(task)
       )));
-    } finally {
-      this.ticking = false;
-    }
+    }).finally(() => { this.activeTick = undefined; });
+    return this.activeTick;
   }
 
   private compactRegistryIfNeeded(): void {
@@ -444,21 +495,21 @@ export class Orchestrator {
     task = current;
     if (this.launchingTaskIds.has(task.id)) return;
 
-    // A bound run owns this task's lifecycle. Terminal reconciliation is
-    // intentionally checked even during a backoff window so an out-of-band
-    // approval resume can settle promptly and can never fall through to launch.
+    // A previous verdict cannot settle a request that has never launched.
+    // Once launched, reconcile even during backoff so an out-of-band resume
+    // can settle promptly without another launch.
     const bound = this.readBoundRun(task);
-    if (bound && this.isSingleFlightCollision(bound)) {
+    if (bound && task.started_at && this.isSingleFlightCollision(bound)) {
       this.deferSingleFlightCollision(task, bound);
       return;
     }
-    if (bound && isTerminalRunStatus(bound.status)) {
+    if (bound && task.started_at && isTerminalRunStatus(bound.status)) {
       await this.reconcileTerminalBoundRun(task, bound);
       return;
     }
     if (task.not_before && this.now().getTime() < Date.parse(task.not_before)) return;
 
-    if (bound) {
+    if (bound && !isTerminalRunStatus(bound.status)) {
       const resolution = resolveRunStatus(bound.status);
       if (resolution.kind === 'unknown') {
         this.defer(
@@ -469,10 +520,7 @@ export class Orchestrator {
         );
         return;
       }
-      if (isPausedRunStatus(bound.status)) {
-        this.defer(task, `bound run ${bound.runId} is awaiting approval resume`, 'wait', task.run_id);
-        return;
-      }
+      if (this.waitForBoundApproval(task, bound)) return;
       const recovery = this.boundRunRecoveryDecision(task, bound);
       if (recovery.kind === 'stop') return;
       if (task.defer_kind !== 'retry') {
@@ -526,8 +574,13 @@ export class Orchestrator {
         });
         return;
       case 'terminal-unknown':
-        await this.handleTerminalUnknown(task, observedUnitState.reason);
-        return;
+        // Bound-run recovery above already proved same-run resume authority.
+        // Requeueing here would revisit this old unit forever without launching.
+        if (!bound) {
+          await this.handleTerminalUnknown(task, observedUnitState.reason);
+          return;
+        }
+        break;
       case 'terminal':
       case 'absent':
         break;
@@ -668,13 +721,9 @@ export class Orchestrator {
   }
 
   private async handleTerminalUnknown(task: TaskEntry, detail: string): Promise<void> {
-    const bound = this.readBoundRun(task);
-    if (bound && isTerminalRunStatus(bound.status)) {
-      await this.reconcileTerminalBoundRun(task, bound);
-      return;
-    }
-    const suffix = bound ? `; bound run ${bound.runId} remains ${bound.status}` : '';
-    this.failClosed(task, `supervisor outcome unknown: ${detail}${suffix}; refusing to retry automatically`);
+    const reason = `supervisor outcome unknown: ${detail}`;
+    if (await this.reconcileBoundRunAfterExit(task, reason)) return;
+    this.failClosed(task, `${reason}; refusing to retry automatically`);
   }
 
   /**
@@ -685,6 +734,9 @@ export class Orchestrator {
   private parkTaskIfRunParked(task: TaskEntry): boolean {
     const parked = findParkedRunForProject(task.projectDir, task.started_at ?? task.created_at);
     if (!parked) return false;
+    // A task's durable binding is authoritative. Project discovery is only
+    // for legacy unbound tasks and must never replace another run's identity.
+    if (task.run_id && this.readBoundRun(task)?.runId !== parked.runId) return false;
     const reason = `awaiting human approval (run ${parked.runId}, request ${parked.requestId}); resolve with: flowcrew inbox approve ${parked.requestId}`;
     this.defer(task, reason, 'wait', parked.runId);
     return true;
@@ -696,23 +748,42 @@ export class Orchestrator {
 
   private readBoundRun(task: TaskEntry): BoundRun | undefined {
     if (!task.run_id) return undefined;
-    const path = this.boundRunPath(task.run_id);
     try {
+      const identity = resolveRunIdentity(this.boundRunPath(task.run_id), isAbsolute(task.run_id) ? undefined : runsRoot());
+      const path = identity.directory;
       const parsed = JSON.parse(readFileSync(join(path, 'run.json'), 'utf-8')) as {
         runId?: unknown;
         status?: unknown;
         failureReason?: unknown;
+        engineCheckpoint?: unknown;
+        projectDir?: string;
+        parked?: { requestId?: string; pausedAt?: string };
+        recovery?: { kind?: string };
       };
-      if (typeof parsed.status !== 'string') return undefined;
+      if (typeof parsed.status !== 'string' || parsed.runId !== identity.runId || typeof parsed.projectDir !== 'string' || resolve(parsed.projectDir) !== resolve(task.projectDir)) return undefined;
+      const requestId = parsed.parked?.requestId;
+      const item = requestId && Number.isFinite(Date.parse(parsed.parked?.pausedAt ?? '')) ? getItem(identity.runId, requestId) : undefined;
+      const boundApproval = item?.runId === identity.runId && resolve(item.projectDir) === resolve(task.projectDir) ? item : undefined;
       return {
-        runId: typeof parsed.runId === 'string' && parsed.runId ? parsed.runId : basename(path),
+        runId: identity.runId,
         path,
         status: parsed.status,
         ...(typeof parsed.failureReason === 'string' ? { failureReason: parsed.failureReason } : {}),
+        ...(boundApproval && isPendingInboxItemState(boundApproval.state) ? { pendingApprovalId: requestId } : {}),
+        resumeAuthorized: parsed.recovery?.kind === 'resumable' || Boolean(boundApproval && !isPendingInboxItemState(boundApproval.state)),
       };
     } catch {
       return undefined;
     }
+  }
+
+  private waitForBoundApproval(task: TaskEntry, bound: BoundRun, prefix = ''): boolean {
+    if (!isPausedRunStatus(bound.status)) return false;
+    if (bound.pendingApprovalId) {
+      this.defer(task, `${prefix}bound run ${bound.runId} is awaiting approval resume (request ${bound.pendingApprovalId})`, 'wait', task.run_id);
+    } else if (bound.resumeAuthorized) return false;
+    else this.failClosed(task, `${prefix}bound run ${bound.runId} has no pending approval and no proven resume authority; ${bound.failureReason ?? 'RECOVERY_FATE_UNKNOWN: inspect the run recovery record before starting new work'}`);
+    return true;
   }
 
   private isSingleFlightCollision(bound: BoundRun): boolean {
@@ -734,7 +805,8 @@ export class Orchestrator {
 
   /**
    * A stopped unit is transport evidence only. Reconcile the bound run first:
-   * terminal verdicts settle, active/parked runs wait, guard collisions defer,
+   * terminal verdicts settle, owned/approval-bound runs wait, authorized runs
+   * resume, guard collisions defer,
    * and an unreadable known binding fails closed. Only a valid reservation or
    * a legacy unbound task may fall through to crash retry.
    */
@@ -759,10 +831,7 @@ export class Orchestrator {
         await this.reconcileTerminalBoundRun(task, bound);
         return true;
       }
-      if (isPausedRunStatus(bound.status)) {
-        this.defer(task, `${reason}; bound run ${bound.runId} is awaiting approval resume`, 'wait', task.run_id);
-        return true;
-      }
+      if (this.waitForBoundApproval(task, bound, `${reason}; `)) return true;
       const recovery = this.boundRunRecoveryDecision(task, bound, reason);
       if (recovery.kind === 'resume') await this.retryOrStuck(task, recovery.reason);
       return true;
@@ -812,6 +881,24 @@ export class Orchestrator {
       );
       return { kind: 'stop' };
     }
+    let recovered = bound.resumeAuthorized === true;
+    if (readRunState(task.projectDir, bound.runId).status === RUN_STATUS.RUNNING) {
+      const reconciled = reconcileHostInterruptedRun(task.projectDir, bound.runId);
+      if (isTerminalRunStatus(reconciled.status)) {
+        this.failClosed(task, `${leading}bound run ${bound.runId} ended ${reconciled.status}: ${reconciled.failureReason ?? 'unknown outcome'}; inspect its recovery record before starting new work`);
+        return { kind: 'stop' };
+      }
+      if (reconciled.recovery?.kind !== 'resumable') {
+        this.failClosed(task, `${leading}${reconciled.failureReason ?? 'RECOVERY_FATE_UNKNOWN: checkpoint could not be reconciled'}`);
+        return { kind: 'stop' };
+      }
+      recovered = true;
+    }
+    const latest = this.readBoundRun(task);
+    if (!latest || latest.runId !== bound.runId || latest.path !== bound.path || isTerminalRunStatus(latest.status) || (isPausedRunStatus(latest.status) && !recovered)) {
+      this.failClosed(task, `${leading}bound run ${bound.runId} changed before resume; inspect its current lifecycle before retrying`);
+      return { kind: 'stop' };
+    }
     const pid = observed.kind === 'missing' ? '' : ` pid ${observed.pid}`;
     return {
       kind: 'resume',
@@ -822,7 +909,7 @@ export class Orchestrator {
   private async reconcileTerminalBoundRun(task: TaskEntry, bound: BoundRun): Promise<void> {
     releaseLaunchIntent(task.projectDir, bound.runId);
     if (isSuccessfulRunStatus(bound.status)) {
-      await this.handleInactive(task, `bound run ${bound.runId} ended ${bound.status}`);
+      await this.handleInactive(task, bound);
       return;
     }
     const completed = this.now().toISOString();
@@ -842,71 +929,57 @@ export class Orchestrator {
   }
 
   /**
-   * Reconcile an inactive unit. completionOnlyReason is set for a terminal
-   * bound run: all verification still runs, but a missing commit can only
-   * settle to operator-visible stuck state, never back into a launch queue.
+   * The bound run owns its admitted completion contract. Task-level artifacts,
+   * commit prefixes and summaries add only their explicitly declared checks.
+   * Git evidence is a fallback for legacy tasks without a bound run verdict.
    */
-  private async handleInactive(task: TaskEntry, completionOnlyReason?: string): Promise<void> {
-    if (!completionOnlyReason && await this.reconcileBoundRunAfterExit(task, 'unit inactive')) return;
+  private async handleInactive(task: TaskEntry, bound?: BoundRun): Promise<void> {
+    if (!bound && await this.reconcileBoundRunAfterExit(task, 'unit inactive')) return;
     const completed = this.now().toISOString();
+    let commit: string | undefined;
     if (task.commit_prefix) {
-      const commit = await this.git.findCommitByPrefix(task.projectDir, task.commit_prefix);
-      if (commit) {
-        const missing = (task.expected_artifacts ?? []).filter((p) => !existsSync(resolve(task.projectDir, p)));
-        if (missing.length === 0) {
-          const summary = this.readCompletionSummary(task, completed, commit);
-          if (!summary) return;
-          this.registry.update(task.id, {
-            status: 'done',
-            completed_at: completed,
-            completing_commit: commit,
-            summary_verdict: summary.parsed.verdict,
-            summary_one_liner: summary.parsed.oneLiner,
-            summary_full: summary.parsed.full,
-            summary_source: summary.path,
-            summary_parsed_at: completed,
-            not_before: undefined,
-            defer_reason: undefined,
-            defer_kind: undefined,
-          });
-          this.registry.appendTick(task.id, { ts: completed, status: 'done', message: `commit ${commit}; summary ${summary.path}` });
-        } else {
-          this.registry.update(task.id, {
-            status: 'stuck', completed_at: completed, completing_commit: commit,
-            notes: `missing artifacts: ${missing.join(', ')}`,
-            not_before: undefined, defer_reason: undefined, defer_kind: undefined,
-          });
-          this.registry.appendTick(task.id, { ts: completed, status: 'stuck', message: `missing artifacts: ${missing.join(', ')}` });
-        }
+      commit = await this.git.findCommitByPrefix(task.projectDir, task.commit_prefix);
+      if (!commit && bound) {
+        this.failClosed(task, `bound run ${bound.runId} ended ${bound.status}; missing completing commit with prefix ${task.commit_prefix}`);
         return;
       }
+    } else if (!bound && task.started_at) {
+      commit = (await this.git.findCommitSince(task.projectDir, task.started_at))?.sha;
     }
 
-    // No commit_prefix match (or no commit_prefix declared). Before declaring
-    // the worktree "stuck on uncommitted changes", check whether the unit
-    // produced ANY commit during its lifetime — planner-style workflows
-    // commit their output (e.g. backlog edits) but routinely leave behind
-    // worktree noise (logs, sqlite-wal, codex .tmp). A successful commit +
-    // leftover WIP should be `done`, not `stuck`.
-    if (task.started_at) {
-      const recent = await this.git.findCommitSince(task.projectDir, task.started_at);
-      if (recent) {
+    if (bound || commit) {
+      const missing = (task.expected_artifacts ?? []).filter((p) => !existsSync(resolve(task.projectDir, p)));
+      if (missing.length > 0) {
         this.registry.update(task.id, {
-          status: 'done',
-          completed_at: completed,
-          completing_commit: recent.sha,
-          notes: `unit committed during lifetime (${recent.subject}); leftover worktree WIP ignored`,
-          not_before: undefined,
-          defer_reason: undefined,
-          defer_kind: undefined,
+          status: 'stuck', completed_at: completed, completing_commit: commit,
+          notes: `missing artifacts: ${missing.join(', ')}`,
+          not_before: undefined, defer_reason: undefined, defer_kind: undefined,
         });
-        this.registry.appendTick(task.id, {
-          ts: completed,
-          status: 'done',
-          message: `commit ${recent.sha} (no prefix match; WIP ignored)`,
-        });
+        this.registry.appendTick(task.id, { ts: completed, status: 'stuck', message: `missing artifacts: ${missing.join(', ')}` });
         return;
       }
+      const summary = task.commit_prefix || task.expected_summary_path
+        ? this.readCompletionSummary(task, completed, commit) : undefined;
+      if ((task.commit_prefix || task.expected_summary_path) && !summary) return;
+      const message = bound ? `bound run ${bound.runId} ended ${bound.status}` : `commit ${commit}`;
+      this.registry.update(task.id, {
+        status: 'done',
+        completed_at: completed,
+        completing_commit: commit,
+        notes: message,
+        ...(summary ? {
+          summary_verdict: summary.parsed.verdict,
+          summary_one_liner: summary.parsed.oneLiner,
+          summary_full: summary.parsed.full,
+          summary_source: summary.path,
+          summary_parsed_at: completed,
+        } : {}),
+        not_before: undefined,
+        defer_reason: undefined,
+        defer_kind: undefined,
+      });
+      this.registry.appendTick(task.id, { ts: completed, status: 'done', message });
+      return;
     }
 
     if (await this.git.hasUncommittedChanges(task.projectDir)) {
@@ -919,19 +992,10 @@ export class Orchestrator {
       return;
     }
 
-    if (completionOnlyReason) {
-      const message = `${completionOnlyReason}; no completing commit or worktree changes found`;
-      this.registry.update(task.id, {
-        status: 'stuck', completed_at: completed, notes: message,
-        not_before: undefined, defer_reason: undefined, defer_kind: undefined,
-      });
-      this.registry.appendTick(task.id, { ts: completed, status: 'stuck', message });
-      return;
-    }
     await this.retryOrStuck(task, 'unit exited without commit or changes');
   }
 
-  private readCompletionSummary(task: TaskEntry, completed: string, commit: string): { path: string; parsed: ReturnType<typeof parseTaskSummary> } | undefined {
+  private readCompletionSummary(task: TaskEntry, completed: string, commit?: string): { path: string; parsed: ReturnType<typeof parseTaskSummary> } | undefined {
     const summaryPaths = this.summaryPaths(task);
     const summaryPath = summaryPaths.find((p) => existsSync(p) && statSync(p).isFile());
     if (!summaryPath) {
@@ -1131,11 +1195,44 @@ export class NodeSystemd implements SupervisorBackend {
     });
   }
 
+  /** A private store cannot delegate to the login manager: that manager starts
+   * children outside the caller's process ownership.
+   * Keep the operator backend and private stub/systemd-less tests; a private
+   * runtime with no session bus cannot select the login manager implicitly.
+   * Check each outlet, rather than caching authority across environment changes. */
+  private managerRefusal(): string | undefined {
+    try {
+      if (isOperatorStateRoot(homedir(), this.baseDir)) return undefined;
+      if (process.env.DBUS_SESSION_BUS_ADDRESS !== undefined) {
+        return 'private engine inherited a session bus';
+      }
+      const runtime = process.env.XDG_RUNTIME_DIR;
+      if (!runtime || !isAbsolute(runtime)) return 'private engine has no private runtime directory';
+      const resolved = resolveControlPath(runtime);
+      if (resolved === resolveControlPath(`/run/user/${userInfo().uid}`)) {
+        return 'private engine inherited the login runtime directory';
+      }
+      if (existsSync(join(runtime, 'bus')) || existsSync(join(runtime, 'systemd', 'private'))) {
+        return 'private engine runtime contains a manager endpoint';
+      }
+      return undefined;
+    } catch {
+      return 'manager routing authority could not be established';
+    }
+  }
+
+  private requireManagerAuthority(): void {
+    const reason = this.managerRefusal();
+    if (reason) throw new Error(`Refusing per-user systemd manager: ${reason}. Use a private runtime without an inherited session bus.`);
+  }
+
   async isActive(unit: string): Promise<UnitStatus> {
     const portable = this.portableState(unit);
     // An atomically-written exit status is the only backend-independent result
     // and therefore outranks even a systemd unit that has not been reaped yet.
     if (portable.kind === 'terminal') return portable;
+    const refusal = this.managerRefusal();
+    if (refusal) return { kind: 'unobservable', reason: `Refusing per-user systemd manager: ${refusal}` };
     try {
       const { stdout } = await execFileAsync(
         'systemctl',
@@ -1188,6 +1285,7 @@ export class NodeSystemd implements SupervisorBackend {
   }
 
   async runUnit(opts: { unit: string; workingDirectory: string; command: string }): Promise<void> {
+    this.requireManagerAuthority();
     gcSupervisionDirectories(this.baseDir, {
       nowMs: this.now().getTime(),
       retentionMs: this.retentionMs,
@@ -1208,8 +1306,10 @@ export class NodeSystemd implements SupervisorBackend {
       createdAt: this.now().toISOString(),
       shutdownGraceMs: this.shutdownGraceMs,
       legacyRecordPath: this.fallbackPath(opts.unit),
+      environment: supervisionEnvironment(process.env),
     };
-    atomicWriteJson(paths.launch, launch);
+    // The environment can contain secrets; keep it out of argv and private on disk.
+    atomicWriteJson(paths.launch, launch, { mode: 0o600 });
     const shimArgs = this.shimArguments(paths.unitDir);
     try {
       await execFileAsync('systemd-run', [
@@ -1243,6 +1343,7 @@ export class NodeSystemd implements SupervisorBackend {
   }
 
   async stopUnit(unit: string): Promise<void> {
+    this.requireManagerAuthority();
     let systemctlError: unknown;
     try {
       await execFileAsync('systemctl', ['--user', 'stop', unit], { encoding: 'utf-8', timeout: 1_000 });
@@ -1368,6 +1469,7 @@ export class NodeSystemd implements SupervisorBackend {
     if (existsSync(logPath)) {
       return this.readFileLogSnapshot(logPath, lines).output;
     }
+    this.requireManagerAuthority();
     try {
       const { stdout } = await execFileAsync('journalctl', ['--user', '-u', unit, '-n', String(lines), '--no-pager']);
       return stdout;
@@ -1408,6 +1510,8 @@ export class NodeSystemd implements SupervisorBackend {
     if (existsSync(this.fallbackPath(unit)) || existsSync(fallbackLogPath)) {
       return { kind: 'file', path: fallbackLogPath };
     }
+    const refusal = this.managerRefusal();
+    if (refusal) return { kind: 'unavailable', reason: `Refusing per-user systemd manager: ${refusal}` };
     return { kind: 'journal', unit };
   }
 
@@ -1631,6 +1735,9 @@ function readBoundRunBrief(task: TaskEntry): string | undefined {
 }
 
 function assertTaskBriefAdmission(task: TaskEntry): { brief: string; admission: BriefAdmissionRecord } {
+  if (task.kind === 'campaign' || task.config_path !== undefined) {
+    throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
+  }
   const brief = readBrief(task);
   const taskVerification = verifyBriefAdmission(brief, task.brief_admission);
   if (taskVerification.status !== 'valid' || !task.brief_admission) {
@@ -1673,18 +1780,16 @@ export function buildCommand(task: TaskEntry, cliPath: string): string {
     }
     userArgs.push(arg);
   }
-  const admitted = task.kind === 'campaign' ? undefined : assertTaskBriefAdmission(task);
-  const args = task.kind === 'campaign'
-    ? ['campaign', 'run', task.config_path ?? '', ...userArgs]
-    : ['quick',
+  const admitted = assertTaskBriefAdmission(task);
+  const args = ['quick',
        // The brief must survive shellJoin AND systemd's own ExecStart unescaping.
        // Passing it raw corrupted any brief containing a single quote, so the
        // relaunch recomputed a different digest than the one the operator
        // admitted and the launch was rejected before run creation. base64url is
        // the same byte-safe transport --brief-admission-record already uses.
-       '--brief-input-base64', Buffer.from(admitted!.brief, 'utf8').toString('base64url'),
+       '--brief-input-base64', Buffer.from(admitted.brief, 'utf8').toString('base64url'),
        '--project', task.projectDir,
-       '--supervise', ...userArgs,
+       ...userArgs,
        '--brief-admission-record', Buffer.from(JSON.stringify(admitted!.admission), 'utf8').toString('base64url'),
        ...(task.run_id ? ['--existing-run-id', task.run_id] : [])];
   return shellJoin([process.execPath, cliPath, ...args.filter(Boolean)]);

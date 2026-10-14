@@ -1,5 +1,7 @@
+import { writeFileSync } from './engine-fs.js';
+
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { StoreState } from './store.js';
 import { resolveResearchPaths } from './research-paths.js';

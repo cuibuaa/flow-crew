@@ -1,5 +1,7 @@
+import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import { createHash } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync } from './engine-fs.js';
+
 import { join } from 'node:path';
 
 export interface BriefCriterion {
@@ -32,37 +34,33 @@ function slug(value: string): string {
   return (normalized || 'criteria').slice(0, 24);
 }
 
-function bodyStartLine(brief: string): number {
-  if (!brief.startsWith('---\n') && !brief.startsWith('---\r\n')) return 1;
-  const close = /\r?\n---(?:\r?\n|$)/g;
-  close.lastIndex = brief.indexOf('\n') + 1;
-  const match = close.exec(brief);
-  return match ? brief.slice(0, (match.index ?? 0) + match[0].length).split(/\r?\n/).length : 1;
-}
 
 /**
  * Extract only structurally numbered/named criteria under an explicit contract
  * heading. Ordinary numbered narrative and parenthetical examples stay prose.
  */
-export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
+function scanBriefCriteria(brief: string) {
   const lines = brief.split(/\r?\n/);
-  const firstBodyLine = bodyStartLine(brief);
+  const firstBodyLine = (splitBriefFrontmatter(brief)?.bodyLineOffset ?? 0) + 1;
   const criteria: BriefCriterion[] = [];
+  const ranges: Array<{ id: string; first: number; last: number }> = [];
   const excluded: NonNullable<BriefCriteriaArtifact['excluded']> = [];
   let section: { title: string; level: number } | undefined;
-  let current: { ordinal: string; line: number; text: string; section: string } | undefined;
+  let current: { ordinal: string; line: number; last: number; text: string; section: string } | undefined;
   let inFence = false;
   const flush = (): void => {
     if (!current) return;
     const text = current.text.replace(/\s+/g, ' ').trim();
     if (text && !ILLUSTRATIVE_ONLY.test(text)) {
       const base = `criterion_${slug(current.section)}_${slug(current.ordinal)}`;
-      criteria.push({
+      const criterion = {
         id: `${base}_${digest(text).slice(0, 8)}`,
         text,
         line: current.line,
         section: current.section,
-      });
+      };
+      criteria.push(criterion);
+      ranges.push({ id: criterion.id, first: current.line, last: current.last });
     } else if (text) excluded.push({ line: current.line, text, reason: 'explicitly_illustrative' });
     current = undefined;
   };
@@ -71,10 +69,14 @@ export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
     const raw = lines[index];
     const trimmed = raw.trim();
     if (/^(?:```|~~~)/.test(trimmed)) {
+      if (current) current.last = index + 1;
       inFence = !inFence;
       continue;
     }
-    if (inFence) continue;
+    if (inFence) {
+      if (current) current.last = index + 1;
+      continue;
+    }
     const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed);
     if (heading) {
       flush();
@@ -96,19 +98,38 @@ export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
       current = {
         ordinal: numbered ? numbered[1] : named![1],
         line: index + 1,
+        last: index + 1,
         text: numbered ? numbered[2] : `${named![1]}: ${named![2]}`,
         section: section.title,
       };
       continue;
     }
-    if (current && trimmed && !/^[-*+]\s+|^\d+[.)]\s+/.test(trimmed)) {
-      current.text += ` ${trimmed}`;
+    if (current && trimmed) {
+      current.last = index + 1;
+      if (!/^[-*+]\s+|^\d+[.)]\s+/.test(trimmed)) current.text += ` ${trimmed}`;
     } else if (!trimmed) {
       flush();
     }
   }
   flush();
-  return { version: 1, briefDigest: digest(brief), criteria, ...(excluded.length ? { excluded } : {}) };
+  const artifact: BriefCriteriaArtifact = { version: 1, briefDigest: digest(brief), criteria, ...(excluded.length ? { excluded } : {}) };
+  return { artifact, ranges };
+}
+
+export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
+  return scanBriefCriteria(brief).artifact;
+}
+
+/** Project the contract without rewriting its criteria or surrounding context.
+ * Original headings, ordinals and text keep the selected canonical IDs stable. */
+export function scopeBriefCriteria(brief: string, criterionRefs: readonly string[]): string {
+  const refs = new Set(criterionRefs);
+  const removed = new Set<number>();
+  for (const range of scanBriefCriteria(brief).ranges) {
+    if (refs.has(range.id)) continue;
+    for (let line = range.first; line <= range.last; line++) removed.add(line);
+  }
+  return brief.split('\n').filter((_line, index) => !removed.has(index + 1)).join('\n');
 }
 
 export function writeBriefCriteriaArtifact(runDir: string, brief: string): BriefCriteriaArtifact {

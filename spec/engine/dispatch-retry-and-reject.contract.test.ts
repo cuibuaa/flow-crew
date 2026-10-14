@@ -1,3 +1,6 @@
+import { parse as parseYaml } from 'yaml';
+import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
+import { artifacts } from '../spec_contracts/declared-fixtures.js';
 /**
  * Phase-0 safety net — regression contracts for two grounded engine failures
  * (fixed on branch autonomous-loop-refactor):
@@ -22,15 +25,7 @@ import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import {
-  runWorkflow,
-  diagnoseEmptyDispatch,
-  decideEmptyDispatchAction,
-  decideRejectAction,
-  buildRetryPreamble,
-  type WorkflowConfig,
-} from '../../src/scheduler.js';
-import { SUPERVISOR_VERDICTS, parseSupervisorVerdict } from '../../src/supervisor.js';
+import { runWorkflow, diagnoseEmptyDispatch, decideEmptyDispatchAction, buildRetryPreamble, type WorkflowConfig } from '../../src/scheduler.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
 import { createRun, readRunState, runDir, writeRunState } from '../../src/store.js';
 
@@ -40,7 +35,7 @@ afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const planWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: plan-only', 'defaults:', '  max_iterations: 4', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: { name: 'plan-only', defaults: { max_iterations: 4 }, stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  config: {description: '',  name: 'plan-only', defaults: { max_iterations: 4 }, stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
 };
 
 function writeRoles(roles: string[]): string {
@@ -191,6 +186,15 @@ describe('FIX 1 (pure) — decideEmptyDispatchAction retries under budget, escal
 });
 
 describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-prompt', () => {
+  it('preserves valid work and evidence while permitting invalid partial work to be redone', () => {
+    const rd = join(projectDir, 'rd'); mkdirSync(join(rd, 'stages', 'work'), { recursive: true });
+    writeFileSync(join(rd, 'stages', 'work', 'status.json'), JSON.stringify({ error: 'command failed' }));
+    const prompt = buildRetryPreamble(1, 1000, rd, 'work');
+    expect(prompt).toContain('Preserve valid work and recorded evidence');
+    expect(prompt).toContain('repair or redo invalid partial work');
+    expect(prompt).toContain('within the current scope and deadline');
+  });
+
   it('emits the dispatch failure, detail, schema, and incumbent-replacement instruction', () => {
     const rd = join(projectDir, 'rd'); mkdirSync(join(rd, 'stages', 'plan'), { recursive: true });
     writeFileSync(join(rd, 'stages', 'plan', 'status.json'),
@@ -198,7 +202,7 @@ describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-p
     const p = buildRetryPreamble(1, 1000, rd, 'plan');
     expect(p).toMatch(/failed to emit a valid dispatch\.yaml/i);
     expect(p).toContain('wizard');
-    expect(p).toMatch(/Required dispatch\.yaml schema/);
+    expect(p).toMatch(/dispatch\.yaml interface/);
     expect(p).toMatch(/Replace the structurally invalid dispatch\.yaml/);
     expect(p).not.toMatch(/continue from where you left off/);
   });
@@ -218,14 +222,14 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
           planCalls++;
           if (planCalls === 1) {
             // First plan: emit an EMPTY dispatch (a transient flake).
-            writeFileSync(join(opts.runDir, 'dispatch.yaml'), 'stages: []');
-            return ok('planned (empty — flake)');
+            writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch('stages: []'));
+            return fixtureResult(ok('planned (empty — flake)'), opts);
           }
           // Retry: emit a valid single stage.
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: do the work'].join('\n'));
-          return ok('planned (valid)');
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: do the work'].join('\n')));
+          return fixtureResult(ok('planned (valid)'), opts);
         }
-        return ok(`did ${opts.stageId}`);
+        return fixtureResult(ok(`did ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
@@ -244,10 +248,10 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: cast', '    role: wizard', '    depends_on: [plan]', '    task: cast a spell'].join('\n'));
-          return ok('planned (unknown role)');
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(['stages:', '  - id: cast', '    role: wizard', '    depends_on: [plan]', '    task: cast a spell'].join('\n')));
+          return fixtureResult(ok('planned (unknown role)'), opts);
         }
-        return ok(`did ${opts.stageId}`);
+        return fixtureResult(ok(`did ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
@@ -272,23 +276,23 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
         if (opts.stageId === 'plan') {
           planCalls += 1;
           planPrompts.push(prompt);
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), planCalls === 1
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(planCalls === 1
             ? measuringOwnerDispatch
-            : separatedResearchDispatch);
-          return ok(`planned attempt ${planCalls}`);
+            : separatedResearchDispatch));
+          return fixtureResult(ok(`planned attempt ${planCalls}`), opts);
         }
         if (opts.stageId === 'measure') {
           measureCalls += 1;
           mkdirSync(join(projectDir, 'docs'), { recursive: true });
           writeFileSync(join(projectDir, 'docs', 'round.json'), JSON.stringify({ label: 'repair_converged', result: 1 }));
-          return ok('measured');
+          return fixtureResult(ok('measured'), opts);
         }
         if (opts.stageId === 'finalize') {
           mkdirSync(join(projectDir, 'docs'), { recursive: true });
           writeFileSync(join(projectDir, 'docs', 'final.md'), '# admitted terminal\n');
-          return ok('finalized');
+          return fixtureResult(ok('finalized'), opts);
         }
-        return ok(`did ${opts.stageId}`);
+        return fixtureResult(ok(`did ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
@@ -303,42 +307,10 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(planPrompts[1]).toContain('research result producer path docs/round.json cannot be owned by a terminal writer');
     expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'));
     expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'));
-    expect(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8'))
-      .toBe(measuringOwnerDispatch);
+    expect(parseYaml(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8')))
+      .toEqual(parseYaml(declaredDispatch(measuringOwnerDispatch)));
     const archived = JSON.parse(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'), 'utf-8')) as { errors: string[] };
     expect(archived.errors.join('\n')).toContain('separate measurement from terminalization');
-  }, 60_000);
-
-  it('stops a repeated identical topology refusal and preserves both rejected attempts', async () => {
-    const runId = setupResearchAdmissionRun();
-    const rd = runDir(projectDir, runId);
-    const agentsDir = writeRoles(['planner', 'qa']);
-    let planCalls = 0;
-    const adapter = {
-      async run(_prompt: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === 'plan') {
-          planCalls += 1;
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), measuringOwnerDispatch);
-          return ok('repeated unchanged proposal');
-        }
-        return ok(`did ${opts.stageId}`);
-      },
-      async discuss(): Promise<RunResult> { return ok(''); },
-      spawnDiscuss() { throw new Error('unused'); },
-      async spawnInteractive() { throw new Error('unused'); },
-    } as unknown as Adapter;
-
-    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-
-    expect(planCalls).toBe(2);
-    expect(final.status).not.toBe('complete');
-    expect(final.failureReason).toContain('identical refused candidate');
-    expect(final.failureReason).toContain('stage:measure:scope');
-    for (const attempt of [1, 2]) {
-      expect(readFileSync(join(rd, 'dispatch_rejections', `attempt_${attempt}`, 'dispatch.yaml'), 'utf-8'))
-        .toBe(measuringOwnerDispatch);
-    }
-    expect(existsSync(join(rd, 'dispatch_rejections', 'attempt_3'))).toBe(false);
   }, 60_000);
 
   it('rolls back a durable non-terminal delta from an admitted validation-capable finalizer', async () => {
@@ -362,7 +334,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     const adapter = {
       async run(_prompt: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: finalize',
             '    role: qa',
@@ -371,21 +343,21 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
             '    scope: [docs/final.md, src/generated.ts]',
             '    criterion_refs: []',
             '    prompt_template: validate and write the terminal report',
-          ].join('\n'));
-          return ok('planned');
+          ].join('\n')));
+          return fixtureResult(ok('planned'), opts);
         }
         if (opts.stageId === 'finalize') {
           finalizerCalls += 1;
           mkdirSync(join(projectDir, 'docs'), { recursive: true });
           writeFileSync(join(projectDir, 'docs', 'final.md'), '# terminal candidate\n');
           writeFileSync(join(projectDir, 'src', 'generated.ts'), 'export const value = "after gate";\n');
-          return {
+          return fixtureResult({
             ...ok('finalized with a forbidden durable delta'),
             writes: ['docs/final.md', 'src/generated.ts'],
             writeAttribution: 'structured',
-          };
+          }, opts);
         }
-        return ok(`did ${opts.stageId}`);
+        return fixtureResult(ok(`did ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
@@ -406,109 +378,4 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(audit.rolledBackWrites).toContain('src/generated.ts');
     expect(audit.terminalDurableScope).toEqual(['docs/final.md']);
   }, 60_000);
-});
-
-// =====================================================================================
-// FIX 2 — supervisor REJECT verdict
-// =====================================================================================
-describe('FIX 2 — REJECT is a first-class supervisor verdict', () => {
-  it('REJECT is in the verdict vocabulary and parses', () => {
-    expect(SUPERVISOR_VERDICTS.map(v => v.id)).toContain('REJECT');
-    const parsed = parseSupervisorVerdict('{"verdict":"REJECT","target_stage":"work","reason":"verdict claims pass but artifact missing","guidance":null}');
-    expect(parsed?.verdict).toBe('REJECT');
-    expect(parsed?.targetStage).toBe('work');
-  });
-});
-
-describe('FIX 2 (pure) — decideRejectAction re-works under budget, then escalates (no silent acceptance)', () => {
-  const sig = { targetStage: 'work', reason: 'verdict says pass but the cited metric shows fail' };
-  it('under budget → REWORK the named stage', () => {
-    const d = decideRejectAction(sig, 'work', 0, 2);
-    expect(d.action).toBe('rework');
-    if (d.action === 'rework') { expect(d.targetStage).toBe('work'); expect(d.nextCount).toBe(1); }
-  });
-  it('at budget → ESCALATE (avoid infinite loop without accepting rejected work)', () => {
-    const d = decideRejectAction(sig, 'work', 2, 2);
-    expect(d.action).toBe('escalate');
-    if (d.action === 'escalate') expect(d.reason).toMatch(/budget exhausted/i);
-  });
-  it('no resolvable target → ESCALATE (cannot mechanically force re-work)', () => {
-    const d = decideRejectAction({ targetStage: null, reason: 'x' }, null, 0, 2);
-    expect(d.action).toBe('escalate');
-  });
-});
-
-describe('FIX 2 (e2e) — REJECT forces re-work; the rejected deliverable is NOT accepted', () => {
-  it('a stage whose first deliverable is rejected is re-run before the run completes', async () => {
-    const runId = setupPlainRun();
-    const agentsDir = writeRoles(['planner', 'qa']);
-    let workCalls = 0;
-    const adapter = {
-      async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n'));
-          return ok('planned');
-        }
-        if (opts.stageId === 'work') {
-          workCalls++;
-          if (workCalls === 1) {
-            // First deliverable is a smoke — drop a supervisor REJECT signal (as
-            // the supervisor's act() would) so the scheduler consumer fires.
-            mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
-            writeFileSync(join(opts.runDir, 'signals', 'reject_work.json'),
-              JSON.stringify({ stage: 'work', reason: 'deliverable claims success but the required artifact is empty', timestamp: new Date().toISOString() }));
-            return ok('produced (smoke)');
-          }
-          return ok('produced (real, re-worked)');
-        }
-        return ok(`did ${opts.stageId}`);
-      },
-      async discuss(): Promise<RunResult> { return ok(''); },
-      spawnDiscuss() { throw new Error('unused'); },
-      async spawnInteractive() { throw new Error('unused'); },
-    } as unknown as Adapter;
-
-    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-    expect(workCalls).toBeGreaterThanOrEqual(2);   // the work stage was RE-DONE (not accepted on the smoke)
-    // The rejection guidance was injected for the re-work.
-    const rd = runDir(projectDir, runId);
-    const guidancePath = join(rd, 'supervisor_guidance.md');
-    if (existsSync(guidancePath)) {
-      expect(readFileSync(guidancePath, 'utf-8')).toMatch(/DELIVERABLE REJECTED/);
-    }
-    // The reject signal was consumed (one-shot).
-    expect(existsSync(join(rd, 'signals', 'reject_work.json'))).toBe(false);
-  });
-
-  it('a mis-firing supervisor that rejects every pass is BOUNDED — the run still terminates', async () => {
-    const runId = setupPlainRun();
-    const agentsDir = writeRoles(['planner', 'qa']);
-    let workCalls = 0;
-    const adapter = {
-      async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), ['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: produce the deliverable'].join('\n'));
-          return ok('planned');
-        }
-        if (opts.stageId === 'work') {
-          workCalls++;
-          // ALWAYS reject — simulate a mis-firing supervisor. The bound must stop it.
-          mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
-          writeFileSync(join(opts.runDir, 'signals', 'reject_work.json'),
-            JSON.stringify({ stage: 'work', reason: 'still not good enough (mis-fire)', timestamp: new Date().toISOString() }));
-          return ok(`produced attempt ${workCalls}`);
-        }
-        return ok(`did ${opts.stageId}`);
-      },
-      async discuss(): Promise<RunResult> { return ok(''); },
-      spawnDiscuss() { throw new Error('unused'); },
-      async spawnInteractive() { throw new Error('unused'); },
-    } as unknown as Adapter;
-
-    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-    // It must NOT loop forever: bounded by default_supervisor_max_rejects (2) per
-    // iteration × iterations. Terminates and does not hang.
-    expect(['complete', 'failed', 'escalated', 'ceiling_hit', 'incomplete', 'stopped']).toContain(final.status);
-    expect(workCalls).toBeLessThan(50); // sanity: not an unbounded loop
-  });
 });

@@ -79,11 +79,10 @@ function p11Preflight(
         fingerprint: "terminal-states-missing",
         level: "warn",
         message: "Terminal contract warning is visible",
-        acknowledgementRequired: true,
+        consequential: true,
         risk: "Terminal artifact paths have no contract.",
         suggestion: "Review the intended terminal contract.",
       }],
-      requiresAcknowledgement: true,
       ...overrides,
     },
     receipt,
@@ -127,60 +126,45 @@ describe("dashboard truthfulness", () => {
     vi.clearAllMocks();
   });
 
-  it("keeps New Run writable and shows exact brief findings before a separately acknowledged start", async () => {
-    const checked = p11Preflight({
-      contractReady: false,
-      findings: [
-        {
-          code: "frontmatter_valid",
-          fingerprint: "frontmatter-valid",
-          level: "ok",
-          message: "Frontmatter parsed successfully",
-          acknowledgementRequired: false,
-        },
-        {
-          code: "criterion_instrument_wording",
-          fingerprint: "criterion-warning",
-          level: "warn",
-          message: "Criterion warning is visible",
-          acknowledgementRequired: true,
-        },
-      ],
-    });
+  it.each([
+    { kind: "clean", brief: "# Clean brief", checked: p11Preflight({ findings: [] }),
+      messages: ["Preflight findings are advisory."] },
+    { kind: "warnings", brief: "# Exact brief\n", checked: p11Preflight({ contractReady: false, findings: [
+      { code: "frontmatter_valid", fingerprint: "frontmatter-valid", level: "ok",
+        message: "Frontmatter parsed successfully", consequential: false },
+      { code: "criterion_instrument_wording", fingerprint: "criterion-warning", level: "warn",
+        message: "Criterion warning is visible", consequential: true },
+    ] }), messages: ["Frontmatter parsed successfully", "Criterion warning is visible"] },
+    { kind: "invalid YAML", brief: "---\ninvalid: [", checked: p11Preflight({
+      frontmatter: { status: "invalid", error: "Malformed YAML" }, contractReady: false,
+      findings: [{ code: "frontmatter_invalid", fingerprint: "frontmatter-invalid", level: "fail",
+        message: "Frontmatter parsing failed", consequential: true }],
+    }), messages: ["Frontmatter parsing failed", "invalid"] },
+  ])("shows $kind findings before an explicit start with the exact brief and receipt", async ({ brief, checked, messages }) => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(checked), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
+      status: 200, headers: { "Content-Type": "application/json" },
     }));
     vi.stubGlobal("fetch", fetchMock);
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<NewRunModal open campaigns={[]} onClose={() => {}} onSubmit={onSubmit} />);
-
     const textarea = screen.getByLabelText("Brief content");
-    fireEvent.change(textarea, { target: { value: "# Exact brief\n" } });
-    expect(textarea).toHaveValue("# Exact brief\n");
+    fireEvent.change(textarea, { target: { value: brief } });
+    expect(textarea).toHaveValue(brief);
     submitNewRunModal();
-
     expect(await screen.findByRole("region", { name: "Brief preflight result" })).toBeInTheDocument();
-    expect(screen.getByText("Frontmatter parsed successfully")).toBeInTheDocument();
-    expect(screen.getByText("Criterion warning is visible")).toBeInTheDocument();
+    for (const message of messages) expect(screen.getByText(message)).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Start run" })).toBeDisabled();
-
-    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed these warnings/i }));
+    expect(screen.getByRole("button", { name: "Start run" })).toBeEnabled();
     submitNewRunModal();
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ brief: "# Exact brief\n" }),
-      {
-        briefPreflightDigest: checked.report.digest,
-        briefPreflightReceipt: checked.receipt,
-        acknowledgeBriefWarnings: true,
-      },
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ brief }),
+      { briefPreflightDigest: checked.report.digest, briefPreflightReceipt: checked.receipt },
     ));
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ brief: "# Exact brief\n" });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ brief });
   });
 
-  it("invalidates the report, receipt, and acknowledgement after any brief edit", async () => {
+  it("invalidates the report and receipt after any brief edit", async () => {
     const checked = p11Preflight();
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(checked), {
       status: 200,
@@ -191,73 +175,15 @@ describe("dashboard truthfulness", () => {
     const textarea = screen.getByLabelText("Brief content");
     fireEvent.change(textarea, { target: { value: "# Before" } });
     submitNewRunModal();
-    const acknowledgement = await screen.findByRole("checkbox", { name: /reviewed these warnings/i });
-    fireEvent.click(acknowledgement);
-    expect(acknowledgement).toBeChecked();
+    expect(await screen.findByRole("region", { name: "Brief preflight result" })).toBeInTheDocument();
 
     fireEvent.change(textarea, { target: { value: "# Before\n" } });
     expect(screen.queryByRole("region", { name: "Brief preflight result" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: /reviewed these warnings/i })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Check brief" })).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("still requires a separate Start action for a clean report without a warning checkbox", async () => {
-    const checked = p11Preflight({ findings: [], requiresAcknowledgement: false });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(checked), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    })));
-    const onSubmit = vi.fn().mockResolvedValue(undefined);
-    render(<NewRunModal open campaigns={[]} onClose={() => {}} onSubmit={onSubmit} />);
-    fireEvent.change(screen.getByLabelText("Brief content"), { target: { value: "# Clean brief" } });
-
-    submitNewRunModal();
-    expect(await screen.findByText("No consequential findings require acknowledgement.")).toBeInTheDocument();
-    expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.queryByRole("checkbox", { name: /reviewed these warnings/i })).not.toBeInTheDocument();
-    submitNewRunModal();
-
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ brief: "# Clean brief" }),
-      {
-        briefPreflightDigest: checked.report.digest,
-        briefPreflightReceipt: checked.receipt,
-      },
-    ));
-  });
-
-  it("allows malformed YAML only after its failure is visible and explicitly acknowledged", async () => {
-    const checked = p11Preflight({
-      frontmatter: { status: "invalid", error: "Malformed YAML" },
-      contractReady: false,
-      findings: [{
-        code: "frontmatter_invalid",
-        fingerprint: "frontmatter-invalid",
-        level: "fail",
-        message: "Frontmatter parsing failed",
-        acknowledgementRequired: true,
-      }],
-      requiresAcknowledgement: true,
-    });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(checked), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    })));
-    const onSubmit = vi.fn().mockResolvedValue(undefined);
-    render(<NewRunModal open campaigns={[]} onClose={() => {}} onSubmit={onSubmit} />);
-    fireEvent.change(screen.getByLabelText("Brief content"), { target: { value: "---\ninvalid: [" } });
-    submitNewRunModal();
-
-    expect(await screen.findByText("Frontmatter parsing failed")).toBeInTheDocument();
-    expect(screen.getByText("invalid")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start run" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed these warnings/i }));
-    submitNewRunModal();
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-  });
-
-  it("refreshes a server-side admission 409 and keeps New Run open for a new acknowledgement", async () => {
+  it("refreshes a server-side admission 409 and keeps New Run open for a new launch decision", async () => {
     const first = p11Preflight({
       digest: "1".repeat(64),
       findings: [{
@@ -265,7 +191,7 @@ describe("dashboard truthfulness", () => {
         fingerprint: "terminal-states-missing",
         level: "warn",
         message: "Initial warning",
-        acknowledgementRequired: true,
+        consequential: true,
       }],
     }, "2".repeat(64));
     const refreshed = p11Preflight({
@@ -275,7 +201,7 @@ describe("dashboard truthfulness", () => {
         fingerprint: "criterion-warning",
         level: "warn",
         message: "Refreshed warning",
-        acknowledgementRequired: true,
+        consequential: true,
       }],
     }, "4".repeat(64));
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(first), {
@@ -288,23 +214,19 @@ describe("dashboard truthfulness", () => {
     render(<NewRunModal open campaigns={[]} onClose={() => {}} onSubmit={onSubmit} />);
     fireEvent.change(screen.getByLabelText("Brief content"), { target: { value: "# Brief" } });
     submitNewRunModal();
-    fireEvent.click(await screen.findByRole("checkbox", { name: /reviewed these warnings/i }));
+    expect(await screen.findByText("Initial warning")).toBeInTheDocument();
     submitNewRunModal();
 
     expect(await screen.findByText("Refreshed warning")).toBeInTheDocument();
     expect(screen.getByTestId("new-run-modal")).toHaveTextContent("+ New Run");
     expect(screen.getByRole("alert")).toHaveTextContent("Brief changed on the server");
-    const refreshedCheckbox = screen.getByRole("checkbox", { name: /reviewed these warnings/i });
-    expect(refreshedCheckbox).not.toBeChecked();
-    expect(screen.getByRole("button", { name: "Start run" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Start run" })).toBeEnabled();
 
-    fireEvent.click(refreshedCheckbox);
     submitNewRunModal();
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
     expect(onSubmit.mock.calls[1][1]).toEqual({
       briefPreflightDigest: refreshed.report.digest,
       briefPreflightReceipt: refreshed.receipt,
-      acknowledgeBriefWarnings: true,
     });
   });
 
@@ -317,7 +239,7 @@ describe("dashboard truthfulness", () => {
     expect(screen.getByLabelText("Brief content")).not.toHaveAttribute("readonly");
   });
 
-  it("shows an Inbox resume 409 and retries the unperformed decision only after acknowledgement", async () => {
+  it("shows an Inbox resume 409 and retries the unperformed decision with the exact receipt", async () => {
     const approval: InboxItem = {
       runId: "run-admission",
       projectDir: "/tmp/project",
@@ -327,7 +249,6 @@ describe("dashboard truthfulness", () => {
       title: "Deploy safely",
       createdAt: "2026-08-03T00:00:00.000Z",
       state: "pending",
-      standingRuleEligible: { ok: true },
     };
     const overview = (items: InboxItem[]): InboxOverview => ({
       approvals: { status: "complete", items },
@@ -343,7 +264,7 @@ describe("dashboard truthfulness", () => {
         fingerprint: "terminal-states-missing",
         level: "warn",
         message: "Resume warning",
-        acknowledgementRequired: true,
+        consequential: true,
       }],
     }, "6".repeat(64));
     const loadOverview = vi.fn()
@@ -351,10 +272,10 @@ describe("dashboard truthfulness", () => {
       .mockResolvedValue(overview([]));
     const resolveItem = vi.fn()
       .mockRejectedValueOnce(new BriefAdmissionRequestError("Resume brief review required", 409, review))
-      .mockResolvedValueOnce({ ok: true, won: true, resumed: true });
+      .mockResolvedValueOnce({ ok: true, won: true, resumeRegistered: true });
     render(
       <MemoryRouter>
-        <Inbox loadOverview={loadOverview} resolveItem={resolveItem} />
+        <><Inbox loadOverview={loadOverview} resolveItem={resolveItem} /><ToastContainer /></>
       </MemoryRouter>,
     );
     fireEvent.click(await screen.findByRole("button", { name: "Approve and resume" }));
@@ -362,12 +283,12 @@ describe("dashboard truthfulness", () => {
     expect(await screen.findByText("Resume warning")).toBeInTheDocument();
     expect(screen.getByText("Resume brief review required")).toBeInTheDocument();
     const continueButton = screen.getByRole("button", { name: "Continue decision and resume" });
-    expect(continueButton).toBeDisabled();
+    expect(continueButton).toBeEnabled();
     expect(resolveItem).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed these warnings/i }));
     fireEvent.click(continueButton);
     await waitFor(() => expect(resolveItem).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/Request approved; resume queued/i)).toBeInTheDocument();
     expect(resolveItem.mock.calls[1]).toEqual([
       approval.runId,
       approval.requestId,
@@ -375,7 +296,6 @@ describe("dashboard truthfulness", () => {
         decision: "approve",
         briefPreflightDigest: review.report.digest,
         briefPreflightReceipt: review.receipt,
-        acknowledgeBriefWarnings: true,
       },
     ]);
   });
@@ -481,7 +401,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "parked",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -499,7 +418,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "awaiting_approval",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -661,7 +579,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "running",
       stages: [{ id: "implement", role: "coder", depends_on: [], status: "running", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -710,7 +627,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "complete",
       stages: [{ id: "verify", role: "qa", depends_on: [], status: "complete", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -731,7 +647,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "running",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -767,7 +682,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "complete",
       stages: [{ id: "verify", role: "qa", depends_on: [], status: "complete", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -794,7 +708,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "failed",
       stages: [{ id: "verify", role: "qa", depends_on: [], status: "failed", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -815,7 +728,6 @@ describe("dashboard truthfulness", () => {
       status: "reality_gate_failed",
       failureReason: "Reality gate blocked: required-build-proof",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
       realityGate: {
@@ -880,7 +792,6 @@ describe("dashboard truthfulness", () => {
       startedAt: "2026-08-01T00:00:00.000Z",
       completedAt: "2026-08-01T00:01:00.000Z",
       stages: [],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: {},
     };
@@ -901,7 +812,6 @@ describe("dashboard truthfulness", () => {
       workflowName: "default",
       status: "incomplete",
       stages: [{ id: "research", role: "researcher", depends_on: [], status: "complete", retries: 0 }],
-      kg: { nodes: [], edges: [] },
       events: [],
       stage_outputs: { research: "useful partial result" },
     };

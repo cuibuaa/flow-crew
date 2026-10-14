@@ -2,6 +2,10 @@ export interface CheckContext {
   taskDir: string;
   projectDir: string;
   briefPath?: string;
+  /** Runtime input capability, supplied only by runAllChecks. */
+  declaredReads?: import('../artifact-declarations.js').ArtifactRead[];
+  /** Runtime authority rebuilt by the parent, never read from check params. */
+  commandBoundary?: import('../engine-integrity.js').EngineExecution;
 }
 
 export interface CheckResult {
@@ -20,6 +24,8 @@ export interface RealityCheck {
 }
 
 interface ValidCheckDecl {
+  /** Mandatory for newly submitted checks; optional only to describe archived records. */
+  reads?: import('../artifact-declarations.js').ArtifactRead[];
   kind?: 'check';
   name: string;
   type: string;

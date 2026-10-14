@@ -1,6 +1,7 @@
 import { realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
-import { isTerminalRunStatus } from './store.js';
+import { basename, isAbsolute, resolve } from 'node:path';
+import { within } from './source_services/cli-inputs.js';
+import { isTerminalRunStatus, terminalArtifactSnapshotName } from './store.js';
 
 export interface TerminalArtifactStatusMismatch {
   lifecycleStatus: string;
@@ -30,22 +31,19 @@ function matchingStatusesForArtifact(
   terminalArtifact: string,
 ): Set<string> {
   const matchingStatuses = new Set<string>();
+  const exactStatuses = new Set<string>();
   for (const [status, rawEntry] of Object.entries(terminalStates)) {
     if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) continue;
     const paths = (rawEntry as { paths?: unknown }).paths;
     if (!Array.isArray(paths)) continue;
+    if (paths.includes(terminalArtifact)) exactStatuses.add(status);
     if (paths.some((path) => typeof path === 'string'
       && path.length > 0
       && basename(path) === terminalArtifact)) {
       matchingStatuses.add(status);
     }
   }
-  return matchingStatuses;
-}
-
-function within(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  return exactStatuses.size > 0 ? exactStatuses : matchingStatuses;
 }
 
 function safeDeclaredCandidate(root: string, declaredPath: string): string | undefined {
@@ -130,7 +128,7 @@ function discoverFreshTerminalArtifact(
         if (projectCandidate) candidates.push({ path: projectCandidate, root: projectDir });
       }
       if (evidence.runDir) {
-        const snapshot = safeDeclaredCandidate(evidence.runDir, `terminal_${basename(rawPath)}`);
+        const snapshot = safeDeclaredCandidate(evidence.runDir, terminalArtifactSnapshotName(rawPath));
         if (snapshot) candidates.push({ path: snapshot, root: evidence.runDir });
       }
       if (!candidates.some((candidate) => {
@@ -141,7 +139,7 @@ function discoverFreshTerminalArtifact(
       }
       fresh.set(`${terminalStatus}\0${rawPath}`, {
         terminalStatus,
-        terminalArtifact: basename(rawPath),
+        terminalArtifact: rawPath,
       });
     }
   }

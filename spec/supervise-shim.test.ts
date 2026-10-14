@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
@@ -8,13 +8,14 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { constants, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NodeSystemd } from '../src/orchestrator.js';
 import { isCancellationResult } from '../src/cancellation-client.js';
 import { processIsAlive, processStartToken, processStartTokensMatch } from '../src/run-lock.js';
@@ -27,6 +28,7 @@ import {
   readSupervisionRunning,
   runningRecordBindingStatus,
   supervisionPaths,
+  readSupervisionLaunch,
   type SupervisionLaunchRecord,
   type SupervisionRunningRecord,
 } from '../src/supervision.js';
@@ -52,6 +54,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (parent?.exitCode === null) parent.kill('SIGKILL');
   parent = undefined;
   await stopOwnedSupervision(root);
@@ -113,8 +116,10 @@ describe('durable portable supervision shim', () => {
     const unit = 'launch-refusal.service';
     const refusal = 'Launch refused: research.stop.max_rounds (8 rounds) exceeds the engine limit (5 iterations).';
     const supervisionModule = pathToFileURL(join(repositoryRoot, 'dist', 'supervision.js')).href;
+    const leaked = join(root, 'grandchild-env.txt');
     const source = [
       `import(${JSON.stringify(supervisionModule)}).then(({ recordLaunchRefusal }) => {`,
+      `  require('node:child_process').spawnSync(process.execPath, ['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(leaked)}, String(process.env.FLOWCREW_LAUNCH_RESULT_PATH))`)}]);`,
       `  recordLaunchRefusal(${JSON.stringify(refusal)});`,
       '  process.exit(2);',
       '});',
@@ -138,6 +143,8 @@ describe('durable portable supervision shim', () => {
       normalized: 2,
       launchRefusal: { version: 1, kind: 'launch_refused', message: refusal },
     });
+    // The private launch-result channel is consumed by the direct child and never inherited further.
+    expect(readFileSync(leaked, 'utf8')).toBe('undefined');
   });
 
   it('lets a live systemd unit veto stale running evidence when exit.json is absent', async () => {
@@ -222,7 +229,12 @@ describe('durable portable supervision shim', () => {
       '});',
       'descendant.once("error", (error) => { throw error; });',
     ].join('\n');
-    const backend = new NodeSystemd(root, { shellPath: '/bin/sh', shutdownGraceMs: 2_500 });
+    // Use the production shim so TypeScript bootstrap cannot consume the
+    // manager's 5 s launch timeout before the intentional 2.5 s shutdown grace.
+    const backend = new NodeSystemd(root, {
+      shellPath: '/bin/sh', shutdownGraceMs: 2_500,
+      shimPath: join(repositoryRoot, 'dist', 'supervise-shim.js'),
+    });
     let descendantPid: number | undefined;
     try {
       await backend.runUnit({
@@ -254,12 +266,19 @@ describe('durable portable supervision shim', () => {
     }
   });
 
-  it('makes stale running evidence a non-retrying cancellation outcome unknown', async () => {
+  it('closes operator cancellation while preserving unknown agent fate and refusing unbound signals', async () => {
     const registry = new TaskRegistry({ baseDir: root });
+    const runId = 'lost-shim-run';
+    const runPath = join(root, 'runs', runId);
+    mkdirSync(runPath, { recursive: true });
+    atomicWriteJson(join(runPath, 'run.json'), {
+      runId, projectDir: root, status: 'running', stages: { work: { status: 'running', retries: 0 } },
+    });
     const task = registry.create({
       brief_text: 'terminal unknown cancellation fixture',
       projectDir: root,
       status: TASK_STATUS.RUNNING,
+      run_id: runId,
     });
     const backend = new NodeSystemd(root, { shellPath: '/bin/sh' });
     await backend.runUnit({
@@ -276,25 +295,30 @@ describe('durable portable supervision shim', () => {
     const coordinator = new RunCancellationCoordinator({
       registry,
       units: backend,
+      runsDir: join(root, 'runs'),
       timeoutMs: 0,
       signalGraceMs: 0,
     });
+    const signals = vi.spyOn(process, 'kill');
 
     const result = await coordinator.cancelTask(task.id);
 
     expect(result).toMatchObject({
-      ok: false,
-      status: 'outcome-unknown',
+      ok: true,
+      status: 'cancelled',
       observation: {
-        unitState: { kind: 'terminal-unknown', reason: 'shim-died-without-status' },
+        unitState: { kind: 'unobservable', reason: 'shim died while its agent or command group may still be running' },
       },
     });
     expect(result.message).toContain('may still be running');
-    expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.STUCK });
-    expect(registry.get(task.id)?.cancellation_unobservable_count).toBeUndefined();
+    expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLED, completed_at: expect.any(String) });
+    expect(JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf8'))).toMatchObject({
+      status: 'stopped', stages: { work: { status: 'failed' } },
+    });
+    expect(signals.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([]);
     expect(processIsAlive(running.agentPid)).toBe(true);
     expect(isCancellationResult(result, { taskId: task.id })).toBe(true);
-    expect(isCancellationResult({ ...result, ok: true, status: 'cancelled' }, { taskId: task.id })).toBe(false);
+    expect(isCancellationResult({ ...result, ok: true, status: 'cancelling' }, { taskId: task.id })).toBe(false);
   });
 
   it('persists an asynchronous shim launcher ENOENT without crashing the owner', async () => {
@@ -349,10 +373,10 @@ describe('durable portable supervision shim', () => {
       const status = await waitForStatus(
         backend,
         unit,
-        (candidate) => candidate.kind === 'terminal-unknown',
+        (candidate) => candidate.kind === 'unobservable',
       );
 
-      expect(status).toEqual({ kind: 'terminal-unknown', reason: 'never-started' });
+      expect(status).toEqual({ kind: 'unobservable', reason: 'launch has no published process identity or exit status' });
       expect(existsSync(supervisionPaths(root, unit).exit)).toBe(false);
       expect(processIsAlive(parsedPid)).toBe(true);
     } finally {
@@ -541,19 +565,71 @@ function linkFirstAvailable(targetDir: string, name: string, candidates: string[
   symlinkSync(source, join(targetDir, name));
 }
 
-describe('the agent runs under a login shell', () => {
-  // v0.6.0 shipped `-c` instead of `-lc`. The systemd user manager's PATH does
-  // not include nvm or ~/.local/bin, so every launch failed with "No adapter
-  // CLI is installed or visible on PATH" on a machine where codex was plainly
-  // installed. Three CI axes missed it because a runner's PATH is already
-  // complete — so this asserts the flag, which is the thing that actually
-  // differs, rather than trying to reproduce an incomplete PATH.
-  it('passes -lc so the login profile is sourced', () => {
-    const source = readFileSync(
-      new URL('../src/supervise-shim.ts', import.meta.url),
-      'utf-8',
-    );
-    expect(source).toContain("spawn(launch.shellPath, ['-lc', launch.command]");
-    expect(source).not.toContain("spawn(launch.shellPath, ['-c', launch.command]");
+describe('daemon environment inheritance', () => {
+  const unitEnvironmentKeys = [
+    'INVOCATION_ID', 'NOTIFY_SOCKET', 'JOURNAL_STREAM', 'MANAGERPID', 'SYSTEMD_EXEC_PID',
+    'LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES', 'WATCHDOG_PID', 'WATCHDOG_USEC',
+    'MEMORY_PRESSURE_WATCH', 'MEMORY_PRESSURE_WRITE',
+  ];
+  it.each(['systemd', 'fallback'])('preserves the entire daemon environment through %s', async route => {
+    const unit = `environment-${route}.service`;
+    const manager = join(bin, 'systemd-run');
+    writeFileSync(manager, route === 'fallback' ? '#!/bin/sh\nexit 1\n' : [
+      '#!/bin/sh',
+      // Model a manager with a different PATH, missing daemon variables, and
+      // extra variables. It launches the real shim, without passing caller env.
+      'while [ "$#" -gt 0 ]; do case "$1" in --*) shift;; *) break;; esac; done',
+      'exec /usr/bin/env -i PATH=/usr/bin:/bin INVOCATION_ID=manager SYSTEMD_ONLY=manager "$@"',
+      '',
+    ].join('\n'));
+    chmodSync(manager, 0o755);
+    writeFileSync(join(root, '.bash_profile'), 'export PATH=/profile-replaced\nexport FC_LOGIN_PROFILE=loaded\n');
+    const daemonEnv = {
+      HOME: root, FC_HOME: join(root, 'store'), XDG_RUNTIME_DIR: join(root, 'runtime'),
+      PATH: `${bin}:/usr/bin:/bin`, CONDA_PREFIX: join(root, 'conda'),
+      PYTHONPATH: join(root, 'python'), LD_LIBRARY_PATH: join(root, 'libraries'),
+      CUDA_VISIBLE_DEVICES: '0', FC_TEST_EMPTY: '',
+      FC_TEST_VALUE: 'spaces "quotes" \'apostrophes\' $HOME `commands` %specifiers%\nsecond line',
+      ...Object.fromEntries(unitEnvironmentKeys.map(key => [key, 'old-unit'])),
+    };
+    const supervisionModule = pathToFileURL(join(repositoryRoot, 'dist', 'supervision.js')).href;
+    // Import consumes the private launch receipt channel, just as the CLI does.
+    const probe = `import(${JSON.stringify(supervisionModule)}).then(()=>console.log(JSON.stringify(process.env)))`;
+    const command = shellJoin([process.execPath, '-e', probe]);
+    const launcher = `import(${JSON.stringify(pathToFileURL(distOrchestrator).href)}).then(async ({NodeSystemd})=>{
+      await new NodeSystemd(${JSON.stringify(root)}, {shellPath:'/bin/bash'}).runUnit({
+        unit:${JSON.stringify(unit)},workingDirectory:${JSON.stringify(root)},command:${JSON.stringify(command)}
+      });
+    })`;
+    parent = spawn(process.execPath, ['-e', launcher], {
+      cwd: root, stdio: 'ignore', env: { ...daemonEnv, HOME: root, FC_HOME: join(root, 'store') },
+    });
+    expect(await waitForChild(parent)).toBe(0);
+    const terminal = await waitForStatus(new NodeSystemd(root), unit, s => s.kind === 'terminal');
+    expect(terminal).toEqual({ kind: 'terminal', exitCode: 0 });
+    const paths = supervisionPaths(root, unit);
+    const actual = JSON.parse(readFileSync(paths.log, 'utf8'));
+    const expected: Record<string, string> = { ...daemonEnv };
+    for (const key of unitEnvironmentKeys) delete expected[key];
+    // Shell bookkeeping is process-local; PATH and all operator settings are exact.
+    expect(realpathSync(actual.PWD)).toBe(realpathSync(root)); // macOS: /var is a link to /private/var
+    for (const key of ['PWD', 'SHLVL', '_', '__CF_USER_TEXT_ENCODING']) { delete actual[key]; delete expected[key]; } // shell and macOS process bookkeeping
+    expect(actual).toEqual(expected);
+    expect(statSync(paths.launch).mode & 0o777).toBe(0o600);
+  });
+
+  it('rejects malformed persisted environments while accepting historical records', () => {
+    const paths = supervisionPaths(root, 'environment-record.service');
+    const record: SupervisionLaunchRecord = {
+      version: SUPERVISION_PROTOCOL_VERSION, unit: 'environment-record.service',
+      workingDirectory: root, command: 'true', nodePath: process.execPath,
+      shellPath: '/bin/sh', createdAt: new Date().toISOString(), shutdownGraceMs: 0,
+    };
+    atomicWriteJson(paths.launch, record);
+    expect(readSupervisionLaunch(paths.launch)).toEqual(record);
+    for (const environment of [null, [], 'bad', { PATH: 1 }]) {
+      atomicWriteJson(paths.launch, { ...record, environment });
+      expect(readSupervisionLaunch(paths.launch)).toBeUndefined();
+    }
   });
 });

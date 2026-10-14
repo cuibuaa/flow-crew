@@ -1,15 +1,10 @@
-import {
-  closeSync,
-  existsSync,
-  openSync,
-  readFileSync,
-  readSync,
-  statSync,
-} from 'node:fs';
+import { valueAfter } from './source_services/cli-inputs.js';
+import { closeSync, openSync } from './engine-fs.js';
+import { existsSync, readFileSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import {
-  defaultSocketPath,
+  commandSocketPath,
   rpcErrorExitCode,
   sendRpc,
   type RpcRequest,
@@ -64,11 +59,11 @@ export async function cmdTask(
     stdout.write(`${taskUsage(sub)}\n`);
     return 0;
   }
-  const socketPath = opts.socketPath ?? socketFromArgs(args);
+  try {
+  const socketPath = commandSocketPath(opts.socketPath ?? valueAfter(args, '--port') ?? valueAfter(args, '--socket'));
   const rpc = <T extends RpcResponse = RpcResponse>(request: RpcRequest) => (
     sendRpc<T>(socketPath, request, opts.rpcTimeoutMs)
   );
-  try {
     if (sub === 'list') {
       const status = valueAfter(args, '--status') as TaskListStatus | undefined;
       const limitRaw = valueAfter(args, '--limit');
@@ -112,10 +107,10 @@ export async function cmdTask(
       stdout.write(`Task #${id} cancelled\n`);
       return 0;
     }
-    if (sub === 'retry') {
+    if (sub === 'retry' || sub === 'resume') {
       const id = parseId(args[2]);
-      const res = await rpc<{ new_attempt: number; unit: string }>({ cmd: 'retry', id });
-      stdout.write(`Task #${id} retry queued after launch ${res.new_attempt}. Current unit: ${res.unit}\n`);
+      const res = await rpc<{ new_attempt: number; unit: string }>({ cmd: sub, id });
+      stdout.write(`Task #${id} ${sub} queued after launch ${res.new_attempt}. Current unit: ${res.unit}\n`);
       return 0;
     }
     if (sub === 'tail') {
@@ -158,7 +153,8 @@ export function taskUsage(subcommand?: string): string {
     '  list                Run, stage execution, elapsed time, and latest reason',
     '  show <id> [--raw]   Bounded detail; raw tick JSON is opt-in',
     '  cancel <id>         Stop an active task',
-    '  retry <id>          Start another task launch',
+    '  resume <id>         Continue stopped, failed or incomplete work in the same run',
+    '  retry <id>          Request another launch; terminal runs start fresh',
     '  tail <id> [-f]      Read or follow supervisor output',
   ].join('\n');
 }
@@ -177,9 +173,8 @@ function printTaskList(tasks: TaskShowEntry[], stdout: NodeJS.WriteStream, withS
       ? `${lifecycle} [terminal artifact says ${task.terminal_status_mismatch.terminal_status}]`
       : lifecycle;
     const active = task.operational?.activeStages[0];
-    const waiting = task.operational?.writerLeaseWaits.length ?? 0;
     const currentStage = active
-      ? `${active.id} (execution ${active.execution})${waiting > 0 ? `; ${waiting} waiting for writer lease` : ''}`
+      ? `${active.id} (execution ${active.execution})`
       : '—';
     const elapsed = formatHumanDuration(active?.elapsedMs ?? task.operational?.runElapsedMs);
     const operationalReason = task.operational?.lastRejection ?? task.operational?.latestReason;
@@ -234,14 +229,7 @@ function printTask(
     stdout.write(`Run elapsed: ${formatHumanDuration(operational.runElapsedMs)}\n`);
     if (operational.activeStages.length === 0) stdout.write('Current stage: none executing\n');
     else for (const stage of operational.activeStages) {
-      const waiting = operational.writerLeaseWaits.length;
-      const waitSummary = waiting > 0
-        ? ` · ${waiting} ${waiting === 1 ? 'stage' : 'stages'} waiting for writer lease`
-        : '';
-      const blocker = stage.writerLeaseWait?.blockedByStageId
-        ? ` behind ${stage.writerLeaseWait.blockedByStageId}`
-        : '';
-      stdout.write(`Current stage: ${stage.id} · execution ${stage.execution} · ${formatHumanDuration(stage.elapsedMs)}${waitSummary}${blocker}\n`);
+      stdout.write(`Current stage: ${stage.id} · execution ${stage.execution} · ${formatHumanDuration(stage.elapsedMs)}\n`);
     }
     if (operational.latestReason) stdout.write(`Latest reason ${formatOperationalReason(operational.latestReason)}\n`);
     if (operational.lastRejection) stdout.write(`Latest rejection ${formatOperationalReason(operational.lastRejection)}\n`);
@@ -273,15 +261,6 @@ function printTask(
   } else {
     stdout.write('Raw ticks: hidden (pass --raw)\n');
   }
-}
-
-function socketFromArgs(args: string[]): string {
-  return valueAfter(args, '--port') ?? valueAfter(args, '--socket') ?? process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
-}
-
-function valueAfter(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  return idx >= 0 ? args[idx + 1] : undefined;
 }
 
 function parseId(raw: string | undefined): number {

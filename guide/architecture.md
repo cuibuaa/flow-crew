@@ -1,169 +1,144 @@
 # Architecture
 
-FlowCrew separates planning, execution, verification, and supervision so long-running agent work remains inspectable and recoverable.
+For a contributor: which engine boundary enforces each guarantee and limitation?
 
-## Runtime Flow
+## Execution and settlement
 
-```text
-brief
-  -> planner writes dispatch.yaml
-  -> scheduler runs the stage DAG
-  -> worker launches the configured backend adapter
-  -> QA gates write verdicts
-  -> fix stages repair failures and gates re-evaluate
-  -> supervisor observes and can guide, abort, replan, or mark early success
-  -> run summary and knowledge graph are persisted
+```mermaid
+flowchart LR
+  Brief --> Admission --> Plan
+  Plan --> Workers --> Gate
+  Gate -->|rejection with admitted repair| Repair --> Gate
+  Gate --> Settlement
+  Settlement --> Records
 ```
 
-The supervisor is backend-driven. It uses the configured adapter and model, reads run state, stage output, and knowledge graph updates, then emits steering signals. It never edits code or runs shell commands directly.
+This diagram summarizes the engineering path, not every terminal research or approval branch.
+The scheduler owns graph execution and settlement; the worker owns one adapter execution.
+Planning and judging are model work when live adapters are selected. Admission, declared
+checks, deadlines, process identity and publication integrity are code boundaries.
 
-## Process supervision and platform behaviour
+A planner's typed result supplies the graph. Roles and check descriptors are supplied from
+registries; unknown roles and invalid whole-plan topology refuse admission.
+[Agent protocol](agent-protocol.md) owns dispatch/verdict/artifact schemas and races.
+[Brief contract](brief-contract.md) owns research policy and deterministic checks.
+Ordinary failed work follows admitted bounded repairs, then stops; it does not force an
+unbounded outer re-plan. Deliberate next-phase/research advancement can plan more work.
 
-Supervision does not depend on a service manager. A background run is owned by a small
-Node shim that records the run's exit status to disk atomically, so the outcome survives
-even the death of FlowCrew's own daemon. Where a systemd user session exists it is still
-used, for cgroup cleanup and tree-kill — but the recorded exit status, not systemd, is
-what the engine treats as the truth.
+Sources: [workflow loop](../src/scheduler/sched_loop/workflow-loop.ts),
+[worker](../src/worker.ts), [gate loop](../src/scheduler/sched_loop/gate-loop.ts),
+[completion](../src/scheduler/sched_settlement/completion.ts).
 
-| | Background tasks | Process identity |
-|---|---|---|
-| **Linux + systemd user session** | supervised units, restart on crash | exact — a recorded pid is bound to that process's `/proc` start-time token, so a recycled pid can never be mistaken for it |
-| **Linux without a systemd session** | portable shim, exit status recorded | exact — the same `/proc` binding |
-| **macOS** | portable shim, exit status recorded | strong, not exact — see below |
+## Deadlines and idle progress
 
-Without `/proc`, macOS binds a pid by its start time to the second (`ps -o lstart=`) *and*
-by the command that was recorded when the run launched. That is weaker than Linux's exact
-token, so it is stated rather than hidden: confusing two processes requires a pid to be
-recycled within the same second *and* relaunched with a matching command line. When the
-binding cannot be read, the engine treats the process as unbound — never as dead.
+Each scheduled execution receives the configured base deadline. It is immutable and covers
+adapter retries, backoff, correction, fallback loading and fallback execution. Extension
+requests cannot move it. A configured technical timeout retry starts a later execution with
+a strictly larger derived budget; there is no aggregate technical-chain deadline above it.
+Settlement synchronously checks the monotonic deadline even if event-loop delay starved timers.
+A current-execution watchdog abort remains authoritative at that boundary.
 
-## Inner Loop
+The always-used deterministic watchdog polls at a default 30 seconds and binds observations
+to the active execution index/start. Changed output, artifact or command CPU/I/O evidence
+advances idle progress. A provider with no active command needs growing socket receive-byte
+counters or output/artifact progress; CPU activity/writes alone are not provider receive progress.
+Linux receive sampling uses `ss` and owned socket inodes. Missing/inaccessible counters provide
+no evidence. Unchanged counters cannot rule out GPU/container/remote work. Local commands
+and finalization remain subject to the silence bound; old verdicts cannot protect a new attempt.
+A verified idle abort does not consume an ordinary failure retry.
 
-The inner loop handles stage-level convergence:
+On POSIX, deadline/abort termination sends SIGTERM to the detached stage process group, then
+SIGKILL after a fixed five-second grace if needed. Cleanup time does not extend the deadline;
+records retain elapsed time and overrun through child settlement. Windows keeps immediate
+direct-child termination because Node does not provide equivalent process-group signal
+semantics. There is no model supervisor or supervision launch flag; settings live in
+[configuration](configuration.md#engine-defaults).
 
-- A planner creates stages.
-- Workers execute stages.
-- QA gates evaluate acceptance criteria.
-- Failed gates trigger matching fix stages.
-- Gates re-run up to `default_gate_retry_loops`; a gate that passes ends the loop
-  immediately rather than consuming its remaining retry budget.
-- Exhausted retries escalate to the outer loop.
+Sources: [deadline](../src/attempt-deadline.ts), [watchdog](../src/stage-watchdog.ts),
+[adapter process boundary](../src/adapters/base.ts),
+[technical policy](../src/scheduler/sched_admission/configuration.ts).
 
-This keeps one implementation execution from being treated as a final answer.
+## Process supervision and recovery
 
-## Outer Loop
+Background tasks run through a portable Node shim that records running/exit facts atomically.
+Where a systemd user session is usable, a unit supplies cgroup cleanup with `KillMode=mixed`;
+it is not configured for automatic crash restart. Both paths use the captured launch
+environment and a non-login shell, excluding invocation/service-manager keys. This process
+shim is separate from the removed model supervisor and the stage idle watchdog.
 
-The outer loop handles campaign-level convergence:
+Linux binds PIDs to procfs start tokens. Without procfs, the fallback uses second-resolution
+`ps -o lstart=` start time and recorded command, a weaker identity. An unreadable binding means unbound,
+not proven dead. A shim exit record can survive daemon death; a hard-killed shim may never
+publish an exit. Unknown fate cannot justify automatic retry, because work may still exist.
 
-- Related runs share campaign history.
-- Metrics, failures, and dead ends are carried forward.
-- Regressions and plateaus can force a different strategy.
-- Later planners receive context about approaches already tried.
+New checkpoints record boot, loaded generation and owned command groups. Startup reconciliation
+first excludes a live scheduler. Proven prior-boot death or closed owned command groups can
+establish a resumable interruption, preserving completed work and budget and repending
+interrupted work. Missing checkpoints, unknown fate or an incompatible admitted plan prevent
+continuation. Historical runs retain their older recovery limits.
 
-Use the outer loop when the task needs exploration, repeated measurement, or multi-round improvement.
+Sources: [shim](../src/supervise-shim.ts), [supervision records](../src/supervision.ts),
+[orchestrator](../src/orchestrator.ts), [process identity](../src/process-liveness.ts), [PID binding](../src/run-lock.ts),
+[recovery](../src/restart-recovery.ts).
 
-## Storage
+## Write and publication ownership
 
-Runs live under the global FlowCrew directory so one dashboard can show every project:
+Project scope is a result constraint with live monitoring and settlement reconciliation.
+`ScopeBatchContext` owns partitions, capabilities, first-write preimages and delivery;
+[scope grants](agent-protocol.md#scope-and-plan-revisions) suspend at a closed child boundary.
+Restoration requires an observed change and baseline content, then re-reads the result.
+An unknown preimage alone proves no write; an attributed write without a restorable preimage
+remains a failure. Gitignored generated output, including installed dependencies, is disposable;
+tracked files and declared inputs remain protected. Batch ownership decides both preservation
+and the audit outcome; scope admission and input protection share one intersection model.
+Snapshot overlap is observation, not proof that two parallel stages wrote the same file;
+structured direct attribution is required for a parallel-write conflict claim.
 
-```text
-~/.fc/runs/<runId>/run.json
-~/.fc/runs/<runId>/task_brief.md
-~/.fc/runs/<runId>/dispatch.yaml
-~/.fc/runs/<runId>/knowledge_graph.json
-~/.fc/runs/<runId>/events.jsonl
-~/.fc/runs/<runId>/progress.md
-~/.fc/runs/<runId>/supervisor_log.md
-~/.fc/runs/<runId>/summary.md
-~/.fc/runs/<runId>/.reality-gate.json
-~/.fc/runs/<runId>/stages/<stageId>/status.json
-~/.fc/runs/<runId>/stages/<stageId>/output_attempt_<execution>.md
-~/.fc/runs/<runId>/stages/<stageId>/attempt_deadline_execution_<execution>_budget.jsonl
-~/.fc/runs/<runId>/stages/<stageId>/constraint_audit_attempt_<execution>.json
-~/.fc/campaigns/<name>.jsonl
-```
+Project validation owns dependency preparation. Each configured validation batch
+installs from the current project lockfiles with the discovered package manager's
+frozen install command before running checks; preparation failures stop the batch.
+Setup captures this baseline before collecting the exact test population. The ready
+record fixes comparison commands and results, not the installed dependency set:
+live gates and settlement prepare from the run's current lockfiles through the same
+[validation owner](../src/project-validation.ts).
 
-`run.json` is the compact canonical projection; append-only histories and `events.jsonl`
-retain the audit trail. Operator surfaces read a bounded event tail and report when either
-source is missing. The three deliberately distinct counters are task **launch**, stage
-**execution**, and gate **re-evaluation**.
+Declared artifact roots remain confined to their stated trees. Directory members
+may reference external tools and dependencies; engine carrier aliases remain refused.
+Authored build outputs survive retries and resumes.
 
-## Design Boundary
+Engine mutation-capable filesystem access goes through `engine-fs`, enforced by ESLint.
+Reserved run carrier identities and acknowledged history are checked independently of
+process supervision. Worker-authored outputs do not become engine records merely by
+occupying a stage directory or resembling a reserved name. Native shared SQLite carrier
+families have their own ownership boundary. Cross-process approval resolutions are projected
+by the resident owner under the run lock; parked status alone does not grant another writer
+ownership while children close. Integrity refusal is an execution failure, not ordinary
+work that can be retried into authority.
 
-FlowCrew keeps "decide what should happen" separate from "make changes":
+These checks do not turn shell-enabled workers into an OS sandbox. Use an isolated host/workspace
+when the task needs stronger access isolation. The brief and injected constraints remain part
+of the agent's instructions.
 
-- Planner decides the stage graph.
-- Worker stages do the work.
-- QA stages verify.
-- Supervisor steers but does not execute.
-- Reality-Gate performs deterministic final checks.
+Sources: [batch owner](../src/scheduler/sched_scope/scope-batch.ts),
+[restoration](../src/scheduler/sched_scope/restore.ts), [integrity](../src/engine-integrity.ts),
+[filesystem](../src/engine-fs.ts), [ownership](../src/engine-owned-carriers.ts),
+[lint rules](../eslint.config.js).
 
-That boundary makes runs easier to debug, replay, and audit.
+## Evidence and builds
 
-## The atom grammar the planner writes in
+`run.json` is the compact projection; append-only histories and events retain earlier facts.
+Its history ref owns the format version and carrier path. New runs use `run-history.jsonl`;
+history records have no version field, and readers and resumed writers follow the ref's path.
+Built-in adapters record compressed immutable invocation inputs before each native transport
+call, including retry inputs. Unknown provider defaults/hidden instructions remain unresolved.
+Private adapter homes isolate invocations; session continuation needs explicit compatible UUID
+binding and never grants scope. [State and operations](operations.md#inspect-guide-and-stop)
+explain the read surfaces and archived aliases.
 
-The planner does not return prose that something later has to interpret. It emits a stage
-graph the scheduler executes literally, written in a small fixed vocabulary — enough to
-express not just *who does what*, but the shape of the work:
+Build compilation stages a complete backend/UI generation and publishes with a manifest-last
+transaction. It refuses changes to live output roots; archived generations cannot redirect
+a running process's later imports. [Contributing](../CONTRIBUTING.md#build-and-validation)
+owns validation commands and private output guidance.
 
-- **dependency** — which stages must finish first, and, for every edge, *why* it exists. An
-  unexplained edge is not accepted, so the graph cannot quietly serialise itself into a chain.
-- **iteration** — a stage can be marked a gate, and a gate names where failing work goes back
-  to. That pair is the loop construct: rework is a declared edge in the graph, not an agent
-  deciding to try again.
-- **runtime expansion** — a stage can be allowed to emit further stages once it knows more, so
-  the planner commits to a subgraph now and the rest when the problem is understood.
-- **capability** — each stage declares which paths it may write. Declaring nothing means
-  writing nothing; the closed case is the default, not an oversight.
-- **budget** — an immutable deadline for one stage execution. Adapter retries, backoff, and
-  fallback all consume it; only a configured technical retry can start a later execution with
-  a strictly larger derived deadline.
-
-Because it is a grammar rather than a fixed template, the planner composes these freely for
-the problem in front of it — a wide parallel fan-out for independent work, a narrow chain with
-a gate looping back for work that must converge, an expansion point where the shape is not yet
-knowable.
-
-And because it is a grammar rather than prose, it can be checked before it runs. Each role
-describes itself at its own source; a registry hands the planner the vocabulary it may compose
-from and rejects anything it invents that is not in it. The menu and the validator are the same
-list, so adding a role needs no prompt edit and the two cannot drift apart. A stage that does
-not parse is dropped and named — never guessed at.
-
-## Why the crew never certifies its own success
-
-The same population of models writes the work, measures the work, and judges the measurement,
-so a natural-language opinion that the bar was met is not independent evidence. Two rules
-follow, and both are enforced rather than advised.
-
-**A gate cannot move its own goalposts.** A gate stage writes its own verdict, but the engine
-validates it against the declared acceptance contract and against the measurement the run
-recorded separately. Renaming the metric, quietly lowering the threshold, claiming a pass on a
-value that misses, and returning a verdict with no numeric value at all are each rejected into
-a structured `{ pass: false, reason }` the retry loop can act on.
-
-A rejecting verdict that prescribes a sample, block, or iteration quantity must also say
-whether its cost is known. Known costs cite an artifact attributed to a completed attempt and
-state the checked multiplication, implied wall time, applicable stage budget, fit, and
-feasible/infeasible disposition. Cost discovery traverses structured arrays, and citations may
-use array-indexed JSON Pointers. The target must name an admitted stage; a stage with no attempt
-yet uses the project default budget. The narrative includes the computed numeric duration, not
-only a qualitative disposition. Unknown costs say so explicitly. Operator notes that name an
-unambiguous canonical criterion follow that criterion into later gate prompts; a gate may still
-disagree, but a failure must quote the ruling and explain why it does not apply. Reliably
-attributed stage-authored checks are likewise assessed against matching rulings, with conflicts
-surfaced as `criterion_check_conflict` rather than silently treated as the criterion itself.
-
-**A running stage has command boundaries.** Adapters report typed command start/completion
-events. The worker uses them to deliver newly written guidance, project an explicit GNU-style
-command timeout against the attempt's remaining budget, and honor an operator interrupt bound
-to the exact active attempt and command. A controlled boundary may reinvoke the adapter inside
-the same attempt; it never resets the deadline or executes advisory text on the stage's behalf.
-
-**A boundary that cannot be enforced is not a boundary.** Anything a stage writes outside its
-declared paths is restored to its pre-stage contents, and the restore is re-read to confirm it
-took. A stage that genuinely needs another file can ask, and the answer comes from a
-deterministic scheduler policy rather than from persuading the supervisor — one of its
-predicates being that the file must not already have been touched. A refusal is handed to the
-next planning round as something the planner must grant properly or explicitly defer, rather
-than leaving the stage to be retried into the same wall.
+Sources: [store](../src/store.ts), [invocation capture](../src/run-state-view.ts),
+[adapter homes](../src/adapter-home.ts), [build publication](../src/build-manifest.ts).

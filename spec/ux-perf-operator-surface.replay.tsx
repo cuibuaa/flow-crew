@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
+
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:net';
@@ -14,7 +16,7 @@ import { cmdShipPreflightWithDeps } from '../src/cli-ship-preflight.js';
 import { startRpcServer, type RpcResponse } from '../src/orchestrator-rpc.js';
 import { AttemptDeadlineController } from '../src/attempt-deadline.js';
 import { runStage } from '../src/worker.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { atomicWrite, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { runValidationCommand } from '../src/project-validation.js';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import RunDetail from '../ui/src/components/RunDetail';
@@ -223,7 +225,6 @@ describe('bounded task and status projections', () => {
             runStatus: live ? 'running' : 'complete',
             runElapsedMs: live ? 90_000 : 120_000,
             activeStages: live ? [{ id: 'implement', status: 'running', execution: 2, elapsedMs: 30_000 }] : [],
-            writerLeaseWaits: [],
             latestReason: live
               ? { type: 'admission_rejected', at: '2026-09-03T10:01:30.000Z', stageId: 'implement', attemptIndex: 2, historical: false, detail: 'missing producer' }
               : { type: 'run_status_changed', at: '2026-09-03T10:02:00.000Z', stageId: 'implement', attemptIndex: 1, historical: true, detail: 'all gates passed' },
@@ -282,7 +283,6 @@ describe('bounded task and status projections', () => {
           runStatus: 'complete',
           runElapsedMs: 120_000,
           activeStages: [],
-          writerLeaseWaits: [],
           latestReason: { type: 'run_status_changed', at: '2026-09-03T10:02:00.000Z', stageId: 'implement', attemptIndex: 1, historical: true, detail: 'all gates passed' },
           pendingScope: [],
           sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
@@ -324,7 +324,6 @@ describe('bounded task and status projections', () => {
         runStatus: 'running',
         runElapsedMs: 90_000,
         activeStages: [{ id: 'implement', status: 'running', execution: 2, elapsedMs: 30_000 }],
-        writerLeaseWaits: [],
         latestReason: { type: 'admission_rejected', at: '2026-09-03T10:01:30.000Z', stageId: 'implement', attemptIndex: 2, historical: false, detail: 'missing producer' },
         lastRejection: { type: 'admission_rejected', at: '2026-09-03T10:01:30.000Z', stageId: 'implement', attemptIndex: 2, historical: false, detail: 'missing producer' },
         pendingScope: [],
@@ -345,7 +344,6 @@ describe('bounded task and status projections', () => {
         runStatus: 'complete',
         runElapsedMs: 120_000,
         activeStages: [],
-        writerLeaseWaits: [],
         latestReason: { type: 'run_status_changed', at: '2026-09-03T10:02:00.000Z', stageId: 'implement', attemptIndex: 1, historical: true, detail: 'all gates passed' },
         pendingScope: [],
         sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
@@ -460,7 +458,7 @@ describe('events, help, watch, and preflight', () => {
     expect(all.stdout).toContain('[WATCH] armed · 201 entries');
   });
 
-  it('unchanged-base seam: preflight can skip all commands and streams progress with a live-project warning', async () => {
+  it('preflight only discovers commands and warns about a live project with either baseline option', async () => {
     writeFileSync(join(project, 'package.json'), JSON.stringify({ scripts: { build: 'fixture-build', test: 'fixture-test', lint: 'fixture-lint' } }), 'utf-8');
     writeFileSync(join(project, 'package-lock.json'), '{}', 'utf-8');
     const runDirectory = writeRun('live-run', 'running', 1_000);
@@ -488,7 +486,7 @@ describe('events, help, watch, and preflight', () => {
     expect(runner).not.toHaveBeenCalled();
     expect(stdout.text()).toContain('Validation baseline: SKIPPED');
     expect(stderr.text()).toContain('shared by live FlowCrew run(s): live-run');
-    expect(stderr.text()).toContain('no project command was launched');
+    expect(stderr.text()).toContain('No project command was launched');
 
     const streamedOut = new Capture();
     const streamedErr = new Capture();
@@ -496,13 +494,12 @@ describe('events, help, watch, and preflight', () => {
       ...dependencies,
       stdout: streamedOut.stream,
       stderr: streamedErr.stream,
-    })).toBe(1);
+    })).toBe(0);
     expect(runner).not.toHaveBeenCalled();
     expect(streamedErr.text()).toContain('shared by live FlowCrew run(s)');
-    expect(streamedErr.text()).toContain('Preflight will not launch validation commands while those runs are live');
     expect(streamedErr.text()).toContain('No project command was launched');
-    expect(streamedErr.text()).toContain('pass --no-baseline');
     expect(streamedErr.text()).not.toContain('Validation baseline: START');
+    expect(streamedOut.text()).toContain('Validation baseline: SKIPPED');
   });
 
   it('unchanged-base seam: the production validation runner streams child output', async () => {
@@ -543,7 +540,6 @@ describe('operator dashboard vocabulary', () => {
         pendingScope: [{ requestId: 'scope-1', stageId: 'implement' }],
         sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
       },
-      kg: { nodes: [], edges: [] },
       events: [{
         timestamp: '2026-09-03T10:01:30.000Z', type: 'admission_rejected', stageId: 'implement',
         attemptIndex: 2, detail: 'the proposal omitted a declared producer',
@@ -581,7 +577,6 @@ describe('operator dashboard vocabulary', () => {
         pendingScope: [],
         sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },
       },
-      kg: { nodes: [], edges: [] },
       events: [{
         timestamp: '2026-09-03T10:02:00.000Z', type: 'run_status_changed',
         runStatus: 'complete', detail: 'all declared gates passed',
@@ -605,7 +600,7 @@ describe('operator dashboard vocabulary', () => {
     expect(readdirSync(stageDirectory)).toContain('attempt_deadline_execution_3_budget.jsonl');
   });
 
-  it('unchanged-base seam: clears stale status and explains an empty supervisor abort through runStage', async () => {
+  it('unchanged-base seam: clears stale status and explains an empty engine abort through runStage', async () => {
     const runId = 'operator-item-10';
     const stageId = 'implement';
     const runDirectory = join(fcHome, 'runs', runId);
@@ -631,14 +626,14 @@ describe('operator dashboard vocabulary', () => {
     const adapter: Adapter = {
       run: async (_prompt, _role, options) => {
         runningStatus = JSON.parse(readFileSync(join(stageDirectory, 'status.json'), 'utf-8')) as Record<string, unknown>;
-        writeFileSync(join(runDirectory, 'signals', `abort_${stageId}.json`), JSON.stringify({
+        atomicWrite(join(runDirectory, 'signals', `abort_${stageId}.json`), JSON.stringify({
           version: 1,
           stageId,
           attemptIndex: 2,
           reason: 'superseded by verified evidence',
           timestamp: new Date().toISOString(),
           source: 'supervisor',
-        }), 'utf-8');
+        }));
         await new Promise<void>((resolveAbort) => {
           if (options.abortSignal?.aborted) return resolveAbort();
           options.abortSignal?.addEventListener('abort', () => resolveAbort(), { once: true });
@@ -648,6 +643,7 @@ describe('operator dashboard vocabulary', () => {
     };
     const role: AgentConfig = { name: 'fixture', description: 'fixture', tools: [], prompt: 'system' };
     await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId,
       role,
       dependsOn: [],
@@ -667,9 +663,9 @@ describe('operator dashboard vocabulary', () => {
       staleErrorCleared: !Object.hasOwn(runningStatus ?? {}, 'error'),
       staleExitCleared: !Object.hasOwn(runningStatus ?? {}, 'exitCode'),
       staleCompletionCleared: !Object.hasOwn(runningStatus ?? {}, 'completedAt'),
-      abortExplained: output.includes('Execution aborted by supervisor')
+      abortExplained: output.includes('Execution aborted by engine')
         && output.includes('superseded by verified evidence'),
-      emptyGuidanceExplained: guidanceReceipt.includes('No supervisor guidance was delivered to this execution.'),
+      emptyGuidanceExplained: guidanceReceipt.includes('No guidance was delivered to this execution.'),
     }).toEqual({
       running: true,
       staleErrorCleared: true,
@@ -680,7 +676,7 @@ describe('operator dashboard vocabulary', () => {
     });
   });
 
-  it('unchanged-base seam: omits cache noise and labels run-local artifacts through runStage', async () => {
+  it('unchanged-base seam: omits cache noise and keeps scoped writes through runStage', async () => {
     const runId = 'operator-artifact-paths';
     const stageId = 'implement';
     const runDirectory = join(fcHome, 'runs', runId);
@@ -692,12 +688,13 @@ describe('operator dashboard vocabulary', () => {
         const cachePath = join(project, 'fixture-root', '.pytest_cache', 'v', 'cache', 'nodeids');
         mkdirSync(dirname(cachePath), { recursive: true });
         writeFileSync(cachePath, '[]\n', 'utf-8');
-        writeFileSync(join(runDirectory, 'knowledge_graph.json'), '{"nodes":[],"edges":[]}\n', 'utf-8');
+        writeFileSync(join(project, 'fixture-root', 'result.txt'), 'done\n', 'utf-8');
         return { output: 'complete', exitCode: 0, duration_ms: 1, timedOut: false };
       },
     };
     const role: AgentConfig = { name: 'fixture', description: 'fixture', tools: [], prompt: 'system' };
     const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
       stageId,
       role,
       dependsOn: [],
@@ -710,27 +707,30 @@ describe('operator dashboard vocabulary', () => {
       projectWriteScope: ['fixture-root/**'],
     });
     expect({
-      runArtifact: result.writes?.includes('run:knowledge_graph.json') ?? false,
+      scopedWrite: result.writes?.includes('fixture-root/result.txt') ?? false,
       cacheNoise: result.writes?.some((path) => path.includes('.pytest_cache')) ?? false,
-    }).toEqual({ runArtifact: true, cacheNoise: false });
+    }).toEqual({ scopedWrite: true, cacheNoise: false });
   });
 
   it('unchanged-base seam: operator guides describe the enforced admission and surface contracts', () => {
-    const architecture = readFileSync(join(repositoryRoot, 'guide', 'architecture.md'), 'utf-8');
+    const protocol = readFileSync(join(repositoryRoot, 'guide', 'agent-protocol.md'), 'utf-8');
     const contract = readFileSync(join(repositoryRoot, 'guide', 'brief-contract.md'), 'utf-8');
     const cli = readFileSync(join(repositoryRoot, 'guide', 'cli.md'), 'utf-8');
-    const lifecycle = readFileSync(join(repositoryRoot, 'guide', 'run-lifecycle.md'), 'utf-8');
-    expect(architecture).toContain('task **launch**, stage');
-    expect(architecture).toContain('**execution**, and gate **re-evaluation**');
-    expect(contract).toContain('scope` is required; omitting it rejects the');
-    expect(contract).toContain('Terminal snapshot basenames must also be unique');
-    expect(contract).toContain('remove the condition or declare research mode');
-    expect(contract).toContain('An accepted revision is inherited and revalidated');
-    expect(contract).toContain('framework-owned `run_manifest.json`');
-    expect(cli).toContain('flowcrew events --run <run-id>');
-    expect(cli).toContain('task show <id> [--summary-only | --raw]');
-    expect(cli).toContain('`--no-baseline` performs');
-    expect(cli).toContain('`--all`\nexplicitly audits every entry');
-    expect(lifecycle).toContain('**launches**, a stage may have multiple **executions**');
+    const lifecycle = readFileSync(join(repositoryRoot, 'guide', 'operations.md'), 'utf-8');
+    expect(lifecycle).toContain('A daemon **task**');
+    expect(lifecycle).toContain('stage **execution**');
+    expect(lifecycle).toContain('gate **re-evaluation**');
+    expect(protocol).toContain('omission becomes closed `[]`');
+    expect(protocol).toContain('only a later re-admitted execution can use `authorizedPaths`');
+    expect(protocol).toContain('Whole-plan admission');
+    expect(contract).toContain('run_manifest.json');
+    expect(contract).toContain('framework manifest');
+    expect(contract).toContain('Configured validation and independent');
+    expect(cli).toContain('`events`');
+    expect(cli).toContain('`task show <numeric-id>`');
+    expect(cli).toContain('`--no-baseline`');
+    expect(cli).toContain('`--all`');
+    expect(lifecycle).toContain('baseline');
+    expect(lifecycle).toContain('exact');
   });
 });

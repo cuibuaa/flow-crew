@@ -1,12 +1,11 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { gunzipSync } from 'node:zlib';
 
 interface RecordedEvidenceRow {
   byteLength: number;
   sha256: string;
-  gzipBase64: string;
+  text: string;
 }
 
 interface RecordedEvidenceCatalog {
@@ -20,13 +19,13 @@ const catalog = JSON.parse(readFileSync(
   'utf-8',
 )) as RecordedEvidenceCatalog;
 
-/** Return byte-identical, hash-checked review evidence embedded in the test corpus. */
+/** Return hash-checked evidence kept as plain text so the tracked-text privacy guard can inspect it. */
 export function recordedEvidence(id: string): Buffer {
   const row = catalog.records[id];
-  if (!row || catalog.version !== 1 || catalog.encoding !== 'gzip+base64') {
+  if (!row || catalog.version !== 1 || catalog.encoding !== 'utf8') {
     throw new Error(`Unknown recorded evidence fixture: ${id}`);
   }
-  const bytes = gunzipSync(Buffer.from(row.gzipBase64, 'base64'));
+  const bytes = Buffer.from(row.text, 'utf8');
   const digest = createHash('sha256').update(bytes).digest('hex');
   if (bytes.byteLength !== row.byteLength || digest !== row.sha256) {
     throw new Error(`Recorded evidence fixture failed integrity check: ${id}`);

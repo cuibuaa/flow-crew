@@ -1,3 +1,4 @@
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
@@ -7,7 +8,6 @@ import {
   mkdtempSync,
   realpathSync,
   readFileSync,
-  readlinkSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -28,7 +28,26 @@ import {
 } from '../src/cli-ship-setup.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
 import { extractBriefInputPaths } from '../src/ship-inputs.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { createRun, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { execWithStdin } from '../src/adapters/base.js';
+import { withEngineIntegrity } from '../src/engine-integrity.js';
+import { clearAttemptSummaryRefreshDebounce } from '../src/run-events.js';
+
+// Temporary projects and outputs share this repository as a container, while
+// their synthetic installation remains a separate sibling fixture namespace.
+const installation = vi.hoisted(() => { vi.resetModules(); return { install: () => {} }; });
+vi.mock('../src/ship-inputs.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/ship-inputs.js')>();
+  const { dirname, join } = await import('node:path');
+  const external = actual.externalOutputDirectory, inventory = actual.inspectBriefOutputs;
+  installation.install = () => {
+    vi.spyOn(actual, 'externalOutputDirectory').mockImplementation((declaration, project, fs, context) =>
+      external(declaration, project, fs, { engineRoot: join(dirname(project), 'engine'), ...context }));
+    vi.spyOn(actual, 'inspectBriefOutputs').mockImplementation((brief, project, fs, context) =>
+      inventory(brief, project, fs, { engineRoot: join(dirname(project), 'engine'), ...context }));
+  };
+  return actual;
+});
 
 class Capture {
   value = '';
@@ -53,6 +72,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  installation.install();
   // Canonicalize the fixture root: on macOS the temp directory is reached through a
   // symlink (/var -> /private/var), so an uncanonicalized root makes every derived
   // path differ from what the code under test computes. Reproducible on Linux by
@@ -82,6 +102,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearAttemptSummaryRefreshDebounce();
   rmSync(fixture.root, { recursive: true, force: true });
 });
 
@@ -199,12 +220,62 @@ function noReadyRecord(): boolean {
 }
 
 describe('ship-setup fail-closed worktree transaction', () => {
+  it('refuses an external output inside the launch target before creating it', async () => {
+    const path = join(fixture.target, 'runs', 'results');
+    writeBrief(['---', 'outputs:', `  - path: ${path}`, '    type: directory', '---', '# Goal', 'Retain results.']);
+    const git = successfulGit();
+    const report = await runShipSetup(setupArgs(), { createWorktree: git, runValidationCommand: validationRunner() });
+    expect(report.state).toBe('refused');
+    expect(report.sourceOutputInventory.blocking[0].reason).toContain('overlaps project');
+    expect(git).not.toHaveBeenCalled();
+    expect(existsSync(fixture.target)).toBe(false);
+  });
+
+  it.each([false, true])('checks source-overlapping outputs at setup and runtime (in-place=%s)', async inPlace => {
+    const path = join(fixture.project, 'data', 'results');
+    writeBrief(['---', 'outputs:', `  - path: ${path}`, '    type: directory', '---', '# Goal', 'Retain results.']);
+    const git = successfulGit();
+    const target = inPlace ? fixture.project : fixture.target;
+    const args = setupArgs();
+    args[args.indexOf('--target') + 1] = target;
+    const report = await runShipSetup(args, { createWorktree: git, runValidationCommand: validationRunner() });
+    expect(report.state).toBe(inPlace ? 'refused' : 'ready');
+    expect(report.sourceOutputInventory.blocking).toHaveLength(inPlace ? 1 : 0);
+    expect(git).toHaveBeenCalledTimes(inPlace ? 0 : 1);
+    expect(existsSync(path)).toBe(false);
+    const run = createRun(target, 'external-output', 'name: fixture\nstages: []\n', ['work']);
+    writeFileSync(join(run.runDirPath, 'task_brief.md'), readFileSync(fixture.brief));
+    const input = { projectDir: target, runDir: run.runDirPath, stageId: 'work', projectWriteScope: [],
+      artifactContract: { version: 1 as const, produces: [], reads: [], groups: [], replays: [] } };
+    const action = vi.fn(async () => execWithStdin(process.execPath, ['-e', `const fs=require('node:fs');fs.mkdirSync(${JSON.stringify(path)},{recursive:true});fs.writeFileSync(${JSON.stringify(join(path, 'result.txt'))},'result');`], '', { cwd: target, timeout_ms: 5000 }));
+    if (inPlace) {
+      await expect(withEngineIntegrity(input, action)).rejects.toThrow('overlaps project');
+      expect(action).not.toHaveBeenCalled();
+      expect(existsSync(path)).toBe(false);
+    } else {
+      expect(report.targetOutputInventory?.blocking).toHaveLength(0);
+      const result = await withEngineIntegrity(input, action);
+      expect(result.exitCode, result.output).toBe(0);
+      expect(readFileSync(join(path, 'result.txt'), 'utf8')).toBe('result');
+    }
+  });
+
+  it.each([false, true])('reports external outputs in setup (forbidden=%s) without creating the durable root', async forbidden => {
+    const path = join(forbidden ? fixture.state : fixture.root, 'durable-results');
+    writeBrief(['---', 'outputs:', `  - path: ${path}`, '    type: directory', '---', '# Goal', 'Retain per-item results.']);
+    const git = successfulGit();
+    const report = await runShipSetup(setupArgs(), { createWorktree: git, runValidationCommand: validationRunner() });
+    expect(report.state).toBe(forbidden ? 'refused' : 'ready');
+    expect(report.sourceOutputInventory.entries).toMatchObject([{
+      path, blocking: forbidden, reason: expect.stringContaining(forbidden ? 'FC_HOME/run storage' : 'not inventoried or archived'),
+    }]);
+    if (!forbidden) expect(report.targetOutputInventory?.entries[0].blocking).toBe(false);
+    expect(git).toHaveBeenCalledTimes(forbidden ? 0 : 1);
+    expect(existsSync(path)).toBe(false);
+  });
+
   it('H4 times worktree add from config, reports progress, and rolls back owned failure residue', async () => {
-    mkdirSync(join(fixture.project, 'config'), { recursive: true });
-    writeFileSync(join(fixture.project, 'config', 'defaults.yaml'), [
-      'default_timeout_ms: 60000',
-      'git_worktree_add_timeout_ms: 1800000',
-    ].join('\n') + '\n');
+    setEngineDefaults({ timeout_ms: 60000, git_worktree_add_timeout_ms: 1800000 });
     writeBrief(['# Goal', 'Create an isolated worktree.']);
     const stderr = new Capture();
     const calls: string[][] = [];
@@ -263,7 +334,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
     const sentinel = join(fixture.target, 'foreign.txt');
     writeFileSync(sentinel, 'not created by this invocation\n');
     const preExisting = await runShipSetup(setupArgs(), { runGitCommand: runner });
-    expect(preExisting.state).toBe('refused');
+    // The mocked git lists this directory as the branch's worktree at the base, so setup reuses it without touching it.
+    expect(preExisting.state).toBe('ready');
     expect(readFileSync(sentinel, 'utf8')).toBe('not created by this invocation\n');
 
     rmSync(fixture.target, { recursive: true, force: true });
@@ -432,7 +504,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     });
   });
 
-  it('creates the exact base and branch, links only absent declared ignored inputs, rechecks them, and atomically records a delta baseline', async () => {
+  it('creates the exact base and branch, copies only absent declared ignored inputs, rechecks them, and atomically records a delta baseline', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     const prices = 'timestamp,price\n2022-01-01,10\n2022-01-03,12\n';
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), prices, 'utf-8');
@@ -478,10 +550,10 @@ describe('ship-setup fail-closed worktree transaction', () => {
 
     const linkedFile = join(fixture.target, 'data', 'frozen.csv');
     const linkedDirectory = join(fixture.target, 'node_modules', 'revision-generator');
-    expect(lstatSync(linkedFile).isSymbolicLink()).toBe(true);
-    expect(lstatSync(linkedDirectory).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(linkedFile)).toBe(join(fixture.project, 'data', 'frozen.csv'));
-    expect(readlinkSync(linkedDirectory)).toBe(join(fixture.project, 'node_modules', 'revision-generator'));
+    expect(lstatSync(linkedFile).isSymbolicLink()).toBe(false);
+    expect(lstatSync(linkedDirectory).isSymbolicLink()).toBe(false);
+    expect(readFileSync(linkedFile, 'utf8')).toBe(prices);
+    expect(readFileSync(join(linkedDirectory, 'alpha.js'), 'utf8')).toBe('export {};\n');
     expect(lstatSync(join(fixture.target, 'package.json')).isSymbolicLink()).toBe(false);
 
     const rendered = JSON.parse(stdout.value) as Record<string, any>;
@@ -496,9 +568,11 @@ describe('ship-setup fail-closed worktree transaction', () => {
       targetDir: fixture.target,
       base: 'release-base',
       branch: 'autonomous-result',
-      links: [
-        expect.objectContaining({ path: 'data/frozen.csv', type: 'file' }),
-        expect.objectContaining({ path: IGNORED_MODULE_PATH, type: 'directory' }),
+      links: [],
+      copies: [
+        expect.objectContaining({ path: 'data/frozen.csv' }),
+        expect.objectContaining({ path: `${IGNORED_MODULE_PATH}/alpha.js` }),
+        expect.objectContaining({ path: `${IGNORED_MODULE_PATH}/beta.js` }),
       ],
     });
     expect(record.sourceVerification.inputs).toHaveLength(3);
@@ -546,11 +620,11 @@ describe('ship-setup fail-closed worktree transaction', () => {
       validationBaseline: { discovery: { state: 'configured', missingRoles: [] } },
     });
     expect(runner.mock.calls.map(([request]) => [request.command, request.args])).toEqual([
-      ['python', ['-m', 'pytest', '--collect-only', '-q']],
-      ['python', ['-m', 'pytest', '--collect-only', '-q']],
       ['python', ['-m', 'build']],
       ['python', ['-m', 'pytest']],
       ['python', ['-m', 'ruff', 'check', '.']],
+      ['python', ['-m', 'pytest', '--collect-only', '-q']],
+      ['python', ['-m', 'pytest', '--collect-only', '-q']],
     ]);
     if (report.state !== 'ready') throw new Error('Python setup unexpectedly refused');
     expect(existsSync(report.readyRecordPath)).toBe(true);
@@ -857,7 +931,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     ]);
   });
 
-  it('refuses UNKNOWN validation before READY when no command can be inferred', async () => {
+  it('reaches READY without engine validation when no command can be inferred and none is declared', async () => {
     writeBrief(['# Goal', 'Validate the repository.']);
     const git = vi.fn<GitWorktreeCreator>((request) => {
       mkdirSync(request.targetDir, { recursive: true });
@@ -872,20 +946,18 @@ describe('ship-setup fail-closed worktree transaction', () => {
 
     expect(runner).not.toHaveBeenCalled();
     expect(report).toMatchObject({
-      state: 'refused',
+      state: 'ready',
       validationBaseline: {
         discovery: { state: 'unknown', commands: [] },
         results: [
-          expect.objectContaining({ role: 'build', state: 'unresolved' }),
-          expect.objectContaining({ role: 'test', state: 'unresolved' }),
-          expect.objectContaining({ role: 'lint', state: 'unresolved' }),
+          expect.objectContaining({ role: 'build', state: 'not_configured', reason: expect.stringContaining('No recognized') }),
+          expect.objectContaining({ role: 'test', state: 'not_configured' }),
+          expect.objectContaining({ role: 'lint', state: 'not_configured' }),
         ],
       },
-      blockers: [expect.objectContaining({
-        phase: 'validation', reason: expect.stringContaining('Validation baseline is unknown'),
-      })],
+      blockers: [],
     });
-    expect(noReadyRecord()).toBe(true);
+    expect(noReadyRecord()).toBe(false);
   });
 
   it('defaults the source project to the injected current directory and reports human-readable delta criteria', async () => {
@@ -1021,7 +1093,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(git).not.toHaveBeenCalled();
   });
 
-  it('refuses when an ignored input cannot be linked, and never runs or records the baseline', async () => {
+  it('refuses when an ignored input cannot be copied, and never runs or records the baseline', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n', 'utf-8');
     writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 1 row.']);
@@ -1032,7 +1104,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       runValidationCommand: runner,
       fs: {
         ...nodeShipSetupFileSystem,
-        createLink: () => { throw new Error('link denied by fixture'); },
+        copyFile: () => { throw new Error('copy denied by fixture'); },
       },
     });
 
@@ -1040,33 +1112,33 @@ describe('ship-setup fail-closed worktree transaction', () => {
       state: 'refused',
       worktreeCreated: true,
       blockers: [expect.objectContaining({
-        phase: 'target', input: 'data/frozen.csv', reason: expect.stringContaining('link denied by fixture'),
+        phase: 'target', input: 'data/frozen.csv', reason: expect.stringContaining('copy denied by fixture'),
       })],
     });
     expect(runner).not.toHaveBeenCalled();
     expect(noReadyRecord()).toBe(true);
   });
 
-  it('re-verifies properties through the target and refuses a changed linked input', async () => {
+  it('compares copied bytes through the target and refuses a corrupted input', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n2\n', 'utf-8');
     writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 2 rows.']);
-    const createLink = vi.fn((_: string, target: string) => {
+    const copyInput = vi.fn((_: string, target: string) => {
       writeFileSync(target, 'id\n1\n', 'utf-8');
     });
 
     const report = await runShipSetup(setupArgs(), {
       createWorktree: successfulGit(),
       runValidationCommand: validationRunner(),
-      fs: { ...nodeShipSetupFileSystem, createLink },
+      fs: { ...nodeShipSetupFileSystem, copyFile: copyInput },
     });
 
-    expect(createLink).toHaveBeenCalledTimes(1);
+    expect(copyInput).toHaveBeenCalledTimes(1);
     expect(report).toMatchObject({
       state: 'refused',
       worktreeCreated: true,
       blockers: [expect.objectContaining({
-        phase: 'target', input: 'data/frozen.csv', assertion: 'row_count', reason: expect.stringContaining('refuted'),
+        phase: 'target', input: 'data/frozen.csv', reason: expect.stringContaining('does not match the declared source bytes'),
       })],
     });
     expect(noReadyRecord()).toBe(true);
@@ -1235,7 +1307,56 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(noReadyRecord()).toBe(true);
   });
 
-  it('links a bare directory named in the explicit inputs list', async () => {
+  it('records a project command that cannot run here while the others run, and reaches READY', async () => {
+    writeBrief(['# Inputs', '- Read `package.json`.']);
+    const runner = vi.fn<ValidationCommandRunner>(({ role }) => role === 'test'
+      ? { exitCode: 127, stderr: 'sh: karma: command not found' }
+      : { exitCode: 0, stdout: 'ok' });
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(),
+      runValidationCommand: runner,
+    });
+
+    expect(report).toMatchObject({
+      state: 'ready',
+      blockers: [],
+      validationBaseline: {
+        results: expect.arrayContaining([
+          expect.objectContaining({ role: 'build', state: 'passed' }),
+          expect.objectContaining({ role: 'test', state: 'launch_error', exitCode: 127 }),
+        ]),
+      },
+    });
+    expect(noReadyRecord()).toBe(false);
+  });
+
+  it('records a tox.ini-inferred runner that is not installed here as a gap, and reaches READY', async () => {
+    // A project whose only validation is inferred from tox.ini had no inferred command before INI inference and was set
+    // up unconfigured; a missing tox must stay an environment gap (SWE-bench django checkouts carry tox.ini, the host has
+    // no tox). A project whose declared scripts none launch is still refused (previous case).
+    rmSync(join(fixture.project, 'package.json'));
+    rmSync(join(fixture.project, 'package-lock.json'));
+    writeFileSync(join(fixture.project, 'tox.ini'), '[testenv]\ncommands = python tests/runtests.py\n', 'utf-8');
+    writeBrief(['# Goal', 'Change the project.']);
+    const git = vi.fn<GitWorktreeCreator>((request) => {
+      mkdirSync(request.targetDir, { recursive: true });
+      copyFileSync(join(request.projectDir, 'tox.ini'), join(request.targetDir, 'tox.ini'));
+      return { exitCode: 0 };
+    });
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: null, error: 'spawn tox ENOENT' }));
+
+    const report = await runShipSetup(setupArgs(), { createWorktree: git, runValidationCommand: runner });
+
+    expect(report).toMatchObject({
+      state: 'ready',
+      blockers: [],
+      validationBaseline: { results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'launch_error' })]) },
+    });
+    expect(noReadyRecord()).toBe(false);
+  });
+
+  it('materializes a bare directory named in the explicit inputs list', async () => {
     mkdirSync(join(fixture.project, 'dependency_cache'), { recursive: true });
     writeFileSync(join(fixture.project, 'dependency_cache', 'tool.js'), 'export {};\n', 'utf-8');
     writeBrief([
@@ -1254,10 +1375,63 @@ describe('ship-setup fail-closed worktree transaction', () => {
     });
 
     expect(report.state).toBe('ready');
-    expect(report.links).toContainEqual(expect.objectContaining({
-      path: 'dependency_cache', type: 'directory',
+    expect(report.copies).toContainEqual(expect.objectContaining({
+      path: 'dependency_cache/tool.js',
     }));
-    expect(lstatSync(join(fixture.target, 'dependency_cache')).isSymbolicLink()).toBe(true);
+    expect(lstatSync(join(fixture.target, 'dependency_cache')).isSymbolicLink()).toBe(false);
+  });
+
+  it('refuses a destination link introduced immediately before copying an input', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    writeFileSync(join(fixture.project, 'data', 'a.txt'), 'source bytes');
+    const outside = join(fixture.root, 'engine-carrier.json');
+    writeFileSync(outside, 'protected bytes');
+    writeBrief(['---', 'inputs: [data]', '---', '# Goal', 'Read the stable input.']);
+    const runner = validationRunner();
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(request => { mkdirSync(join(request.targetDir, 'data')); }),
+      runValidationCommand: runner,
+      fs: { ...nodeShipSetupFileSystem, copyFile: (source, target) => {
+        symlinkSync(outside, target);
+        nodeShipSetupFileSystem.copyFile(source, target);
+      } },
+    });
+    expect(report.state).toBe('refused');
+    expect(readFileSync(outside, 'utf8')).toBe('protected bytes');
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('preserves internal dependency links within the prepared target', async () => {
+    mkdirSync(join(fixture.project, 'tools', '.bin'), { recursive: true });
+    mkdirSync(join(fixture.project, 'tools', 'pkg'));
+    writeFileSync(join(fixture.project, 'tools', 'pkg', 'tool.js'), 'export {};');
+    symlinkSync('../pkg/tool.js', join(fixture.project, 'tools', '.bin', 'tool'));
+    writeBrief(['---', 'inputs: [tools]', '---', '# Goal', 'Read the dependency tree.']);
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(), runValidationCommand: validationRunner(),
+    });
+    expect(report.state).toBe('ready');
+    expect(lstatSync(join(fixture.target, 'tools', '.bin', 'tool')).isSymbolicLink()).toBe(true);
+    expect(realpathSync(join(fixture.target, 'tools', '.bin', 'tool'))).toBe(join(fixture.target, 'tools', 'pkg', 'tool.js'));
+    expect(readFileSync(join(fixture.target, 'tools', '.bin', 'tool'), 'utf8')).toBe('export {};');
+  });
+
+  it('refuses source membership changes while materializing a declared directory', async () => {
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    writeFileSync(join(fixture.project, 'data', 'a.txt'), 'A');
+    writeBrief(['---', 'inputs: [data]', '---', '# Goal', 'Read the stable input.']);
+    const runner = validationRunner();
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(request => { mkdirSync(join(request.targetDir, 'data')); }),
+      runValidationCommand: runner,
+      fs: { ...nodeShipSetupFileSystem, copyFile: (source, target) => {
+        nodeShipSetupFileSystem.copyFile(source, target);
+        writeFileSync(join(fixture.project, 'data', 'added.txt'), 'new member');
+      } },
+    });
+    expect(report.state).toBe('refused');
+    expect(report.declaredInputStability).toContainEqual(expect.objectContaining({ phase: 'input_materialization', state: 'changed' }));
+    expect(runner).not.toHaveBeenCalled();
   });
 
   it('reconciles missing descendants when a declared directory already has tracked target content', async () => {
@@ -1300,7 +1474,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(baseline).toHaveBeenCalledTimes(3);
   });
 
-  it('refuses a smaller target test population before baseline when the ignored input was omitted', async () => {
+  it('refuses a smaller target test population after baseline when the ignored input was omitted', async () => {
     writePopulationFixture();
     writeBrief(['# Goal', 'Run the complete configured test population.']);
     const baseline = validationRunner();
@@ -1327,7 +1501,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       })],
     });
     expect(population).toHaveBeenCalledTimes(2);
-    expect(baseline).not.toHaveBeenCalled();
+    expect(baseline).toHaveBeenCalledTimes(3);
     expect(noReadyRecord()).toBe(true);
   });
 

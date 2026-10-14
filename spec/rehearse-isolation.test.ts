@@ -2,15 +2,20 @@ import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  copyFileSync,
+  cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const repositoryRoot = join(import.meta.dirname, '..');
@@ -47,10 +52,18 @@ function runRehearsal(
   fixture: RehearsalFixture,
   briefPath: string,
   extraEnv: Record<string, string> = {},
+  extraArgs: string[] = [],
 ) {
+  const installation = join(fixture.root, 'installation');
+  mkdirSync(installation);
+  cpSync(join(repositoryRoot, 'dist'), join(installation, 'dist'), { recursive: true });
+  cpSync(join(repositoryRoot, 'config'), join(installation, 'config'), { recursive: true });
+  copyFileSync(join(repositoryRoot, 'package.json'), join(installation, 'package.json'));
+  const dependencies = dirname(dirname(createRequire(import.meta.url).resolve('yaml/package.json')));
+  symlinkSync(dependencies, join(installation, 'node_modules'), 'dir');
   return spawnSync(
     process.execPath,
-    [join(repositoryRoot, 'dist', 'cli.js'), 'rehearse', briefPath],
+    [join(installation, 'dist', 'cli.js'), 'rehearse', briefPath, ...extraArgs],
     {
       cwd: repositoryRoot,
       env: {
@@ -195,6 +208,37 @@ describe('rehearsal Git isolation', () => {
     expect(output).toContain('0 tokens');
     expect(output).not.toContain('criterion_');
     expect(output).not.toContain('dispatch');
+  });
+
+  it.each([false, true])('reports external output admission (forbidden=%s) and leaves the real directory absent', { timeout: 100_000 }, forbidden => {
+    const fixture = rehearsalFixture();
+    const outputPath = join(forbidden ? fixture.fcHome : fixture.root, 'durable-results');
+    const authored = writeCriterionBrief(fixture);
+    writeFileSync(authored.path, authored.source.replace('---\n', `---\noutputs:\n  - path: ${outputPath}\n    type: directory\n`));
+    const result = runRehearsal(fixture, authored.path, { PROJECT_DIR: fixture.project });
+    const output = `${result.stdout}${result.stderr}`;
+    expect(result.status, output).toBe(forbidden ? 1 : 0);
+    expect(output).toContain(forbidden ? 'EXTERNAL_OUTPUT_REFUSED' : 'rehearsal uses a temporary substitute');
+    expect(existsSync(outputPath)).toBe(false);
+  });
+
+  it.each(['unknown', 'in-place', 'project', 'worktree', 'target-overlap'])('checks source overlap before rehearsal (%s)', { timeout: 100_000 }, launch => {
+    const fixture = rehearsalFixture();
+    const target = join(fixture.root, 'worktree');
+    const outputPath = join(launch === 'target-overlap' ? target : fixture.project, 'runs', 'results');
+    writeFileSync(join(fixture.project, '.gitignore'), 'runs/\n');
+    const authored = writeCriterionBrief(fixture);
+    writeFileSync(authored.path, authored.source.replace('---\n', `---\noutputs:\n  - path: ${outputPath}\n    type: directory\n`));
+    const args = launch === 'unknown' ? [] : launch === 'project' ? ['--project', fixture.project]
+      : ['--target', launch === 'in-place' ? fixture.project : target];
+    const result = runRehearsal(fixture, authored.path, { PROJECT_DIR: fixture.project }, args);
+    const output = `${result.stdout}${result.stderr}`;
+    expect(result.error).toBeUndefined();
+    const blocked = ['in-place', 'project', 'target-overlap'].includes(launch);
+    expect(result.status, output).toBe(blocked ? 1 : 0);
+    expect(output).toContain(blocked ? 'overlaps project' : 'rehearsal uses a temporary substitute');
+    if (launch === 'unknown') expect(output).toMatch(/worktree launch.*blocks if launched in place/);
+    expect(existsSync(outputPath)).toBe(false);
   });
 
   it('rejects an occupied declared output before simulation', { timeout: 100_000 }, () => {

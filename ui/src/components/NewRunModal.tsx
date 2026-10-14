@@ -9,7 +9,6 @@ const initialDraft = {
   projectDir: "",
   workflow: "default",
   brief: "# Task: example brief\n\n## Goal\nImplement X.\n",
-  supervise: true,
   maxIter: 8,
 };
 
@@ -27,12 +26,8 @@ type NewRunModalProps = {
 
 export function BriefPreflightPanel({
   preflight,
-  acknowledged,
-  onAcknowledgedChange,
 }: {
   preflight: BriefPreflightResponse;
-  acknowledged: boolean;
-  onAcknowledgedChange: (checked: boolean) => void;
 }) {
   return (
     <section className="brief-preflight" aria-live="polite" aria-label="Brief preflight result">
@@ -55,12 +50,7 @@ export function BriefPreflightPanel({
           </li>
         ))}
       </ul>
-      {preflight.report.requiresAcknowledgement ? (
-        <label className="brief-acknowledgement">
-          <input type="checkbox" checked={acknowledged} onChange={(event) => onAcknowledgedChange(event.target.checked)} />
-          I reviewed these warnings or contract problems and want to continue with this exact brief.
-        </label>
-      ) : <p className="brief-preflight-ready">No consequential findings require acknowledgement.</p>}
+      <p className="brief-preflight-ready">Preflight findings are advisory.</p>
     </section>
   );
 }
@@ -70,7 +60,6 @@ export default function NewRunModal({ open, isOpen, campaigns, defaultCampaignId
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<BriefPreflightResponse | null>(null);
-  const [acknowledged, setAcknowledged] = useState(false);
   const visible = open ?? isOpen ?? false;
   const ship = onShip ?? onSubmit;
   const submitUnavailable = !ship;
@@ -79,7 +68,6 @@ export default function NewRunModal({ open, isOpen, campaigns, defaultCampaignId
     if (!visible) return;
     setSubmitError(null);
     setPreflight(null);
-    setAcknowledged(false);
   }, [visible]);
   useEffect(() => {
     if (!visible) return;
@@ -90,7 +78,6 @@ export default function NewRunModal({ open, isOpen, campaigns, defaultCampaignId
   const updateBrief = (brief: string) => {
     setDraft((current) => ({ ...current, brief }));
     setPreflight(null);
-    setAcknowledged(false);
     setSubmitError(null);
   };
 
@@ -102,19 +89,15 @@ export default function NewRunModal({ open, isOpen, campaigns, defaultCampaignId
     try {
       if (!preflight) {
         setPreflight(await preflightBrief(draft.brief));
-        setAcknowledged(false);
         return;
       }
-      if (preflight.report.requiresAcknowledgement && !acknowledged) return;
       await ship(draft, {
         briefPreflightDigest: preflight.report.digest,
         briefPreflightReceipt: preflight.receipt,
-        ...(preflight.report.requiresAcknowledgement ? { acknowledgeBriefWarnings: true } : {}),
       });
     } catch (err) {
       if (err instanceof BriefAdmissionRequestError) {
         setPreflight(err.preflight);
-        setAcknowledged(false);
       }
       setSubmitError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -135,17 +118,16 @@ export default function NewRunModal({ open, isOpen, campaigns, defaultCampaignId
           </div>
         ) : null}
         <div className="form-row"><label htmlFor="new-run-project-dir">Working directory <span>(where agents read/write code · runs storage stays in ~/.fc/)</span></label><input id="new-run-project-dir" value={draft.projectDir} onChange={(event) => setDraft({ ...draft, projectDir: event.target.value })} /></div>
-        <div className="form-row"><label htmlFor="new-run-workflow">Workflow</label><select id="new-run-workflow" value={draft.workflow} onChange={(event) => setDraft({ ...draft, workflow: event.target.value })}><option value="default">default (plan → execute → review)</option><option value="engineering">engineering (with QA gate retry)</option><option value="research-mode">research-mode (campaign-loop with greedy_stack)</option></select></div>
+        <div className="form-row"><label htmlFor="new-run-workflow">Workflow</label><select id="new-run-workflow" value={draft.workflow} onChange={(event) => setDraft({ ...draft, workflow: event.target.value })}><option value="default">default (plan → execute → review)</option><option value="research">research (research workflow)</option></select></div>
         <div className="form-row"><label htmlFor="new-run-brief">Brief content</label><textarea id="new-run-brief" required value={draft.brief} onChange={(event) => updateBrief(event.target.value)} /></div>
-        {preflight ? <BriefPreflightPanel preflight={preflight} acknowledged={acknowledged} onAcknowledgedChange={setAcknowledged} /> : null}
+        {preflight ? <BriefPreflightPanel preflight={preflight} /> : null}
         <div className="form-row inline-controls">
-          <label><input type="checkbox" checked={draft.supervise} onChange={(event) => setDraft({ ...draft, supervise: event.target.checked })} /> Supervise run</label>
           <label>Max iterations <input type="number" min={1} step={1} aria-invalid={maxIterInvalid} value={draft.maxIter} onChange={(event) => setDraft({ ...draft, maxIter: Math.max(1, Math.trunc(Number(event.target.value) || 1)) })} /></label>
         </div>
         {maxIterInvalid ? <div className="field-error" role="alert">Max iterations must be at least 1.</div> : null}
         {submitUnavailable ? <div className="form-error" role="status">Run creation is not connected yet.</div> : null}
         {submitError ? <div className="form-error" role="alert">Unable to continue: {submitError}</div> : null}
-        <div className="footer"><button className="btn ghost" type="button" disabled={submitting} onClick={onClose}>cancel</button><button className="btn" type="submit" disabled={submitUnavailable || maxIterInvalid || submitting || Boolean(preflight?.report.requiresAcknowledgement && !acknowledged)}>{submitting ? (preflight ? "Starting…" : "Checking…") : (preflight ? "Start run" : "Check brief")}</button></div>
+        <div className="footer"><button className="btn ghost" type="button" disabled={submitting} onClick={onClose}>cancel</button><button className="btn" type="submit" disabled={submitUnavailable || maxIterInvalid || submitting}>{submitting ? (preflight ? "Starting…" : "Checking…") : (preflight ? "Start run" : "Check brief")}</button></div>
       </form>
     </div>
   );

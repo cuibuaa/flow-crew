@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   campaignsRoot as storeCampaignsRoot,
@@ -435,27 +435,6 @@ export function nextCampaignSeq(projectDir: string, campaignId: string): number 
   return maxSeq + 1;
 }
 
-export function collapseEntriesForHealth(entries: CampaignHistoryEntry[]): CampaignHistoryEntry[] {
-  const bySeq = new Map<number, CampaignHistoryEntry>();
-  for (const entry of entries) {
-    if (typeof entry.score !== 'number' || typeof entry.metric !== 'string') continue;
-    const previous = bySeq.get(entry.seq);
-    if (!previous) {
-      bySeq.set(entry.seq, entry);
-      continue;
-    }
-    const prevIteration = previous.iteration ?? 0;
-    const nextIteration = entry.iteration ?? 0;
-    if (nextIteration > prevIteration || (nextIteration === prevIteration && entry.timestamp > previous.timestamp)) {
-      bySeq.set(entry.seq, entry);
-    }
-  }
-  return [...bySeq.values()].sort((a, b) => {
-    if (a.seq !== b.seq) return a.seq - b.seq;
-    return a.timestamp.localeCompare(b.timestamp);
-  });
-}
-
 export interface CampaignPhaseProgress {
   entries: CampaignHistoryEntry[];
   completedPhases: string[];
@@ -487,11 +466,4 @@ export function summarizeCampaignPhaseProgress(entries: CampaignHistoryEntry[]):
     currentPhase,
     latest,
   };
-}
-
-export function campaignExists(projectDir: string, campaignId: string): boolean {
-  const storageKey = resolveCampaignStorageKey({ campaignId });
-  if (!storageKey) return false;
-  if (listCampaigns(projectDir).some((campaign) => campaign.storageKey === storageKey)) return true;
-  return existsSync(join(campaignsRoot(projectDir), `${storageKey}.jsonl`));
 }

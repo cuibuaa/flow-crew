@@ -95,11 +95,11 @@ describe('applyFix writes a config that truly drops the parameter', () => {
 });
 
 describe('dead session recovery', () => {
-  // Verbatim tail from verify_m7 attempt 3 (run 2026-08-04T04-04-43), which died in
+  // Failure tail from a recorded verification attempt, which died in
   // 1,781 ms having spent zero tokens. verify_e13 attempt 3 failed the same way.
   const REAL_TAIL = [
     'Error: thread/resume: thread/resume failed: no rollout found for thread id',
-    '019fcb52-9967-7931-adc0-1506817cf3fd (code -32600)',
+    '11111111-1111-4111-8111-111111111111 (code -32600)',
   ].join(' ');
 
   it('recognises the resume failure and asks for a fresh session', () => {

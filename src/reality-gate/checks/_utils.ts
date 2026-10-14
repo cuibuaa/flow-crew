@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { resolveDeclaredRealityPath } from '../declared-reads.js';
 import type { CheckContext, CheckResult } from '../types.js';
 
 export function trimDetails(details: string): string {
@@ -16,6 +17,7 @@ export function result(pass: boolean, details: string, evidence?: object): Check
 }
 
 export function resolvePath(value: string, context: CheckContext): string {
+  if (context.declaredReads !== undefined) return resolveDeclaredRealityPath(value, context);
   if (isAbsolute(value)) return value;
   const projectPath = join(context.projectDir, value);
   if (existsSync(projectPath)) return projectPath;

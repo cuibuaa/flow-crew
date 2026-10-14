@@ -1,10 +1,12 @@
+import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
+import { artifacts } from '../spec_contracts/declared-fixtures.js';
 /**
  * Engine terminal truthfulness contracts for budget, integrity, summary, and confirm state.
  * (honesty edges the prior A+ work did not cover). All task-agnostic: no domain field/threshold.
  *
  *   FIX A — budget-exhaustion with INSUFFICIENT banked measured rounds → `incomplete`, not a
  *           false `ceiling_hit`; a genuine policy ceiling (enough banked rounds) stays `ceiling_hit`.
- *   FIX B — integrity-rejected (e.g. noop) round COUNT is surfaced in the terminal report/detail,
+ *   FIX B — integrity-rejected round COUNT is surfaced in the terminal report/detail,
  *           so honest work the gate discarded is visible (gate decision unchanged).
  *   FIX C — summary.md Decision label derives from the TERMINAL run.json status, not a stale
  *           research_decision.json snapshot.
@@ -27,7 +29,7 @@ afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: research', 'defaults:', '  max_iterations: 6', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: { name: 'research', defaults: { max_iterations: 6 }, stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  config: {description: '',  name: 'research', defaults: { max_iterations: 6 }, stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
 };
 
 function writeRoles(): string {
@@ -39,13 +41,21 @@ function writeRoles(): string {
   return agentsDir;
 }
 
-function setupRun(stop: Record<string, unknown>, opts?: { confirmCommand?: string; baseline?: number; maxIterations?: number }): string {
+function setupRun(stop: Record<string, unknown>, opts?: { confirmCommand?: string; baseline?: number; maxIterations?: number; resultMinimum?: number }): string {
   const created = createRun(projectDir, 'research', researchWorkflow.yaml, ['plan']);
   const rd = runDir(projectDir, created.runId);
   writeFileSync(join(rd, 'scheduler.pid'), String(process.pid));
   const brief = [
     '---', 'research:', `  baseline: ${opts?.baseline ?? 0}`, '  policy: best_of_n', '  higher_is_better: true',
     '  result_file: docs/research_round_result.json',
+    ...(opts?.resultMinimum === undefined ? [] : [
+      '  result_schema:',
+      '    type: object',
+      '    required: [label, result]',
+      '    properties:',
+      '      label: {type: string}',
+      `      result: {type: number, minimum: ${opts.resultMinimum}}`,
+    ]),
     ...(opts?.confirmCommand ? ['  confirm:', `    command: ${JSON.stringify(opts.confirmCommand)}`, '    requires: candidate must reconfirm on a fresh split'] : []),
     '  stop:',
     ...Object.entries(stop).map(([k, v]) => `    ${k}: ${v}`),
@@ -69,13 +79,13 @@ function loopAdapter(results: number[]): Adapter {
   return {
     async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]',
           '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
           '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
           '    task: measure this round',
-        ].join('\n'));
-        return ok('planned a round');
+        ].join('\n')));
+        return fixtureResult(ok('planned a round'), opts);
       }
       if (opts.stageId === 'measure') {
         const result = results[Math.min(i, results.length - 1)];
@@ -84,9 +94,9 @@ function loopAdapter(results: number[]): Adapter {
         const file = join(projectDir, 'docs', 'research_round_result.json');
         mkdirSync(join(file, '..'), { recursive: true });
         writeFileSync(file, JSON.stringify({ label, result }));
-        return ok(`measured ${label}=${result}`);
+        return fixtureResult(ok(`measured ${label}=${result}`), opts);
       }
-      return ok(`noop ${opts.stageId}`);
+      return fixtureResult(ok(`noop ${opts.stageId}`), opts);
     },
     async discuss(): Promise<RunResult> { return ok(''); },
     spawnDiscuss() { throw new Error('unused'); },
@@ -97,23 +107,13 @@ function loopAdapter(results: number[]): Adapter {
 // A summary-narrative adapter that returns an empty narrative, so generateRunSummary falls back to
 // its deterministic facts (the Decision/Outcome line we want to assert) without an LLM call.
 const emptyNarrativeAdapter = {
-  async run(): Promise<RunResult> { return ok(''); },
+  async run(_record0, _record1, recordOpts: import("../../src/adapters/base.js").RunOpts): Promise<RunResult> { return fixtureResult(ok(''), recordOpts); },
   async discuss(): Promise<RunResult> { return ok(''); },
   spawnDiscuss() { throw new Error('unused'); },
   async spawnInteractive() { throw new Error('unused'); },
 } as unknown as Adapter;
 
 describe('FIX A — budget-exhaustion: incomplete (insufficient rounds) vs ceiling_hit (genuine ceiling)', () => {
-  it('INSUFFICIENT banked rounds → `incomplete` (every round noop-rejected; 0 < required)', async () => {
-    // baseline 0, every measured round == 0 → noop-rejected → 0 banked rounds.
-    // required = min(max_rounds 8, halt 2) = 2; banked 0 < 2 → incomplete.
-    const runId = setupRun({ beat: 99, max_rounds: 8, halt_after_no_improvement: 2 }, { baseline: 0, maxIterations: 4 });
-    const agentsDir = writeRoles();
-    const final = await runWorkflow(researchWorkflow.config, researchWorkflow.yaml, projectDir, loopAdapter([0, 0, 0, 0]), new Map(), undefined, agentsDir, runId);
-    expect(final.status).toBe('incomplete');
-    expect(final.status).not.toBe('ceiling_hit');
-  });
-
   it('SUFFICIENT banked rounds → `ceiling_hit` (policy stayed `continue`, budget ran out, enough measured)', async () => {
     // Strictly-improving rounds keep best_of_n at `continue` (streak never reaches halt 3), no
     // max_rounds → policy never self-ceilings; budget (4 iters) exhausts with >=3 banked rounds.
@@ -129,19 +129,19 @@ describe('FIX A — budget-exhaustion: incomplete (insufficient rounds) vs ceili
 });
 
 describe('FIX B — integrity-rejected round count is surfaced in the terminal report/detail', () => {
-  it('a run with noop-rejected rounds shows the rejection count in the run_completed event detail', async () => {
-    const runId = setupRun({ beat: 99, max_rounds: 8, halt_after_no_improvement: 2 }, { baseline: 0, maxIterations: 4 });
+  it('a run with schema-rejected rounds shows the rejection count in the run_completed event detail', async () => {
+    const runId = setupRun({ beat: 99, max_rounds: 8, halt_after_no_improvement: 2 }, { baseline: 0, maxIterations: 4, resultMinimum: 0.1 });
     const agentsDir = writeRoles();
     await runWorkflow(researchWorkflow.config, researchWorkflow.yaml, projectDir, loopAdapter([0, 0, 0, 0]), new Map(), undefined, agentsDir, runId);
-    // The noop gate must have recorded rejections (these are the honest ~0 results it discarded).
+    // The brief's declared result bound must have recorded rejections.
     const rej = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_integrity_rejections.json'), 'utf-8'));
-    expect((rej.noop ?? 0)).toBeGreaterThan(0);
+    expect((rej.schema_mismatch ?? 0)).toBeGreaterThan(0);
     // The terminal event detail must surface that count (observability — honest work made visible).
     const events = readFileSync(join(runDir(projectDir, runId), 'events.jsonl'), 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
     const completed = events.filter((e) => e.type === 'run_completed').at(-1);
     expect(completed).toBeDefined();
     expect(String(completed.detail)).toMatch(/integrity-rejected rounds:\s*\d+/);
-    expect(String(completed.detail)).toMatch(/noop:\d+/);
+    expect(String(completed.detail)).toMatch(/schema_mismatch:\d+/);
   });
 });
 
@@ -155,7 +155,7 @@ describe('rejected research rounds settle their repair before the journal advanc
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           order.push('plan');
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: measure',
             '    role: researcher',
@@ -177,32 +177,32 @@ describe('rejected research rounds settle their repair before the journal advanc
             '    scope: [docs/repair_marker.txt]',
             '    retry_to: [audit_round]',
             '    task: repair the rejected round',
-          ].join('\n'));
-          return ok('planned measured, audited, and repairable work');
+          ].join('\n')));
+          return fixtureResult(ok('planned measured, audited, and repairable work'), opts);
         }
         if (opts.stageId === 'measure') {
           order.push('measure');
           mkdirSync(join(projectDir, 'docs'), { recursive: true });
           writeFileSync(join(projectDir, 'docs', 'research_round_result.json'), JSON.stringify({ label: 'round_1', result: 0.5 }));
-          return ok('measured round 1');
+          return fixtureResult(ok('measured round 1'), opts);
         }
         if (opts.stageId === 'audit_round') {
           gateCalls++;
           order.push(`audit_${gateCalls}`);
           expect(existsSync(join(taskRunDir, 'research_journal.json'))).toBe(false);
-          writeFileSync(join(opts.runDir, 'verdict_audit_round.json'), JSON.stringify({
+          writeFileSync(join(opts.runDir, 'fixture_verdict_audit_round.json'), JSON.stringify({
             pass: gateCalls > 1,
             reason: gateCalls > 1 ? 'repair verified' : 'repair required',
           }));
-          return ok(`audit ${gateCalls}`);
+          return fixtureResult(ok(`audit ${gateCalls}`), opts);
         }
         if (opts.stageId === 'repair_round') {
           order.push('repair');
           expect(existsSync(join(taskRunDir, 'research_journal.json'))).toBe(false);
           writeFileSync(join(projectDir, 'docs', 'repair_marker.txt'), 'repaired\n');
-          return ok('repaired round 1');
+          return fixtureResult(ok('repaired round 1'), opts);
         }
-        return ok(`noop ${opts.stageId}`);
+        return fixtureResult(ok(`noop ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },

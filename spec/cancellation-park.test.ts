@@ -126,7 +126,7 @@ function boundTask(runId: string, overrides: Partial<TaskEntry> = {}): TaskEntry
 }
 
 describe('cancellation entry convergence', () => {
-  it('uses run-id first and locally completes a legacy daemon cancellation without numeric mutation', async () => {
+  it('routes task identity directly and locally completes a legacy daemon cancellation', async () => {
     const created = createRun(
       projectDir,
       'default',
@@ -150,8 +150,8 @@ describe('cancellation entry convergence', () => {
     server = await startRpcServer(socketPath, (request): RpcResponse => {
       requests.push(request);
       if (request.cmd === 'show') return { task, recent_ticks: [] };
-      if (request.cmd === 'cancel-run') return { error: 'unknown command' };
-      if (request.cmd === 'cancel') throw new Error('legacy numeric mutation must not be sent');
+      if (request.cmd === 'cancel') return { ok: true };
+      if (request.cmd === 'cancel-run') throw new Error('task cancellation must retain its registry binding');
       return { error: 'unexpected command' };
     });
     const io = capture();
@@ -169,10 +169,7 @@ describe('cancellation entry convergence', () => {
     expect(code).toBe(0);
     expect(io.output()).toBe(`Task #${task.id} cancelled\n`);
     expect(io.error()).toBe('');
-    expect(requests).toEqual([
-      { cmd: 'show', id: task.id },
-      { cmd: 'cancel-run', runId: created.runId, unit: task.systemd_unit },
-    ]);
+    expect(requests).toEqual([{ cmd: 'cancel', id: task.id }]);
     expect(systemd.stopCalls).toBe(1);
     expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLED });
     expect(finalRun).toMatchObject({
@@ -306,7 +303,7 @@ describe('cancellation entry convergence', () => {
     };
     const io = capture();
     const sendRequest = vi.fn(async (request: RpcRequest): Promise<RpcResponse> => (
-      request.cmd === 'show' ? { task, recent_ticks: [] } : remote
+      request.cmd === 'show' ? { task, recent_ticks: [] } : { ...remote, taskId: task.id }
     ));
 
     const code = await cmdTask(['task', 'cancel', String(task.id)], {
@@ -318,6 +315,8 @@ describe('cancellation entry convergence', () => {
     expect(code).toBe(expectedCode);
     expect(io.output()).toBe('');
     expect(io.error()).toContain('Cancellation still in progress');
+    if (_name === 'pending') expect(local.cancel).not.toHaveBeenCalled();
+    else expect(local.cancel).toHaveBeenCalledOnce();
   });
 });
 
@@ -375,7 +374,6 @@ describe('parked resume durability', () => {
       parked.runId,
       '# Replacement brief that must not be persisted',
       true,
-      false,
       undefined,
       false,
     );

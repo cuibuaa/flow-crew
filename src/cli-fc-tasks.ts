@@ -69,7 +69,7 @@ export function fcTasksUsage(): string {
   return [
     'Usage:',
     '  flowcrew fc_tasks render [--session <id>] [--session-key <key>] [--payload-arg <json>] [--store-root <dir>] [--engine-root <dir>]',
-    '  flowcrew fc_tasks list --json [--session <id>] [--store-root <dir>] [--engine-root <dir>]',
+    '  flowcrew fc_tasks list [--json] [--session <id>] [--store-root <dir>] [--engine-root <dir>]',
     '  flowcrew fc_tasks reconcile [--json] [--session <id>] [--store-root <dir>] [--engine-root <dir>]',
     '  flowcrew fc_tasks create --session <id> [--entry <json>] [--flowcrew-task-id <number>] [--store-root <dir>] [--engine-root <dir>]',
     '  flowcrew fc_tasks update <id> --session <id> [--entry <json>] [--flowcrew-task-id <number> | --clear-flowcrew-task-link] [--expected-run-id <id>] [--store-root <dir>] [--engine-root <dir>]',
@@ -364,7 +364,6 @@ export function cmdFcTasks(
         stdout.write(`${fcTasksUsage()}\n`);
         return 0;
       }
-      if (!parsed.flags.has('--json')) throw new FcTasksRefusal('list requires --json');
       if (parsed.positionals.length > 0) throw new FcTasksRefusal('list takes no positional arguments');
       const session = resolveSessionForCommand(parsed, dependencies, true);
       if (!session.ok) return writeRefusal(stderr, 'list', `${session.code}: ${session.detail}`);

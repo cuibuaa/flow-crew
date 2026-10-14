@@ -16,7 +16,6 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   runShipSetup,
-  type GitCommandRunner,
   type GitWorktreeCreator,
 } from '../src/cli-ship-setup.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
@@ -108,8 +107,8 @@ afterEach(() => {
   for (const path of cleanupPaths.splice(0).reverse()) rmSync(path, { recursive: true, force: true });
 });
 
-describe('ship-setup locked JavaScript dependency preparation', () => {
-  it('G1 installs locked JS dependencies before baseline, safely reruns, and uses Node lookup paths', async () => {
+describe('ship-setup JavaScript validation environment', () => {
+  it('uses Node lookup paths and captures validation before exact population collection', async () => {
     const root = temporaryRoot('flowcrew-ship-setup-node-deps-');
     const upwardBuild = createUpwardResolutionBuildFixture(root);
     const build = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/build.ts'], {
@@ -124,116 +123,37 @@ describe('ship-setup locked JavaScript dependency preparation', () => {
     const targetDir = join(root, 'target');
     const events: string[] = [];
     const createWorktree = createFixtureWorktree(projectDir, events);
-    const install = vi.fn((request: { command: string; args: string[]; cwd: string }) => {
-      events.push('install');
-      expect(request).toEqual({ command: 'npm', args: ['ci'], cwd: targetDir, display: 'npm ci' });
-      return { exitCode: 0, stdout: 'installed', durationMs: 37 };
-    });
     const collect = collectionRunner(expectedVitest, events);
     const baseline = successfulValidation(events);
     const report = await runShipSetup(setupArgs(projectDir, briefPath, targetDir), {
       createWorktree,
-      runDependencyInstallCommand: install,
       runTestCollectionCommand: collect,
       runValidationCommand: baseline,
       globalDir: () => join(root, 'state'),
     });
 
-    const retryTarget = join(root, 'retry-target');
-    const retryEvents: string[] = [];
-    const retryWorktree = createFixtureWorktree(projectDir, retryEvents);
-    const failedInstall = vi.fn(() => ({ exitCode: 1, stderr: 'registry unavailable', durationMs: 11 }));
-    const firstRetry = await runShipSetup(setupArgs(projectDir, briefPath, retryTarget), {
-      createWorktree: retryWorktree,
-      runDependencyInstallCommand: failedInstall,
-      runTestCollectionCommand: collectionRunner(expectedVitest, retryEvents),
-      runValidationCommand: successfulValidation(retryEvents),
-      globalDir: () => join(root, 'retry-state'),
-    });
-    const head = '1234567890abcdef1234567890abcdef12345678';
-    const git = vi.fn<GitCommandRunner>((request) => {
-      if (request.args[0] === 'worktree') {
-        return {
-          exitCode: 0,
-          stdout: `worktree ${retryTarget}\0HEAD ${head}\0branch refs/heads/fixture-branch\0\0`,
-        };
-      }
-      expect(request.args).toEqual(['rev-parse', '--verify', '--end-of-options', 'fixture-base^{commit}']);
-      return { exitCode: 0, stdout: `${head}\n` };
-    });
-    const successfulRetryInstall = vi.fn(() => ({ exitCode: 0, durationMs: 19 }));
-    const secondRetry = await runShipSetup(setupArgs(projectDir, briefPath, retryTarget), {
-      createWorktree: retryWorktree,
-      runGitCommand: git,
-      runDependencyInstallCommand: successfulRetryInstall,
-      runTestCollectionCommand: collectionRunner(expectedVitest, retryEvents),
-      runValidationCommand: successfulValidation(retryEvents),
-      globalDir: () => join(root, 'retry-state'),
-    });
-
     const missingRoot = temporaryRoot('flowcrew-ship-setup-node-resolver-missing-');
+    // Keep this fixture's unavailable Vitest package from resolving to the
+    // repository dependency above TMPDIR through Node's normal lookup paths.
+    const unavailableVitest = join(missingRoot, 'node_modules', 'vitest');
+    mkdirSync(unavailableVitest, { recursive: true });
+    writeFileSync(join(unavailableVitest, 'package.json'), '{"name":"vitest","exports":{}}');
     const missingProject = writeNodeProject(missingRoot);
     const missingTarget = join(missingRoot, 'target');
     const missingReport = await runShipSetup(
       setupArgs(missingProject.projectDir, missingProject.briefPath, missingTarget),
       {
         createWorktree: createFixtureWorktree(missingProject.projectDir, []),
-        runDependencyInstallCommand: vi.fn(() => ({ exitCode: 0, durationMs: 1 })),
         runValidationCommand: successfulValidation([]),
         globalDir: () => join(missingRoot, 'state'),
       },
     );
 
     expect(build.status, `${build.stdout ?? ''}\n${build.stderr ?? ''}`).toBe(0);
-    expect(report).toMatchObject({
-      state: 'ready',
-      dependencyInstall: {
-        state: 'installed', command: 'npm', args: ['ci'], exitCode: 0, durationMs: 37,
-      },
-    });
-    expect(events.indexOf('install')).toBeGreaterThan(events.indexOf('worktree'));
-    expect(events.indexOf('install')).toBeLessThan(events.findIndex((entry) => entry.startsWith('collect:')));
-    expect(events.indexOf('install')).toBeLessThan(events.findIndex((entry) => entry.startsWith('baseline:')));
-    expect(firstRetry).toMatchObject({
-      state: 'refused',
-      worktreeCreated: true,
-      dependencyInstall: { state: 'failed', exitCode: 1, durationMs: 11 },
-      blockers: [{ phase: 'dependency', reason: expect.stringContaining('npm ci') }],
-    });
-    expect(firstRetry.blockers[0].repair).toMatch(/node_modules.*npm ci.*rerun/i);
-    expect(secondRetry).toMatchObject({ state: 'ready', worktreeCreated: false, worktreeReused: true });
-    expect(retryWorktree).toHaveBeenCalledTimes(1);
-    expect(git).toHaveBeenCalledTimes(2);
+    expect(report.state).toBe('ready');
+    expect(events.indexOf('worktree')).toBeLessThan(events.findIndex(entry => entry.startsWith('baseline:')));
+    expect(events.findIndex(entry => entry.startsWith('baseline:'))).toBeLessThan(events.findIndex(entry => entry.startsWith('collect:')));
     expect(missingReport.testPopulation?.reason).toMatch(/Cannot resolve vitest.*lookup paths:/i);
   }, 180_000);
 
-  it('G1 refuses a missing node_modules without an npm lockfile with an actionable retry', async () => {
-    const root = temporaryRoot('flowcrew-ship-setup-node-no-lock-');
-    writeParentVitest(root);
-    const { projectDir, briefPath } = writeNodeProject(root);
-    rmSync(join(projectDir, 'package-lock.json'));
-    const targetDir = join(root, 'target');
-    const install = vi.fn();
-    const report = await runShipSetup(setupArgs(projectDir, briefPath, targetDir), {
-      createWorktree: vi.fn<GitWorktreeCreator>((request) => {
-        mkdirSync(request.targetDir, { recursive: true });
-        copyFileSync(join(projectDir, 'package.json'), join(request.targetDir, 'package.json'));
-        return { exitCode: 0 };
-      }),
-      runDependencyInstallCommand: install,
-      runValidationCommand: successfulValidation([]),
-      globalDir: () => join(root, 'state'),
-    });
-
-    expect(report).toMatchObject({
-      state: 'refused',
-      dependencyInstall: { state: 'manual_required', display: 'npm ci', exitCode: null },
-      blockers: [{
-        phase: 'dependency',
-        reason: expect.stringMatching(/no node_modules or npm lockfile/i),
-        repair: expect.stringMatching(/restore.*lockfile.*or install dependencies.*rerun/i),
-      }],
-    });
-    expect(install).not.toHaveBeenCalled();
-  });
 });

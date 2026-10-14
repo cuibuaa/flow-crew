@@ -1,14 +1,5 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from './engine-fs.js';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import {
@@ -18,6 +9,7 @@ import {
   processStartTokensMatch,
   type ProcessStartToken,
 } from './run-lock.js';
+import { processGroupIsAlive } from './process-liveness.js';
 
 export type UnitStatus =
   | { kind: 'active' }
@@ -67,8 +59,27 @@ export interface SupervisorBackend {
 
 export const SUPERVISION_PROTOCOL_VERSION = 1 as const;
 export const FLOWCREW_LAUNCH_RESULT_PATH_ENV = 'FLOWCREW_LAUNCH_RESULT_PATH';
+/** The supervise shim hands its direct CLI child a private launch-result path.
+ * It is consumed once, here, and removed from the environment so that no
+ * stage, validation command or test the CLI later launches can inherit it and
+ * write into the real supervision directory. */
+const launchResultPath = process.env[FLOWCREW_LAUNCH_RESULT_PATH_ENV];
+delete process.env[FLOWCREW_LAUNCH_RESULT_PATH_ENV];
 export const DEFAULT_SUPERVISION_STARTUP_GRACE_MS = 5_000;
 export const DEFAULT_SUPERVISION_RETENTION_MS = 30 * 24 * 60 * 60_000;
+
+/** These identify one service invocation or its manager-owned descriptors.
+ * They cannot describe a newly launched child, on either supervision backend. */
+export const UNIT_ENVIRONMENT_KEYS = [
+  'INVOCATION_ID', 'NOTIFY_SOCKET', 'JOURNAL_STREAM', 'MANAGERPID', 'SYSTEMD_EXEC_PID',
+  'LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES', 'WATCHDOG_PID', 'WATCHDOG_USEC',
+  'MEMORY_PRESSURE_WATCH', 'MEMORY_PRESSURE_WRITE',
+] as const;
+
+export function supervisionEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(source).filter(([key, value]) =>
+    value !== undefined && !UNIT_ENVIRONMENT_KEYS.some(excluded => excluded === key))) as Record<string, string>;
+}
 
 export interface SupervisionLaunchRecord {
   version: typeof SUPERVISION_PROTOCOL_VERSION;
@@ -80,6 +91,8 @@ export interface SupervisionLaunchRecord {
   createdAt: string;
   shutdownGraceMs: number;
   legacyRecordPath?: string;
+  /** Absent only in launch records written before environment inheritance. */
+  environment?: Record<string, string>;
 }
 
 export interface SupervisionRunningRecord {
@@ -162,12 +175,12 @@ export function supervisionPaths(baseDir: string, unit: string): SupervisionPath
 export function atomicWriteJson(
   path: string,
   value: unknown,
-  options: { createParent?: boolean } = {},
+  options: { createParent?: boolean; mode?: number } = {},
 ): void {
   if (options.createParent !== false) mkdirSync(dirname(path), { recursive: true });
   const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
   try {
-    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf-8');
+    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf-8', mode: options.mode });
     renameSync(temporary, path);
   } finally {
     try { unlinkSync(temporary); } catch { /* rename succeeded or cleanup is best-effort */ }
@@ -204,7 +217,9 @@ export function readSupervisionLaunch(path: string): SupervisionLaunchRecord | u
     || typeof value.shellPath !== 'string'
     || typeof value.createdAt !== 'string'
     || !Number.isFinite(value.shutdownGraceMs)
-    || (value.legacyRecordPath !== undefined && typeof value.legacyRecordPath !== 'string')) return undefined;
+    || (value.legacyRecordPath !== undefined && typeof value.legacyRecordPath !== 'string')
+    || (value.environment !== undefined && (!isRecord(value.environment)
+      || Object.values(value.environment).some(entry => typeof entry !== 'string')))) return undefined;
   return value as unknown as SupervisionLaunchRecord;
 }
 
@@ -256,7 +271,7 @@ export function readLaunchRefusal(path: string): LaunchRefusalRecord | undefined
 
 /** Called by the supervised CLI before returning from a pre-launch refusal. */
 export function recordLaunchRefusal(message: string): void {
-  const path = process.env[FLOWCREW_LAUNCH_RESULT_PATH_ENV];
+  const path = launchResultPath;
   if (!path || !message.startsWith('Launch refused:')) return;
   atomicWriteJson(path, {
     version: SUPERVISION_PROTOCOL_VERSION,
@@ -264,10 +279,6 @@ export function recordLaunchRefusal(message: string): void {
     message,
     refusedAt: new Date().toISOString(),
   } satisfies LaunchRefusalRecord);
-}
-
-export function runningRecordBindsShim(record: SupervisionRunningRecord): boolean {
-  return runningRecordBindingStatus(record) === 'bound';
 }
 
 export type RunningRecordBindingStatus = 'bound' | 'unbound' | 'unreadable';
@@ -287,6 +298,18 @@ export function runningRecordBindingStatus(record: SupervisionRunningRecord): Ru
   return processCommandBinding(record.shimPid, record.shimCommand);
 }
 
+function terminalExitObservation(exit: SupervisionExitRecord): PortableUnitObservation {
+  return {
+    status: {
+      kind: 'terminal',
+      exitCode: exit.normalized,
+      ...(exit.signal ? { signal: exit.signal } : {}),
+      ...(exit.launchRefusal ? { launchRefusal: exit.launchRefusal } : {}),
+    },
+    exit,
+  };
+}
+
 /**
  * Read order is a safety property, not an implementation detail. A durable exit
  * result wins even while a stale PID or a systemd cgroup still appears alive.
@@ -298,17 +321,7 @@ export function observePortableUnit(
 ): PortableUnitObservation {
   const paths = supervisionPaths(baseDir, unit);
   const exit = readSupervisionExit(paths.exit);
-  if (exit) {
-    return {
-      status: {
-        kind: 'terminal',
-        exitCode: exit.normalized,
-        ...(exit.signal ? { signal: exit.signal } : {}),
-        ...(exit.launchRefusal ? { launchRefusal: exit.launchRefusal } : {}),
-      },
-      exit,
-    };
-  }
+  if (exit) return terminalExitObservation(exit);
 
   const runningExists = existsSync(paths.running);
   const running = readSupervisionRunning(paths.running);
@@ -326,13 +339,32 @@ export function observePortableUnit(
         running,
       };
     }
+    // The shim publishes exit.json before exiting. It can do both between our
+    // first exit read and the binding probe; re-read validated durable evidence
+    // before declaring its fate unknown. Absence or invalid JSON still fails closed.
+    const finalExit = readSupervisionExit(paths.exit);
+    if (finalExit) return terminalExitObservation(finalExit);
+    // A lost verdict and unknown liveness are different observations. The
+    // shim's death cannot certify its detached agent or descendants stopped.
+    // Keep those consumers behind the existing unobservable stop barrier.
+    try {
+      const agentToken = processStartToken(running.agentPid);
+      const agentReused = running.agentToken !== undefined && agentToken !== undefined
+        && !processStartTokensMatch(running.agentToken, agentToken);
+      if ((!agentReused && processIsAlive(running.agentPid))
+          || (process.platform !== 'win32' && processGroupIsAlive(running.agentPid))) {
+        return { status: { kind: 'unobservable', reason: 'shim died while its agent or command group may still be running' }, running };
+      }
+    } catch {
+      return { status: { kind: 'unobservable', reason: 'interrupted agent liveness is unreadable' }, running };
+    }
     return {
       status: { kind: 'terminal-unknown', reason: 'shim-died-without-status' },
       running,
     };
   }
   if (runningExists) {
-    return { status: { kind: 'terminal-unknown', reason: 'shim-died-without-status' } };
+    return { status: { kind: 'unobservable', reason: 'supervision running identity is unreadable' } };
   }
 
   const launchExists = existsSync(paths.launch);
@@ -344,10 +376,10 @@ export function observePortableUnit(
     if (Number.isFinite(createdAt) && createdAt <= nowMs + 5_000 && nowMs - createdAt <= startupGraceMs) {
       return { status: { kind: 'active' }, launch };
     }
-    return { status: { kind: 'terminal-unknown', reason: 'never-started' }, launch };
+    return { status: { kind: 'unobservable', reason: 'launch has no published process identity or exit status' }, launch };
   }
   if (launchExists) {
-    return { status: { kind: 'terminal-unknown', reason: 'never-started' } };
+    return { status: { kind: 'unobservable', reason: 'supervision launch identity is unreadable' } };
   }
   return { status: { kind: 'absent' } };
 }

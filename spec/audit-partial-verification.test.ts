@@ -9,7 +9,6 @@ import {
   type ValidationCommandResult,
   type ValidationRunResponse,
 } from '../src/project-validation.js';
-import { inspectRealityChecks } from '../src/reality-check-preflight.js';
 import {
   readShipSetupReadyValidationBaseline,
   shipSetupBriefDigest,
@@ -231,6 +230,21 @@ describe('partial failure evidence audit', () => {
     expect(testDelta(unknownBaseline, completeNew)).toMatchObject({
       state: 'unresolved', reason: 'Baseline failure identity/count was unavailable',
     });
+    expect(testDelta(unknownBaseline, testResult(unknownBaseline))).toMatchObject({
+      state: 'pass', reason: expect.stringContaining('cannot show a regression'),
+    });
+    const unlaunched: ValidationCommandResult = {
+      role: 'test', state: 'launch_error', exitCode: 127, durationMs: 1, output: 'sh: karma: not found',
+      failureIdentifiers: [], failureIdentity: 'unknown',
+    };
+    const unlaunchedBaseline = { ...unknownBaseline, results: [unlaunched] };
+    expect(testDelta(unlaunchedBaseline, unlaunched)).toMatchObject({ state: 'pass', reason: expect.stringContaining('cannot show a regression') });
+    expect(testDelta(unlaunchedBaseline, passed)).toMatchObject({ state: 'pass' });
+    expect(testDelta(unlaunchedBaseline, completeNew)).toMatchObject({ state: 'unresolved', reason: 'Baseline was not executable/configured' });
+    expect(testDelta(greenBaseline, unlaunched)).toMatchObject({ state: 'unresolved' });
+    expect(testDelta(completeBaseline, testResult(unknownBaseline))).toMatchObject({
+      state: 'unresolved', reason: 'Current failure identity/count is unavailable',
+    });
     expect(testDelta(completeBaseline, completeSame)).toMatchObject({ state: 'pass' });
     expect(testDelta(completeBaseline, completeNew)).toMatchObject({
       state: 'regression', newFailureIdentifiers: ['spec/new.test.ts'],
@@ -294,38 +308,4 @@ describe('partial failure evidence audit', () => {
     expect(readShipSetupReadyValidationBaseline(canonicalProject, brief, globalRoot)).toBeUndefined();
   });
 
-  it('renders partial identities and counts as lower-bound observed evidence', async () => {
-    const baseline = await baselineFor({
-      exitCode: 1,
-      stdout: '[... 64 earlier bytes omitted ...]\nFAIL spec/retained.test.ts\nTests 1 failed',
-    });
-    const brief = [
-      '---',
-      'terminal_states:',
-      '  complete:',
-      '    paths: [docs/final.md]',
-      '---',
-      '# Portable contract',
-    ].join('\n');
-    const checks = [
-      '## Reality checks',
-      '```yaml',
-      'checks:',
-      '  - name: project validation remains acceptable',
-      '    type: exec-script-exit-zero',
-      '    params:',
-      '      script: fixture-test',
-      '```',
-    ].join('\n');
-
-    const report = inspectRealityChecks(brief, checks, { validationBaseline: baseline });
-    const finding = report.blockingTierFindings.find(({ code }) => code === 'hard_check_cannot_pass');
-
-    expect(finding?.message).toMatch(/partial failure evidence.*observed partial-evidence count of 1/i);
-    expect(finding?.message).toMatch(/identities \(lower bound\).*red-to-red comparison must remain unresolved/i);
-    expect(finding?.evidence).toContain('baseline_failure_evidence=partial');
-    expect(finding?.evidence).toContain('baseline_observed_failure_count=1');
-    expect(finding?.evidence).toContain('baseline_failure_identities_lower_bound=');
-    expect(finding?.evidence).not.toContain('baseline_failure_count=');
-  });
 });

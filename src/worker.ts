@@ -1,32 +1,48 @@
+import { writeFileSync, appendFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
+
+
 // Module: worker
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, watch, writeFileSync } from 'node:fs';
+import { withEngineIntegrity } from './engine-integrity.js';
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join, relative } from 'node:path';
+import { recordInvocationInput } from './run-state-view.js';
+import { finalizeCodexHome, isCodexSessionUuid, readCodexSession, stageCodexHome } from './adapters/codex.js';
+import { declaredOutputFacts, runStateContext } from './run-state-access.js';
+import { providerFailureDetail } from './provider-result.js';
+import { sumInvocationUsage } from './invocation-usage.js';
+import { renderPlanInterface, renderPlannerAdmissionCheck } from './plan-interface.js';
+import { ARTIFACT_CONTRACT_SCHEMA_DOC, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
+import { join, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
+import { runProcessAbortSignal } from './adapters/base.js';
 export { ADAPTER_FAILURE_PATTERNS, classifyAdapterFailure } from './adapters/failure.js';
-import { loadAdapterByName } from './adapters/loader.js';
-import { buildStagePrompt } from './handoff.js';
-import { loadProjectDefaults } from './config.js';
+import { buildStagePrompt, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
+import type { Schema } from './reality-gate/checks/json-schema-match.js';
+import { recordGateValidationDelta, settleGateValidationEvidence } from './scheduler/sched_settlement/gate-validation.js';
+import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
+import { AuditFindingsSchema } from './scoped-audit-repair.js';
+import { getDefaultTimeout } from './config.js';
+import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
+import { renderPlannerPolicies } from './planner-policies.js';
+import { extractBriefCriteria } from './brief-criteria.js';
 import { parseStageAbortSignal } from './abort-signal.js';
 import {
+  RUN_STATUS,
   beginStageAttempt,
-  completeStageAttempt,
-  suspendStageAttempt,
+  closeStageAttempt,
+  settleStageAttempt,
+  StageAttemptSettlementError,
+  readStageStatus,
+  readRunState,
   writeStageStatus,
   writeStageInput,
   writeStageOutput,
+  atomicWrite,
   TERMINAL_STATUSES,
   VERDICT_CONTRACT_DOC,
   PHASE_METADATA_FIELDS,
 } from './store.js';
-import type { StageAttemptTimeoutSummary, StageStatus } from './store.js';
-import {
-  negotiationRequestDigest,
-  parseTimeoutExtensionRequest,
-  publishConstraintDecision,
-  type NegotiationRequester,
-  type TimeoutExtensionRequestV1,
-} from './runtime-negotiation.js';
+import type { AttemptAttribution, StageAttemptTimeoutSummary, StageStatus } from './store.js';
 import {
   ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS,
   AttemptDeadlineController,
@@ -34,12 +50,14 @@ import {
 } from './attempt-deadline.js';
 import {
   guidanceForStageFromText,
+  guidanceForExecution,
   appendGuidanceEnvelope,
   readGuidanceForStage,
   renderGuidanceDelivery,
+  renderGuidanceEnvelope,
   routePendingOperatorGuidanceToStage,
 } from './guidance.js';
-import { recordRunEvent } from './run-events.js';
+import { attemptEventFields, recordRunEvent } from './run-events.js';
 import { parseExplicitCommandTimeout } from './command-activity.js';
 import {
   commandFingerprint,
@@ -47,28 +65,42 @@ import {
   type StageCommandInterruptSignal,
 } from './command-interrupt.js';
 import {
-  acquireAttributableWriterLease,
   compareLiveConstraintContentIdentities,
-  LIVE_CONSTRAINT_MAX_REINVOCATIONS,
   readLiveConstraintContentIdentity,
   type LiveConstraintContentIdentity,
   type LiveConstraintGuardFactory,
   type LiveConstraintInvocationResult,
 } from './live-constraint-guard.js';
 import {
-  captureDeferredStageArtifactContract,
-  captureStageArtifactContractPreimages,
   inspectStageArtifactContract,
   writeStageArtifactContractAudit,
+  stageArtifactProduction,
 } from './stage-artifact-contract.js';
+import { readAcceptedScopeRevisionDecisions } from './runtime-negotiation.js';
+import { buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 
-function getDefaultTimeout(projectDir: string): string {
-  return String(loadProjectDefaults(projectDir).timeout_ms);
+/** Put the canonical IDs beside the planner's first proposal instructions. */
+export function plannerCriterionAssignmentContext(brief: string): string {
+  const criteria = extractBriefCriteria(brief).criteria;
+  if (criteria.length === 0) return '';
+  return [
+    '# First-proposal criterion assignments',
+    'Empty/omitted criterion_refs assign all criteria conservatively. Use these exact IDs only when assigning explicit subsets. Ordinary work needs a downstream independent gate.',
+    ...criteria.map((criterion) => `- ${criterion.id}: ${criterion.text}`),
+  ].join('\n');
 }
 
 export interface StageOpts {
+  /** Scheduled stages return JSON; standalone legacy workers remain readable. */
+  outputSchema?: Schema;
+  artifactContract?: ArtifactContract;
+  planRevision?: { revision: number; digest: string };
+  artifactStatuses?: Record<string, StageStatus>;
+  /** Trusted engine provider injection; never supplied by a model declaration. */
   stageId: string;
   role: AgentConfig;
+  /** Scheduler declaration, captured before role loading or plan replacement. */
+  attribution?: AttemptAttribution;
   dependsOn: string[];
   promptTemplate: string;
   /** Planner-authored stage text before scheduler contracts are appended. */
@@ -79,8 +111,9 @@ export interface StageOpts {
   /** Internal dependency injection for deterministic attempt-deadline tests. */
   technicalRetry?: {
     delaysMs?: readonly number[];
-    loadFallbackAdapter?: (name: string) => Promise<Adapter>;
   };
+  /** The worker awaits scope admission, then audit classification, before publication. */
+  settlementBoundary?: (phase: 'child_closed' | 'attempt_closed') => Promise<boolean>;
   projectDir: string;
   runId: string;
   runDir: string;
@@ -95,6 +128,10 @@ export interface StageOpts {
   ledgerDigest?: string;
   taskDescription?: string;
   isGate?: boolean;
+  gateContext?: Pick<Parameters<typeof buildGateDispatchPreamble>[0], 'authorIds' | 'fixStageIds' | 'roundDiffPath'>;
+  /** A gate reviews this author's result, so a blocked result settles the stage for that gate to confirm or reject. */
+  gateReviewed?: boolean;
+  dynamicDispatch?: boolean;
   researchOutcomeGate?: boolean;
   criterionRefs?: string[];
   resumeSessionId?: string;
@@ -110,63 +147,9 @@ export interface StageOpts {
 
 const ADAPTER_RETRY_DELAYS = [30_000, 60_000, 120_000];
 
-export type TimeoutExtensionTimingBasis = 'requested_at' | 'legacy_consumption';
-
-export interface TimeoutExtensionPolicyInput {
-  request: TimeoutExtensionRequestV1;
-  attemptStartedWallMs: number;
-  attemptElapsedMs: number;
-  effectiveBudgetMs: number;
-  supervisorAborted: boolean;
-  attemptAborted: boolean;
-  deadlineAborted: boolean;
-}
-
-export interface TimeoutExtensionPolicyDecision {
-  accepted: boolean;
-  requestedExtensionMs: number;
-  grantedExtensionMs: number;
-  rejectionReason?: string;
-  timingBasis: TimeoutExtensionTimingBasis;
-  adjudicatedAttemptElapsedMs: number;
-  requestedAtAttemptElapsedMs?: number;
-}
-
-export function evaluateTimeoutExtensionRequest(
-  input: TimeoutExtensionPolicyInput,
-): TimeoutExtensionPolicyDecision {
-  const requestedAtMs = input.request.requestedAt === undefined
-    ? undefined
-    : Date.parse(input.request.requestedAt);
-  const usesRequestedAt = requestedAtMs !== undefined
-    && Number.isFinite(requestedAtMs)
-    && Number.isFinite(input.attemptStartedWallMs);
-  const requestedAtAttemptElapsedMs = usesRequestedAt
-    ? Math.max(0, requestedAtMs - input.attemptStartedWallMs)
-    : undefined;
-  const adjudicatedAttemptElapsedMs = requestedAtAttemptElapsedMs ?? input.attemptElapsedMs;
-  const timingBasis: TimeoutExtensionTimingBasis = usesRequestedAt ? 'requested_at' : 'legacy_consumption';
-  let rejectionReason: string | undefined;
-  if (!input.request.reason) rejectionReason = 'timeout extension reason must be non-empty';
-  else if (!Number.isSafeInteger(input.request.requestedExtensionMs) || input.request.requestedExtensionMs <= 0) rejectionReason = 'requestedExtensionMs must be a positive safe integer';
-  else if (input.supervisorAborted) rejectionReason = 'a current-attempt ABORT already exists';
-  else if (adjudicatedAttemptElapsedMs >= input.effectiveBudgetMs || input.attemptAborted || input.deadlineAborted) rejectionReason = 'request arrived at or after the immutable attempt deadline';
-  else rejectionReason = 'running attempt deadlines are immutable; edit config/defaults.yaml::default_timeout_ms before launch';
-
-  const requestedExtensionMs = Number.isSafeInteger(input.request.requestedExtensionMs)
-    && input.request.requestedExtensionMs > 0
-    ? input.request.requestedExtensionMs
-    : 0;
-  return {
-    accepted: false,
-    requestedExtensionMs,
-    grantedExtensionMs: 0,
-    ...(rejectionReason ? { rejectionReason } : {}),
-    timingBasis,
-    adjudicatedAttemptElapsedMs,
-    ...(requestedAtAttemptElapsedMs === undefined ? {} : { requestedAtAttemptElapsedMs }),
-  };
-}
+const PARALLEL_EXECUTION_BOUNDARY = '# Parallel execution boundary\n'
+  + 'Other stages share this wave. Do not revert or stage their edits. Never use git add . or git commit -a. '
+  + 'Shared git status or diff does not attribute changes to you; the engine records per-attempt writes.';
 
 function inferAdapterName(adapter: Adapter): string | undefined {
   const name = adapter.constructor?.name;
@@ -189,7 +172,6 @@ function literalScopeRoot(scope: string): string | undefined {
 function snapshotScopedContent(
   projectDir: string,
   scopes: readonly string[],
-  extraFiles: string[] = [],
 ): Map<string, LiveConstraintContentIdentity> {
   const snap = new Map<string, LiveConstraintContentIdentity>();
   function walk(dir: string, depth: number) {
@@ -216,10 +198,6 @@ function snapshotScopedContent(
       else snap.set(absolute, readLiveConstraintContentIdentity(absolute));
     } catch { /* an exact declared output may not exist yet */ }
   }
-  for (const file of extraFiles) {
-    const identity = readLiveConstraintContentIdentity(file);
-    if (identity.state !== 'absent') snap.set(file, identity);
-  }
   return snap;
 }
 
@@ -227,18 +205,13 @@ function diffScopedArtifacts(
   before: Map<string, LiveConstraintContentIdentity>,
   projectDir: string,
   scopes: readonly string[],
-  extraFiles: string[] = [],
-  runDirectory?: string,
 ): string[] {
-  const after = snapshotScopedContent(projectDir, scopes, extraFiles);
+  const after = snapshotScopedContent(projectDir, scopes);
   const changed: string[] = [];
   const absent: LiveConstraintContentIdentity = { state: 'absent' };
   for (const path of new Set([...before.keys(), ...after.keys()])) {
     if (compareLiveConstraintContentIdentities(before.get(path) ?? absent, after.get(path) ?? absent) !== 'different') continue;
-    const runRelative = runDirectory ? relative(runDirectory, path) : undefined;
-    changed.push(runRelative !== undefined && runRelative !== '' && !runRelative.startsWith('..')
-      ? `run:${runRelative.replace(/\\/g, '/')}`
-      : relative(projectDir, path).replace(/\\/g, '/'));
+    changed.push(relative(projectDir, path).replace(/\\/g, '/'));
   }
   return changed.sort();
 }
@@ -257,12 +230,12 @@ export function freshRunningStageProjection(
   };
   for (const field of [
     'exitCode', 'duration_ms', 'artifacts', 'completedAt', 'error', 'tokens_in', 'tokens_out',
-    'kgChanged', 'writes', 'writeAttribution', 'constraintAudit', 'timeout',
+    'writes', 'writeAttribution', 'constraintAudit', 'timeout',
   ] as const) delete next[field];
   return next;
 }
 
-export function renderSupervisorAbortOutput(
+export function renderStageAbortOutput(
   output: string,
   stageId: string,
   executionIndex: number,
@@ -270,9 +243,9 @@ export function renderSupervisorAbortOutput(
 ): string {
   if (output.trim().length > 0) return output;
   return [
-    '# Execution aborted by supervisor',
+    '# Execution aborted by engine',
     '',
-    reason?.trim() || 'The supervisor stopped this execution before it produced output.',
+    reason?.trim() || 'The engine stopped this execution before it produced output.',
     '',
     `Stage: ${stageId}`,
     `Execution: ${executionIndex}`,
@@ -286,7 +259,7 @@ export interface AttemptEvidenceGeneration {
   attemptStartedAt: string;
   segmentStart: number;
   /** Content fingerprints at the boundary for shared artifact slots. An
-   * unchanged prior-attempt verdict/metric is therefore never current evidence. */
+   * unchanged prior-attempt verdict is therefore never current evidence. */
   artifactBaselines: Record<string, string | null>;
   recordedAt: string;
 }
@@ -295,7 +268,7 @@ function attemptArtifactFingerprint(path: string): string | null {
   try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return null; }
 }
 
-/** Delimit the append-only live log so every supervisor read can prove which
+/** Delimit the append-only live log so each watchdog read can prove which
  * scheduler attempt produced its bytes. */
 export function beginAttemptEvidenceGeneration(
   runDirectory: string,
@@ -317,7 +290,6 @@ export function beginAttemptEvidenceGeneration(
     artifactBaselines: {
       output: attemptArtifactFingerprint(join(stagePath, `output_attempt_${attemptIndex}.md`)),
       verdict: attemptArtifactFingerprint(join(runDirectory, `verdict_${stageId}.json`)),
-      metric: attemptArtifactFingerprint(join(stagePath, 'metric.json')),
     },
     recordedAt: new Date().toISOString(),
   };
@@ -344,61 +316,18 @@ export async function runStage(
   adapter: Adapter,
   opts: StageOpts,
 ): Promise<RunResult> {
-  // Preserve the synchronous launch edge only when the scheduler supplied no
-  // live policy. An explicitly empty scope is read-only and therefore takes no
-  // writer lease; its live guard still restores and records every project write.
-  if (!opts.liveConstraintGuardFactory) {
-    return runStageWithWriterLease(adapter, opts);
-  }
-  const binding = opts.liveConstraintGuardFactory.writerLease;
-  const writeCapable = opts.projectWriteScope === undefined || opts.projectWriteScope.length > 0;
-  const releaseWriterLease = await acquireAttributableWriterLease(
-    opts.projectDir,
-    writeCapable,
-    {
-      ...(binding ?? {}),
-      ownerStageId: binding?.ownerStageId ?? opts.stageId,
-      onWait: (wait) => {
-        const blockedBy = wait.blockedByOwnerStageId ?? 'another writer';
-        recordRunEvent(opts.projectDir, opts.runId, {
-          type: wait.phase === 'started'
-            ? 'writer_lease_wait_started'
-            : 'writer_lease_wait_finished',
-          runId: opts.runId,
-          timestamp: wait.phase === 'started'
-            ? wait.waitStartedAt
-            : new Date().toISOString(),
-          stageId: opts.stageId,
-          ...(wait.blockedByOwnerStageId
-            ? { blockedByStageId: wait.blockedByOwnerStageId }
-            : {}),
-          leasePartition: wait.partitionId,
-          waitStartedAt: wait.waitStartedAt,
-          ...(wait.waitedMs === undefined ? {} : { waitedMs: wait.waitedMs }),
-          detail: wait.phase === 'started'
-            ? `waiting for writer lease behind ${blockedBy} on partition ${wait.partitionId}`
-            : `writer lease acquired after ${wait.waitedMs ?? 0}ms behind ${blockedBy} on partition ${wait.partitionId}`,
-          source: 'worker',
-        });
-      },
-    },
-  );
-  try {
-    return await runStageWithWriterLease(adapter, opts);
-  } finally {
-    releaseWriterLease();
-  }
-}
-
-async function runStageWithWriterLease(
-  adapter: Adapter,
-  opts: StageOpts,
-): Promise<RunResult> {
+  // Direct already supplies the whole admitted task. Its guarantees are the
+  // same worker/scheduler checks, rather than a second process brief.
+  const runState = existsSync(join(opts.runDir, 'run.json'))
+    ? readRunState(opts.projectDir, opts.runId) : undefined;
+  const direct = runState?.workflowName === 'direct';
+  const promptTemplate = direct && opts.taskDescription && runState.taskDescription
+    ? opts.promptTemplate.replace(opts.taskDescription.trim(), () => runState.taskDescription!)
+    : opts.promptTemplate;
   const skillNames = opts.stageSkills ?? [];
-  const guidanceBeforePrompt = readGuidanceForStage(opts.runDir, opts.stageId);
   let prompt = buildStagePrompt({
     dependsOn: opts.dependsOn,
-    promptTemplate: opts.promptTemplate,
+    promptTemplate,
     projectDir: opts.projectDir,
     runId: opts.runId,
     runDir: opts.runDir,
@@ -407,19 +336,51 @@ async function runStageWithWriterLease(
     availableRoles: opts.availableRoles,
     availableSkills: opts.availableSkills,
     taskDescription: opts.taskDescription,
-    isGate: opts.isGate,
+    isGate: direct ? false : opts.isGate,
     researchOutcomeGate: opts.researchOutcomeGate,
-    criterionRefs: opts.criterionRefs,
+    criterionRefs: direct && !opts.isGate ? undefined : opts.criterionRefs,
     stageId: opts.stageId,
     role: opts.role.name,
-    handoffVisibility: opts.role.handoff_visibility,
+    handoffVisibility: direct && opts.isGate ? 'none' : opts.role.handoff_visibility,
   });
 
-  const runningStatus = beginStageAttempt(opts.projectDir, opts.runId, opts.stageId, opts.retries);
+  const attribution = opts.attribution ?? {
+    role: opts.role.name,
+    iteration: existsSync(join(opts.runDir, 'run.json'))
+      ? readRunState(opts.projectDir, opts.runId).currentIteration ?? 1
+      : 1,
+  };
+  const runningStatus = beginStageAttempt(opts.projectDir, opts.runId, opts.stageId, opts.retries, undefined, attribution);
+  const previous = runningStatus.attempts?.at(-2);
+  if (previous?.disposition === 'superseded') {
+    recordRunEvent(opts.projectDir, opts.runId, {
+      type: 'attempt_results_updated', runId: opts.runId, timestamp: new Date().toISOString(),
+      stageId: opts.stageId, ...attemptEventFields(previous), source: 'worker',
+      detail: 'attempt result replaced by another execution',
+    });
+  }
   const attemptIndex = runningStatus.attempts?.at(-1)?.index;
   if (attemptIndex === undefined) throw new Error(`Stage ${opts.stageId} started without an execution index`);
+  if (opts.isGate) prompt = `${buildGateDispatchPreamble({
+    runDirPath: opts.runDir, gateId: opts.stageId,
+    evaluationRound: runningStatus.attempts!.length, priorAttemptCount: runningStatus.attempts!.length - 1,
+    ...opts.gateContext,
+  })}\n\n${prompt}`;
   const attemptStartedAt = runningStatus.attempts?.at(-1)?.startedAt;
   if (!attemptStartedAt) throw new Error(`Stage ${opts.stageId} started without an execution start timestamp`);
+  const guidanceBeforePrompt = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex);
+  // Retain delivered, targeted notices across execution boundaries. Their
+  // original attempt identity remains explicit; only re-admission grants scope.
+  try {
+    const priorReceipt = readFileSync(join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md'), 'utf-8');
+    for (const attempt of runningStatus.attempts ?? []) {
+      for (const entry of guidanceForStageFromText(priorReceipt, opts.stageId, attempt.index)) {
+        if (!guidanceBeforePrompt.some((current) => current.id === entry.id)) guidanceBeforePrompt.push(entry);
+      }
+    }
+  } catch { /* first execution has no delivery receipt */ }
+  const guidanceBlock = (entries: ReturnType<typeof readGuidanceForStage>): string =>
+    renderGuidanceDelivery(guidanceForExecution(entries, attemptIndex));
   const liveConstraintGuard = opts.liveConstraintGuardFactory?.({ attemptIndex, attemptStartedAt });
   // Compatibility aggregates remain in the attempt ledger; live top-level
   // outcome fields must describe this execution, not the one it retried.
@@ -428,37 +389,36 @@ async function runStageWithWriterLease(
   prompt = prompt
     .replace(/<current execution index>/g, String(attemptIndex))
     .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
-  writeStageInput(opts.projectDir, opts.runId, opts.stageId, prompt);
+  const priorAttempt = runningStatus.attempts?.at(-2);
+  if (priorAttempt && (priorAttempt.status === RUN_STATUS.FAILED || priorAttempt.status === 'suspended')) {
+    prompt += `\n\n# Own-stage continuation evidence\nRead ${opts.runDir}/stages/${opts.stageId}/output_attempt_${priorAttempt.index}.md and ${opts.runDir}/stages/${opts.stageId}/live.log for the previous execution's progress. Its attributed writes were ${JSON.stringify(priorAttempt.writes ?? [])}. Verify these existing artifacts and continue the declared duties; do not infer success from the prior attempt. An unavailable thread uses the full current duties and these same evidence references.`;
+  }
+  // buildStagePrompt ran before the execution index existed and intentionally
+  // included only run-wide guidance. Add notices bound to this execution now.
+  const scopedAtStart = guidanceBeforePrompt.filter((entry) => entry.attemptIndex !== undefined);
+  if (scopedAtStart.length > 0) prompt += `\n\n${guidanceBlock(scopedAtStart)}`;
   beginAttemptEvidenceGeneration(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
   recordRunEvent(opts.projectDir, opts.runId, {
     type: 'attempt_started',
+    ...attemptEventFields(runningStatus.attempts?.at(-1)),
     runId: opts.runId,
     timestamp: attemptStartedAt,
     stageId: opts.stageId,
-    attemptIndex,
-    attemptStartedAt,
     source: 'worker',
   });
 
   const guidanceReceiptPath = join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md');
   const deliveredGuidanceIds = new Set(guidanceBeforePrompt.map((entry) => entry.id));
   const deliveredGuidance = [...guidanceBeforePrompt];
-  const guidanceBlock = (entries: ReturnType<typeof readGuidanceForStage>): string => {
-    const rendered = renderGuidanceDelivery(entries);
-    return rendered
-      ? `## Supervisor Guidance (HIGH PRIORITY — follow this)\n${rendered}\n\n`
-        + 'Guidance may clarify execution or repair a violated brief property. It cannot override the admitted task brief, introduce a required result in place of a required property, or invalidate a better brief-conforming result.'
-      : '';
-  };
+  let receiptContent: string | undefined;
   const persistGuidanceReceipt = (): void => {
     try {
       mkdirSync(join(opts.runDir, 'stages', opts.stageId), { recursive: true });
       const rendered = renderGuidanceDelivery(deliveredGuidance);
-      writeFileSync(
-        guidanceReceiptPath,
-        rendered ? `${rendered}\n` : 'No supervisor guidance was delivered to this execution.\n',
-        'utf-8',
-      );
+      const content = rendered ? `${rendered}\n` : 'No guidance was delivered to this execution.\n';
+      if (content === receiptContent) return;
+      writeFileSync(guidanceReceiptPath, content, 'utf-8');
+      receiptContent = content;
     } catch { /* the run event remains the delivery audit */ }
   };
   const consumeNewGuidance = (
@@ -467,16 +427,19 @@ async function runStageWithWriterLease(
     commandEvent?: Pick<CommandLifecycleEvent, 'id' | 'command'>,
   ): ReturnType<typeof readGuidanceForStage> => {
     let entries: ReturnType<typeof readGuidanceForStage> = [];
+    let checkFailed = false;
     try {
       routePendingOperatorGuidanceToStage(opts.runDir, opts.stageId);
-      entries = readGuidanceForStage(opts.runDir, opts.stageId)
+      entries = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex)
         .filter((entry) => !deliveredGuidanceIds.has(entry.id));
       for (const entry of entries) {
         deliveredGuidanceIds.add(entry.id);
         deliveredGuidance.push(entry);
       }
       persistGuidanceReceipt();
-    } catch { /* report the failed/empty check below */ }
+    } catch { checkFailed = true; }
+    if (!entries.length && !checkFailed && boundary !== 'attempt_start' && boundary !== 'adapter_invocation') return entries;
+    const currentDelivery = guidanceForExecution(boundary === 'attempt_start' ? deliveredGuidance : entries, attemptIndex);
     recordRunEvent(opts.projectDir, opts.runId, {
       type: 'guidance_delivery_checked',
       runId: opts.runId,
@@ -487,15 +450,13 @@ async function runStageWithWriterLease(
       boundary,
       ...(boundaryInvocationIndex === undefined ? {} : { invocationIndex: boundaryInvocationIndex }),
       ...(commandEvent?.id ? { commandId: commandEvent.id } : {}),
-      ...(commandEvent?.command ? { command: commandEvent.command } : {}),
-      guidanceIds: boundary === 'attempt_start'
-        ? [...deliveredGuidanceIds]
-        : entries.map((entry) => entry.id),
-      delivered: boundary === 'attempt_start' ? deliveredGuidanceIds.size > 0 : entries.length > 0,
+      ...(checkFailed ? { checkFailed: true } : {}),
+      guidanceIds: currentDelivery.map((entry) => entry.id),
+      delivered: currentDelivery.length > 0,
       detail: entries.length > 0
         ? `delivered ${entries.length} new guidance envelope${entries.length === 1 ? '' : 's'} at ${boundary}`
-        : boundary === 'attempt_start' && deliveredGuidanceIds.size > 0
-          ? `confirmed ${deliveredGuidanceIds.size} guidance envelope${deliveredGuidanceIds.size === 1 ? '' : 's'} at attempt start`
+        : boundary === 'attempt_start' && currentDelivery.length > 0
+          ? `confirmed ${currentDelivery.length} guidance envelope${currentDelivery.length === 1 ? '' : 's'} at attempt start`
           : `no new guidance available at ${boundary}`,
       source: 'worker',
     });
@@ -517,7 +478,12 @@ async function runStageWithWriterLease(
   // (cli.ts cmdQuick or the dashboard). If absent, we skip prepending.
   const projectContract = opts.role.prompt.includes('{project_contract}')
     ? loadProjectContract(opts.projectDir) : 'none';
-  let resolvedSystemPrompt = opts.role.prompt
+  let resolvedSystemPrompt = (direct
+    ? (opts.isGate
+      ? "Decide independently whether the change achieves the brief's outcome and what it breaks. Return a short verdict and concrete defects with evidence."
+      : "Implement the brief's outcome. You decide how. Return a short result; the engine runs configured validation and checks declared outputs.")
+      + '\nRun unattended. Do not access credentials or signal processes you did not start. Use private scratch at $TMPDIR.'
+    : opts.role.prompt)
     .replace(/\{available_roles\}/g, opts.availableRoles ?? '')
     .replace(/\{available_checks\}/g, opts.availableChecks ?? 'none')
     .replace(/\{available_skills\}/g, opts.availableSkills ?? 'none')
@@ -526,14 +492,15 @@ async function runStageWithWriterLease(
     .replace(/\{ledger_digest\}/g, opts.ledgerDigest ?? 'none')
     .replace(/\{terminal_statuses\}/g, TERMINAL_STATUSES.join(', '))
     .replace(/\{verdict_contract\}/g, VERDICT_CONTRACT_DOC)
+    .replace(/\{artifact_contract_schema\}/g, () => ARTIFACT_CONTRACT_SCHEMA_DOC)
     .replace(/\{phase_metadata_fields\}/g, PHASE_METADATA_FIELDS)
     .replace(/\{project_contract\}/g, projectContract)
     .replace(/\{run_dir\}/g, opts.runDir)
     .replace(/\{project\}/g, opts.projectDir)
-    .replace(/\{default_timeout_ms\}/g, getDefaultTimeout(opts.projectDir));
+    .replace(/\{default_timeout_ms\}/g, getDefaultTimeout());
   try {
     const taskBriefPath = join(opts.runDir, 'task_brief.md');
-    if (existsSync(taskBriefPath)) {
+    if (!direct && existsSync(taskBriefPath)) {
       const brief = readFileSync(taskBriefPath, 'utf-8').trim();
       if (brief) {
         resolvedSystemPrompt = `# Task Brief\n\n${brief}\n\n---\n\n${resolvedSystemPrompt}`;
@@ -543,7 +510,7 @@ async function runStageWithWriterLease(
 
   // Planner-only history remains target-filtered. An archived instruction for
   // an implementation or gate stage must not become a planner instruction.
-  if (opts.role.name === 'planner') {
+  if (opts.dynamicDispatch || opts.role.name === 'planner') {
     try {
       const historyDir = join(opts.runDir, 'guidance_history');
       if (existsSync(historyDir)) {
@@ -559,44 +526,47 @@ async function runStageWithWriterLease(
           const prev = readFileSync(join(historyDir, latest), 'utf-8');
           const targeted = renderGuidanceDelivery(guidanceForStageFromText(prev, opts.stageId));
           if (targeted) {
-            resolvedSystemPrompt = `# Previous iteration's targeted supervisor guidance\n\n${targeted}\n\n---\n\n${resolvedSystemPrompt}`;
+            resolvedSystemPrompt = `# Previous iteration's targeted guidance\n\n${targeted}\n\n---\n\n${resolvedSystemPrompt}`;
           }
         }
       }
     } catch { /* non-critical */ }
+    const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '');
+    if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
+    if (opts.dynamicDispatch) resolvedSystemPrompt += `\n\n${renderPlanInterface()}\n\n${renderPlannerAdmissionCheck(opts.projectDir, opts.runDir)}`;
+    const briefPath = join(opts.runDir, 'task_brief.md');
+    const brief = existsSync(briefPath) ? readFileSync(briefPath, 'utf-8') : opts.taskDescription ?? '';
+    const policies = renderPlannerPolicies(parseBriefFrontmatter(brief).plannerPolicies ?? []);
+    if (policies) resolvedSystemPrompt += `\n\n${policies}`;
   }
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
+  if (opts.outputSchema) {
+    const judgement = opts.isGate
+      ? 'Judge assigned criteria in the context of the full brief, including permitted outcomes and stopping conditions. Stage instructions and extracted criteria cannot narrow or replace the outcomes the brief permits. Pass when an allowed outcome has all required evidence, including a permitted negative or blocked report. Reject missing required attempts, measurements or artifacts. '
+      : '';
+    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff, stage or verdict-file instructions. ${judgement}Write declared human deliverables and necessary evidence within admitted capabilities. Evidence references name reproducible files or commands.`;
+  }
+  if (opts.artifactContract && (!direct || opts.artifactContract.produces.length || opts.artifactContract.reads.length)) prompt += `\n\n# Declared output and input locations\n${JSON.stringify(opts.artifactContract)}`;
 
-  const kgPath = join(opts.runDir, 'knowledge_graph.json');
   const projectWriteScope = opts.projectWriteScope ?? [];
-  const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope, [kgPath]);
-  const artifactContractPath = join(opts.runDir, 'stages', opts.stageId, 'artifact_contract.json');
-  const artifactContractPreimages = opts.artifactObligationTemplate?.trim()
-    ? captureStageArtifactContractPreimages({
-        template: opts.artifactObligationTemplate,
-        projectDir: opts.projectDir,
-        runDir: opts.runDir,
-      })
-    : [];
-  let priorProducedPromptArtifacts: string[] = [];
-  try {
-    const prior = JSON.parse(readFileSync(artifactContractPath, 'utf-8')) as {
-      producedPromptArtifacts?: unknown;
-    };
-    if (Array.isArray(prior.producedPromptArtifacts)) {
-      priorProducedPromptArtifacts = prior.producedPromptArtifacts
-        .filter((path): path is string => typeof path === 'string');
-    }
-  } catch { /* first attempt, or no prior artifact contract */ }
-
+  const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope);
+  // A declared run product may belong to later work, but an available product
+  // cannot disappear during this attempt. This fact was only model advice;
+  // deletion alone cannot preserve it, so bind the engine check to this start.
+  const availableProductsAtStart = existsSync(join(opts.runDir, 'run.json'))
+    ? declaredOutputFacts(opts.projectDir, opts.runId).filter(output => output.available) : [];
+  const production = artifactDeclarationErrors(opts.artifactContract, opts.stageId).length === 0 ? stageArtifactProduction({
+    runId: opts.runId, stageId: opts.stageId, projectDir: opts.projectDir, runDir: opts.runDir,
+    template: opts.artifactObligationTemplate ?? '', artifactContract: opts.artifactContract,
+    isGate: opts.isGate, planRevision: opts.planRevision, attemptIndex, attemptStartedAt,
+  }) : undefined;
   const attemptDeadline = new AttemptDeadlineController({
     budgetMs: opts.timeout_ms,
     ledgerDir: join(opts.runDir, 'stages', opts.stageId),
     executionIndex: attemptIndex,
     ...(opts.deadlineClock ? { clock: opts.deadlineClock } : {}),
   });
-  const attemptStartedWallMs = Date.parse(attemptDeadline.attemptStartedAt);
   const effectiveBudgetMs = attemptDeadline.budgetMs;
 
   // Abort files are one-shot envelopes owned by this exact stage attempt. A
@@ -611,26 +581,20 @@ async function runStageWithWriterLease(
   let activeInvocationAbortController: AbortController | undefined;
   let activeInvocationIndex: number | undefined;
   type CommandBoundaryControl = {
-    kind: 'guidance' | 'timeout_projection' | 'operator_interrupt';
+    kind: 'guidance' | 'timeout_projection' | 'operator_interrupt' | 'scope_revision';
     command: CommandLifecycleEvent;
     guidance: ReturnType<typeof readGuidanceForStage>;
     interrupt?: StageCommandInterruptSignal;
   };
   let commandBoundaryControl: CommandBoundaryControl | undefined;
   let scopeRevisionBoundaryReached = false;
-  let supervisorAborted = false;
+  let stageAborted = false;
   let approvalSuspended = false;
   let approvalRequestId: string | undefined;
   let approvalRequestingStageId: string | undefined;
   let abortReason = '';
   let terminationCause: StageAttemptTimeoutSummary['terminationCause'];
-  let rejectedExtensionCount = 0;
-  const timeoutDecisionPaths: string[] = [];
-  const timeoutMismatchPaths: string[] = [];
-  const handledRequestDigests = new Set<string>();
-
   const attemptElapsedMs = (): number => attemptDeadline.elapsedMs();
-  const relativeAuditPath = (path: string): string => relative(opts.runDir, path).replace(/\\/g, '/');
 
   const removeAbortSignal = (): void => {
     try {
@@ -652,7 +616,7 @@ async function runStageWithWriterLease(
       if (!parsed.ok) {
         removeAbortSignal();
         appendAbortWarning(
-          `Ignored stale supervisor ABORT signal: expected attempt ${attemptIndex} for stage "${opts.stageId}", `
+          `Ignored stale stage abort signal: expected attempt ${attemptIndex} for stage "${opts.stageId}", `
           + `observed attempt ${parsed.observedAttemptIndex ?? 'unknown'} for stage "${parsed.observedStageId ?? 'unknown'}" `
           + `(${parsed.error}); signal removed without aborting.`,
         );
@@ -661,7 +625,7 @@ async function runStageWithWriterLease(
       if (parsed.signal.stageId !== opts.stageId || parsed.signal.attemptIndex !== attemptIndex) {
         removeAbortSignal();
         appendAbortWarning(
-          `Ignored stale supervisor ABORT signal: expected attempt ${attemptIndex} for stage "${opts.stageId}", `
+          `Ignored stale stage abort signal: expected attempt ${attemptIndex} for stage "${opts.stageId}", `
           + `observed attempt ${parsed.signal.attemptIndex} for stage "${parsed.signal.stageId}"; `
           + 'signal removed without aborting.',
         );
@@ -679,18 +643,18 @@ async function runStageWithWriterLease(
         approvalRequestingStageId = parsed.signal.requestingStageId;
         terminationCause = 'approval_suspension';
       } else {
-        supervisorAborted = true;
-        terminationCause ??= 'supervisor_abort';
+        stageAborted = true;
+        terminationCause ??= 'stage_abort';
       }
       try {
         appendFileSync(
           liveLogPath,
           approvalSignal
             ? `\nApproval suspension ${approvalRequestId} consumed for attempt ${attemptIndex}; stopping stage child process.\n`
-            : `\nSupervisor ABORT signal consumed for attempt ${attemptIndex}; killing stage child process.\n`,
+            : `\nStage abort signal consumed for attempt ${attemptIndex}; killing stage child process.\n`,
         );
       } catch { /* non-critical */ }
-      attemptAbortController.abort(approvalSignal ? 'approval_suspension' : 'supervisor_abort');
+      attemptAbortController.abort(approvalSignal ? 'approval_suspension' : 'stage_abort');
     } catch { /* non-critical */ }
   };
   const pollCommandInterruptSignal = (): void => {
@@ -717,6 +681,13 @@ async function runStageWithWriterLease(
         return;
       }
 
+      const acceptedGuidance = appendGuidanceEnvelope({ runDir: opts.runDir, target: opts.stageId,
+        source: 'operator', body: signal.reason, knownStageIds: [opts.stageId], createdAt: signal.requestedAt });
+      signal.guidanceId = acceptedGuidance.id;
+      recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_command_interrupt_requested', runId: opts.runId,
+        timestamp: signal.requestedAt, stageId: opts.stageId, attemptIndex, attemptStartedAt,
+        requestId: signal.requestId, guidanceId: signal.guidanceId, commandId: signal.commandId,
+        command: signal.command, commandFingerprint: signal.commandFingerprint, detail: signal.reason, source: 'operator' });
       // Consume before stopping the child so a crash cannot replay this exact
       // request into a later command or attempt.
       removeCommandInterruptSignal();
@@ -777,104 +748,10 @@ async function runStageWithWriterLease(
       }
     } catch { /* retain an unreadable signal for diagnosis */ }
   };
-  const stageTimeoutRequestPath = join(opts.runDir, 'stages', opts.stageId, 'timeout_extension_request.json');
-  const engineTimeoutRequestPath = join(opts.runDir, 'signals', `timeout_extension_${opts.stageId}.json`);
-
-  const processTimeoutRequest = (request: TimeoutExtensionRequestV1): void => {
-    const digest = negotiationRequestDigest(request);
-    if (handledRequestDigests.has(digest)) return;
-    handledRequestDigests.add(digest);
-
-    // A transport slot can outlive its attempt. It is not an audit source and
-    // must not cause an old accepted decision to be published/replayed into a
-    // later attempt. Current-attempt requests alone reach worker policy.
-    if (request.stageId !== opts.stageId || request.attemptIndex !== attemptIndex) {
-      appendAbortWarning(
-        `Ignored stale timeout extension request: expected attempt ${attemptIndex} for stage "${opts.stageId}", `
-        + `observed attempt ${request.attemptIndex} for stage "${request.stageId}".`,
-      );
-      return;
-    }
-
-    const elapsed = attemptElapsedMs();
-    const policy = evaluateTimeoutExtensionRequest({
-      request,
-      attemptStartedWallMs,
-      attemptElapsedMs: elapsed,
-      effectiveBudgetMs,
-      supervisorAborted: supervisorAborted || terminationCause === 'supervisor_abort',
-      attemptAborted: attemptAbortController.signal.aborted,
-      deadlineAborted: attemptDeadline.signal.aborted,
-    });
-    const { rejectionReason } = policy;
-    const publication = publishConstraintDecision({
-      stagePath: join(opts.runDir, 'stages', opts.stageId),
-      request,
-      decidedBy: 'worker-policy',
-      decision: {
-        accepted: false,
-        decision: 'rejected',
-        decidedAt: new Date().toISOString(),
-        policyBasis: rejectionReason ?? 'running attempt deadlines are immutable',
-        requestedExtensionMs: request.requestedExtensionMs,
-        grantedExtensionMs: 0,
-        effectiveBudgetMs,
-        attemptBudgetMs: effectiveBudgetMs,
-        deadlineAt: attemptDeadline.deadlineAt,
-        attemptElapsedMs: Math.round(elapsed),
-        timingBasis: policy.timingBasis,
-        adjudicatedAttemptElapsedMs: Math.round(policy.adjudicatedAttemptElapsedMs),
-        ...(request.requestedAt === undefined ? {} : { requestedAt: request.requestedAt }),
-        ...(policy.requestedAtAttemptElapsedMs === undefined
-          ? {}
-          : { requestedAtAttemptElapsedMs: Math.round(policy.requestedAtAttemptElapsedMs) }),
-        requestRemainingMs: Math.max(0, Math.round(effectiveBudgetMs - policy.adjudicatedAttemptElapsedMs)),
-        remainingMs: Math.max(0, Math.round(attemptDeadline.remainingMs())),
-        rejectedExtensionCount: rejectedExtensionCount + 1,
-        ...(rejectionReason ? { rejectionReason } : {}),
-      },
-    });
-    if (publication.kind === 'mismatch') {
-      timeoutMismatchPaths.push(relativeAuditPath(publication.path));
-      return;
-    }
-    if (!timeoutDecisionPaths.includes(relativeAuditPath(publication.path))) timeoutDecisionPaths.push(relativeAuditPath(publication.path));
-    rejectedExtensionCount++;
-    attemptDeadline.append('timeout_extension_rejected', {
-      stageId: opts.stageId,
-      attemptIndex,
-      requestedBy: request.requestedBy,
-      requestedExtensionMs: request.requestedExtensionMs,
-      decisionPath: relativeAuditPath(publication.path),
-      rejectionReason,
-    });
-  };
-
-  function pollTimeoutExtensionRequests(): void {
-    const channels: Array<{ path: string; requestedBy: NegotiationRequester }> = [
-      { path: stageTimeoutRequestPath, requestedBy: 'stage' },
-    ];
-    try {
-      if (existsSync(engineTimeoutRequestPath)) {
-        const raw = JSON.parse(readFileSync(engineTimeoutRequestPath, 'utf-8')) as Record<string, unknown>;
-        channels.push({ path: engineTimeoutRequestPath, requestedBy: raw.source === 'operator' ? 'operator' : 'supervisor' });
-      }
-    } catch { /* the normal parse below will retry after a complete write */ }
-    for (const channel of channels) {
-      try {
-        if (!existsSync(channel.path)) continue;
-        const parsed = parseTimeoutExtensionRequest(JSON.parse(readFileSync(channel.path, 'utf-8')), channel.requestedBy);
-        if (parsed.ok) processTimeoutRequest(parsed.request);
-      } catch { /* request slot may be between writes; retry on the next poll */ }
-    }
-  }
-
   pollAbortSignal();
   pollCommandInterruptSignal();
-  pollTimeoutExtensionRequests();
   const abortPollTimer = setInterval(pollAbortSignal, 1000);
   const commandInterruptPollTimer = setInterval(pollCommandInterruptSignal, 250);
-  const extensionPollTimer = setInterval(pollTimeoutExtensionRequests, 1000);
   const requestWatchers: import('node:fs').FSWatcher[] = [];
   try {
     const signalsDir = join(opts.runDir, 'signals');
@@ -884,34 +761,12 @@ async function runStageWithWriterLease(
         const name = fileName?.toString() ?? '';
         if (!name || name === `abort_${opts.stageId}.json`) pollAbortSignal();
         if (!name || name === `interrupt_${opts.stageId}.json`) pollCommandInterruptSignal();
-        if (!name || name.includes('timeout_extension')) pollTimeoutExtensionRequests();
       }));
     }
   } catch { /* one-second reconciliation remains the portable fallback */ }
-  const aggregateAbortSignal = AbortSignal.any([attemptAbortController.signal, attemptDeadline.signal]);
-  const PHASE_ABORTED = Symbol('phase-aborted');
-  const racePhaseWithAbort = <T>(phase: Promise<T>): Promise<T | typeof PHASE_ABORTED> => {
-    if (aggregateAbortSignal.aborted) return Promise.resolve(PHASE_ABORTED);
-    return new Promise<T | typeof PHASE_ABORTED>((resolvePromise, rejectPromise) => {
-      let settled = false;
-      const finish = (value: T | typeof PHASE_ABORTED): void => {
-        if (settled) return;
-        settled = true;
-        aggregateAbortSignal.removeEventListener('abort', onAbort);
-        resolvePromise(value);
-      };
-      const fail = (error: unknown): void => {
-        if (settled) return;
-        settled = true;
-        aggregateAbortSignal.removeEventListener('abort', onAbort);
-        rejectPromise(error);
-      };
-      const onAbort = (): void => finish(PHASE_ABORTED);
-      aggregateAbortSignal.addEventListener('abort', onAbort, { once: true });
-      phase.then(finish, fail);
-    });
-  };
-
+  const parentAbortSignal = runProcessAbortSignal();
+  const aggregateAbortSignal = AbortSignal.any([attemptAbortController.signal, attemptDeadline.signal,
+    ...(parentAbortSignal ? [parentAbortSignal] : [])]);
   const cancelledResult = (telemetry?: RunResult): RunResult => {
     const tokensIn = typeof telemetry?.tokens_in === 'number' && Number.isFinite(telemetry.tokens_in)
       ? telemetry.tokens_in
@@ -923,6 +778,8 @@ async function runStageWithWriterLease(
     return {
       output: '',
       exitCode: approvalSuspended ? 0 : timedOut ? 124 : 137,
+      ...(telemetry?.processExitCode !== undefined ? { processExitCode: telemetry.processExitCode } : {}),
+      ...(telemetry?.processSignal !== undefined ? { processSignal: telemetry.processSignal } : {}),
       duration_ms: Math.round(attemptElapsedMs()),
       timedOut,
       ...(approvalSuspended ? {
@@ -933,23 +790,34 @@ async function runStageWithWriterLease(
       } : {}),
       ...(tokensIn !== undefined ? { tokens_in: tokensIn } : {}),
       ...(tokensOut !== undefined ? { tokens_out: tokensOut } : {}),
+      tokenUsage: telemetry?.tokenUsage,
+      tokens_cached: telemetry?.tokens_cached,
+      tokens_reasoning: telemetry?.tokens_reasoning,
+      invocations: telemetry?.invocations,
     };
   };
   const observeAdapterSettlement = (): void => {
-    // Timer starvation delays both deadline and supervisor polling. Consume a
-    // current-attempt ABORT first because supervisor authority takes
+    // Timer starvation delays both deadline and abort polling. Consume a
+    // current-attempt ABORT first because abort authority takes
     // precedence, then observe the monotonic deadline synchronously.
     pollAbortSignal();
-    if (!supervisorAborted && !approvalSuspended) attemptDeadline.observeSettlement();
+    if (!stageAborted && !approvalSuspended) attemptDeadline.observeSettlement();
   };
   let lastChildClosedAt: string | undefined;
   let childCloseUnverified = false;
   let invocationIndex = 0;
+  let inputRecordIndex = 0;
   let latestLiveConstraintResult: LiveConstraintInvocationResult | undefined;
+  const continuations = new Map<Adapter, { sessionId: string; ownerStageId: string }>();
+  if (opts.resumeSessionId && isCodexSessionUuid(opts.resumeSessionId)) {
+    continuations.set(adapter, { sessionId: opts.resumeSessionId, ownerStageId: opts.sessionOwnerStageId ?? opts.stageId });
+  }
+  const deadlineContext = (): string => direct
+    ? `Execution deadline: ${attemptDeadline.deadlineAt}.`
+    : `# Execution clock\nExecution ${attemptIndex}: started ${attemptDeadline.attemptStartedAt}; absolute deadline ${attemptDeadline.deadlineAt}; remaining ${Math.floor(attemptDeadline.remainingMs())} ms at ${new Date(attemptDeadline.wallNow()).toISOString()}. This deadline is immutable. Query UTC time with node -e "console.log(new Date().toISOString())".`;
   const invokeAdapter = async (
     selectedAdapter: Adapter,
     selectedRole: AgentConfig,
-    session: boolean,
     invocationPrompt = prompt,
   ): Promise<RunResult> => {
     if (aggregateAbortSignal.aborted || attemptDeadline.remainingMs() <= 0) {
@@ -963,10 +831,37 @@ async function runStageWithWriterLease(
       effectiveBudgetMs,
     });
     invocationIndex++;
-    const invocationGuidance = consumeNewGuidance('adapter_invocation', invocationIndex);
-    const effectiveInvocationPrompt = invocationGuidance.length > 0
-      ? `${invocationPrompt}\n\n${guidanceBlock(invocationGuidance)}`
-      : invocationPrompt;
+    // Keep cached roles topology-neutral, including retries after a peer closes.
+    const invocationRole = opts.liveConstraintGuardFactory?.parallelExecution?.()
+      ? { ...selectedRole, prompt: `${selectedRole.prompt}\n\n${PARALLEL_EXECUTION_BOUNDARY}` }
+      : selectedRole;
+    consumeNewGuidance('adapter_invocation', invocationIndex);
+    const continuation = continuations.get(selectedAdapter);
+    // A fresh child (including a failed-resume fallback) needs both its duties
+    // and the current local correction; the thread only carries the former.
+    const additionalGuidance = deliveredGuidance.filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
+    const stateContext = direct ? '' : runStateContext(opts.projectDir, opts.runId, opts.planRevision);
+    const fullPrompt = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`;
+    const effectiveInvocationPrompt = continuation && invocationPrompt !== prompt
+      ? `${invocationPrompt}\n\n${guidanceBlock(deliveredGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`
+      : fullPrompt;
+    const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
+      // The public standalone worker API predates initialized run projections.
+      // Keep it usable, but do not manufacture an authenticated run carrier.
+      if (!existsSync(join(opts.runDir, 'run.json'))) {
+        appendFileSync(liveLogPath, '\nINVOCATION_INPUT_UNAVAILABLE: standalone stage has no initialized run projection.\n');
+        return;
+      }
+      recordInvocationInput(opts.runDir, {
+        runId: opts.runId, stageId: opts.stageId, attemptIndex, attemptStartedAt,
+        invocationIndex: ++inputRecordIndex, boundary,
+        adapter: invocationRole.adapter ?? inferAdapterName(selectedAdapter) ?? 'custom',
+        model: input.model ?? invocationRole.model ?? 'provider-default-unresolved', systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
+        resumeSessionId: input.resumeSessionId, transport: input.transport, guidanceIds: guidanceForExecution(deliveredGuidance, attemptIndex).map((entry) => entry.id),
+      });
+    };
+    // input.md remains a compatible latest alias; immutable records carry exact inputs.
+    writeStageInput(opts.projectDir, opts.runId, opts.stageId, effectiveInvocationPrompt);
     const invocationAbortController = new AbortController();
     commandBoundaryControl = undefined;
     activeInvocationAbortController = invocationAbortController;
@@ -977,7 +872,6 @@ async function runStageWithWriterLease(
     });
     const onCommandLifecycle = (event: CommandLifecycleEvent): void => {
       if (event.phase === 'started') {
-        liveMonitor?.commandStarted(event.id, event.command);
         activeCommands.set(event.id, event);
         recordRunEvent(opts.projectDir, opts.runId, {
           type: 'stage_command_started',
@@ -999,9 +893,7 @@ async function runStageWithWriterLease(
         );
         if (startGuidance.length > 0) {
           commandBoundaryControl = { kind: 'guidance', command: event, guidance: startGuidance };
-          if (!invocationAbortController.signal.aborted) {
-            invocationAbortController.abort('guidance_delivery_at_tool_start');
-          }
+
         }
         if (event.command) {
           const fingerprint = commandFingerprint(event.command);
@@ -1082,7 +974,6 @@ async function runStageWithWriterLease(
 
       const started = activeCommands.get(event.id);
       activeCommands.delete(event.id);
-      liveMonitor?.commandCompleted(event.id);
       const completed = started
         ? { ...event, ...(started.command ? { command: started.command } : {}) }
         : event;
@@ -1104,11 +995,20 @@ async function runStageWithWriterLease(
       const guidance = consumeNewGuidance(
         'tool_call_completion', invocationIndex, { id: event.id, command: completed.command },
       );
-      if (guidance.length > 0 && !commandBoundaryControl) {
-        commandBoundaryControl = { kind: 'guidance', command: completed, guidance };
-        if (!invocationAbortController.signal.aborted) {
-          invocationAbortController.abort('guidance_delivery_at_tool_completion');
-        }
+      if (guidance.length > 0 && !commandBoundaryControl) commandBoundaryControl = { kind: 'guidance', command: completed, guidance };
+      // Scope admission is an immutable control fact, independent of which
+      // operator guidance happened to arrive first. Finish every active tool
+      // and wait for child closure before re-admitting a new execution.
+      if (activeCommands.size === 0 && commandBoundaryControl?.kind !== 'operator_interrupt'
+        && readAcceptedScopeRevisionDecisions(join(opts.runDir, 'stages', opts.stageId), {
+          runId: opts.runId, stageId: opts.stageId, attemptIndex,
+        }).length > 0) {
+        commandBoundaryControl = { kind: 'scope_revision', command: completed, guidance: [] };
+      }
+      if ((commandBoundaryControl?.kind === 'guidance' || commandBoundaryControl?.kind === 'scope_revision')
+        && activeCommands.size === 0 && !invocationAbortController.signal.aborted) {
+        invocationAbortController.abort(commandBoundaryControl.kind === 'scope_revision'
+          ? 'scope_revision_at_tool_completion' : 'guidance_delivery_at_tool_completion');
       }
     };
     latestLiveConstraintResult = undefined;
@@ -1143,21 +1043,41 @@ async function runStageWithWriterLease(
         }
       };
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
-      selectedAdapter.run(effectiveInvocationPrompt, selectedRole, {
-        timeout_ms: effectiveBudgetMs,
-        workDir: opts.projectDir,
-        runDir: opts.runDir,
-        stageId: opts.stageId,
-        attemptIndex,
-        attemptStartedAt,
-        resumeSessionId: session && opts.retries === 0 ? opts.resumeSessionId : undefined,
-        sessionOwnerStageId: session && opts.retries === 0 ? opts.sessionOwnerStageId : undefined,
-        preserveSession: opts.preserveSession,
-        abortSignal: invocationAbortSignal,
-        onCommandLifecycle,
+      withEngineIntegrity({ projectDir: opts.projectDir, runDir: opts.runDir,
+        stageId: opts.stageId, dynamicDispatch: opts.dynamicDispatch, structuredResult: Boolean(opts.outputSchema), artifactContract: opts.artifactContract! },
+      () => {
+        if (!selectedAdapter.capturesInvocationInput) {
+          captureInput({ systemPrompt: invocationRole.prompt, userPrompt: effectiveInvocationPrompt,
+            resumeSessionId: continuation?.sessionId }, 'adapter');
+        }
+        return selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
+          timeout_ms: effectiveBudgetMs,
+          workDir: opts.projectDir,
+          runDir: opts.runDir,
+          stageId: opts.stageId,
+          attemptIndex,
+          attemptStartedAt,
+          resumeSessionId: continuation?.sessionId,
+          sessionOwnerStageId: continuation?.ownerStageId,
+          // The worker owns final cleanup; an adapter call may be corrected.
+          preserveSession: true,
+          freshSessionPrompt: fullPrompt,
+          abortSignal: invocationAbortSignal,
+          onCommandLifecycle,
+          onInvocationInput: (input) => captureInput(input, 'model'),
+          outputSchema: opts.outputSchema,
+        });
       }).then(
         (value) => {
-          liveMonitor?.observePaths(value.writes ?? []);
+          if (value.writeAttribution === 'structured') liveMonitor?.observePaths(value.writes ?? []);
+          if (isCodexSessionUuid(value.sessionId)) {
+            const recorded = readCodexSession(opts.runDir, opts.stageId);
+            continuations.set(selectedAdapter, {
+              sessionId: value.sessionId,
+              ownerStageId: recorded?.sessionId === value.sessionId ? recorded.ownerStageId
+                : value.sessionId === continuation?.sessionId ? continuation.ownerStageId : opts.stageId,
+            });
+          }
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
           // Cancellation changes the attempt outcome, not telemetry already
@@ -1167,7 +1087,10 @@ async function runStageWithWriterLease(
         (error) => {
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
-          if (aggregateAbortSignal.aborted) finish(cancelledResult());
+          if (error instanceof Error && /^ENGINE_STATE_(?:TAMPERED|REFUSED):/.test(error.message)) {
+            approvalSuspended = false;
+            finish({ output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) });
+          } else if (aggregateAbortSignal.aborted) finish(cancelledResult());
           else if (invocationAbortController.signal.aborted) finish(cancelledResult());
           else fail(error);
         },
@@ -1198,45 +1121,50 @@ async function runStageWithWriterLease(
     const structured = prior.writeAttribution === 'structured' && next.writeAttribution === 'structured';
     return {
       ...next,
-      output: [prior.output, next.output].filter(Boolean).join('\n\n[adapter reinvoked at a controlled same-attempt boundary]\n\n'),
+      output: opts.outputSchema ? next.output : [prior.output, next.output].filter(Boolean).join('\n\n[adapter reinvoked at a controlled same-attempt boundary]\n\n'),
       duration_ms: prior.duration_ms + next.duration_ms,
-      tokens_in: (prior.tokens_in === undefined && next.tokens_in === undefined)
-        ? undefined
-        : (prior.tokens_in ?? 0) + (next.tokens_in ?? 0),
-      tokens_out: (prior.tokens_out === undefined && next.tokens_out === undefined)
-        ? undefined
-        : (prior.tokens_out ?? 0) + (next.tokens_out ?? 0),
+      ...sumInvocationUsage([prior, next]),
+      invocations: [...(prior.invocations ?? []), ...(next.invocations ?? [])],
       ...(writes.length > 0 ? { writes } : {}),
       ...(writes.length > 0 ? { writeAttribution: structured ? 'structured' : 'unknown' } : {}),
       ...(validationGeneratedWrites.length > 0 ? { validationGeneratedWrites } : {}),
     };
   };
 
-  let liveReinvocations = 0;
-  const invokeAdapterWithLiveCorrection = async (
+  const stageRecord = (output: string): Record<string, unknown> => {
+    // Older native/fixture answers remain readable; only the response schema
+    // advertises new output. Admission still checks every executable field.
+    const record = parseStageRecord(output, opts.outputSchema === HANDOFF_SCHEMA ? RECORDED_HANDOFF_SCHEMA : opts.outputSchema!);
+    if (opts.isGate) {
+      const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)
+        ?? validateGateRepairability(record) ?? explicitPassContradiction(record, 'verdict');
+      if (violation) throw new Error(violation);
+      const findings = AuditFindingsSchema.parse(record.audit_findings);
+      if (record.pass === true && findings.findings.length) throw new Error('AUDIT_FINDINGS_OPEN: passing verdict has unresolved findings');
+    }
+    return record;
+  };
+  let correctionReinvocations = 0;
+  const invokeAdapterWithCorrection = async (
     selectedAdapter: Adapter,
     selectedRole: AgentConfig,
-    session: boolean,
   ): Promise<RunResult> => {
     let combined: RunResult | undefined;
     let invocationPrompt = prompt;
-    let mayResume = session;
     while (true) {
-      const current = await invokeAdapter(selectedAdapter, selectedRole, mayResume, invocationPrompt);
+      const current = await invokeAdapter(selectedAdapter, selectedRole, invocationPrompt);
       combined = mergeInvocationTelemetry(combined, current);
       const commandControl = commandBoundaryControl;
+      // No correction may launch another child until the prior child is known
+      // closed; a scope grant cannot turn missing closure into clean suspension.
+      if (childCloseUnverified) return combined;
       if (commandControl && !aggregateAbortSignal.aborted) {
         activeCommands.delete(commandControl.command.id);
-        // The scheduler has already persisted the accepted decision before
-        // publishing this guidance. The current tool has settled and the
-        // adapter child has closed, so no same-attempt reinvocation is needed.
-        // The scheduler will suspend this successful attempt and re-dispatch
-        // with the inherited capability after its normal reconciliation.
-        const acceptedScopeRevision = commandControl.guidance.some((entry) => (
-          entry.source === 'scheduler'
-          && /^Scope revision [^\s]+ was accepted\. This attempt stops at the control boundary\b/.test(entry.body)
-        ));
-        if (acceptedScopeRevision && commandControl.kind !== 'operator_interrupt'
+        // A durable current-execution grant stops at the closed child boundary.
+        // The scheduler alone re-admits inherited capability for the next child.
+        if (commandControl.kind === 'scope_revision'
+            && (combined.exitCode !== 0 && combined.exitCode !== 137)) return combined;
+        if (commandControl.kind === 'scope_revision'
             && !latestLiveConstraintResult?.monitorFailure
             && !(latestLiveConstraintResult?.incidents.length)) {
           scopeRevisionBoundaryReached = true;
@@ -1245,6 +1173,7 @@ async function runStageWithWriterLease(
             exitCode: 0,
             timedOut: false,
             adapterError: false,
+            providerFailure: undefined,
             output: `${combined.output}${combined.output ? '\n\n' : ''}Accepted scope revision ended this attempt at the control boundary.`,
           };
         }
@@ -1268,13 +1197,12 @@ async function runStageWithWriterLease(
             source: 'worker',
           });
         }
-        mayResume = false;
         const label = commandControl.kind === 'operator_interrupt'
           ? 'Operator command interrupt'
           : commandControl.kind === 'timeout_projection'
             ? 'Command timeout projection'
             : 'Live guidance delivered at tool completion';
-        invocationPrompt = `${prompt}\n\n# ${label}\n${guidanceBlock(commandControl.guidance)}`;
+        invocationPrompt = `# ${label}`;
         try {
           appendFileSync(
             liveLogPath,
@@ -1297,11 +1225,19 @@ async function runStageWithWriterLease(
           timedOut: false,
           adapterError: false,
           friendlyError: live.monitorFailure.reason,
+          providerFailure: undefined,
         };
       }
       const incidents = live?.incidents ?? [];
-      if (incidents.length === 0) return combined;
-      const instructions = [...new Set(incidents.map((incident) => incident.scopeRevisionInstruction))];
+      let recordError: string | undefined;
+      if (incidents.length === 0) {
+        if (combined.exitCode !== 0 || !opts.outputSchema) return combined;
+        try { stageRecord(combined.output); return combined; }
+        catch (error) { recordError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`; }
+      }
+      const instructions = recordError
+        ? [`# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct only the final JSON document using the retained work and evidence. Preserve the substantive result; never invent evidence or change a rejection to pass to satisfy the format.\nSchema: ${JSON.stringify(opts.outputSchema)}\nRejected answer:\n${combined.output}`]
+        : [...new Set(incidents.map((incident) => incident.scopeRevisionInstruction))];
       if (incidents.some((incident) => !incident.restored)) {
         return {
           ...combined,
@@ -1309,26 +1245,27 @@ async function runStageWithWriterLease(
           timedOut: false,
           adapterError: false,
           friendlyError: `live constraint rollback failed; ${instructions.join(' ')}`,
+          providerFailure: undefined,
         };
       }
-      if (liveReinvocations >= LIVE_CONSTRAINT_MAX_REINVOCATIONS || aggregateAbortSignal.aborted) {
+      if (correctionReinvocations >= 1 || aggregateAbortSignal.aborted) {
         return {
           ...combined,
           exitCode: aggregateAbortSignal.aborted ? combined.exitCode : 1,
           timedOut: aggregateAbortSignal.aborted ? combined.timedOut : false,
           adapterError: false,
+          providerFailure: undefined,
           friendlyError: aggregateAbortSignal.aborted
             ? combined.friendlyError
-            : `scope_violation: repeated live constraint violation after same-attempt correction; ${instructions.join(' ')}`,
+            : recordError ?? `scope_violation: repeated live constraint violation after same-attempt correction; ${instructions.join(' ')}`,
         };
       }
-      liveReinvocations++;
-      mayResume = false;
-      invocationPrompt = `${prompt}\n\n# Live constraint correction\n${instructions.join('\n')}`;
+      correctionReinvocations++;
+      invocationPrompt = recordError ? instructions.join('\n') : `# Live constraint correction\n${instructions.join('\n')}`;
       try {
         appendFileSync(
           liveLogPath,
-          `\nLive constraint guard restored ${incidents.map((incident) => incident.path).join(', ')}; reinvoking inside attempt ${attemptIndex}.\n`,
+          `\n${recordError ?? `Live constraint guard restored ${incidents.map((incident) => incident.path).join(', ')}`}; reinvoking inside attempt ${attemptIndex}.\n`,
         );
       } catch { /* durable incident JSONL remains the audit source */ }
     }
@@ -1342,10 +1279,44 @@ async function runStageWithWriterLease(
   };
 
   let result: RunResult;
-  // Abort and legacy-extension polling live through adapter backoff and
-  // fallback so every phase remains governed by this attempt's one deadline.
+  // All adapter work shares one immutable attempt boundary.
   try {
-    result = await invokeAdapterWithLiveCorrection(adapter, resolvedRole, true);
+  try {
+    const preflightErrors = artifactDeclarationErrors(opts.artifactContract, opts.stageId);
+    let validationFailure: RunResult | undefined;
+    if (!preflightErrors.length && opts.isGate && !aggregateAbortSignal.aborted) {
+      const dependencies = {
+        remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
+      };
+      let validation = await recordGateValidationDelta(opts.projectDir, opts.runId, opts.stageId, dependencies);
+      if (validation && !validation.pass && !validation.delta.some(entry => entry.state === 'regression')) {
+        const settlement = await settleGateValidationEvidence(opts.projectDir, opts.runId, opts.stageId, dependencies);
+        if (settlement.kind === 'refused') validationFailure = {
+          exitCode: 1, duration_ms: Math.round(attemptElapsedMs()), output: settlement.reason, friendlyError: settlement.reason,
+          writes: [], writeAttribution: 'structured',
+        };
+        // Settlement owns the replay and its receipt; do not run commands again.
+        validation = JSON.parse(readFileSync(join(opts.runDir, `validation_delta_${opts.stageId}.json`), 'utf8'));
+      }
+      if (validation?.pass) prompt += `\n\nEngine validation: pass=true; ${validation.current.map(command => `${command.display ?? command.role}: exit=${command.exitCode ?? 'unavailable'}, state=${command.state}`).join('; ')}. Receipt: ${join(opts.runDir, validation.immutablePath ?? `validation_delta_${opts.stageId}.json`)}. The engine enforces this comparison. Review every assigned criterion lacking a prior independent conclusion; validation receipts contain no semantic conclusions. Do not rerun configured commands without a concrete evidence gap. Project writes require post-write validation.`;
+      const regressions = validation?.delta.filter(entry => entry.state === 'regression') ?? [];
+      if (validation && regressions.length) {
+        // Use the existing verdict carrier and repair path without a model decision.
+        const evidence = join(opts.runDir, validation.immutablePath!);
+        const reason = regressions.map(entry => `${entry.display ?? entry.role}: ${entry.newFailureIdentifiers.join(', ') || entry.reason}`).join('; ');
+        validationFailure = { exitCode: 0, duration_ms: Math.round(attemptElapsedMs()), writes: [], writeAttribution: 'structured', output: JSON.stringify({
+          pass: false, reason,
+          criteria: Object.fromEntries((opts.criterionRefs ?? []).map(id => [id, { status: 'fail', evidence }])),
+          audit_findings: { version: 1, findings: [] },
+          repairability: { version: 1, disposition: 'repairable', evidence },
+        }) };
+      } else if (direct && opts.isGate && !opts.resumeSessionId) {
+        prompt += '\nThis is a fresh independent review. Evaluate the entire brief, including after an engine validation failure was repaired.';
+      }
+    }
+    result = aggregateAbortSignal.aborted ? { ...cancelledResult(), output: preflightErrors.join('\n') }
+      : preflightErrors.length ? { output: preflightErrors.join('\n'), exitCode: 1, duration_ms: Math.round(attemptElapsedMs()), friendlyError: preflightErrors.join('; ') }
+      : validationFailure ?? await invokeAdapterWithCorrection(adapter, resolvedRole);
 
     // Adapter error detection + exponential backoff retry on the SAME adapter.
     if (result.exitCode !== 0 && result.adapterError === true) {
@@ -1359,39 +1330,8 @@ async function runStageWithWriterLease(
           result = cancelledResult();
           break;
         }
-        result = await invokeAdapterWithLiveCorrection(adapter, resolvedRole, false);
+        result = await invokeAdapterWithCorrection(adapter, resolvedRole);
         if (result.exitCode === 0 || result.adapterError !== true) break;
-      }
-
-      // Final escape hatch: a different configured adapter may run once, but
-      // loading and execution consume the same immutable attempt deadline.
-      if (!aggregateAbortSignal.aborted && result.exitCode !== 0 && result.adapterError === true) {
-        try {
-          const projectDefaults = loadProjectDefaults(opts.projectDir);
-          const primaryName = opts.role.adapter ?? inferAdapterName(adapter) ?? projectDefaults.adapter;
-          const fallbackName = projectDefaults.adapter;
-          if (fallbackName && fallbackName !== primaryName && attemptDeadline.remainingMs() > 0) {
-            try { appendFileSync(liveLogPath, `\n↩︎ Same-adapter retries exhausted (${primaryName}). Falling back to defaults.yaml adapter=${fallbackName} model=${projectDefaults.model}…\n`); } catch { /* ignore */ }
-            const fallbackAdapter = await racePhaseWithAbort(
-              (opts.technicalRetry?.loadFallbackAdapter ?? loadAdapterByName)(fallbackName),
-            );
-            if (fallbackAdapter === PHASE_ABORTED) {
-              if (attemptDeadline.signal.aborted) terminationCause ??= 'attempt_timeout';
-              result = cancelledResult();
-            } else if (!aggregateAbortSignal.aborted && attemptDeadline.remainingMs() > 0) {
-              const fallbackRole: AgentConfig = {
-                ...resolvedRole,
-                adapter: fallbackName,
-                model: projectDefaults.model,
-                reasoning_effort: projectDefaults.reasoning_effort,
-              };
-              result = await invokeAdapterWithLiveCorrection(fallbackAdapter, fallbackRole, false);
-              try { appendFileSync(liveLogPath, `\n↪︎ Fallback ${fallbackName} returned exit=${result.exitCode}.\n`); } catch { /* ignore */ }
-            }
-          }
-        } catch (err) {
-          try { appendFileSync(liveLogPath, `\n⚠️  Cross-adapter fallback failed to load: ${err instanceof Error ? err.message : String(err)}\n`); } catch { /* ignore */ }
-        }
       }
 
       // The adapter classifies its own diagnostic channel. Worker output is an
@@ -1401,75 +1341,103 @@ async function runStageWithWriterLease(
     observeAdapterSettlement();
     if (!aggregateAbortSignal.aborted) throw error;
     result = cancelledResult();
-  } finally {
-    pollAbortSignal();
-    clearInterval(abortPollTimer);
-    clearInterval(commandInterruptPollTimer);
-    clearInterval(extensionPollTimer);
-    for (const watcher of requestWatchers) watcher.close();
-    cleanupAbortSignalAtExit();
-    cleanupCommandInterruptSignalAtExit();
-    // The execution attempt ends when adapter/fallback child settlement ends.
-    // A blocked event loop can settle after the immutable boundary before its
-    // timer callback runs, so observe monotonic expiry before disposal.
-    if (!supervisorAborted && !approvalSuspended) attemptDeadline.observeSettlement();
-    // Dispose here as well on thrown adapter errors so no long deadline timer
-    // survives this invocation and keeps the worker process alive.
-    attemptDeadline.dispose();
   }
 
-  if (result.exitCode === 0 && opts.artifactObligationTemplate?.trim()) {
+  // The scheduler flushes requests written immediately before a synchronous close
+  // while this attempt still owns its identity and immutable deadline.
+  if (opts.settlementBoundary && !aggregateAbortSignal.aborted) {
+    scopeRevisionBoundaryReached ||= await opts.settlementBoundary('child_closed');
+  }
+  const enginePublishedCarriers: string[] = [];
+  let blockedStageResult = false;
+  if (result.exitCode === 0 && opts.outputSchema && !scopeRevisionBoundaryReached) {
+    try {
+      const record = stageRecord(result.output);
+      blockedStageResult = record.status === 'blocked';
+      if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
+      const carriers = opts.isGate ? [`verdict_${opts.stageId}.json`] : [];
+      const handoff = `handoff_${opts.stageId}.md`;
+      if (opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === handoff)) carriers.push(handoff);
+      for (const carrier of carriers) {
+        atomicWrite(join(opts.runDir, carrier), `${JSON.stringify(record)}\n`);
+        enginePublishedCarriers.push(`run:${carrier}`);
+      }
+    } catch (error) {
+      result.exitCode = 1;
+      result.friendlyError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  if (result.exitCode === 0 || (production && invocationIndex > 0 && !childCloseUnverified)) {
     try {
       const artifactInput = {
+        attemptIndex,
+        isGate: opts.isGate,
         stageId: opts.stageId,
-        template: opts.artifactObligationTemplate,
+        template: opts.artifactObligationTemplate ?? '',
         projectDir: opts.projectDir,
         runDir: opts.runDir,
-        writes: result.writes,
-        preimages: artifactContractPreimages,
-        priorProducedPromptArtifacts,
+        writes: [...(result.writes ?? []), ...enginePublishedCarriers],
+        artifactContract: opts.artifactContract,
+        statuses: opts.artifactStatuses,
       };
-      const audit = scopeRevisionBoundaryReached
-        ? captureDeferredStageArtifactContract(artifactInput)
-        : inspectStageArtifactContract(artifactInput);
-      if (audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
-      if (!scopeRevisionBoundaryReached && audit.violations.length > 0) {
-        const detail = audit.violations.map((violation) => violation.reason).join('; ');
-        result.exitCode = 1;
-        result.timedOut = false;
-        result.adapterError = false;
-        result.adapterFailureKind = undefined;
-        result.friendlyError = `artifact contract violation: ${detail}`;
-        result.output = `${result.output}${result.output ? '\n\n' : ''}Artifact contract refused completion: ${detail}`;
-        recordRunEvent(opts.projectDir, opts.runId, {
-          type: 'stage_artifact_contract_violation',
-          runId: opts.runId,
-          timestamp: audit.checkedAt,
-          stageId: opts.stageId,
-          attemptIndex,
-          attemptStartedAt,
-          files: audit.violations.map((violation) => violation.mention),
-          detail,
-          level: 'warning',
-          source: 'worker',
+      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || scopeRevisionBoundaryReached || result.exitCode !== 0);
+      const productFacts = existsSync(join(opts.runDir, 'run.json')) ? declaredOutputFacts(opts.projectDir, opts.runId) : [];
+      // A single direct author owns the whole brief. Split plans settle each
+      // stage's artifact contract; completion still requires every run product.
+      const authors = runState?.planControl?.stages.filter(stage => !stage.is_gate && !stage.dynamic_dispatch && !stage.retry_to?.length);
+      const dueProducts = direct && (authors?.length ?? 1) <= 1 && !opts.isGate && !opts.dynamicDispatch && !blockedStageResult && result.exitCode === 0 ? productFacts : [];
+      const requiredProducts = new Map([...dueProducts, ...availableProductsAtStart].map(product => [product.path, product]));
+      for (const product of requiredProducts.values()) {
+        const current = productFacts.find(output => output.path === product.path);
+        if (current?.available) continue;
+        audit.violations.push({
+          kind: 'declared_artifact', source: 'declaration', mention: product.path,
+          path: resolve(opts.projectDir, product.path),
+          reason: `${product.available ? 'DECLARED_OUTPUT_REMOVED' : 'DECLARED_OUTPUT_REQUIRED'}: ${product.path}; ${current?.reason ?? 'required product declaration disappeared'}`,
         });
+      }
+      if (production && !childCloseUnverified) audit.production = production;
+      if (opts.artifactContract || audit.obligations.length > 0) writeStageArtifactContractAudit(opts.runDir, audit);
+      if (audit.violations.length && result.exitCode === 0) {
+        result.exitCode = 1;
+        result.friendlyError = `Stage settlement refused: ${audit.violations.map(violation => violation.reason).join('; ')}`;
       }
     } catch (error) {
       result.exitCode = 1;
       result.timedOut = false;
       result.adapterError = false;
       result.adapterFailureKind = undefined;
+      result.providerFailure = undefined;
       result.friendlyError = `artifact contract could not be checked: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
+  } finally {
+    pollAbortSignal();
+    clearInterval(abortPollTimer);
+    clearInterval(commandInterruptPollTimer);
+    for (const watcher of requestWatchers) watcher.close();
+    cleanupAbortSignalAtExit();
+    cleanupCommandInterruptSignalAtExit();
+    // The execution attempt ends after adapter settlement.
+    // A blocked event loop can settle after the immutable boundary before its
+    // timer callback runs, so observe monotonic expiry before disposal.
+    if (!stageAborted && !approvalSuspended) attemptDeadline.observeSettlement();
+    // Dispose here as well on thrown adapter errors so no long deadline timer
+    // survives this invocation and keeps the worker process alive.
+    attemptDeadline.dispose();
+  }
 
-  if (attemptDeadline.signal.aborted && !supervisorAborted && !approvalSuspended) terminationCause = 'attempt_timeout';
-  const timedOut = !supervisorAborted && !approvalSuspended && (
+  if (attemptDeadline.signal.aborted && !stageAborted && !approvalSuspended) terminationCause = 'attempt_timeout';
+  const timedOut = !stageAborted && !approvalSuspended && (
     terminationCause === 'attempt_timeout'
     || result.exitCode === 124
     || result.timedOut === true
     || (result.duration_ms >= effectiveBudgetMs && result.exitCode !== 0)
   );
+  if (scopeRevisionBoundaryReached && !stageAborted && !timedOut && result.exitCode === 0) {
+    result.suspended = true;
+    result.suspensionReason = 'scope_revision';
+  }
   if (approvalSuspended) {
     result.exitCode = 0;
     result.timedOut = false;
@@ -1482,10 +1450,12 @@ async function runStageWithWriterLease(
     result.exitCode = 124;
     result.timedOut = true;
     terminationCause = 'attempt_timeout';
-  } else if (supervisorAborted) {
+  } else if (stageAborted) {
     result.exitCode = 137;
     result.timedOut = false;
-    terminationCause = 'supervisor_abort';
+    terminationCause = 'stage_abort';
+  } else if (result.suspensionReason === 'scope_revision') {
+    terminationCause = 'scope_revision_suspension';
   } else if (result.exitCode === 0) {
     terminationCause = 'complete';
   } else if (result.adapterError) {
@@ -1493,13 +1463,14 @@ async function runStageWithWriterLease(
   } else {
     terminationCause ??= 'failed';
   }
-  if (supervisorAborted) result.output = renderSupervisorAbortOutput(result.output, opts.stageId, attemptIndex, abortReason);
+  if (stageAborted) result.output = renderStageAbortOutput(result.output, opts.stageId, attemptIndex, abortReason);
+  if (approvalSuspended || timedOut || stageAborted || result.exitCode === 0) result.providerFailure = undefined;
   result.effectiveTimeoutMs = effectiveBudgetMs;
   result.timeoutTerminationCause = terminationCause;
 
   writeStageOutput(opts.projectDir, opts.runId, opts.stageId, result.output, attemptIndex);
 
-  const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope, [kgPath], opts.runDir);
+  const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope);
   const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
   const writes = structuredWrites ?? artifacts;
   const writeAttribution = structuredWrites ? 'structured' as const : 'snapshot' as const;
@@ -1514,9 +1485,6 @@ async function runStageWithWriterLease(
     deadlineAt: attemptDeadline.deadlineAt,
     elapsedMs: deadlineSnapshot.elapsedMs,
     remainingMs: deadlineSnapshot.remainingMs,
-    rejectedExtensionCount,
-    decisionPaths: timeoutDecisionPaths,
-    mismatchPaths: timeoutMismatchPaths,
     terminationCause,
     deadlineReachedAt: deadlineSnapshot.deadlineReachedAt,
     ...(childClosedAt ? { childClosedAt } : {}),
@@ -1527,18 +1495,22 @@ async function runStageWithWriterLease(
     attemptIndex,
     exitCode: result.exitCode,
     effectiveBudgetMs,
-    rejectedExtensionCount,
     terminationCause,
   });
-  let final = completeStageAttempt(opts.projectDir, opts.runId, opts.stageId, opts.retries, {
+  let final = closeStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, {
+    ...(correctionReinvocations > 0 ? { disposition: 'repaired' as const } : {}),
     exitCode: result.exitCode,
     duration_ms: result.duration_ms,
+    processExitCode: result.processExitCode,
+    processSignal: result.processSignal,
+    providerFailure: result.providerFailure,
     artifacts,
     completedAt: new Date().toISOString(),
     error: result.exitCode !== 0
       ? (
-        supervisorAborted
-          ? (abortReason ? `aborted by supervisor: ${abortReason}` : 'aborted by supervisor')
+        stageAborted
+          ? (abortReason ? `aborted by engine: ${abortReason}` : 'aborted by engine')
+          : result.providerFailure ? providerFailureDetail(result.exitCode, result.providerFailure)
           : result.adapterError ? `upstream adapter failure (${result.adapterFailureKind ?? 'unclassified'})`
           : result.timedOut ? `timed out after ${Math.round(effectiveBudgetMs / 1000)}s`
           // A diagnosed failure explains itself in one actionable sentence
@@ -1549,38 +1521,63 @@ async function runStageWithWriterLease(
       : undefined,
     tokens_in: result.tokens_in,
     tokens_out: result.tokens_out,
+    tokens_cached: result.tokens_cached,
+    tokens_reasoning: result.tokens_reasoning,
+    tokenUsage: result.tokenUsage,
+    invocations: result.invocations,
     adapterFailureKind: result.adapterFailureKind,
-    kgChanged: artifacts.some(a => a.endsWith('knowledge_graph.json')),
     writes,
     writeAttribution,
     validationGeneratedWrites: result.validationGeneratedWrites,
     timeout: timeoutSummary,
   });
-  if (approvalSuspended) {
-    final = suspendStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex);
+
+  let boundaryError: unknown;
+  try {
+    const suspended = await opts.settlementBoundary?.('attempt_closed');
+    final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, result.suspended === true || suspended === true);
+  } catch (error) {
+    boundaryError = error;
+    final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, false,
+      { exitCode: 1, error: error instanceof Error ? error.message : String(error) });
   }
-  recordRunEvent(opts.projectDir, opts.runId, {
-    type: approvalSuspended ? 'approval_attempt_suspended' : result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
-    runId: opts.runId,
-    timestamp: final.attempts?.at(-1)?.completedAt ?? new Date().toISOString(),
-    stageId: opts.stageId,
-    attemptIndex,
-    attemptStartedAt,
-    status: final.status,
-    exitCode: result.exitCode,
-    adapterFailure: result.adapterError === true,
-    ...(result.adapterFailureKind ? { adapterFailureKind: result.adapterFailureKind } : {}),
-    ...(approvalRequestId ? { requestId: approvalRequestId } : {}),
-    ...(approvalRequestingStageId ? { requestingStageId: approvalRequestingStageId } : {}),
-    detail: approvalSuspended
-      ? `attempt suspended for approval ${approvalRequestId ?? 'unknown'}`
-      : result.exitCode === 0 ? 'attempt completed' : (final.error ?? `exit ${result.exitCode}`),
-    source: 'worker',
-  });
+  {
+    const settled = final.attempts?.at(-1);
+    const suspended = settled?.status === 'suspended';
+    if (settled?.exitCode !== undefined) result.exitCode = settled.exitCode;
+    result.suspended = suspended;
+    if (result.exitCode !== 0 && !suspended) result.timeoutTerminationCause = settled?.timeout?.terminationCause ?? 'failed';
+    recordRunEvent(opts.projectDir, opts.runId, {
+      type: approvalSuspended ? 'approval_attempt_suspended' : suspended ? 'attempt_suspended' : result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
+      runId: opts.runId,
+      timestamp: final.attempts?.at(-1)?.completedAt ?? new Date().toISOString(),
+      stageId: opts.stageId,
+      ...attemptEventFields(settled),
+      status: final.status,
+      exitCode: result.exitCode,
+      adapterFailure: result.adapterError === true,
+      ...(result.processExitCode !== undefined ? { processExitCode: result.processExitCode } : {}),
+      ...(result.processSignal !== undefined ? { processSignal: result.processSignal } : {}),
+      ...(result.providerFailure ? { providerFailure: result.providerFailure } : {}),
+      ...(result.adapterFailureKind ? { adapterFailureKind: result.adapterFailureKind } : {}),
+      ...(approvalRequestId ? { requestId: approvalRequestId } : {}),
+      ...(approvalRequestingStageId ? { requestingStageId: approvalRequestingStageId } : {}),
+      detail: approvalSuspended
+        ? `attempt suspended for approval ${approvalRequestId ?? 'unknown'}`
+        : suspended ? 'attempt suspended at scheduler control boundary' : result.exitCode === 0 ? 'attempt completed' : (final.error ?? `exit ${result.exitCode}`),
+      source: 'worker',
+    });
 
-  // Surface fallback attribution to callers without changing adapter semantics.
-  result.writes = final.attempts?.at(-1)?.writes;
-  result.writeAttribution = final.attempts?.at(-1)?.writeAttribution;
+    // Return reconciled write attribution to the scheduler.
+    result.writes = final.attempts?.at(-1)?.writes;
+    result.writeAttribution = final.attempts?.at(-1)?.writeAttribution;
 
+    // Final classification and durable settlement, rather than a raw child zero,
+    // determine whether the successful-home cleanup policy applies.
+    if (final.status === RUN_STATUS.COMPLETE && !opts.preserveSession && !suspended) {
+      for (const continuation of continuations.values()) finalizeCodexHome(stageCodexHome(opts.runDir, continuation.ownerStageId), 0);
+    }
+  }
+  if (boundaryError !== undefined) throw new StageAttemptSettlementError(opts.stageId, attemptIndex, boundaryError);
   return result;
 }

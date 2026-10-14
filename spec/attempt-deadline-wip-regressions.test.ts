@@ -1,4 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { atomicWrite } from '../src/store.js';
+import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -43,13 +45,28 @@ describe('immutable attempt deadline regressions', () => {
     const stageId = 'starved_deadline';
     const created = createRun(projectRoot, 'starved-deadline', 'name: starved-deadline', [stageId]);
     const budgetMs = 40;
+    const home = join(created.runDirPath, 'stages', stageId, 'codex_home');
+    let adapterStartedAt: number | undefined;
+    const startedWall = Date.now();
+    // This fixture isolates starvation during a started adapter, rather than
+    // letting unrelated setup load consume the 40ms construction first.
+    const elapsed = () => adapterStartedAt === undefined ? 0 : performance.now() - adapterStartedAt;
+    const deadlineClock = {
+      monotonicNow: elapsed,
+      wallNow: () => startedWall + elapsed(),
+      setTimer: (callback: () => void, delay: number) => setTimeout(callback, delay),
+      clearTimer: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer),
+    };
     const adapter: Adapter = {
       async run() {
+        adapterStartedAt = performance.now();
+        mkdirSync(home, { recursive: true });
+        writeFileSync(join(home, 'fixture-thread.json'), '{"messages":["needed thread context"]}');
         const blockedUntil = performance.now() + 120;
         while (performance.now() < blockedUntil) {
           // Deliberately prevent the already-due timer callback from running.
         }
-        return { output: 'late success', exitCode: 0, duration_ms: 120 };
+        return { output: 'late success', exitCode: 0, duration_ms: 120, sessionId: '123e4567-e89b-42d3-a456-426614174000' };
       },
     };
 
@@ -58,6 +75,8 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'deadline starvation fixture',
+      deadlineClock,
+      artifactContract: emptyArtifactContract(),
       timeout_ms: budgetMs,
       projectDir: projectRoot,
       runId: created.runId,
@@ -67,6 +86,8 @@ describe('immutable attempt deadline regressions', () => {
     const status = readStageStatus(projectRoot, created.runId, stageId);
 
     expect(result).toMatchObject({ exitCode: 124, timedOut: true });
+    expect(adapterStartedAt).toBeDefined();
+    expect(existsSync(home)).toBe(true);
     expect(status).toMatchObject({
       status: 'failed',
       error: expect.stringMatching(/timed out/iu),
@@ -100,6 +121,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'deadline-starved rejection fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: budgetMs,
       projectDir: projectRoot,
       runId: created.runId,
@@ -120,7 +142,7 @@ describe('immutable attempt deadline regressions', () => {
   });
 
   it('QA17 keeps a current-attempt supervisor ABORT authoritative at starved settlement', { timeout: 10_000 }, async () => {
-    const stageId = 'starved_supervisor_abort';
+    const stageId = 'starved_stage_abort';
     const created = createRun(projectRoot, 'starved-supervisor-abort', 'name: starved-supervisor-abort', [stageId]);
     const signalDirectory = join(created.runDirPath, 'signals');
     const signalPath = join(signalDirectory, `abort_${stageId}.json`);
@@ -131,7 +153,7 @@ describe('immutable attempt deadline regressions', () => {
         while (performance.now() < blockedUntil) {
           // Deliberately prevent both the deadline and ABORT poll timers.
         }
-        writeFileSync(signalPath, JSON.stringify({
+        atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId,
           attemptIndex: 1,
@@ -139,7 +161,7 @@ describe('immutable attempt deadline regressions', () => {
           timestamp: new Date().toISOString(),
           source: 'supervisor',
         }));
-        return { output: 'late success', exitCode: 0, duration_ms: 120 };
+        return { output: 'late success', exitCode: 0, duration_ms: 120, sessionId: '123e4567-e89b-42d3-a456-426614174000' };
       },
     };
 
@@ -148,6 +170,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'starved supervisor ABORT fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: 40,
       projectDir: projectRoot,
       runId: created.runId,
@@ -159,16 +182,16 @@ describe('immutable attempt deadline regressions', () => {
     expect(result).toMatchObject({
       exitCode: 137,
       timedOut: false,
-      timeoutTerminationCause: 'supervisor_abort',
+      timeoutTerminationCause: 'stage_abort',
     });
     expect(status).toMatchObject({
       status: 'failed',
-      timeout: { terminationCause: 'supervisor_abort' },
+      timeout: { terminationCause: 'stage_abort' },
     });
   });
 
   it('QA18 normalizes exit telemetry when supervisor ABORT arrives after deadline but before settlement', { timeout: 10_000 }, async () => {
-    const stageId = 'deadline_then_supervisor_abort';
+    const stageId = 'deadline_then_stage_abort';
     const created = createRun(projectRoot, 'deadline-then-supervisor', 'name: deadline-then-supervisor', [stageId]);
     const signalDirectory = join(created.runDirPath, 'signals');
     const signalPath = join(signalDirectory, `abort_${stageId}.json`);
@@ -176,7 +199,7 @@ describe('immutable attempt deadline regressions', () => {
     const adapter: Adapter = {
       async run() {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
-        writeFileSync(signalPath, JSON.stringify({
+        atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId,
           attemptIndex: 1,
@@ -193,6 +216,7 @@ describe('immutable attempt deadline regressions', () => {
       role,
       dependsOn: [],
       promptTemplate: 'deadline then supervisor ABORT fixture',
+      artifactContract: emptyArtifactContract(),
       timeout_ms: 40,
       projectDir: projectRoot,
       runId: created.runId,
@@ -204,11 +228,11 @@ describe('immutable attempt deadline regressions', () => {
     expect(result).toMatchObject({
       exitCode: 137,
       timedOut: false,
-      timeoutTerminationCause: 'supervisor_abort',
+      timeoutTerminationCause: 'stage_abort',
     });
     expect(status).toMatchObject({
       status: 'failed',
-      timeout: { terminationCause: 'supervisor_abort' },
+      timeout: { terminationCause: 'stage_abort' },
     });
   });
 });

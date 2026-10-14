@@ -281,10 +281,10 @@ describe('watch heartbeat and edge semantics', () => {
       runId: 'settled-but-running',
       lifecycleStatus: 'running',
       terminalStatus: 'complete',
-      terminalArtifact: 'final_verification.md',
+      terminalArtifact: 'docs/final_verification.md',
     })]);
     expect(formatWatchPoll(first)).toContain(
-      '[STATUS MISMATCH] settled-but-running: lifecycle status running; terminal artifact "final_verification.md" declares complete',
+      '[STATUS MISMATCH] settled-but-running: lifecycle status running; terminal artifact "docs/final_verification.md" declares complete',
     );
     const second = poll(fixture, first.state);
     expect(second.alerts).toEqual([]);
@@ -1127,11 +1127,15 @@ describe('watch command adapter', () => {
     expect(sleep).not.toHaveBeenCalled();
   });
 
-  it('accepts a bounded positive interval and rejects zero, excessive, or nonnumeric values', () => {
+  it('accepts positive intervals within the Node timer range', () => {
     expect(parseWatchArgs(['watch', '--poll', '1'])).toMatchObject({ pollMs: 1_000 });
     expect(parseWatchArgs(['--poll=3600'])).toMatchObject({ pollMs: 3_600_000 });
-    expect(() => parseWatchArgs(['watch', '--poll', '0'])).toThrow(/between 1 and 3600/);
-    expect(() => parseWatchArgs(['watch', '--poll', '3601'])).toThrow(/between 1 and 3600/);
+    expect(parseWatchArgs(['--poll=0.25'])).toMatchObject({ pollMs: 250 });
+    expect(parseWatchArgs(['--poll=7200'])).toMatchObject({ pollMs: 7_200_000 });
+    expect(parseWatchArgs(['--poll=2147483.647'])).toMatchObject({ pollMs: 2_147_483_647 });
+    expect(() => parseWatchArgs(['watch', '--poll', '0'])).toThrow(/positive/);
+    expect(() => parseWatchArgs(['watch', '--poll', '2147483.648'])).toThrow(/timer/);
+    expect(() => parseWatchArgs(['watch', '--poll', '9'.repeat(400)])).toThrow(/timer/);
     expect(() => parseWatchArgs(['watch', '--poll', 'soon'])).toThrow(/number of seconds/);
   });
 

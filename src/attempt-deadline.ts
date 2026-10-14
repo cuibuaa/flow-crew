@@ -1,5 +1,7 @@
+import { appendFileSync, mkdirSync } from './engine-fs.js';
+
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, mkdirSync } from 'node:fs';
+
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { ATTEMPT_TERMINATION_GRACE_MS } from './adapters/base.js';
@@ -247,11 +249,7 @@ export type TechnicalRetryBudgetTransition =
 
 export function nextTechnicalRetryBudget(previousBudgetMs: number): number {
   positiveSafeInteger(previousBudgetMs, 'previous attempt timeout');
-  const next = previousBudgetMs * 2;
-  if (!Number.isSafeInteger(next) || next <= previousBudgetMs) {
-    throw new Error('configured stage timeout cannot produce the required strictly larger technical retry budget');
-  }
-  return next;
+  return positiveSafeInteger(previousBudgetMs * 2, 'retry attempt timeout');
 }
 
 export function createTechnicalRetryBudgetState(input: {

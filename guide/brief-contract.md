@@ -1,894 +1,402 @@
-# Brief and file contract
+# Brief contract
 
-This is the canonical public contract between a FlowCrew brief, its agents, and
-the scheduler. Brief-writing tools such as `/ship` should link here instead of
-maintaining their own copy.
+For a task author: how do I express the outcome, evidence and limits the run must satisfy?
 
-## Three rules that decide most outcomes
+Write a self-contained outcome, explicit input paths, real constraints and numbered acceptance
+criteria. Name the report and the evidence it must show. Separate a required property from
+an illustrative implementation. The preflight wording lint warns about mandatory
+implementation verbs attached to code-shaped targets; warnings do not prove a criterion is
+wrong or waive a compatibility requirement.
 
-A run's result is determined more by its brief than by anything the engine does afterwards.
-These three are the ones that most often go wrong:
+## Engineering and workflow selection
 
-- **State a criterion as the observable property, not the instrument.** "The probe must import
-  `jsdom`" pins an implementation; "prove a real browser environment was exercised" states what
-  you actually want, and a gate can satisfy it by other means without failing you on a
-  technicality.
-- **Put the boundaries in the brief, not in a follow-up message.** Anything a stage may write,
-  and anything it must not, has to be declared up front — a constraint sent later cannot
-  retroactively govern work already done, and an undeclared write scope means the stage is
-  neither allowed to write nor told it may ask.
-- **Declare terminal artifacts only on what the last stage writes.** Naming a path that some
-  mid-pipeline stage produces lets the run reach a terminal state before the gates that were
-  supposed to guard it have run. Dynamic dispatch admission enforces one common terminal-owner
-  sink and requires every mandatory stage to be its ancestor.
-
-## Contract flow
-
-```text
-brief frontmatter + Markdown body
-  -> scheduler records task_brief.md and parses engine settings
-  -> planner writes dispatch.yaml and optional reality_checks.md
-  -> workers execute the dispatched DAG
-  -> gates write verdict_<stageId>.json
-  -> research stages write round_result JSON; the engine decides continue/ship/ceiling
-  -> consequential stages write approval_request.json; the engine parks if needed
-  -> guidance steers later stages and iterations
-  -> a terminal artifact or engine-owned decision commits the run outcome
-```
-
-The frontmatter configures the engine. The Markdown body remains the complete,
-self-contained task: goal, context, constraints, approach, acceptance criteria,
-and relevant files. A stage does not inherit the conversation that created the
-brief.
-
-## Frontmatter envelope
-
-Engine settings must be YAML frontmatter at the very start of the file, bounded
-by `---` lines:
+This is an illustrative engineering envelope, not a complete launch-ready task:
 
 ```yaml
 ---
-research:
-  baseline: 0.72
-  policy: greedy_stack
-  higher_is_better: true
-  feasibility:
-    hard_floor: 10
-    warn_below: 20
-    rules:
-      - label: eligible across the full window
-        model: independent_repeated_conjunction
-        population: 500
-        per_period_rate: 0.8
-        periods: 12
-  result_file: artifacts/evaluation/round_result.json
-  report_dir: artifacts/evaluation
-  result_schema:
-    type: object
-    required: [label, result]
-    properties:
-      label: {type: string}
-      result: {type: number}
-  confirm:
-    command: node scripts/confirm-result.mjs
-    requires: Recompute the candidate on an independent fixture.
-    timeout_seconds: 300
-  stop:
-    beat: 0.85
-    max_rounds: 8
-    halt_after_no_improvement: 2
-
-terminal_states:
-  shipped:
-    paths: [artifacts/evaluation/ship_report.md]
-  ceiling_hit:
-    paths: [artifacts/evaluation/ceiling_report.md]
-    floor:
-      min_attempted_stages: 4
----
-# Improve evaluation accuracy
-
-The complete task begins here.
-```
-
-Putting `research.confirm:` in the prose body or inside a quoted `flowcrew
-quick` task does not configure the engine. The parser only reads these keys from
-the leading YAML block. Rehearse and submit the whole file:
-
-```bash
-flowcrew rehearse path/to/task.brief.md
-flowcrew quick --task "$(cat path/to/task.brief.md)"
-```
-
-When `quick` sees a valid `research` block and no explicit `--workflow`, it
-selects the research workflow automatically.
-
-## Declared outputs and existing-path disposition
-
-Preflight and setup inventory paths declared structurally by `outputs`,
-`deliverables`, `artifacts`, `result_file`, `report_file`, `report_dir`, and
-`terminal_states`. Prose mentions do not authorize replacement. A declaration
-defaults to create-only:
-
-```yaml
+workflow: direct
+inputs:
+  - src/
 outputs:
-  - path: artifacts/evaluation/new-result.json
-  - path: artifacts/evaluation/rolling-log.jsonl
-    on_existing: append
-```
-
-`on_existing` accepts `update`, `append`, or `replace`. A non-empty file at a
-create-only path blocks before work starts and is reported with type, size, and
-SHA-256; a symlink or unsupported entry type always blocks. An output also
-declared as an input is inventoried as input rather than treated as replaceable.
-Setup checks both the source and the newly created target worktree, so an
-unrelated artifact left by an earlier campaign cannot silently satisfy a new
-run's result contract.
-
-## `validation.commands`
-
-`ship-setup` normally discovers build, test, and lint commands from the target
-worktree's `package.json`, `Makefile`, or `pyproject.toml`. When a project cannot
-state the correct command there—for example, when only the operator knows which
-environment has the test dependencies—the brief may supply an argv-shaped
-fallback in its leading frontmatter:
-
-```yaml
+  - path: docs/result.md
+    on_existing: update
 validation:
   commands:
-    test:
-      command: /path/to/the/project-environment/bin/python
-      args: [-m, pytest]
+    build: {command: npm, args: [run, build]}
+    test: {command: npm, args: [test]}
+    lint: {command: npm, args: [run, lint]}
+---
 ```
 
-`build`, `test`, and `lint` are the only role names. Each role must contain
-exactly a non-empty string `command` and a required `args` array of strings;
-use `args: []` when the executable takes no arguments. The commands map must
-not be empty. Unknown roles or fields, malformed YAML, and control characters
-make setup refuse before it creates a worktree. The evidence locator stored for
-each accepted role is `<brief path>#validation.commands.<role>`.
-An otherwise empty leading frontmatter block is valid and behaves as though no
-brief validation command were declared. Control characters include both the
-ASCII C0/DEL set and the Unicode C1 range (U+0080 through U+009F).
+Follow it with the goal, constraints and extractable acceptance criteria. `workflow: direct`
+selects a fixed author/gate/repair plan; `workflow: planner` or omission uses the planner.
+Numeric research selects the research workflow unless an explicit CLI workflow overrides it.
+Direct research and program loops are refused. Input/output count does not choose the workflow.
 
-Resolution is role-by-role and fail-closed:
+`objective:` is an exact alias for `research:`, with `research` winning when both exist.
+A numeric `baseline` activates the metric loop. An engineering `objective` containing only
+`confirm` does not activate confirmation. Use normal engineering gates and configured
+validation for a pass/fail task.
 
-- A command declared by the target's project configuration governs that role.
-- A brief command fills a role that project configuration does not declare.
-- Exact command-and-ordered-argument agreement is accepted once and recorded
-  as project-governed validation corroborated by the brief.
-- Any other overlap is a conflict. Setup names both evidence locations and both
-  argv values, executes no baseline command, and refuses instead of choosing
-  silently.
-- A target-owned role whose executable cannot be resolved—for example, a
-  package script with conflicting package-manager lockfiles—is not a missing
-  role. Setup refuses; a brief command cannot replace that ambiguous project
-  declaration.
+Sources: [frontmatter](../src/scheduler/sched_admission/brief-contract.ts),
+[criteria extraction](../src/brief-criteria.ts), [preflight](../src/brief-preflight.ts).
 
-For baseline execution, setup passes `command` and `args` unchanged to the
-process runner, fixes the working directory to the target, inherits the setup
-environment, and never enables a shell. Shell punctuation inside an argument
-is data. This shape makes the executed argv reviewable and prevents setup from
-reinterpreting an operator-supplied shell line.
+## Inputs, outputs and validation
 
-A declaration supplies a command; it does not waive measurement or make an
-unrunnable environment ready. The command goes through the same baseline result
-parser and regression-gate construction as a discovered command. A launch
-error or exit 127 refuses setup and names the failed declaration, while roles
-with no command remain `not_configured` once at least one role is measurable.
-There is no validation-bypass flag.
+Declare inputs in leading YAML frontmatter. Project-relative directory names are accepted
+without a trailing slash there; unsafe declarations are reported unresolved. Code also has
+conservative prose path discovery, but explicit declarations avoid depending on it.
+Mechanically bound row-count, date-span, recursive file-count and SHA-256 assertions can be
+confirmed, refuted or not checkable. Setup refuses unproven required input assertions.
 
-For a resolved test argv beginning with a Python executable followed by `-m
-pytest`, setup derives the population probe by appending `--collect-only -q` to
-that same argv and compares source and target identities before capturing the
-baseline. Other custom test commands use the generic baseline-output fallback:
-complete named top-level TAP records are compared by normalized name plus
-name-local occurrence. A target that covers all source identities and adds tests
-is recorded as matched `SOURCE-PLUS-ADDITIONS`; missing or renamed source tests
-still refuse. Output that cannot establish identities is recorded as
-reason-bearing `unverified`. A command declaration never weakens the validation
-baseline or its gates.
+Outputs accept path strings or structured entries with `path`, optional `type: file|directory`
+and `on_existing: update|append|replace`. They are create-only by default. Declaring an existing
+output as an input records intentional reuse. Nonempty create-only files, create-only symlinks
+and unsupported entry types block the output inventory. Explicit existing-content authority
+admits project symlinks. Archival preserves symlink objects without traversing their targets.
+Absolute external outputs require an explicit directory declaration: protected/root-level
+overlaps and aliases are refused.
+Their contents are not recursively inventoried by preflight. Rehearsal substitutes temporary
+locations. A declaration is authority for its named location, not permission for siblings.
 
-## `terminal_states`
+`validation.commands` is a nonempty mapping of `build`, `test` and/or `lint` to
+`{command: string, args: string[]}`. These declarations supply shell-free argv; unknown roles,
+extra fields and control characters refuse parsing. Without declarations, setup discovers
+commands from project configuration. [Setup](operations.md#setup-validation) owns the exact
+baseline and comparison semantics. Do not replace the full configured suite with a subset.
 
-`terminal_states` maps a terminal run status to one or more project-relative
-files. A string, list of strings, or object with `path`/`paths` is accepted. A
-non-terminal key is ignored.
+Sources: [input/output inventory](../src/ship-inputs.ts), [setup parser](../src/cli-ship-setup.ts),
+[validation discovery](../src/project-validation.ts).
 
-```yaml
-terminal_states:
-  escalated: artifacts/evaluation/escalation.md
-  phase_complete:
-    paths: [artifacts/evaluation/phase_verdict.md]
-    stage_glob: artifacts/evaluation/stage_*_verdict.md
-    floor:
-      min_attempted_stages: 3
-      min_wall_minutes: 30
-    post_terminate_hook:
-      command: scripts/advance-phase.sh
-      args: [artifacts/evaluation/phase_verdict.md]
-      timeout_seconds: 120
-      env:
-        PROGRAM_MODE: evaluate
-```
+## Research rounds
+
+The [tracked research brief](../examples/hello-research.brief.md) is a complete rehearsal
+example. The metric block accepts these fields:
 
 | Field | Meaning |
 |---|---|
-| `paths` / `path` | Project-relative artifact paths that assert this status. The first existing path wins. |
-| `floor.min_attempted_stages` | Minimum number of substantive files matching `stage_glob`. Without an explicit glob, the scheduler infers `stage_*_verdict.md` beside the terminal artifact. |
-| `floor.min_wall_minutes` | Minimum wall time when no stage-count floor exists. When the stage-count floor is met, wall time is informational rather than blocking. |
-| `stage_glob` | Simple project-relative `*` pattern used by the stage-count floor. Entry-level placement is canonical; placement inside `floor` is also accepted. |
-| `post_terminate_hook` | Best-effort command run only after the terminal state, campaign entry, and completion event are committed. |
+| `baseline` | Numeric reference activating the native loop |
+| `policy` | `greedy_stack` (default), `best_of_n`, `replace_if_better`; invalid names are diagnosed |
+| `higher_is_better` | Direction; defaults higher; boolean strings are also recognized |
+| `result_file`, `report_dir` | Mutable round slot and report directory; [resolver](../src/research-paths.ts) supplies omitted paths |
+| `result_schema` | JSON schema for each measured round |
+| `context_roots` | Context inventory roots |
+| `integrity.max_std_ratio`, `outlier_factor` | Declared variability/outlier bounds |
+| `integrity.field_floors` | Numeric minimums for named result fields |
+| `integrity.reject_if_positive` | Named fields that must not be positive |
+| `confirm.command`, `requires`, `timeout_seconds`, `reads` | Optional real shell check, human assertion, bound and rooted reads |
+| `stop.beat` | Ship target, inclusive in the declared direction |
+| `stop.max_rounds`, `max_wall_hours`, `halt_after_no_improvement` | Stop budgets |
+| `stop.min_improvement`, `improvement_se_multiple` | Required gain beyond running best and reported uncertainty |
+| `feasibility` | Optional structural preflight model; see below |
 
-The hook receives `FC_PHASE`, `FC_VERDICT_FILE`, `FC_RUN_DIR`,
-`FC_PROJECT_DIR`, and `FC_RUN_ID`. A program also adds `FC_PROGRAM_NAME`,
-`FC_PROGRAM_PHASE`, and configured roadmap/ledger variables. Hook failure or
-timeout is logged but does not undo the committed terminal state.
+A measured round supplies numeric `result`, a nonblank `label`, and optionally `result_std` and declared
+schema fields. No safe acting candidate uses the fresh `<result_file>.no_candidate.json`
+sidecar with `label`, `outcome: no_candidate` and a nonblank `reason`. Exactly one slot may
+be fresh. No-candidate rounds consume stop budget without inventing a baseline observation.
+Duplicate journaled labels are refused. Accepted rounds enter `research_journal.json` and
+the report directory's exact `run_manifest.json` before confirmation.
 
-Successful statuses still pass Reality-Gate before commit. A research
-`shipped` artifact also has to pass `research.confirm`; a rejected artifact
-does not end the run.
+Variability and outlier bounds apply only when declared. Reported uncertainty still determines
+whether a gain counts; surprising gains and high variance need independent review or a declared
+confirmation check.
 
-For a dynamically dispatched run, every declared terminal path must appear in
-the scope of exactly one stage. Terminal snapshot basenames must also be unique,
-even when their parent directories differ. Each owner must be a non-gate,
-non-repair DAG sink downstream of every mandatory stage; different terminal
-paths may have different valid owners.
-The scheduler accepts the artifact only when the admitted owner's latest
-completed execution attributes a write to that exact path. A research terminal
-owner additionally needs a condition that is mechanically false while the policy
-continues; `research.terminalPath == "<that exact path>"` is the preferred form.
-The policy publishes the selected status and path before re-pending that owner.
+The latest result and sidecar change between rounds. Immutable round evidence and the
+framework manifest record accepted observations. Configured validation and independent
+review decide whether authored tests remain valid after later work. Hard-check reachability
+is checked against the round timeline.
 
-## `research` (or `objective`)
+An unknown policy produces a strict-parser error and a preflight finding.
+`plan-check` refuses that error; an explicit quick launch can retain the
+parser's `greedy_stack` fallback. Set a valid name rather than assuming the diagnostic is an
+unconditional launch barrier.
 
-`objective` is accepted as an exact alias for `research`. A numeric `baseline`
-is the field that activates the native metric loop; an omitted or unknown
-`policy` then defaults to `greedy_stack`. The one independently parsed field is
-`feasibility`: static preflight accepts it without a baseline, and doing so does
-not create a metric-loop configuration. The `quick` command's automatic
-workflow selection recognizes the `research:` spelling; pass `--workflow
-research` explicitly when using the `objective:` alias for a metric loop.
+The policy computes keep/drop and continue/ship/ceiling. Improvement must clear the configured
+absolute margin and, when reported, uncertainty margin. Confirmation runs only when declared
+and a ship decision is reached. Failure prevents that candidate from being kept and permits
+further search; missing confirmation produces an advisory warning. Static budget checks compare round, iteration and wall limits; a large round limit
+cannot override the engine iteration bound.
 
-| Key | Contract |
+Sources: [policy](../src/research-policy.ts), [research settlement](../src/scheduler/sched_policy/research.ts),
+[research path contract](../src/scheduler/sched_policy/prompt-contracts.ts),
+[candidate validation](../src/research-candidate.ts).
+
+### Structural feasibility and statistics
+
+`feasibility` requires positive finite `hard_floor`, optional `warn_below` at least that floor,
+and nonempty `rules` with unique labels. A rule names one model:
+
+- `independent_repeated_conjunction`: positive integer `population` and `periods`,
+  `per_period_rate` between zero and one; estimates population × rate^periods.
+- `formation_count_distribution`: nonempty nonnegative integer `counts`; evaluates the
+  minimum formation count and reports its distribution.
+- `not_computable`: nonblank `reason` naming the unavailable structural quantity.
+
+This static contract can be parsed without activating a numeric loop. It does not establish
+that the chosen model fits the real problem. Unknown fields/models return parser errors;
+preflight reports them, while `plan-check` refuses them.
+
+Sources: [feasibility](../src/research-feasibility.ts), [planning policies](../src/planner-policies.ts).
+
+## Evidence authoring policy
+
+When leading brief frontmatter selects `planner_policies: [evidence_statistics]`, the planner receives
+these authoring requirements: a requested headline or quoted statistic needs its mean, median
+and position in its own distribution; a rule frozen before outcomes needs a structurally
+computed qualifying-member count, numeric feasibility floor and revision below that floor
+before outcomes are seen. An operator numeric expectation requires exact result fields
+`within_expected_range` and `method_was_not_adjusted_to_match_expectation`. These are injected
+planning instructions, not an automatic statistic calculator or guarantee of model obedience.
+
+For other evidence, state the user-visible consequence, boundaries, counter-examples and
+unacceptable outcomes. Preserve an authoritative exact mechanism when it is required; label
+illustrative mechanisms as examples. For a known defect, require the unfixed reproducer and
+recurrence evidence, including a failure rate with its denominator when recurrence matters.
+Do not replace an outcome with a line-count check; if a count itself is a supplied requirement,
+it remains binding. Explain concentrated contributions with per-item, largest-share and
+leave-one-out evidence when those properties are part of the task.
+
+Sources: [selected planning policy](../src/planner-policies.ts),
+[criterion wording lint](../src/brief-preflight.ts), [gate contract](../src/scheduler/sched_settlement/gate-contract.ts).
+
+## Authoring and verification principles
+
+These are author/operator judgments to encode when relevant, not extra engine schemas or
+promises that a model will obey. Keep the detailed contract above authoritative.
+
+### Scope and evidence
+
+- Keep work of one kind in one task; let its planner decompose and parallelize it.
+  Reason: an operator-created chain removes choices the planner can make with the whole goal.
+- Split only genuinely different kinds of work and run independent pieces in parallel.
+  Reason: serial queues of related work add coordination and delay without improving ownership.
+- State what the run must find, leaving its approach, decomposition and interpretation open.
+  Reason: supplying those conclusions turns investigation into following the operator's answer.
+- Keep the brief near one page of outcome, evidence paths, real constraints, timed report criteria
+  and terminal products; omit speculative approaches and histories of what evidence means.
+  Reason: extra interpretation is where unverified context becomes an accepted premise.
+- Supplied quantities and prohibitions bind exactly as written; state when an enumeration is
+  incomplete and require discovery of omitted dependencies before acting on it.
+  Reason: honoring a visible count can leave the unstated quantity it depends on unchanged.
+- An out-of-scope list must contain only real exclusions; identify open dimensions explicitly
+  rather than relying on an unmentioned option remaining available.
+  Reason: a seemingly complete constraint list can close useful work unintentionally.
+- Give original evidence paths and require reading them; a supplied figure is a cross-check,
+  accompanied by the anti-anchoring fields, rather than a settled premise.
+  Reason: a summary preserves its author's confidence while losing the evidence they omitted.
+- State the property to establish in the target, rather than a manually derived answer from
+  the operator's environment; label an operator measurement as a cross-check.
+  Reason: the target can differ and must expose disagreement instead of silently reconciling it.
+
+### Criteria and inputs
+
+- Constrain rigor through required reproduction, controls, independent review and evidence,
+  rather than predetermining the finding; pin each check to its moment and evidence form.
+  Reason: demanding a finding invites reshaping the work, while an untimed check may precede its last write.
+- Label examples, including parenthetical examples, as illustrative rather than acceptance
+  criteria; if an exact path, API or format is mandatory, say it is the criterion and alternatives fail.
+  Reason: gates must distinguish an illustrative instrument from an authoritative compatibility requirement.
+- Pair a prohibition on an exact case with a quantitative demonstration of the intended effect,
+  such as a control difference, count or interval excluding the null.
+  Reason: a nearly identical result can satisfy an exact-case prohibition without achieving the purpose.
+- Keep task-local criteria independent of a shared running total.
+  Reason: another task's accumulated work cannot establish that this task performed its obligation.
+- Map every authored stage's writable paths, including validation outputs, to its outputs and
+  declared reads; identify the writers of substantive evidence. Treat `min_wall_minutes` at or
+  below 10 as an anti-instant-quit guard only.
+  Reason: a clock or an early terminal file cannot prove that downstream verification happened.
+- Require preflight, rehearsal and setup to agree on declared output inventory and intended
+  existing-content authority before launch.
+  Reason: an occupied path does not become safe merely because it is the requested output name.
+- Prose paths can become input candidates even without frontmatter declarations; distinguish
+  outputs and explicitly excluded paths, or keep hypothetical paths in fenced examples.
+  Reason: an out-of-scope heading alone does not make a path mention an explicit exclusion.
+- Declare only intended task inputs and inspect target content/type collisions rather than
+  adding unrelated declarations to silence discovery; setup's target-copy rules remain authoritative.
+  Reason: excess inputs can import unrelated work or ask for incompatible materialization.
+- Use guidance for missing facts or correction of an operator error, not delayed scope or
+  replacing a required property with a preferred result; preserve better brief-conforming results.
+  Reason: erasing criteria or widening authority requires a revised, rehearsed brief and new admission.
+- Repeated engineering guidance suggests an incomplete brief; research steering on intermediate
+  evidence can be intentional. Check the addressed stage's consumption receipt and changed artifact.
+  Reason: sending guidance proves neither that the worker received it in time nor that it took effect.
+
+### Measurement and limits
+
+- Confirm supplied baselines, floors and thresholds on the candidates' scale against the
+  unchanged incumbent, input or constant control appropriate to the task.
+  Reason: the best result so far can still be worse than changing nothing.
+- Before creating a harness, collector, evaluator or execution path, name what the project
+  already provides and why it does not serve this comparison or isolation requirement.
+  Reason: otherwise the run can silently measure its own replacement for an existing capability.
+- Identify every bound on a limited quantity, establish which binds first and state what to
+  do at exhaustion; reserve enough budget to audit and report the final attempted round.
+  Reason: a second cap can nullify a raised limit or stop the run before its required report.
+- For a stateful defect compare unfixed reproduction with the fixed result; for a probabilistic
+  defect compare before/after failure rates with denominators; isolate mutations where only the guard protects behavior.
+  Reason: success after a change does not prove that change corrected the claimed defect.
+- Name and use the repository's reproducible runtime selector; treat failed launch, build,
+  test or lint execution as environment evidence before drawing a domain conclusion.
+  Reason: inability to execute an experiment says nothing about the subject it was meant to measure.
+- Before teardown, identify an input's later consumers, preserve its only copy durably and
+  bind useful row-count, date-span, file-count or digest assertions to that preserved location.
+  Reason: a successful round is unusable if the next consumer loses its evidence.
+- Shared accumulating records are append-only without restructuring, with non-decreasing
+  line counts; permit a visibly traced in-place correction of this task's own false claim.
+  Reason: protecting history should neither hide a correction nor erase another task's evidence.
+- For each census item give its user-visible consequence; classify consequence-free entries
+  as drift and explain whether fixing them pays back its cost, rather than imposing a zero target.
+  Reason: a count of differences is not a count of defects worth repairing.
+- For every aggregate show result and baseline distributions, per-item contributions, largest
+  share, leave-one-out results and the fewest top contributors whose removal flips the conclusion.
+  Reason: a favorable total can depend on a small exceptional subset rather than a general effect.
+
+### Independent acceptance
+
+- Read durable declared-check and gate evidence alongside actual deliverables. Reproduce a
+  rejected declaration independently; rerun a recorded script verbatim with full stdout/stderr and its direct exit code.
+  Reason: a terminal label or summary cannot replace the evidence that decided the run.
+- Record direct command exits and totals; never report `$?` after a pipeline as the measured
+  command's exit, and prefer structured parsing to lossy shell filters for decision-changing numbers.
+  Reason: a successful filter or plausible default can hide failure in the command being assessed.
+- A green rerun only makes a false negative plausible; characterize recurrence, explain the
+  first failure's mechanism and assess residual uncertainty against the task's risk.
+  Reason: one success cannot dismiss an intermittent failure whose cause remains unknown.
+- For a near-instant, zero-token failed attempt inspect its live log and adapter transition
+  before treating it as substantive evidence; ask what a numeric probe returns when broken and verify plausible values another way.
+  Reason: an execution failure or silent fallback can look like a believable finding.
+
+### Interpretation and review
+
+- Attribute a subagent's, report's or earlier document's conclusion, or re-establish its
+  evidence independently before adopting it as your own.
+  Reason: relaying a confident conclusion does not carry the chain that earned it.
+- Treat “flaky” as an observation awaiting a cause; a second failure of the same family calls
+  for a shared external-variable investigation using a comparison that changes one condition.
+  Reason: separate labels can conceal one mechanism and prematurely end investigation.
+- Match inspection environment to the property: use the real served path for latency,
+  authentication, caching and integration; deterministic headless rendering proves rendering properties only.
+  Reason: source and metric totals cannot establish behavior that depends on the served environment.
+- For a surprising result inspect the deciding code, query, formula, protocol, setting,
+  rubric or predicate before theorizing, and prove the experiment varied the variable it claims.
+  Reason: a mistaken instrument or unchanged treatment can produce a coherent but irrelevant explanation.
+- Expose assumptions and challenge the question when a plausible value can answer the wrong
+  framing; move a failure into commands or gates once a reliable check makes it announce itself.
+  Reason: mechanical success cannot choose the right question, but repeatable operator mistakes need not stay manual.
+
+### Safe wrap-up
+
+- After independent verification and archival, stop any watcher you started before reclaiming
+  disposable work; retain invalid results unchanged with an `INVALID.md` or `SUPERSEDED.md` marker explaining the defect.
+  Reason: ending observation and marking preserved evidence prevents stale activity or mistaken later reuse.
+- Investigate a refused audit or non-force removal and leave wrap-up open; before using a
+  guarded post-reclaim ledger repair, verify its reported entry/session/run identity.
+  Reason: a repair command cannot safely close a different obligation or substitute for unfinished preservation.
+- Change tracked specifications only for an authorized behavior regression or contradiction,
+  explain the affected assertion, and avoid adding a public test merely for each task criterion.
+  Reason: the maintained suite expresses intended behavior; one-off proof belongs in private temporary or declared run evidence.
+- If FlowCrew is unavailable, stop live work and provide the [public installation recipe](getting-started.md#install-in-a-development-checkout).
+  Reason: an unavailable executable cannot establish launch or verification evidence.
+
+## Terminal artifacts and programs
+
+`terminal_states` maps a known terminal run status to a path string, path list or object with
+`paths` (or `path`). Declare only whole-run terminal products. Nonterminal keys are ignored
+with diagnostics. Each terminal path has one final ordinary producer; ordered authors and
+repairs may share its write scope. Admission checks the producer's mandatory gate and criterion
+ancestors. Intermediate reports belong in outputs,
+not terminal declarations.
+
+An entry may include `floor.min_attempted_stages`, `floor.min_wall_minutes` and `stage_glob`
+(entry-level wins over floor-level). For generic terminal-file evaluation, attempted-stage proof counts fresh nonempty files
+matching the declared evidence pattern. Result checks determine whether those receipts prove the outcome; file length does not.
+Native research ceiling evaluation instead counts journaled rounds, including valid
+no-candidate attempts; neither counts arbitrary scheduler executions. With an attempted-stage floor satisfied,
+wall time is advisory; without it, wall time can be the sole floor. Use substantive artifacts
+and criteria rather than elapsed time as evidence of work.
+
+`post_terminate_hook` accepts `command`, optional string-array `args`, positive
+`timeout_seconds` and string-valued `env`. It runs after terminal commit under the command
+boundary, with a default 300-second timeout and `FC_PHASE`, `FC_VERDICT_FILE`, `FC_RUN_DIR`,
+`FC_PROJECT_DIR`, `FC_RUN_ID` defaulting to the committed terminal context; explicit hook
+`env` can override them. A failed/timed-out hook is
+recorded without turning the already committed terminal into a live run. Treat it as real
+execution authority and review it before launch.
+
+An optional `program` with string `name` and `phase` can specify `roadmap`, `ledger` and
+`safeguards`: `max_phases`, `max_wall_hours`, `stop_file`,
+`halt_after_consecutive_no_improvement`. Safeguards consume ledger phases and wall totals;
+malformed ledger content does not prove prior work. Program and campaign are different:
+one supplies phase safeguards, the other groups run history.
+
+Sources: [frontmatter/floors/programs](../src/scheduler/sched_admission/brief-contract.ts),
+[terminal admission](../src/scheduler/sched_admission/dispatch.ts),
+[terminal settlement](../src/scheduler/sched_policy/terminal.ts).
+
+## Deterministic checks
+
+Only one `## Reality checks` section with a `checks` list is parsed. Each check supplies
+`name`, `type`, `reads` (explicitly empty if it has no file inputs), `params`, and optional
+`advisory: true`. Rooted reads follow [agent protocol](agent-protocol.md#artifact-locations).
+Typed handler file parameters must agree with declared reads; shell text is not parsed to
+discover every dynamic read.
+
+| Type | Parameters |
 |---|---|
-| `baseline` | Required number for a metric loop: the running-best value at entry. Omit it for a feasibility-only static declaration. |
-| `policy` | `greedy_stack`, `best_of_n`, or `replace_if_better`. |
-| `higher_is_better` | Direction of improvement; defaults to true. Boolean strings `"true"` and `"false"` are coerced. |
-| `result_file` | Project-relative latest-round JSON. Default: `docs/research_round_result.json`. |
-| `report_dir` | Optional project-relative override for framework-owned reports and `run_manifest.json`. When omitted, the directory containing `result_file` is used; the default result file therefore resolves to `docs`. |
-| `result_schema` | JSON Schema subset used both in planner context and at round ingestion. |
-| `context_roots` | Project-relative roots inventoried for a dynamic planner. Default: `data`. |
-| `directions` | Opaque portfolio labels an outer campaign should cover before accepting a frontier. |
-| `feasibility` | Independently parsed pre-run structural feasibility contract for pre-registered selection rules; see below. It does not activate a metric loop. |
-| `integrity.noop` | Reject baseline-equivalent results unless explicitly false. |
-| `integrity.max_std_ratio` | Maximum accepted `result_std / abs(result)`; default 0.30 when `result_std` exists. |
-| `integrity.outlier_factor` | Directional implausible-improvement cap relative to a nonzero baseline; default 5. |
-| `integrity.field_floors` | Brief-owned numeric minimums for arbitrary result fields. |
-| `integrity.reject_if_positive` | Brief-owned fields that must not be positive. |
-| `stop.beat` | Target that proposes `ship`. |
-| `stop.max_rounds` | Maximum accepted research rounds. |
-| `stop.max_wall_hours` | Cumulative wall-time stop. |
-| `stop.halt_after_no_improvement` | Stop after this many accepted non-improving rounds. |
-| `stop.min_improvement` | Absolute margin required to count as improvement. |
-| `stop.improvement_se_multiple` | Additional standard-error margin; default 1. |
-| `confirm.command` | Shell command run from the project directory before accepting `ship`; exit zero confirms it. |
-| `confirm.requires` | Human-readable assertion only; it does not affect execution. |
-| `confirm.timeout_seconds` | Command timeout; default 300 seconds. |
-
-The agent measures; the engine owns the decision. A confirmation failure marks
-that candidate unconfirmed, removes it from policy consideration, and then lets
-the remaining stop budget decide whether to continue or finish with an honest
-ceiling.
-
-### `research.feasibility`
-
-A pre-registered selection rule must not defer arithmetic that can be done from
-outcome-independent counts, rates, universe sizes, or window lengths. Put that
-arithmetic in `research.feasibility`; a prose promise to calculate it during the
-run is not a substitute.
-
-The missing-feasibility preflight applies only when a local instruction carries
-positive evidence that this task owns the commitment. Recognized forms include a
-direct imperative to freeze a selection procedure, a mandatory or future action
-assigned to this task, run, round, stage, a named task-performing role, `we`, or
-`you`, a mandatory passive requirement on the rule itself, and a
-pre-registration artifact assigned to be written before outcomes are accessed.
-Generic detector or guide prose, a post-mortem about an earlier round, and an
-attributed quotation merely describe the act and do not create that commitment.
-
-The base-form actions `pre-register` and `preregister` also count when the same
-normalized instruction is already a positive task-owned commitment and the
-action takes a selection procedure as its direct object. The detector consumes
-the complete initial object phrase up to punctuation, a conjunction, or a
-preposition, regardless of its modifier count, and requires the phrase's final
-token (its head) to be a procedure noun. A procedure noun that only modifies
-`documentation`, or one in a later clause, does not count. The object negators
-`no`, `not`, `none`, `zero`, `nothing`, and `neither` do not create positive
-evidence. This relationship only adds positive evidence and supplies the
-finding's excerpt; it never suppresses evidence, so asserting it cannot create
-an opt-out.
-
-Quotation attribution is structural and unit-local: a Markdown quotation beside
-prose identifying its prior or documentary source is descriptive, while an
-unattributed quoted directive remains an instruction. Attribution never cancels
-a positive directive elsewhere in the brief.
-
-The four prose recognizers that span words—headline distribution, exact-method
-criterion exceptions, assigned stage-floor writers, and per-stage writable-path
-mappings—treat an ordinary Markdown soft wrap inside one paragraph or list item
-as presentation, not semantics. They keep blank-separated paragraphs, headings,
-distinct list items, tables, quotations, and fenced blocks separate, so moving a
-line break cannot make a correct requirement appear absent or join two
-independent fragments into a new requirement.
-
-A disclaimer is not an exemption and never cancels positive evidence elsewhere.
-For example, saying that the task does not pre-register anything contributes no
-commitment evidence; if the brief also directs a stage to freeze a selection rule,
-the missing-feasibility finding still applies. Silence is earned by the absence of
-a task-owned positive commitment, not by an asserted opt-out sentence.
-
-A diagnostic or engineering brief with no metric to beat may declare only this
-field under `research` (or `objective`). Preflight evaluates the declaration,
-but the scheduler still treats the brief as an engineering run: it proposes no
-research candidates, expects no round-result file, and applies no stop policy.
-
-`hard_floor` is a positive qualifying-member minimum shared by the labelled
-rules. `warn_below`, when present, must be at least the hard floor. A computable
-count below `hard_floor` is a failing preflight finding. A count at or above the
-floor but below `warn_below` is a warning, so a feasible but tight rule remains a
-deliberate author decision. A count at or above both thresholds is OK.
-
-The supported models are deliberately structural and discriminated:
-
-| Model | Required fields | Computation |
-|---|---|---|
-| `independent_repeated_conjunction` | `population` (positive integer), `per_period_rate` (0 through 1), `periods` (positive integer) | `population × per_period_rate^periods`, evaluated in log space. Use this only when the repeated-rate and independence assumptions are justified before outcomes are opened. |
-| `formation_count_distribution` | Non-empty `counts` list of non-negative integers | Uses the minimum formation count as the rule's qualifying-member count. The counts must be structural and outcome-independent. |
-| `not_computable` | Non-empty `reason` | Emits an explicit warning and no numeric estimate. The reason should name the unavailable structural distribution or quantity. |
-
-Every computable evaluation also reports the structural sample size, mean,
-median, spread, selected value, rank interval, and midrank percentile. A repeated
-scalar rate is a distribution of `periods` tied observations, so its spread is
-reported as zero rather than omitted. Unknown fields, duplicate labels,
-non-finite values, out-of-range rates, fractional counts, and fields from a
-different model make the feasibility declaration invalid instead of being
-silently ignored.
-
-When feasibility depends on a distribution that does not yet exist, use
-`not_computable` honestly. Preflight must not invent a rate merely to produce a
-number; once the missing structural distribution has been measured without
-opening outcomes, a later brief can replace the declaration with a computable
-model.
-
-## `program`
-
-`program` describes one run within a multi-phase program. Both `name` and
-`phase` must be strings for the block to take effect.
-
-```yaml
-program:
-  name: evaluation-program
-  phase: phase-2
-  roadmap: artifacts/program/ROADMAP.md
-  ledger: artifacts/program/findings_ledger.json
-  safeguards:
-    max_phases: 6
-    max_wall_hours: 24
-    stop_file: artifacts/program/STOP
-    halt_after_consecutive_no_improvement: 2
-```
-
-At startup, safeguards check the stop file, phase count, cumulative ledger wall
-time, and consecutive non-breakthrough rows. A violation fails the run before
-work begins and writes `program_aborted.md` beside the ledger. A declared
-`phase_complete` terminal appends a phase row to the configured ledger. There
-is no implicit next-phase launcher; use an explicit `post_terminate_hook` if
-automation is required.
-
-## Runtime file contracts
-
-`<runDir>` below is the run's durable control-plane directory. Project-relative
-artifacts remain in the selected project.
-
-| File | Producer | Consumer | Location and lifetime |
-|---|---|---|---|
-| `task_brief.md` | CLI or dashboard | Scheduler and every worker | `<runDir>/task_brief.md`; immutable input for the run and for same-ID resume. |
-| `dispatch.yaml` | Dynamic planner stage | Scheduler | `<runDir>/dispatch.yaml`; read after planning, replaced on a later re-plan. |
-| `brief_criteria.json` | Scheduler from exact brief bytes | Planner, workers, gates, dispatch admission | Canonical criterion IDs and brief digest; created before dynamic planning. |
-| `dispatch_admission.json` | Scheduler | Scheduler and operator | Atomic schema/topology/criterion/reality-path result; a failed report injects no proposed stage. |
-| `verdict_<stageId>.json` | Gate stage | Scheduler | `<runDir>`; live evidence for the current execution. A technical retry or later planner iteration may replace it. |
-| `stages/<stageId>/metric.json` | Scheduler, then optionally the gate stage | Scheduler | Seeded before every gate execution as `hasMetric:false`; the gate replaces it only when that execution has a trustworthy numeric metric. |
-| Rejected gate evidence | Scheduler | Repairs, reports, operator | `<runDir>/gate_reevaluation/iteration_<n>/round_<n>/`; durable copies of the rejected verdict, evaluated metric, gate output, and engine-effective verdict. |
-| Re-plan stage evidence | Scheduler | Summary, dashboard, campaign accounting, operator | `run.json.stageEvidence` keys each retired dynamic stage by iteration and stage ID and points to immutable status, output, attempt-output, and optional verdict copies under `<runDir>/stage_evidence/iteration_<n>/`. |
-| Round result | Measurement stage | Research advance gate | Path from `research.result_file`, or the mutually exclusive `.no_candidate.json` sidecar. After ingestion it is moved to an outcome-named `<runDir>/research_round_<N>_*consumed.json` and journaled. |
-| `approval_request.json` | Any stage needing authority | Approval park gate | Prefer `<runDir>/stages/<stageId>/approval_request.json`; consumed into `approvals/` and the append-only inbox log. |
-| `reality_checks.md` | Planner | Reality-Gate | `<runDir>/reality_checks.md`; evaluated with the brief's own checks before a successful terminal commit. |
-| `handoff_<stageId>.md` | Each stage on completion | Operator and explicitly directed later stages | `<runDir>/handoff_<stageId>.md`; the concise human handoff requested by the worker prompt. Automatic predecessor context does not read this file; it reads the stage status and output described below. |
-| `scope_revision_request.json` | A stage needing a path outside its declared scope | Scheduler policy, which writes `scope_revision_decision_*.json` beside it | `<runDir>/stages/<stageId>/`; answered by a deterministic predicate chain — matching run and live execution index (`attemptIndex` in the machine contract), digest-verified paths, no collision with a running peer, and the requested file not already modified — never by the supervisor. |
-| Guidance | Supervisor, scheduler, or operator path | Exact target stage and explicit run-wide consumers | Targeted envelopes in `supervisor_guidance.md` plus optional `stages/<stageId>/guidance.md`; filtered per consumer and archived by iteration. |
-| Terminal artifact | Exactly one admitted owner for that terminal path (or the static-workflow compatibility path) | Terminal-state gate, summary, operator | Project path declared in `terminal_states`; accepted only with owner-attributed latest-execution write evidence and snapshotted as `<runDir>/terminal_<basename>`. |
-| Stage output | Every stage execution | Technical retries, summary, operator | `<runDir>/stages/<stageId>/output.md` always holds the latest execution. A retry that needs to read what an *earlier* execution actually produced uses `output_attempt_<n>.md`, written alongside it for every numbered execution — `output.md` alone was overwritten by each new execution, so a passing execution's output could be destroyed by a later one that failed in seconds. |
-
-### Automatic predecessor context budget
-
-For each `depends_on` edge, the worker renders one predecessor block from
-`stages/<stageId>/status.json` and `stages/<stageId>/output.md`. In `full`
-visibility that candidate contains status, the comma-separated artifact list,
-and output. In `minimal` visibility it contains status, the artifact list, and
-the verification instruction; `none` injects no predecessor block.
-
-The engine measures the complete candidate with UTF-8 byte accounting. A block
-of **8,000 bytes or less is injected unchanged**. A block of **8,001 bytes or
-more switches** to a bounded form that contains:
-
-- status and the complete candidate's byte count;
-- the predecessor stage directory as one absolute path;
-- the number of artifact names omitted, with an instruction to read
-  `status.json` for the complete status and artifact list;
-- the complete output byte count, an instruction to read `output.md`, and a
-  UTF-8-safe head/tail excerpt (the `minimal` excerpt is additionally limited
-  to 512 bytes).
-
-The complete replacement, including headings, counts, path, filenames,
-instructions, and excerpt, is mechanically capped at
-`MAX_PREDECESSOR_CONTEXT_BYTES = 8_000`; truncation never splits a Unicode code
-point. The files named by the replacement remain the source of truth. Following
-the instruction to open them is agent behavior rather than an engine-enforced
-read, so permanent boundary/real-child tests and criterion-aware QA must catch a
-wording regression.
-
-For `n` visible predecessors, let `B_i` be the UTF-8 size produced by the rule
-above for predecessor `i`. The exact dependency-context contribution is
-`sum(B_i) + 2 * (n - 1)` bytes because blocks have a two-newline separator, and
-its upper bound is therefore `n * 8,000 + 2 * (n - 1)` bytes. With `none` it is
-zero. The prompt template, assigned criteria, guidance, skills, and handoff
-suffix are separate additive sections; this is deliberately not a whole-prompt
-size limit. Process-backed adapters deliver that assembled prompt through stdin
-(Codex uses the explicit `-` sentinel), so those other sections are not exposed
-to an operating system's single-argument limit; the mock adapter stays
-in-process.
-
-The `stages` map and `stages/<stageId>/` files are live aliases for the active
-DAG. At an outer re-plan boundary, the scheduler first materializes the
-iteration-qualified stage-evidence files and then publishes those references in
-the same atomic `run.json` replacement that removes the old dynamic stages.
-Reusing a stage ID starts a fresh live execution ledger; it cannot redirect the
-older record or inherit its completed status. Campaign costs and summaries read
-the archived status through `stageEvidence`, with `retiredStageUsage` retained
-only as a compatibility fallback for older runs.
-
-A blocking planner-check preflight retry is narrower: it removes the refused
-proposal's `dispatch.yaml` and `reality_checks.md` and re-pends only the planner
-before downstream injection. It neither retires the active DAG nor mutates
-already archived stage evidence.
-
-### `approval_request.json`
-
-A stage that needs human authority before a consequential action writes exactly
-one JSON object to its isolated
-`<runDir>/stages/<stageId>/approval_request.json` slot, then stops without
-performing the action:
-
-```json
-{
-  "id": "publish-release",
-  "action": "publish",
-  "target": "release-channel",
-  "risk": "external",
-  "title": "Publish the accepted release",
-  "body": "This makes the release visible outside the project."
-}
-```
-
-| Field | Required | Contract |
-|---|---|---|
-| `id` | Yes | Stable idempotency key within the run: 1–64 ASCII letters, digits, dots, underscores, or hyphens. `requestId` remains a compatibility alias, but new artifacts use `id`. |
-| `action` | Yes | Non-empty string naming the requested operation. |
-| `target` | No | Exact object of the action. It is required if this request may ever qualify for a standing rule. |
-| `risk` | No | `external`, `exec`, or `write`; an omitted or unknown value is stored as `unknown`. Only `external` requests with an exact `target` can mint or match a standing rule. |
-| `title` | No | Inbox summary. If omitted, the engine derives it from `action` and, when present, `target`. |
-| `body` | No | Longer explanatory text shown to the human decision-maker. |
-
-Invalid JSON, a missing `id` or `action`, and an unsafe `id` are ignored rather
-than authorized. On ingestion, the engine durably records the request, moves it
-to `<runDir>/approvals/<id>.request.json`, and parks the run when no exact
-standing rule applies. A decision is materialized as
-`<runDir>/approvals/<id>.decision.json` for the resumed stage; among concurrent
-human resolutions, the first valid resolution wins. See
-[Approvals and the inbox](approvals.md) for park/resume behavior and operator
-commands.
-
-### `dispatch.yaml`
-
-The top level is either a list or `{stages: [...]}`. Each usable stage names a
-registered role and has a unique ID:
-
-```yaml
-- id: implement_change
-  role: coder
-  depends_on: [inspect_code]
-  scope: ["src/search/**", "spec/search/**"]
-  dependency_reasons:
-    inspect_code: The implementation uses the inspected call graph.
-  criterion_refs: [criterion_4d142ca0]
-  prompt_template: |
-    Implement the accepted design and add focused tests.
-  skills: []
-  dynamic_dispatch: false
-  is_gate: false
-  retry_to: []
-```
-
-Every dynamically emitted stage requires `id`, `role`, `depends_on`, `scope`,
-and `dependency_reasons`; `prompt_template` defaults to empty, and `task` is a
-compatibility alias. IDs are snake_case and at most 20 characters. Dependency
-reasons must have exactly one non-empty entry per dependency edge. Optional
-fields are `condition`, `skills`, `dynamic_dispatch`, `is_gate`, `retry_to`,
-and `criterion_refs`.
-
-For research workflows, `research` is reserved as the framework-owned policy
-fact namespace (for example, `research.decision`) and cannot be used as a
-dynamically dispatched stage ID.
-In a non-research run, a condition that references this namespace rejects the
-whole proposal with a remedy: remove the condition or declare research mode.
-
-Admission is atomic. One unknown role, duplicate ID, malformed stage, unknown
-edge, cycle, incoherent repair/gate edge, unowned terminal path, or criterion
-coverage gap rejects the whole proposal before any proposed stage runs. Older
-dynamic plans that relied on omitted scope/dependency metadata or silent
-partial admission are therefore intentionally incompatible; static workflow
-configuration continues to use the compatibility schema.
-
-At run start the scheduler extracts explicitly numbered or named criteria from
-the admitted brief into `brief_criteria.json`. Each criterion must be assigned
-through `criterion_refs` to at least one capable work/finalizer stage and to a
-downstream gate. A passing gate must provide a status and non-empty evidence for
-every assigned criterion; a missing or failed entry makes its effective verdict
-fail even if the gate writes `pass: true`.
-
-Dynamic plans do not control technical retry count. A historical `max_retries`
-field in planner output is ignored and omitted from the recorded workflow;
-`config/defaults.yaml::default_stage_technical_retries` remains the operator-owned
-bound for timeout retries.
-
-`depends_on` is a production edge, not merely an ordering hint. A dependency
-releases an ordinary dependent only after its stage status is `complete`.
-`skipped`, `failed`, `pending`, and `running` do not release it. A gate dependency
-has the additional requirement that its stage-specific
-`verdict_<stageId>.json` is valid and says `pass: true`. Consequently, a skipped
-measurement cannot release a report stage: the DAG remains unresolved and ends
-`incomplete` if no later iteration repairs it.
-
-`condition` is a typed comparison of one producer fact, for example
-`audit_freeze.pass == true` or `build.status == complete`. Status fields are read
-first from `stages/<stageId>/status.json`; fields absent there are read only from
-that producer's `verdict_<stageId>.json`. A shared or sibling verdict is never a
-substitute. A missing, malformed, or wrong-typed fact makes the condition false
-and the conditional stage is recorded `skipped`. Dynamically dispatched
-conditions are also persisted in `workflow.yaml`, so the recorded DAG matches
-the one the scheduler evaluated.
-
-The generic stage schema has no list of arbitrary project artifacts promised in
-prose. For an ordinary stage, `complete` therefore proves successful process
-completion, not that every prose-named file exists. When downstream safety
-depends on a machine-checkable output, express it through an existing typed
-contract (a gate verdict, research result, or terminal artifact) instead of
-relying only on prose.
-
-### `scope`: the paths a stage may write
-
-```yaml
-- id: implement_change
-  role: coder
-  scope: ["src/search/**", "spec/search/**"]
-```
-
-`scope` is a list of project-relative paths or globs. A write outside the stage's
-declared scope is reverted to its pre-stage contents once the execution ends — this is
-what backs the "do not edit the project while a run is working in it" rule: your edit and
-the stage's are indistinguishable in the snapshot diff that scope enforcement reads.
-
-The same limitation governs parallel-write warnings. A shared-worktree snapshot says
-only that a path changed while a stage was running; it is observation, not ownership
-proof. The scheduler reports a parallel write conflict only when both latest executions
-directly attribute the same normalized path (`writeAttribution: structured`). Snapshot
-and unknown attribution remain in execution history and constraint audits as reduced-
-confidence evidence, but neither is used to claim that two stages authored one file.
-Consequently, a real write by an adapter that cannot report structured paths may go
-unwarned; its snapshot overlap could equally have been caused entirely by its peer.
-
-For an authored multi-stage brief, include an explicit writable-path mapping for every stage,
-including planning and gates. Brief preflight warns when the mapping is absent; it cannot
-choose the correct paths for the author. The planner still translates that contract into each
-generated stage's `scope`.
-
-For dynamically dispatched stages, `scope` is required; omitting it rejects the
-whole proposal before execution. The static-workflow compatibility parser can
-still represent three historical states:
-
-- **declared** — `scope` is present. Only those paths (and, once negotiated, any
-  accepted revision) survive.
-- **missing but negotiated** — `scope` is absent, but the stage requested and was
-  granted a path at runtime (below). Enforcement governs exactly the granted set.
-- **missing and never negotiated** — legacy static configuration omitted `scope` and no
-  request was made. With no declared preimage boundary, the scheduler audits but does not
-  roll back those writes. This compatibility state is not available to a dynamic plan; the
-  worker prompt treats it as closed, and authored work must request an explicit capability.
-
-A stage that needs a path outside its declared scope writes one JSON object to
-`stages/<stageId>/scope_revision_request.json`, then waits for
-`scope_revision_decision_<requestId>.json` in the same directory before writing the new
-path. The request, the decision, and the outcome are all recorded in the run directory —
-this is the mechanism behind "a stage that needs something outside its boundary can ask"
-mentioned in the project README.
-The worker yields while waiting for that exact request ID. The scheduler wakes it through
-the decision file plus a bounded fallback check; an agent must not implement a tight poll.
-A mismatched run, stage, execution index, or path digest receives a rejected decision file.
-An accepted revision is inherited and revalidated by later executions of the same stage.
-
-The stage-execution budget comes only from `config/defaults.yaml::default_timeout_ms`.
-It is immutable after an execution starts and covers adapter retries, backoff,
-fallback loading, and fallback execution. A timed-out technical retry receives
-a strictly larger derived execution budget; there is no aggregate technical-chain
-cap. Legacy timeout fields in a plan and runtime extension requests are rejected
-with a migration message, so a plan cannot make its first timeout fatal or move
-a running execution's deadline without bound.
-
-Every `retry_to` target is normalized to a gate and added to the repair stage's
-dependencies. Only a completed, validated `pass:false` verdict makes that
-repair eligible; a pending or never-run gate blocks terminal success but does
-not dispatch its repair. Conversely, a completed `pass:true` gate makes only
-its `retry_to` repair unnecessary. That repair receives a terminal `skipped`
-disposition; ordinary dependents of the same gate remain eligible.
-
-### Gate verdicts
-
-A gate stage is instructed to write:
-
-```json
-{"pass": false, "reason": "The acceptance command still fails."}
-```
-
-`pass` and `reason` are the core fields. Scored gates may also provide `score`,
-`metric`, and `threshold`; campaign phase gates may carry the phase metadata
-listed in their prompt. The path is specific to the gate stage, so concurrent
-gates do not overwrite one another.
-
-A numeric metric is optional unless a `gate_contract.json` contract applies to
-that gate. Before each execution, the scheduler replaces any older metric artifact
-with an engine-owned `hasMetric:false` marker. This makes “no metric for this
-execution” explicit and prevents a failing metric from an earlier planner
-iteration from contradicting a new qualitative verdict. When an applicable
-contract names a metric and threshold, the current verdict or metric artifact
-must contain the numeric value; omission fails the run at that first gate
-evaluation, naming the missing metric and threshold, before any product repair
-or outer re-plan is dispatched.
-
-When a gate does write a metric, the verdict must agree with it. In particular,
-a passing verdict paired with a failing metric from the same execution remains an
-engine rejection. This freshness rule does not relax the measure-round
-self-deception guard.
-
-The root verdict path is live, not a permanent report citation. Gate prompts
-receive the exact durable path where a rejection will be archived under
-`gate_reevaluation/iteration_<n>/round_<n>/`; reports should cite that injected
-path. The archive also preserves the metric actually evaluated and the engine's
-effective verdict when it differs from the gate's written verdict.
-
-### Round results
-
-The minimum payload is:
-
-```json
-{"label": "indexed-lookup", "result": 0.81}
-```
-
-`result` must be numeric; `label` defaults to a generated round name. A declared
-`result_schema` can require additional fields, and integrity rules can inspect
-their numeric values. The scheduler ignores stale files from before the run,
-rejects an already-journaled label as an immutable round identity, writes the durable
-`research_journal.json`, and mirrors accepted rounds to the resolved report
-directory's exact `run_manifest.json`. An explicit `report_dir` wins; otherwise
-the manifest is written beside `result_file`. A same-basename path elsewhere,
-a wildcard, and any unrelated sibling path are not framework outputs.
-
-A round with no acting candidate writes no fake baseline measurement. Instead,
-write exactly one fresh sidecar at `<result_file>.no_candidate.json`:
-
-```json
-{"label":"direction-with-no-safe-change","outcome":"no_candidate","reason":"why no candidate could be acted on"}
-```
-
-Exactly one of the measured result and sidecar may be fresh. The engine journals
-the no-candidate outcome and counts the attempted round for stop budgets, but it
-does not add a fabricated metric to the kept stack. A newly attributed test
-file is also rejected when it pins the shared latest-result file to one round's
-label or asserts that a terminal artifact must remain absent: later valid rounds
-and valid closure necessarily falsify those assertions.
-
-### Planner Reality-Gate checks
-
-Both the human brief and planner-owned `reality_checks.md` use the same section
-contract:
-
-````markdown
-## Reality checks
+| `exec-script-exit-zero` | Shell text `script`; optional `args`, `timeout_seconds` (default 60) |
+| `file-exists-nonempty` | `paths` list or `{from_manifest, field}` |
+| `json-schema-match` | `file`, `schema` object or schema-file reference |
+
+A script runs via Bash from the project directory. Exit 127 with command-not-found diagnostics and narrowly
+recognized unbound versioned-JSON shape failures become advisory with the failed execution
+retained. This limits what a passing Reality Gate proves. Rejected terminal candidates
+are quarantined; prose reports do not create executable checks.
+
+Sources: [parser/execution](../src/reality-gate/index.ts), [registry](../src/reality-gate/registry.ts),
+[shell handler](../src/reality-gate/checks/exec-script-exit-zero.ts).
+
+### Generic declared-check example
+
+This illustration checks a document and a numeric JSON field; it is not a native research-round
+check. Provide the declared `docs/output.md` and `result.json` inputs before running it. The
+finite-number script adds a check beyond the JSON field's type; no measurement is claimed.
 
 ```yaml
 checks:
+  - name: docs-generated
+    type: file-exists-nonempty
+    reads:
+      - {id: document, root: project, path: docs/output.md, source: {kind: input}}
+    params:
+      paths:
+        - docs/output.md
+
   - name: result-shape
     type: json-schema-match
+    reads:
+      - {id: result, root: project, path: result.json, source: {kind: input}}
     params:
-      file: artifacts/evaluation/round_result.json
+      file: result.json
       schema:
         type: object
-        required: [label, result]
+        required: [metric, value, evidence]
+        properties:
+          metric: {type: string}
+          value: {type: number}
+          evidence: {type: string}
+
+  - name: result-value
+    type: exec-script-exit-zero
+    reads:
+      - {id: result, root: project, path: result.json, source: {kind: input}}
+    params:
+      script: |
+        node <<'NODE'
+        const fs = require('node:fs');
+        const result = JSON.parse(fs.readFileSync('result.json', 'utf8'));
+        if (!Number.isFinite(result.value)) {
+          console.error('result.value must be a finite number');
+          process.exit(1);
+        }
+        NODE
 ```
-````
-
-Only a `checks:` list inside a `## Reality checks` section is parsed. See
-[Reality-Gate](reality-gate.md) for available check types.
-
-Planner-authored hard checks may not make their verdict the unprocessed exit
-status of a project build, test, or lint command. The ship-setup ready record is
-bound to the canonical target and exact brief bytes; when it records a red
-`no_regression_from_baseline` criterion, compare current failure identities with
-that record or omit the redundant validation check.
-
-Before dispatch admission, every literal path in a hard planner check must
-already exist, be a framework-owned research/terminal path, or be owned by an
-admitted stage. This prevents a check from requiring an artifact that no stage
-can create before the check runs. Terminal candidates are materialized before
-their final reality checks and quarantined into the run directory if rejected.
-For research runs, the mutable latest-round `result_file` is not automatically
-a safe hard-check target: it is consumed and may be absent when the check runs.
-Use the resolved report directory's framework-owned `run_manifest.json`, or an
-artifact with an admitted producer, when the check needs durable round evidence.
-
-### Guidance
-
-Every guidance entry is an auditable envelope with an explicit target stage or
-the explicit run-wide target `*`. Unknown or missing targets are quarantined.
-A worker receives only exact-target and run-wide envelopes, and snapshots that
-filtered delivery to `stages/<stageId>/guidance_consumed.md`; guidance intended
-for another stage remains only in the global ledger. At iteration boundaries,
-the ledger moves to `guidance_history/iter_<N>.md`.
-
-Guidance is high-priority steering inside the admitted brief, not a silent
-contract amendment. It may clarify a property or request a repair, but it may
-not erase an admitted criterion, widen write authority, replace a required
-property with a named result, or invalidate a better result that still satisfies
-the property. Such a change requires revised brief bytes and a new preflight and
-rehearsal.
-
-Use `flowcrew guide --run <run-id> "message"` to write operator input to a
-specific running run. Omitting `--run` is safe only when exactly one readable run
-is executing; zero or multiple candidates cause a non-zero, zero-write refusal.
-The selected supervisor ingests the message on its next tick and turns it into
-run guidance.
-
-## Validate before launch
-
-Inspect and rehearse the exact bytes before a live launch, then create the launch worktree:
-
-```bash
-flowcrew ship-preflight --brief <brief.md> [--campaign <name>] [--no-baseline]
-flowcrew rehearse <brief.md>
-flowcrew ship-setup --brief <brief.md> --target <dir> --base <ref> --branch <name> [--project <source>]
-flowcrew watch --once
-```
-
-Preflight reports prior-run and campaign facts, verifies declared input claims, and records the
-configuration-discovered validation baseline as a delta contract. The baseline streams command
-output and warns before touching a project shared by a verified live run; `--no-baseline` launches
-no project command and records the omission. Rehearsal validates the
-frontmatter and exercises the terminal, confirmation, floor, and round-file paths with a
-scripted adapter. It does not validate research quality; see [Zero-token rehearsal](rehearse.md).
-
-Values under the leading frontmatter `inputs:` key are explicit path declarations. A safe bare
-directory name is accepted there without a trailing slash because the key already supplies the
-path context. An explicit value that is unsafe or cannot be normalized is retained and reported
-as unresolved; it is never silently dropped. Path discovery in ordinary prose remains
-conservative, so a bare noun outside an explicit declaration is not promoted into an input.
-
-Setup is the fail-closed boundary: it creates the declared worktree and reconciles each declared
-input by content. A wholly missing input is linked as before. When Git created only part of a
-declared directory, setup walks the source directory, materializes missing subdirectories, and
-copies their files into the target. Copies remain untracked and isolate the source from target
-edits; they also keep test-module paths rooted in the target instead of resolving through a
-symlink to the source checkout. Existing target files are never overwritten: a type or content
-collision is a blocker. Setup then verifies the input assertions again through the target.
-
-Before recording the target baseline, setup prefers an exact test-file collector derived from the
-configured command (Vitest and pytest are supported), or an explicit `package.json`
-`flowcrew.testPopulation.files` list. It compares the normalized source and target identity sets—not
-just their counts—and refuses setup when those identities differ. This collector check runs
-whether or not the brief remembered to declare the ignored test
-directory, so a smaller launch suite cannot silently become the baseline.
-
-Missing collector knowledge is recorded separately from a broken target. When no exact collector
-is available, setup runs the configured source test command once and observes the test response
-already used to construct the target baseline. If both executions emit complete top-level TAP,
-each identity joins the normalized name to its occurrence number among records with that same name.
-Thus an unrelated insertion does not rename later tests, while `1:duplicate` and `2:duplicate`
-preserve the multiplicity of legal duplicate names. If the target contains every source identity,
-an equal population is `matched`; a strict superset is also ready and is rendered as
-`SOURCE-PLUS-ADDITIONS` with the exact additions. This is a source-coverage decision: extra target
-tests do not create the guarded risk of silently running fewer tests. A missing source identity
-still refuses, and a rename reports the old identity as missing and the new one as extra. Exact
-collector identity and strict-parity behavior are unchanged.
-
-The population comparison and baseline failure extraction share one structural TAP reader. It
-accepts only one version, one column-zero plan, a complete set of uniquely numbered, non-empty
-column-zero records, and a matching top-level `# fail` summary when that summary is present.
-Indented TAP remains nested evidence and is not promoted to a top-level identity. Population
-comparison occurrence-qualifies every complete record; failure extraction records the names of
-the complete reader's `not ok` records. Those are deliberately different conclusions over the
-same validated syntax.
-
-Failure extraction runs against the complete joined command response available at the baseline
-handoff, before only the persisted `output` field is byte-bounded. The ready record therefore stays
-bounded without hiding an early failure from identification. The command runner has an earlier,
-independent streaming bound; if that bound is reached, its omission marker makes the structural
-reader refuse a whole-run TAP conclusion. Failure extraction then applies its line-oriented
-`FAIL`/`FAILED`, cross-mark, and compiler-diagnostic adapters to the retained lines. Facts recovered
-there are kept instead of being hidden by the structural refusal.
-
-Name-local identity cannot prove execution order or detect a name-preserving body change. For
-duplicates it can prove multiplicity, but it cannot identify which same-named body was added,
-removed, or changed. Truncated, ambiguous, bailed-out, non-TAP output, or records without names
-instead produce a ready record with test-population state `unverified`, the configured runner, and
-the reason source coverage could not be established. This is the same modelling choice as
-`research.feasibility: not_computable`: an underivable assurance is first-class and reason-bearing,
-not silently converted into either success or failure.
-
-A failed validation result whose failure identity remains `unknown` carries a reason. Empty output,
-capture truncation, structurally invalid TAP, and an unrecognized non-TAP format are distinct causes;
-the same cause is persisted on the result and appended to the human
-`no_regression_from_baseline` gate line. The gate remains conservative: a later failure is
-unresolved and is never compared with an invented zero baseline.
-
-Known failed results written by the current implementation also carry `failureEvidence`, either
-`complete` or `partial`; the derived criterion carries the same value as
-`baselineFailureEvidence`. Older version-1 records without these additive fields retain their prior
-complete-known comparison behavior. If an omission marker is present and a line adapter finds a
-failure, the result is `known` with `failureEvidence: partial` and retains a recovery/truncation
-reason. Its identifier list is only a lower bound. A parsed summary count is preserved as observed
-evidence, but it is not asserted to describe the whole run. Human gate and preflight evidence label
-both facts accordingly.
-
-Red-to-red delta evaluation requires complete evidence on both sides. If either side is partial, it
-returns unresolved: a partial identity cannot support identifier-set equality or subset, absence of
-new failures, count equality, count increase or decrease, or an unchanged-red pass. A current lower
-bound may omit a genuinely new failure; a baseline lower bound may contain an identity that would
-only appear new against the retained subset. Green-to-red remains a regression and red-to-green
-remains a pass because those transitions do not depend on comparing two failure inventories.
-
-Failure identification still cannot see malformed or incomplete TAP without a recognized failure
-line, bytes wholly lost at the earlier streaming bound, nested leaf failures beyond the complete
-top-level record name, non-TAP runners outside the retained `FAIL`/`FAILED`, cross-mark, and
-compiler-diagnostic adapters, ANSI/control variants those adapters do not normalize, JSON- or
-JUnit-only reports, custom prose, or failures that emit no output. These remain reason-bearing
-`unknown` results rather than guessed identities.
-
-The costs and assurances differ by state:
-
-- Collector-matched uses two cheap collections plus the one governing target suite run. It proves
-  the collector's normalized identities agree, but cannot prove tests outside the configured
-  command or explicit declaration exist.
-- TAP-matched uses two full suite executions: one source run and the governing target baseline run.
-  It proves every complete reported source identity occurs in the target. The visible
-  `SOURCE-PLUS-ADDITIONS` relation distinguishes a strict target superset from equality, but neither
-  relation has runner-specific discovery assurance for tests the command never reports.
-- `unverified` still proves the target validation command ran and records its unchanged baseline
-  and gates. It does not prove source/target population parity; the runner and missing evidence are
-  visible in both JSON and human output.
-- `mismatched` proves configured test availability or the observed populations differ and refuses
-  without a ready record.
-
-Population evidence never relaxes validation. Target launch failures, including exit 127, still
-refuse, and ordinary red baselines keep the same `no_regression_from_baseline` criterion in every
-population state. A ready record remains keyed by the exact brief digest plus the canonical target.
-Use `flowcrew watch` after launch for a continuous heartbeat and edge-triggered stalls; `--once`
-performs one read-only pass.

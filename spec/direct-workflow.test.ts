@@ -1,0 +1,196 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
+import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
+import { fixtureResult } from './test-support/declared-dispatch.js';
+import { writeReadySetupRecord } from './test-support/ready-setup.js';
+
+const root = join(import.meta.dirname, '..');
+const agentsDir = join(root, 'config', 'agents');
+const authorSession = '12345678-1234-4234-8234-123456789abc';
+const reviewerSession = '87654321-4321-4321-8321-cba987654321';
+let projectDir: string;
+let fixtureRoot: string;
+let previousStore: string;
+
+beforeEach(() => {
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-direct-'));
+  projectDir = join(fixtureRoot, 'project');
+  mkdirSync(projectDir);
+  previousStore = fcGlobalDir();
+  setFcGlobalDir(join(fixtureRoot, 'private-store'));
+});
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(fixtureRoot, { recursive: true, force: true }); });
+
+function brief(frontmatter: string): string {
+  return ['---', frontmatter, '---', '# Add a greeting', '', '## What the report must show',
+    '1. The greeting added.', '2. The test command and its direct exit code.', ''].join('\n');
+}
+
+/** Records every adapter call; the gate rejects its first review when asked to. */
+function adapter(calls: string[], rejectFirstReview: boolean, observe?: (prompt: string, role: AgentConfig, opts: RunOpts) => void): Adapter {
+  let reviews = 0;
+  return {
+    async run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
+      if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
+      calls.push(opts.stageId);
+      observe?.(prompt, role, opts);
+      if (opts.stageId === 'review') {
+        const pass = !(rejectFirstReview && ++reviews === 1);
+        const { criteria } = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')) as { criteria: Array<{ id: string }> };
+        writeFileSync(join(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({
+          pass, reason: pass ? 'accepted' : 'the greeting is missing',
+          criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: pass ? 'pass' : 'fail', evidence: 'docs/report.md' }])),
+        }));
+        return fixtureResult({ output: 'reviewed', exitCode: 0, duration_ms: 1, sessionId: reviewerSession }, opts);
+      }
+      mkdirSync(join(projectDir, 'docs'), { recursive: true });
+      writeFileSync(join(projectDir, 'docs', 'report.md'), `# Report written by ${opts.stageId}\n`);
+      return fixtureResult({ output: `${opts.stageId} done`, exitCode: 0, duration_ms: 1, sessionId: authorSession, writes: ['docs/report.md'], writeAttribution: 'structured' }, opts);
+    },
+  };
+}
+
+async function runDirect(task: string, calls: string[], rejectFirstReview = false, observe?: (prompt: string, role: AgentConfig, opts: RunOpts) => void) {
+  const { config, raw } = loadWorkflow(join(root, 'config', 'workflows', 'direct.yaml'));
+  return runWorkflow(config, raw, projectDir, adapter(calls, rejectFirstReview, observe), new Map(), undefined, agentsDir, undefined, task, true);
+}
+
+describe('direct workflow', () => {
+  it('sends the admitted task once with generic roles on author, reviewer and repair calls', async () => {
+    const task = brief('outputs:\n  - docs/report.md').replace('---\n#', '---\n\n#');
+    const captured: Array<{ id: string; system: string; user: string }> = [];
+    const result = await runDirect(task, [], true, (user, role, opts) => {
+      captured.push({ id: opts.stageId, system: role.prompt, user });
+      expect(opts.outputSchema).toBeDefined();
+      if (opts.stageId === 'review') {
+        expect(opts.resumeSessionId).not.toBe(authorSession);
+        if (captured.filter(call => call.id === 'review').length === 1) {
+          expect(opts.resumeSessionId).not.toBeDefined();
+          expect(user).not.toContain('Previous stage: implement');
+          expect(user).not.toContain('Context from stage: implement');
+        } else if (opts.resumeSessionId) {
+          expect(opts.resumeSessionId).toBe(reviewerSession);
+          expect(opts.sessionOwnerStageId).toBe('review');
+        }
+      }
+    });
+    expect(result.status).toBe('complete');
+    expect(captured.map(call => call.id)).toEqual(['implement', 'review', 'repair', 'review']);
+    for (const call of captured) {
+      expect(call.user).toContain(task.trim());
+      expect((call.system + call.user).split(task.trim())).toHaveLength(2);
+      expect(Buffer.byteLength(call.system)).toBeLessThan(400);
+      expect(call.user).not.toContain('Runtime timeout contract');
+      expect(call.user).not.toContain('scope_revision_request');
+      expect(call.user).not.toContain('optional trustworthy numeric campaign');
+      expect(call.user).not.toContain('Engine state query');
+    }
+  });
+
+  it('rejects a model acceptance on an engine-observed regression and repairs the concrete failure', async () => {
+    const task = brief('outputs:\n  - docs/report.md');
+    const readyPath = writeReadySetupRecord(projectDir, task, fcGlobalDir());
+    const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
+    ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
+    writeFileSync(readyPath, JSON.stringify(ready));
+    const calls: string[] = [];
+    const receipts: string[] = [];
+    const final = await runDirect(task, calls, false, (prompt, _role, opts) => {
+      if (opts.stageId === 'implement') writeFileSync(join(projectDir, 'validation-probe.mjs'), 'process.stderr.write("FAIL spec/new.test.ts\\n"); process.exit(1);\n');
+      if (opts.stageId === 'repair') writeFileSync(join(projectDir, 'validation-probe.mjs'), 'process.exit(0);\n');
+      if (opts.stageId === 'review') {
+        expect(prompt).toContain('Engine validation:');
+        expect(prompt).toContain('exit=');
+        const receipt = prompt.match(/Receipt: (.+?\.json)/)?.[1];
+        expect(receipt).toBeDefined();
+        receipts.push(receipt!);
+        expect(JSON.parse(readFileSync(receipt!, 'utf8')).current[0].exitCode).toBe(0);
+      }
+    });
+    expect(final.status, final.failureReason).toBe('complete');
+    expect(calls).toEqual(['implement', 'repair', 'review']);
+    expect(receipts).toHaveLength(1);
+  });
+
+  it('cannot accept a missing declared output even when the reviewer accepts', async () => {
+    const { config, raw } = loadWorkflow(join(root, 'config', 'workflows', 'direct.yaml'));
+    const accepting = adapter([], false);
+    const final = await runWorkflow(config, raw, projectDir, {
+      async run(prompt, role, opts) {
+        if (opts.stageId === 'implement' || opts.stageId === 'repair') {
+          return fixtureResult({ output: 'delivered', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
+        }
+        return accepting.run(prompt, role, opts);
+      },
+    }, new Map(), undefined, agentsDir, undefined, brief('outputs:\n  - docs/report.md'), true);
+    expect(final.status).not.toBe('complete');
+    expect(final.stages.implement.status).toBe('failed');
+    expect(final.stages.implement.error).toContain('DECLARED_OUTPUT_REQUIRED');
+    expect(existsSync(join(runDir(projectDir, final.runId), 'verdict_review.json'))).toBe(false);
+    expect(existsSync(join(projectDir, 'docs', 'report.md'))).toBe(false);
+  });
+
+  it('admits its fixed plan without a planner call and repairs a rejection like a planned run', async () => {
+    const calls: string[] = [];
+    const final = await runDirect(brief('outputs:\n  - docs/report.md'), calls, true);
+    const directory = runDir(projectDir, final.runId);
+    const criteria = (JSON.parse(readFileSync(join(directory, 'brief_criteria.json'), 'utf8')) as { criteria: Array<{ id: string }> }).criteria.map(({ id }) => id);
+    const admission = JSON.parse(readFileSync(join(directory, 'dispatch_admission.json'), 'utf8')) as { pass: boolean; criterionGateRefs: Record<string, string[]> };
+
+    expect(final.status).toBe('complete');
+    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(final.stages.plan).toMatchObject({ status: 'complete' });
+    expect(final.stages.plan.attempts ?? []).toEqual([]);
+    expect(criteria).toHaveLength(2);
+    expect(admission).toMatchObject({ pass: true, criterionGateRefs: { review: criteria } });
+    expect(existsSync(join(directory, 'declared_outputs', 'docs', 'report.md'))).toBe(true);
+  });
+
+  it('refuses at admission a brief its fixed plan cannot satisfy, before any stage runs', async () => {
+    const refusals: Array<[string, string]> = [
+      ['workflow: direct\nresearch:\n  baseline: 0.5', 'direct cannot run the research loop'],
+      ['workflow: direct\nprogram:\n  name: study\n  phase: first', 'direct cannot run the program loop'],
+      ['terminal_states:\n  complete:\n    paths: [docs/report.md]', 'terminal owner implement.depends_on: mandatory stage review is not an ancestor'],
+    ];
+    for (const [frontmatter, reason] of refusals) {
+      const calls: string[] = [];
+      const final = await runDirect(brief(frontmatter), calls);
+      expect(['failed', 'escalated']).toContain(final.status);
+      const admissionPath = join(runDir(projectDir, final.runId), 'dispatch_admission.json');
+      const errors = existsSync(admissionPath) ? JSON.parse(readFileSync(admissionPath, 'utf8')).errors : [];
+      expect([final.failureReason, ...errors].join('\n')).toContain(reason);
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it('authors and repairs with declared read-only files and trees without a planner call', async () => {
+    mkdirSync(join(projectDir, 'evidence'));
+    writeFileSync(join(projectDir, 'evidence', 'source.md'), 'frozen evidence\n');
+    writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
+    const calls: string[] = [];
+    const final = await runDirect(brief('workflow: direct\ninputs: [notes.md, evidence]\noutputs: [docs/report.md]'), calls, true);
+    expect(final.status, final.failureReason).toBe('complete');
+    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('frozen notes\n');
+    expect(readFileSync(join(projectDir, 'evidence', 'source.md'), 'utf8')).toBe('frozen evidence\n');
+  });
+
+  it.each(['notes.md', 'evidence/source.md', 'evidence/new.md', 'alias/source.md'])('restores an input write to %s despite broad scope', async (path) => {
+    mkdirSync(join(projectDir, 'evidence'));
+    writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
+    writeFileSync(join(projectDir, 'evidence', 'source.md'), 'frozen evidence\n');
+    symlinkSync('evidence', join(projectDir, 'alias'));
+    const final = await runDirect(brief('workflow: direct\ninputs: [notes.md, evidence]\noutputs: [docs/report.md]'), [], false, (_prompt, _role, opts) => {
+      if (opts.stageId === 'implement' || opts.stageId === 'repair') writeFileSync(join(projectDir, path), 'unauthorized\n');
+    });
+    expect(final.status).not.toBe('complete');
+    expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('frozen notes\n');
+    expect(readFileSync(join(projectDir, 'evidence', 'source.md'), 'utf8')).toBe('frozen evidence\n');
+    expect(existsSync(join(projectDir, 'evidence', 'new.md'))).toBe(false);
+    expect(final.stages.implement.attempts?.length).toBeGreaterThan(0);
+  });
+});

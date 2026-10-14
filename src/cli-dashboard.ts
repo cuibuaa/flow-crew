@@ -1,3 +1,4 @@
+import { valueAfter } from './source_services/cli-inputs.js';
 import type { DashboardStatusResponse } from './dashboard.js';
 
 interface TextWriter {
@@ -11,11 +12,6 @@ export interface DashboardCommandOptions {
   /** Test seam for an already-resolved dashboard origin. */
   baseUrl?: string;
   timeoutMs?: number;
-}
-
-function valueAfter(args: string[], flag: string): string | undefined {
-  const index = args.indexOf(flag);
-  return index >= 0 ? args[index + 1] : undefined;
 }
 
 function usage(writer: TextWriter): void {

@@ -14,7 +14,8 @@
  * round results) and/or the RUN dir (dispatch.yaml, reality_checks.md), with
  * the same containment check the mock adapter uses.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from '../engine-fs.js';
+
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from './base.js';
 
@@ -32,8 +33,25 @@ export interface ScriptedTurn {
 
 export type StageScript = ScriptedTurn | ScriptedTurn[];
 
-function writeContained(root: string, files: Record<string, string> | undefined): void {
-  if (!files) return;
+/** Legacy narrative fixture turns now model a typed final answer. Explicit
+ * JSON (including malformed JSON) is returned untouched for negative probes. */
+export function scriptedRecord(output: string, opts: RunOpts, finalRecord?: string): string {
+  if (!opts.outputSchema || /^\s*[[{]/.test(output)) return output;
+  if (opts.outputSchema.anyOf) {
+    if (!finalRecord) return output; // absence must still be refused
+    const record = JSON.parse(finalRecord);
+    record.reason ??= output.trim() || 'Fixture verdict.';
+    if (!opts.outputSchema.anyOf[0].properties?.criteria.required?.length) record.criteria ??= {};
+    record.audit_findings ??= { version: 1, findings: [] };
+    if (record.pass === false && !('repairability' in record)) record.repairability = { version: 1, disposition: 'repairable', evidence: record.reason };
+    return JSON.stringify(record);
+  }
+  return JSON.stringify({ status: 'delivered', summary: output.trim() || 'Fixture completed.', checks: [], caveats: [] });
+}
+
+function writeContained(root: string, files: Record<string, string> | undefined): string[] {
+  const writes: string[] = [];
+  if (!files) return writes;
   const base = resolve(root);
   for (const [rel, content] of Object.entries(files)) {
     const target = resolve(base, rel);
@@ -41,7 +59,9 @@ function writeContained(root: string, files: Record<string, string> | undefined)
     if (r === '' || r.startsWith('..') || isAbsolute(r)) continue;
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, content, 'utf-8');
+    writes.push(rel);
   }
+  return writes;
 }
 
 export class ScriptedAdapter implements Adapter {
@@ -65,17 +85,17 @@ export class ScriptedAdapter implements Adapter {
     else turn = entry;
     if (!turn) turn = this.fallback;
 
-    writeContained(opts.workDir, turn.projectFiles);
-    writeContained(opts.runDir, turn.runFiles);
+    const finalPath = `verdict_${opts.stageId}.json`;
+    const finalRecord = turn.runFiles?.[finalPath];
+    const files = Object.fromEntries(Object.entries(turn.runFiles ?? {}).filter(([path]) => !opts.outputSchema || path !== finalPath));
+    const writes = [...writeContained(opts.workDir, turn.projectFiles), ...writeContained(opts.runDir, files).map((path) => `run:${path}`)];
     return {
-      output: turn.output ?? '',
+      output: turn.exitCode ? turn.output ?? '' : scriptedRecord(turn.output ?? '', opts, finalRecord),
       exitCode: turn.exitCode ?? 0,
       duration_ms: 1,
+      writes,
+      writeAttribution: 'structured',
       ...(turn.tokens_out !== undefined ? { tokens_out: turn.tokens_out } : {}),
     };
   }
-}
-
-export function createAdapter(): Adapter {
-  return new ScriptedAdapter({});
 }

@@ -1,16 +1,12 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
-  canDeriveBriefAdmission,
   createBriefAdmission,
   inspectBrief,
   verifyBriefAdmission,
-  type BriefAdmissionAcknowledgement,
   type BriefAdmissionRecord,
 } from '../src/brief-preflight.js';
 import { parseBriefFrontmatter } from '../src/scheduler.js';
-
-const AT = '2026-08-03T00:00:00.000Z';
 
 function structuredBrief(body = '# Goal\nShip an observable result.\n'): string {
   return [
@@ -44,20 +40,15 @@ describe('shared brief preflight', () => {
     const valid = inspectBrief(structuredBrief());
     expect(valid.frontmatter.status).toBe('valid');
     expect(valid.contractReady).toBe(true);
-    expect(valid.requiresAcknowledgement).toBe(false);
     expect(valid.findings).toContainEqual(expect.objectContaining({
       code: 'research_absent',
-      acknowledgementRequired: false,
+      consequential: false,
     }));
 
     const invalid = inspectBrief('---\nterminal_states: [\n---\n# Goal');
     expect(invalid.frontmatter.status).toBe('invalid');
     expect(invalid.contractReady).toBe(false);
-    expect(invalid.requiresAcknowledgement).toBe(true);
-    expect(() => createBriefAdmission(invalid, { kind: 'not_required' })).toThrow(/explicit acknowledgement/);
-    const admitted = createBriefAdmission(invalid, {
-      kind: 'explicit', source: 'cli_digest_flag', at: AT,
-    });
+    const admitted = createBriefAdmission(invalid, { kind: 'not_required' });
     expect(verifyBriefAdmission('---\nterminal_states: [\n---\n# Goal', admitted).status).toBe('valid');
   });
 
@@ -100,7 +91,7 @@ describe('shared brief preflight', () => {
     const finding = report.findings.find((item) => item.code === 'criterion_instrument_wording');
     expect(finding).toMatchObject({
       level: 'warn',
-      acknowledgementRequired: true,
+      consequential: true,
       excerpt: criterion,
     });
     expect(finding?.risk).toMatch(/^This wording makes/);
@@ -109,49 +100,23 @@ describe('shared brief preflight', () => {
       .not.toMatch(/[\u3400-\u9fff]/u);
   });
 
-  it('constructs and verifies every acknowledgement class and rejects malformed provenance', () => {
+  it('admits advisory findings while binding exact bytes and recorded findings', () => {
+    const text = 'Fix the race';
+    const report = inspectBrief(text);
+    const record = createBriefAdmission(report, { kind: 'not_required' });
+    expect(verifyBriefAdmission(text, record).status).toBe('valid');
+    expect(verifyBriefAdmission(`${text}\n`, record).status).toBe('digest_mismatch');
+    expect(verifyBriefAdmission(text, undefined).status).toBe('missing');
+    expect(verifyBriefAdmission(text, { ...record, findingFingerprints: [] }).status).toBe('findings_mismatch');
     const cleanText = structuredBrief();
-    const clean = inspectBrief(cleanText);
-    const notRequired = createBriefAdmission(clean, { kind: 'not_required' });
-    expect(verifyBriefAdmission(cleanText, notRequired).status).toBe('valid');
-
-    const consequentialText = 'Fix the race';
-    const consequential = inspectBrief(consequentialText);
-    const acknowledgements: BriefAdmissionAcknowledgement[] = [
-      { kind: 'explicit', source: 'cli_current_input_flag', at: AT },
-      { kind: 'explicit', source: 'cli_digest_flag', at: AT },
-      { kind: 'explicit', source: 'dashboard_receipt', at: AT },
-      {
-        kind: 'derived',
-        source: 'campaign_loop',
-        at: AT,
-        parentDigest: clean.digest,
-        transformation: 'outer_loop_directive_v1',
-      },
-    ];
-    for (const acknowledgement of acknowledgements) {
-      const record = createBriefAdmission(consequential, acknowledgement);
-      expect(verifyBriefAdmission(consequentialText, record).status).toBe('valid');
+    const clean = createBriefAdmission(inspectBrief(cleanText), { kind: 'not_required' });
+    for (const findingFingerprints of [undefined, 'invalid', [1]]) {
+      expect(verifyBriefAdmission(cleanText, { ...clean, findingFingerprints } as unknown as BriefAdmissionRecord).status)
+        .toBe('findings_mismatch');
     }
-
-    const valid = createBriefAdmission(consequential, acknowledgements[0]);
-    expect(verifyBriefAdmission(`${consequentialText}\n`, valid).status).toBe('digest_mismatch');
-    expect(verifyBriefAdmission(consequentialText, undefined).status).toBe('missing');
-    const missingAcknowledgement = { ...valid, acknowledgement: undefined } as unknown as BriefAdmissionRecord;
-    expect(verifyBriefAdmission(consequentialText, missingAcknowledgement).status).toBe('acknowledgement_missing');
   });
 
-  it('derives only an exact child whose contract does not degrade or gain a finding', () => {
-    const parentText = structuredBrief('# Goal\nExplore one direction.\n');
-    const parentReport = inspectBrief(parentText);
-    const parent = createBriefAdmission(parentReport, { kind: 'not_required' });
-    const fixedChild = inspectBrief(`${parentText}\n\n## OUTER-LOOP DIRECTIVE\nFocus on one direction.\n`);
-    expect(canDeriveBriefAdmission(parent, parentReport, fixedChild)).toBe(true);
 
-    const newFinding = inspectBrief(`${parentText}\nThe implementation must import \`probe.ts\`.\n`);
-    expect(newFinding.findings.map((finding) => finding.code)).toContain('criterion_instrument_wording');
-    expect(canDeriveBriefAdmission(parent, parentReport, newFinding)).toBe(false);
-  });
 });
 
 describe('decision-grade brief requirements', () => {
@@ -271,7 +236,7 @@ describe('decision-grade brief requirements', () => {
       .toMatchObject({
         code: 'preregistration_feasibility_missing',
         level: 'fail',
-        acknowledgementRequired: true,
+        consequential: true,
         excerpt: 'D1 — Pre-register the matching rule, before computing any return',
       });
   });
@@ -299,7 +264,7 @@ describe('decision-grade brief requirements', () => {
         .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
       expect({ body, finding }).toEqual({
         body,
-        finding: expect.objectContaining({ level: 'fail', acknowledgementRequired: true }),
+        finding: expect.objectContaining({ level: 'fail', consequential: true }),
       });
     }
   });
@@ -325,7 +290,7 @@ describe('decision-grade brief requirements', () => {
     expect({ condition: 'complete direct-object phrase', body, observed: finding }).toEqual({
       condition: 'complete direct-object phrase',
       body,
-      observed: expect.objectContaining({ level: 'fail', acknowledgementRequired: true }),
+      observed: expect.objectContaining({ level: 'fail', consequential: true }),
     });
   });
 
@@ -368,7 +333,7 @@ describe('decision-grade brief requirements', () => {
       condition: 'later positive action survives disclaimer',
       observed: expect.objectContaining({
         level: 'fail',
-        acknowledgementRequired: true,
+        consequential: true,
         excerpt: 'Pre-register the final threshold before opening outcomes.',
       }),
     });
@@ -395,7 +360,7 @@ describe('decision-grade brief requirements', () => {
       expect(report.findings).toContainEqual(expect.objectContaining({
         code: 'preregistration_feasibility_missing',
         level: 'fail',
-        acknowledgementRequired: true,
+        consequential: true,
       }));
       expect(report.findings.find((finding) => finding.code === 'preregistration_feasibility_missing'))
         .not.toHaveProperty('attributedQuote');
@@ -433,53 +398,6 @@ describe('decision-grade brief requirements', () => {
       .not.toContain('preregistration_feasibility_missing');
   });
 
-  it('keeps the historical committing snippets positive', () => {
-    const historicalSnippets = [
-      {
-        caseName: 'frozen threshold on validation before one gold evaluation',
-        text: [
-          '# HARD guardrails',
-          '1. NEVER train on / tune thresholds on FaithBench or TofuEval. Train only on RAGTruth-train; freeze threshold on RAGTruth-test.',
-          '2. FROZEN threshold: choose on the val split, FREEZE, evaluate ONCE on gold.',
-          '3. MULTI-SEED 42/43/44 before any kept result.',
-        ].join('\n'),
-      },
-      {
-        caseName: 'assigned signal pre-registration artifact',
-        text: [
-          '## Signal — pre-register before computing anything',
-          'Build the selection signal from the revision history.',
-          'Write your pre-registration to `research/revision_signal/d1/pre_registration.json` before loading the price panel.',
-        ].join('\n'),
-      },
-      {
-        caseName: 'assigned matched-control pre-registration artifact',
-        text: [
-          '## D1 — Pre-register the matching rule, before computing any return',
-          '`research/sector_null/d1/pre_registration.json`, written before any performance series is loaded.',
-          'The final report must establish that the pre-registration preceded any performance computation.',
-        ].join('\n'),
-      },
-      {
-        caseName: 'assigned construction pre-registration artifact',
-        text: [
-          '## Pre-registration, and the feasibility check that two rounds died without',
-          '`research/construction_search/d1/pre_registration.json`, written before any return series is loaded.',
-          'Declare every construction you will measure and its selection protocol.',
-        ].join('\n'),
-      },
-    ];
-
-    for (const snippet of historicalSnippets) {
-      const finding = inspectBrief(structuredBrief(snippet.text)).findings
-        .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
-      expect({ caseName: snippet.caseName, finding }).toEqual({
-        caseName: snippet.caseName,
-        finding: expect.objectContaining({ level: 'fail', acknowledgementRequired: true }),
-      });
-    }
-  });
-
   it('does not let a disclaimer suppress a qualifying directive before, after, or beside it', () => {
     const disclaimer = 'This task does not pre-register anything and adopts no selection rule.';
     const directive = 'Pre-register and freeze the selection rule before measuring outcomes.';
@@ -510,7 +428,7 @@ describe('decision-grade brief requirements', () => {
         .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
       expect(finding).toMatchObject({
         level: 'fail',
-        acknowledgementRequired: true,
+        consequential: true,
         excerpt: expect.stringMatching(/(?:Pre-register|freeze the selection rule)/i),
       });
       expect(finding?.excerpt).not.toMatch(/does not pre-register/i);
@@ -875,7 +793,6 @@ describe('feasibility-only brief declarations', () => {
       '        model: formation_count_distribution',
       '        counts: [20, 25]',
       '  integrity:',
-      '    noop: false',
       '    max_std_ratio: 0.25',
       '    outlier_factor: 4',
       '    field_floors: {sample_size: 30}',
@@ -886,7 +803,6 @@ describe('feasibility-only brief declarations', () => {
       '      result: {type: number}',
       '    required: [result]',
       '  context_roots: [src, data]',
-      '  directions: [first, second]',
       '  confirm:',
       '    command: npm run verify-result',
       '    requires: independent rerun',
@@ -918,7 +834,6 @@ describe('feasibility-only brief declarations', () => {
       reportDir: 'docs/reports',
       feasibility,
       integrity: {
-        noop: false,
         maxStdRatio: 0.25,
         outlierFactor: 4,
         fieldFloors: { sample_size: 30 },
@@ -930,7 +845,6 @@ describe('feasibility-only brief declarations', () => {
         required: ['result'],
       },
       contextRoots: ['src', 'data'],
-      directions: ['first', 'second'],
       confirm: {
         command: 'npm run verify-result',
         requires: 'independent rerun',
@@ -1110,7 +1024,7 @@ describe('terminal wall-floor structure', () => {
     expect(above.findings).toContainEqual(expect.objectContaining({
       code: 'terminal_wall_floor_too_high_complete',
       level: 'warn',
-      acknowledgementRequired: true,
+      consequential: true,
       message: expect.stringContaining('clock gate'),
       risk: expect.stringContaining('efficient run'),
       suggestion: expect.stringContaining('at most 10 minutes'),

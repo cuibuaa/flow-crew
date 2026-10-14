@@ -10,7 +10,7 @@ function canonicalPath(path: string): string {
   }
 }
 
-function gitCommonDirectory(projectDir: string): string | undefined {
+export function gitCommonDirectory(projectDir: string): string | undefined {
   const dotGit = join(resolve(projectDir), '.git');
   try {
     const stat = lstatSync(dotGit);

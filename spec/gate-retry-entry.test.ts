@@ -1,3 +1,4 @@
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -7,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { routeLogsToFile } from '../src/logging.js';
 import { readRunEvents } from '../src/run-events.js';
+import { foldItems } from '../src/inbox.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, RUN_STATUS, setFcGlobalDir } from '../src/store.js';
 
@@ -92,10 +94,10 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'e18-gate-retry-entry',
       defaults: { max_iterations: 1, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [],
         scope: ['src/scheduler.ts', 'spec/e18-gate-retry-entry.test.ts', 'docs/task_summary.md'],
         prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false,
@@ -126,6 +128,12 @@ function dispatchYaml(
       '    dependency_reasons: {plan: "audit an unrelated concern"}',
       '    is_gate: true',
       '    task: verify unrelated concern',
+      '  - id: fix_unrelated',
+      '    role: repair',
+      '    scope: [spec/e18-gate-retry-entry.test.ts]',
+      `    depends_on: [${UNRELATED_GATE_ID}]`,
+      `    retry_to: [${UNRELATED_GATE_ID}]`,
+      '    task: repair the unrelated rejected concern',
     ] : []),
     `  - id: ${REPAIR_ID}`,
     '    role: repair',
@@ -163,6 +171,7 @@ interface ScenarioOptions {
   terminalArtifactOnPass?: boolean;
   researchMode?: boolean;
   escalationTerminal?: boolean;
+  unauthorizedEscalationWrite?: boolean;
 }
 
 async function runScenario(options: ScenarioOptions): Promise<{
@@ -184,18 +193,18 @@ async function runScenario(options: ScenarioOptions): Promise<{
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') {
-        return { output: '## E18 fixture summary', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: '## E18 fixture summary', exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === 'plan') {
         writeFileSync(
-          join(opts.runDir, 'dispatch.yaml'),
-          dispatchYaml(
+          join(opts.runDir, 'fixture_dispatch.yaml'),
+          declaredDispatch(dispatchYaml(
             options.includeUnrelatedRejectedGate,
             options.terminalArtifactOnPass,
             options.escalationTerminal,
-          ),
+          )),
         );
-        return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === GATE_ID) {
         gateInputs.push(readFileSync(join(opts.runDir, 'stages', GATE_ID, 'input.md'), 'utf-8'));
@@ -204,7 +213,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
         const verdict = scoredVerdict(pass, pass ? 'accepted' : 'explicit rejection');
         if (options.gateCriteria) verdict.criteria = options.gateCriteria;
         writeFileSync(
-          join(opts.runDir, `verdict_${GATE_ID}.json`),
+          join(opts.runDir, `fixture_verdict_${GATE_ID}.json`),
           JSON.stringify(verdict, null, 2) + '\n',
         );
         const metricPath = join(opts.runDir, 'stages', GATE_ID, 'metric.json');
@@ -218,7 +227,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
             passing: JSON.stringify(metricArtifact(true)),
           });
         }
-        return { output: `gate ${gateCalls}: ${pass}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: `gate ${gateCalls}: ${pass}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'terminal_finalize') {
         mkdirSync(join(projectDir, 'docs'), { recursive: true });
@@ -226,13 +235,13 @@ async function runScenario(options: ScenarioOptions): Promise<{
           join(projectDir, 'docs', 'final_verification.md'),
           '# Synthetic final verification\n\nThe declared outcome is complete.\n',
         );
-        return {
+        return fixtureResult({
           output: 'terminal report written by its admitted owner',
           exitCode: 0,
           duration_ms: 1,
           writes: ['docs/final_verification.md'],
           writeAttribution: 'structured',
-        };
+        }, opts);
       }
       if (opts.stageId === 'escalation_finalize') {
         escalationCalls++;
@@ -241,20 +250,21 @@ async function runScenario(options: ScenarioOptions): Promise<{
           join(projectDir, 'docs', 'research_escalation.md'),
           '# Research gate escalation\n\nThe rejected criteria remain unsatisfied.\n',
         );
-        return {
+        if (options.unauthorizedEscalationWrite) writeFileSync(join(projectDir, 'outside.txt'), 'unauthorized finalizer work');
+        return fixtureResult({
           output: 'escalation terminal written by its admitted owner',
           exitCode: 0,
           duration_ms: 1,
-          writes: ['docs/research_escalation.md'],
+          writes: ['docs/research_escalation.md', ...(options.unauthorizedEscalationWrite ? ['outside.txt'] : [])],
           writeAttribution: 'structured',
-        };
+        }, opts);
       }
       if (opts.stageId === UNRELATED_GATE_ID) {
         writeFileSync(
-          join(opts.runDir, `verdict_${UNRELATED_GATE_ID}.json`),
+          join(opts.runDir, `fixture_verdict_${UNRELATED_GATE_ID}.json`),
           JSON.stringify(scoredVerdict(false, 'unrelated rejection'), null, 2) + '\n',
         );
-        return { output: 'unrelated gate: false', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'unrelated gate: false', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === REPAIR_ID) {
         repairCalls++;
@@ -268,9 +278,12 @@ async function runScenario(options: ScenarioOptions): Promise<{
         if (existsSync(archived)) {
           repairSawArchivedNegative ||= JSON.parse(readFileSync(archived, 'utf-8')).pass === false;
         }
-        return { output: 'repair executed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'repair executed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
-      return { output: `unexpected stage ${opts.stageId}`, exitCode: 1, duration_ms: 1 };
+      if (opts.stageId === 'fix_unrelated') {
+        return fixtureResult({ output: 'unrelated repair executed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
+      }
+      return fixtureResult({ output: `unexpected stage ${opts.stageId}`, exitCode: 1, duration_ms: 1 }, opts);
     },
   };
 
@@ -312,10 +325,6 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), `flowcrew-e18-${randomBytes(4).toString('hex')}-`));
   projectDir = join(root, 'project');
   mkdirSync(join(projectDir, 'config'), { recursive: true });
-  writeFileSync(
-    join(projectDir, 'config', 'defaults.yaml'),
-    readFileSync(join(REPOSITORY_ROOT, 'config', 'defaults.yaml')),
-  );
   setFcGlobalDir(join(root, 'fc-home'));
   Object.assign(metricReadControl, { path: '', reads: 0, staleReads: 0, stale: '', passing: '' });
 });
@@ -329,7 +338,7 @@ afterEach(() => {
 });
 
 describe('gate retry loop entry', () => {
-  it('H7 parks or escalates an exhausted rejected research round without advancing', async () => {
+  it('H7 completes an exhausted rejected research round as incomplete without advancing or requesting approval', async () => {
     const result = await runScenario({
       gatePasses: [false],
       researchMode: true,
@@ -344,8 +353,11 @@ describe('gate retry loop entry', () => {
       'utf-8',
     )) as { criteria: string[] };
 
-    expect(result.final.status).toBe(RUN_STATUS.PARKED);
-    expect(result.final.completedAt).toBeUndefined();
+    expect(result.final.status).toBe(RUN_STATUS.INCOMPLETE);
+    expect(result.final.completedAt).toEqual(expect.any(String));
+    expect(result.final.parked).toBeUndefined();
+    expect(foldItems(result.final.runId).size).toBe(0);
+    expect(events.some((event) => event.type === 'approval_parked')).toBe(false);
     expect(events.some((event) => event.type === 'iteration_completed')).toBe(false);
     expect(events).toContainEqual(expect.objectContaining({
       type: 'research_gate_exhausted',
@@ -353,9 +365,14 @@ describe('gate retry loop entry', () => {
       criteria: ['criterion_fail'],
     }));
     expect(exhausted.criteria).toEqual(['criterion_fail']);
-    expect(result.final.parked?.target).toBe('round 1: criterion_fail');
-    expect(result.final.parked?.reason).toContain('round 1');
-    expect(result.final.parked?.reason).toContain('criterion_fail');
+    expect(result.final.failureReason).toContain('round 1');
+    expect(result.final.failureReason).toContain('criterion_fail');
+    expect(result.final.failureReason).toContain('no admitted escalation terminal owner');
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'run_completed',
+      timestamp: result.final.completedAt,
+      detail: result.final.failureReason,
+    }));
   });
 
   it('H7 runs an admitted escalation terminal owner after research gate exhaustion', async () => {
@@ -388,6 +405,18 @@ describe('gate retry loop entry', () => {
     }));
     expect(decision.failingCriteria).toEqual(['criterion_fail']);
     expect(ready.failingCriteria).toEqual(['criterion_fail']);
+  });
+
+  it('audits and refuses unauthorized escalation-finalizer work after gate exhaustion', async () => {
+    const result = await runScenario({ gatePasses: [false], escalationTerminal: true, unauthorizedEscalationWrite: true,
+      gateCriteria: { criterion_fail: { status: 'fail', evidence: 'still unsatisfied' } } });
+    expect(result.final.status).not.toBe(RUN_STATUS.ESCALATED);
+    expect(result.escalationCalls).toBeGreaterThan(0);
+    expect(existsSync(join(projectDir, 'outside.txt'))).toBe(false);
+    const attempt = result.final.stages.escalation_finalize.attempts?.at(-1);
+    expect(attempt?.status).toBe('failed');
+    expect(attempt?.constraintAudit).toBeDefined();
+    expect(readFileSync(join(result.runDirPath, attempt!.constraintAudit!.path), 'utf8')).toContain('outside.txt');
   });
 
   it('treats pass=true at score=0/threshold=0 as accepted and never dispatches repair', async () => {
@@ -454,7 +483,7 @@ describe('gate retry loop entry', () => {
     expect(result.gateCalls).toBe(2);
     expect(result.repairCalls).toBe(1);
     expect(result.final.status).toBe(RUN_STATUS.COMPLETE);
-    expect(result.final.terminalArtifact).toBe('final_verification.md');
+    expect(result.final.terminalArtifact).toBe('docs/final_verification.md');
     expect(Object.values(result.final.stages).map((stage) => stage.status)).toEqual([
       'complete',
       'complete',
@@ -467,7 +496,7 @@ describe('gate retry loop entry', () => {
     }));
   });
 
-  it('uses a fresh round-zero entrance read instead of reaching the dispatch guard', async () => {
+  it('settles transient evidence without re-running a passing review', async () => {
     const logPath = join(root, 'mechanism.log');
     const result = await runScenario({ gatePasses: [true], staleMetricReads: 2, logPath });
     const logs = readFileSync(logPath, 'utf-8');
@@ -476,14 +505,11 @@ describe('gate retry loop entry', () => {
     expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
     expect(result.final.stages[REPAIR_ID]?.status).toBe('skipped');
-    expect(logs).toContain('"event":"gate_retry_entry_check"');
-    expect(logs).toContain('"source":"fresh-runtime-collection","allPass":true');
-    expect(logs).toContain('"decision":"break"');
     expect(logs).not.toContain('"event":"gate_retry_dispatch_guard"');
     expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
   });
 
-  it('re-reads related verdicts at the dispatch point and blocks a stale entrance', async () => {
+  it('does not dispatch product repair for a passing authored review with transient metric evidence', async () => {
     const logPath = join(root, 'guard.log');
     const result = await runScenario({ gatePasses: [true], staleMetricReads: 4, logPath });
     const logs = readFileSync(logPath, 'utf-8');
@@ -491,26 +517,17 @@ describe('gate retry loop entry', () => {
     expect(result.final.status).toBe('complete');
     expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
-    expect(logs).toContain('"event":"gate_retry_dispatch_guard"');
-    expect(logs).toContain('"decision":"skip-repair-dispatch"');
+    expect(logs).not.toContain('"event":"gate_retry_dispatch_guard"');
     expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
     expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
   });
 
-  it('keeps policy-aware metric rejection authoritative at the dispatch guard', async () => {
-    const result = await runScenario({ gatePasses: [true, true], staleMetricReads: 6 });
-
+  it('ignores persistent retired metric evidence without re-running a passing review', async () => {
+    const result = await runScenario({ gatePasses: [true, true], staleMetricReads: Number.MAX_SAFE_INTEGER });
     expect(result.final.status).toBe('complete');
-    expect(result.gateCalls).toBe(2);
+    expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
-    expect(result.final.stages[REPAIR_ID]?.status).toBe('skipped');
-    expect(JSON.parse(readFileSync(join(
-      result.runDirPath,
-      'gate_reevaluation',
-      'iteration_1',
-      'round_1',
-      `rejected_verdict_${GATE_ID}.json`,
-    ), 'utf-8'))).toMatchObject({ pass: true });
+    expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
   });
 
   it('guards a related pass even while an unrelated gate remains rejected', async () => {
@@ -524,11 +541,10 @@ describe('gate retry loop entry', () => {
     const logs = readFileSync(logPath, 'utf-8');
 
     expect(result.repairCalls).toBe(0);
-    expect(logs).toContain(`"activeGateIds":["${GATE_ID}"]`);
-    expect(logs).toContain('"decision":"skip-repair-dispatch"');
+    expect(result.gateCalls).toBe(1);
+    expect(logs).not.toContain('"event":"gate_retry_dispatch_guard"');
     expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
     const archiveDir = join(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
-    expect(existsSync(join(archiveDir, `rejected_verdict_${GATE_ID}.json`))).toBe(false);
     expect(JSON.parse(readFileSync(
       join(archiveDir, `rejected_verdict_${UNRELATED_GATE_ID}.json`),
       'utf-8',

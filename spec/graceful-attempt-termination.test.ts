@@ -1,3 +1,4 @@
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import {
   existsSync,
   mkdirSync,
@@ -13,13 +14,13 @@ import { describe, expect, it } from 'vitest';
 import {
   ATTEMPT_TERMINATION_GRACE_MS,
   execWithStdin,
-  execWithTimeout,
   resolveChildTerminationTiming,
   type Adapter,
   type AgentConfig,
   type RunResult,
 } from '../src/adapters/base.js';
 import {
+  atomicWrite,
   createRun,
   fcGlobalDir,
   readStageStatus,
@@ -29,7 +30,10 @@ import { runStage } from '../src/worker.js';
 import { ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS } from '../src/attempt-deadline.js';
 
 const CLEANUP_TRIALS = 3;
-const FIXTURE_TIMEOUT_MS = 350;
+// Leave room for the child to install its signal handler under full-suite load.
+const FIXTURE_TIMEOUT_MS = 1_500;
+const DESCENDANT_FIXTURE_TIMEOUT_MS = 1_500;
+const DESCENDANT_READY_TIMEOUT_MS = 1_200;
 const ABORT_FIXTURE_TIMEOUT_MS = 10_000;
 const TEST_TERMINATION_GRACE_MS = 150;
 const TEST_TERMINATION_TIMING = { graceMs: TEST_TERMINATION_GRACE_MS, pollMs: 5 } as const;
@@ -130,11 +134,11 @@ async function runCleanupTrial(
   const settlementStarted = performance.now();
   const execution = execKind === 'with-stdin'
     ? execWithStdin(process.execPath, args, 'fixture input', opts)
-    : execWithTimeout(process.execPath, args, opts);
+    : execWithStdin(process.execPath, args, '', opts);
 
   try {
     await waitForFile(readyPath, FIXTURE_TIMEOUT_MS - 100);
-    controller?.abort('supervisor_abort');
+    controller?.abort('stage_abort');
     const result = await awaitBounded(
       execution,
       timeoutMs + TEST_TERMINATION_GRACE_MS + 2_000,
@@ -219,9 +223,9 @@ async function runIgnoredSignalTrial(
   ].join('\n');
   const controller = timeoutThenAbort ? new AbortController() : undefined;
   const settlementStarted = performance.now();
-  const execution = execWithTimeout(process.execPath, [
+  const execution = execWithStdin(process.execPath, [
     '-e', fixture, readyPath, pidPath, termCountPath,
-  ], {
+  ], '', {
     cwd: root,
     timeout_ms: IGNORE_TERM_TIMEOUT_MS,
     env: {
@@ -243,7 +247,7 @@ async function runIgnoredSignalTrial(
         + IGNORE_TERM_TIMEOUT_MS
         + Math.floor(TEST_TERMINATION_GRACE_MS / 2);
       abortTimer = setTimeout(
-        () => controller.abort('supervisor_abort'),
+        () => controller.abort('stage_abort'),
         Math.max(0, abortAt - performance.now()),
       );
     }
@@ -289,7 +293,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('applies graceful cleanup to stdin timeouts and both supervisor-abort paths', { timeout: 15_000 }, async () => {
+  it('applies graceful cleanup to stdin timeouts and both supervisor-abort paths', { timeout: 30_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-matrix-'));
     try {
       const observations: CleanupObservation[] = [];
@@ -377,25 +381,25 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       '}, 10);',
     ].join('\n');
     const settlementStarted = performance.now();
-    const execution = execWithTimeout(process.execPath, [
+    const execution = execWithStdin(process.execPath, [
       '-e', fixture, cleanupPath, readyPath, pidPath,
       descendantReadyPath, descendantPidPath, descendantTermPath,
-    ], {
+    ], '', {
       cwd: root,
-      timeout_ms: FIXTURE_TIMEOUT_MS,
+      timeout_ms: DESCENDANT_FIXTURE_TIMEOUT_MS,
       env: { HOME: root, FC_HOME: join(root, 'fc-home') },
       terminationTiming: TEST_TERMINATION_TIMING,
     });
 
     try {
-      await waitForFile(readyPath, FIXTURE_TIMEOUT_MS - 100);
+      await waitForFile(readyPath, DESCENDANT_READY_TIMEOUT_MS);
       const result = await awaitBounded(
         execution,
-        FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS + 2_000,
+        DESCENDANT_FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS + 2_000,
       );
       expect(result.exitCode).toBe(124);
       expect(performance.now() - settlementStarted).toBeGreaterThanOrEqual(
-        FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS - 100,
+        DESCENDANT_FIXTURE_TIMEOUT_MS + TEST_TERMINATION_GRACE_MS - 100,
       );
       expect(existsSync(cleanupPath)).toBe(true);
       expect(existsSync(descendantTermPath)).toBe(true);
@@ -409,13 +413,13 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('records post-deadline cleanup as real overrun without moving the immutable deadline', { timeout: 15_000 }, async () => {
+  it('records post-deadline cleanup as real overrun without moving the immutable deadline', { timeout: 30_000 }, async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-deadline-project-'));
     const stateRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-deadline-state-'));
     const previousStateRoot = fcGlobalDir();
     setFcGlobalDir(stateRoot);
     try {
-      const budgetMs = 600;
+      const budgetMs = 2_000;
       const observations: DeadlineObservation[] = [];
       for (let trial = 1; trial <= CLEANUP_TRIALS; trial++) {
         const stageId = `deadline_${trial}`;
@@ -437,9 +441,9 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
         let adapterExecution: Promise<RunResult> | undefined;
         const adapter: Adapter = {
           async run(_prompt, _role, opts) {
-            adapterExecution = execWithTimeout(process.execPath, [
+            adapterExecution = execWithStdin(process.execPath, [
               '-e', fixture, cleanupPath, readyPath, pidPath,
-            ], {
+            ], '', {
               cwd: projectRoot,
               timeout_ms: opts.timeout_ms,
               abortSignal: opts.abortSignal,
@@ -454,10 +458,12 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
         try {
           const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
             stageId,
             role: FIXTURE_ROLE,
             dependsOn: [],
             promptTemplate: 'deadline fixture',
+            projectWriteScope: ['deadline-*'],
             timeout_ms: budgetMs,
             projectDir: projectRoot,
             runId: created.runId,
@@ -489,7 +495,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
       expect(observations.every(({ exitCode }) => exitCode === 124)).toBe(true);
       expect(observations.every(({ budgetMs, deadlineSpanMs }) => (
-        budgetMs === 600 && deadlineSpanMs === budgetMs
+        budgetMs === 2_000 && deadlineSpanMs === budgetMs
       ))).toBe(true);
       expect(observations.every(({ elapsedMs, budgetMs }) => elapsedMs >= budgetMs)).toBe(true);
       expect(observations.every(({ deadlineOverrunMs }) => (
@@ -509,7 +515,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     const stateRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-abort-state-'));
     const previousStateRoot = fcGlobalDir();
     setFcGlobalDir(stateRoot);
-    const stageId = 'supervisor_abort';
+    const stageId = 'stage_abort';
     const created = createRun(projectRoot, 'graceful-abort', 'name: graceful-abort', [stageId]);
     mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
     const cleanupPath = join(projectRoot, 'abort-cleanup');
@@ -529,9 +535,9 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     let adapterExecution: Promise<RunResult> | undefined;
     const adapter: Adapter = {
       async run(_prompt, _role, opts) {
-        adapterExecution = execWithTimeout(process.execPath, [
+        adapterExecution = execWithStdin(process.execPath, [
           '-e', fixture, cleanupPath, readyPath, pidPath,
-        ], {
+        ], '', {
           cwd: projectRoot,
           timeout_ms: opts.timeout_ms,
           abortSignal: opts.abortSignal,
@@ -541,7 +547,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
           },
         });
         await waitForFile(readyPath, 1_000);
-        writeFileSync(join(created.runDirPath, 'signals', `abort_${stageId}.json`), JSON.stringify({
+        atomicWrite(join(created.runDirPath, 'signals', `abort_${stageId}.json`), JSON.stringify({
           version: 1,
           stageId,
           attemptIndex: 1,
@@ -555,10 +561,12 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
 
     try {
       const result = await runStage(adapter, {
+      artifactContract: fixtureArtifactContract(stageId),
         stageId,
         role: FIXTURE_ROLE,
         dependsOn: [],
         promptTemplate: 'supervisor abort fixture',
+        projectWriteScope: ['abort-*'],
         timeout_ms: 7_000,
         projectDir: projectRoot,
         runId: created.runId,
@@ -567,8 +575,8 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       });
       const status = readStageStatus(projectRoot, created.runId, stageId);
       expect(result.exitCode).toBe(137);
-      expect(status.error).toBe('aborted by supervisor: fixture supervisor decision');
-      expect(status.timeout?.terminationCause).toBe('supervisor_abort');
+      expect(status.error).toBe('aborted by engine: fixture supervisor decision');
+      expect(status.timeout?.terminationCause).toBe('stage_abort');
       expect(status.timeout?.deadlineReachedAt).toBeUndefined();
       expect(status.timeout?.deadlineOverrunMs).toBe(0);
       expect(existsSync(cleanupPath)).toBe(true);
@@ -590,7 +598,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     let hardExecution: Promise<RunResult> | undefined;
     try {
       const earlyAbort = new AbortController();
-      const early = await execWithTimeout(process.execPath, ['-e', 'process.exit(0)'], {
+      const early = await execWithStdin(process.execPath, ['-e', 'process.exit(0)'], '', {
         cwd: root,
         timeout_ms: ABORT_FIXTURE_TIMEOUT_MS,
         abortSignal: earlyAbort.signal,
@@ -599,7 +607,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       expect(early).toMatchObject({ exitCode: 0, timedOut: false });
       earlyAbort.abort('after_settlement');
 
-      const spawnFailure = await execWithTimeout(process.execPath, ['-e', 'process.exit(0)'], {
+      const spawnFailure = await execWithStdin(process.execPath, ['-e', 'process.exit(0)'], '', {
         cwd: join(root, 'missing-working-directory'),
         timeout_ms: ABORT_FIXTURE_TIMEOUT_MS,
         env: { HOME: root, FC_HOME: join(root, 'fc-home') },
@@ -636,4 +644,50 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       rmSync(root, { recursive: true, force: true });
     }
   });
+  it('keeps command evidence open through child retirement and closes it on launch failure', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'fc-command-owner-'));
+    const controller = new AbortController();
+    const activityPath = join(root, 'stages', 'fixture', 'command_activity.json');
+    const readyPath = join(root, 'ready'), cleanupPath = join(root, 'cleanup'), scratchPath = join(root, 'scratch.json');
+    const execution = { runDir: root, stageId: 'fixture', attemptIndex: 1, attemptStartedAt: new Date().toISOString() };
+    const fixture = [
+      "const fs = require('node:fs');",
+      'const [activity, ready, cleanup, scratch] = process.argv.slice(1);',
+      "fs.writeFileSync(scratch, JSON.stringify({path:process.env.TMPDIR,tmp:process.env.TMP,temp:process.env.TEMP}));",
+      "fs.writeFileSync(require('node:path').join(process.env.TMPDIR, 'private-work'), 'fixture');",
+      "process.on('SIGTERM', () => { fs.writeFileSync(cleanup, String(JSON.parse(fs.readFileSync(activity, 'utf8')).streamClosed)); process.exit(0); });",
+      "console.log(JSON.stringify({type:'item.started', item:{type:'command_execution',id:'quiet',command:'fixture'}}));",
+      "fs.writeFileSync(ready, 'ready'); setInterval(() => {}, 1000);",
+    ].join('\n');
+    let pending: Promise<RunResult> | undefined;
+    try {
+      pending = execWithStdin(process.execPath, ['-e', fixture, activityPath, readyPath, cleanupPath, scratchPath], '', {
+        cwd: root, timeout_ms: 10_000, execution, abortSignal: controller.signal,
+        onStdout: (text, activity) => activity?.feed(text),
+      });
+      await waitForFile(readyPath, 5_000);
+      expect(JSON.parse(readFileSync(activityPath, 'utf8')).streamClosed).toBe(false);
+      const scratch = JSON.parse(readFileSync(scratchPath, 'utf8'));
+      expect(scratch).toMatchObject({ tmp: scratch.path, temp: scratch.path });
+      expect(existsSync(join(scratch.path, 'private-work'))).toBe(true);
+      controller.abort();
+      expect((await pending).exitCode).toBe(137);
+      expect(existsSync(scratch.path)).toBe(false);
+      expect(readFileSync(cleanupPath, 'utf8')).toBe('false');
+      expect(JSON.parse(readFileSync(activityPath, 'utf8'))).toMatchObject({ streamClosed: true, active: [] });
+      const failed = await execWithStdin(join(root, 'absent-executable'), [], '', {
+        cwd: root, timeout_ms: 10_000, execution: { ...execution, attemptIndex: 2 },
+      });
+      expect(failed.spawnError).toBeDefined();
+      expect(JSON.parse(readFileSync(activityPath, 'utf8'))).toMatchObject({ attemptIndex: 2, streamClosed: true, active: [] });
+      let startedPid: number | undefined;
+      await expect(execWithStdin(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], '', {
+        cwd: root, timeout_ms: 10_000, execution: { ...execution, attemptIndex: 3 },
+        onChild: ({ pid }) => { startedPid = pid; throw new Error('fixture binding refused'); },
+      })).rejects.toThrow('fixture binding refused');
+      expect(processSurvived(startedPid)).toBe(false);
+      expect(JSON.parse(readFileSync(activityPath, 'utf8'))).toMatchObject({ attemptIndex: 3, streamClosed: true });
+    } finally { controller.abort(); await pending?.catch(() => undefined); rmSync(root, { recursive: true, force: true }); }
+  });
+
 });

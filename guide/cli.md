@@ -1,712 +1,177 @@
-# CLI Reference
+# CLI reference
 
-## Top-level Commands
+For an operator: which command and parsed options do I use?
+Use `node dist/cli.js` from a built source checkout, or `flowcrew` when a command link is
+installed. Below, `flowcrew` is the executable prefix. Angle-bracket values are placeholders;
+synopses are syntax references, not recipes to run without selecting real identities.
+[Operations](operations.md) owns lifecycle, baseline, approvals, campaigns and preservation.
+[Configuration](configuration.md) owns defaults and environment routing.
 
-The current `src/cli.ts` dispatcher exposes these commands:
+## Dispatch and help
 
-| Command | Purpose |
+The current dispatcher has 28 named command routes, including the early `fc_tasks`,
+`plan-check` and `state` paths. Bare invocation, `--help`, `-h` print top-level help;
+`version`, `--version`, `-v` print package version. Unknown commands exit 1. Command help is
+an abbreviated synopsis and can omit parsed options (notably state/ledger indexing and
+rehearsal's actual options); the tables below follow parsers, not just help text.
+
+| Command | Question answered |
 |---|---|
-| `init` | Initialize FlowCrew configuration and storage in a project. |
-| `adapter` | Show or explicitly set the project adapter choice. |
-| `quick` | Run or enqueue one task brief. |
-| `status` | Show the latest project run's current stage execution, elapsed time, and latest reason. |
-| `list` | List recent runs. |
-| `guide` | Send guidance to one explicitly selected running supervisor. |
-| `interrupt` | Stop the active command in a named running stage and deliver the reason as operator guidance. |
-| `clean` | Delete old run directories. |
-| `export` | Export a run as JSON. |
-| `campaign` | Run and manage configured campaigns. |
-| `campaign-loop` | Run the autonomous research direction loop. |
-| `daemon` | Operate the background orchestrator. |
-| `dashboard` | Query the running web dashboard. |
-| `task` | Inspect and control daemon tasks. |
-| `fc_tasks` | Render, inspect, and atomically update the conversational task ledger. |
-| `audit-reality` | Re-run deterministic checks against task history. |
-| `inbox` | Resolve approval requests that parked runs. |
-| `ship-preflight` | Gather prior-run, campaign, build, and declared-input facts before shipping. |
-| `ship-setup` | Create the declared launch worktree and fail closed on unreachable or invalid inputs. |
-| `land` | Audit terminal artifacts and unique worktree state; optionally remove a proven-safe linked worktree. |
-| `audit-report` | Re-derive supported numeric and path-bearing claims from a terminal report. |
-| `watch` | Report edge-triggered stall judgements for live runs. |
-| `events` | Read or follow the canonical, filterable run event feed. |
-| `rehearse` | Exercise a brief with the real scheduler and a scripted agent. |
-| `brief` | Inspect, diff, or roll back a versioned brief. |
-| `doctor` | Check the runtime, configuration, builds, and agent CLIs. |
-| `start` | Start the web dashboard. |
-| `version` | Print the FlowCrew version. |
-
-## Core Commands
-
-```bash
-flowcrew init
-flowcrew adapter
-flowcrew adapter claude
-flowcrew quick "task"
-flowcrew rehearse <brief.md>
-flowcrew status
-flowcrew list
-flowcrew guide --run <run-id> "message"
-flowcrew interrupt --run <run-id> --stage <stage-id> "reason"
-flowcrew start                       # web dashboard only
-flowcrew daemon status               # background orchestrator identity/freshness
-flowcrew daemon restart              # reload the background orchestrator
-flowcrew dashboard status            # query the web dashboard listener
-flowcrew campaign run <config.yaml>
-flowcrew campaign-loop - --project <dir> --campaign <name>
-flowcrew task list
-flowcrew fc_tasks render
-flowcrew audit-reality
-flowcrew inbox list
-flowcrew ship-preflight --brief docs/task_brief.md
-flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work
-flowcrew land --run <run-id>
-flowcrew audit-report --report docs/final.md --run-dir <run-dir>
-flowcrew watch --once
-flowcrew events --follow
-flowcrew brief head <briefDir>
-flowcrew doctor
-flowcrew clean
-flowcrew export
-flowcrew version
-```
-
-See [`fc_tasks`](fc_tasks.md) for the legacy-compatible store contract, width-bounded status-line
-rendering, exact optional FlowCrew task/run links, validated create/update commands, and the
-distinct Claude Code and Codex plumbing.
-
-## `flowcrew ship-preflight`
-
-Gather the facts needed before authoring or launching a FlowCrew handoff:
-
-```bash
-flowcrew ship-preflight
-flowcrew ship-preflight --brief docs/task_brief.md --json
-flowcrew ship-preflight --campaign <name> --brief docs/task_brief.md
-flowcrew ship-preflight --no-baseline --brief docs/task_brief.md
-```
-
-Campaign resolution follows launch precedence: explicit `--campaign`, parsed
-`config/defaults.yaml::campaign`, then the repository main-worktree basename. An uncertain
-resolution stays unknown; preflight never substitutes another campaign's hygiene. The report
-summarises readable and unreadable run entries rather than printing one error per entry.
-
-For a requested brief, preflight distinguishes inputs from outputs and checks every declared
-input for existence and readability. Mechanically bound row-count, date-span, recursive
-file-count, and SHA-256 claims are reported as confirmed, refuted, or not checkable. It also
-discovers the target's build, test, and lint scripts from checked-in configuration, executes
-that untouched baseline, streams each command's output and ten-second heartbeat as it runs,
-and states later gate criteria as a delta from the observed result. `--no-baseline` performs
-discovery but launches none of those project commands and records the baseline as skipped.
-When a process-identity-verified live run shares the canonical project, a warning is printed
-before any validation command starts.
-The report separately records daemon→`dist` and `src`→`dist` freshness.
-
-Structurally declared outputs are inventoried separately. A non-empty create-only file, any
-symlink, or an unsupported filesystem entry is blocking; explicit `on_existing: update`,
-`append`, or `replace` records intentional reuse. Each existing file row includes its type,
-size, and SHA-256 so a large unrelated artifact from an earlier run cannot pass unnoticed.
-
-Exit 0 means the facts were gathered, even when history is adverse, a baseline is red, a build
-is stale, or an input is missing; invalid arguments, an unreadable requested brief, or a
-collection failure exit non-zero. `--json` emits the same facts as one machine-readable object.
-
-## `flowcrew ship-setup`
-
-Create an exact launch worktree only after the brief's inputs can be proven usable:
-
-```bash
-flowcrew ship-setup --brief <path> --target <path> --base <ref> --branch <name> [--project <path>] [--json]
-```
-
-`--brief`, `--target`, `--base`, and `--branch` are required. `--project` identifies the
-source repository and defaults to the current directory. The target must not already exist.
-Git receives the declared base and branch as argv, without a shell.
-
-Setup is fail-closed in two phases. Before creating a worktree, it verifies every source input
-and every bound row-count, date-span, file-count, or SHA-256 assertion. Missing, unreadable,
-refuted, and not-checkable inputs refuse the command before Git runs. After Git creates the
-worktree, each declared input absent from the target is linked from the source at that exact
-relative path. This makes ignored inputs such as `data/` and `node_modules/` reachable without
-copying or guessing sibling modules. Existing target entries are never overwritten, and the
-same assertions are evaluated again through the target path.
-
-Only a fully verified target advances to the configuration-discovered build, test, and lint
-baseline. A pre-existing red check is recorded honestly with a no-new-failure delta criterion;
-it is not rewritten as an impossible absolute-zero gate. A command that cannot run in the target
-environment is not a red baseline: in particular, exit 127 makes the verdict line
-`Ship setup: REFUSED` and leaves every affected gate unresolved. Success exits 0 and atomically
-stores the JSON-ready record under the FlowCrew state root. The record stores the SHA-256 of the
-exact brief bytes and its path is content-addressed by that digest together with the canonical
-target, so different briefs at the conventional path cannot overwrite or impersonate one
-another. Refusal exits non-zero and names every blocker. **No ready record is written** for a
-partial link, a target mismatch, an unusable validation baseline, a validation launch error, or
-a record-write failure; an already-created worktree may remain for diagnosis.
-Every structured blocker includes `phase`, `reason`, and `repair` (plus the
-offending input/assertion when available); human output prints the repair
-directly beneath its refusal.
-
-For a failed command, setup extracts failure identity from the complete joined response before it
-byte-bounds only the stored output field. A long record therefore remains bounded while an early
-failure can still be identified. If the command runner's earlier streaming bound has already added
-an omission marker, the structural TAP reader still refuses to make a whole-run conclusion, but
-the three line-oriented adapters inspect the retained lines. A match is recorded with
-`failureEvidence: partial`: retained identifiers are a lower bound, and a summary count is an
-observed count rather than a proven whole-run count. The truncation cause remains on the result.
-
-Test-population evidence has its own three-way result. Setup first prefers an exact Vitest, pytest,
-or explicitly declared-file collector. If that knowledge is unavailable, it runs the source test
-suite once and compares complete top-level TAP identities with the output observed from the target
-test baseline. A generic identity is the normalized test name paired with its occurrence number
-among records having that same name (`1:name`, `2:name`, and so on), not its position in the run.
-Unrelated insertions therefore leave existing identities stable, while duplicate names remain
-distinct and dropping one duplicate is observable. Every population record must still carry a
-non-empty test name; ordinals alone prove only a count.
-
-The generic fallback protects source coverage. Equal TAP populations render `MATCHED`. If the
-target covers every source identity and reports additional tests, setup reaches ready and renders
-`SOURCE-PLUS-ADDITIONS` plus the exact additions: extra target tests do not reduce source coverage.
-A missing source identity still refuses, and a rename refuses with the old identity missing and the
-new identity extra. This source-coverage policy does not change the exact collectors' strict identity
-parity. Name-local identities cannot prove execution order, distinguish same-named test bodies, or
-identify which body among interchangeable duplicates changed.
-
-The generic fallback uses two full suite executions (source and target), whereas the collector path
-uses one target suite execution plus two cheap collections. Output that cannot establish complete
-named TAP evidence reaches ready as `UNVERIFIED`; human output and the ready record name the
-configured runner and the reason. In that state the operator retains the executable target baseline
-and all its unchanged gates, but loses the assurance that the target covers the source population.
-A target command that cannot launch, including exit 127, remains a refusal regardless of population
-state.
-
-Generic population comparison and baseline failure extraction use the same fail-closed top-level
-TAP reader. It requires one version and plan, unique planned ordinals, non-empty names, no bailout
-or omission marker, and agreement between `not ok` records and a top-level `# fail` summary when one
-is printed. Population identities remain name-local and occurrence-qualified; complete baseline
-failure identifiers remain the failed top-level names. Failure extraction alone can fall back to
-the `FAIL`/`FAILED`, cross-mark, and compiler-diagnostic line adapters after the structural reader
-refuses. Those adapters report only what their individual matched lines establish.
-
-When a failed baseline is still `unknown`, its result records whether output was empty, truncated,
-structurally invalid TAP, or an unrecognized non-TAP format. The rendered
-`no_regression_from_baseline` gate repeats that cause and continues to leave a later failure
-unresolved rather than treating the baseline as zero. Truncated or structurally invalid TAP remains
-`unknown` only when no line adapter recovers a failure fact. A recovered truncated result is
-`known` and `partial`, and its gate says that a later red-to-red comparison is unresolved. If either
-side of such a comparison is partial, the gate cannot conclude identifier equality or subset,
-absence of new failures, count equality or increase/decrease, or an unchanged-red pass. Green to
-red remains a regression and red to green remains a pass because neither decision depends on a
-complete red-to-red inventory. Identification remains unavailable for malformed/incomplete TAP
-without a recognized failure line, nested leaf detail beyond its top-level name, entirely lost
-output, JSON/JUnit-only or custom-prose runners outside the three legacy adapters, unsupported
-ANSI/control variants, and failures with no output.
-
-## `flowcrew land`
-
-Inspect one explicitly selected run before reclaiming its linked worktree:
-
-```bash
-flowcrew land --run <run-id>
-flowcrew land --run <run-id> --json
-flowcrew land --run <run-id> --remove --acknowledge-regenerable=<audited-count>
-flowcrew land --run <run-id> --remove --acknowledge-regenerable=<audited-count> \
-  --complete-fc-task <entry-id> --fc-task-session <session-id> [--fc-tasks-root <dir>]
-```
-
-The audit reports the run's recorded status and every artifact declared for that status. An
-artifact is present when either its project path or the scheduler's preserved run snapshot
-exists. It takes an unfiltered Git census of tracked modifications and deletions, every
-untracked and ignored path, and each commit after the recorded base that is absent from all
-remote refs. It reports those unpushed commits, then separately identifies commits with no ref
-that would survive deletion of the selected worktree branch. Grading happens only after that
-complete census: proven build outputs and installed dependencies are summarized by count, while
-source, data or state, symlinks, and anything not proven regenerable are named individually. A
-symlink is identified as a link and includes its
-exact target. A source-like file inside a build directory stays named; an inspection failure is
-an issue and an enumerated unknown, never a hidden count.
-
-Removal requires the operator to state the exact count of paths the audit proved regenerable.
-An absent or mismatched count refuses before any destructive Git call. That acknowledgement is
-only consent to discard that measured set; it cannot cover tracked changes, source, data or
-state, symlinks, unknown items, inspection failures, or any other ungraded path. Archive, move,
-commit, or otherwise account for such unique content, remove the local copy, and rerun the
-audit.
-
-Without `--remove`, inventory is read-only and unique items are reported without turning the
-audit itself into a removal attempt. With `--remove`, every enumerated ungraded item remains an
-unconditional non-zero refusal, while the summarized regenerable set crosses the boundary only
-under an exact count acknowledgement. Before a destructive Git call, any non-terminal status,
-absent declared artifact, incomplete Git inspection, at-risk commit, or ungraded inventory item
-is a non-zero refusal. A commit already merged into another local branch is still reported as
-unpushed but is not at risk merely because no remote contains it. A clean request still has to
-prove that the target is a linked
-(not primary or bare) worktree with an attached local branch. Removal uses non-force worktree
-removal, pruning, and `branch -d`, stopping at the first failure.
-Each refusal has a position-matched repair in `refusalRepairs`, and human output
-prints it beside the reason. A failed removal step likewise records the failed
-Git operation and a repair that preserves unique data and surviving refs.
-
-The optional `--complete-fc-task` and `--fc-task-session` pair is explicit operator closure intent
-for the exact `--run`; `--fc-tasks-root` selects a non-default ledger root. The pair is valid only
-with `--remove`. Before any destructive Git call, `land` proves the selected ledger contains exactly
-one entry, that its verified engine link resolves to the selected known-terminal run, and that the
-run describes the worktree being removed. It does not infer acceptance from terminal state.
-
-The entry remains unchanged through the audit and all removal steps. Only after non-force worktree
-removal, prune, and branch deletion all succeed does `land` atomically patch that exact entry to
-`completed`, rechecking its exact run binding while holding the ledger lock. Omitting the pair is a
-deliberate-open request: even a successful reclaim leaves the ledger unchanged. If the final write
-fails after reclaim, the command exits nonzero, distinguishes a confirmed-open ledger from an
-unconfirmed persistence outcome, and emits a guarded `flowcrew fc_tasks update` repair command.
-
-`land` does not decide whether a terminal result is good or whether its evidence answers the
-right question. The operator reads and independently judges the result before requesting
-removal and optional ledger closure; the command enforces the mechanical preservation and exact
-identity boundaries around that explicit decision.
-
-## `flowcrew audit-report`
-
-Check a report's own arithmetic and artifact attributions against one run and its project:
-
-```bash
-flowcrew audit-report --report <path> --run-dir <path>
-flowcrew audit-report --report <path> --run-dir <path> --json
-```
-
-The report itself and every named artifact must resolve within the run or project root.
-Relative artifact paths are checked against both; if the same path exists in both, use
-`project:<path>` or `run:<path>` to make the attribution unambiguous. Symlinks and `..` cannot
-escape those roots. Validation commands are tokenized into direct argv and run in the project
-without a shell; shell operators, environment-prefix assignments, launch failures, and
-unparseable commands remain visible as `not_checkable`.
-
-These sentence forms are checkable (punctuation around them is optional):
-
-```markdown
-`project:guide/cli.md`: 509 lines.
-`artifacts/evidence` contains 14 files.
-`project:guide/cli.md`: 20 sections.
-Validation command `npm test`: exit 0; 412 passed, 0 failed.
-`artifacts/result.json` field `metrics.percentile` = 97.
-`run:research_round_1.json` field `/series/0/mean` = -1.25.
-```
-
-Line counts use logical text lines, recursive file counts include regular files, and section
-counts include Markdown ATX headings outside fenced examples. JSON fields accept dotted paths
-or JSON Pointers and must resolve to a scalar. A command claim compares its direct exit code
-and every stated passed/failed/skipped/error tally. Other numeric sentences that name a path
-are retained as `not_checkable` instead of being silently ignored.
-
-Each claim is `confirmed`, `contradicted`, or `not_checkable`. Only a contradiction makes the
-command exit non-zero. Confirmation proves that the report repeated the measured value
-accurately; it deliberately does not prove that the chosen measurement or framing was sound.
-
-## `flowcrew watch`
-
-Watch all FlowCrew runs continuously, or perform one deterministic pass:
-
-```bash
-flowcrew watch
-flowcrew watch --once
-flowcrew watch --poll 15
-flowcrew watch --all --once
-```
-
-The default candidate set comes from the persistent run index and contains only operational or
-identity-owned runs, so old fixtures do not turn every poll into a full archive scan. `--all`
-explicitly audits every entry under the runs directory. The first pass always prints a heartbeat
-with entry, readable-run, live-run, and scan-time counts. Later output is edge-triggered: an unchanged condition is silent, and ordinary stage
-transitions are not reported. The heartbeat makes a quiet healthy scan distinguishable from a
-watcher too slow to finish its first pass. A run counts as live only when `run.json` says `running`
-and its `scheduler.pid` names a process that is alive. A known-dead scheduler suppresses live-run
-stall judgements; an unreadable marker produces an evidence-gap diagnostic instead.
-
-The watch command makes these judgements, including when already present on the first pass:
-
-- **Terminal indecision:** a live run has a valid declared terminal contract, no recorded terminal
-  artifact or completion timestamp, at least one complete/failed/skipped stage, and no running
-  stage. A pending stage is quiescent here, because an unused repair stage can remain pending after
-  its gate passes. The condition fires only after nine minutes without a scheduler-owned write.
-  The activity clock is the newest mtime among `run.json`, existing event/progress/supervisor
-  records, and existing stage status, live-log, and output files. The bounded scan does not follow
-  symlinks. A fresh write, a running stage, an all-pending DAG, a terminal result, a missing
-  terminal contract, a dead scheduler, or a run still within grace does not fire this condition.
-- **Gate direction:** the latest two durable rejected verdicts in canonical iteration/round order
-  must name the same gate, metric, numeric threshold, declared direction (when present), and
-  nonzero side of that threshold. Current archives carry the numeric observation in the matching
-  `metric_<gate>.json`; legacy verdict-embedded metrics remain readable. Equal absolute distance is
-  a plateau; greater distance is a regression; movement toward the threshold is silent. Canonical
-  iteration evidence takes precedence over legacy round-only archives. One verdict, an unscored
-  rejection, a changed or missing threshold/metric/direction, a score at the threshold, or a
-  threshold crossing is not called a stall.
-- **Evidence gaps:** unavailable roots, unreadable run or scheduler records, malformed or
-  unreadable gate archives, unjudgeable terminal clocks/contracts/stages, and incomparable latest
-  gate verdicts emit `[EVIDENCE GAP]`. This means **not judged**, not healthy and not stalled.
-  Diagnostics are bounded, edge-triggered, clear on recovery, and re-arm if the gap recurs.
-- **Status disagreement:** when a terminal artifact unambiguously declares a status different from
-  the persisted lifecycle status, the command emits `[STATUS MISMATCH]`; terminal and live runs are
-  both covered.
-
-Nine minutes rounds the independently re-derived current-contract terminal-lag tail up to the
-45-second polling cadence; the final verification report records the population, full distribution,
-and sensitivity strata. A future healthy run quiet beyond that historical tail will alert once even
-if it later terminates normally. Execution count is deliberately not a stall judgement: executions three
-and four can still be converging, while a plateau or regression can be visible after only two
-comparable gate rounds.
-
-`--poll` accepts 1 through 3600 seconds and defaults to 45. `--once` emits the initial heartbeat,
-existing stalls, status mismatches, and evidence gaps, then exits. The command is read-only: it
-**does not write run or task status**, decide whether wrap-up is complete, accept a terminal status,
-or depend on an operator home-directory layout. A judgement only reports durable evidence; it never
-changes that evidence.
-
-## `flowcrew events`
-
-Read the same canonical event records used by task and dashboard projections:
-
-```bash
-flowcrew events --run <run-id>
-flowcrew events --project <path> --stage verify --type admission_rejected,attempt_failed
-flowcrew events --run <run-id> --json --follow
-```
-
-`--run`, `--project`, `--stage`, and `--type` filter the feed; `--limit` bounds initial
-history; `--follow` continues from the last emitted record. JSON retains every field. Human
-output retains the run, stage, execution number, and detail. Maintenance refresh records are
-hidden unless `--include-maintenance` is supplied. Without `--run`, selection uses the indexed
-operational runs for the selected or current project.
-
-## `flowcrew rehearse`
-
-Rehearse a brief before spending tokens or allowing a live agent to run:
-
-```bash
-flowcrew rehearse examples/hello-research.brief.md
-flowcrew rehearse path/to/brief.md --static-only
-```
-
-The default command parses the brief and then runs the real scheduler with an in-process scripted adapter in an isolated temporary project and `FC_HOME`. It launches no agent process or model, consumes no tokens, and does not write to the selected project. Its temporary Git repository ignores inherited `GIT_*`, global/system config, signing, hooks, and templates. If Git or the simulation still cannot run, the report gives a concise explanation and a pasteable `--static-only` command; raw child-process buffers and Node stacks are not the user-facing diagnosis. `--static-only` skips the scheduler simulation; `--keep` preserves the otherwise temporary rehearsal artifacts for inspection.
-
-An exit-zero report ends with `✅ Contract ready`. The static section also prints the exact brief digest and whether live admission requires an explicit acknowledgement. This verifies the engine-to-brief contract—frontmatter, research result consumption, stop rules, terminal paths, and confirmation wiring—not the truth or quality of a future research result. A `✗` is a contract failure that should be fixed before launch; a `⚠` is a review item that may be intentional.
-
-See [Zero-token rehearsal](rehearse.md) for the complete boundary.
-
-## `flowcrew adapter`
-
-Inspect adapter state without changing the project:
-
-```bash
-flowcrew adapter
-```
-
-The output names the current configuration value, the physically installed adapter CLIs,
-and the recommended execution backend. Set a value with a directly pasteable command:
-
-```bash
-flowcrew adapter auto
-flowcrew adapter codex
-flowcrew adapter claude
-```
-
-An explicit physical adapter must be installed before it can be selected. `auto` remains
-undecided on disk: at runtime it chooses the only installed CLI, or recommended `codex`
-when both are installed. If neither is installed, live execution exits nonzero and prints
-both installation commands. Runtime fallback is in memory only; `quick`, `start`, and the
-dashboard never rewrite `config/defaults.yaml` while resolving an adapter. Existing
-projects with explicit `codex` or `claude` values remain valid and are not migrated.
-
-`flowcrew init` uses the same facts when creating a new project. With both CLIs it prompts
-only on a TTY and preselects `codex`; non-interactive init chooses the recommendation and
-states why. With neither CLI it creates `adapter: auto` and succeeds, so daemon-oriented
-or image-building scaffolds cannot hang on a prompt.
-
-## `flowcrew guide`
-
-Target a running run directly whenever more than one task may be executing:
-
-```bash
-flowcrew guide --run 2026-08-02T12-00-00-a1b2c3 "try the isolated reproduction"
-```
-
-Without `--run`, guidance is sent only when exactly one readable run is currently
-executing. With no running run or multiple candidates, the command exits non-zero
-without writing any `user_input.md`; the ambiguous case lists the candidate run IDs
-and task titles. Explicit targets must exist and still be running. The selected supervisor
-consumes the input on its next heartbeat, normally within 30 seconds.
-
-Direct stage guidance is also checked at executable tool-call start and completion
-boundaries. When new guidance is found there, FlowCrew closes only that adapter
-invocation and gives the text to a same-attempt continuation; it does not execute
-the guidance, extend the deadline, widen scope, or lower a gate.
-
-## `flowcrew interrupt`
-
-Stop the one command currently attributed to a named running stage:
-
-```bash
-flowcrew interrupt --run 2026-08-02T12-00-00-a1b2c3 --stage repair \
-  "the projected sample cannot fit; stop it and report the measured rate"
-```
-
-Both selectors and a non-empty reason are required. The command refuses if the run
-or stage is not running, command lifecycle evidence is stale, no command is active,
-or more than one command is active. It writes the reason as operator guidance first,
-then atomically publishes a one-shot request bound to the current attempt, command ID,
-and normalized command fingerprint. The worker terminates the current adapter process
-group and continues within the same immutable attempt. This is distinct from an adapter
-crash, supervisor abort, attempt timeout, and whole-run cancellation. If the stage starts
-the same normalized command again, `interrupted_command_repeated` records the original
-request and guidance IDs.
-
-## `flowcrew quick`
-
-`flowcrew quick` runs an already-authored task brief without needing the dashboard server.
-It always prints the shared static preflight before loading an adapter, writing the project
-brief, registering a daemon task, or creating a run. A single-line request is reported as
-plain text because no structured brief contract was available to validate; use the `ship`
-skill (`/ship` in Claude Code, `$ship` in Codex) to author one or
-`flowcrew rehearse <brief.md>` to inspect a file first.
-
-```bash
-flowcrew quick "fix failing tests"
-flowcrew quick - < task.md
-flowcrew quick --background - < task.md
-```
-
-Warnings and contract failures are honest diagnostics, not an absolute denial policy. If
-the report has consequential findings, `quick` exits before launch and prints the exact
-digest-valued continuation flag. A human two-pass launch can use:
-
-```bash
-flowcrew quick - < task.md
-flowcrew quick --acknowledge-brief-warnings=<digest-from-report> - < task.md
-```
-
-CI and cron may use the bare `--acknowledge-brief-warnings` flag when their policy accepts
-findings on the current input. It still inspects and prints every result, and it never reads
-an interactive answer from stdin, so unattended jobs cannot hang. Reading a file through
-stdin preserves trailing newlines; `--task "$(cat task.md)"` does not.
-
-> [!WARNING]
-> `quick` runs the selected agent without approval or sandbox prompts and can retain full shell access for hours. Use a dedicated workspace or isolated environment. It also writes the submitted task to `<projectDir>/docs/task_brief.md`; if different content already exists there, FlowCrew warns and then replaces it.
-
-Common flags:
-
-| Flag | Default | Description |
-|---|---|---|
-| `--project <path>` | cwd | Project directory |
-| `--adapter <name>` | `defaults.yaml` | Registered adapter: `auto`, `codex`, `claude`, or `mock` |
-| `--workflow <name>` | `default` | Workflow from `config/workflows/` |
-| `--max-iterations <n>` | config | Max plan-execute-review cycles |
-| `--supervise` | on | Enable supervisor |
-| `--no-supervise` | off | Disable supervisor for this run |
-| `--campaign <name>` | config or cwd slug | Attach run to a campaign |
-| `--no-campaign` | off | Run without campaign tagging |
-| `--campaign-context=inherit\|skip` | history-sensitive | Include or skip relevant planner history without changing campaign ownership. With no flag, three or more adverse endings among the ten most recent completed campaign tasks default to `skip`; otherwise context is inherited. |
-| `--background` | off | Register with daemon and detach |
-| `--acknowledge-brief-warnings[=<digest>]` | off | Explicitly continue the current inspected brief; never skip the report |
-| `--task "text"` | none | Provide task as a flag |
-| `-` | none | Read task from stdin |
-
-Unknown adapter names fail before a task runs and list the registered values. The `mock` adapter reads deterministic per-stage JSON files from `MOCK_FIXTURE_DIR` and never invokes a model; use the isolated example in [`examples/README.md`](../examples/README.md) to see a complete zero-token loop.
-
-Stage execution duration is configured only by
-`config/defaults.yaml::default_timeout_ms`. The removed `--timeout` run override
-fails with a migration hint instead of silently creating a second control.
-
-Campaign ownership and planner context are separate dimensions. `--no-campaign` makes the run fully
-standalone: it writes no campaign telemetry, contributes no campaign KG aggregation, and appears
-ungrouped in the dashboard. `--campaign-context=skip` keeps the run attached and grouped, but omits the
-verbose prior-run score/phase block from planner prompts. The compact deduplicated ledger, including all
-known dead ends, remains available. `--no-inherit-campaign` is retained only as a compatibility alias for
-`--campaign-context=skip`; new commands and scripts should use the explicit context form.
-When neither context flag is supplied, `quick` consumes the same campaign-hygiene decision shown by
-`ship-preflight`: three or more adverse endings among the ten most recent completed campaign tasks
-selects `skip` and prints the reason. An explicit `--campaign-context=inherit` always overrides that
-reversible default. Continuations retain their recorded choice.
-
-Research configuration belongs in the brief's leading YAML frontmatter. See
-[Brief and file contract](brief-contract.md).
-
-## Campaign Commands
-
-Validate and inspect a campaign configuration without launching it:
-
-```bash
-flowcrew campaign run examples/example_campaign.yaml --dry-run
-```
-
-The example prints the resolved campaign plan and exits with `Campaign hello-research-example: dry_run`. Its launch command is intentionally a placeholder; replace the launch settings before removing `--dry-run`.
-
-The complete subcommand set is:
-
-```bash
-flowcrew campaign run <config.yaml> [--dry-run] [--background]
-flowcrew campaign status <campaignId>
-flowcrew campaign stop <campaignId>
-flowcrew campaign pending <campaignId>
-flowcrew campaign review <campaignId>
-```
-
-`pending` lists proposed brief patches. `review` interactively accepts,
-rejects, skips, or quits them; redirected standard input supplies scripted
-answers one per line.
-
-## `flowcrew campaign-loop`
-
-```bash
-flowcrew campaign-loop - --project <dir> --campaign <name> \
-  [--max-directions N] [--no-scout]
-flowcrew campaign-loop - --project <dir> --campaign <name> \
-  < research.brief.md
-```
-
-Use a `research:` frontmatter block. The outer parser also accepts the
-`objective:` alias, and spawned inner `quick` runs use the canonical parsed
-research configuration for workflow selection. Unless `--no-scout` is present,
-the configured literature scout may use live model and network access. This is
-a long-running live command, not a rehearsal.
-
-## `flowcrew doctor`
-
-Checks the agent CLIs (installed and authenticated), each installed agent's FlowCrew skill
-copies, `config/defaults.yaml` and the configured adapter, every `config/agents/*.yaml` and
-the shared base prompt, and whether the dashboard port is already held. Agents absent from
-`PATH` receive no missing-skill warning. For an installed agent, doctor checks the supported
-project and global paths against the packaged source bytes, reports incomplete, changed, or
-older copies, and gives the matching `skills/install.sh --<agent> --global|--project`
-command.
-
-Doctor is diagnostic-only: it reports the installed adapters, current value, recommendation,
-and a pasteable `flowcrew adapter <name>` correction without creating or changing project
-files. Installation commands come from the same shared constants used by runtime errors.
-
-The port check does more than report "something is listening": when a FlowCrew dashboard
-answers, it resolves the listener's pid through `/proc` and compares the serving process's
-working directory against this checkout's own root. `ok` means this install's dashboard is
-running; a `warn` names the other checkout serving that port (and the alternate-port
-command to start this one alongside it) instead of falsely reporting success. The PATH
-check likewise resolves the `flowcrew` executable with `realpath` and compares it with this
-checkout's built CLI; another checkout is reported as a different install, never as `ok`.
-
-`flowcrew doctor --repair-registry` and `--compact-registry` are documented under
-[Registry maintenance](#registry-maintenance) below.
-
-## Daemon Commands
-
-```bash
-flowcrew daemon status
-flowcrew daemon restart
-flowcrew daemon restart --force
-flowcrew daemon start        # compatibility: only starts when no daemon is listening
-flowcrew daemon stop
-flowcrew daemon logs [--tail N] [--follow]
-flowcrew daemon serve        # foreground/internal orchestrator service entry
-flowcrew task list
-flowcrew task show <id>
-flowcrew task cancel <id>
-```
-
-`flowcrew start` and `flowcrew daemon serve` are deliberately different: **start is the web dashboard**;
-**daemon serve is the long-lived background orchestrator** that owns `daemon.sock`. Existing `daemon start`
-scripts remain compatible, but `flowcrew daemon restart` is the operator entry point for loading a new engine build.
-On Linux it resolves the listener from the Unix-socket inode in `/proc`, never from a command-line pattern.
-Off Linux there is no inode-to-pid map to consult, so it falls back to the pid the daemon recorded for itself
-and accepts it only while that process is still alive — strictly weaker than the inode lookup, and stated
-here rather than implied away.
-
-`flowcrew daemon status` prints the listener pid, `startedAt`, socket path, startup-time SHA-256 build hash,
-module count, uptime, watched-task count, and unreadable registry-record count. The startup identity is persisted
-as `daemon.json` beside the configured socket (so a custom `FLOWCREW_DAEMON_SOCKET` keeps all daemon state together).
-If current `dist/**/*.js` content differs from the process's loaded build, status prints
-`STALE: dist is newer than the running daemon — its fixes are NOT loaded` and exits 2. Missing or conflicting
-identity is `UNVERIFIED` and also exits nonzero.
-
-Restart has a replay-safety interlock. If any task is `running` without a bound `run_id`, restart exits 3 before
-stopping or signaling anything and lists `flowcrew task cancel <id>` commands. `--force` explicitly accepts that
-brief-replay risk; it does not bypass unreadable registry evidence. A successful background registration names
-the receiver as `Task #N registered (daemon pid=…, build=…)`. If the RPC response times out after delivery, the
-outcome remains unknown—confirm both task state and receiver freshness with `flowcrew daemon status`; the timeout
-does not claim the daemon was absent.
-
-`flowcrew dashboard status [--port N]` remains a status-only command. When it proves the
-loaded Dashboard is stale, it reports the validated PID and selected port in an executable
-next step: `kill <pid> && PORT=<port> flowcrew start`. It does not advertise a nonexistent
-`dashboard restart` command.
-
-Additional task operations are:
-
-```bash
-flowcrew task list [--status active|all|<task-status>] [--limit N] [--with-summary]
-flowcrew task show <id> [--summary-only | --raw]
-flowcrew task retry <id>
-flowcrew task tail <id> [--tail N] [--follow|-f]
-```
-
-`task list` and `task show` keep the persisted lifecycle status intact. When the bound run's
-recorded terminal artifact maps unambiguously to a different declared terminal status, they
-display that artifact status beside the lifecycle status rather than silently presenting the
-contradiction as an ordinary completion.
-
-Both commands use a bounded operational projection: task launch number, bound run, current
-stage execution, elapsed time, latest reason/rejection/guidance, pending scope or approval
-decisions, and source coverage. `task show` hides the tick-log JSON by default; `--raw` is the
-explicit escape hatch for its path and recent records. A task retry creates another **launch**;
-a stage retry is another **execution**; a repeated gate after repair is a **re-evaluation**.
-
-`task tail` reads the run's captured output. Where a systemd user journal exists, `--follow` streams it
-through `journalctl`; where it does not — macOS, or any Linux without a systemd session — it follows the
-log the supervising shim captured instead. If neither is available it says so and exits, rather than
-failing on a missing binary.
-
-### Registry maintenance
-
-```bash
-flowcrew doctor --repair-registry [--apply]
-flowcrew doctor --compact-registry [--apply]
-```
-
-The registry that tracks background tasks is append-only, so a process killed mid-write can
-leave a torn final row. `--repair-registry` recovers what is recoverable and quarantines the
-rest rather than guessing; `--compact-registry` rewrites the file down to the last record per
-task, which is what `daemon status` counts.
-
-Both are **dry-run by default**: without `--apply` they report what they would change and
-exit without touching the file. `--apply` takes a backup and verifies it is readable before
-the original is replaced.
-
-## Approval Inbox
-
-```bash
-flowcrew inbox list [--state pending|resolved|all] [--run <runId>]
-flowcrew inbox show <requestId> [--run <runId>]
-flowcrew inbox approve <requestId> [--reason "..."] [--always] [--no-resume]
-flowcrew inbox deny <requestId> [--reason "..."] [--no-resume]
-flowcrew inbox rules
-flowcrew inbox revoke <action> <target> [--project <dir>]
-```
-
-See [Approval inbox](approvals.md) for park/resume, first-wins resolution, and
-standing-rule restrictions.
-
-## Versioned Briefs
-
-```bash
-flowcrew brief head <briefDir>
-flowcrew brief diff <briefDir> <fromVersion> <toVersion>
-flowcrew brief rollback <briefDir> <version>
-flowcrew brief log <briefDir>
-```
-
-Rollback makes historical content the new head and records a revision; it does
-not erase version history.
-
-## Reality Audit
-
-```bash
-flowcrew audit-reality
-flowcrew audit-reality --task <id>
-flowcrew audit-reality --range last-21-days
-flowcrew audit-reality --output <report.md>
-```
-
-Reality audit applies deterministic checks to past runs and reports which terminal results were supported by real evidence. With `--output`, it writes and also prints the Markdown report.
+| `init`, `adapter`, `doctor` | Is local configuration/runtime ready? |
+| `ship-preflight`, `rehearse`, `plan-check`, `ship-setup` | What can be established before launch? |
+| `quick` | Run or register a saved brief |
+| `status`, `list`, `state`, `events`, `watch` | What happened or is happening? |
+| `guide`, `interrupt` | Request guidance or stop an active stage command |
+| `daemon`, `task`, `dashboard`, `start` | Operate the orchestrator or dashboard |
+| `inbox` | Resolve a per-request approval |
+| `campaign`, `brief` | Inspect grouped history and versioned brief patches |
+| `fc_tasks` | Inspect/update optional conversation ledger intent |
+| `audit-reality`, `land`, `export`, `clean` | Recheck, preserve, export or reclaim records |
+| `version` | Which package version is this? |
+
+`race` is removed. `quick --supervise`, `--no-supervise`, `--foreground`, `--hold-gates`
+and unknown long options refuse with exit 1. `--timeout`/`--timeout=...` refuses with a
+engine-default migration hint. Foreground is the absence of `--background`.
+Standing approval rules are retired. Historic usage records remain readable.
+
+Source: [dispatch/bootstrap](../src/cli.ts), [early ledger](../src/cli-fc-tasks.ts).
+
+## Inspection and setup
+
+| Synopsis | Parsed options and exit contract |
+|---|---|
+| `init` | No command-specific options. Creates global run storage and the project's stage-skill extension directory. |
+| `adapter [auto\|codex\|claude]` | No argument reads engine choice/installed executables; setter writes engine defaults and refuses unavailable physical backend. |
+| `doctor` | Diagnostics; exit 1 for failures, 0 also permits warnings. `--repair-registry` or `--compact-registry` select dry-run maintenance; `--apply` performs it. Conflicting maintenance selection refuses. |
+| `ship-preflight` | `--json`, `--no-baseline`, `--project`, `--target`, `--campaign`, `--brief`; value options accept separate or equals syntax. Exit 0 for completed fact collection, 1 for argument/read/collection failure. No validation execution. |
+| `rehearse <brief>` | `--static-only`, `--keep`, `--project`, `--target` (paths also accept equals). Exit 0 for ready even with warnings, 1 for contract/environment failure. `--json` is not a parsed output mode despite abbreviated help. |
+| `plan-check <dispatch-file>` | Exactly one of `--brief <file>` or `--run <run-directory>`; `--project <path>` defaults to cwd. Reads draft and returns JSON admission facts, 0 pass / 1 refusal. Run selector here is a directory, unlike `state`. |
+| `ship-setup` | Required `--brief`, `--target`, `--base`, `--branch`; optional `--project`, `--json`. Value options accept equals, duplicates refuse. Exit 0 only for ready record publication, 1 refusal. |
+
+Doctor can inspect authentication state and the dashboard listener. Preflight may inspect
+isolated daemon/build identity; neither is a model launch. Rehearsal runs real declared shell
+confirmation in its disposable project unless static-only. Review it first.
+
+Sources: [core diagnostics](../src/cli.ts), [maintenance](../src/cli-doctor.ts),
+[preflight parser](../src/cli-ship-preflight.ts), [rehearse parser](../src/rehearse.ts),
+[plan parser](../src/plan-interface.ts), [setup parser](../src/cli-ship-setup.ts).
+
+## Launch
+
+`quick <brief-path|task-text|->` accepts a path, joined positional text, `--task <text>` or
+stdin `-`. Saved briefs need extractable criteria; warning acknowledgment cannot admit a
+brief with no criteria. Other preflight findings are advisory and printed before project/run mutation.
+Quick writes the submitted brief to `docs/task_brief.md`
+in the selected project and warns before replacing different content.
+
+| Option | Meaning |
+|---|---|
+| `--project <path>` | Select launch project |
+| `--adapter <name>` | Override backend; registered auto/codex/claude/mock routing |
+| `--workflow <name>` | Explicit workflow file name |
+| `--max-iterations <n>` | Run iteration override |
+| `--campaign <name>`, `--no-campaign` | Campaign selection/opt-out |
+| `--campaign-context=inherit\|skip` | Context policy; equals form required |
+| `--no-inherit-campaign` | Compatibility alias for skip |
+| `--background` | Register with daemon; daemon must be available |
+| `--acknowledge-brief-warnings[=<digest>]` | Confirm changed-run continuation; an optional exact digest checks input identity |
+| `--task <text>`, `-` | Alternate input transport |
+| `--existing-run-id <id>` | Existing-run continuation; reads saved run brief absent exact transported input |
+
+Internal launch transport also parses `--brief-input-base64 <base64url>` and
+`--brief-admission-record <record>`. They bind engine-transferred exact bytes and admission;
+use the ordinary file/stdin route in operator scripts. Help omits these internal fields.
+Do not use shell command substitution to transport saved brief bytes: it strips trailing
+newlines. Quick has multiple refusal/settlement paths; zero means the process succeeded,
+not that a research metric won. Inspect final lifecycle and evidence.
+
+Source: [quick parser/admission/launch](../src/cli.ts), [adapter registry](../src/adapters/loader.ts).
+
+## Read and steer
+
+| Synopsis | Parsed options |
+|---|---|
+| `status` | `--all` or `--project <path>`/`--project=<path>`, `--details`; ambiguous selection refuses |
+| `list` | `--limit N`, default 10; recent global runs |
+| `state` | Required `--project <path>`, `--run <id>`; `--summary`, `--prompts`; JSON, 0 read / 1 error |
+| `events` | `--run`, `--project`, `--stage`, `--type <comma-list>`, `--limit` (1–10000, default 100), `--json`, `--follow`/`-f`, `--include-maintenance`; value options accept equals |
+| `watch` | `--once`, `--all`, `--poll <seconds>`/equals; positive seconds within the Node timer limit (2147483.647), default 45; 1 for invalid arguments, alerts alone do not mean command failure |
+| `guide "message"` | Optional `--run <id>`, `--stage <id>`; omission of run requires exactly one running candidate; 1 for invalid/ambiguous targets |
+| `interrupt ["reason"]` | Required `--run <id>`, `--stage <id>`; exactly one active bound command; omitted reason uses an action description; 1 refusal |
+
+Source: [core status/steering](../src/cli.ts), [state](../src/run-state-access.ts),
+[events](../src/cli-events.ts), [watch](../src/cli-watch.ts).
+
+## Services and tasks
+
+| Synopsis | Options and outcomes |
+|---|---|
+| `start` | Starts dashboard only. `PORT` and `PROJECT_DIR` select listener/project. It can build missing UI; occupied port refuses before that write. Long-running process. |
+| `dashboard status` | `--port N`, otherwise PORT/3000. Exit 0 verified fresh; 1 unreachable/invalid arguments; 2 stale or unverified response. |
+| `daemon start\|serve\|stop\|restart\|status\|logs` | `--port` or `--socket` selects socket path (port is a compatibility spelling). Start/restart accept `--force`; logs `--tail N` (default 100), `--follow`. Serve is the resident internal process. |
+| `task list` | `--status active\|all\|<task-status>`, `--limit N`, `--with-summary` |
+| `task show <numeric-id>` | `--summary-only`, `--raw` for tick JSON |
+| `task cancel <numeric-id>` | Record cancellation and attempt owned worker cleanup; an active run becomes `stopped` |
+| `task resume <numeric-id>` | Continue the task's stopped, failed or incomplete run, preserving completed stages, history, plan and iteration budget |
+| `task retry <numeric-id>` | Request another launch attempt; a settled terminal run starts fresh, discarding its continuation state |
+| `task tail <numeric-id>` | `--tail N` (default 100), `--follow`/`-f` |
+
+Open the dashboard at `http://localhost:<PORT>/`; [configuration](configuration.md#runtime-environment)
+owns the default listener port.
+
+Task commands also parse socket `--port`/`--socket`. Daemon status returns 0 for verified
+fresh, 1 when no listener, 2 for stale/unverified/nonresponsive evidence; read the diagnosis.
+Restart force can accept active-task replay risk but cannot bypass registry corruption.
+These commands can control other work; use them only for an intentionally selected service.
+Resume resolves the saved run and project from the task ID. The dashboard offers the
+same Resume control beside Cancel. A completed nonpassing gate in an incomplete run
+is retried in the next remaining iteration; exhausted iteration budget is an error.
+Stopped and failed work continues its current iteration. CLI output exits quietly
+when a pipe reader closes early. Restart, recovery and automatic retry never resume
+a stopped run. Retry remains distinct: before a run settles it requests another launch;
+after terminal settlement it starts a new run instead of continuing the previous one.
+Parked approval requests continue through `inbox approve` or `inbox deny`.
+
+Sources: [daemon](../src/cli-daemon.ts), [task](../src/cli-task.ts),
+[dashboard identity](../src/cli-dashboard.ts), [dashboard startup](../src/cli.ts).
+
+## Approval and campaign controls
+
+| Synopsis | Options |
+|---|---|
+| `inbox list` | `--state pending\|resolved\|all`, `--run <id>` |
+| `inbox show <request-id>` | Optional `--run` to disambiguate |
+| `inbox approve\|deny <request-id>` | `--run`, `--reason <text>`, `--no-resume`; 0 winning resolution, 2 lost first-responder race, 1 failure |
+| `campaign status\|pending\|review <campaign-id>` | No command-specific flags; review reads accept/reject/skip/quit interactively or one answer per stdin line |
+| `brief head\|log <brief-directory>` | Inspect current version or revision log |
+| `brief diff <brief-directory> <from> <to>` | Inspect version difference |
+| `brief rollback <brief-directory> <version>` | Author a rollback revision |
+
+`inbox --always`, `rules`, `revoke` refuse. Decisions can relaunch work unless no-resume.
+Only explicit external authority requests wait for a human. Legacy local or ambiguous
+requests receive engine decisions without parking; resolved history includes those answers.
+An approval cannot override engine ownership or admitted scope guards.
+Campaign review/brief rollback change versioned state; review a patch before accepting it.
+
+Sources: [inbox parser](../src/cli-inbox.ts), [campaign/brief dispatch](../src/cli.ts).
+
+## Audit, export and cleanup
+
+| Synopsis | Options and boundary |
+|---|---|
+| `audit-reality` | `--task <numeric-id>`, `--range last-21-days`, `--output <path>`; executes recorded deterministic checks and prints Markdown. Exit 0 for completed audit, including failed/unverifiable rows. |
+| `land` | Required `--run`; `--json`; `--remove`, `--acknowledge-regenerable=<count>`; optional closure pair `--complete-fc-task`, `--fc-task-session`, `--fc-tasks-root`. Value options also accept separate syntax. Audit/removal outcomes can refuse nonzero; read reasons. |
+| `export [run-id]` | Writes a JSON bundle to the current directory, default latest global run |
+| `clean` | `--keep N`, default 5; removes selected old readable runs and expired reservations, skipping verified live schedulers; zero keeps no recent readable runs |
+
+These are execution or deletion authority, not passive status commands. Detailed preservation
+requirements are in [operations](operations.md#preserve-and-reclaim).
+
+Sources: [audit](../src/reality-gate/audit-reality.ts), [landing](../src/cli-land.ts),
+[export/clean](../src/cli.ts).
+
+## Optional ledger
+
+`fc_tasks render|list|reconcile|create|update` uses a separate validating parser.
+[Ledger reference](fc_tasks.md) owns its complete option and record grammar. It does not
+install frontend configuration or implicitly close human wrap-up because a run ended.

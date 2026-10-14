@@ -1,3 +1,5 @@
+import { appendFileSync, mkdirSync } from './engine-fs.js';
+
 /**
  * Approval inbox — a durable, idempotent, resolve-from-anywhere queue for the
  * consequential actions an unattended run must NOT take on its own.
@@ -20,29 +22,18 @@
  *     read-modify-write, because append order IS the arbiter.
  * There is no second source of truth to rebuild or keep in sync.
  *
- * A request-time `--always` grant remains restricted to an EXTERNAL-risk action
- * bound to an exact target. Separately, an operator may explicitly create a
- * project-bound action-pattern rule. That broader grant is never inferred from
- * a request; it exists only after an operator names both the project and action
- * pattern through the rules CLI.
  */
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  realpathSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
-import { isValidApprovalRequestId } from './approval-artifacts.js';
+import { existsSync, readdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { dirname, join } from 'node:path';
+import { approvalArtifactPath, isStageOwnedApprovalTarget, isValidApprovalRequestId } from './approval-artifacts.js';
 import { readJsonlFile } from './jsonl.js';
-import { fcGlobalDir, runDir, runsRoot } from './store.js';
+import { runDir, runsRoot, withRunStateLock } from './store.js';
+import { appendRunEventAtRunDir, readRunEvents } from './run-events.js';
+import { inspectRunScheduler } from './run-lock.js';
+import { publishJsonCreateOnly } from './runtime-negotiation.js';
 
-/** Risk classes a brief may declare on a request. Only `external` is eligible for request-time `--always`. */
+/** Only external authority needs a human. Other risks are legacy transport metadata. */
 export type ApprovalRisk = 'external' | 'exec' | 'write' | 'unknown';
 
 export interface ApprovalRequest {
@@ -53,7 +44,7 @@ export interface ApprovalRequest {
   requestId: string;
   /** What the agent wants to do, e.g. "deploy" / "spend" / "send_order". */
   action: string;
-  /** The exact object of the action, e.g. "binance-mainnet" — required for request-time `--always`. */
+  /** The exact object of the action, e.g. "binance-mainnet" */
   target?: string;
   risk: ApprovalRisk;
   title: string;
@@ -73,6 +64,7 @@ export interface ApprovalResolution {
   by: string;
   at: string;
   reason?: string;
+  source?: 'operator' | 'scheduler';
   /** True when this resolution ALSO minted a standing rule. */
   always?: boolean;
   /** Set when the decision came from a pre-existing standing rule rather than a human. */
@@ -102,48 +94,7 @@ export function isPendingInboxItemState(state: string): boolean {
   return state === INBOX_ITEM_STATE.PENDING;
 }
 
-export interface StandingRule {
-  projectDir: string;
-  action: string;
-  target: string;
-  grantedBy: string;
-  grantedAt: string;
-  /** requestId that occasioned the rule — audit trail only. */
-  fromRequestId?: string;
-}
-
-/**
- * A broader grant that can only be authored by an explicit operator command.
- * `actionPattern` is an anchored glob where `*` is the sole metacharacter.
- */
-export interface ProjectActionStandingRule {
-  version: 1;
-  kind: 'standing_rule';
-  id: string;
-  projectDir: string;
-  actionPattern: string;
-  decision: 'approve';
-  grantedBy: string;
-  grantedAt: string;
-}
-
-export type ApprovalStandingRule = StandingRule | ProjectActionStandingRule;
-
-/** Compatibility shape for existing consumers, plus a stable audit identity. */
-export interface StandingRuleMatch extends StandingRule {
-  id: string;
-  actionPattern: string;
-  decision: 'approve';
-  source: 'legacy_exact' | 'project_action';
-}
-
 const approvalsPath = (projectDir: string, runId: string) => join(runDir(projectDir, runId), 'approvals.jsonl');
-const rulesPath = () => join(fcGlobalDir(), 'approval-rules.jsonl');
-
-function canonicalProjectDir(projectDir: string): string {
-  const absolute = resolve(projectDir);
-  try { return realpathSync.native(absolute); } catch { return absolute; }
-}
 
 function appendJsonl(path: string, rec: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -159,8 +110,8 @@ function readJsonl<T>(path: string): T[] {
 
 /**
  * Record a request. Idempotent on (runId, requestId): a second call with the
- * same key returns the ORIGINAL record and appends nothing, which is what makes
- * a resumed run safe to re-scan the same request file.
+ * same key retains the ORIGINAL request. Non-external requests settle once
+ * under existing engine authority, including historical pending requests.
  */
 export function recordRequest(req: Omit<ApprovalRequest, 'kind'>): { item: InboxItem; created: boolean } {
   if (!isValidApprovalRequestId(req.requestId)) {
@@ -168,10 +119,19 @@ export function recordRequest(req: Omit<ApprovalRequest, 'kind'>): { item: Inbox
   }
   const path = approvalsPath(req.projectDir, req.runId);
   const existing = foldItems(req.runId).get(req.requestId);
-  if (existing) return { item: existing, created: false };
   const rec: ApprovalRequest = { kind: 'request', ...req };
-  appendJsonl(path, rec);
-  return { item: { ...rec, state: INBOX_ITEM_STATE.PENDING }, created: true };
+  if (!existing) appendJsonl(path, rec);
+  let item: InboxItem = existing ?? { ...rec, state: INBOX_ITEM_STATE.PENDING };
+  if (isPendingInboxItemState(item.state) && item.risk !== 'external') {
+    const owned = isStageOwnedApprovalTarget(runDir(item.projectDir, item.runId), item.stageId, item.target);
+    item = resolveRequest(item.projectDir, item.runId, item.requestId, owned ? 'approve' : 'deny', {
+      by: 'engine', source: 'scheduler',
+      reason: owned
+        ? 'Existing stage scratch authority; no human authorization required. This grants no external effects.'
+        : 'This request grants no new authority; existing admitted work may proceed. Use execution/scope mechanisms; request risk external only for an effect outside the run.',
+    }).item;
+  }
+  return { item, created: !existing };
 }
 
 /**
@@ -184,7 +144,7 @@ export function resolveRequest(
   runId: string,
   requestId: string,
   decision: 'approve' | 'deny',
-  opts: { by?: string; reason?: string; always?: boolean; viaRule?: string; now?: () => Date } = {},
+  opts: { by?: string; reason?: string; now?: () => Date; source?: 'operator' | 'scheduler' } = {},
 ): { item: InboxItem; won: boolean; error?: string } {
   if (!isValidApprovalRequestId(requestId)) {
     return { item: undefined as unknown as InboxItem, won: false, error: `unsafe request id: ${requestId}` };
@@ -193,30 +153,52 @@ export function resolveRequest(
   const item = items.get(requestId);
   if (!item) return { item: undefined as unknown as InboxItem, won: false, error: `unknown request: ${requestId}` };
   if (!isPendingInboxItemState(item.state)) return { item, won: false, error: `already ${item.state} by ${item.resolution?.by ?? 'unknown'}` };
-
-  if (opts.always) {
-    const eligible = standingRuleEligible(item);
-    if (!eligible.ok) return { item, won: false, error: eligible.reason };
+  if (item.risk !== 'external' && opts.source !== 'scheduler') {
+    return { item: recordRequest(item).item, won: false, error: 'this request has an engine-owned decision' };
   }
+
   const at = (opts.now ?? (() => new Date()))().toISOString();
   const res: ApprovalResolution = {
     kind: 'resolution', runId, requestId, resolutionId: randomUUID(), decision,
     by: opts.by ?? 'operator', at,
     ...(opts.reason ? { reason: opts.reason } : {}),
-    ...(opts.always ? { always: true } : {}),
-    ...(opts.viaRule ? { viaRule: opts.viaRule } : {}),
+    ...(opts.source ? { source: opts.source } : {}),
   };
   appendJsonl(approvalsPath(projectDir, runId), res);
   // Re-fold so the returned state reflects who actually won the append race.
   const settled = foldItems(runId).get(requestId)!;
   const won = settled.resolution?.resolutionId === res.resolutionId;
-  if (won && decision === 'approve' && opts.always && item.target) {
-    addStandingRule({
-      projectDir, action: item.action, target: item.target,
-      grantedBy: res.by, grantedAt: at, fromRequestId: requestId,
-    });
-  }
+  if (won) publishApprovalResolution(settled);
   return { item: settled, won };
+}
+
+/** The inbox accepts cross-process decisions. Only its resident scheduler may
+ * publish canonical records while children are still running; a parked status
+ * can precede their closure. With no resident, the operator publishes directly. */
+export function publishApprovalResolution(item: InboxItem): void {
+  const resolution = item.resolution;
+  if (!resolution) return;
+  const directory = runDir(item.projectDir, item.runId);
+  const decisionPath = approvalArtifactPath(directory, item.requestId, 'decision');
+  // A settled poll must not mutate the directory that wakes the monitor.
+  if (existsSync(decisionPath) && readRunEvents(item.projectDir, item.runId).some(event => event.type === 'approval_resolved' && event.requestId === item.requestId)) return;
+  withRunStateLock(directory, () => {
+    const scheduler = inspectRunScheduler(item.runId, directory);
+    if (scheduler.kind === 'corrupt' || scheduler.kind === 'unverifiable'
+      || (scheduler.kind === 'live' && scheduler.pid !== process.pid)) return;
+    publishJsonCreateOnly(decisionPath, {
+      requestId: item.requestId, decision: resolution.decision, by: resolution.by,
+      reason: resolution.reason ?? '', at: resolution.at,
+    });
+    if (!readRunEvents(item.projectDir, item.runId).some(event => event.type === 'approval_resolved' && event.requestId === item.requestId)) {
+      appendRunEventAtRunDir(directory, {
+        type: 'approval_resolved', runId: item.runId, timestamp: resolution.at, requestId: item.requestId,
+        stageId: item.stageId, decision: resolution.decision === 'approve' ? 'accepted' : 'rejected',
+        detail: `${resolution.decision} ${item.action}${item.target ? ' → ' + item.target : ''} (${item.requestId})`,
+        source: resolution.source ?? 'operator',
+      });
+    }
+  });
 }
 
 /**
@@ -269,182 +251,3 @@ function safeReaddir(dir: string): string[] {
   try { return readdirSync(dir); } catch { return []; }
 }
 
-// ------------------------------------------------------------ standing rules
-
-/**
- * An "always allow" grant is only offered where it is machine-checkably bounded:
- * an EXTERNAL-risk action with an exact target. Exec/write actions and untargeted
- * actions ask every time — their blast radius is not pinned by the grant.
- */
-export function standingRuleEligible(item: ApprovalRequest): { ok: boolean; reason?: string } {
-  if (item.risk !== 'external') {
-    return {
-      ok: false,
-      reason: `request-time --always rules are only allowed for risk=external (this request is risk=${item.risk}); approve it once, or explicitly add a project action rule with flowcrew inbox rules add`,
-    };
-  }
-  if (!item.target) {
-    return {
-      ok: false,
-      reason: 'request-time --always rules require an exact target; approve it once, or explicitly add a project action rule with flowcrew inbox rules add',
-    };
-  }
-  return { ok: true };
-}
-
-export function addStandingRule(rule: StandingRule): void {
-  appendJsonl(rulesPath(), { ...rule, projectDir: canonicalProjectDir(rule.projectDir) });
-}
-
-/** Legacy exact action→target rules minted by `approve --always`. */
-export function listStandingRules(): StandingRule[] {
-  return listApprovalStandingRules().filter(isLegacyStandingRule);
-}
-
-/** Every supported on-disk rule, preserving JSONL order for first-match semantics. */
-export function listApprovalStandingRules(): ApprovalStandingRule[] {
-  return readJsonl<unknown>(rulesPath()).filter(isApprovalStandingRule);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
-function isLegacyStandingRule(value: ApprovalStandingRule | unknown): value is StandingRule {
-  return isRecord(value)
-    && typeof value.projectDir === 'string'
-    && typeof value.action === 'string'
-    && typeof value.target === 'string'
-    && typeof value.grantedBy === 'string'
-    && typeof value.grantedAt === 'string';
-}
-
-export function isProjectActionStandingRule(
-  value: ApprovalStandingRule | unknown,
-): value is ProjectActionStandingRule {
-  return isRecord(value)
-    && value.version === 1
-    && value.kind === 'standing_rule'
-    && typeof value.id === 'string'
-    && value.id.length > 0
-    && typeof value.projectDir === 'string'
-    && typeof value.actionPattern === 'string'
-    && value.actionPattern.length > 0
-    && value.decision === 'approve'
-    && typeof value.grantedBy === 'string'
-    && typeof value.grantedAt === 'string';
-}
-
-function isApprovalStandingRule(value: unknown): value is ApprovalStandingRule {
-  return isLegacyStandingRule(value) || isProjectActionStandingRule(value);
-}
-
-function normalizeActionPattern(actionPattern: string): string {
-  const normalized = actionPattern.trim();
-  if (!normalized) throw new Error('standing rule action pattern must not be empty');
-  if (normalized.length > 256) throw new Error('standing rule action pattern must be at most 256 characters');
-  if (/\r|\n|\0/u.test(normalized)) throw new Error('standing rule action pattern must be one line');
-  return normalized;
-}
-
-function actionMatchesPattern(action: string, actionPattern: string): boolean {
-  const escapedParts = actionPattern
-    .split('*')
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'));
-  return new RegExp(`^${escapedParts.join('.*')}$`, 'u').test(action);
-}
-
-/** Stable identity for both versioned and pre-versioned rules. */
-export function standingRuleId(rule: ApprovalStandingRule): string {
-  if (isProjectActionStandingRule(rule)) return rule.id;
-  return `legacy-${createHash('sha256')
-    .update(JSON.stringify([
-      canonicalProjectDir(rule.projectDir), rule.action, rule.target,
-      rule.grantedBy, rule.grantedAt, rule.fromRequestId ?? '',
-    ]))
-    .digest('hex')
-    .slice(0, 16)}`;
-}
-
-export function addProjectActionStandingRule(input: {
-  projectDir: string;
-  actionPattern: string;
-  decision: 'approve';
-  grantedBy: string;
-  grantedAt?: string;
-}): { rule: ProjectActionStandingRule; created: boolean } {
-  const projectDir = canonicalProjectDir(input.projectDir);
-  const actionPattern = normalizeActionPattern(input.actionPattern);
-  const existing = listApprovalStandingRules().find((rule): rule is ProjectActionStandingRule =>
-    isProjectActionStandingRule(rule)
-      && canonicalProjectDir(rule.projectDir) === projectDir
-      && rule.actionPattern === actionPattern
-      && rule.decision === input.decision);
-  if (existing) return { rule: existing, created: false };
-
-  const rule: ProjectActionStandingRule = {
-    version: 1,
-    kind: 'standing_rule',
-    id: randomUUID(),
-    projectDir,
-    actionPattern,
-    decision: input.decision,
-    grantedBy: input.grantedBy,
-    grantedAt: input.grantedAt ?? new Date().toISOString(),
-  };
-  appendJsonl(rulesPath(), rule);
-  return { rule, created: true };
-}
-
-/** The rule that pre-authorizes this request, if any. */
-export function matchStandingRule(req: Omit<ApprovalRequest, 'kind'>): StandingRuleMatch | undefined {
-  const projectDir = canonicalProjectDir(req.projectDir);
-  for (const rule of listApprovalStandingRules()) {
-    if (canonicalProjectDir(rule.projectDir) !== projectDir) continue;
-    if (isProjectActionStandingRule(rule)) {
-      if (!actionMatchesPattern(req.action, rule.actionPattern)) continue;
-      return {
-        projectDir,
-        action: rule.actionPattern,
-        target: '*',
-        grantedBy: rule.grantedBy,
-        grantedAt: rule.grantedAt,
-        id: rule.id,
-        actionPattern: rule.actionPattern,
-        decision: rule.decision,
-        source: 'project_action',
-      };
-    }
-    if (req.risk !== 'external' || !req.target) continue;
-    if (rule.action !== req.action || rule.target !== req.target) continue;
-    return {
-      ...rule,
-      projectDir,
-      id: standingRuleId(rule),
-      actionPattern: rule.action,
-      decision: 'approve',
-      source: 'legacy_exact',
-    };
-  }
-  return undefined;
-}
-
-export function revokeStandingRule(projectDir: string, action: string, target: string): boolean {
-  const canonicalProject = canonicalProjectDir(projectDir);
-  const rules = listApprovalStandingRules();
-  const keep = rules.filter((rule) => {
-    if (canonicalProjectDir(rule.projectDir) !== canonicalProject) return true;
-    if (isProjectActionStandingRule(rule)) {
-      return !(rule.actionPattern === action && target === '*');
-    }
-    return !(rule.action === action && rule.target === target);
-  });
-  if (keep.length === rules.length) return false;
-  // Rewrite is safe here: rules are operator-scale (tens), and a revoke MUST
-  // remove history rather than append a tombstone the matcher could miss.
-  mkdirSync(fcGlobalDir(), { recursive: true });
-  const tmp = rulesPath() + '.tmp';
-  writeFileSync(tmp, keep.map((r) => JSON.stringify(r)).join('\n') + (keep.length ? '\n' : ''), 'utf-8');
-  try { renameSync(tmp, rulesPath()); } catch { rmSync(tmp, { force: true }); return false; }
-  return true;
-}

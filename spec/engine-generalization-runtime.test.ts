@@ -1,3 +1,6 @@
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
+import { artifacts, stageArtifacts } from './spec_contracts/declared-fixtures.js';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -9,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { parseChecksFromMarkdown, runAllChecks } from '../src/reality-gate/index.js';
@@ -18,10 +21,10 @@ import {
   inspectRealityChecks,
 } from '../src/reality-check-preflight.js';
 import {
-  appendResearchTemporalPathContract,
+  appendResearchPathContract,
   ensureTerminalArtifactValidation,
   findGateRecoveryStages,
-  normalizedResearchEvidenceDigest,
+  inspectDispatchAdmission,
   parseDispatchedStageConfig,
   recordGateValidationDelta,
   runWorkflow,
@@ -50,6 +53,9 @@ import {
   type StoreState,
 } from '../src/store.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
+import { gateValidationRefusal, settleGateValidationEvidence } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { settleGateRetries } from '../src/scheduler/sched_loop/gate-loop.js';
+import { readGateVerdict } from '../src/scheduler/sched_settlement/gate-verdict.js';
 
 const roots: string[] = [];
 const originalStateRoot = fcGlobalDir();
@@ -64,12 +70,7 @@ function seedProject(label: string, ...roles: string[]): { projectDir: string; a
   const projectDir = join(temporaryRoot(label), 'project');
   const agentsDir = join(projectDir, 'config', 'agents');
   mkdirSync(agentsDir, { recursive: true });
-  writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
-    'default_timeout_ms: 60000',
-    'default_max_iterations: 1',
-    'default_gate_retry_loops: 1',
-    'default_stage_technical_retries: 0',
-  ].join('\n'));
+  setEngineDefaults({ timeout_ms: 60000, max_iterations: 1, gate_retry_loops: 1, stage_technical_retries: 0 });
   for (const role of roles) {
     writeFileSync(join(agentsDir, `${role}.yaml`), [
       `name: ${role}`,
@@ -85,7 +86,7 @@ function seedProject(label: string, ...roles: string[]): { projectDir: string; a
 }
 
 function stage(raw: Record<string, unknown>): StageConfig {
-  return parseDispatchedStageConfig({
+  return parseDispatchedStageConfig({ artifact_contract: stageArtifacts(String(raw.id), raw.is_gate === true),
     role: 'worker',
     prompt_template: 'runtime fixture',
     scope: [],
@@ -195,9 +196,252 @@ afterEach(() => {
 });
 
 describe('engine generalization runtime bindings', () => {
+  it.each(['regression', 'authored-rejection', 'peer-regression', 'peer-green'])('settles static completion after %s against current validation', async (failure) => {
+    const { projectDir, agentsDir } = seedProject('static-gate-acceptance', 'qa', 'coder');
+    setEngineDefaults({ timeout_ms: 60000, max_iterations: 1, gate_retry_loops: 0, stage_technical_retries: 0 });
+    const gate = stage({ id: 'qa', role: 'qa', is_gate: true });
+    const workflow: WorkflowConfig = { name: 'static-gate-acceptance', defaults: { max_iterations: 1, max_retries: 0 }, stages: failure.startsWith('peer-') ? [gate, stage({ id: 'peer', role: 'coder', scope: ['validation.cjs'] }), stage({ id: 'peer_review', role: 'qa', is_gate: true, depends_on: ['peer'] })] : [gate] };
+    workflow.stages.push(...workflow.stages.filter(item => item.is_gate).map(item => stage({
+      id: `repair_${item.id}`, role: 'coder', scope: [], depends_on: [item.id], retry_to: [item.id],
+    })));
+    expect(inspectDispatchAdmission({ dispatched: workflow.stages, baseStages: [], dispatchStageId: 'plan' }).pass).toBe(true);
+    const created = createRun(projectDir, workflow.name, `name: ${workflow.name}`, workflow.stages.map(item => item.id));
+    const command = join(projectDir, 'validation.cjs');
+    writeFileSync(command, failure === 'regression'
+      ? 'console.log("FAIL spec/regression.test.ts");process.exitCode=1'
+      : 'console.log("ok")');
+    const baseline = await runProjectValidationBaseline(projectDir, {
+      commands: (['build', 'test', 'lint'] as const).map(role => ({ role, command: process.execPath, args: [command], display: `private ${role}` })),
+      runCommand: validationRunner(0),
+    });
+    writeValidationSnapshot(created.runDirPath, baseline);
+    let reviews = 0;
+    let reviewStarted!: () => void, peerFinished!: () => void;
+    const reviewing = new Promise<void>(resolve => { reviewStarted = resolve; });
+    const peerDone = new Promise<void>(resolve => { peerFinished = resolve; });
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      const summary = summaryResult(opts); if (summary) return fixtureResult(summary, opts);
+      if (opts.stageId === 'peer_review') return { output: JSON.stringify({ pass: true, reason: 'Peer reviewed', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      if (opts.stageId === 'peer') {
+        await reviewing;
+        writeFileSync(command, failure === 'peer-regression' ? 'console.log("FAIL spec/regression.test.ts");process.exitCode=1' : 'console.log("ok")');
+        peerFinished();
+        return fixtureResult({ output: 'peer', exitCode: 0, duration_ms: 1, writes: ['validation.cjs'], writeAttribution: 'structured' }, opts);
+      }
+      reviews++; reviewStarted();
+      if (failure.startsWith('peer-')) await peerDone;
+      writeFileSync(join(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify({ pass: failure !== 'authored-rejection', reason: 'Authored review' }));
+      return fixtureResult({ output: 'review', exitCode: 0, duration_ms: 1, writes: ['run:verdict_qa.json'], writeAttribution: 'structured' }, opts);
+    } };
+    const final = await runWorkflow(workflow, `name: ${workflow.name}`, projectDir, adapter, new Map(), undefined, agentsDir,
+      created.runId, '# Require accepted gates.', true);
+    expect(final.status).toBe(failure === 'peer-green' ? 'complete' : 'incomplete');
+    const receipt = JSON.parse(readFileSync(join(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
+    expect(receipt.pass).toBe(failure === 'authored-rejection' || failure === 'peer-green');
+    expect(final.stages.qa.status).toBe('complete');
+    expect(reviews).toBe(failure === 'regression' ? 0 : 1);
+    expect(final.stages.qa.attempts).toHaveLength(1);
+  });
+  it.each(['regression', 'regression-with-report', 'post-write-regression', 'persistent-unknown', 'transient-unknown', 'semantic'])
+  ('settles %s before spending gate review and preserves semantic repair', async (failure) => {
+    const { projectDir, agentsDir } = seedProject('validation-routing', 'qa', 'coder');
+    const regression = failure.includes('regression');
+    const gate = stage({ id: 'qa', role: 'qa', is_gate: true,
+      ...(failure === 'regression-with-report' ? { artifact_contract: artifacts([
+        { id: 'verdict', root: 'run', path: 'verdict_qa.json' }, { id: 'report', root: 'project', path: 'docs/review.md' },
+      ], [], [], []) } : {}),
+      ...(failure === 'post-write-regression' ? { scope: ['validation.cjs'] } : {}),
+    });
+    const repair = stage({ id: 'repair', role: 'coder', depends_on: ['qa'], retry_to: ['qa'] });
+    const workflow: WorkflowConfig = { name: 'validation-routing', defaults: { max_iterations: 1, max_retries: 0 }, stages: [gate, repair] };
+    const created = createRun(projectDir, workflow.name, 'name: validation-routing', ['qa', 'repair']);
+    const command = join(projectDir, 'validation.cjs'), marker = join(dirname(projectDir), 'validated-once');
+    writeFileSync(command, failure.startsWith('regression') ? 'console.log("FAIL spec/regression.test.ts"); process.exitCode=1'
+      : failure.endsWith('unknown') ? `const fs=require('node:fs'); const marker=${JSON.stringify(marker)};
+        if (${failure === 'persistent-unknown'} || !fs.existsSync(marker)) {
+          fs.writeFileSync(marker,'retry'); console.log('opaque failure'); process.exitCode=1;
+        } else console.log('ok');` : 'console.log("ok")');
+    writeValidationSnapshot(created.runDirPath, await runProjectValidationBaseline(projectDir, {
+      commands: [{ role: 'test', command: process.execPath, args: [command], display: 'configured test' }],
+      runCommand: validationRunner(0),
+    }));
+    const state = readRunState(projectDir, created.runId); state.maxRetries = 1;
+    writeRunState(projectDir, created.runId, state);
+    const calls: string[] = [];
+    let reviews = 0;
+    const final = await runWorkflow(workflow, 'name: validation-routing', projectDir, { async run(_prompt, _role, opts) {
+      const summary = summaryResult(opts); if (summary) return fixtureResult(summary, opts);
+      calls.push(opts.stageId);
+      if (opts.stageId === 'qa') {
+        if (failure === 'post-write-regression') writeFileSync(command, 'console.log("FAIL spec/regression.test.ts"); process.exitCode=1');
+        const pass = failure !== 'semantic' || ++reviews > 1;
+        return fixtureResult({ output: JSON.stringify({ pass, reason: pass ? 'Work verified' : 'Required behavior absent',
+          criteria: {}, audit_findings: { version: 1, findings: [] },
+          ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Independent behavior probe' } } : {}),
+        }), exitCode: 0, duration_ms: 1, writes: failure === 'post-write-regression' ? ['validation.cjs'] : [], writeAttribution: 'structured' }, opts);
+      }
+      const rejection = readGateVerdict(projectDir, 'qa', created.runId);
+      expect(rejection?.reason).toContain(regression ? 'spec/regression.test.ts' : 'Required behavior absent');
+      expect(rejection?.repairability?.evidence).toBeTruthy();
+      return fixtureResult({ output: 'Repair completed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
+    } }, new Map(), undefined, agentsDir, created.runId, '# Independently verify the work.', true);
+    expect(calls).toEqual(failure === 'semantic' ? ['qa', 'repair', 'qa']
+      : failure === 'transient-unknown' ? ['qa'] : failure === 'post-write-regression' ? ['qa', 'repair'] : regression ? ['repair'] : []);
+    expect(final.status).toBe(failure === 'semantic' || failure === 'transient-unknown' ? 'complete' : 'incomplete');
+    if (regression) {
+      expect(readGateVerdict(projectDir, 'qa', created.runId)?.pass).toBe(false);
+      expect(final.stages.qa.attempts).toHaveLength(2);
+    }
+    if (failure === 'persistent-unknown') expect(final.stages.qa.error).toContain('remains unresolved after its mechanical retry');
+    const receipts = readdirSync(created.runDirPath).filter(name => /^validation_delta_qa_attempt_/.test(name));
+    if (failure === 'transient-unknown') expect(receipts.map(name => JSON.parse(readFileSync(join(created.runDirPath, name), 'utf8')).pass))
+      .toEqual(expect.arrayContaining([false, true]));
+  });
+  it.each([false, true])('settles mechanical validation for dynamic=%s without another authored review', async (dynamic) => {
+    const { projectDir, agentsDir } = seedProject('gate-settlement-parity');
+    const created = createRun(projectDir, 'gate-settlement-parity', 'name: gate-settlement-parity', ['qa']);
+    const at = new Date().toISOString();
+    const status = { status: 'complete', retries: 0, attempts: [{ index: 1, startedAt: at, completedAt: at, status: 'complete', exitCode: 0 }] };
+    writeStageStatus(projectDir, created.runId, 'qa', status);
+    const state = readRunState(projectDir, created.runId);
+    state.status = 'running'; state.stages.qa = status; state.maxRetries = 0;
+    writeRunState(projectDir, created.runId, state);
+    const command = join(projectDir, 'validation.cjs');
+    writeFileSync(command, 'console.log("ok")');
+    const baseline = await runProjectValidationBaseline(projectDir, {
+      commands: (['build', 'test', 'lint'] as const).map(role => ({ role, command: process.execPath, args: [command], display: `private ${role}` })),
+      runCommand: validationRunner(0),
+    });
+    writeValidationSnapshot(created.runDirPath, baseline);
+    const verdict = '{"pass":true,"reason":"Authored review remains valid"}';
+    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), verdict);
+    const first = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: () => ({ exitCode: 1, stdout: 'unparseable failure' }) });
+    const gate = stage({ id: 'qa', is_gate: true });
+    const workflow: WorkflowConfig = { name: 'gate-settlement-parity', defaults: { max_iterations: 1, max_retries: 0 }, stages: [gate] };
+    const adapter: Adapter = { run: async () => { throw new Error('Mechanical settlement must preserve the authored review'); } };
+    await settleGateRetries(state, [gate], 1, new Set(), new Map(), projectDir, created.runId, created.runDirPath,
+      workflow, adapter, new Map(), agentsDir, new Map());
+    const settled = JSON.parse(readFileSync(join(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
+    expect(settled.pass).toBe(true); expect(settled.validationAttemptIndex).toBe(2);
+    expect(readFileSync(join(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
+    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('unparseable failure');
+    expect(readRunState(projectDir, created.runId).stages.qa.attempts).toEqual(status.attempts);
+  });
+  it('does not let green validation approve a failed gate execution', async () => {
+    const { projectDir } = seedProject('failed-gate-receipt');
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['qa']);
+    const at = new Date().toISOString();
+    writeStageStatus(projectDir, created.runId, 'qa', { status: 'failed', retries: 0, attempts: [{
+      index: 1, startedAt: at, completedAt: at, status: 'failed', exitCode: 1,
+    }] });
+    writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: validationRunner(0) });
+    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), '{"pass":true,"reason":"Authored pass"}');
+    expect(readGateVerdict(projectDir, 'qa', created.runId)).toMatchObject({ pass: false,
+      reason: expect.stringContaining('gate execution failed') });
+  });
+  it('refuses a synthetic terminal receipt for a normal gate with the same legal stage name', async () => {
+    const { projectDir } = seedProject('receipt-namespace');
+    const gate = parseDispatchedStageConfig({ id: 'terminal_author', role: 'qa', is_gate: true, scope: [] });
+    const created = createRun(projectDir, 'fixture', 'name: fixture', [gate.id]);
+    writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    const synthetic = await recordGateValidationDelta(projectDir, created.runId, gate.id, { runCommand: validationRunner(0) });
+    expect(synthetic).toMatchObject({ pass: true, attemptIndex: 0 });
+    const receiptTime = Date.parse(synthetic!.checkedAt);
+    writeStageStatus(projectDir, created.runId, gate.id, { status: 'complete', retries: 0, attempts: [{
+      index: 1, status: 'complete', startedAt: new Date(receiptTime + 1000).toISOString(),
+      completedAt: new Date(receiptTime + 2000).toISOString(), exitCode: 0,
+    }] });
+    const verdict = JSON.stringify({ pass: true, reason: 'Authored work passes' });
+    writeFileSync(join(created.runDirPath, `verdict_${gate.id}.json`), verdict);
+    expect(gateValidationRefusal(projectDir, created.runId, gate.id)?.reason).toMatch(/attempt 0.*attempt 1/);
+    expect(readGateVerdict(projectDir, gate.id, created.runId)).toMatchObject({ pass: false });
+    let commands = 0;
+    expect(await settleGateValidationEvidence(projectDir, created.runId, gate.id, {
+      runCommand: request => { commands++; return validationRunner(0)(request); },
+    })).toEqual({ kind: 'replayed' });
+    expect(commands).toBe(3);
+    expect(readGateVerdict(projectDir, gate.id, created.runId)).toMatchObject({ pass: true });
+    expect(readFileSync(join(created.runDirPath, `verdict_${gate.id}.json`), 'utf8')).toBe(verdict);
+    expect(JSON.parse(readFileSync(join(created.runDirPath, synthetic!.immutablePath!), 'utf8'))).toEqual(synthetic);
+  });
+
+  it.each([
+    ['index', '1'], ['startedAt', 123], ['completedAt', 456],
+  ] as const)('refuses malformed %s even when receipt and settled ledger fields agree', async (field, value) => {
+    const { projectDir } = seedProject('malformed-receipt');
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['qa']);
+    writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    const at = new Date().toISOString();
+    writeStageStatus(projectDir, created.runId, 'qa', { status: 'complete', retries: 0, attempts: [{
+      index: 1, status: 'complete', startedAt: at, completedAt: at, [field]: value,
+    }] });
+    const receipt = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: validationRunner(0) });
+    expect(receipt?.pass).toBe(true);
+    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'Authored work passes' }));
+    expect(gateValidationRefusal(projectDir, created.runId, 'qa')?.reason).toContain('belongs to execution');
+    expect(readGateVerdict(projectDir, 'qa', created.runId)).toMatchObject({ pass: false });
+  });
+
+  it('reuses only an identity-bound synthetic receipt for the current terminal owner', async () => {
+    const { projectDir } = seedProject('terminal-receipt');
+    const created = createRun(projectDir, 'fixture', 'name: fixture', []);
+    writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    const input = { projectDir, runId: created.runId, runDirPath: created.runDirPath,
+      state: readRunState(projectDir, created.runId), ownerStageId: 'author', terminalPath: 'docs/final.md',
+      artifactMtimeMs: Date.now() - 1000, dependencies: { runCommand: validationRunner(0) } };
+    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'revalidated' });
+    const noCommands = { runCommand: () => { throw new Error('A bound terminal receipt must be reused'); } };
+    expect(await ensureTerminalArtifactValidation({ ...input, dependencies: noCommands }))
+      .toMatchObject({ pass: true, disposition: 'already_blessed', validationStageId: 'terminal_author' });
+    expect(await ensureTerminalArtifactValidation({ ...input, ownerStageId: 'other', dependencies: noCommands }))
+      .toMatchObject({ pass: false, disposition: 'rejected' });
+    const path = join(created.runDirPath, 'validation_delta_terminal_author.json');
+    const receipt = JSON.parse(readFileSync(path, 'utf8'));
+    writeFileSync(path, JSON.stringify({ ...receipt, executionId: 'wrong-execution' }));
+    // The immutable original remains valid, so remove it to isolate the bad carrier.
+    rmSync(join(created.runDirPath, receipt.immutablePath));
+    expect(await ensureTerminalArtifactValidation({ ...input, dependencies: noCommands }))
+      .toMatchObject({ pass: false, disposition: 'rejected' });
+  });
+
+  it('settles incomplete validation once without replacing its authored gate review', async () => {
+    const { projectDir } = seedProject('validation-only');
+    const created = createRun(projectDir, 'validation-only', 'name: validation-only', ['qa']);
+    const at = new Date().toISOString();
+    writeStageStatus(projectDir, created.runId, 'qa', { status: 'complete', retries: 0,
+      attempts: [{ index: 1, startedAt: at, completedAt: at, status: 'complete', exitCode: 0 }] });
+    writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    const verdict = JSON.stringify({ pass: true, reason: 'Authored review remains valid' });
+    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), verdict);
+    const first = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: () => ({ exitCode: 1, stdout: 'unparseable failure' }) });
+    expect(first?.pass).toBe(false);
+    expect(first?.delta.every((entry) => entry.state === 'unresolved')).toBe(true);
+    let commands = 0;
+    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: (request) => { commands++; return validationRunner(0)(request); } })).toEqual({ kind: 'replayed' });
+    expect(commands).toBe(3);
+    expect(readFileSync(join(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
+    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('unparseable failure');
+    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: () => { throw new Error('settled validation must not repeat'); } })).toEqual({ kind: 'unchanged' });
+  });
+  it('keeps persistent unknown validation fail-closed and bounds mechanical retries across calls', async () => {
+    const { projectDir } = seedProject('validation-unresolved');
+    const created = createRun(projectDir, 'validation-unresolved', 'name: validation-unresolved', ['qa']);
+    const at = new Date().toISOString();
+    writeStageStatus(projectDir, created.runId, 'qa', { status: 'complete', retries: 0,
+      attempts: [{ index: 1, startedAt: at, completedAt: at, status: 'complete', exitCode: 0 }] });
+    writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    let commands = 0;
+    const deps = { runCommand: () => { commands++; return { exitCode: 1, stdout: 'unparseable failure' }; } };
+    await recordGateValidationDelta(projectDir, created.runId, 'qa', deps);
+    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('refused');
+    expect(commands).toBe(6);
+    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('refused');
+    expect(commands).toBe(6);
+  });
   it('9 — routes authored/effective rejection facts to the responsible producer', async () => {
     const measure = stage({ id: 'measure', scope: ['artifacts/round.json'] });
-    const gate = stage({
+    const gate = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []),
       id: 'qa', role: 'qa', is_gate: true, depends_on: ['measure'],
       dependency_reasons: { measure: 'audit measured work' },
     });
@@ -215,7 +459,7 @@ describe('engine generalization runtime bindings', () => {
       gateId: 'qa',
       authoredVerdict: { pass: false, reason: 'product behavior is wrong' },
       effectiveVerdict: { pass: false, reason: 'product behavior is wrong' },
-      rejectionKind: 'authored_substantive_failure',
+      rejectionKind: 'repairable_failure',
     };
     const omittedFact: GateRecoveryFact = {
       gateId: 'qa',
@@ -232,7 +476,7 @@ describe('engine generalization runtime bindings', () => {
     const research = { baseline: 0, policy: 'best_of_n' as const, resultFile: 'artifacts/round.json' };
     expect(findGateRecoveryStages(
       [measure, gate, repair], ['qa'], { qa: contractFact.effectiveVerdict?.reason }, research, { qa: contractFact },
-    ).map((entry) => entry.id)).toEqual(['qa']);
+    ).map((entry) => entry.id)).toEqual([]);
     expect(findGateRecoveryStages(
       [measure, gate, repair], ['qa'], { qa: substantiveFact.effectiveVerdict?.reason }, research, { qa: substantiveFact },
     ).map((entry) => entry.id)).toEqual(['repair']);
@@ -244,10 +488,10 @@ describe('engine generalization runtime bindings', () => {
     ).map((entry) => entry.id)).toEqual(['repair']);
 
     const { projectDir, agentsDir } = seedProject('recovery', 'planner', 'qa', 'repair');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'typed-gate-recovery',
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [stage({ id: 'plan', role: 'planner', dynamic_dispatch: true })],
+      stages: [stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'plan', role: 'planner', dynamic_dispatch: true })],
     };
     const created = createRun(projectDir, workflow.name, 'name: typed-gate-recovery', ['plan']);
     writeFileSync(join(created.runDirPath, 'gate_contract.json'), JSON.stringify({
@@ -257,9 +501,9 @@ describe('engine generalization runtime bindings', () => {
     let repairCalls = 0;
     const adapter: Adapter = { async run(prompt, _role, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: qa',
           '    role: qa',
@@ -275,19 +519,19 @@ describe('engine generalization runtime bindings', () => {
           '    dependency_reasons: {qa: "repair a substantive product rejection"}',
           '    retry_to: [qa]',
           '    prompt_template: Repair only a product defect.',
-        ].join('\n'));
-        return { output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        ].join('\n')));
+        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'qa') {
         gateCalls++;
-        writeFileSync(join(opts.runDir, 'verdict_qa.json'), JSON.stringify(gateCalls === 1
+        writeFileSync(join(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify(gateCalls === 1
           ? { pass: true, reason: 'work itself passes', metric: 'quality' }
           : { pass: true, reason: 'contract evidence supplied', metric: 'quality', value: 8 }));
         if (gateCalls === 2) expect(prompt).toContain('engine_rejection_reason');
-        return { output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'repair') repairCalls++;
-      return { output: 'unexpected repair', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'unexpected repair', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(
       workflow,
@@ -302,9 +546,9 @@ describe('engine generalization runtime bindings', () => {
       true,
     );
     expect({ status: final.status, gateCalls, repairCalls }).toEqual({
-      // The contract rejection must re-run only the gate/evidence producer; the
-      // product-repair stage remains blocked because the authored verdict passed.
-      status: 'complete', gateCalls: 2, repairCalls: 0,
+      // Invalid gate evidence does not authorize product repair or another
+      // unchanged gate review. The contract refusal remains a terminal failure.
+      status: 'failed', gateCalls: 1, repairCalls: 0,
     });
   });
 
@@ -330,6 +574,7 @@ describe('engine generalization runtime bindings', () => {
       'checks:',
       '  - name: produced JSON shape',
       '    type: exec-script-exit-zero',
+      '    reads: [{id: result, root: project, path: output/result.json, kind: file, source: {kind: input}}]',
       '    params:',
       '      script: |',
       ...script.split('\n').map((line) => `        ${line}`),
@@ -342,12 +587,13 @@ describe('engine generalization runtime bindings', () => {
     expect(parseChecksFromMarkdown(rewrite.markdown)[0]).not.toMatchObject({ advisory: true });
 
     writeFileSync(artifactPath, JSON.stringify({ artifact: 'generic.summary.v2', expected_one: true }));
+    const isolatedRun = join(dirname(projectDir), 'run'); mkdirSync(isolatedRun, { recursive: true });
     const producedInvalid = await runAllChecks(parseChecksFromMarkdown(rewrite.markdown), {
-      taskDir: join(projectDir, 'run'), projectDir,
+      taskDir: isolatedRun, projectDir,
     });
     expect(producedInvalid).toMatchObject({
       pass: false,
-      results: [{ pass: false, evidence: { code: 1 } }],
+      results: [{ pass: false, evidence: { exit: { code: 1, signal: null, timedOut: false } } }],
     });
     expect(producedInvalid.results[0]).not.toHaveProperty('advisory');
 
@@ -355,13 +601,13 @@ describe('engine generalization runtime bindings', () => {
       artifact: 'generic.summary.v2', expected_one: true, expected_two: { rows: [] },
     }));
     const compatible = await runAllChecks(parseChecksFromMarkdown(rewrite.markdown), {
-      taskDir: join(projectDir, 'run'), projectDir,
+      taskDir: isolatedRun, projectDir,
     });
     expect(compatible).toMatchObject({ pass: true, results: [{ pass: true }] });
 
     writeFileSync(artifactPath, oldBytes);
     const unchangedPreflightBytes = await runAllChecks(parseChecksFromMarkdown(rewrite.markdown), {
-      taskDir: join(projectDir, 'run'), projectDir,
+      taskDir: isolatedRun, projectDir,
     });
     expect(unchangedPreflightBytes).toMatchObject({
       pass: true,
@@ -482,7 +728,7 @@ describe('engine generalization runtime bindings', () => {
     expect(noBaseline).toMatchObject({ required: false, pass: true, disposition: 'no_baseline' });
   });
 
-  it('13 — rejects reused normalized round evidence while equal scores with independent evidence pass', async () => {
+  it('keeps round identities immutable and preserves consumed measurements', async () => {
     const { projectDir } = seedProject('round-evidence');
     const runDirPath = join(dirname(projectDir), 'run');
     const resultPath = join(projectDir, 'artifacts', 'round.json');
@@ -491,57 +737,25 @@ describe('engine generalization runtime bindings', () => {
     const state = {
       runId: 'round-evidence', workflowName: 'fixture', projectDir, status: 'running', stages: {},
       startedAt: new Date(Date.now() - 1_000).toISOString(),
-      research: {
-        baseline: 0, policy: 'best_of_n', resultFile: 'artifacts/round.json', reportDir: 'artifacts',
-        stop: { maxRounds: 4 },
-      },
+      research: { baseline: 0, policy: 'best_of_n', resultFile: 'artifacts/round.json', reportDir: 'artifacts', stop: { maxRounds: 4 } },
     } as StoreState;
-    const common = {
-      result: 0.018,
-      result_std: 0.001,
-      control: { mean: 0.01, lower: 0.009, upper: 0.011 },
-      evidence: { sample: 'control-pair-a', seed: 11 },
-    };
-    const first = { label: 'round-a', ...common };
-    const reused = { label: 'round-b', ...common };
-    expect(normalizedResearchEvidenceDigest(first)).toBe(normalizedResearchEvidenceDigest(reused));
-    writeFileSync(resultPath, JSON.stringify(first));
-    await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: 1, adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) } });
-    writeFileSync(resultPath, JSON.stringify(first));
-    await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: 2, adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) } });
+    const first = { label: 'round-a', result: 0.018, result_std: 0.001,
+      control: { mean: 0.01, lower: 0.009, upper: 0.011 }, evidence: { sample: 'control-pair-a', seed: 11 } };
+    const independent = { ...first, label: 'round-c', evidence: { sample: 'control-pair-c', seed: 29 } };
+    const adapter = { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) };
+    for (const [index, round] of [first, independent].entries()) {
+      writeFileSync(resultPath, JSON.stringify(round));
+      await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: index + 1, adapter });
+      expect(JSON.parse(readFileSync(join(runDirPath, `research_round_${index + 1}_consumed.json`), 'utf-8'))).toEqual(round);
+    }
+    const journal = JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf-8'));
+    expect(journal.rounds.map((round: { label: string; result: number }) => [round.label, round.result]))
+      .toEqual([['round-a', 0.018], ['round-c', 0.018]]);
+    writeFileSync(resultPath, JSON.stringify({ label: 'round-a', result: 0.019, evidence: { sample: 'new', seed: 41 } }));
+    await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: 3, adapter });
     expect(readFileSync(join(runDirPath, 'supervisor_guidance.md'), 'utf-8')).toContain('immutable identity');
-    writeFileSync(resultPath, JSON.stringify(reused));
-    await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: 3, adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) } });
-    const rejected = JSON.parse(readFileSync(join(runDirPath, 'research_round_input_error.json'), 'utf-8')) as Record<string, unknown>;
-    let journal = JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf-8')) as {
-      rounds: Array<{ label: string; result: number }>;
-      measurementEvidence: Array<{ label: string; normalizedSha256: string; source: string }>;
-    };
-    expect(rejected).toMatchObject({ kind: 'research_round_evidence_reused' });
-    expect(journal.rounds.map((round) => round.label)).toEqual(['round-a']);
-    expect(journal.measurementEvidence).toEqual([
-      expect.objectContaining({ label: 'round-a', source: 'research_round_1_consumed.json' }),
-    ]);
-
-    const independent = {
-      label: 'round-c',
-      ...common,
-      evidence: { sample: 'control-pair-c', seed: 29 },
-    };
-    expect(normalizedResearchEvidenceDigest(independent)).not.toBe(normalizedResearchEvidenceDigest(first));
-    writeFileSync(resultPath, JSON.stringify(independent));
-    await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: 4, adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) } });
-    journal = JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf-8'));
-    expect(journal.rounds.map((round) => [round.label, round.result])).toEqual([
-      ['round-a', 0.018],
-      ['round-c', 0.018],
-    ]);
-
-    writeFileSync(resultPath, JSON.stringify({
-      label: 'round-a', result: 0.019, evidence: { sample: 'new', seed: 41 },
-    }));
-    await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: 5, adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) } });
-    expect(readFileSync(join(runDirPath, 'supervisor_guidance.md'), 'utf-8')).toContain('immutable identity');
+    expect(JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf-8')).rounds).toEqual(journal.rounds);
+    expect(JSON.parse(readFileSync(join(runDirPath, 'research_round_1_consumed.json'), 'utf-8'))).toEqual(first);
   });
 
   it('16 — names a proven configured-command intersection only while research rounds remain', async () => {
@@ -578,8 +792,8 @@ describe('engine generalization runtime bindings', () => {
       readText: () => misleadingConfig,
     })).toEqual([]);
 
-    const work = stage({ id: 'measure', role: 'worker', scope: ['src/declared.ts'] });
-    const workflow: WorkflowConfig = {
+    const work = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'measure', role: 'worker', scope: ['src/declared.ts'] });
+    const workflow: WorkflowConfig = {description: '', 
       name: 'scope-consequence',
       defaults: { max_iterations: 1, max_retries: 0 },
       stages: [work],
@@ -594,7 +808,7 @@ describe('engine generalization runtime bindings', () => {
     let redispatchPrompt = '';
     const adapter: Adapter = { async run(prompt, _role: AgentConfig, opts: RunOpts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       calls++;
       if (calls === 1) {
         const directory = join(opts.runDir, 'stages', opts.stageId);
@@ -603,7 +817,7 @@ describe('engine generalization runtime bindings', () => {
           version: 1,
           kind: 'scope_revision',
           requestId: 'validation-input',
-          runId: opts.runId,
+          runId: basename(opts.runDir),
           stageId: opts.stageId,
           attemptIndex: 1,
           requestedBy: 'stage',
@@ -615,10 +829,10 @@ describe('engine generalization runtime bindings', () => {
           const name = readdirSync(directory).find((file) => file.startsWith('scope_revision_decision_'));
           return name ? JSON.parse(readFileSync(join(directory, name), 'utf-8')) as Record<string, unknown> : undefined;
         });
-        return { output: 'scope accepted', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'scope accepted', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       redispatchPrompt = prompt;
-      return { output: 'done', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     await runWorkflow(
       workflow,
@@ -633,7 +847,7 @@ describe('engine generalization runtime bindings', () => {
       true,
     );
     expect(calls).toBe(2);
-    expect(redispatchPrompt).toContain('Scope revision validation-input was accepted');
+    expect(redispatchPrompt).toContain('# Accepted scope revision');
     expect(redispatchPrompt).toContain('spec/new-audit.test.ts -> test command "npm run test"');
     expect(redispatchPrompt).toContain('3 research rounds remain');
     expect(redispatchPrompt).toContain('new failing identifier will block acceptance');
@@ -664,18 +878,18 @@ describe('engine generalization runtime bindings', () => {
 
   it('17 — carries the exact no-candidate shape through both dispatch paths and retains runtime refusals', async () => {
     const { projectDir, agentsDir } = seedProject('round-shape', 'planner', 'qa', 'repair');
-    const workflow: WorkflowConfig = {
+    const workflow: WorkflowConfig = {description: '', 
       name: 'round-shape-paths',
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [stage({ id: 'plan', role: 'planner', dynamic_dispatch: true })],
+      stages: [stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'plan', role: 'planner', dynamic_dispatch: true })],
     };
     let initialPrompt = '';
     let repairPrompt = '';
     const adapter: Adapter = { async run(prompt, _role, opts) {
       const summary = summaryResult(opts);
-      if (summary) return summary;
+      if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: qa',
           '    role: qa',
@@ -691,16 +905,16 @@ describe('engine generalization runtime bindings', () => {
           '    dependency_reasons: {qa: "repair the substantive rejection"}',
           '    retry_to: [qa]',
           '    prompt_template: Repair the fixture.',
-        ].join('\n'));
+        ].join('\n')));
       } else if (opts.stageId === 'qa') {
         initialPrompt ||= prompt;
-        writeFileSync(join(opts.runDir, 'verdict_qa.json'), JSON.stringify({
+        writeFileSync(join(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify({
           pass: false, reason: 'substantive fixture rejection',
         }));
       } else {
         repairPrompt = prompt;
       }
-      return { output: opts.stageId, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return fixtureResult({ output: opts.stageId, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     } };
     await runWorkflow(
       workflow,
@@ -717,7 +931,7 @@ describe('engine generalization runtime bindings', () => {
     const exactShape = '{"label":"<non-empty>","outcome":"no_candidate","reason":"<non-empty>"}';
     expect(initialPrompt).toContain(exactShape);
     expect(repairPrompt).toContain(exactShape);
-    expect(appendResearchTemporalPathContract('ROUND', {
+    expect(appendResearchPathContract('ROUND', {
       baseline: 0, policy: 'best_of_n', resultFile: 'artifacts/round.json',
     }, undefined)).toContain(exactShape);
 

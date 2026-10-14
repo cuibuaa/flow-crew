@@ -14,7 +14,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { parse as parseYaml } from 'yaml';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   ADAPTER_INSTALL_HINT,
@@ -92,11 +91,6 @@ function runCli(
 
 function structuredBrief(): string {
   return [
-    '---',
-    'terminal_states:',
-    '  complete:',
-    '    paths: [docs/result.md]',
-    '---',
     '# Goal',
     'Exercise adapter resolution.',
     '',
@@ -141,6 +135,35 @@ afterEach(() => {
 });
 
 describe('adapter resolution matrix', () => {
+  it.skipIf(process.platform === 'win32')('matches execvp for a literal backslash in a Unix executable name', () => {
+    const fixture = cliFixture();
+    const command = 'cod\\ex';
+    const executable = join(fixture.bin, command);
+    writeFileSync(executable, '#!/bin/sh\nprintf selected\n', { mode: 0o755 });
+    // Run native PATH lookup inside an isolated project-local Node probe.
+    // Its only executable candidate and state directories belong to this fixture.
+    const probe = join(fixture.project, 'lookup.cjs');
+    writeFileSync(probe, `
+      const { spawnSync } = require('node:child_process');
+      const actual = spawnSync(process.argv[2], [], {
+        cwd: process.cwd(),
+        env: { PATH: process.env.PATH, HOME: process.env.HOME, FC_HOME: process.env.FC_HOME },
+        encoding: 'utf8', timeout: 5_000,
+      });
+      console.log(JSON.stringify({ status: actual.status, stdout: actual.stdout, stderr: actual.stderr }));
+    `);
+    const result = spawnSync(process.execPath, [probe, command], {
+      cwd: fixture.project,
+      env: { PATH: fixture.bin, HOME: fixture.home, FC_HOME: fixture.fcHome },
+      encoding: 'utf8', timeout: 5_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const actual = JSON.parse(result.stdout);
+    expect(actual.status, actual.stderr).toBe(0);
+    expect(actual.stdout).toBe('selected');
+    expect(findExecutableOnPath(command, fixture.bin, fixture.project)).toBe(executable);
+  });
+
   it('finds executable PATH entries without an external which command', () => {
     const fixture = cliFixture();
     const codex = installCommand(fixture, 'codex');
@@ -160,11 +183,11 @@ describe('adapter resolution matrix', () => {
   const explicit = [undefined, 'codex', 'claude'] as const;
 
   for (const installation of installations) {
-    for (const projectChoice of configured) {
+    for (const engineChoice of configured) {
       for (const cliChoice of explicit) {
-        it(`${installation.label}; configured=${projectChoice}; explicit=${cliChoice ?? 'absent'}`, () => {
+        it(`${installation.label}; configured=${engineChoice}; explicit=${cliChoice ?? 'absent'}`, () => {
           const result = resolveAdapterChoice(
-            { configured: projectChoice, explicit: cliChoice },
+            { configured: engineChoice, explicit: cliChoice },
             installation.installed,
           );
           if (installation.installed.length === 0) {
@@ -172,7 +195,7 @@ describe('adapter resolution matrix', () => {
             return;
           }
 
-          const requested = cliChoice ?? projectChoice;
+          const requested = cliChoice ?? engineChoice;
           const expected = requested !== 'auto' && installation.installed.includes(requested)
             ? requested
             : installation.installed.includes('codex')
@@ -180,7 +203,7 @@ describe('adapter resolution matrix', () => {
               : 'claude';
           expect(result).toMatchObject({ ok: true, adapter: expected });
           if (!result.ok) return;
-          expect(result.reason).toContain(cliChoice ? 'explicit --adapter' : projectChoice === 'auto' ? 'auto' : 'project configuration');
+          expect(result.reason).toContain(cliChoice ? 'explicit --adapter' : engineChoice === 'auto' ? 'auto' : 'engine configuration');
           if (requested !== 'auto' && !installation.installed.includes(requested)) {
             expect(result.reason).toContain('not installed');
             expect(result.reason).toContain('fallback');
@@ -232,6 +255,15 @@ describe('adapter resolution matrix', () => {
 });
 
 describe('CLI adapter behavior', () => {
+  it.each(['--supervise', '--no-supervise'])('refuses removed quick flag %s before launch', (flag) => {
+    const fixture = cliFixture();
+    const result = runCli(fixture, ['quick', '--project', fixture.project, flag, '--task', structuredBrief()]);
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain(`Unknown quick option: ${flag}`);
+    expect(readdirSync(fixture.fcHome)).toEqual([]);
+    expect(readdirSync(fixture.project)).toEqual([]);
+  });
+
   it.each(['codex', 'claude'] as const)('selects the only installed %s CLI at runtime', (adapter) => {
     const fixture = cliFixture();
     writeAdapterConfig(fixture, 'auto');
@@ -257,12 +289,12 @@ describe('CLI adapter behavior', () => {
     expect(output).not.toContain('@anthropic/claude-code');
   });
 
-  it('does not rewrite defaults while start resolves an unavailable legacy choice', () => {
+  it('leaves ignored project defaults byte-identical during launch', () => {
     const fixture = cliFixture();
     const defaultsPath = writeAdapterConfig(fixture, 'codex');
     const before = { content: readFileSync(defaultsPath, 'utf-8'), mtimeMs: statSync(defaultsPath).mtimeMs };
 
-    const result = runCli(fixture, ['start']);
+    const result = quickUntilWorkflowLookup(fixture);
 
     expect(result.status).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain('@anthropic-ai/claude-code');
@@ -270,16 +302,16 @@ describe('CLI adapter behavior', () => {
     expect(statSync(defaultsPath).mtimeMs).toBe(before.mtimeMs);
   });
 
-  it('keeps a legacy codex setting effective and byte-identical when codex is installed', () => {
+  it('ignores a legacy project adapter setting when choosing an installed CLI', () => {
     const fixture = cliFixture();
-    const defaultsPath = writeAdapterConfig(fixture, 'codex');
+    const defaultsPath = writeAdapterConfig(fixture, 'retired-backend');
     installCommand(fixture, 'codex');
     const before = readFileSync(defaultsPath, 'utf-8');
 
     const result = quickUntilWorkflowLookup(fixture);
 
     expect(`${result.stdout}${result.stderr}`).toContain('Adapter resolution: codex');
-    expect(`${result.stdout}${result.stderr}`).toContain('project configuration');
+    expect(`${result.stdout}${result.stderr}`).toContain('only installed CLI');
     expect(readFileSync(defaultsPath, 'utf-8')).toBe(before);
   });
 
@@ -316,11 +348,10 @@ describe('CLI adapter behavior', () => {
     expect(output).toContain('Process supervision: portable Node shim');
   });
 
-  it('reports adapter state read-only, then writes only on an explicit valid set command', () => {
+  it('reports engine adapter state without changing project configuration', () => {
     const fixture = cliFixture();
-    const defaultsPath = writeAdapterConfig(fixture, 'auto');
+    const defaultsPath = writeAdapterConfig(fixture, 'retired-backend');
     installCommand(fixture, 'claude');
-
     const before = readFileSync(defaultsPath, 'utf-8');
     const readOnly = runCli(fixture, ['adapter']);
     expect(readOnly.status).toBe(0);
@@ -328,72 +359,64 @@ describe('CLI adapter behavior', () => {
     expect(readOnly.stdout).toContain('Installed adapters: claude');
     expect(readOnly.stdout).toContain('Recommended adapter: codex');
     expect(readFileSync(defaultsPath, 'utf-8')).toBe(before);
-
-    const write = runCli(fixture, ['adapter', 'claude']);
-    expect(write.status).toBe(0);
-    expect(write.stdout).toContain('Adapter set to claude');
-    expect((parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown>).adapter).toBe('claude');
-
-    const readBack = runCli(fixture, ['adapter']);
-    expect(readBack.stdout).toContain('Current adapter: claude');
   });
 
-  it('initializes to auto without an installed CLI and to recommended codex non-interactively when both exist', () => {
-    const empty = cliFixture();
-    const emptyResult = runCli(empty, ['init']);
-    expect(emptyResult.status).toBe(0);
-    expect(emptyResult.stdout).toContain('keeping adapter: auto');
-    expect((parseYaml(readFileSync(join(empty.project, 'config', 'defaults.yaml'), 'utf-8')) as Record<string, unknown>).adapter).toBe('auto');
-
-    const both = cliFixture();
-    installCommand(both, 'codex');
-    installCommand(both, 'claude');
-    const bothResult = runCli(both, ['init']);
-    expect(bothResult.status).toBe(0);
-    expect(bothResult.stdout).toContain('non-interactive init selected recommended execution backend codex');
-    expect((parseYaml(readFileSync(join(both.project, 'config', 'defaults.yaml'), 'utf-8')) as Record<string, unknown>).adapter).toBe('codex');
+  it.each([false, true])('initializes skills and global state without copying engine configuration (installed CLIs=%s)', installed => {
+    const fixture = cliFixture();
+    if (installed) { installCommand(fixture, 'codex'); installCommand(fixture, 'claude'); }
+    const result = runCli(fixture, ['init']);
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(fixture.project, '.fc'))).toBe(false);
+    expect(existsSync(join(fixture.project, '.gitignore'))).toBe(false);
+    expect(existsSync(join(fixture.project, 'config', 'skills'))).toBe(true);
+    for (const name of ['defaults.yaml', 'agents', 'workflows']) {
+      expect(existsSync(join(fixture.project, 'config', name))).toBe(false);
+    }
   });
 
-  it('prints the run failure reason and failed-stage error after the stage list', () => {
+  it('leaves existing local run records and gitignore intact during explicit init', () => {
+    const fixture = cliFixture();
+    mkdirSync(join(fixture.project, '.fc', 'runs'), { recursive: true });
+    writeFileSync(join(fixture.project, '.fc', 'runs', 'user.txt'), 'User state');
+    writeFileSync(join(fixture.project, '.gitignore'), 'build/\n');
+    const before = projectSnapshot(join(fixture.project, '.fc'));
+    expect(runCli(fixture, ['init']).status).toBe(0);
+    expect(projectSnapshot(join(fixture.project, '.fc'))).toEqual(before);
+    expect(readFileSync(join(fixture.project, '.gitignore'), 'utf8')).toBe('build/\n');
+  });
+
+  it.each([false, true])('launches foreground quick without project writes (existing brief=%s)', existingBrief => {
     const fixture = cliFixture();
     writeAdapterConfig(fixture, 'mock');
-    const workflowDir = join(fixture.project, 'config', 'workflows');
-    const agentsDir = join(fixture.project, 'config', 'agents');
     const mockDir = join(fixture.root, 'mock');
-    for (const path of [workflowDir, agentsDir, mockDir]) mkdirSync(path, { recursive: true });
-    writeFileSync(join(workflowDir, 'failure.yaml'), [
-      'name: failure',
-      'stages:',
-      '  - id: work',
-      '    role: worker',
-      '',
-    ].join('\n'), 'utf-8');
-    writeFileSync(join(agentsDir, 'worker.yaml'), [
-      'name: worker',
-      'description: deterministic failure worker',
-      'model: default',
-      'reasoning_effort: default',
-      'tools: []',
-      'prompt: run the fixture',
-      '',
-    ].join('\n'), 'utf-8');
-    writeFileSync(join(mockDir, 'work.json'), JSON.stringify({
+    const brief = structuredBrief();
+    mkdirSync(mockDir);
+    writeFileSync(join(mockDir, 'implement.json'), JSON.stringify({
       output_text: 'fixture stage failure detail',
       exit_code: 1,
     }), 'utf-8');
 
-    const brief = structuredBrief();
+    if (existingBrief) {
+      mkdirSync(join(fixture.project, 'docs'));
+      writeFileSync(join(fixture.project, 'docs', 'task_brief.md'), 'User-authored brief');
+    }
+    const before = projectSnapshot(fixture.project);
     writeReadySetupRecord(fixture.project, brief, fixture.fcHome);
     const result = runCli(fixture, [
-      'quick', '--project', fixture.project, '--adapter', 'mock', '--workflow', 'failure',
-      '--no-supervise', '--no-campaign', '--task', brief,
+      'quick', '--project', fixture.project, '--adapter', 'mock', '--workflow', 'direct',
+      '--no-campaign', '--task', brief,
     ], { MOCK_FIXTURE_DIR: mockDir });
     const output = `${result.stdout}${result.stderr}`;
 
     expect(result.status).toBe(1);
-    expect(output).toContain('work: failed');
+    expect(output, output).toContain('implement: failed');
     expect(output).toContain('Failure reason:');
-    expect(output).toContain('Failed stage work:');
+    expect(output).toContain('Failed stage implement:');
+    // The brief lives in the run directory; a launch writes nothing of its own into the project.
+    expect(projectSnapshot(fixture.project)).toEqual(before);
+    const runs = readdirSync(join(fixture.fcHome, 'runs'));
+    expect(runs).toHaveLength(1);
+    expect(readFileSync(join(fixture.fcHome, 'runs', runs[0], 'task_brief.md'), 'utf8')).toBe(brief);
   });
 
   it('makes malformed Reality-check YAML fail rehearsal while no heading remains admissible', () => {

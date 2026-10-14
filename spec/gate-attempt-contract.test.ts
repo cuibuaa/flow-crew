@@ -1,3 +1,7 @@
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { atomicWrite } from '../src/store.js';
+import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
+import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,10 +52,10 @@ function workflow(maxIterations: number): { config: WorkflowConfig; yaml: string
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'gate-attempt-contract',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], scope: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -60,7 +64,7 @@ function workflow(maxIterations: number): { config: WorkflowConfig; yaml: string
 }
 
 function dispatchYaml(includeRepair: boolean): string {
-  return [
+  return declaredDispatch([
     'stages:',
     `  - id: ${GATE_ID}`,
     '    role: qa',
@@ -78,7 +82,7 @@ function dispatchYaml(includeRepair: boolean): string {
       `    retry_to: [${GATE_ID}]`,
       '    prompt_template: Repair the product defect named by the gate.',
     ] : []),
-  ].join('\n');
+  ].join('\n'));
 }
 
 interface ScenarioOptions {
@@ -91,6 +95,88 @@ interface ScenarioOptions {
     opts: RunOpts;
   }) => { verdict: Record<string, unknown>; metric?: Record<string, unknown>; output?: string };
 }
+
+describe('explicit gate repairability', () => {
+  it.each([
+    null,
+    'irreparable',
+    { version: 2, disposition: 'irreparable', evidence: 'fact' },
+    { version: 1, disposition: 'unknown', evidence: 'fact' },
+    { version: 1, disposition: 'irreparable', evidence: ' ' },
+    { version: 1, disposition: 'irreparable', evidence: 'fact', extra: true },
+  ])('refuses malformed repairability case %# without inferring a terminal fact', (repairability) => {
+    writeGateVerdict({ pass: false, repairability });
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({
+      pass: false, contractViolation: 'repairability', reason: expect.stringContaining('exactly {version:1'),
+    });
+  });
+
+  it('refuses repairability alongside pass=true', () => {
+    writeGateVerdict({ pass: true, repairability: { version: 1, disposition: 'irreparable', evidence: 'fact' } });
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({ pass: false, contractViolation: 'repairability' });
+  });
+
+  it('refuses rejected repairability alongside terminal study completion success', () => {
+    const conflicting = { pass: false, reason: 'study_complete_without_model_success', study_complete: true, model_success: false,
+      repairability: { version: 1, disposition: 'irreparable', evidence: 'Unrepairable failed constraint' } };
+    writeGateVerdict(conflicting);
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({ pass: false, contractViolation: 'repairability', reason: expect.stringContaining('incompatible outcome declarations') });
+    const directory = runDir(projectDir, UNIT_RUN_ID);
+    rmSync(join(directory, `verdict_${GATE_ID}.json`));
+    writeFileSync(join(directory, `pre_gate_verdict_${GATE_ID}.json`), JSON.stringify(conflicting));
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toBeNull();
+  });
+
+  it('escalates an irreparable rejection once without dispatching repair or re-planning', async () => {
+    const result = await runScenario({ maxIterations: 3, includeRepair: true,
+      gateAttempt: () => ({ verdict: { pass: false, reason: 'Owned immutable failure',
+        repairability: { version: 1, disposition: 'irreparable', evidence: 'Retained immutable fact' },
+        criteria: { fact: { status: 'fail', evidence: 'Retained immutable fact' } },
+      } }),
+    });
+    expect(result.final.status).toBe('escalated');
+    expect(result.planCalls).toBe(1);
+    expect(result.gateCalls).toBe(1);
+    expect(result.repairCalls).toBe(0);
+    expect(result.final.failureReason).toContain('Irreparable gate rejection');
+    const retained = JSON.parse(readFileSync(join(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1', `rejected_verdict_${GATE_ID}.json`), 'utf8'));
+    expect(retained.criteria.fact.status).toBe('fail');
+    expect(retained.repairability.disposition).toBe('irreparable');
+  });
+
+  it('keeps explicit repairable rejections on the bounded repair route', async () => {
+    const result = await runScenario({ includeRepair: true,
+      gateAttempt: ({ call }) => ({ verdict: call === 1
+        ? { pass: false, repairability: { version: 1, disposition: 'repairable', evidence: 'Correctable output' } }
+        : { pass: true } }),
+    });
+    expect(result.final.status).toBe('complete');
+    expect(result.repairCalls).toBe(1);
+    expect(result.gateCalls).toBe(2);
+  });
+
+  it('keeps an unmeasured irreversible rejection terminal under a metric contract', async () => {
+    const result = await runScenario({ includeRepair: true, contract: { metric: 'quality', threshold: 1, higherIsBetter: true },
+      gateAttempt: () => ({ verdict: { pass: false, reason: 'Owned immutable failure',
+        repairability: { version: 1, disposition: 'irreparable', evidence: 'Retained immutable fact' } } }),
+    });
+    expect(result.final.status).toBe('escalated');
+    expect(result.repairCalls).toBe(0);
+    expect(result.gateCalls).toBe(1);
+    expect(result.final.failureReason).toContain('Owned immutable failure');
+  });
+
+  it('repairs an unmeasured rejection before accepting a measured score', async () => {
+    const result = await runScenario({ includeRepair: true, contract: { metric: 'quality', threshold: 1, higherIsBetter: true },
+      gateAttempt: ({ call }) => ({ verdict: call === 1
+        ? { pass: false, reason: 'No usable measurement was produced.' }
+        : { pass: true, metric: 'quality', value: 1 } }),
+    });
+    expect(result.final.status).toBe('complete');
+    expect(result.repairCalls).toBe(1);
+    expect(result.gateCalls).toBe(2);
+  });
+});
 
 async function runScenario(options: ScenarioOptions): Promise<{
   final: Awaited<ReturnType<typeof runWorkflow>>;
@@ -108,22 +194,22 @@ async function runScenario(options: ScenarioOptions): Promise<{
   const adapter: Adapter = {
     async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') {
-        return { output: '## Gate attempt contract fixture', exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: '## Gate attempt contract fixture', exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === 'plan') {
         planCalls += 1;
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), dispatchYaml(options.includeRepair === true));
+        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(dispatchYaml(options.includeRepair !== false)));
         if (options.contract) {
-          writeFileSync(join(opts.runDir, 'gate_contract.json'), JSON.stringify(options.contract, null, 2) + '\n');
+          atomicWrite(join(opts.runDir, 'gate_contract.json'), JSON.stringify(options.contract, null, 2) + '\n');
         }
-        return { output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === GATE_ID) {
         gateCalls += 1;
         gatePrompts.push(prompt);
         const attempt = options.gateAttempt({ call: gateCalls, prompt, opts });
         writeFileSync(
-          join(opts.runDir, `verdict_${GATE_ID}.json`),
+          join(opts.runDir, `fixture_verdict_${GATE_ID}.json`),
           JSON.stringify(attempt.verdict, null, 2) + '\n',
         );
         if (attempt.metric) {
@@ -132,13 +218,13 @@ async function runScenario(options: ScenarioOptions): Promise<{
             JSON.stringify(attempt.metric, null, 2) + '\n',
           );
         }
-        return { output: attempt.output ?? `gate ${gateCalls}`, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: attempt.output ?? `gate ${gateCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === REPAIR_ID) {
         repairCalls += 1;
-        return { output: `repair ${repairCalls}`, exitCode: 0, duration_ms: 1 };
+        return fixtureResult({ output: `repair ${repairCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       }
-      return { output: `unexpected ${opts.stageId}`, exitCode: 1, duration_ms: 1 };
+      return fixtureResult({ output: `unexpected ${opts.stageId}`, exitCode: 1, duration_ms: 1 }, opts);
     },
   };
 
@@ -164,18 +250,6 @@ async function runScenario(options: ScenarioOptions): Promise<{
   };
 }
 
-function failingMetric(): Record<string, unknown> {
-  return {
-    hasMetric: true,
-    metric: 'quality',
-    value: 0,
-    threshold: 1,
-    higherIsBetter: true,
-    pass: false,
-    source: { path: 'fixture', evidence: 'quality=0' },
-  };
-}
-
 function writeGateVerdict(value: Record<string, unknown>): void {
   const directory = runDir(projectDir, UNIT_RUN_ID);
   mkdirSync(directory, { recursive: true });
@@ -193,10 +267,6 @@ beforeEach(() => {
   root = join(tmpdir(), `flowcrew-gate-attempt-${randomBytes(6).toString('hex')}`);
   projectDir = join(root, 'project');
   mkdirSync(join(projectDir, 'config'), { recursive: true });
-  writeFileSync(
-    join(projectDir, 'config', 'defaults.yaml'),
-    readFileSync(join(REPOSITORY_ROOT, 'config', 'defaults.yaml')),
-  );
   setFcGlobalDir(join(root, 'fc-home'));
 });
 
@@ -205,59 +275,24 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe('per-attempt gate metric contract', () => {
-  it('accepts a qualitative gate with no metric declaration or worker-authored metric', async () => {
+describe('gate verdict and score contracts', () => {
+  it('accepts a qualitative gate without a score contract', async () => {
     const result = await runScenario({
       gateAttempt: () => ({ verdict: { pass: true, reason: 'qualitative audit passed' } }),
     });
 
     expect(result.final.status).toBe('complete');
     expect(result.gateCalls).toBe(1);
-    expect(JSON.parse(readFileSync(
-      join(result.runDirPath, 'stages', GATE_ID, 'metric.json'),
-      'utf-8',
-    ))).toMatchObject({ hasMetric: false, source: { kind: 'engine_attempt_default' } });
-  });
-
-  it('replaces a prior iteration failing metric before a new passing gate writes no metric', async () => {
-    const result = await runScenario({
-      maxIterations: 2,
-      gateAttempt: ({ call }) => call === 1
-        ? { verdict: { pass: false, reason: 'iteration one rejected' }, metric: failingMetric() }
-        : { verdict: { pass: true, reason: 'iteration two qualitative audit passed' } },
-    });
-
-    expect(result.gateCalls).toBe(2);
-    expect(result.final.status).toBe('complete');
-    expect(readGateVerdict(projectDir, GATE_ID, result.final.runId)).toMatchObject({ pass: true });
-    expect(JSON.parse(readFileSync(
-      join(result.runDirPath, 'stages', GATE_ID, 'metric.json'),
-      'utf-8',
-    ))).toMatchObject({ hasMetric: false, source: { kind: 'engine_attempt_default' } });
-  });
-
-  it('still rejects a current attempt that contradicts its own failing metric', async () => {
-    const result = await runScenario({
-      gateAttempt: () => ({
-        verdict: { pass: true, reason: 'dishonest pass' },
-        metric: failingMetric(),
-      }),
-    });
-
-    expect(result.final.status).not.toBe('complete');
-    expect(readGateVerdict(projectDir, GATE_ID, result.final.runId)).toEqual({
-      pass: false,
-      reason: 'verdict/metric.json mismatch: metric says fail, verdict says pass',
-    });
   });
 
   it('gives a rejecting gate a durable verdict citation that exists after archiving', async () => {
+    setEngineDefaults({ gate_retry_loops: 0 });
     let citedPath = '';
     const result = await runScenario({
       gateAttempt: ({ prompt }) => {
         citedPath = /Durable rejected-verdict citation: (.+\.json)/.exec(prompt)?.[1] ?? '';
         return {
-          verdict: { pass: false, reason: 'substantive rejection' },
+          verdict: { pass: false, reason: `substantive rejection; evidence: ${citedPath}` },
           output: `Rejected. Verdict evidence: ${citedPath || 'missing durable citation'}`,
         };
       },
@@ -291,28 +326,18 @@ describe('per-attempt gate metric contract', () => {
     expect(result.final.failureReason).toContain('metric="quality"');
     expect(result.final.failureReason).toContain('threshold=10');
     expect(result.planCalls).toBe(1);
-    expect(result.gateCalls).toBe(4);
+    expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
   });
 });
 
-describe('gate verdict and metric consistency', () => {
+describe('verdict authority and binding score consistency', () => {
   it('accepts a qualitative verdict when no metric file exists', () => {
     writeGateVerdict({ pass: true, reason: 'qualitative evidence is sufficient' });
 
     expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual({
       pass: true,
       reason: 'qualitative evidence is sufficient',
-    });
-  });
-
-  it('rejects a current passing verdict that contradicts its failing metric', () => {
-    writeGateVerdict({ pass: true, reason: 'claimed pass' });
-    writeGateMetric(JSON.stringify({ hasMetric: true, metric: 'quality', value: 0, threshold: 1, pass: false }));
-
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual({
-      pass: false,
-      reason: 'verdict/metric.json mismatch: metric says fail, verdict says pass',
     });
   });
 

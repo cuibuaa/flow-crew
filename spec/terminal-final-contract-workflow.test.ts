@@ -1,3 +1,4 @@
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -45,10 +46,10 @@ function workflow(maxIterations = 3): { config: WorkflowConfig; yaml: string } {
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name: 'default',
       defaults: { max_iterations: maxIterations },
-      stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }],
     },
   };
 }
@@ -110,7 +111,7 @@ describe('terminal final contract workflow behavior', () => {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         calls.push(opts.stageId);
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             `  - id: ${gateId}`,
             '    role: qa',
@@ -126,18 +127,18 @@ describe('terminal final contract workflow behavior', () => {
             '    scope: []',
             `    retry_to: [${gateId}]`,
             '    task: repair final gate evidence',
-          ].join('\n'));
-          return result('planned');
+          ].join('\n')));
+          return fixtureResult(result('planned'), opts);
         }
         if (opts.stageId === gateId) {
           gateAttempts++;
-          writeJson(join(opts.runDir, `verdict_${gateId}.json`), gateAttempts === 1
+          writeJson(join(opts.runDir, `fixture_verdict_${gateId}.json`), gateAttempts === 1
             ? { pass: false, reason: 'missing_required_replay_artifact', model_success: false, study_complete: false }
             : { pass: true, reason: 'model_success', model_success: true, study_complete: true });
-          return result(`gate attempt ${gateAttempts}`);
+          return fixtureResult(result(`gate attempt ${gateAttempts}`), opts);
         }
-        if (opts.stageId === fixId) return result('fixed missing replay artifact');
-        return result(`unexpected ${opts.stageId}`, 1);
+        if (opts.stageId === fixId) return fixtureResult(result('fixed missing replay artifact'), opts);
+        return fixtureResult(result(`unexpected ${opts.stageId}`, 1), opts);
       },
       async discuss(): Promise<RunResult> { return result(''); },
       spawnDiscuss() { throw new Error('not used'); },
@@ -167,7 +168,7 @@ describe('terminal final contract workflow behavior', () => {
         calls.push(opts.stageId);
         if (opts.stageId === 'plan') {
           planCalls++;
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), planCalls === 1
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(planCalls === 1
             ? [
                 'stages:',
                 `  - id: ${phaseGate}`,
@@ -177,6 +178,10 @@ describe('terminal final contract workflow behavior', () => {
                 '    scope: []',
                 '    is_gate: true',
                 '    task: verify phase progress',
+                '  - id: repair_phase', '    role: repair', '    scope: []',
+                `    depends_on: [${phaseGate}]`, `    retry_to: [${phaseGate}]`,
+                `    dependency_reasons: {${phaseGate}: "repair only an explicit phase rejection"}`,
+                '    task: repair the rejected phase',
               ].join('\n')
             : [
                 'stages:',
@@ -187,11 +192,15 @@ describe('terminal final contract workflow behavior', () => {
                 '    scope: []',
                 '    is_gate: true',
                 '    task: verify final transfer gate',
-              ].join('\n'));
-          return result(`planned ${planCalls}`);
+                '  - id: repair_final', '    role: repair', '    scope: []',
+                `    depends_on: [${finalGate}]`, `    retry_to: [${finalGate}]`,
+                `    dependency_reasons: {${finalGate}: "repair only an explicit final rejection"}`,
+                '    task: repair the rejected final evidence',
+              ].join('\n')));
+          return fixtureResult(result(`planned ${planCalls}`), opts);
         }
         if (opts.stageId === phaseGate) {
-          writeJson(join(opts.runDir, `verdict_${phaseGate}.json`), {
+          writeJson(join(opts.runDir, `fixture_verdict_${phaseGate}.json`), {
             pass: true,
             reason: 'phase3_complete_continue_next_phase',
             phase: 'phase3',
@@ -199,15 +208,15 @@ describe('terminal final contract workflow behavior', () => {
             nextPhase: 'final',
             outcome: 'phase3_complete_continue_next_phase',
           });
-          return result('phase complete');
+          return fixtureResult(result('phase complete'), opts);
         }
         if (opts.stageId === finalGate) {
           const verdict = terminalVerdict();
           writeJson(join(opts.runDir, `pre_gate_verdict_${finalGate}.json`), verdict);
-          writeJson(join(opts.runDir, `verdict_${finalGate}.json`), verdict);
-          return result('terminal final completion');
+          writeJson(join(opts.runDir, `fixture_verdict_${finalGate}.json`), verdict);
+          return fixtureResult(result('terminal final completion'), opts);
         }
-        return result(`unexpected ${opts.stageId}`, 1);
+        return fixtureResult(result(`unexpected ${opts.stageId}`, 1), opts);
       },
       async discuss(): Promise<RunResult> { return result(''); },
       spawnDiscuss() { throw new Error('not used'); },

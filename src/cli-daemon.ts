@@ -1,4 +1,5 @@
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, closeSync, mkdirSync, openSync, rmSync } from './engine-fs.js';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import {
@@ -12,14 +13,16 @@ import {
 } from './daemon-identity.js';
 import { TaskRegistry, TASK_STATUS, type TaskEntry } from './task-registry.js';
 import { Orchestrator } from './orchestrator.js';
+import { createDaemonReconciler } from './daemon-reconciliation.js';
 import {
   DaemonUnavailableError,
-  defaultSocketPath,
+  commandSocketPath,
   rpcErrorExitCode,
   sendRpc as sendRpcRequest,
   startRpcServer,
   type DaemonStatusRpcResponse,
   type RpcHandlerError,
+  type RegisterRpcResponse,
   type RpcRequest,
   type RpcResponse,
   type TaskShowEntry,
@@ -56,12 +59,11 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
     stdout.write(`${daemonUsage()}\n`);
     return 0;
   }
-  const socketPath = resolve(
+  try {
+  const socketPath = resolve(commandSocketPath(
     valueAfter(args, '--port')
-      ?? valueAfter(args, '--socket')
-      ?? process.env.FLOWCREW_DAEMON_SOCKET
-      ?? defaultSocketPath(),
-  );
+      ?? valueAfter(args, '--socket'),
+  ));
   const baseDir = dirname(socketPath);
   const logPath = join(baseDir, 'daemon.log');
   const distDir = resolve(opts.distDir ?? (import.meta.dirname ?? '.'));
@@ -74,7 +76,6 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
     ...opts.controls,
   };
 
-  try {
     if (sub === 'start') {
       if (await isRunning(socketPath, controls.sendRpc)) {
         stdout.write(`daemon already running at ${socketPath}; use "flowcrew daemon restart" to load a new build\n`);
@@ -244,6 +245,18 @@ function runVerdict(verdict: unknown, realityGate: unknown): string | undefined 
   return undefined;
 }
 
+/** Explicit persisted requests acknowledge durable admission before launch work. */
+export async function handleDaemonRegistrationRequest(
+  orchestrator: Orchestrator,
+  request: Extract<RpcRequest, { cmd: 'register' }>,
+  identity: Pick<DaemonIdentity, 'pid' | 'build'>,
+): Promise<RegisterRpcResponse> {
+  const persisted = request.acknowledgement === 'persisted';
+  const task = persisted ? orchestrator.enqueue(request.task) : await orchestrator.register(request.task);
+  return { id: task.id, unit: task.systemd_unit, pid: identity.pid, build: identity.build.hash,
+    ...(persisted ? { acknowledgement: 'persisted' as const } : {}) };
+}
+
 async function serve(socketPath: string, logPath: string, distDir: string): Promise<void> {
   mkdirSync(dirname(socketPath), { recursive: true });
   const identity = createDaemonIdentity({ socketPath, distDir });
@@ -253,6 +266,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
   const registry = new TaskRegistry({ baseDir: dirname(socketPath), warn });
   const orchestrator = new Orchestrator({
     registry,
+    reconcileOrphanRuns: createDaemonReconciler(registry, warn),
     onMaintenanceEvent: (event) => {
       appendFileSync(logPath, `${event.timestamp} EVENT ${JSON.stringify(event)}\n`, 'utf-8');
     },
@@ -260,8 +274,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
   const handler = async (req: RpcRequest): Promise<RpcResponse> => {
     appendFileSync(logPath, `${new Date().toISOString()} ${req.cmd}\n`, 'utf-8');
     if (req.cmd === 'register') {
-      const task = await orchestrator.register(req.task);
-      return { id: task.id, unit: task.systemd_unit, pid: identity.pid, build: identity.build.hash };
+      return handleDaemonRegistrationRequest(orchestrator, req, identity);
     }
     if (req.cmd === 'list') {
       return {
@@ -285,8 +298,8 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     }
     const cancellation = await handleDaemonCancellationRequest(orchestrator, req);
     if (cancellation) return cancellation;
-    if (req.cmd === 'retry') {
-      const task = await orchestrator.retry(req.id);
+    if (req.cmd === 'retry' || req.cmd === 'resume') {
+      const task = await orchestrator[req.cmd](req.id);
       return { new_attempt: task.attempt, unit: task.systemd_unit };
     }
     if (req.cmd === 'tail') {
@@ -295,7 +308,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     }
     if (req.cmd === 'status') return { ...orchestrator.status(), ...rpcIdentity(identity) };
     if (req.cmd === 'stop') {
-      orchestrator.stop();
+      await orchestrator.stop();
       setTimeout(() => {
         server.close(() => {
           rmSync(socketPath, { force: true });
@@ -309,6 +322,11 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
 
   const server = await startRpcServer(socketPath, handler, {
     onHandlerError: createDaemonRpcErrorLogger(logPath),
+    onResponse: (req, response) => {
+      if (req.cmd === 'register' && 'acknowledgement' in response) {
+        setImmediate(() => void orchestrator.tickOnce());
+      }
+    },
   });
   writeDaemonIdentity(socketPath, identity);
   orchestrator.start();

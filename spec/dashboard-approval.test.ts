@@ -78,17 +78,17 @@ afterAll(() => {
 });
 
 describe('dashboard parked-run execution guard (M6)', () => {
-  it('returns 409 before mutating the parked run or spawning a resume', async () => {
+  it('keeps retired direct execution unavailable and leaves the parked run unchanged', async () => {
     const runJson = join(runsRoot(), runId, 'run.json');
     const before = readFileSync(runJson, 'utf-8');
 
     const response = await app!.inject({
       method: 'POST',
       url: `/api/tasks/${runId}/execute`,
+      payload: {},
     });
 
-    expect(response.statusCode).toBe(409);
-    expect(response.json().error).toContain('approval');
+    expect(response.statusCode).toBe(400);
     expect(readFileSync(runJson, 'utf-8')).toBe(before);
   });
 

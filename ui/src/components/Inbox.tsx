@@ -22,6 +22,8 @@ import type {
 } from "../types";
 import { BriefPreflightPanel } from "./NewRunModal";
 import { showToast } from "./Toast";
+import { simulationSource } from "../lib/simulation-source";
+import { isRecord, isNonNegativeInteger } from "../lib/source-validation";
 
 const POLL_MS = 15_000;
 const SOURCE_KEYS = ["approvals", "deferred", "stale", "patches"] as const;
@@ -42,9 +44,7 @@ interface ResolutionNotice {
 
 interface BriefAdmissionReview {
   preflight: BriefPreflightResponse;
-  acknowledged: boolean;
   decision: InboxDecision;
-  always: boolean;
 }
 
 const SOURCE_LABELS: Record<InboxSourceKey, string> = {
@@ -90,19 +90,11 @@ function patchPreview(item: InboxPatchItem): string {
   ].join("\n");
 }
 
-function simulationSource(source: string | undefined): boolean {
-  return Boolean(source && /(?:^|[:/_.-])(?:mock|test|fixture|simulation|simulated)(?:$|[:/_.-])/iu.test(source));
-}
-
 function diffVersions(item: InboxPatchItem): { from: string; to: string } | null {
   const from = item.fromVersion ?? item.from_version ?? item.briefVersion;
   const explicitTo = item.toVersion ?? item.to_version;
   const to = explicitTo ?? (item.latestVersion && item.latestVersion !== from ? item.latestVersion : undefined);
   return from && to && from !== to ? { from, to } : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -111,10 +103,6 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
-}
-
-function isNonNegativeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function isEnumString<T extends string>(value: unknown, allowed: readonly T[]): value is T {
@@ -146,8 +134,7 @@ function isRunStanding(value: unknown): boolean {
 }
 
 function isInboxItem(value: unknown): value is InboxItem {
-  if (!isRecord(value) || !isRecord(value.standingRuleEligible)) return false;
-  const standingRule = value.standingRuleEligible;
+  if (!isRecord(value)) return false;
   return isNonEmptyString(value.runId)
     && isNonEmptyString(value.projectDir)
     && isNonEmptyString(value.requestId)
@@ -162,8 +149,6 @@ function isInboxItem(value: unknown): value is InboxItem {
     && isEnumString(value.state, ["pending", "approved", "denied"] as const)
     && (value.resolution === undefined || isInboxResolution(value.resolution))
     && (value.runStanding === undefined || isRunStanding(value.runStanding))
-    && typeof standingRule.ok === "boolean"
-    && isOptionalString(standingRule.reason)
     && isOptionalString(value.campaignId)
     && isOptionalString(value.campaignName);
 }
@@ -340,7 +325,6 @@ export default function Inbox({
   const resolveApproval = async (
     item: InboxItem,
     decision: InboxDecision,
-    always = false,
     admission?: BriefAdmissionSubmission,
   ) => {
     const key = `approval:${item.runId}:${item.requestId}`;
@@ -350,7 +334,6 @@ export default function Inbox({
     try {
       const result = await resolveItem(item.runId, item.requestId, {
         decision,
-        ...(always ? { always: true } : {}),
         ...admission,
       });
       if (!result.won) {
@@ -365,7 +348,7 @@ export default function Inbox({
           showToast(result.error ?? "Approval decision did not take effect");
         }
       } else {
-        showToast(result.resumed ? `Request ${decisionLabel(decision)}; run resumed` : `Request ${decisionLabel(decision)}`, "success");
+        showToast(result.resumeRegistered ? `Request ${decisionLabel(decision)}; resume queued` : `Request ${decisionLabel(decision)}`, "success");
       }
       setBriefAdmissionReviews((current) => {
         const next = { ...current };
@@ -379,9 +362,7 @@ export default function Inbox({
           ...current,
           [key]: {
             preflight: error.preflight,
-            acknowledged: false,
             decision,
-            always,
           },
         }));
         setItemError(key, error.message);
@@ -585,14 +566,7 @@ export default function Inbox({
                           {itemErrors[itemKey] ? <div className="inbox-item-error" role="alert">{itemErrors[itemKey]}</div> : null}
                           {briefReview ? (
                             <>
-                              <BriefPreflightPanel
-                                preflight={briefReview.preflight}
-                                acknowledged={briefReview.acknowledged}
-                                onAcknowledgedChange={(acknowledged) => setBriefAdmissionReviews((current) => ({
-                                  ...current,
-                                  [itemKey]: { ...briefReview, acknowledged },
-                                }))}
-                              />
+                              <BriefPreflightPanel preflight={briefReview.preflight} />
                               <div className="inbox-actions">
                                 <button
                                   className="btn ghost"
@@ -610,17 +584,13 @@ export default function Inbox({
                                 <button
                                   className="btn"
                                   type="button"
-                                  disabled={busy || (briefReview.preflight.report.requiresAcknowledgement && !briefReview.acknowledged)}
+                                  disabled={busy}
                                   onClick={() => void resolveApproval(
                                     item,
                                     briefReview.decision,
-                                    briefReview.always,
                                     {
                                       briefPreflightDigest: briefReview.preflight.report.digest,
                                       briefPreflightReceipt: briefReview.preflight.receipt,
-                                      ...(briefReview.preflight.report.requiresAcknowledgement
-                                        ? { acknowledgeBriefWarnings: true }
-                                        : {}),
                                     },
                                   )}
                                 >Continue decision and resume</button>
@@ -630,7 +600,6 @@ export default function Inbox({
                             <div className="inbox-actions">
                               <button className="btn" type="button" disabled={busy} onClick={() => void resolveApproval(item, "approve")}>{!item.runStanding || item.runStanding.kind === "parked" ? "Approve and resume" : "Approve"}</button>
                               <button className="btn ghost" type="button" disabled={busy} onClick={() => void resolveApproval(item, "deny")}>Deny</button>
-                              {item.standingRuleEligible.ok ? <button className="btn ghost always" type="button" disabled={busy} onClick={() => void resolveApproval(item, "approve", true)}>Always allow</button> : null}
                             </div>
                           )}
                         </article>

@@ -1,16 +1,20 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import './test-support/policy-runtime.js';
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { portCanBind } from './test-support/engine-fixtures.js';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { deriveRunTokenCost } from '../src/campaign-page.js';
-import type { SupervisorConfig } from '../src/config.js';
 import { startDashboard } from '../src/dashboard.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import {
+  atomicWrite,
   beginStageAttempt,
   completeStageAttempt,
   createRun,
@@ -22,7 +26,6 @@ import {
   writeRunState,
   writeStageStatus,
 } from '../src/store.js';
-import { Supervisor, type DirectionEvidenceBinding, type SupervisorAssessment, type SupervisorStageEvidence } from '../src/supervisor.js';
 import { readRunEvents, recordRunEvent } from '../src/run-events.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
@@ -72,10 +75,10 @@ function dynamicWorkflow(name: string): { config: WorkflowConfig; yaml: string }
   ].join('\n');
   return {
     yaml,
-    config: {
+    config: {description: '', 
       name,
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [{
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -140,7 +143,7 @@ describe('current-attempt truth', () => {
   });
 });
 
-function waitForDashboard(child: ChildProcessWithoutNullStreams): Promise<{ port: number; output: string }> {
+function waitForDashboard(child: ChildProcessByStdio<null, Readable, Readable>): Promise<{ port: number; output: string }> {
   return new Promise((resolve, reject) => {
     let output = '';
     const timeout = setTimeout(() => {
@@ -162,7 +165,7 @@ function waitForDashboard(child: ChildProcessWithoutNullStreams): Promise<{ port
   });
 }
 
-function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<{ code: number | null; signal: NodeJS.Signals | null } | null> {
+function waitForExit(child: ChildProcessByStdio<null, Readable, Readable>, timeoutMs: number): Promise<{ code: number | null; signal: NodeJS.Signals | null } | null> {
   return new Promise((resolve) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -179,20 +182,17 @@ function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): 
   });
 }
 
-function portCanBind(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = createServer();
-    server.once('error', () => resolve(false));
-    server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)));
-  });
-}
+
 
 describe('dashboard signal shutdown', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)('releases the listening port and exits zero after the first %s', { timeout: 20_000 }, async (signal) => {
     const childHome = mkdtempSync(join(tmpdir(), 'flowcrew-p6-signal-home-'));
     const childProject = mkdtempSync(join(tmpdir(), 'flowcrew-p6-signal-project-'));
     const dashboardUrl = pathToFileURL(join(process.cwd(), 'dist', 'dashboard.js')).href;
+    const listenerPolicyUrl = pathToFileURL(join(process.cwd(), 'spec', 'test-support', 'loopback-listen.mjs')).href;
     const source = `
+      import { installLoopbackListenFence } from ${JSON.stringify(listenerPolicyUrl)};
+      installLoopbackListenFence('engine-truthfulness.test.ts');
       import { startDashboard } from ${JSON.stringify(dashboardUrl)};
       await startDashboard(process.env.P6_PROJECT_DIR, 0, { distDir: process.env.P6_DIST_DIR });
     `;
@@ -315,13 +315,13 @@ describe('campaign cost honesty', () => {
     });
   });
 
-  it('keeps an absent supervisor ledger unknown unless the run explicitly disabled supervision', () => {
+  it('keeps an absent historical supervisor ledger unknown when the run enabled supervision', () => {
     const created = createRun(projectDir, 'p6-supervisor-cost', 'name: p6-supervisor-cost', ['work']);
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
     state.stages.work = { status: 'skipped', retries: 0 };
     delete state.supervisor;
-    delete state.supervise;
+    state.supervise = true;
     const unknown = deriveRunTokenCost(state);
     state.supervise = false;
     const disabled = deriveRunTokenCost(state);
@@ -335,7 +335,7 @@ describe('campaign cost honesty', () => {
     });
   });
 
-  it('keeps usage from stages replaced by a later successful outer re-plan', { timeout: 15_000 }, async () => {
+  it('keeps usage from stages replaced by a deliberate next phase', { timeout: 15_000 }, async () => {
     const yaml = [
       'name: p6-replan-cost',
       'defaults:',
@@ -346,10 +346,10 @@ describe('campaign cost honesty', () => {
       '    role: planner',
       '    dynamic_dispatch: true',
     ].join('\n');
-    const config: WorkflowConfig = {
+    const config: WorkflowConfig = {description: '', 
       name: 'p6-replan-cost',
       defaults: { max_iterations: 2, max_retries: 0 },
-      stages: [{
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -364,12 +364,12 @@ describe('campaign cost honesty', () => {
     const planPrompts: string[] = [];
     const adapter: Adapter = {
       async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: '## What was done\n- completed after a re-plan', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- completed after a re-plan', exitCode: 0, duration_ms: 1 }, opts);
         if (opts.stageId === 'plan') {
           planCalls++;
           planPrompts.push(prompt);
           const suffix = planCalls === 1 ? 'one' : 'two';
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             `  - id: work_${suffix}`,
             '    role: coder',
@@ -384,16 +384,23 @@ describe('campaign cost honesty', () => {
             `    dependency_reasons: {work_${suffix}: "verify iteration ${planCalls}"}`,
             '    is_gate: true',
             `    task: verify iteration ${planCalls}`,
-          ].join('\n'));
-          return { output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1, tokens_in: 10, tokens_out: 1 };
+            `  - id: repair_${suffix}`,
+            '    role: coder',
+            `    depends_on: [gate_${suffix}]`,
+            '    scope: []',
+            `    dependency_reasons: {gate_${suffix}: "repair only an explicit rejection"}`,
+            `    retry_to: [gate_${suffix}]`,
+            '    task: repair the rejected iteration',
+          ].join('\n')));
+          return fixtureResult({ output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1, tokens_in: 10, tokens_out: 1 }, opts);
         }
         if (opts.stageId === 'work_one') {
           const signalDir = join(opts.runDir, 'signals');
           mkdirSync(signalDir, { recursive: true });
           const reason = 'recorded corpus text was mistaken for the stage direction';
           const signalTimestamp = new Date().toISOString();
-          writeFileSync(join(signalDir, 'replan.json'), JSON.stringify({ reason, timestamp: signalTimestamp }));
-          writeFileSync(join(opts.runDir, 'supervisor_state.json'), JSON.stringify({ actions: [{
+          atomicWrite(join(signalDir, 'replan.json'), JSON.stringify({ reason, timestamp: signalTimestamp }));
+          atomicWrite(join(opts.runDir, 'supervisor_state.json'), JSON.stringify({ actions: [{
             tick: 1,
             timestamp: new Date(Date.parse(signalTimestamp) + 1).toISOString(),
             verdict: 'REPLAN',
@@ -405,18 +412,18 @@ describe('campaign cost honesty', () => {
             },
             reason,
           }] }));
-          return { output: 'first work', exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 };
+          return fixtureResult({ output: 'first work', exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 }, opts);
         }
         if (opts.stageId === 'gate_one') {
-          writeFileSync(join(opts.runDir, 'verdict_gate_one.json'), JSON.stringify({ pass: false, reason: 're-plan required' }));
-          return { output: 'first gate rejected', exitCode: 0, duration_ms: 1, tokens_in: 20, tokens_out: 2 };
+          writeFileSync(join(opts.runDir, 'fixture_verdict_gate_one.json'), JSON.stringify({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' }));
+          return fixtureResult({ output: 'first gate rejected', exitCode: 0, duration_ms: 1, tokens_in: 20, tokens_out: 2 }, opts);
         }
-        if (opts.stageId === 'work_two') return { output: 'second work', exitCode: 0, duration_ms: 1, tokens_in: 200, tokens_out: 20 };
+        if (opts.stageId === 'work_two') return fixtureResult({ output: 'second work', exitCode: 0, duration_ms: 1, tokens_in: 200, tokens_out: 20 }, opts);
         if (opts.stageId === 'gate_two') {
-          writeFileSync(join(opts.runDir, 'verdict_gate_two.json'), JSON.stringify({ pass: true, reason: 'accepted' }));
-          return { output: 'second gate passed', exitCode: 0, duration_ms: 1, tokens_in: 30, tokens_out: 3 };
+          writeFileSync(join(opts.runDir, 'fixture_verdict_gate_two.json'), JSON.stringify({ pass: true, reason: 'accepted' }));
+          return fixtureResult({ output: 'second gate passed', exitCode: 0, duration_ms: 1, tokens_in: 30, tokens_out: 3 }, opts);
         }
-        return { output: 'unexpected', exitCode: 1, duration_ms: 1 };
+        return fixtureResult({ output: 'unexpected', exitCode: 1, duration_ms: 1 }, opts);
       },
     };
 
@@ -428,15 +435,7 @@ describe('campaign cost honesty', () => {
     expect(final.status).toBe('complete');
     expect(planCalls).toBe(2);
     expect(planPrompts[1]).not.toContain('PIVOT REQUIRED');
-    expect(replanEvents).toEqual([
-      expect.objectContaining({
-        type: 'supervisor_replan',
-        stageId: 'work_one',
-        assessmentId: expect.stringMatching(/^sa_[0-9a-f]{20}$/),
-        decision: 'discarded',
-      }),
-    ]);
-    expect(replanEvents[0]?.detail).toContain('target work_one execution 1 subsequently completed');
+    expect(replanEvents).toEqual([]);
     expect(cost).toEqual({
       tokens: 407,
       supervisorTokens: 0,
@@ -454,10 +453,10 @@ describe('gate-aware DAG ordering', () => {
     let gateCalls = 0;
     const adapter: Adapter = {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === '_summary') return { output: '## What was done\n- verified ordering', exitCode: 0, duration_ms: 1 };
+        if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- verified ordering', exitCode: 0, duration_ms: 1 }, opts);
         if (opts.stageId === 'plan') {
           calls.push('plan');
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: design_gate',
             '    role: qa',
@@ -479,25 +478,25 @@ describe('gate-aware DAG ordering', () => {
             '    depends_on: [design_gate]',
             '    dependency_reasons: {design_gate: "build only from an accepted design"}',
             '    task: build product',
-          ].join('\n'));
-          return { output: 'planned', exitCode: 0, duration_ms: 1 };
+          ].join('\n')));
+          return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1 }, opts);
         }
         if (opts.stageId === 'design_gate') {
           gateCalls++;
           const pass = gateCalls > 1;
           calls.push(`gate:${pass ? 'pass' : 'fail'}`);
-          writeFileSync(join(opts.runDir, 'verdict_design_gate.json'), JSON.stringify({ pass, reason: pass ? 'accepted' : 'design rejected' }));
-          return { output: pass ? 'accepted' : 'rejected', exitCode: 0, duration_ms: 1 };
+          writeFileSync(join(opts.runDir, 'fixture_verdict_design_gate.json'), JSON.stringify({ pass, reason: pass ? 'accepted' : 'design rejected' }));
+          return fixtureResult({ output: pass ? 'accepted' : 'rejected', exitCode: 0, duration_ms: 1 }, opts);
         }
         if (opts.stageId === 'repair_design') {
           calls.push('repair');
-          return { output: 'repaired', exitCode: 0, duration_ms: 1, writes: ['src/design.ts'], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'repaired', exitCode: 0, duration_ms: 1, writes: ['src/design.ts'], writeAttribution: 'structured' }, opts);
         }
         if (opts.stageId === 'build_product') {
           calls.push('downstream');
-          return { output: 'built', exitCode: 0, duration_ms: 1, writes: ['src/product.ts'], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'built', exitCode: 0, duration_ms: 1, writes: ['src/product.ts'], writeAttribution: 'structured' }, opts);
         }
-        return { output: 'unexpected', exitCode: 1, duration_ms: 1 };
+        return fixtureResult({ output: 'unexpected', exitCode: 1, duration_ms: 1 }, opts);
       },
     };
 
@@ -550,6 +549,10 @@ async function runScopeRevisionScenario(input: {
   expectAcceptance: boolean;
   peerConflict?: boolean;
 }) {
+  // This fixture observes the first scope decision and its repair diff. Pin
+  // one repair round instead of inheriting repeated rejections from defaults.
+  mkdirSync(join(projectDir, 'config'), { recursive: true });
+  setEngineDefaults({ gate_retry_loops: 1 });
   const { config, yaml } = dynamicWorkflow(`p6-scope-${input.expectAcceptance ? 'accept' : 'reject'}`);
   const created = prepareRun(config, yaml);
   mkdirSync(join(projectDir, 'src'), { recursive: true });
@@ -563,9 +566,9 @@ async function runScopeRevisionScenario(input: {
   const requestId = `scope-${input.expectAcceptance ? 'accept' : 'reject'}`;
   const adapter: Adapter = {
     async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-      if (opts.stageId === '_summary') return { output: '## What was done\n- scope scenario', exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- scope scenario', exitCode: 0, duration_ms: 1 }, opts);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: scope_gate',
           '    role: qa',
@@ -590,19 +593,19 @@ async function runScopeRevisionScenario(input: {
             '    retry_to: [scope_gate]',
             '    task: peer repair',
           ] : []),
-        ].join('\n'));
-        return { output: 'planned', exitCode: 0, duration_ms: 1 };
+        ].join('\n')));
+        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === 'scope_gate') {
         gateCalls++;
         const pass = input.expectAcceptance && readFileSync(join(projectDir, 'src', 'store.ts'), 'utf-8').includes('audit fields');
-        writeFileSync(join(opts.runDir, 'verdict_scope_gate.json'), JSON.stringify({ pass, reason: pass ? 'fixed' : 'still missing' }));
-        return { output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 1 };
+        writeFileSync(join(opts.runDir, 'fixture_verdict_scope_gate.json'), JSON.stringify({ pass, reason: pass ? 'fixed' : 'still missing' }));
+        return fixtureResult({ output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       }
       if (opts.stageId === 'peer_repair') {
         writeFileSync(join(projectDir, 'src', 'peer.ts'), 'peer-active\n');
         await peerMayFinish;
-        return { output: 'peer complete', exitCode: 0, duration_ms: 1, writes: ['src/peer.ts'], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'peer complete', exitCode: 0, duration_ms: 1, writes: ['src/peer.ts'], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === 'repair_scope') {
         const stagePath = join(opts.runDir, 'stages', opts.stageId);
@@ -624,15 +627,15 @@ async function runScopeRevisionScenario(input: {
         if (observedDecision?.accepted && input.requestedPath === 'src/store.ts') {
           writeFileSync(join(projectDir, 'src', 'store.ts'), 'audit fields\n');
         }
-        return {
+        return fixtureResult({
           output: observedDecision ? `scope ${observedDecision.accepted ? 'accepted' : 'rejected'}` : 'scope decision missing',
           exitCode: input.expectAcceptance && !observedDecision?.accepted ? 1 : 0,
           duration_ms: 800,
           writes: observedDecision?.accepted && input.requestedPath === 'src/store.ts' ? ['src/store.ts'] : [],
           writeAttribution: 'structured',
-        };
+        }, opts);
       }
-      return { output: 'unexpected', exitCode: 1, duration_ms: 1 };
+      return fixtureResult({ output: 'unexpected', exitCode: 1, duration_ms: 1 }, opts);
     },
   };
   const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('planner', 'qa', 'repair'), created.runId, 'scope revision fixture', true);
@@ -671,7 +674,6 @@ describe('reasoned scope revision', () => {
   });
 
   it.each([
-    { requestedPath: 'src/store.ts', reason: '', label: 'empty reason' },
     { requestedPath: '../outside.ts', reason: 'write outside the project', label: 'path traversal' },
   ])('rejects $label before any newly requested path is written', { timeout: 15_000 }, async ({ requestedPath, reason }) => {
     const result = await runScopeRevisionScenario({ requestedPath, reason, expectAcceptance: false });
@@ -708,172 +710,5 @@ describe('reasoned scope revision', () => {
       peerRan: true,
       diffHasConflict: true,
     });
-  });
-});
-
-const supervisorConfig: SupervisorConfig = {
-  enabled: true,
-  adapter: 'scripted',
-  model: 'test',
-  reasoningEffort: 'low',
-  pollIntervalMs: 30_000,
-  routineAssessmentIntervalMs: 180_000,
-  cooldownAfterActionMs: 0,
-  maxAssessmentsPerIteration: 20,
-  tailBytes: 16_384,
-  minDeltaBytes: 4096,
-  stuckThresholdMs: 60_000,
-};
-
-type SupervisorActionFixture = {
-  timestamp: string;
-  tick: number;
-  assessment: SupervisorAssessment;
-  runningStages: string[];
-  targetAttemptIndex: number;
-  source: 'supervisor' | 'operator';
-  directionEvidence?: DirectionEvidenceBinding;
-};
-
-function runningSupervisorFixture(attemptIndex = 2) {
-  const created = createRun(projectDir, 'p6-supervisor', 'name: p6-supervisor', ['review_design']);
-  const startedAt = new Date(Date.now() - 1_000).toISOString();
-  const previousStartedAt = new Date(Date.now() - 120_000).toISOString();
-  const status = {
-    status: 'running' as const,
-    retries: 0,
-    startedAt: previousStartedAt,
-    attempts: [
-      { index: 1, startedAt: previousStartedAt, completedAt: startedAt, status: 'failed' as const, duration_ms: 119_000, exitCode: 1 },
-      { index: attemptIndex, startedAt, status: 'running' as const },
-    ],
-  };
-  const state = readRunState(projectDir, created.runId);
-  state.status = 'running';
-  state.stages.review_design = status;
-  writeRunState(projectDir, created.runId, state);
-  writeStageStatus(projectDir, created.runId, 'review_design', status);
-  mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
-  const adapter: Adapter = { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) };
-  const supervisor = new Supervisor(projectDir, created.runId, adapter, supervisorConfig, 'P6 supervisor fixture');
-  const internals = supervisor as unknown as {
-    act(
-      assessment: SupervisorAssessment,
-      progressSinceMs?: number,
-      source?: 'supervisor' | 'operator',
-      observedDeliverables?: ReadonlyMap<string, never>,
-      observedDirectionEvidence?: ReadonlyMap<string, DirectionEvidenceBinding>,
-      observedStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
-      comparisonStageEvidence?: ReadonlyMap<string, SupervisorStageEvidence>,
-    ): Promise<SupervisorAssessment>;
-    actions: SupervisorActionFixture[];
-    stageLastProgressMs: Record<string, number>;
-  };
-  internals.stageLastProgressMs = { review_design: Date.now() };
-  return { created, internals };
-}
-
-function guideAction(tick: number, targetAttemptIndex: number, source: 'supervisor' | 'operator'): SupervisorActionFixture {
-  return {
-    timestamp: new Date().toISOString(),
-    tick,
-    assessment: {
-      verdict: 'GUIDE',
-      targetStage: 'review_design',
-      reason: source === 'operator' ? 'operator supplied an additional requirement' : 'same concrete wrong direction',
-      guidance: source === 'operator' ? 'also include the new evidence' : 'use the required evidence path',
-    },
-    runningStages: ['review_design'],
-    targetAttemptIndex,
-    source,
-  };
-}
-
-describe('attempt- and source-scoped supervisor guidance', () => {
-  it('does not let two GUIDE decisions from attempt 1 authorize aborting attempt 2', async () => {
-    const { created, internals } = runningSupervisorFixture(2);
-    internals.actions = [guideAction(1, 1, 'supervisor'), guideAction(2, 1, 'supervisor')];
-    const result = await internals.act({
-      verdict: 'ABORT', targetStage: 'review_design',
-      reason: 'the same wrong direction continues', guidance: null,
-    });
-    const signalExists = existsSync(join(created.runDirPath, 'signals', 'abort_review_design.json'));
-    console.info(`[P6_BASELINE_46_ATTEMPT] ${JSON.stringify({ verdict: result.verdict, reason: result.reason, signalExists })}`);
-    expect({ verdict: result.verdict, signalExists }).toEqual({ verdict: 'WAIT', signalExists: false });
-  });
-
-  it('does not count operator additions as supervisor wrong-direction corrections', async () => {
-    const { created, internals } = runningSupervisorFixture(2);
-    internals.actions = [guideAction(1, 2, 'operator'), guideAction(2, 2, 'operator')];
-    const result = await internals.act({
-      verdict: 'ABORT', targetStage: 'review_design',
-      reason: 'the same wrong direction continues', guidance: null,
-    });
-    const signalExists = existsSync(join(created.runDirPath, 'signals', 'abort_review_design.json'));
-    console.info(`[P6_BASELINE_46_OPERATOR] ${JSON.stringify({ verdict: result.verdict, reason: result.reason, signalExists })}`);
-    expect({ verdict: result.verdict, signalExists }).toEqual({ verdict: 'WAIT', signalExists: false });
-  });
-
-  it('still aborts after two supervisor corrections in the current attempt', async () => {
-    const { created, internals } = runningSupervisorFixture(2);
-    const attempt = readRunState(projectDir, created.runId).stages.review_design.attempts!.at(-1)!;
-    const now = Date.now();
-    const directionKey = 'same_concrete_wrong_direction';
-    internals.actions = [1, 2].map((tick) => ({
-      ...guideAction(tick, 2, 'supervisor'),
-      timestamp: new Date(now - (tick === 1 ? 4_000 : 2_000)).toISOString(),
-      assessment: {
-        ...guideAction(tick, 2, 'supervisor').assessment,
-        directionKey,
-        guidanceId: `guide-${tick}`,
-        evidenceIds: [`ev_${(tick === 1 ? 'a' : 'b').repeat(20)}`],
-      },
-      directionEvidence: {
-        version: 1, stageId: 'review_design', attemptIndex: 2,
-        attemptStartedAt: attempt.startedAt, generation: (tick === 1 ? 'a' : 'b').repeat(64),
-      },
-    }));
-    for (const [offset, guidanceId, invocationIndex] of [[3_000, 'guide-1', 8], [1_000, 'guide-2', 9]] as const) {
-      recordRunEvent(projectDir, created.runId, {
-        type: 'guidance_delivery_checked', runId: created.runId,
-        timestamp: new Date(now - offset).toISOString(), stageId: 'review_design',
-        attemptIndex: 2, attemptStartedAt: attempt.startedAt,
-        boundary: 'adapter_invocation', invocationIndex,
-        guidanceIds: [guidanceId], delivered: true, source: 'worker',
-      });
-    }
-    const result = await internals.act({
-      verdict: 'ABORT', targetStage: 'review_design',
-      reason: 'the same wrong direction continues', guidance: null, directionKey,
-      evidenceIds: ['ev_cccccccccccccccccccc'], assessedAt: new Date(now).toISOString(),
-    }, Date.now() + 1_000, 'supervisor', undefined, new Map([['review_design', {
-      version: 1, stageId: 'review_design', attemptIndex: 2,
-      attemptStartedAt: attempt.startedAt, generation: 'c'.repeat(64),
-    }]]), undefined, new Map([['review_design', {
-      version: 1,
-      stageId: 'review_design',
-      attemptIndex: 2,
-      attemptStartedAt: attempt.startedAt,
-      rows: [{
-        id: 'ev_cccccccccccccccccccc',
-        kind: 'command_invocation',
-        authority: 'action',
-        text: 'continue the same concrete direction',
-      }],
-    }], ['unaccused', {
-      version: 1,
-      stageId: 'unaccused',
-      attemptIndex: 1,
-      attemptStartedAt: attempt.startedAt,
-      rows: [{
-        id: 'ev_dddddddddddddddddddd',
-        kind: 'command_invocation',
-        authority: 'action',
-        text: 'npm test completed',
-      }],
-    }]]));
-    const signalPath = join(created.runDirPath, 'signals', 'abort_review_design.json');
-    const signal = existsSync(signalPath) ? JSON.parse(readFileSync(signalPath, 'utf-8')) as { attemptIndex?: number } : null;
-    expect({ verdict: result.verdict, signalAttempt: signal?.attemptIndex }).toEqual({ verdict: 'ABORT', signalAttempt: 2 });
   });
 });

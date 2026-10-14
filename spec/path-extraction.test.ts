@@ -1,456 +1,66 @@
-import { createHash } from 'node:crypto';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import {
-  inspectDispatchAdmission,
-  inspectRealityCheckReachability,
-  parseDispatchedStageConfig,
-} from '../src/scheduler.js';
-
-type AdmissionInput = Parameters<typeof inspectDispatchAdmission>[0];
-type ReachabilityInput = Parameters<typeof inspectRealityCheckReachability>[0];
-
-interface FixtureContext {
-  source: {
-    runId: string;
-    rejectionAttempt: string;
-    dispatchBytes: number;
-    dispatchSha256: string;
-    recordedAdmissionBytes: number;
-    recordedAdmissionSha256: string;
-    realityChecksBytes: number;
-    realityChecksSha256: string;
-  };
-  dispatchStageId: string;
-  baseStages: unknown[];
-  terminalStates?: AdmissionInput['terminalStates'];
-  research?: AdmissionInput['research'];
-  existingPaths: string[];
-}
-
-interface RecordedAdmission {
-  pass: boolean;
-  proposalDigest: string;
-  errors: string[];
-}
+import { stringify as stringifyYaml } from 'yaml';
+import { inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig } from '../src/scheduler.js';
+import type { ArtifactRead } from '../src/artifact-declarations.js';
+import { artifacts, producedRead, stageArtifacts } from './spec_contracts/declared-fixtures.js';
 
 const temporaryRoots: string[] = [];
-
-afterEach(() => {
-  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
-
+afterEach(() => { for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function temporaryProject(): string {
-  const root = mkdtempSync(join(tmpdir(), 'flowcrew-path-extraction-'));
+  const root = mkdtempSync(join(tmpdir(), 'flowcrew-reality-reads-'));
   temporaryRoots.push(root);
   return root;
 }
 
-function sha256(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex');
+function markdownFor(type: string, params: Record<string, unknown>, reads: ArtifactRead[] = []): string {
+  return ['## Reality checks', '```yaml', stringifyYaml({ checks: [{ name: 'path boundary probe', type, params, reads }] }).trimEnd(), '```'].join('\n');
 }
-
-function fixture(name: 'research' | 'diagram') {
-  const root = join(import.meta.dirname, 'fixtures', 'path-extraction', name);
-  const dispatchBytes = readFileSync(join(root, 'dispatch.yaml'));
-  const admissionBytes = readFileSync(join(root, 'recorded_admission.json'));
-  const checksBytes = readFileSync(join(root, 'reality_checks.md'));
-  const context = JSON.parse(readFileSync(join(root, 'context.json'), 'utf8')) as FixtureContext;
-  const criteria = JSON.parse(readFileSync(join(root, 'brief_criteria.json'), 'utf8')) as AdmissionInput['criteria'];
-  const recorded = JSON.parse(admissionBytes.toString('utf8')) as RecordedAdmission;
-  const parsed = parseYaml(dispatchBytes.toString('utf8')) as unknown;
-  const rawStages = Array.isArray(parsed)
-    ? parsed
-    : (parsed as { stages?: unknown[] } | undefined)?.stages;
-
-  expect(rawStages).toBeInstanceOf(Array);
-  expect(dispatchBytes.byteLength).toBe(context.source.dispatchBytes);
-  expect(sha256(dispatchBytes)).toBe(context.source.dispatchSha256);
-  expect(admissionBytes.byteLength).toBe(context.source.recordedAdmissionBytes);
-  expect(sha256(admissionBytes)).toBe(context.source.recordedAdmissionSha256);
-  expect(checksBytes.byteLength).toBe(context.source.realityChecksBytes);
-  expect(sha256(checksBytes)).toBe(context.source.realityChecksSha256);
-  expect(recorded.proposalDigest).toBe(context.source.dispatchSha256);
-
-  const projectDir = temporaryProject();
-  for (const relativePath of context.existingPaths) {
-    const absolutePath = join(projectDir, relativePath);
-    mkdirSync(dirname(absolutePath), { recursive: true });
-    writeFileSync(absolutePath, 'recorded admission context\n', 'utf8');
-  }
-
-  const dispatched = (rawStages as unknown[]).map((stage) => {
-    const parsedStage = parseDispatchedStageConfig(stage);
-    // This fixture predates the closed stage-status domain. Keep the path
-    // extraction subject reachable with the real completion literal.
-    if (parsedStage.condition === 'verify_diagram.status == passed') {
-      parsedStage.condition = 'verify_diagram.status == complete';
-    }
-    return parsedStage;
-  });
-  const baseStages = context.baseStages.map((stage) => parseDispatchedStageConfig(stage));
-  return {
-    context,
-    criteria,
-    recorded,
-    checks: checksBytes.toString('utf8'),
-    projectDir,
-    dispatched,
-    admission: {
-      dispatched,
-      baseStages,
-      dispatchStageId: context.dispatchStageId,
-      terminalStates: context.terminalStates,
-      research: context.research,
-      criteria,
-    } satisfies AdmissionInput,
-  };
-}
-
-function markdownFor(type: string, params: Record<string, unknown>): string {
-  return [
-    '## Reality checks',
-    '```yaml',
-    stringifyYaml({ checks: [{ name: 'path boundary probe', type, params }] }).trimEnd(),
-    '```',
-  ].join('\n');
-}
-
-function reachabilityErrors(type: string, params: Record<string, unknown>): string[] {
-  return inspectRealityCheckReachability({
-    markdown: markdownFor(type, params),
-    projectDir: temporaryProject(),
-    stages: [],
-  });
-}
-
 function stage(raw: Record<string, unknown>) {
   return parseDispatchedStageConfig({
-    prompt_template: 'bounded path-extraction probe',
-    skills: [],
-    is_gate: false,
-    criterion_refs: [],
-    ...raw,
+    artifact_contract: stageArtifacts(String(raw.id), raw.is_gate === true), prompt_template: 'exact declaration probe', skills: [],
+    is_gate: false, criterion_refs: [], ...raw,
   });
 }
 
-describe('literal reality-check path extraction', () => {
-  it('H3b treats a literal parent scope as ownership of named descendants', () => {
-    const projectDir = temporaryProject();
-    const errors = inspectRealityCheckReachability({
-      markdown: markdownFor('file-exists-nonempty', {
-        paths: ['docs/honest_plan/evidence.json'],
-      }),
-      projectDir,
-      stages: [stage({
-        id: 'evidence_writer',
-        role: 'coder',
-        scope: ['docs/honest_plan'],
-        depends_on: [],
-        dependency_reasons: {},
-      })],
-    });
-
-    expect(errors).toEqual([]);
+describe('declared reality-check reads', () => {
+  it('requires an exact output declaration even when a parent write scope covers the path', () => {
+    const projectDir = temporaryProject(), path = 'docs/honest_plan/evidence.json';
+    const writer = stage({ criterion_refs: [], id: 'evidence_writer', role: 'coder', scope: ['docs/honest_plan'], depends_on: [], dependency_reasons: {} });
+    const markdown = markdownFor('file-exists-nonempty', { paths: [path] }, [producedRead('evidence', path, writer.id)]);
+    expect(inspectRealityCheckReachability({ markdown, projectDir, stages: [writer] }).join('\n')).toContain('ARTIFACT_READ_UNBOUND');
+    writer.artifact_contract = artifacts([{ id: 'evidence', root: 'project', path }]);
+    expect(inspectRealityCheckReachability({ markdown, projectDir, stages: [writer] })).toEqual([]);
   });
-
-  const recordedFalsePositives = {
-    research: [
-      'console.error',
-      'ship_report.md',
-      'run_manifest.json',
-      'process.exit',
-      'JSON.parse',
-      'fs.readFileSync',
-      'manifest.rounds',
-      'manifest.rounds.length',
-      'latest.result',
-      '0.05',
-    ],
-    diagram: [
-      'fs.readFileSync',
-      'html.match',
-      'content.replace',
-      '.trim',
-      'fs.readFileSync',
-      'report.match',
-      'images.length',
-      'JSON.parse',
-      'fs.readFileSync',
-      'baseline.branch',
-      'path.resolve',
-      'baseline.targetDir',
-      'process.cwd',
-      'baseline.validationBaseline.results.find',
-      'entry.role',
-      'recorded.failureIdentifiers.length',
-      'process.execPath',
-      '.map',
-      '.replace',
-      'run.status',
-      'JSON.stringify',
-    ],
-  } as const;
-
-  it.each(['research', 'diagram'] as const)(
-    'replays the byte-identical %s quarantine and removes only code-token path errors',
-    (name) => {
-      const subject = fixture(name);
-      expect(subject.recorded.pass).toBe(false);
-      expect(subject.recorded.errors.map((error) => (
-        / references absent (.*), but no admitted stage or framework emitter owns it$/.exec(error)?.[1]
-      ))).toEqual(recordedFalsePositives[name]);
-
-      const topology = inspectDispatchAdmission(subject.admission);
-      expect(topology.pass, topology.errors.join('\n')).toBe(true);
-
-      const afterErrors = inspectRealityCheckReachability({
-        markdown: subject.checks,
-        projectDir: subject.projectDir,
-        stages: subject.dispatched,
-        terminalStates: subject.context.terminalStates,
-        research: subject.context.research,
-      });
-      expect(afterErrors).toEqual(name === 'research'
-        ? [expect.stringContaining('references post-consumption framework manifest')]
-        : []);
-    },
-  );
-
   it.each([
-    {
-      name: 'structured dotted filename',
-      type: 'json-schema-match',
-      params: { file: 'report.json', schema: { type: 'object' } },
-      path: 'report.json',
-    },
-    {
-      name: 'structured extensionless filename',
-      type: 'file-exists-nonempty',
-      params: { paths: ['Makefile'] },
-      path: 'Makefile',
-    },
-    {
-      name: 'unquoted shell file operand',
-      type: 'exec-script-exit-zero',
-      params: { script: 'test -s unquoted.json' },
-      path: 'unquoted.json',
-    },
-    {
-      name: 'quoted shell file operand',
-      type: 'exec-script-exit-zero',
-      params: { script: 'test -s "quoted.json"' },
-      path: 'quoted.json',
-    },
-    {
-      name: 'quoted static file-API argument',
-      type: 'exec-script-exit-zero',
-      params: {
-        script: [
-          "node <<'NODE'",
-          "const fs = require('fs');",
-          "fs.readFileSync('api.json', 'utf8');",
-          'NODE',
-        ].join('\n'),
-      },
-      path: 'api.json',
-    },
-    {
-      name: 'interpreter file operand',
-      type: 'exec-script-exit-zero',
-      params: { script: 'node check.js' },
-      path: 'check.js',
-    },
-    {
-      name: 'quoted direct file-command operand',
-      type: 'exec-script-exit-zero',
-      params: { script: 'cat "capture.json"' },
-      path: 'capture.json',
-    },
-    {
-      name: 'extensionless relative path',
-      type: 'exec-script-exit-zero',
-      params: { script: 'test -s docs/report' },
-      path: 'docs/report',
-    },
-  ])('treats $name as a required path', ({ type, params, path }) => {
-    expect(reachabilityErrors(type, params).join('\n')).toContain(`references absent ${path}`);
+    ['json-schema-match', { file: 'report.json', schema: { type: 'object' } }, 'report.json'],
+    ['file-exists-nonempty', { paths: ['Makefile'] }, 'Makefile'],
+  ] as const)('requires the declared handler input for %s', (type, params, path) => {
+    const projectDir = temporaryProject(), markdown = markdownFor(type, params);
+    expect(inspectRealityCheckReachability({ markdown, projectDir, stages: [] }).join('\n')).toContain('ARTIFACT_HANDLER_READ_UNDECLARED');
+    const read = producedRead('input', path, 'absent');
+    const errors = inspectRealityCheckReachability({ markdown: markdownFor(type, params, [read]), projectDir, stages: [] });
+    expect(errors.join('\n')).toContain('ARTIFACT_READ_UNBOUND');
   });
-
-  it.each([
-    {
-      name: 'JavaScript identifiers, property access, methods, and a bare number',
-      type: 'exec-script-exit-zero',
-      params: {
-        script: [
-          "node <<'NODE'",
-          "const fs = require('fs');",
-          'const parsed = JSON.parse(payload);',
-          'const latest = manifest.rounds[manifest.rounds.length - 1];',
-          'const match = html.match(pattern);',
-          'const clean = content.replace(pattern, value).trim();',
-          'if (images.length === 0 || latest.result <= 0.05) process.exit(1);',
-          "console.error('diagnostic only');",
-          'void fs.readFileSync;',
-          'NODE',
-        ].join('\n'),
-      },
-    },
-    {
-      name: 'structured JSON field selector',
-      type: 'variance-floor',
-      params: { field_path: 'manifest.rounds', min_stddev: 0.05 },
-    },
-    {
-      name: 'quoted dotted diagnostic outside file context',
-      type: 'exec-script-exit-zero',
-      params: { script: "node -e \"console.error('report.json')\"" },
-    },
-  ])('does not treat $name as a project path', ({ type, params }) => {
-    expect(reachabilityErrors(type, params)).toEqual([]);
+  it('checks every declared read independently of incidental operands in the same script', () => {
+    const projectDir = temporaryProject(); writeFileSync(join(projectDir, 'present.json'), '{}\n');
+    const reads: ArtifactRead[] = [
+      { id: 'present', root: 'project', path: 'present.json', kind: 'file', source: { kind: 'input' } },
+      producedRead('future', 'future.json', 'absent'),
+    ];
+    const errors = inspectRealityCheckReachability({ markdown: markdownFor('exec-script-exit-zero', { script: 'cat present.json future.json; console.error(manifest.rounds)' }, reads), projectDir, stages: [] });
+    expect(errors).toEqual([expect.stringContaining('ARTIFACT_READ_UNBOUND')]);
   });
-
-  it('checks every file operand while ignoring code identifiers in the same script', () => {
-    const projectDir = temporaryProject();
-    writeFileSync(join(projectDir, 'present.json'), '{}\n', 'utf8');
-    const errors = inspectRealityCheckReachability({
-      markdown: markdownFor('exec-script-exit-zero', {
-        script: [
-          'cat present.json future.json',
-          "node <<'NODE'",
-          'console.error(manifest.rounds);',
-          'NODE',
-        ].join('\n'),
-      }),
-      projectDir,
-      stages: [],
-    });
-
-    expect(errors).toEqual([
-      'reality check "path boundary probe" references absent future.json, but no admitted stage or framework emitter owns it',
-    ]);
-  });
-
-  it('does not claim the recorded slash-bearing sed capture program as a path', () => {
-    const projectDir = temporaryProject();
-    const manifest = join(projectDir, 'docs', 'happymj_incumbent', 'run_manifest.json');
-    mkdirSync(dirname(manifest), { recursive: true });
-    writeFileSync(manifest, '{"rounds":[]}\n', 'utf8');
-    const errors = inspectRealityCheckReachability({
-      markdown: markdownFor('exec-script-exit-zero', {
-        script: String.raw`sed -n 's/^[[:space:]]*"label"[[:space:]]*:[[:space:]]*"\([^\"]*\)".*/\1/p' docs/happymj_incumbent/run_manifest.json`,
-      }),
-      projectDir,
-      stages: [],
-    });
-
-    expect(errors).toEqual([]);
-  });
-
-  it.each([
-    ['attached short expression', "sed -e's/foo/bar/' data/input.json"],
-    ['attached long expression', "sed --expression='s/foo/bar/' data/input.json"],
-  ])('does not claim an %s while retaining the input file', (_name, script) => {
-    const errors = reachabilityErrors('exec-script-exit-zero', { script });
-
-    expect(errors).toEqual([
-      'reality check "path boundary probe" references absent data/input.json, but no admitted stage or framework emitter owns it',
-    ]);
-  });
-
-  it('does not convert regex escapes into project separators in any quoted generic literal', () => {
-    const escaped = [
-      String.raw`grep -E 'round_result\.json(\.no_candidate\.json)?'`,
-      String.raw`grep -E "round_result\.json(\.no_candidate\.json)?"`,
-      'grep -E `round_result\\.json(\\.no_candidate\\.json)?`',
-    ].map((script) => reachabilityErrors('exec-script-exit-zero', { script }));
-    const unescaped = reachabilityErrors('exec-script-exit-zero', {
-      script: "grep -E 'round_result.json(.no_candidate.json)?'",
-    });
-    const realOperand = reachabilityErrors('exec-script-exit-zero', {
-      script: 'test -s docs/report.json',
-    });
-
-    expect({ escaped, unescaped }).toEqual({ escaped: [[], [], []], unescaped: [] });
-    expect(realOperand).toEqual([
-      'reality check "path boundary probe" references absent docs/report.json, but no admitted stage or framework emitter owns it',
-    ]);
-  });
-
-  it('still extracts sed script files, input files, and redirection targets', () => {
-    const errors = reachabilityErrors('exec-script-exit-zero', {
-      script: 'sed -f scripts/filter.sed data/input.json > out/result.txt',
-    });
-
-    expect(errors.join('\n')).toContain('references absent scripts/filter.sed');
-    expect(errors.join('\n')).toContain('references absent data/input.json');
-    expect(errors.join('\n')).toContain('references absent out/result.txt');
-  });
-
-  it('ignores static file API syntax inside an embedded-code comment', () => {
-    expect(reachabilityErrors('exec-script-exit-zero', {
-      script: [
-        "node <<'NODE'",
-        "// fs.readFileSync('commented.json', 'utf8');",
-        'NODE',
-      ].join('\n'),
-    })).toEqual([]);
-  });
-
-  it('still rejects a terminal report whose writer runs after the declared terminal owner', () => {
-    const work = stage({
-      id: 'work', role: 'coder', scope: ['src/**'], depends_on: [], dependency_reasons: {},
-    });
-    const finalize = stage({
-      id: 'finalize', role: 'writer', scope: ['docs/outcome.md'], depends_on: ['work'],
-      dependency_reasons: { work: 'Consumes the completed work.' },
-    });
-    const lateReport = stage({
-      id: 'write_report', role: 'writer', scope: ['docs/final_verification.md'], depends_on: ['finalize'],
-      dependency_reasons: { finalize: 'Runs only after terminalization.' },
-    });
-    const errors = inspectRealityCheckReachability({
-      markdown: markdownFor('json-schema-match', {
-        file: 'docs/final_verification.md', schema: { type: 'object' },
-      }),
-      projectDir: temporaryProject(),
-      stages: [work, finalize, lateReport],
-      terminalStates: { complete: { paths: ['docs/outcome.md'] } },
-    });
-
-    expect(errors.join('\n')).toContain(
-      'docs/final_verification.md, but no producer is an ancestor of every terminal owner',
-    );
-  });
-
-  it('still rejects a hard check on the optional research result', () => {
-    const measure = stage({
-      id: 'measure', role: 'researcher', scope: ['docs/round.json'],
-      depends_on: [], dependency_reasons: {},
-    });
-    const errors = inspectRealityCheckReachability({
-      markdown: markdownFor('json-schema-match', {
-        file: 'docs/round.json', schema: { type: 'object' },
-      }),
-      projectDir: temporaryProject(),
-      stages: [measure],
-      research: { baseline: 0, policy: 'best_of_n', resultFile: 'docs/round.json' },
-    });
-
+  it('still rejects an explicitly declared read of the mutable optional research result', () => {
+    const path = 'docs/round.json';
+    const measure = stage({ criterion_refs: [], id: 'measure', role: 'researcher', scope: [path], depends_on: [], dependency_reasons: {}, artifact_contract: artifacts([{ id: 'result', root: 'project', path }]) });
+    const errors = inspectRealityCheckReachability({ markdown: markdownFor('json-schema-match', { file: path, schema: { type: 'object' } }, [producedRead('result', path, measure.id)]), projectDir: temporaryProject(), stages: [measure], research: { baseline: 0, policy: 'best_of_n', resultFile: path } });
     expect(errors.join('\n')).toContain('valid no-candidate round writes only its sidecar');
   });
-
   it('keeps the measurement-owner and continue-predicate admission probes red', () => {
-    const measuringOwner = stage({
+    const measuringOwner = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'measure', role: 'researcher', scope: ['docs/round.json', 'docs/final.md'],
       depends_on: [], dependency_reasons: {}, condition: 'research.decision != continue',
     });
@@ -464,7 +74,7 @@ describe('literal reality-check path extraction', () => {
       'research result producer path docs/round.json cannot be owned by a terminal writer',
     );
 
-    const continueOwner = stage({
+    const continueOwner = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'finalize', role: 'writer', scope: ['docs/final.md'], depends_on: [],
       dependency_reasons: {}, condition: 'research.decision == continue',
     });

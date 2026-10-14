@@ -1,7 +1,9 @@
 import type { CheckContext, RealityCheck } from '../types.js';
 import { readJsonFile, result } from './_utils.js';
+import { isDeepStrictEqual } from 'node:util';
 
-interface Schema {
+export interface Schema {
+  anyOf?: Schema[];
   /** A single JSON Schema type name, or a union of them. JSON Schema allows both, and a
    *  union is the standard way to say "nullable" — `type: [string, "null"]`. Declaring this
    *  as `string` alone silently rejected every union: the array is truthy, so validation
@@ -11,6 +13,12 @@ interface Schema {
    *  through validate(), so both were affected. */
   type?: string | string[];
   required?: string[];
+  additionalProperties?: boolean | Schema;
+  pattern?: string;
+  minLength?: number;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
   properties?: Record<string, Schema>;
   items?: Schema;
   enum?: unknown[];
@@ -52,9 +60,22 @@ export default class JsonSchemaMatchCheck implements RealityCheck {
  *  brief-declared round_result schema). Returns a list of human-readable path errors. */
 export function validate(value: unknown, schema: Schema, path: string): string[] {
   const errors: string[] = [];
+  if (schema.anyOf) {
+    const variants = schema.anyOf.map(variant => validate(value, variant, path));
+    if (!variants.some(variant => variant.length === 0)) {
+      errors.push(`${path} matches no anyOf variant`, ...(variants.sort((a, b) => a.length - b.length)[0] ?? []));
+    }
+  }
   if (hasTypeConstraint(schema.type) && !matchesType(value, schema.type)) {
     errors.push(`${path} expected ${describeType(schema.type)}`);
   }
+  if (typeof value === 'string') {
+    if (schema.pattern && !new RegExp(schema.pattern).test(value)) errors.push(`${path} does not match ${schema.pattern}`);
+    if (schema.minLength !== undefined && value.length < schema.minLength) errors.push(`${path} below minLength`);
+  }
+  if (Array.isArray(value) && schema.minItems !== undefined && value.length < schema.minItems) errors.push(`${path} below minItems`);
+  if (Array.isArray(value) && schema.maxItems !== undefined && value.length > schema.maxItems) errors.push(`${path} above maxItems`);
+  if (Array.isArray(value) && schema.uniqueItems && value.some((item, index) => value.slice(0, index).some(prior => isDeepStrictEqual(prior, item)))) errors.push(`${path} has duplicate items`);
   if (schema.enum && !schema.enum.some((item) => Object.is(item, value))) errors.push(`${path} not in enum`);
   if (typeof value === 'number') {
     if (typeof schema.minimum === 'number' && value < schema.minimum) errors.push(`${path} below minimum`);
@@ -62,6 +83,11 @@ export function validate(value: unknown, schema: Schema, path: string): string[]
   }
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const obj = value as Record<string, unknown>;
+    for (const key of Object.keys(obj)) {
+      if (Object.hasOwn(schema.properties ?? {}, key)) continue;
+      if (schema.additionalProperties === false) errors.push(`${path}.${key} unknown field`);
+      else if (schema.additionalProperties && typeof schema.additionalProperties === 'object') errors.push(...validate(obj[key], schema.additionalProperties, `${path}.${key}`));
+    }
     for (const key of schema.required ?? []) {
       if (!(key in obj)) errors.push(`${path}.${key} required`);
     }
@@ -96,4 +122,14 @@ function matchesOneType(value: unknown, type: string): boolean {
   if (type === 'integer') return Number.isInteger(value);
   if (type === 'null') return value === null;
   return typeof value === type;
+}
+
+/** Codex requires a closed root object; anyOf is supported only below it. */
+export function generationCompatibleSchema(schema: Schema): boolean {
+  const compatible = (part: Schema): boolean => {
+    if (part.type === 'object' && !part.anyOf && (part.additionalProperties !== false
+      || Object.keys(part.properties ?? {}).some(key => !part.required?.includes(key)))) return false;
+    return [...Object.values(part.properties ?? {}), ...(part.anyOf ?? []), ...(part.items ? [part.items] : [])].every(compatible);
+  };
+  return schema.type === 'object' && !schema.anyOf && compatible(schema);
 }

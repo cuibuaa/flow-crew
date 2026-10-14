@@ -8,7 +8,7 @@ import {
   type LiveConstraintIncident,
 } from '../src/live-constraint-guard.js';
 
-// Run 2026-09-26T04-55-39-131f79: one fallback scan reported 12,888 paths and
+// Run example-run-1: one fallback scan reported 12,888 paths and
 // every persisted incident embedded the same ~1.8 MB instruction naming all of
 // them, so the incident file reached 23 GB and the synchronous appends stalled
 // the scheduler. These cases pin the persisted size to the incident count.

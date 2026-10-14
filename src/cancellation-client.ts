@@ -1,4 +1,4 @@
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Orchestrator } from './orchestrator.js';
 import {
   DaemonUnavailableError,
@@ -10,12 +10,12 @@ import {
   type RpcResponse,
 } from './orchestrator-rpc.js';
 import {
-  unitIsStopped,
   type CancellationObservation,
   type CancellationResult,
 } from './run-control.js';
 import { isUnitStatus } from './supervision.js';
-import { TaskRegistry, type TaskEntry } from './task-registry.js';
+import { TaskRegistry } from './task-registry.js';
+import { canonicalRunId } from './cancellation-policy.js';
 
 export interface LocalCancellationControl {
   cancel(taskId: number): Promise<CancellationResult>;
@@ -41,14 +41,14 @@ function isCancellationObservation(value: unknown): value is CancellationObserva
     && (value.schedulerPid === null
       || (Number.isSafeInteger(value.schedulerPid) && Number(value.schedulerPid) > 0))
     && typeof value.schedulerAlive === 'boolean'
-    && typeof value.launchInFlight === 'boolean';
+    && typeof value.launchInFlight === 'boolean'
+    && (value.commandFateKnown === undefined || typeof value.commandFateKnown === 'boolean')
+    && (value.activeCommandPids === undefined || (Array.isArray(value.activeCommandPids)
+      && value.activeCommandPids.every(pid => Number.isSafeInteger(pid) && pid > 0)));
 }
 
-/**
- * RPC success is only authoritative when it contains the coordinator's full
- * observation and that observation proves every stop barrier. A legacy
- * `{ok:true}` therefore cannot be mistaken for convergence.
- */
+/** A complete response acknowledges the durable control decision. Its process
+ * observation remains evidence, including unresolved fate, rather than a veto. */
 export function isCancellationResult(
   value: unknown,
   expected: { runId?: string; taskId?: number } = {},
@@ -66,35 +66,13 @@ export function isCancellationResult(
       || (value.status === 'outcome-unknown' && value.observation.unitState.kind === 'terminal-unknown');
   }
   if (value.status === 'cancelling' || value.status === 'outcome-unknown') return false;
-  const observation = value.observation;
-  return observation.unitState.kind !== 'terminal-unknown'
-    && unitIsStopped(observation.unitState)
-    && observation.runReadable
-    && !observation.schedulerAlive
-    && !observation.launchInFlight;
-}
-
-function taskFromShowResponse(value: unknown, taskId: number): TaskEntry | undefined {
-  if (!isRecord(value) || !isRecord(value.task)) return undefined;
-  const task = value.task;
-  if (task.id !== taskId || typeof task.systemd_unit !== 'string') return undefined;
-  if (task.run_id !== undefined && typeof task.run_id !== 'string') return undefined;
-  return task as unknown as TaskEntry;
-}
-
-function explicitlyUnsupported(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return /(?:unknown|unsupported)\s+(?:rpc\s+)?command|command\s+(?:is\s+)?(?:unknown|unsupported)/i.test(error.message);
-}
-
-function mayFallbackAfter(error: unknown): boolean {
-  if (error instanceof RpcOutcomeUnknownError) return false;
-  return error instanceof DaemonUnavailableError || explicitlyUnsupported(error);
+  return true;
 }
 
 function clientRuntime(options: CancellationClientOptions): {
   request: (request: RpcRequest) => Promise<RpcResponse>;
   local: () => LocalCancellationControl;
+  runsDirectory: string;
 } {
   const socketPath = options.socketPath ?? defaultSocketPath();
   const request = options.sendRequest ?? ((rpcRequest: RpcRequest) => (
@@ -107,6 +85,7 @@ function clientRuntime(options: CancellationClientOptions): {
   let localControl = options.localControl;
   return {
     request,
+    runsDirectory: join(dirname(socketPath), 'runs'),
     local: () => {
       if (!localControl) {
         const baseDir = dirname(socketPath);
@@ -126,6 +105,7 @@ export async function cancelRunThroughControlPlane(
   options: CancellationClientOptions = {},
 ): Promise<CancellationResult> {
   const runtime = clientRuntime(options);
+  runId = canonicalRunId(runtime.runsDirectory, runId);
   return requestRunCancellation(
     runId,
     unit,
@@ -151,13 +131,13 @@ async function requestRunCancellation(
       } catch { /* preserve the original ambiguous delivery error below */ }
       throw error;
     }
-    if (!mayFallbackAfter(error)) throw error;
+    if (!(error instanceof DaemonUnavailableError)) throw error;
     return fallback();
   }
   if (isCancellationResult(response, { runId })) return response;
   // A complete but legacy/incomplete response has a known delivery outcome.
-  // Re-run the idempotent coordinator locally so it verifies all barriers and
-  // settles run.json; this is never used for an ambiguous transport failure.
+  // Re-run the idempotent coordinator locally to record the decision and
+  // attempt owned cleanup; this is never used for an ambiguous transport failure.
   return fallback();
 }
 
@@ -166,33 +146,11 @@ export async function cancelTaskThroughControlPlane(
   options: CancellationClientOptions = {},
 ): Promise<CancellationResult> {
   const runtime = clientRuntime(options);
-  let task: TaskEntry | undefined;
-  try {
-    task = taskFromShowResponse(await runtime.request({ cmd: 'show', id: taskId }), taskId);
-  } catch (error) {
-    if (!mayFallbackAfter(error)) throw error;
-    return runtime.local().cancel(taskId);
-  }
-  if (!task) return runtime.local().cancel(taskId);
-
-  if (task.run_id) {
-    const runId = isAbsolute(task.run_id) ? basename(task.run_id) : task.run_id;
-    // The daemon protocol is run-id first. If compatibility finalization is
-    // needed, retain the registry task binding (including legacy absolute run
-    // paths) instead of re-deriving that binding from the socket root.
-    return requestRunCancellation(
-      runId,
-      task.systemd_unit,
-      runtime.request,
-      () => runtime.local().cancel(taskId),
-    );
-  }
-
   let response: RpcResponse;
   try {
     response = await runtime.request({ cmd: 'cancel', id: taskId });
   } catch (error) {
-    if (!mayFallbackAfter(error)) throw error;
+    if (!(error instanceof DaemonUnavailableError)) throw error;
     return runtime.local().cancel(taskId);
   }
   if (isCancellationResult(response, { taskId })) return response;

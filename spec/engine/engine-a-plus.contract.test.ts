@@ -1,3 +1,5 @@
+import { setEngineDefaults } from '../test-support/engine-defaults-fixture.js';
+import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
  * engine-a-plus regression contracts — the 3 confirmed gaps + 3 A+ deltas of the
  * framework-pure engine hardening on branch engine-a-plus.
@@ -33,7 +35,7 @@ import {
   writeRunState,
   TERMINAL_STATUSES,
 } from '../../src/store.js';
-import { detectStalledStages } from '../../src/supervisor.js';
+import { detectStalledStages } from '../../src/stage-watchdog.js';
 
 describe('GAP-1 — scheduler isTerminalStatus is unified with store isTerminalRunStatus', () => {
   it('returns true for ALL terminal statuses, incl. reality_gate_failed and failed (the prior omission)', () => {
@@ -182,7 +184,7 @@ describe('GAP-2 — detectStalledStages (pure, deterministic, no LLM verdict)', 
 
 // =====================================================================================
 // GAP-1 + A+(c) — end-to-end: a non-research run whose gate never passes exhausts its
-// iteration budget and resolves `incomplete` (NOT the old unconditional 'failed' clobber).
+// admitted repair budget and resolves `incomplete` without failure-driven replanning.
 // =====================================================================================
 describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `failed` clobber', () => {
   let projectDir: string;
@@ -190,8 +192,8 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
   afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
   const planWorkflow: { config: WorkflowConfig; yaml: string } = {
-    yaml: ['name: plan-only', 'defaults:', '  max_iterations: 3', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-    config: { name: 'plan-only', defaults: { max_iterations: 3 }, stages: [{ id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+    yaml: ['name: plan-only', 'defaults:', '  max_iterations: 3', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}'].join('\n'),
+    config: {description: '',  name: 'plan-only', defaults: { max_iterations: 3 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } }] },
   };
   const ok = (output: string): RunResult => ({ output, exitCode: 0, duration_ms: 1 });
 
@@ -211,25 +213,35 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
     return created.runId;
   }
 
-  it('a gate that never passes unchanged reaches repeated-blockage escalation (terminal, not a success, not a crash)', async () => {
+  it('a rejected gate exhausts its admitted repair budget without starting another iteration', async () => {
     const runId = setupPlainRun();
     const agentsDir = join(projectDir, 'config', 'agents');
-    // Every iteration: plan a gate stage that writes a FAILING verdict, so gates never pass.
+    setEngineDefaults({ gate_retry_loops: 1 });
+    let plans = 0;
+    let gates = 0;
+    let repairs = 0;
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'dispatch.yaml'), [
+          plans++;
+          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:', '  - id: check', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "evaluate only after this iteration is planned"}',
             '    is_gate: true', '    task: gate',
-          ].join('\n'));
-          return ok('planned a gate');
+            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_check.json}], reads: [], replays: []}',
+            '  - id: repair', '    role: planner', '    depends_on: [check]', '    retry_to: [check]',
+            '    scope: []', '    task: inspect the rejected evidence',
+          ].join('\n')));
+          return fixtureResult(ok('planned a gate'), opts);
         }
         if (opts.stageId === 'check') {
-          writeFileSync(join(opts.runDir, 'verdict_check.json'), JSON.stringify({ pass: false, reason: 'not yet' }));
-          return ok('gate failed');
+          gates++;
+          writeFileSync(join(opts.runDir, 'fixture_verdict_check.json'), JSON.stringify({ pass: false, reason: `review ${gates} still needs work`,
+            repairability: { version: 1, disposition: 'repairable', evidence: 'The admitted repair can inspect the rejected evidence.' } }));
+          return fixtureResult(ok('gate failed'), opts);
         }
-        return ok(`noop ${opts.stageId}`);
+        if (opts.stageId === 'repair') repairs++;
+        return fixtureResult(ok(`noop ${opts.stageId}`), opts);
       },
       async discuss(): Promise<RunResult> { return ok(''); },
       spawnDiscuss() { throw new Error('unused'); },
@@ -237,7 +249,10 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
     } as unknown as Adapter;
 
     const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-    expect(final.status).toBe('escalated');           // unchanged rejection crossed repeated-failure threshold
+    expect(final.status).toBe('incomplete');
+    expect(final.currentIteration).toBe(1);
+    expect([plans, repairs, gates]).toEqual([1, 1, 2]);
+    expect(final.failureReason).toBe('Workflow stopped after bounded stage/repair attempts: gates did not pass or required work did not complete (iteration 1/3; gate re-evaluations used: 1/1).');
     expect(final.status).not.toBe('failed');          // no longer the unconditional 'failed' clobber
     expect(isTerminalRunStatus(final.status)).toBe(true);
     expect(isSuccessfulRunStatus(final.status)).toBe(false);

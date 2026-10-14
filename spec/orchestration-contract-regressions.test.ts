@@ -1,9 +1,8 @@
+import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { parse as parseYaml } from 'yaml';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { evaluateCondition } from '../src/condition.js';
 import {
@@ -12,29 +11,19 @@ import {
   readGuidanceForStage,
   RUN_WIDE_GUIDANCE_TARGET,
 } from '../src/guidance.js';
-import {
-  consumeSupervisorReject,
-  decideRejectAction,
-  inspectDispatchAdmission,
-  inspectRealityCheckReachability,
-  parseDispatchedStageConfig,
-  readGateVerdict,
-  resolveDispatchDependencies,
-  researchAdvanceEligible,
-  tryAdvanceResearch,
-  tryTerminateOnTerminalState,
-} from '../src/scheduler.js';
+import { decideScopeRevision, inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, readGateVerdict, resolveDispatchDependencies, researchAdvanceEligible, tryAdvanceResearch, tryTerminateOnTerminalState } from '../src/scheduler.js';
 import { inspectBriefOutputs } from '../src/ship-inputs.js';
 import { inspectBrief } from '../src/brief-preflight.js';
-import { inspectTemporalResearchTests } from '../src/temporal-test-guard.js';
 import { recordBlockageOccurrence } from '../src/blockage-ledger.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
-import { inspectStageExecutionFacts } from '../src/supervisor.js';
+import { inspectStageExecutionFacts } from '../src/stage-watchdog.js';
 import { evaluateResearch } from '../src/research-policy.js';
 import { buildStagePrompt } from '../src/handoff.js';
-import { fcGlobalDir, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { createRun, fcGlobalDir, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
 import type { StoreState, StageStatus } from '../src/store.js';
 import type { Adapter } from '../src/adapters/base.js';
+import { recordAdmittedPlan } from '../src/plan-revisions.js';
+import { scopePathDigest } from '../src/runtime-negotiation.js';
 
 const roots: string[] = [];
 function temporaryRoot(): string {
@@ -47,6 +36,7 @@ afterEach(() => {
 });
 
 const stage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({
+  artifact_contract: stageArtifacts(String(raw.id), raw.is_gate === true),
   prompt_template: 'bounded test stage',
   skills: [],
   is_gate: false,
@@ -57,38 +47,6 @@ const stage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({
 const inertAdapter: Adapter = {
   run: async () => ({ output: '', exitCode: 0, duration_ms: 0 }),
 };
-
-type AdmissionInput = Parameters<typeof inspectDispatchAdmission>[0];
-
-function recordedDispatchFixture(name: string): {
-  raw: string;
-  source: { dispatchSha256: string; dispatchBytes: number };
-  admission: AdmissionInput;
-} {
-  const root = join(import.meta.dirname, 'fixtures', 'dispatch-admission', name);
-  const raw = readFileSync(join(root, 'dispatch.yaml'), 'utf-8');
-  const context = JSON.parse(readFileSync(join(root, 'context.json'), 'utf-8')) as {
-    source: { dispatchSha256: string; dispatchBytes: number };
-    terminalStates?: AdmissionInput['terminalStates'];
-    research?: AdmissionInput['research'];
-    criteria?: AdmissionInput['criteria'];
-  };
-  const parsed = parseYaml(raw) as unknown[];
-  expect(createHash('sha256').update(raw).digest('hex')).toBe(context.source.dispatchSha256);
-  expect(Buffer.byteLength(raw)).toBe(context.source.dispatchBytes);
-  return {
-    raw,
-    source: context.source,
-    admission: {
-      dispatched: parsed.map((item) => parseDispatchedStageConfig(item)),
-      baseStages: [],
-      dispatchStageId: 'plan',
-      terminalStates: context.terminalStates,
-      research: context.research,
-      criteria: context.criteria,
-    },
-  };
-}
 
 describe('addressed guidance envelopes', () => {
   it('delivers only exact-target and explicit run-wide entries and quarantines unknown targets', () => {
@@ -172,13 +130,13 @@ describe('canonical criteria and atomic dispatch admission', () => {
     expect(artifact.criteria[0].id).toMatch(/^criterion_what_the_report_must_/);
   });
 
-  it('requires criterion worker+gate coverage, coherent repairs, and one terminal sink owner', () => {
+  it('preserves terminal outcome identity while allowing ordered authors and repairs', () => {
     const criterionId = 'criterion_report_1_deadbeef';
-    const plan = stage({ id: 'plan', role: 'planner', depends_on: [], dependency_reasons: {}, scope: [] });
-    const work = stage({ id: 'work', role: 'coder', depends_on: ['plan'], dependency_reasons: { plan: 'Consumes the admitted plan.' }, scope: ['src/**'], criterion_refs: [criterionId] });
-    const gate = stage({ id: 'verify', role: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Audits the implementation.' }, scope: [], is_gate: true, criterion_refs: [criterionId] });
-    const repair = stage({ id: 'repair', role: 'coder', depends_on: ['verify'], dependency_reasons: { verify: 'Consumes the rejected verdict.' }, scope: ['src/**'], retry_to: ['verify'] });
-    const finalizer = stage({ id: 'finalize', role: 'writer', depends_on: ['verify'], dependency_reasons: { verify: 'Consumes the accepted gate evidence.' }, scope: ['docs/final.md'] });
+    const plan = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'plan', role: 'planner', depends_on: [], dependency_reasons: {}, scope: [] });
+    const work = stage({ artifact_contract: artifacts([], [], [], []), id: 'work', role: 'coder', depends_on: ['plan'], dependency_reasons: { plan: 'Consumes the admitted plan.' }, scope: ['src/**'], criterion_refs: [criterionId] });
+    const gate = stage({ artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_verify.json" }], [], [], []), id: 'verify', role: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Audits the implementation.' }, scope: [], is_gate: true, criterion_refs: [criterionId] });
+    const repair = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'repair', role: 'coder', depends_on: ['verify'], dependency_reasons: { verify: 'Consumes the rejected verdict.' }, scope: ['src/**'], retry_to: ['verify'] });
+    const finalizer = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'finalize', role: 'writer', depends_on: ['verify'], dependency_reasons: { verify: 'Consumes the accepted gate evidence.' }, scope: ['docs/final.md', 'dist/**'] });
     const criteria = { version: 1 as const, briefDigest: 'abc', criteria: [{ id: criterionId, text: 'Show the repair proof.', line: 1, section: 'Report' }] };
     const accepted = inspectDispatchAdmission({
       dispatched: [work, gate, repair, finalizer],
@@ -189,17 +147,44 @@ describe('canonical criteria and atomic dispatch admission', () => {
     });
     expect(accepted.pass, accepted.errors.join('\n')).toBe(true);
     expect(accepted.terminalOwners).toEqual({ 'docs/final.md': 'finalize' });
+    expect(accepted.terminalValidationScopes).toEqual({ finalize: ['dist/**'] });
 
     const badOwner = stage({ ...work, scope: ['src/**', 'docs/final.md'] });
-    const refused = inspectDispatchAdmission({
-      dispatched: [badOwner, gate, repair, finalizer],
+    const shared = inspectDispatchAdmission({
+      dispatched: [badOwner, gate, { ...repair, scope: ['src/**', 'docs/final.md'] }, finalizer],
       baseStages: [plan],
       dispatchStageId: 'plan',
       terminalStates: { complete: { paths: ['docs/final.md'] } },
       criteria,
     });
-    expect(refused.pass).toBe(false);
-    expect(refused.errors.join('\n')).toMatch(/expected exactly one scoped owner/);
+    expect(shared.pass, shared.errors.join('\n')).toBe(true);
+    expect(shared.terminalOwners).toEqual({ 'docs/final.md': 'finalize' });
+
+    const projectDir = temporaryRoot(), previousStore = fcGlobalDir();
+    setFcGlobalDir(join(temporaryRoot(), 'state'));
+    try {
+      const planner = { ...plan, dynamic_dispatch: true };
+      const dispatched = [work, gate, repair, finalizer];
+      const created = createRun(projectDir, 'ordered-terminal-scope', 'name: fixture', [planner, ...dispatched].map(candidate => candidate.id));
+      const state = JSON.parse(readFileSync(join(created.runDirPath, 'run.json'), 'utf8')) as StoreState;
+      state.dispatchedStages = dispatched;
+      state.terminalStates = { complete: { paths: ['docs/final.md'] } };
+      recordAdmittedPlan(state, [planner, ...dispatched], created.runDirPath, 'initial dispatch', true, accepted);
+      writeRunState(projectDir, created.runId, state);
+      writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify(accepted));
+      writeFileSync(join(created.runDirPath, 'brief_criteria.json'), JSON.stringify(criteria));
+      const requestedPaths = ['docs/final.md'];
+      for (const author of [work, repair]) {
+        const decision = decideScopeRevision({
+          request: { version: 1, kind: 'scope_revision', requestId: `share-${author.id}`, runId: created.runId,
+            stageId: author.id, attemptIndex: 1, requestedBy: 'stage', reason: 'Prepare the report before final publication.',
+            requestedPaths, pathDigest: scopePathDigest(requestedPaths) },
+          stage: author, priorScope: author.scope ?? [], activePeers: [], projectDir, runId: created.runId, attemptIndex: 1,
+        });
+        expect(decision, String(decision.rejectionReason)).toMatchObject({ accepted: true,
+          authorizedPaths: requestedPaths, effectiveScope: ['src/**', 'docs/final.md'] });
+      }
+    } finally { setFcGlobalDir(previousStore); }
 
     const collidingFinalizer = stage({
       ...finalizer,
@@ -215,7 +200,11 @@ describe('canonical criteria and atomic dispatch admission', () => {
       },
       criteria,
     });
-    expect(collision.errors.join('\n')).toContain('snapshot basename report.md');
+    expect(collision.pass, collision.errors.join('\n')).toBe(true);
+    expect(collision.terminalOwners).toEqual({
+      'docs/complete/report.md': 'finalize',
+      'docs/escalated/report.md': 'finalize',
+    });
 
     const reusedPath = inspectDispatchAdmission({
       dispatched: [work, gate, repair, finalizer],
@@ -230,29 +219,29 @@ describe('canonical criteria and atomic dispatch admission', () => {
     expect(reusedPath.errors.join('\n')).toContain('one path cannot encode multiple outcomes');
   });
 
-  it('still rejects missing acting-stage transport and ordinary work without a downstream gate', () => {
+  it('assigns conservative coverage and refuses ordinary work without a downstream gate', () => {
     const criterionId = 'criterion_report_1_deadbeef';
     const criteria = { version: 1 as const, briefDigest: 'abc', criteria: [{
       id: criterionId, text: 'Show independently checked work.', line: 1, section: 'Report',
     }] };
-    const work = stage({
+    const work = stage({ artifact_contract: artifacts([], [], [], []),
       id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['src/**'],
       criterion_refs: [criterionId],
     });
-    const gate = stage({
+    const gate = stage({ artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_verify.json" }], [], [], []),
       id: 'verify', role: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Audits work.' },
       scope: [], is_gate: true, criterion_refs: [criterionId],
     });
 
     const gateOnly = inspectDispatchAdmission({
-      dispatched: [{ ...work, criterion_refs: [] }, gate],
+      dispatched: [{ ...work, criterion_refs: [] }, gate, stage({ id: 'repair', role: 'coder', scope: ['src/**'],
+        depends_on: ['verify'], dependency_reasons: { verify: 'Correct rejected work.' }, retry_to: ['verify'], criterion_refs: [] })],
       baseStages: [], dispatchStageId: 'plan', criteria,
     });
-    expect(gateOnly.pass).toBe(false);
-    expect(gateOnly.errors.join('\n')).toContain('not assigned to a capable work/finalizer stage');
+    expect(gateOnly.pass).toBe(true);
 
     const ordinaryWithoutGate = inspectDispatchAdmission({
-      dispatched: [work, { ...gate, criterion_refs: [] }],
+      dispatched: [work],
       baseStages: [], dispatchStageId: 'plan', criteria,
     });
     expect(ordinaryWithoutGate.pass).toBe(false);
@@ -260,10 +249,10 @@ describe('canonical criteria and atomic dispatch admission', () => {
   });
 
   it('rejects an unconditional research finalizer and malformed dynamic schema', () => {
-    expect(() => parseDispatchedStageConfig({ id: 'work', role: 'coder' })).toThrow(/depends_on|scope/);
-    const plan = stage({ id: 'plan', role: 'planner', depends_on: [], dependency_reasons: {}, scope: [] });
-    const measure = stage({ id: 'measure', role: 'researcher', depends_on: ['plan'], dependency_reasons: { plan: 'Consumes the research plan.' }, scope: ['docs/round.json'] });
-    const finalizer = stage({ id: 'finalize', role: 'writer', depends_on: ['measure'], dependency_reasons: { measure: 'Consumes the accepted measurement.' }, scope: ['docs/final.md'] });
+    expect(() => parseDispatchedStageConfig({id:'work',role:'coder',scope:'src/**'})).toThrow(/scope/);
+    const plan = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'plan', role: 'planner', depends_on: [], dependency_reasons: {}, scope: [] });
+    const measure = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'measure', role: 'researcher', depends_on: ['plan'], dependency_reasons: { plan: 'Consumes the research plan.' }, scope: ['docs/round.json'] });
+    const finalizer = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'finalize', role: 'writer', depends_on: ['measure'], dependency_reasons: { measure: 'Consumes the accepted measurement.' }, scope: ['docs/final.md'] });
     const report = inspectDispatchAdmission({
       dispatched: [measure, finalizer], baseStages: [plan], dispatchStageId: 'plan',
       terminalStates: { ceiling_hit: { paths: ['docs/final.md'] } },
@@ -272,7 +261,7 @@ describe('canonical criteria and atomic dispatch admission', () => {
     expect(report.errors.join('\n')).toContain('must be mechanically false when research.decision is continue');
 
     const reserved = inspectDispatchAdmission({
-      dispatched: [stage({
+      dispatched: [stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []),
         id: 'research', role: 'researcher', depends_on: ['plan'],
         dependency_reasons: { plan: 'Consumes the research plan.' }, scope: ['docs/round.json'],
       })],
@@ -283,38 +272,13 @@ describe('canonical criteria and atomic dispatch admission', () => {
   });
 
   it('preserves explicit root dependencies instead of silently wiring them to the planner', () => {
-    const root = stage({ id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['src/**'] });
+    const root = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['src/**'] });
     resolveDispatchDependencies([root], 'plan');
     expect(root.depends_on).toEqual([]);
     expect(root.dependency_reasons).toEqual({});
   });
 
-  it('admits the exact recorded research proposal with one guarded writer per terminal path', () => {
-    const fixture = recordedDispatchFixture('research_multi_writer');
-    const report = inspectDispatchAdmission(fixture.admission);
-
-    expect(report.pass, report.errors.join('\n')).toBe(true);
-    expect(report.terminalOwners).toEqual({
-      'docs/happymj_incumbent/ship_report.md': 'write_ship',
-      'docs/happymj_incumbent/ceiling_report.md': 'write_ceiling',
-      'docs/happymj_incumbent/escalation_note.md': 'write_escalation',
-    });
-    expect(report.criterionTerminalRefs).toMatchObject({
-      write_ship: expect.arrayContaining([
-        'criterion_what_each_round_s_report_9_f4d0b217',
-        'criterion_what_each_round_s_report_10_24e8ca77',
-      ]),
-    });
-    expect(Object.fromEntries(fixture.admission.dispatched.map((item) => [item.id, item.condition])))
-      .toMatchObject({
-        write_ship: 'research.decision == "ship"',
-        write_ceiling: 'research.decision == "stop_ceiling"',
-        write_escalation: 'research.terminalStatus == "escalated"',
-      });
-  });
-
-  it('releases the recorded policy writers on the framework-emitted terminal facts', () => {
-    const fixture = recordedDispatchFixture('research_multi_writer');
+  it('releases policy writers on the framework-emitted terminal facts', () => {
     const root = temporaryRoot();
     const previousStateRoot = fcGlobalDir();
     setFcGlobalDir(root);
@@ -322,58 +286,19 @@ describe('canonical criteria and atomic dispatch admission', () => {
       const taskRunDir = join(root, 'runs', 'run');
       mkdirSync(taskRunDir, { recursive: true });
       for (const expected of [
-        { id: 'write_ship', decision: 'ship', terminalStatus: 'shipped' },
-        { id: 'write_ceiling', decision: 'stop_ceiling', terminalStatus: 'ceiling_hit' },
+        { condition: 'research.decision == ship', decision: 'ship', terminalStatus: 'shipped' },
+        { condition: 'research.decision == stop_ceiling', decision: 'stop_ceiling', terminalStatus: 'ceiling_hit' },
       ]) {
         writeFileSync(join(taskRunDir, 'research_decision.json'), JSON.stringify(expected));
-        const condition = fixture.admission.dispatched.find((item) => item.id === expected.id)?.condition;
-        expect(condition).toBeTypeOf('string');
-        expect(evaluateCondition(condition!, 'unused-project', 'run')).toBe(true);
+        expect(evaluateCondition(expected.condition, 'unused-project', 'run')).toBe(true);
       }
     } finally {
       setFcGlobalDir(previousStateRoot);
     }
   });
 
-  it.each([
-    ['diagram_extra_dist', 'finalize_report', ['dist/**']],
-    ['diagram_extra_directory', 'finalize_diagram', ['docs/diagram_shape/**', 'dist/**']],
-  ] as const)('admits exact recorded finalizer capability for %s as validation-only scope', (name, owner, scopes) => {
-    const fixture = recordedDispatchFixture(name);
-    const recorded = JSON.parse(readFileSync(join(
-      import.meta.dirname, 'fixtures', 'dispatch-admission', name, 'recorded_admission.json',
-    ), 'utf-8')) as { pass: boolean };
-    expect(recorded.pass).toBe(false);
-
-    const report = inspectDispatchAdmission(fixture.admission);
-    if (name === 'diagram_extra_directory') {
-      expect(report.pass).toBe(false);
-      expect(report.errors).toContain('brief_criteria.json contains zero criteria; dispatch cannot prove coverage');
-      return;
-    }
-    expect(report.pass, report.errors.join('\n')).toBe(true);
-    expect(report.terminalValidationScopes?.[owner]).toEqual(scopes);
-  });
-
-  it('keeps the exact already-admitted single-owner proposal admitted', () => {
-    const fixture = recordedDispatchFixture('admitted_single_owner');
-    const report = inspectDispatchAdmission(fixture.admission);
-    expect(report.pass, report.errors.join('\n')).toBe(true);
-    expect(report.terminalOwners).toEqual({
-      'docs/task_ledger_staleness/final_verification.md': 'finalize_outcome',
-      'docs/task_ledger_staleness/escalation_note.md': 'finalize_outcome',
-    });
-  });
-
-  it('still rejects the exact recorded measuring-owner proposal', () => {
-    const fixture = recordedDispatchFixture('research_measuring_owner');
-    const report = inspectDispatchAdmission(fixture.admission);
-    expect(report.pass).toBe(false);
-    expect(report.errors.join('\n')).toContain('expected exactly one scoped owner');
-  });
-
   it('mechanically rejects a sole terminal owner that also owns the research result', () => {
-    const measureAndFinalize = stage({
+    const measureAndFinalize = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'measure', role: 'researcher', depends_on: [], dependency_reasons: {},
       scope: ['docs/round.json', 'docs/final.md'],
       condition: 'research.decision != continue',
@@ -392,7 +317,7 @@ describe('canonical criteria and atomic dispatch admission', () => {
     'research.decision != shipped',
     'research.decision == invented_terminal',
   ])('mechanically rejects a terminal predicate that does not prove exclusion on continue: %s', (condition) => {
-    const finalizer = stage({
+    const finalizer = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []),
       id: 'finalize', role: 'writer', depends_on: [], dependency_reasons: {},
       scope: ['docs/final.md'], condition,
     });
@@ -407,11 +332,10 @@ describe('canonical criteria and atomic dispatch admission', () => {
 });
 
 describe('gate settlement and research evidence', () => {
-  it('does not advance a round while a gate, stage, or supervisor rejection is unsettled', () => {
-    expect(researchAdvanceEligible({ gatesSettled: false, stageFailed: false, supervisorRejectPending: false })).toBe(false);
-    expect(researchAdvanceEligible({ gatesSettled: true, stageFailed: true, supervisorRejectPending: false })).toBe(false);
-    expect(researchAdvanceEligible({ gatesSettled: true, stageFailed: false, supervisorRejectPending: true })).toBe(false);
-    expect(researchAdvanceEligible({ gatesSettled: true, stageFailed: false, supervisorRejectPending: false })).toBe(true);
+  it('does not advance a round while a gate or stage is unsettled', () => {
+    expect(researchAdvanceEligible({ gatesSettled: false, stageFailed: false })).toBe(false);
+    expect(researchAdvanceEligible({ gatesSettled: true, stageFailed: true })).toBe(false);
+    expect(researchAdvanceEligible({ gatesSettled: true, stageFailed: false })).toBe(true);
   });
 
   it('treats contradictory pass/repair fields and missing criterion evidence as rejection', () => {
@@ -454,71 +378,6 @@ describe('gate settlement and research evidence', () => {
     expect(journal.rounds[0]).not.toHaveProperty('result');
   });
 
-  it('treats a journal label as immutable even when the shared result value changes', async () => {
-    const projectDir = temporaryRoot();
-    const taskRunDir = join(projectDir, 'run');
-    mkdirSync(join(projectDir, 'docs'), { recursive: true });
-    mkdirSync(taskRunDir, { recursive: true });
-    writeFileSync(join(projectDir, 'docs', 'round.json'), JSON.stringify({ label: 'round_1', result: 12 }));
-    writeFileSync(join(taskRunDir, 'research_journal.json'), JSON.stringify({
-      rounds: [{ label: 'round_1', result: 11, outcome: 'measured' }],
-    }));
-    const state = {
-      runId: 'run', workflowName: 'test', projectDir, status: 'running', stages: {},
-      startedAt: new Date(Date.now() - 1000).toISOString(),
-      research: { baseline: 10, policy: 'best_of_n', resultFile: 'docs/round.json', reportDir: 'docs', stop: { maxRounds: 3 } },
-    } as StoreState;
-
-    await tryAdvanceResearch(state, {
-      projectDir, runId: 'run', runDirPath: taskRunDir, iteration: 2, adapter: inertAdapter,
-    });
-
-    const journal = JSON.parse(readFileSync(join(taskRunDir, 'research_journal.json'), 'utf-8')) as { rounds: Array<Record<string, unknown>> };
-    expect(journal.rounds).toEqual([{ label: 'round_1', result: 11, outcome: 'measured' }]);
-    expect(readFileSync(join(taskRunDir, 'supervisor_guidance.md'), 'utf-8')).toContain('immutable identity');
-  });
-
-  it('never converts an exhausted or unaddressed REJECT into acceptance', () => {
-    expect(decideRejectAction({ targetStage: 'work', reason: 'still false' }, 'work', 2, 2).action).toBe('escalate');
-    expect(decideRejectAction({ targetStage: null, reason: 'unknown target' }, null, 0, 2).action).toBe('escalate');
-  });
-
-  it('routes a supervisor-rejected gate through its admitted repair stage', () => {
-    const projectDir = temporaryRoot();
-    const previousStateRoot = fcGlobalDir();
-    setFcGlobalDir(join(projectDir, 'fc-home'));
-    try {
-      const runId = 'supervisor-gate-reject';
-      const taskRunDir = runDir(projectDir, runId);
-      mkdirSync(join(taskRunDir, 'signals'), { recursive: true });
-      const verify = stage({ id: 'verify', role: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Audits work.' }, scope: [], is_gate: true });
-      const repair = stage({ id: 'repair', role: 'coder', depends_on: ['verify'], dependency_reasons: { verify: 'Repairs rejection.' }, scope: ['src/**'], retry_to: ['verify'] });
-      const state = {
-        runId, workflowName: 'test', projectDir, status: 'running', startedAt: new Date().toISOString(),
-        stages: {
-          work: { status: 'complete', retries: 0 },
-          verify: { status: 'complete', retries: 0, completedAt: new Date().toISOString() },
-          repair: { status: 'skipped', retries: 0 },
-        },
-      } as StoreState;
-      writeRunState(projectDir, runId, state);
-      writeFileSync(join(taskRunDir, 'verdict_verify.json'), JSON.stringify({ pass: true }));
-      writeFileSync(join(taskRunDir, 'signals', 'reject_verify.json'), JSON.stringify({ stage: 'verify', reason: 'criterion evidence is incomplete' }));
-
-      expect(consumeSupervisorReject(state, [verify, repair], ['verify', 'repair'], {
-        projectDir, runId, runDirPath: taskRunDir, iteration: 1,
-      })).toBe(true);
-      expect(JSON.parse(readFileSync(join(taskRunDir, 'verdict_verify.json'), 'utf-8'))).toMatchObject({
-        pass: false, outcome: 'repair-required', source: 'supervisor_reject',
-      });
-      expect(state.stages.repair.status).toBe('pending');
-      expect(readFileSync(join(taskRunDir, 'supervisor_guidance.md'), 'utf-8')).toContain('"target":"repair"');
-      expect(existsSync(join(taskRunDir, 'supervisor_rejections', 'verify', 'reject_1', 'verdict_before.json'))).toBe(true);
-    } finally {
-      setFcGlobalDir(previousStateRoot);
-    }
-  });
-
   it('rejects a terminal artifact that contradicts the settled research terminal path', async () => {
     const projectDir = temporaryRoot();
     const taskRunDir = join(projectDir, 'run');
@@ -556,7 +415,7 @@ describe('gate settlement and research evidence', () => {
 
   it('quarantines multiple non-research terminal outcomes and re-pends their sole owner', async () => {
     const projectDir = temporaryRoot();
-    const taskRunDir = join(projectDir, 'run');
+    const { runId, runDirPath: taskRunDir } = createRun(projectDir, 'test', 'name: test\nstages: []\n', ['finalize']);
     const startedAt = new Date(Date.now() - 1000).toISOString();
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
     mkdirSync(taskRunDir, { recursive: true });
@@ -567,7 +426,7 @@ describe('gate settlement and research evidence', () => {
       terminalOwners: { 'docs/final.md': 'finalize', 'docs/escalation.md': 'finalize' },
     }));
     const state = {
-      runId: 'run', workflowName: 'test', projectDir, status: 'running', startedAt,
+      runId, workflowName: 'test', projectDir, status: 'running', startedAt,
       terminalStates: {
         complete: { paths: ['docs/final.md'] },
         escalated: { paths: ['docs/escalation.md'] },
@@ -582,8 +441,9 @@ describe('gate settlement and research evidence', () => {
         },
       },
     } as StoreState;
+    writeRunState(projectDir, runId, state);
     const result = await tryTerminateOnTerminalState(state, {
-      projectDir, runId: 'run', runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter,
+      projectDir, runId, runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter,
     });
     expect(result.decision).toBe('deferred');
     expect(state.status).toBe('running');
@@ -595,7 +455,7 @@ describe('gate settlement and research evidence', () => {
 
   it('re-pends every implicated owner when path-specific terminal writers emit conflicting outcomes', async () => {
     const projectDir = temporaryRoot();
-    const taskRunDir = join(projectDir, 'run');
+    const { runId, runDirPath: taskRunDir } = createRun(projectDir, 'test', 'name: test\nstages: []\n', ['finish', 'escalate']);
     const startedAt = new Date(Date.now() - 1000).toISOString();
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
     mkdirSync(join(taskRunDir, 'stages', 'finish', 'placeholder'), { recursive: true });
@@ -611,7 +471,7 @@ describe('gate settlement and research evidence', () => {
       attempts: [{ index: 1, status: 'complete', startedAt, writes: [path] }],
     });
     const state = {
-      runId: 'run', workflowName: 'test', projectDir, status: 'running', startedAt,
+      runId, workflowName: 'test', projectDir, status: 'running', startedAt,
       terminalStates: {
         complete: { paths: ['docs/final.md'] },
         escalated: { paths: ['docs/escalation.md'] },
@@ -621,10 +481,10 @@ describe('gate settlement and research evidence', () => {
         escalate: complete('docs/escalation.md'),
       },
     } as StoreState;
-    writeRunState(projectDir, 'run', state);
+    writeRunState(projectDir, runId, state);
 
     const result = await tryTerminateOnTerminalState(state, {
-      projectDir, runId: 'run', runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter,
+      projectDir, runId, runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter,
     });
 
     expect(result.decision).toBe('deferred');
@@ -654,53 +514,7 @@ describe('persistent blockers and quiet active commands', () => {
     expect(recordBlockageOccurrence({ runDir, kind: 'gate', detail: 'same cause', evidenceDigest: 'b', repairDigest: 'repair-b' }).occurrence.consecutive).toBe(1);
   });
 
-  it('escalates the run on the third unchanged supervisor rejection', () => {
-    const projectDir = temporaryRoot();
-    const previousStateRoot = fcGlobalDir();
-    setFcGlobalDir(join(projectDir, 'fc-home'));
-    try {
-      const runId = 'unchanged-supervisor-reject';
-      const taskRunDir = runDir(projectDir, runId);
-      const work = stage({
-        id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['src/**'],
-      });
-      const state = {
-        runId, workflowName: 'test', projectDir, status: 'running',
-        startedAt: new Date().toISOString(),
-        campaignTriggers: { repeatedFailureAfter: 3 },
-        stages: { work: { status: 'complete', retries: 0, completedAt: new Date().toISOString() } },
-      } as StoreState;
-      mkdirSync(taskRunDir, { recursive: true });
-      writeRunState(projectDir, runId, state);
-      mkdirSync(join(taskRunDir, 'signals'), { recursive: true });
-      mkdirSync(join(taskRunDir, 'stages', 'work'), { recursive: true });
-      writeFileSync(join(taskRunDir, 'stages', 'work', 'output.md'), 'unchanged rejected evidence\n');
-
-      for (let observation = 1; observation <= 3; observation += 1) {
-        state.stages.work = {
-          ...state.stages.work,
-          status: 'complete',
-          completedAt: new Date().toISOString(),
-        };
-        writeRunState(projectDir, runId, state);
-        writeFileSync(join(taskRunDir, 'signals', 'reject_work.json'), JSON.stringify({
-          stage: 'work', reason: 'the same evidence is still invalid',
-        }));
-        const rework = consumeSupervisorReject(state, [work], ['work'], {
-          projectDir, runId, runDirPath: taskRunDir, iteration: observation,
-        });
-        expect(rework).toBe(observation < 3);
-      }
-
-      expect(state.status).toBe('escalated');
-      expect(state.failureReason).toContain('3 consecutive observations');
-      expect(existsSync(join(taskRunDir, 'signals', 'repeated_blockage.json'))).toBe(true);
-    } finally {
-      setFcGlobalDir(previousStateRoot);
-    }
-  });
-
-  it('protects only a current-attempt command between start and completion', () => {
+  it('counts a current-attempt command without treating its existence as ongoing work', () => {
     const runDir = temporaryRoot();
     const attemptStartedAt = '2026-01-01T00:00:00.000Z';
     const status: StageStatus = {
@@ -709,7 +523,8 @@ describe('persistent blockers and quiet active commands', () => {
     };
     const tracker = new CommandActivityTracker({ runDir, stageId: 'work', attemptIndex: 0, attemptStartedAt });
     tracker.feed(`${JSON.stringify({ type: 'item.started', item: { id: 'cmd-1', type: 'command_execution', command: 'npm test > /tmp/test.log 2>&1' } })}\n`);
-    expect(inspectStageExecutionFacts({ runDir, stageId: 'work', status, sinceMs: Date.now() }).protectedFromIdleAbort).toBe(true);
+    expect(inspectStageExecutionFacts({ runDir, stageId: 'work', status, sinceMs: Date.now() }))
+      .toMatchObject({ activeCommandCount: 1, commandActivityValid: true, protectedFromIdleAbort: false });
     tracker.feed(`${JSON.stringify({ type: 'item.completed', item: { id: 'cmd-1', type: 'command_execution' } })}\n`);
     const completed = inspectStageExecutionFacts({ runDir, stageId: 'work', status, sinceMs: Date.now() });
     expect(completed).toMatchObject({ activeCommandCount: 0, commandActivityValid: true, protectedFromIdleAbort: false });
@@ -731,30 +546,7 @@ describe('persistent blockers and quiet active commands', () => {
   });
 });
 
-describe('temporal tests, output inventory, reachability, and stage prose', () => {
-  // Stable workload ID; depends_on_shared_presence is the replacement
-  // assertion added after this historical title was registered.
-  it('rejects tests that pin mutable round state or require terminal absence', () => {
-    const projectDir = temporaryRoot();
-    mkdirSync(join(projectDir, 'spec'), { recursive: true });
-    writeFileSync(join(projectDir, 'spec', 'round.test.ts'), [
-      "const resultFile = 'docs/round_result.json';",
-      "expect(read(resultFile).label).toBe('round_3');",
-      "expect(existsSync('docs/final.md')).toBe(false);",
-    ].join('\n'));
-    const findings = inspectTemporalResearchTests({
-      projectDir,
-      writes: ['spec/round.test.ts'],
-      resultFile: 'docs/round_result.json',
-      terminalPaths: ['docs/final.md'],
-    });
-    expect(findings.map((finding) => finding.kind).sort()).toEqual([
-      'asserts_terminal_absence',
-      'depends_on_shared_presence',
-      'pins_shared_result',
-    ]);
-  });
-
+describe('output inventory, reachability, and stage prose', () => {
   it('blocks an occupied create-only output, permits explicit update, and never trusts a symlink', () => {
     const projectDir = temporaryRoot();
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
@@ -803,19 +595,20 @@ describe('temporal tests, output inventory, reachability, and stage prose', () =
 
   it('refuses absent hard-check paths with no emitter and ignores prose that only discusses stages', () => {
     const projectDir = temporaryRoot();
-    const work = stage({ id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/generated.json'] });
+    const work = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/generated.json'] });
     const markdown = [
       '## Reality checks',
       '```yaml',
       'checks:',
       '  - name: future file',
       '    type: json-schema-match',
+      '    reads: [{id: file, root: project, path: docs/not_owned.json, kind: file, source: {kind: input}}]',
       '    params:',
       '      file: docs/not_owned.json',
       '      schema: {type: object}',
       '```',
     ].join('\n');
-    expect(inspectRealityCheckReachability({ markdown, projectDir, stages: [work] }).join('\n')).toContain('no admitted stage');
+    expect(inspectRealityCheckReachability({ markdown, projectDir, stages: [work] }).join('\n')).toContain('ARTIFACT_INPUT_ABSENT');
 
     const execMarkdown = [
       '## Reality checks',
@@ -823,6 +616,7 @@ describe('temporal tests, output inventory, reachability, and stage prose', () =
       'checks:',
       '  - name: future script file',
       '    type: exec-script-exit-zero',
+      '    reads: [{id: file, root: project, path: docs/not_owned_from_script.json, kind: file, source: {kind: input}}]',
       '    params:',
       '      script: |',
       '        artifact="docs/not_owned_from_script.json"',
@@ -842,17 +636,21 @@ describe('temporal tests, output inventory, reachability, and stage prose', () =
     expect(inspectBrief('The QA stage must write docs/verdict.md.').findings.some((finding) => finding.code === 'stage_writable_paths_missing')).toBe(true);
     expect(inspectBrief('The QA stage must not write project files.').findings.some((finding) => finding.code === 'stage_writable_paths_missing')).toBe(false);
 
-    const finalizer = stage({ id: 'finalize', role: 'writer', depends_on: ['work'], dependency_reasons: { work: 'Consumes work.' }, scope: ['docs/final.md'] });
-    const late = stage({ id: 'late', role: 'writer', depends_on: ['finalize'], dependency_reasons: { finalize: 'Runs too late.' }, scope: ['docs/future.json'] });
-    const lateMarkdown = markdown.replace('docs/not_owned.json', 'docs/future.json');
+    const finalizer = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'finalize', role: 'writer', depends_on: ['work'], dependency_reasons: { work: 'Consumes work.' }, scope: ['docs/final.md'] });
+    const late = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'file', root: 'project', path: 'docs/future.json' }]), id: 'late', role: 'writer', depends_on: ['finalize'], dependency_reasons: { finalize: 'Runs too late.' }, scope: ['docs/future.json'] });
+    const lateMarkdown = markdown.replaceAll('docs/not_owned.json', 'docs/future.json')
+      .replace('source: {kind: input}', 'source: {kind: stage, stage: late, artifact: file}');
     expect(inspectRealityCheckReachability({
       markdown: lateMarkdown,
       projectDir,
       stages: [work, finalizer, late],
       terminalStates: { complete: { paths: ['docs/final.md'] } },
-    }).join('\n')).toContain('no producer is an ancestor of every terminal owner');
+    })).toEqual([]);
+    expect(inspectDispatchAdmission({ dispatched: [work, finalizer, late], baseStages: [], dispatchStageId: 'plan',
+      terminalStates: { complete: { paths: ['docs/final.md'] } },
+    }).errors.join('\n')).toContain('terminal owner finalize.depends_on: mandatory stage late is not an ancestor');
 
-    const optionalResultMarkdown = markdown.replace('docs/not_owned.json', 'docs/round.json');
+    const optionalResultMarkdown = markdown.replaceAll('docs/not_owned.json', 'docs/round.json');
     expect(inspectRealityCheckReachability({
       markdown: optionalResultMarkdown,
       projectDir,

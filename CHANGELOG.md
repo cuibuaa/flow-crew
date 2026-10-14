@@ -1,3 +1,24 @@
+# Release history
+
+Entries below describe the versions in which they were written. Commands, defaults and
+features in older entries are historical; use the [current CLI](guide/cli.md) and
+[configuration](guide/configuration.md) for operation. Historical measurements, anecdotes
+and publication claims below were not independently reproduced in this overhaul; they are
+retained as reported release history, not current guarantees or benchmark evidence.
+
+## Current checkout migration
+
+Model stage supervision and its launch flags have been removed; the deterministic idle
+watchdog and immutable attempt deadlines remain. Portable process supervision is separate.
+Stage races are a planner choice (`race: true`) admitted with independent gates; the separate
+race command and gate-hold launch control are removed. See [architecture](guide/architecture.md)
+and [agent protocol](guide/agent-protocol.md). These notes describe source on this checkout,
+not a newly published release.
+
+Engine defaults, roles and workflows now come only from the package's `config/` directory;
+target-project copies no longer override them. Campaign selection uses `--campaign` or the
+repository basename, and task-specific `planner_policies` selection lives in brief frontmatter.
+
 # Changelog
 
 ## [0.9.2] - 2026-09-26
@@ -205,7 +226,7 @@ scope or requiring an impossible rotating-literal preimage.
 
 ### Known — rollback must not treat an uncaptured ignored path as absent
 
-Run `2026-09-18T07-00-46-e0468d` exposed a separate guard defect while verifying these
+Run `example-run-1` exposed a separate guard defect while verifying these
 controls: a rollback sweep deleted 379 pre-existing files across nine ignored dependency trees
 after treating uncaptured preimages as absent, then stopped partway and left the installation
 unusable. The dependency trees were restored from a byte-matching install for this run; the
@@ -712,14 +733,6 @@ unknown, which makes the attribution it was built for impossible.
   is now one control: `config/defaults.yaml::default_timeout_ms`. See the breaking note above.
 
 ### Changed — rules a correct task can actually satisfy
-
-- **Four instances of one defect had accumulated: a rule whose judgement is right but whose
-  expression admits no compliant answer.** The test that separates it from a merely strict rule is
-  not whether the rule is correct but whether a correct task can satisfy it. The trigger was a
-  Reality-Gate check whose verdict was a validation command's raw exit status while the recorded
-  criterion for that role was no-regression over nine known failing identities — exit zero was
-  unreachable, so the check could never pass on a repository whose suite is red. The class was
-  repaired rather than the instance.
 
 - **Three more rules had the right intent and a form that made them either impossible to obey or safe
   to ignore.** The safety clause forbidding agents to touch other run directories bound reading to

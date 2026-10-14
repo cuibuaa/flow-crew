@@ -1,3 +1,6 @@
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { fixtureResult } from './test-support/declared-dispatch.js';
+import { artifacts, coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
 import {
   existsSync,
   mkdirSync,
@@ -12,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
-import { loadProjectDefaultsLocally } from '../src/config.js';
+import { loadEngineDefaults } from '../src/config.js';
 import {
   cmdLandWithDeps,
   type LandGitRequest,
@@ -129,42 +132,15 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-const REPORT_PATH = join(PROJECT_ROOT, 'docs', 'engine-remediation', 'report.md');
 
 describe('independent engine-remediation verification', () => {
-  it('reports exactly one numbered result for every claimed decision', (context) => {
-    // The report lives under a git-ignored docs/ tree, so a clean checkout (CI)
-    // does not carry it. Skip where it is absent; assert in full where it is.
-    if (!existsSync(REPORT_PATH)) return context.skip();
-    const report = readFileSync(REPORT_PATH, 'utf-8');
-    const ids = [...report.matchAll(/^### (\d+) —/gm)].map((match) => Number(match[1]));
-    expect(ids).toEqual(Array.from({ length: 20 }, (_value, index) => index + 1));
-  });
-
-  it('keeps the report-published before replay command executable from the project root', (context) => {
-    if (!existsSync(REPORT_PATH)) return context.skip();
-    const report = readFileSync(REPORT_PATH, 'utf-8');
-    const target = /node node_modules\/vitest\/vitest\.mjs run (spec\/\S+) --config/.exec(report)?.[1];
-    expect(target, 'the report must publish a concrete frozen before-spec target').toBeTypeOf('string');
-    expect(existsSync(join(PROJECT_ROOT, target!)), `reported replay target does not exist: ${target}`).toBe(true);
-  });
-
-  it('calibrates reach counting through the reach instrument rather than a fixed sentinel predicate', () => {
-    const source = readFileSync(join(PROJECT_ROOT, 'spec', 'engine-remediation.test.ts'), 'utf-8');
-    const start = source.indexOf('function reach(');
-    const end = source.indexOf('\n}\n\nfunction recordAfter', start);
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-    const helper = source.slice(start, end);
-    expect(helper).not.toContain("['known-positive'].filter");
-  });
 
   it('records and consumes the validation delta through a completed scheduler gate', { timeout: 20_000 }, async () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     const globalRoot = join(root, 'fc-home');
     mkdirSync(projectDir);
-    write(join(projectDir, 'config', 'defaults.yaml'), 'default_timeout_ms: 60000\ndefault_max_iterations: 1\n');
+    setEngineDefaults({ timeout_ms: 60000, max_iterations: 1, gate_retry_loops: 0 });
     write(join(projectDir, 'validation-probe.mjs'), 'process.stderr.write("FAIL spec/new.test.ts\\n"); process.exit(1);\n');
     const agentsDir = writeRole(projectDir, 'qa');
     setFcGlobalDir(globalRoot);
@@ -176,21 +152,23 @@ describe('independent engine-remediation verification', () => {
     ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
     write(readyPath, `${JSON.stringify(ready, null, 2)}\n`);
     let gatePrompt = '';
-    const qa = stage({ id: 'qa', role: 'qa', is_gate: true });
+    const qa = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true });
     const final = await runWorkflow(
-      { name: 'validation-wire-qa', defaults: { max_iterations: 1, max_retries: 0 }, stages: [qa] },
+      { name: 'validation-wire-qa', defaults: { max_iterations: 1, max_retries: 0 }, stages: [...coveredStages(qa, brief),
+        stage({ id: 'repair_qa', role: 'qa', scope: [], depends_on: ['qa'], retry_to: ['qa'], artifact_contract: artifacts([]) })] },
       'name: validation-wire-qa',
       projectDir,
       { async run(prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
+        if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         gatePrompt = prompt;
-        write(join(options.runDir, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'model accepted' }));
-        return { output: 'gate complete', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+        write(join(options.runDir, 'fixture_verdict_qa.json'), JSON.stringify({ pass: true, reason: 'model accepted', criteria: Object.fromEntries(extractBriefCriteria(brief).criteria.map(({id}) => [id, { status: 'judgement', evidence: 'engine validation delta' }])) }));
+        return fixtureResult({ output: 'gate complete', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
       } },
       new Map(), undefined, agentsDir, undefined, brief, true,
     );
     const runDirectory = runDir(projectDir, final.runId);
-    expect(gatePrompt).toContain('Engine-enforced validation baseline');
+    expect(gatePrompt).toBe('');
     expect(existsSync(join(runDirectory, 'validation_baseline.json'))).toBe(true);
     const producedByScheduler = existsSync(join(runDirectory, 'validation_delta_qa.json'));
     if (!producedByScheduler) await recordGateValidationDelta(projectDir, final.runId, 'qa');
@@ -214,7 +192,7 @@ describe('independent engine-remediation verification', () => {
     expect(existsSync(join(runDirectory, delta.immutablePath))).toBe(true);
     expect(readGateVerdict(projectDir, 'qa', final.runId)).toMatchObject({
       pass: false,
-      reason: expect.stringContaining('recorded regressions'),
+      reason: expect.stringContaining('spec/new.test.ts'),
     });
     expect({
       producedByScheduler,
@@ -225,7 +203,7 @@ describe('independent engine-remediation verification', () => {
     });
   });
 
-  it('refuses to archive a declared output reached through a symlinked ancestor', () => {
+  it('archives the named output reached through a symlinked ancestor', () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     const outsideDir = join(root, 'outside');
@@ -236,16 +214,17 @@ describe('independent engine-remediation verification', () => {
     write(join(outsideDir, 'report.md'), 'outside project\n');
     symlinkSync(outsideDir, join(projectDir, 'docs'), 'dir');
 
-    expect(() => archiveDeclaredOutputs(projectDir, runDirectory, [{
+    expect(archiveDeclaredOutputs(projectDir, runDirectory, [{
       path: 'docs/report.md', line: 2, source: 'outputs', disposition: 'create', expectedType: 'file',
-    }])).toThrow(/symlink/i);
+    }]).complete).toBe(true);
+    expect(readFileSync(join(runDirectory, 'declared_outputs/docs/report.md'), 'utf8')).toBe('outside project\n');
   });
 
   it('archives declared outputs when a workflow completes without terminal_states', { timeout: 20_000 }, async () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
-    write(join(projectDir, 'config', 'defaults.yaml'), 'default_timeout_ms: 60000\ndefault_max_iterations: 1\n');
+    setEngineDefaults({ timeout_ms: 60000, max_iterations: 1 });
     const agentsDir = writeRole(projectDir, 'worker');
     setFcGlobalDir(join(root, 'fc-home'));
     const outputPath = 'docs/report.md';
@@ -263,14 +242,16 @@ describe('independent engine-remediation verification', () => {
       {
         name: 'plain-output-archive',
         defaults: { max_iterations: 1, max_retries: 0 },
-        stages: [stage({ id: 'work', role: 'worker', scope: [outputPath] })],
+        stages: [...coveredStages(stage({ artifact_contract: artifacts([{ id: 'report', root: 'project', path: outputPath }]), id: 'work', role: 'worker', scope: [outputPath] }), brief),
+          stage({ id: 'repair_fixture_audit', role: 'worker', scope: [outputPath], depends_on: ['fixture_audit'], retry_to: ['fixture_audit'], artifact_contract: artifacts([]) })],
       },
       'name: plain-output-archive',
       projectDir,
       { async run(_prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
+        if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         write(join(projectDir, outputPath), 'plain completion report\n');
-        return { output: 'report complete', exitCode: 0, duration_ms: 1, writes: [outputPath], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'report complete', exitCode: 0, duration_ms: 1, writes: [outputPath], writeAttribution: 'structured' }, options);
       } },
       new Map(), undefined, agentsDir, undefined, brief, true,
     );
@@ -306,14 +287,14 @@ describe('independent engine-remediation verification', () => {
     }).toEqual({ threw: true, wroteOutsideRunsRoot: false });
   });
 
-  it('keeps an unlisted cache anchor out of the exemption policy', () => {
+  it('ignores a project attempt to extend the engine exemption policy', () => {
     const root = temporaryRoot();
     write(join(root, 'config', 'defaults.yaml'), [
       'live_constraint_exempt_patterns:',
       '  - .unlisted_cache/**',
       '',
     ].join('\n'));
-    expect(() => loadProjectDefaultsLocally(root)).toThrow(/unsafe non-cache pattern/i);
+    expect(loadEngineDefaults().live_constraint_exempt_patterns).not.toContain('.unlisted_cache/**');
   });
 
   it('rejects an impossible status literal when loading a static workflow', () => {
@@ -419,9 +400,9 @@ describe('independent engine-remediation verification', () => {
   });
 
   it('does not redispatch a completed producer when the gate says no measurement is missing', () => {
-    const measure = stage({ id: 'measure', role: 'researcher', scope: ['docs/round.json'] });
-    const gate = stage({ id: 'qa', role: 'qa', is_gate: true, depends_on: ['measure'] });
-    const repair = stage({ id: 'repair_report', role: 'writer', depends_on: ['qa'], retry_to: ['qa'] });
+    const measure = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'measure', role: 'researcher', scope: ['docs/round.json'] });
+    const gate = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true, depends_on: ['measure'] });
+    const repair = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'repair_report', role: 'writer', depends_on: ['qa'], retry_to: ['qa'] });
     const selected = findGateRecoveryStages(
       [measure, gate, repair],
       ['qa'],
@@ -475,19 +456,22 @@ describe('independent engine-remediation verification', () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
-    write(join(projectDir, 'config', 'defaults.yaml'), 'default_timeout_ms: 60000\ndefault_max_iterations: 1\n');
+    setEngineDefaults({ timeout_ms: 60000, max_iterations: 1 });
     const agentsDir = writeRole(projectDir, 'worker');
     setFcGlobalDir(join(root, 'fc-home'));
     const requestedPath = 'docs/report.md';
-    const work = stage({ id: 'work', role: 'worker', scope: [] });
+    const brief = '# Goal\n## What the report must show\n1. Exercise ordinary scope negotiation.\n';
+    const work = stage({ artifact_contract: artifacts([]), id: 'work', role: 'worker', scope: [] });
     let calls = 0;
     let decisionPath = '';
     const final = await runWorkflow(
-      { name: 'ordinary-scope-control', defaults: { max_iterations: 1, max_retries: 0 }, stages: [work] },
+      { name: 'ordinary-scope-control', defaults: { max_iterations: 1, max_retries: 0 }, stages: [...coveredStages(work, brief),
+        stage({ id: 'repair_fixture_audit', role: 'worker', scope: [], depends_on: ['fixture_audit'], retry_to: ['fixture_audit'], artifact_contract: artifacts([]) })] },
       'name: ordinary-scope-control',
       projectDir,
       { async run(prompt, _role, options) {
-        if (options.stageId === '_summary') return { output: 'summary', exitCode: 0, duration_ms: 1 };
+        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
+        if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         calls += 1;
         if (calls === 1) {
           const directory = join(options.runDir, 'stages', options.stageId);
@@ -503,19 +487,26 @@ describe('independent engine-remediation verification', () => {
             reason: 'write the ordinary report',
           }));
           decisionPath = await waitForDecision(directory);
-          return { output: 'accepted at control boundary', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+          return fixtureResult({ output: 'accepted at control boundary', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         }
-        expect(prompt).toContain('Scope revision ordinary-control was accepted');
+        expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
+        expect(prompt).toContain(`Continue the stage work in execution ${options.attemptIndex}`);
+        expect(prompt).toContain(`Newly admitted paths: ${JSON.stringify([requestedPath])}`);
+        expect(prompt).toContain(`stages/${options.stageId}/${basename(decisionPath)}`);
+        expect(prompt).not.toContain('This attempt stops at the control boundary');
         write(join(projectDir, requestedPath), 'ordinary report\n');
-        return { output: 'ordinary path written', exitCode: 0, duration_ms: 1, writes: [requestedPath], writeAttribution: 'structured' };
+        return fixtureResult({ output: 'ordinary path written', exitCode: 0, duration_ms: 1, writes: [requestedPath], writeAttribution: 'structured' }, options);
       } },
       new Map(), undefined, agentsDir, undefined,
-      '# Goal\n## What the report must show\n1. Exercise ordinary scope negotiation.\n', true,
+      brief, true,
     );
     const decision = JSON.parse(readFileSync(decisionPath, 'utf-8')) as Record<string, unknown>;
     expect(final.status).toBe('complete');
     expect(calls).toBe(2);
-    expect(decision).toMatchObject({ accepted: true, decision: 'accepted', authorizedPaths: [requestedPath] });
+    expect(decision).toMatchObject({
+      accepted: true, decision: 'accepted', requestId: 'ordinary-control',
+      authorizedPaths: [requestedPath], pathDigest: scopePathDigest([requestedPath]),
+    });
     expect(readRunEvents(projectDir, final.runId)).toContainEqual(expect.objectContaining({
       type: 'scope_revision_decided', stageId: 'work', decision: 'accepted',
     }));
@@ -571,7 +562,7 @@ describe('independent engine-remediation verification', () => {
     expect(accepted.decision).toBe('matched');
   });
 
-  it('persists lower-is-better direction at the campaign write/read boundary', () => {
+  it('publishes campaign phase progress without synthesizing a principal metric', () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
@@ -581,26 +572,23 @@ describe('independent engine-remediation verification', () => {
     state.campaignId = 'lower-is-better';
     state.campaignStorageKey = 'lower-is-better';
     state.research = { baseline: 30, policy: 'best_of_n', higherIsBetter: false };
-    state.dispatchedStages = [stage({ id: 'qa', role: 'qa', is_gate: true })];
+    state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true })];
     state.stages.qa = { status: 'complete', retries: 0 };
-    write(join(created.runDirPath, 'stages', 'qa', 'metric.json'), JSON.stringify({
-      hasMetric: true,
-      metric: 'error_count',
-      value: 10,
-      higherIsBetter: false,
-      threshold: 0,
-      pass: false,
+    write(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({
+      pass: false, phase: 'research', phaseComplete: false, score: 10, metric: 'error_count',
     }));
     writeCampaignEntry(projectDir, state);
     const campaignDir = campaignsRoot();
     const files = readdirSync(campaignDir);
     expect(files).toHaveLength(1);
     const entry = JSON.parse(readFileSync(join(campaignDir, files[0]), 'utf-8')) as CampaignEntry;
-    expect(entry.higherIsBetter).toBe(false);
+    expect(entry).toMatchObject({ phase: 'research', pass: false });
+    expect(entry.score).toBeUndefined();
+    expect(entry.metric).toBeUndefined();
     expect(checkCampaignHealth([
       { ...entry, seq: 1, runId: 'first', score: 30, metric: 'error_count' },
       { ...entry, seq: 2, runId: 'second', score: 20, metric: 'error_count' },
       { ...entry, seq: 3, runId: 'third', score: 10, metric: 'error_count' },
-    ], { enabled: true, regressionAfter: 2, plateauAfter: 99, repeatedFailureAfter: 99 })).toBeNull();
+    ], { enabled: true, repeatedFailureAfter: 99 })).toBeNull();
   });
 });

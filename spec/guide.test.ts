@@ -11,7 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { parseGuidanceLedger } from '../src/guidance.js';
+import { parseGuidanceLedger, routePendingOperatorGuidanceToStage } from '../src/guidance.js';
 
 let fixtureRoot: string;
 let isolatedHome: string;
@@ -98,7 +98,8 @@ describe('safe guide targeting', () => {
     const result = runGuide('--run', 'run-alpha', 'use the isolated reproduction');
 
     expect(result.status).toBe(0);
-    expect(readFileSync(guidancePath('run-alpha'), 'utf-8')).toBe('use the isolated reproduction');
+    expect(parseGuidanceLedger(readFileSync(guidancePath('run-alpha'), 'utf-8'))).toEqual([expect.objectContaining({ target: '*', source: 'operator', body: 'use the isolated reproduction' })]);
+    expect(existsSync(guidancePath('run-alpha'))).toBe(true);
     expect(existsSync(guidancePath('run-beta'))).toBe(false);
   });
 
@@ -109,7 +110,8 @@ describe('safe guide targeting', () => {
     const result = runGuide('continue with the live task');
 
     expect(result.status).toBe(0);
-    expect(readFileSync(guidancePath('run-live'), 'utf-8')).toBe('continue with the live task');
+    expect(parseGuidanceLedger(readFileSync(guidancePath('run-live'), 'utf-8'))).toEqual([expect.objectContaining({ target: '*', source: 'operator', body: 'continue with the live task' })]);
+    expect(existsSync(guidancePath('run-live'))).toBe(true);
     expect(existsSync(guidancePath('run-finished'))).toBe(false);
   });
 
@@ -136,6 +138,8 @@ describe('safe guide targeting', () => {
     );
 
     expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+    expect(existsSync(join(runsDir, 'run-alpha', 'supervisor_guidance.md'))).toBe(false);
+    routePendingOperatorGuidanceToStage(join(runsDir, 'run-alpha'), 'implement');
     expect(existsSync(guidancePath('run-alpha'))).toBe(false);
     const ledger = parseGuidanceLedger(readFileSync(join(runsDir, 'run-alpha', 'supervisor_guidance.md'), 'utf-8'));
     expect(ledger).toEqual([

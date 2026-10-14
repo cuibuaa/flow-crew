@@ -1,3 +1,4 @@
+import { closeRepairRoundSnapshot } from './test-support/close-repair-snapshot.js';
 import {
   chmodSync,
   existsSync,
@@ -14,7 +15,6 @@ import { describe, expect, it } from 'vitest';
 import {
   captureRepairRoundSnapshot,
   changedProjectPathsSinceSnapshotCooperatively,
-  closeRepairRoundSnapshot,
   restoreProjectPath,
   type StageConfig,
 } from '../src/scheduler.js';
@@ -25,6 +25,30 @@ function stage(): StageConfig {
 }
 
 describe('ignored-content rollback reconciliation', () => {
+  it('shares unchanged preimage bytes across metadata churn while preserving independent writer snapshots', () => {
+    const projectDir = join(process.env.FLOWCREW_VITEST_ROOT!, 'shared-preimages');
+    mkdirSync(projectDir, { recursive: true });
+    const target = join(projectDir, 'model.bin');
+    writeFileSync(target, Buffer.alloc(1024 * 1024, 0x41));
+    const created = createRun(projectDir, 'preimages', 'name: preimages', ['writer']);
+    const first = captureRepairRoundSnapshot(projectDir, [{ ...stage(), scope: ['model.bin'] }], { runDirPath: created.runDirPath });
+    try {
+      const original = first.files.get('model.bin')!;
+      chmodSync(target, 0o600);
+      const second = captureRepairRoundSnapshot(projectDir, [{ ...stage(), scope: ['model.bin'] }], { runDirPath: created.runDirPath });
+      const metadata = second.files.get('model.bin')!;
+      expect(metadata.backingPath).toBe(original.backingPath);
+      expect(metadata.mode).toBe(0o600);
+      expect(metadata.statIdentity).not.toEqual(original.statIdentity);
+      expect(second.allFileImages.get('model.bin')).toBe(original);
+      writeFileSync(target, Buffer.alloc(1024 * 1024, 0x42));
+      const third = captureRepairRoundSnapshot(projectDir, [{ ...stage(), scope: ['model.bin'] }], { runDirPath: created.runDirPath });
+      expect(third.files.get('model.bin')!.backingPath).not.toBe(original.backingPath);
+      expect(restoreProjectPath(projectDir, 'model.bin', original)).toEqual({ restored: true });
+      expect(readFileSync(target)[0]).toBe(0x41);
+    } finally { closeRepairRoundSnapshot(first); }
+  });
+
   it('keeps a large preimage outside the project, skips unchanged bytes, and restores a same-size replacement', async () => {
     const projectDir = join(process.env.FLOWCREW_VITEST_ROOT!, 'ignored-project');
     mkdirSync(projectDir, { recursive: true });

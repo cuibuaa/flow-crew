@@ -1,10 +1,22 @@
 #!/usr/bin/env node
-import type { RunStatus } from './store.js';
+import type { RetiredStageUsage, RunStatus } from './store.js';
 import type { AdapterName, AdapterResolution } from './adapters/availability.js';
 import type { RegisterRpcResponse } from './orchestrator-rpc.js';
 import type { TaskCreateInput } from './task-registry.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
-import { createCampaignProposerScratch } from './campaign-scratch.js';
+
+function handleOutputError(error: NodeJS.ErrnoException): never {
+  if (error.code === 'EPIPE') process.exit(0);
+  throw error;
+}
+
+process.stdout.on('error', handleOutputError);
+process.stderr.on('error', handleOutputError);
+process.on('exit', () => {
+  for (const stream of [process.stdout, process.stderr]) {
+    if (stream.errored) handleOutputError(stream.errored);
+  }
+});
 
 function earlyCommandHelp(input: string[]): string | undefined {
   if (!input.includes('--help') && !input.includes('-h')) return undefined;
@@ -13,15 +25,36 @@ function earlyCommandHelp(input: string[]): string | undefined {
   if (command === 'task') {
     if (subcommand === 'list') return 'Usage: flowcrew task list [--status active|all|<status>] [--limit N] [--with-summary]';
     if (subcommand === 'show') return 'Usage: flowcrew task show <id> [--summary-only | --raw]\nShows bounded run/stage detail; raw tick JSON is opt-in.';
-    return 'Usage: flowcrew task list|show|cancel|retry|tail ...';
+    return 'Usage: flowcrew task list|show|cancel|resume|retry|tail ...';
   }
   if (command === 'daemon') return 'Usage: flowcrew daemon start|serve|stop|restart|status|logs [options]';
-  if (command === 'quick') return 'Usage: flowcrew quick <task|brief path|-> [--project <path>] [--supervise] [--max-iterations N]';
+  if (command === 'quick') return 'Usage: flowcrew quick <task|brief path|-> [--project <path>] [--max-iterations N]';
   if (command === 'rehearse') return 'Usage: flowcrew rehearse <brief> [--project <path>] [--json]';
   if (command === 'interrupt') return 'Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"';
-  if (command === 'campaign') return 'Usage: flowcrew campaign run|list|show|stop ...';
+  if (command === 'state') return 'Usage: flowcrew state --project <path> --run <run-id> [--prompts] [--summary]';
+  if (command === 'campaign') return 'Usage: flowcrew campaign status|pending|review ...';
   if (command === 'brief') return 'Usage: flowcrew brief head|diff|rollback|log ...';
-  return undefined;
+  const usage: Record<string, string> = {
+    start: 'Usage: flowcrew start (PORT and PROJECT_DIR select the dashboard)',
+    guide: 'Usage: flowcrew guide [--run <run-id>] [--stage <stage-id>] "message"',
+    inbox: 'Usage: flowcrew inbox list|show|approve|deny ...',
+    dashboard: 'Usage: flowcrew dashboard status [--port N]',
+    init: 'Usage: flowcrew init',
+    adapter: 'Usage: flowcrew adapter [codex|claude|auto]',
+    status: 'Usage: flowcrew status [--all] [--project <path>]',
+    list: 'Usage: flowcrew list [--limit N]',
+    clean: 'Usage: flowcrew clean [--keep N]',
+    export: 'Usage: flowcrew export [run-id]',
+    'audit-reality': 'Usage: flowcrew audit-reality [options]',
+    'ship-preflight': 'Usage: flowcrew ship-preflight [--brief <path>] [options]',
+    'ship-setup': 'Usage: flowcrew ship-setup --brief <path> --target <path> [options]',
+    watch: 'Usage: flowcrew watch [--once]',
+    events: 'Usage: flowcrew events [--run <run-id>] [--follow]',
+    doctor: 'Usage: flowcrew doctor [--repair-registry|--compact-registry] [--apply]',
+    'plan-check': 'Usage: flowcrew plan-check --project <project> (--brief <brief-file> | --run <run-dir>) <dispatch-file>',
+    version: 'Usage: flowcrew version',
+  };
+  return usage[command];
 }
 
 const bootstrapArgs = process.argv.slice(2);
@@ -31,6 +64,9 @@ const bootstrapHelp = earlyCommandHelp(bootstrapArgs);
 if (bootstrapHelp !== undefined) {
   process.stdout.write(`${bootstrapHelp}\n`);
   process.exitCode = 0;
+} else if (bootstrapArgs[0] === 'land' && (bootstrapArgs.includes('--help') || bootstrapArgs.includes('-h'))) {
+  const { cmdLand } = await import('./cli-land.js');
+  process.exitCode = await cmdLand(bootstrapArgs);
 } else if (bootstrapArgs[0] === 'fc_tasks') {
   try {
     const { cmdFcTasks } = await import('./cli-fc-tasks.js');
@@ -39,6 +75,12 @@ if (bootstrapHelp !== undefined) {
     process.stdout.write(`fc_tasks: degraded[internal_error] · command failed to load: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   }
+} else if (bootstrapArgs[0] === 'plan-check') {
+  const { cmdPlanCheck } = await import('./plan-interface.js');
+  process.exitCode = await cmdPlanCheck(bootstrapArgs);
+} else if (bootstrapArgs[0] === 'state') {
+  const { cmdState } = await import('./run-state-access.js');
+  process.exitCode = cmdState(bootstrapArgs);
 } else {
 const [
   fsModule,
@@ -48,7 +90,6 @@ const [
   yamlModule,
   storeModule,
   configModule,
-  campaignModule,
   campaignsModule,
   campaignHygieneModule,
   briefVersioningModule,
@@ -62,15 +103,15 @@ const [
   guidanceModule,
   commandInterruptModule,
   supervisionModule,
+  runStateViewModule,
 ] = await Promise.all([
-  import('node:fs'),
+  import('./engine-fs.js'),
   import('node:path'),
   import('node:child_process'),
   import('node:readline/promises'),
   import('yaml'),
   import('./store.js'),
   import('./config.js'),
-  import('./campaign.js'),
   import('./campaigns.js'),
   import('./campaign-hygiene.js'),
   import('./brief-versioning.js'),
@@ -84,6 +125,7 @@ const [
   import('./guidance.js'),
   import('./command-interrupt.js'),
   import('./supervision.js'),
+  import('./run-state-view.js'),
 ]);
 
 const {
@@ -94,15 +136,14 @@ const {
   readdirSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   lstatSync,
   statSync,
-  renameSync: fsRenameSync,
 } = fsModule;
 const { join, relative, resolve } = pathModule;
 const { execFileSync, execSync } = childProcessModule;
 const { createInterface } = readlineModule;
 const { parse: parseYaml, parseDocument } = yamlModule;
+const { projectRunStageHistory } = runStateViewModule;
 const {
   campaignDir,
   extractTaskTitle,
@@ -112,14 +153,14 @@ const {
   isTerminalRunStatus,
   resolveRunStatus,
   readRunState,
+  readArchivedRunState,
   RUN_STATUS,
   RUN_RESERVATION_FILE,
   RUN_RESERVATION_TTL_MS,
   runsRoot,
   STAGE_STATUS,
 } = storeModule;
-const { campaignBaseDirectory, ensureProjectDefaultsFile, loadProjectDefaults } = configModule;
-const { loadCampaignConfig, runCampaign, stopCampaign } = campaignModule;
+const { campaignBaseDirectory, engineConfigDir, loadEngineDefaults } = configModule;
 const { readCampaignEntries } = campaignsModule;
 const { assessCampaignHygiene } = campaignHygieneModule;
 const { diffVersions, readHead, rollback } = briefVersioningModule;
@@ -142,7 +183,7 @@ const {
   formatRunDriftProjection,
   readOperationalProjection,
 } = cliEventsModule;
-const { appendGuidanceEnvelope, readGuidanceDeliveryStatus } = guidanceModule;
+const { queueOperatorGuidance, RUN_WIDE_GUIDANCE_TARGET } = guidanceModule;
 const { requestStageCommandInterrupt } = commandInterruptModule;
 const { recordLaunchRefusal } = supervisionModule;
 
@@ -172,10 +213,6 @@ const CLI_RUN_STATUS_PRESENTATION = {
   [RUN_STATUS.INCOMPLETE]: { listLabel: '· incomplete', notificationTitle: 'FlowCrew: Task Failed' },
 } as const satisfies Record<RunStatus, CliRunStatusPresentation>;
 
-function encodeBriefAdmission(record: BriefAdmissionRecord): string {
-  return Buffer.from(JSON.stringify(record), 'utf8').toString('base64url');
-}
-
 function decodeBriefAdmission(value: string): BriefAdmissionRecord {
   try {
     return JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as BriefAdmissionRecord;
@@ -200,21 +237,21 @@ type RuntimeAdapterResolution = AdapterResolution | {
   reason: string;
 };
 
-function readAdapterSetting(projectDir: string): AdapterSetting {
-  const path = join(projectDir, 'config', 'defaults.yaml');
+function readAdapterSetting(): AdapterSetting {
+  const path = join(engineConfigDir, 'defaults.yaml');
   if (!existsSync(path)) return { exists: false };
   try {
     const parsed = parseYaml(readFileSync(path, 'utf-8')) as Record<string, unknown> | null;
     const raw = parsed?.adapter;
     if (raw === undefined) return { exists: true };
     if (typeof raw !== 'string' || !raw.trim()) {
-      return { exists: true, error: 'config/defaults.yaml adapter must be a non-empty string' };
+      return { exists: true, error: 'Engine config/defaults.yaml adapter must be a non-empty string' };
     }
     return { exists: true, value: raw.trim() };
   } catch (error) {
     return {
       exists: true,
-      error: `config/defaults.yaml YAML parsing failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: `Engine config/defaults.yaml YAML parsing failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }
@@ -230,14 +267,14 @@ function resolveRuntimeAdapter(
     return {
       ok: true,
       adapter: 'mock',
-      reason: `Selected mock from the ${explicit ? 'explicit --adapter choice' : 'project configuration'}; it is the deterministic in-process test adapter and needs no external CLI.`,
+      reason: `Selected mock from the ${explicit ? 'explicit --adapter choice' : 'engine configuration'}; it is the deterministic in-process test adapter and needs no external CLI.`,
     };
   }
   return resolveAdapterChoice(opts, installed);
 }
 
-function writeAdapterSetting(projectDir: string, adapter: AdapterName | 'auto'): string {
-  const path = ensureProjectDefaultsFile(projectDir);
+function writeAdapterSetting(adapter: AdapterName | 'auto'): string {
+  const path = join(engineConfigDir, 'defaults.yaml');
   const document = parseDocument(readFileSync(path, 'utf-8'));
   if (document.errors.length > 0) {
     throw new Error(`Cannot update ${path}: ${document.errors[0].message}`);
@@ -248,125 +285,22 @@ function writeAdapterSetting(projectDir: string, adapter: AdapterName | 'auto'):
 }
 
 async function registerBackgroundTask(task: TaskCreateInput): Promise<void> {
-  const { defaultSocketPath, formatDaemonRegistration, sendRpc } = await import('./orchestrator-rpc.js');
-  const socketPath = process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
-  const response = await sendRpc<RegisterRpcResponse>(socketPath, { cmd: 'register', task });
+  const { commandSocketPath, formatDaemonRegistration, sendRpc } = await import('./orchestrator-rpc.js');
+  const socketPath = commandSocketPath();
+  const response = await sendRpc<RegisterRpcResponse>(socketPath, { cmd: 'register', task, acknowledgement: 'persisted' });
   console.log(formatDaemonRegistration(response));
-}
-
-async function chooseInitialAdapter(): Promise<AdapterName | 'auto'> {
-  const installed = installedAdapters();
-  if (installed.length === 0) {
-    console.log('⚠️  No adapter CLI is installed; keeping adapter: auto.');
-    console.log(`   Install Codex: ${ADAPTER_INSTALL_HINT.codex}`);
-    console.log(`   Install Claude Code: ${ADAPTER_INSTALL_HINT.claude}`);
-    console.log('   After installation, set an explicit choice with `flowcrew adapter codex` or `flowcrew adapter claude`.');
-    return 'auto';
-  }
-  if (installed.length === 1) {
-    console.log(`ℹ️  Selected ${installed[0]} because it is the only installed adapter CLI.`);
-    return installed[0];
-  }
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    console.log(`ℹ️  Both adapter CLIs are installed; non-interactive init selected recommended execution backend ${RECOMMENDED}.`);
-    return RECOMMENDED;
-  }
-
-  const input = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    while (true) {
-      const answer = (await input.question(`Choose adapter [${RECOMMENDED}/claude] (${RECOMMENDED}): `)).trim().toLowerCase();
-      const selected = answer || RECOMMENDED;
-      if (selected === 'codex' || selected === 'claude') return selected;
-      console.log('Please enter `codex` or `claude`.');
-    }
-  } finally {
-    input.close();
-  }
 }
 
 async function cmdInit() {
   const projectDir = detectProjectDir();
-  const configDir = join(projectDir, 'config');
-  const agentsDir = join(configDir, 'agents');
-  const workflowsDir = join(configDir, 'workflows');
-  const skillsDir = join(configDir, 'skills');
-
-  // Scaffold directories
-  for (const dir of [configDir, agentsDir, workflowsDir, skillsDir]) {
-    mkdirSync(dir, { recursive: true });
-  }
-
-  // Create defaults.yaml if missing
-  const defaultsPath = join(configDir, 'defaults.yaml');
-  if (!existsSync(defaultsPath)) {
-    const adapter = await chooseInitialAdapter();
-    ensureProjectDefaultsFile(projectDir);
-    if (adapter !== 'auto') writeAdapterSetting(projectDir, adapter);
-    console.log(`✅ Created ${defaultsPath} (adapter: ${adapter})`);
-  } else {
-    console.log(`⏭️  ${defaultsPath} already exists`);
-  }
-
-  // Create default workflow if missing
-  const defaultWf = join(workflowsDir, 'default.yaml');
-  if (!existsSync(defaultWf)) {
-    writeFileSync(defaultWf, 'name: default\nstages:\n  - id: plan\n    role: planner\n    dynamic_dispatch: true\n', 'utf-8');
-    console.log(`✅ Created ${defaultWf}`);
-  } else {
-    console.log(`⏭️  ${defaultWf} already exists`);
-  }
-
-  // Copy agent configs from flowcrew's own config if they don't exist
-  const srcAgentsDir = join(import.meta.dirname ?? '.', '..', 'config', 'agents');
-  if (existsSync(srcAgentsDir)) {
-    try {
-      for (const f of readdirSync(srcAgentsDir)) {
-        const dest = join(agentsDir, f);
-        if (!existsSync(dest)) {
-          writeFileSync(dest, readFileSync(join(srcAgentsDir, f), 'utf-8'), 'utf-8');
-          console.log(`✅ Created ${dest}`);
-        }
-      }
-    } catch { /* best effort */ }
-  }
+  const skillsDir = join(projectDir, 'config', 'skills');
+  mkdirSync(skillsDir, { recursive: true });
+  console.log(`✅ Project skills directory: ${skillsDir}`);
 
   // Create global ~/.fc/runs/ directory (all runs stored centrally)
   const globalFcDir = runsRoot(projectDir);
   mkdirSync(globalFcDir, { recursive: true });
   console.log(`✅ Global runs directory: ${globalFcDir}`);
-
-  // Create project-local .fc/runs symlink pointing to global dir (for backward compat)
-  const localFcRuns = join(projectDir, '.fc', 'runs');
-  const localFcDir = join(projectDir, '.fc');
-  mkdirSync(localFcDir, { recursive: true });
-  if (resolve(localFcRuns) !== resolve(globalFcDir)) {
-    try {
-      const stat = lstatSync(localFcRuns);
-      if (!stat.isSymbolicLink()) {
-        // Existing real directory — migrate contents to global, replace with symlink
-        for (const f of readdirSync(localFcRuns)) {
-          try { fsRenameSync(join(localFcRuns, f), join(globalFcDir, f)); } catch { /* skip conflicts */ }
-        }
-        rmSync(localFcRuns, { recursive: true, force: true });
-        symlinkSync(globalFcDir, localFcRuns);
-      }
-    } catch { /* expected - optional resource */
-      // No existing dir — create symlink
-      try { symlinkSync(globalFcDir, localFcRuns); } catch { /* non-critical */ }
-    }
-  }
-
-  // Add .fc/ to .gitignore if not already present
-  const gitignorePath = join(projectDir, '.gitignore');
-  try {
-    const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
-    if (!existing.split('\n').some(line => line.trim() === '.fc/' || line.trim() === '.fc')) {
-      const entry = existing.endsWith('\n') || !existing ? '.fc/\n' : '\n.fc/\n';
-      writeFileSync(gitignorePath, existing + entry, 'utf-8');
-      console.log(`✅ Added .fc/ to ${gitignorePath}`);
-    }
-  } catch { /* best effort */ }
 
   // `start` refuses without an adapter CLI, so pointing an agentless newcomer at it
   // would dead-end them one command later. Send them to what actually works instead:
@@ -427,6 +361,32 @@ function skillRevision(content: string): string | undefined {
   return /<!--\s*flowcrew-skill-revision:\s*([^\s]+)\s*-->/.exec(content)?.[1];
 }
 
+function skillReferencesMatch(packageRoot: string, skillPath: string, content: string): boolean {
+  const guideDir = join(packageRoot, 'guide');
+  const referencesDir = join(pathModule.dirname(skillPath), 'references');
+  const visited = new Set<string>();
+  const links = /\[([^\]]+)\]\(([^\s)]+)\)/g;
+  const check = (source: string): boolean => {
+    if (visited.has(source)) return true;
+    visited.add(source);
+    const installed = join(referencesDir, relative(guideDir, source));
+    if (!existsSync(source) || !existsSync(installed)) return false;
+    const dependencies: string[] = [];
+    const expected = readFileSync(source, 'utf8').replace(links, (link, label: string, href: string) => {
+      if (/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(href)) return link;
+      const target = resolve(pathModule.dirname(source), href.split('#')[0]);
+      if (target.startsWith(guideDir + pathModule.sep)) {
+        dependencies.push(target);
+        return link; // The relative layout within guide/ is preserved in references/.
+      }
+      return `${label} (\`${href}\`)`;
+    });
+    return readFileSync(installed, 'utf8') === expected && dependencies.every(check);
+  };
+  return [...content.matchAll(/\]\(references\/([^#)]+)/g)]
+    .every(([, path]) => check(resolve(guideDir, path)));
+}
+
 function addDoctorSkillCheck(
   checks: DoctorCheck[],
   adapter: AdapterName,
@@ -460,15 +420,15 @@ function addDoctorSkillCheck(
       {
         label: 'project',
         files: {
-          ship: join(projectDir, '.claude', 'commands', 'ship.md'),
-          'fc-status': join(projectDir, '.claude', 'commands', 'fc-status.md'),
+          ship: join(projectDir, '.claude', 'skills', 'ship', 'SKILL.md'),
+          'fc-status': join(projectDir, '.claude', 'skills', 'fc-status', 'SKILL.md'),
         },
       },
       ...(home ? [{
         label: 'global' as const,
         files: {
-          ship: join(home, '.claude', 'commands', 'ship.md'),
-          'fc-status': join(home, '.claude', 'commands', 'fc-status.md'),
+          ship: join(home, '.claude', 'skills', 'ship', 'SKILL.md'),
+          'fc-status': join(home, '.claude', 'skills', 'fc-status', 'SKILL.md'),
         },
       }] : []),
     ];
@@ -495,7 +455,7 @@ function addDoctorSkillCheck(
   }
   const sourceContent = new Map<string, string>();
   for (const name of names) {
-    sourceContent.set(name, readFileSync(sourceFiles[name], 'utf-8'));
+    sourceContent.set(name, readFileSync(sourceFiles[name], 'utf-8').replaceAll('](../guide/', '](references/'));
   }
 
   const issues: string[] = [];
@@ -512,7 +472,7 @@ function addDoctorSkillCheck(
       seen.add(name);
       const installedContent = readFileSync(location.files[name], 'utf-8');
       const expectedContent = sourceContent.get(name)!;
-      if (installedContent === expectedContent) {
+      if (installedContent === expectedContent && skillReferencesMatch(packageRoot, location.files[name], expectedContent)) {
         current.push(`${name} (${location.label})`);
         continue;
       }
@@ -549,26 +509,23 @@ function commandSucceeds(commandName: string, commandArgs: string[]): boolean {
 }
 
 function cmdAdapter(): void {
-  const projectDir = detectProjectDir();
-  // Take the first positional argument, not args[1]: a leading flag such as the
-  // documented --project would otherwise be read as the adapter name and rejected
-  // with a usage error that says nothing about the real problem.
+  // Flags are not adapter names.
   const positional = args.slice(1).filter((a) => !a.startsWith('-'));
   const requested = positional[0]?.trim().toLowerCase();
   if (!requested) {
-    const setting = readAdapterSetting(projectDir);
+    const setting = readAdapterSetting();
     const current = setting.error
       ? `invalid (${setting.error})`
       : setting.exists
         ? (setting.value ?? 'auto')
-        : '(config/defaults.yaml is missing)';
+        : '(engine config/defaults.yaml is missing)';
     const installed = installedAdapters();
     console.log(`Current adapter: ${current}`);
     console.log(`Installed adapters: ${installed.length > 0 ? installed.join(', ') : 'none'}`);
     console.log(`Recommended adapter: ${RECOMMENDED}`);
     // Every other message in this surface ends in a command the reader can run;
     // these two states used to end in a statement of the problem alone.
-    if (!setting.exists) console.log('Next: run `flowcrew init` to create it.');
+    if (!setting.exists) console.log('Next: reinstall FlowCrew to restore its engine configuration.');
     else if (setting.error) console.log('Next: fix the file by hand, or run `flowcrew adapter <auto|codex|claude>` to rewrite the adapter line.');
     else if (installed.length === 0) console.log(`Next: install an adapter CLI — ${ADAPTER_INSTALL_HINT[RECOMMENDED]}`);
     if (setting.error) process.exitCode = 1;
@@ -585,7 +542,7 @@ function cmdAdapter(): void {
     process.exitCode = 1;
     return;
   }
-  const path = writeAdapterSetting(projectDir, requested);
+  const path = writeAdapterSetting(requested);
   console.log(`Adapter set to ${requested} in ${path}`);
 }
 
@@ -688,11 +645,11 @@ async function cmdDoctor() {
     });
 
   // Config files
-  const setting = readAdapterSetting(projectDir);
+  const setting = readAdapterSetting();
   if (!setting.exists) {
-    checks.push({ name: 'config/defaults.yaml', status: 'fail', message: 'Missing. Run `flowcrew init` to create it.' });
+    checks.push({ name: 'config/defaults.yaml', status: 'fail', message: 'Engine defaults missing. Reinstall FlowCrew to restore them.' });
   } else if (setting.error) {
-    checks.push({ name: 'config/defaults.yaml', status: 'fail', message: `${setting.error}. Run \`flowcrew init\` to regenerate it.` });
+    checks.push({ name: 'config/defaults.yaml', status: 'fail', message: `${setting.error}. Fix the engine configuration or reinstall FlowCrew.` });
   } else {
     const configured = setting.value ?? 'auto';
     checks.push({ name: 'config/defaults.yaml', status: 'ok', message: `adapter: ${configured}` });
@@ -724,14 +681,14 @@ async function cmdDoctor() {
   }
 
   // Agents directory
-  const agentsDir = join(projectDir, 'config', 'agents');
+  const agentsDir = join(engineConfigDir, 'agents');
   if (existsSync(agentsDir)) {
     const agents = readdirSync(agentsDir).filter(f => f.endsWith('.yaml'));
     checks.push({ name: 'Agent configs', status: agents.length > 0 ? 'ok' : 'warn', message: `${agents.length} agents found` });
     const requiredAgents = ['planner'];
     for (const name of requiredAgents) {
       if (!agents.includes(`${name}.yaml`)) {
-        checks.push({ name: `Agent: ${name}`, status: 'warn', message: `config/agents/${name}.yaml missing. Run \`flowcrew init\` to create it.` });
+        checks.push({ name: `Agent: ${name}`, status: 'warn', message: `Engine config/agents/${name}.yaml missing. Reinstall FlowCrew to restore it.` });
       }
     }
     // Check for _base.md (shared prompt prepended to all agents)
@@ -740,11 +697,14 @@ async function cmdDoctor() {
       const size = readFileSync(baseMdPath, 'utf-8').trim().length;
       checks.push({ name: 'Base prompt (_base.md)', status: size > 0 ? 'ok' : 'warn', message: size > 0 ? `${size} chars` : 'empty — agents will run without shared guidelines' });
     } else {
-      checks.push({ name: 'Base prompt (_base.md)', status: 'warn', message: 'missing — agents will run without shared guidelines. Run `flowcrew init` to create it.' });
+      checks.push({ name: 'Base prompt (_base.md)', status: 'warn', message: 'missing — agents will run without shared guidelines. Reinstall FlowCrew to restore it.' });
     }
   } else {
-    checks.push({ name: 'Agent configs', status: 'fail', message: 'config/agents/ missing. Run `flowcrew init`.' });
+    checks.push({ name: 'Agent configs', status: 'fail', message: 'Engine config/agents/ missing. Reinstall FlowCrew to restore it.' });
   }
+  const workflowsDir = join(engineConfigDir, 'workflows');
+  const workflows = existsSync(workflowsDir) ? readdirSync(workflowsDir).filter(f => f.endsWith('.yaml')) : [];
+  checks.push({ name: 'Workflow configs', status: workflows.length > 0 ? 'ok' : 'fail', message: `${workflows.length} engine workflows found` });
 
   // Port occupancy is not the same fact as "your dashboard is running". The previous probe
   // resolved on any response at all — a 404 from an unrelated server counted, and so did a
@@ -847,28 +807,22 @@ async function cmdDoctor() {
 async function cmdStart() {
   const projectDir = detectProjectDir();
   const port = parseInt(process.env.PORT || '3000', 10);
-  const setting = readAdapterSetting(projectDir);
-  if (setting.error) throw new Error(setting.error);
-  const resolution = resolveRuntimeAdapter({ configured: setting.value ?? 'auto' });
-  if (!resolution.ok) {
-    console.error(`❌ ${resolution.hint}`);
-    process.exitCode = 1;
-    return;
-  }
-  const adapterInstance = await loadAdapterByName(resolution.adapter);
-  console.log(`Adapter: ${resolution.adapter} — ${resolution.reason}`);
-
+  const { dashboardListenHosts, startDashboard } = await import('./dashboard.js');
   const net = await import('node:net');
-  const portAvailable = await new Promise<boolean>((resolve) => {
-    const server = net.createServer();
-    server.once('error', () => resolve(false));
-    server.once('listening', () => server.close(() => resolve(true)));
-    server.listen(port, '0.0.0.0');
-  });
-  if (!portAvailable) {
-    console.error(`❌ Port ${port} is already in use. Either stop the other process or use a different port:`);
-    console.error(`   PORT=${port + 1} flowcrew start`);
-    process.exit(1);
+  // Preserve refusal before the optional UI build writes anything. The actual
+  // listeners still arbitrate races; the probe uses their same authority set.
+  for (const host of dashboardListenHosts()) {
+    const portAvailable = await new Promise<boolean>((resolve) => {
+      const server = net.createServer();
+      server.once('error', () => resolve(false));
+      server.once('listening', () => server.close(() => resolve(true)));
+      server.listen(port, host);
+    });
+    if (!portAvailable) {
+      console.error(`❌ Port ${port} is already in use. Either stop the other process or use a different port:`);
+      console.error(`   PORT=${port + 1} flowcrew start`);
+      process.exit(1);
+    }
   }
 
   // Build UI if dist doesn't exist
@@ -885,8 +839,7 @@ async function cmdStart() {
     }
   }
 
-  const { startDashboard } = await import('./dashboard.js');
-  await startDashboard(projectDir, port, { adapter: adapterInstance });
+  await startDashboard(projectDir, port);
 }
 
 async function cmdQuick() {
@@ -896,8 +849,7 @@ async function cmdQuick() {
   let workflow = 'default';
   let workflowExplicit = false; // true once the user passes --workflow, so we don't override their choice
   let maxIterations: number | undefined;
-  let supervise = true; // supervisor brain on by default; opt out with --no-supervise
-  let campaignArg: string | undefined; // --campaign <name> wins over defaults.yaml; --no-campaign forces undefined
+  let campaignArg: string | undefined; // --campaign <name> wins over the repository name; --no-campaign forces undefined
   let campaignDisabled = false;
   let inheritCampaignContext = true; // Context is independent from campaign ownership; legacy alias maps to skip.
   let campaignContextExplicit = false;
@@ -919,12 +871,10 @@ async function cmdQuick() {
     if (args[i] === '--workflow' && args[i + 1]) { workflow = args[++i]; workflowExplicit = true; launchArgs.push('--workflow', workflow); continue; }
     if (args[i] === '--max-iterations' && args[i + 1]) { maxIterations = parseInt(args[++i], 10); launchArgs.push('--max-iterations', String(maxIterations)); continue; }
     if (args[i] === '--timeout' || args[i].startsWith('--timeout=')) {
-      console.error('The --timeout run override was removed; edit config/defaults.yaml::default_timeout_ms instead.');
+      console.error('The --timeout run override was removed; edit the engine config/defaults.yaml::default_timeout_ms instead.');
       process.exitCode = 1;
       return;
     }
-    if (args[i] === '--supervise') { supervise = true; launchArgs.push('--supervise'); continue; }
-    if (args[i] === '--no-supervise') { supervise = false; launchArgs.push('--no-supervise'); continue; }
     if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; launchArgs.push('--campaign', campaignArg); continue; }
     if (args[i] === '--no-campaign') { campaignDisabled = true; launchArgs.push('--no-campaign'); continue; }
     if (args[i].startsWith('--campaign-context=')) {
@@ -964,6 +914,12 @@ async function cmdQuick() {
       continue;
     }
     if (args[i] === '-') { task = readFileSync(0, 'utf-8'); taskSupplied = true; continue; }
+    // Without this check, removed options would silently become brief text.
+    if (args[i].startsWith('--')) {
+      console.error(`Unknown quick option: ${args[i]}`);
+      process.exitCode = 1;
+      return;
+    }
     taskParts.push(args[i]);
   }
   if (!task && taskParts.length > 0) {
@@ -996,18 +952,16 @@ async function cmdQuick() {
     console.error('Usage: flowcrew quick "task description" [options]');
     console.error('');
     console.error('Options:');
-    console.error('  --adapter auto|codex|claude|mock  Agent backend (defaults to config/defaults.yaml)');
+    console.error('  --adapter auto|codex|claude|mock  Agent backend (defaults to engine config/defaults.yaml)');
     console.error('  --workflow <name>       Workflow to use (default: default)');
-    console.error('  --max-iterations <n>    Override config/defaults.yaml for this run');
-    console.error('  --supervise             Enable supervisor brain (default: ON)');
-    console.error('  --no-supervise          Disable supervisor brain (opt-out)');
-    console.error('  --campaign <name>       Attach run to campaign (default: defaults.yaml::campaign or slug of the main worktree)');
+    console.error('  --max-iterations <n>    Override engine config/defaults.yaml for this run');
+    console.error('  --campaign <name>       Attach run to campaign (default: slug of the main worktree)');
     console.error('  --no-campaign           Run un-attached to any campaign (opt-out)');
     console.error('  --campaign-context=inherit|skip  Planner history context; no flag skips after 3 recent adverse endings');
     console.error('  --project <path>        Project directory (default: cwd)');
     console.error('  --task "text"           Task description as flag');
     console.error('  --background            Register and launch under the flowcrew daemon');
-    console.error('  --acknowledge-brief-warnings[=<digest>]  Continue after reviewing consequential findings (never skips inspection)');
+    console.error('  --acknowledge-brief-warnings[=<digest>]  Confirm changed-run continuation (never skips inspection)');
     console.error('  -                       Read task from stdin');
     console.error('  --existing-run-id <id>  Resume an existing run (reads task from <run_dir>/task_brief.md)');
     process.exit(1);
@@ -1023,6 +977,16 @@ async function cmdQuick() {
   const preflightContext = projectBriefPreflightContext(projectDir, task);
   const preflight = inspectBrief(task, preflightContext);
   console.log(`${formatBriefPreflightReport(preflight)}\n`);
+  const { parseBriefFrontmatter, autoSelectedWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
+  const parsedBrief = parseBriefFrontmatter(task);
+  const auto = autoSelectedWorkflow(parsedBrief, workflowExplicit ? workflow : undefined);
+  if (auto.error) {
+    const refusal = `Launch refused: ${auto.error}.`;
+    recordLaunchRefusal(refusal);
+    console.error(refusal);
+    process.exitCode = 2;
+    return;
+  }
 
   // Nothing about the brief matters if nothing can execute it. A newcomer whose
   // adapter CLI is not installed must be told the install command, not sent to
@@ -1031,7 +995,7 @@ async function cmdQuick() {
   if (background) {
     const earlyResolution = resolveRuntimeAdapter({
       explicit: adapter?.trim() || undefined,
-      configured: loadProjectDefaults(projectDir).adapter,
+      configured: loadEngineDefaults().adapter,
     });
     if (!earlyResolution.ok) {
       console.error(`❌ ${earlyResolution.hint}`);
@@ -1065,14 +1029,8 @@ async function cmdQuick() {
     && transportedVerification?.status === 'valid'
     && storedVerification?.status === 'valid'
     && transportedAdmission!.digest === storedAdmission!.digest;
-  // A first launch of a daemon-registered task always arrives with BOTH a
-  // pre-allocated --existing-run-id and a transported record, but the reserved run
-  // has no run.json yet — so storedAdmission is ABSENT, not conflicting. Requiring
-  // a stored record here threw away a valid transported admission and paused every
-  // backgrounded brief that needed acknowledgement, with exit 2 asking for a flag
-  // the orchestrator deliberately strips. An absent stored record is not evidence
-  // of a mismatch; a PRESENT one that disagrees still is, and keeps failing closed
-  // — that is the TOCTOU guard, and it must survive this.
+  // A reserved first launch has no stored admission yet. A present record
+  // still owns continuation identity and must agree with transported input.
   const priorAdmission = transportedExistingRun
     ? (transportedContinuationIsBound
         ? transportedAdmission
@@ -1086,7 +1044,7 @@ async function cmdQuick() {
     briefAdmission = priorAdmission!;
   } else {
     const continuationNeedsFreshDecision = Boolean(existingRunId || transportedAdmission);
-    if ((preflight.requiresAcknowledgement || continuationNeedsFreshDecision) && !acknowledgementPresent) {
+    if (continuationNeedsFreshDecision && !acknowledgementPresent) {
       const reason = priorVerification
         ? ` Stored admission status: ${priorVerification.status}.`
         : '';
@@ -1108,14 +1066,12 @@ async function cmdQuick() {
     );
   }
 
-  // Auto-select the research workflow only after the shared report is visible.
-  // The canonical frontmatter parser owns this decision; quick has no YAML regex.
-  const { parseBriefFrontmatter } = await import('./scheduler.js');
-  const parsedBrief = parseBriefFrontmatter(task);
-  if (!workflowExplicit && workflow === 'default' && parsedBrief.research) {
-    workflow = 'research';
-    launchArgs.push('--workflow', 'research');
-    console.error('Note: brief has a `research:` block -> auto-selected --workflow research (pass --workflow to override).');
+  // Auto-select the workflow only after the shared report is visible. The canonical frontmatter parser owns this
+  // decision, quick has no YAML regex, and rehearse reports the same choice.
+  if (!workflowExplicit && workflow === 'default' && auto.workflow !== 'default') {
+    workflow = auto.workflow;
+    launchArgs.push('--workflow', workflow);
+    console.error(`Note: ${auto.reason} -> auto-selected --workflow ${workflow} (pass --workflow to override).`);
   }
 
   const initializedContinuation = Boolean(existingRunId && existsSync(join((await import('./store.js')).runsRoot(), existingRunId, 'run.json')));
@@ -1136,8 +1092,7 @@ async function cmdQuick() {
     }
   }
 
-  const projectDefaults = loadProjectDefaults(projectDir);
-  const campaignFromDefaults = projectDefaults.campaign;
+  const defaults = loadEngineDefaults();
   const campaignBaseDir = campaignBaseDirectory(projectDir);
   const campaignBaseSlug = (campaignBaseDir.split(/[\\/]/).filter(Boolean).pop() ?? '')
     .toLowerCase()
@@ -1145,7 +1100,7 @@ async function cmdQuick() {
     .replace(/^-+|-+$/g, '');
   const resolvedCampaign = campaignDisabled
     ? undefined
-    : (campaignArg || campaignFromDefaults || campaignBaseSlug || undefined);
+    : (campaignArg || campaignBaseSlug || undefined);
 
   if (!campaignContextExplicit && initializedContinuation && existingRunId) {
     try {
@@ -1182,7 +1137,7 @@ async function cmdQuick() {
     // performs the authoritative resolution; this only fails fast.
     const backgroundResolution = resolveRuntimeAdapter({
       explicit: adapter || undefined,
-      configured: loadProjectDefaults(projectDir).adapter,
+      configured: loadEngineDefaults().adapter,
     });
     if (!backgroundResolution.ok) {
       console.error(`❌ ${backgroundResolution.hint}`);
@@ -1207,7 +1162,7 @@ async function cmdQuick() {
     }
   }
 
-  const configuredAdapter = loadProjectDefaults(projectDir).adapter;
+  const configuredAdapter = loadEngineDefaults().adapter;
   const adapterResolution = resolveRuntimeAdapter({
     explicit: adapter || undefined,
     configured: configuredAdapter,
@@ -1221,69 +1176,55 @@ async function cmdQuick() {
   console.log(`Adapter resolution: ${adapter} — ${adapterResolution.reason}`);
   adapter = normalizeAdapterName(adapter);
 
-  const configRoot = join(import.meta.dirname ?? '.', '..', 'config', 'workflows');
-  const localRoot = join(projectDir, 'config', 'workflows');
-  let workflowPath = join(localRoot, `${workflow}.yaml`);
-  if (!existsSync(workflowPath)) workflowPath = join(configRoot, `${workflow}.yaml`);
+  const workflowsDir = join(engineConfigDir, 'workflows');
+  const workflowPath = initializedContinuation
+    ? join((await import('./store.js')).runsRoot(), existingRunId!, 'workflow.yaml')
+    : join(workflowsDir, `${workflow}.yaml`);
   if (!existsSync(workflowPath)) {
     console.error(`Workflow not found: ${workflow}.yaml`);
-    const available = existsSync(localRoot) ? readdirSync(localRoot).filter(f => f.endsWith('.yaml')).map(f => f.replace('.yaml', '')) : [];
+    const available = existsSync(workflowsDir) ? readdirSync(workflowsDir).filter(f => f.endsWith('.yaml')).map(f => f.replace('.yaml', '')) : [];
     if (available.length > 0) console.error(`  Available: ${available.join(', ')}`);
-    else console.error(`  Run \`flowcrew init\` first.`);
+    else console.error('  Reinstall FlowCrew to restore its engine workflows.');
     process.exit(1);
   }
 
   const { assessResearchIterationBudget, loadWorkflow, runWorkflow } = await import('./scheduler.js');
   const { config, raw } = loadWorkflow(workflowPath);
-  if (maxIterations) config.defaults.max_iterations = maxIterations;
-  const budgetDefaults = loadProjectDefaults(projectDir);
-  const budgetAssessment = assessResearchIterationBudget(
-    parsedBrief.research,
-    config.defaults.max_iterations ?? budgetDefaults.max_iterations,
-    {
-      attemptTimeoutMs: budgetDefaults.timeout_ms,
-      technicalRetries: budgetDefaults.stage_technical_retries,
-    },
-  );
-  if (!budgetAssessment.pass) {
-    const refusal = `Launch refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding.`;
-    recordLaunchRefusal(refusal);
-    console.error(refusal);
-    process.exitCode = 2;
-    return;
+  if (maxIterations && !initializedContinuation) config.defaults.max_iterations = maxIterations;
+  if (!initializedContinuation) {
+    const budgetDefaults = loadEngineDefaults();
+    const budgetAssessment = assessResearchIterationBudget(
+      parsedBrief.research,
+      config.defaults.max_iterations ?? budgetDefaults.max_iterations,
+      {
+        attemptTimeoutMs: budgetDefaults.timeout_ms,
+        technicalRetries: budgetDefaults.stage_technical_retries,
+      },
+    );
+    if (!budgetAssessment.pass) {
+      const refusal = `Launch refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding.`;
+      recordLaunchRefusal(refusal);
+      console.error(refusal);
+      process.exitCode = 2;
+      return;
+    }
   }
 
-  const agentsDir = join(projectDir, 'config', 'agents');
-  const fallbackAgentsDir = join(import.meta.dirname ?? '.', '..', 'config', 'agents');
-  const resolvedAgentsDir = existsSync(agentsDir) ? agentsDir : fallbackAgentsDir;
+  const resolvedAgentsDir = join(engineConfigDir, 'agents');
   const agents = new Map<string, unknown>();
 
   const adapterInstance = await loadAdapterByName(adapter);
-
-  // Only write docs/task_brief.md on a fresh ship. For --existing-run-id path
-  // the brief already lives in <run_dir>/task_brief.md; rewriting docs/ would
-  // also stomp a sibling project's brief if multiple are reusing the same docs.
-  if (!existingRunId) {
-    const docsDir = join(projectDir, 'docs');
-    mkdirSync(docsDir, { recursive: true });
-    const taskBriefPath = join(docsDir, 'task_brief.md');
-    if (existsSync(taskBriefPath) && readFileSync(taskBriefPath, 'utf-8') !== task) {
-      console.warn(`⚠️  Overwriting existing brief with different content: ${taskBriefPath}`);
-    }
-    writeFileSync(taskBriefPath, task, 'utf-8');
-  }
 
   console.log(`FlowCrew: shipping task with workflow "${config.name}"...`);
   console.log(`Task: ${task.slice(0, 100)}${task.length > 100 ? '...' : ''}`);
   console.log(`Project: ${projectDir}`);
   console.log(`Adapter: ${adapter}`);
-  console.log(`Max iterations: ${config.defaults.max_iterations ?? projectDefaults.max_iterations}`);
-  console.log(`Stage timeout: ${projectDefaults.timeout_ms}ms (config/defaults.yaml::default_timeout_ms)`);
-  console.log(`Supervisor: ${supervise ? 'enabled' : 'disabled'}`);
-  // Resolve campaign id: explicit --campaign > defaults.yaml::campaign > slug(basename(campaignBaseDirectory)).
+  console.log(`Max iterations: ${config.defaults.max_iterations ?? defaults.max_iterations}`);
+  console.log(`Stage timeout: ${defaults.timeout_ms}ms (engine config/defaults.yaml::default_timeout_ms)`);
+  // Resolve campaign id: explicit --campaign > slug(basename(campaignBaseDirectory)).
   // --no-campaign forces undefined (run stays untagged).
   console.log(`Campaign: ${resolvedCampaign ?? '(none — --no-campaign)'}`);
-  if (!campaignDisabled && !campaignArg && !campaignFromDefaults && campaignBaseDir !== projectDir) {
+  if (!campaignDisabled && !campaignArg && campaignBaseDir !== projectDir) {
     // Only reachable inside a linked worktree. Say so, because the name does
     // not match the directory the user is standing in.
     console.log(`Campaign source: main worktree of this repository (${campaignBaseDir})`);
@@ -1317,8 +1258,13 @@ async function cmdQuick() {
     } catch { /* non-critical */ }
   }, 2000);
 
-  const finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, supervise, resolvedCampaign, inheritCampaignContext, briefAdmission);
-  clearInterval(progressTimer);
+  let finalState;
+  try {
+    finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, resolvedCampaign, inheritCampaignContext, briefAdmission);
+  } finally {
+    clearInterval(progressTimer);
+  }
+  console.log(`FlowCrew run: ${finalState.runId}`);
 
   // Desktop notification
   try {
@@ -1414,6 +1360,8 @@ interface StatusSelection {
 interface StatusRun {
   id: string;
   directory: string;
+  history?: RetiredStageUsage[];
+  historyError?: string;
   state: {
     projectDir?: string;
     taskDescription?: string;
@@ -1506,7 +1454,19 @@ function latestStatusRun(root: string, runIds: string[], selection: StatusSelect
       const state = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf-8')) as StatusRun['state'];
       const matchesProject = typeof state.projectDir === 'string'
         && canonicalProjectPath(state.projectDir) === selection.projectDir;
-      if (selection.all || matchesProject) return { id, directory, state };
+      if (selection.all || matchesProject) {
+        try {
+          const diagnostics: string[] = [];
+          const history = projectRunStageHistory(readArchivedRunState('', id).state,
+            diagnostic => diagnostics.push(`${diagnostic.code}: ${diagnostic.path}: ${diagnostic.detail}`));
+          return { id, directory, state, history,
+            ...(diagnostics.length ? { historyError: diagnostics.join('; ') } : {}) };
+        } catch (error) {
+          // Keep the previously readable active projection when an archived
+          // prefix is absent or damaged; never silently hide the selected run.
+          return { id, directory, state, historyError: error instanceof Error ? error.message : String(error) };
+        }
+      }
     } catch { /* malformed or concurrently removed run: try the next one */ }
   }
   return undefined;
@@ -1554,6 +1514,11 @@ function cmdStatus() {
     const icon = ss.status === STAGE_STATUS.COMPLETE ? '✓' : ss.status === STAGE_STATUS.RUNNING ? '⟳' : ss.status === STAGE_STATUS.FAILED ? '✗' : '·';
     console.log(`  ${icon} ${id}: ${ss.status}${dur}`);
   }
+  for (const { stageId, iteration, status } of selected.history ?? []) {
+    const dur = status.duration_ms ? ` (${formatHumanDuration(status.duration_ms)})` : '';
+    console.log(`  ${stageId} [iteration ${iteration}, archived]: ${status.status}${dur}`);
+  }
+  if (selected.historyError) console.log(`History unavailable: ${selected.historyError}`);
   if (selection.details) {
     const summaryPath = join(runDir, 'summary.md');
     const progressPath = join(runDir, 'progress.md');
@@ -1651,7 +1616,6 @@ function parseGuideArguments(): { message: string; targetRunId?: string; targetS
     messageParts.push(value);
   }
   const message = messageParts.join(' ').trim();
-  if (!message) guideArgumentError('Guidance message must not be empty.');
   return { message, targetRunId, targetStageId };
 }
 
@@ -1698,6 +1662,7 @@ function cmdGuide() {
     return;
   }
   const { message, targetRunId, targetStageId } = parseGuideArguments();
+  if (!message) guideArgumentError('Guidance message must not be empty.');
   const root = runsRoot();
   if (!existsSync(root)) { console.error('No runs found.'); process.exit(1); }
   const runs = runIdsByRecency(root);
@@ -1744,47 +1709,37 @@ function cmdGuide() {
     selected = running[0];
   }
 
-  if (targetStageId !== undefined) {
-    if (!selected.stageIds.includes(targetStageId)) {
-      console.error(`Stage "${targetStageId}" is not part of run "${selected.id}"; guidance was not sent.`);
-      process.exit(1);
-    }
-    const envelope = appendGuidanceEnvelope({
-      runDir: join(root, selected.id),
-      target: targetStageId,
-      source: 'operator',
-      body: message,
-      knownStageIds: selected.stageIds,
-    });
-    const receipt = readGuidanceDeliveryStatus(join(root, selected.id), envelope.id);
-    if (receipt.state === 'quarantined') {
-      console.error(`Guidance ${envelope.id} was quarantined and was not queued for delivery: ${receipt.reason ?? 'invalid envelope'}`);
-      process.exitCode = 2;
-      return;
-    }
-    console.log(`Guidance ${envelope.id} queued for stage ${targetStageId} in run ${selected.id}:`);
-    console.log(`  "${message}"`);
-    console.log('\nDelivery is not yet confirmed; a guidance_delivery_checked receipt will identify the consuming execution.');
-    return;
+  if (targetStageId !== undefined && !selected.stageIds.includes(targetStageId)) {
+    console.error(`Stage "${targetStageId}" is not part of run "${selected.id}"; guidance was not sent.`);
+    process.exit(1);
   }
-
-  writeFileSync(join(root, selected.id, 'user_input.md'), message, 'utf-8');
-  console.log(`Guidance sent to run ${selected.id}:`);
+  const target = targetStageId ?? RUN_WIDE_GUIDANCE_TARGET;
+  const envelope = queueOperatorGuidance({
+    runDir: join(root, selected.id),
+    target,
+    body: message,
+    knownStageIds: selected.stageIds,
+  });
+  if (envelope.quarantined) {
+    console.error(`Guidance ${envelope.id} quarantined: ${envelope.quarantineReason}; not queued for delivery.`);
+    process.exit(2);
+  }
+  console.log(`Guidance ${envelope.id} queued for ${targetStageId ? 'stage ' + targetStageId : 'all stages'} in run ${selected.id}:`);
   console.log(`  "${message}"`);
-  console.log(`\nThe supervisor will pick this up on its next heartbeat (normally within 30s).`);
+  console.log('\nDelivery is not yet confirmed; a guidance_delivery_checked receipt will identify the consuming execution.');
 }
 
 function cmdInterrupt() {
   if (args.includes('--help') || args.includes('-h')) {
-    console.log('Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"');
+    console.log('Usage: flowcrew interrupt --run <run-id> --stage <stage-id> ["reason"]');
     console.log('');
-    console.log('Stops the command currently running in the named stage and delivers the reason as operator guidance.');
+    console.log('Stops the active stage command and delivers the reason or action description as operator guidance.');
     return;
   }
   const { message: reason, targetRunId, targetStageId } = parseGuideArguments();
   if (!targetRunId || !targetStageId) {
     console.error('Both --run and --stage are required for a command interrupt.');
-    console.error('Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"');
+    console.error('Usage: flowcrew interrupt --run <run-id> --stage <stage-id> ["reason"]');
     process.exit(1);
   }
   const root = runsRoot();
@@ -1809,7 +1764,7 @@ function cmdInterrupt() {
     });
     console.log(`Interrupt ${signal.requestId} sent to stage ${targetStageId} in run ${targetRunId}.`);
     console.log(`Command: ${signal.command}`);
-    console.log('The reason was recorded as operator guidance before the one-shot interrupt was published.');
+    console.log('The engine will validate the interrupt and record its reason as operator guidance before stopping the command.');
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -1894,7 +1849,6 @@ function cmdExport() {
     }
     bundle.stages = stages;
   }
-  try { bundle.knowledgeGraph = JSON.parse(readFileSync(join(runDir, 'knowledge_graph.json'), 'utf-8')); } catch { /* non-critical */ }
   try { bundle.supervisorLog = readFileSync(join(runDir, 'supervisor_log.md'), 'utf-8'); } catch { /* non-critical */ }
   try { bundle.progress = readFileSync(join(runDir, 'progress.md'), 'utf-8'); } catch { /* non-critical */ }
   try { bundle.dispatch = readFileSync(join(runDir, 'dispatch.yaml'), 'utf-8'); } catch { /* non-critical */ }
@@ -1971,35 +1925,6 @@ async function cmdCampaign() {
     return;
   }
 
-  if (subcommand === 'run') {
-    const configPath = args[2];
-    if (!configPath || args.includes('--help') || args.includes('-h')) {
-      console.error('Usage: flowcrew campaign run <config.yaml> [--dry-run] [--background]');
-      process.exit(1);
-    }
-    if (args.includes('--background')) {
-      try {
-        const launchArgs = args.slice(3).filter((arg) => arg !== '--background');
-        await registerBackgroundTask({
-          kind: 'campaign',
-          name: `Campaign ${configPath}`,
-          config_path: resolve(configPath),
-          projectDir: detectProjectDir(),
-          launch_args: launchArgs,
-        });
-        return;
-      } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
-        const { rpcErrorExitCode } = await import('./orchestrator-rpc.js');
-        process.exit(rpcErrorExitCode(err));
-      }
-    }
-    const cfg = await loadCampaignConfig(resolve(configPath));
-    const result = await runCampaign(cfg, { dryRun: args.includes('--dry-run') });
-    console.log(`Campaign ${cfg.id}: ${result.status}`);
-    return;
-  }
-
   if (subcommand === 'status') {
     const id = args[2];
     if (!id || args.includes('--help') || args.includes('-h')) {
@@ -2044,18 +1969,7 @@ async function cmdCampaign() {
     return;
   }
 
-  if (subcommand === 'stop') {
-    const id = args[2];
-    if (!id || args.includes('--help') || args.includes('-h')) {
-      console.error('Usage: flowcrew campaign stop <campaign_id>');
-      process.exit(1);
-    }
-    await stopCampaign(id);
-    console.log(`Campaign ${id}: stop requested`);
-    return;
-  }
-
-  console.error('Usage: flowcrew campaign run|status|stop|pending|review ...');
+  console.error('Usage: flowcrew campaign status|pending|review ...');
   process.exit(1);
 }
 
@@ -2137,22 +2051,21 @@ Commands:
   quick     Inspect, then run or enqueue an authored brief (no server needed)
   status    Show the latest run for this project (--all/--project for others)
   list      Show all recent runs with status and duration
-  guide     Send guidance to the running supervisor
+  guide     Queue original guidance for a running stage or every stage
   interrupt Stop the active command in a named stage and deliver a reason
   clean     Delete old runs (keeps 5 most recent by default)
   export    Export a run as JSON bundle
-  campaign  Run, inspect, or stop an outer-loop research campaign
-  campaign-loop  Run the long-lived autonomous research direction loop
+  campaign  Inspect recorded campaign state and review pending brief patches
   daemon    Operate the background orchestrator (restart/status; serve is foreground/internal)
   dashboard Query the running web dashboard (status)
   task      List and manage background tasks
   fc_tasks  Render and safely update a conversational task ledger
   audit-reality  Run declared checks against task history
+  plan-check  Check a draft stage list against a brief without launching
   inbox     Review and resolve approval requests that parked a run
   ship-preflight  Gather prior-run, campaign, build, and brief-input facts before shipping
   ship-setup  Create a launch worktree, link declared inputs, and baseline validation
   land      Audit terminal artifacts and every unique worktree item before safe removal
-  audit-report  Re-derive supported numeric and path-bearing claims from a terminal report
   watch     Report edge-triggered stall judgements for live runs
   events    Read or follow the canonical run event feed
   rehearse  Wind-tunnel a research brief pre-launch: real scheduler + scripted fake agent, 0 tokens
@@ -2165,7 +2078,7 @@ Examples:
   flowcrew adapter
   flowcrew adapter claude
   flowcrew quick "refactor auth module"
-  flowcrew quick "task" --supervise --max-iterations 3
+  flowcrew quick "task" --max-iterations 3
   flowcrew status
   flowcrew status --all
   flowcrew status --project ../another-project
@@ -2182,11 +2095,9 @@ Examples:
   flowcrew guide --run <run-id> "try a different approach"
   flowcrew interrupt --run <run-id> --stage <stage-id> "stop the oversized job"
   flowcrew clean --keep 3
-  flowcrew campaign run examples/example_campaign.yaml --dry-run
   flowcrew ship-preflight --brief docs/task_brief.md
   flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work
   flowcrew land --run <run-id>
-  flowcrew audit-report --report docs/final.md --run-dir <run-dir>
   flowcrew watch --once
   flowcrew events --follow
   flowcrew brief head docs/brief
@@ -2199,192 +2110,6 @@ Environment:
   PROJECT_DIR   Project directory (default: current directory)
   FC_TASKS_ROOT Task-ledger root (default: ~/.claude/tasks)
 `);
-}
-
-/**
- * P3 autonomous outer loop: campaign_planner proposes a direction → a full inner research run
- * explores it → the same policy decides → repeat until the policy ships/ceilings or the planner
- * runs dry. Each direction is a real ~45min inner run, so this command runs for hours.
- */
-async function cmdCampaignLoop(): Promise<void> {
-  let projectDir = detectProjectDir();
-  let campaignArg: string | undefined;
-  let task = '';
-  let maxDirections: number | undefined;
-  let noScout = false;
-  let acknowledgementPresent = false;
-  let acknowledgementDigest: string | undefined;
-  for (let i = 1; i < args.length; i++) {
-    if (args[i] === '--project' && args[i + 1]) { projectDir = resolve(args[++i]); continue; }
-    if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; continue; }
-    if (args[i] === '--max-directions' && args[i + 1]) { maxDirections = parseInt(args[++i], 10); continue; }
-    if (args[i] === '--no-scout') { noScout = true; continue; } // skip the up-front literature scout
-    if (args[i] === '--task' && args[i + 1]) { task = args[++i]; continue; }
-    if (args[i] === '--acknowledge-brief-warnings') { acknowledgementPresent = true; continue; }
-    if (args[i].startsWith('--acknowledge-brief-warnings=')) {
-      acknowledgementPresent = true;
-      acknowledgementDigest = args[i].slice('--acknowledge-brief-warnings='.length);
-      continue;
-    }
-    if (args[i] === '-') { task = readFileSync(0, 'utf-8'); continue; }
-  }
-  if (!task.trim() || !campaignArg) {
-    console.error('Usage: flowcrew campaign-loop - --project <dir> --campaign <name> [--max-directions N] [--acknowledge-brief-warnings[=<digest>]]');
-    console.error('  Autonomous outer loop: proposes a NEW direction, runs a full inner research loop on it, repeats until frontier/ship.');
-    process.exit(1); return;
-  }
-  const {
-    canDeriveBriefAdmission,
-    createBriefAdmission,
-    formatBriefPreflightReport,
-    inspectBrief,
-  } = await import('./brief-preflight.js');
-  const parentReport = inspectBrief(task);
-  console.log(`${formatBriefPreflightReport(parentReport)}\n`);
-  if (acknowledgementDigest !== undefined && acknowledgementDigest !== parentReport.digest) {
-    console.error(`Brief acknowledgement digest mismatch: received ${acknowledgementDigest || '(empty)'}, current digest is ${parentReport.digest}.`);
-    process.exit(2); return;
-  }
-  if (parentReport.requiresAcknowledgement && !acknowledgementPresent) {
-    console.error('Campaign launch paused before adapter or proposer loading. Review the report above, then rerun with:');
-    console.error(`  --acknowledge-brief-warnings=${parentReport.digest}`);
-    process.exit(2); return;
-  }
-  const parentAdmission = createBriefAdmission(
-    parentReport,
-    acknowledgementPresent
-      ? {
-          kind: 'explicit',
-          source: acknowledgementDigest === undefined ? 'cli_current_input_flag' : 'cli_digest_flag',
-          at: new Date().toISOString(),
-        }
-      : { kind: 'not_required' },
-  );
-  const { parseBriefFrontmatter } = await import('./scheduler.js');
-  const { research } = parseBriefFrontmatter(task);
-  if (!research) { console.error('campaign-loop needs a brief with a research:/objective: block (baseline + policy + stop).'); process.exit(1); return; }
-  const objective = { ...research, stop: { ...(research.stop ?? {}), ...(maxDirections !== undefined ? { maxRounds: maxDirections } : {}) } };
-
-  const cfgRole = join(import.meta.dirname ?? '.', '..', 'config', 'agents', 'campaign_planner.yaml');
-  const localRole = join(projectDir, 'config', 'agents', 'campaign_planner.yaml');
-  const proposeRole = parseYaml(readFileSync(existsSync(localRole) ? localRole : cfgRole, 'utf-8')) as { name: string; description: string; model: string; reasoning_effort: string; tools: string[]; prompt: string };
-
-  const projDefaults = loadProjectDefaults(projectDir);
-  // The inner `quick` runs get the project's model via the scheduler, but this propose
-  // call hits the adapter directly — apply the project default here too so both paths
-  // resolve identically. ('default' now inherits the user's global codex config in the
-  // adapter; the historical hazard was the CLI built-in default drifting to a model the
-  // account lacked — gpt-5.3-codex, HTTP 400 — and the failed propose masquerading as a frontier.)
-  if ((!proposeRole.model || proposeRole.model === 'default') && projDefaults.model) proposeRole.model = projDefaults.model;
-  const campaignAdapterResolution = resolveRuntimeAdapter({ configured: projDefaults.adapter });
-  if (!campaignAdapterResolution.ok) {
-    console.error(`❌ ${campaignAdapterResolution.hint}`);
-    process.exitCode = 1;
-    return;
-  }
-  const adapterName = normalizeAdapterName(campaignAdapterResolution.adapter);
-  console.log(`Adapter resolution: ${adapterName} — ${campaignAdapterResolution.reason}`);
-  const adapterInstance = await loadAdapterByName(adapterName);
-
-  const cliPath = process.argv[1];
-  const proposeDir = createCampaignProposerScratch();
-
-  const { runLiveCampaign, scoutDirections } = await import('./campaign-loop-live.js');
-
-  // LITERATURE SCOUT (before exploring): web_search the external literature for methods not in the
-  // ledger that are expressible on the on-disk assets, and EXPAND the portfolio with them — so the
-  // campaign can autonomously discover breakthroughs outside the brief's static list (and a frontier
-  // is literature-backed, not confabulated from the ledger alone). Merged into objective.directions,
-  // which the deterministic coverage floor then forces to be tried before any frontier.
-  if (!noScout) {
-    const scoutCfg = join(import.meta.dirname ?? '.', '..', 'config', 'agents', 'campaign_scout.yaml');
-    const scoutLocal = join(projectDir, 'config', 'agents', 'campaign_scout.yaml');
-    const scoutPath = existsSync(scoutLocal) ? scoutLocal : scoutCfg;
-    if (existsSync(scoutPath)) {
-      const scoutRole = parseYaml(readFileSync(scoutPath, 'utf-8')) as { name: string; description: string; model: string; reasoning_effort: string; tools: string[]; prompt: string };
-      if ((!scoutRole.model || scoutRole.model === 'default') && projDefaults.model) scoutRole.model = projDefaults.model;
-      console.log('Campaign-loop: running the literature scout (web_search) to expand the portfolio before exploring...');
-      try {
-        const found = await scoutDirections({
-          projectDir, campaignId: campaignArg, objective,
-          scoutRole, adapter: adapterInstance as unknown as import('./adapters/base.js').Adapter,
-          runOpts: { timeout_ms: 600000, workDir: proposeDir, runDir: proposeDir, stageId: 'campaign_scout' },
-          briefContext: task,
-        });
-        const existing = new Set((objective.directions ?? []).map((d) => d.toLowerCase()));
-        const fresh = found.filter((d) => !existing.has(d.toLowerCase()));
-        if (fresh.length) {
-          objective.directions = [...(objective.directions ?? []), ...fresh];
-          console.log(`Scout added ${fresh.length} literature-found direction(s) to the portfolio: ${fresh.join(', ')}`);
-        } else {
-          console.log('Scout found no new literature-expressible direction beyond the ledger/portfolio.');
-        }
-      } catch (e) {
-        console.error(`Scout failed (proceeding with the brief portfolio): ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-  }
-
-  console.log(`Campaign-loop: autonomous outer loop on '${campaignArg}' (adapter=${adapterName}). Each direction spawns a full inner run — this runs for hours.`);
-  const result = await runLiveCampaign({
-    projectDir, campaignId: campaignArg, objective,
-    proposeRole, adapter: adapterInstance as unknown as import('./adapters/base.js').Adapter,
-    proposeRunOpts: { timeout_ms: 600000, workDir: proposeDir, runDir: proposeDir, stageId: 'campaign_propose' },
-    briefContext: task, // give the proposer the campaign brief (goal + gates + historical ledger) so it does not re-propose dead directions
-    launchInner: async (direction) => {
-      const seeded = task + `\n\n## OUTER-LOOP DIRECTIVE\nFocus this entire run on ONE direction: ${direction}\n`;
-      const childReport = inspectBrief(seeded);
-      console.log(`${formatBriefPreflightReport(childReport)}\n`);
-      if (!canDeriveBriefAdmission(parentAdmission, parentReport, childReport)) {
-        console.error(`Generated brief ${childReport.digest} has a new consequential finding or degraded contract readiness.`);
-        console.error(`Review it and launch explicitly with --acknowledge-brief-warnings=${childReport.digest}`);
-        throw new Error(`inner run for '${direction}' stopped before reservation because its exact brief was not admitted`);
-      }
-      const childAdmission = createBriefAdmission(childReport, {
-        kind: 'derived',
-        source: 'campaign_loop',
-        at: new Date().toISOString(),
-        parentDigest: parentReport.digest,
-        transformation: 'outer_loop_directive_v1',
-      });
-      let out: string;
-      try {
-        out = execFileSync(process.execPath, [
-          cliPath,
-          'quick',
-          '-',
-          '--project', projectDir,
-          '--campaign', campaignArg,
-          '--campaign-context=skip',
-          '--brief-admission-record', encodeBriefAdmission(childAdmission),
-        ], { input: seeded, encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 });
-      } catch (e) { out = String((e as { stdout?: string }).stdout ?? '') + String((e as { stderr?: string }).stderr ?? ''); }
-      const m = /"runId":"([^"]+)"/.exec(out);
-      if (!m) throw new Error(`inner run for '${direction}' produced no runId`);
-      console.log(`  ↳ direction '${direction}' → run ${m[1]}`);
-      return m[1];
-    },
-    readBest: (runId) => {
-      try {
-        const j = JSON.parse(readFileSync(join(runsRoot(), runId, 'research_journal.json'), 'utf-8')) as { rounds?: { result?: number }[] };
-        const rs = (j.rounds ?? []).map((r) => r.result).filter((v): v is number => typeof v === 'number');
-        if (!rs.length) return objective.baseline;
-        return objective.higherIsBetter === false ? Math.min(...rs) : Math.max(...rs);
-      } catch { return objective.baseline; }
-    },
-    readRunStatus: (runId) => {
-      // The inner run's terminal verdict. A reality_gate_failed run had its claim rejected by the
-      // inner safety net — the outer loop must not ship its journaled number.
-      try {
-        const r = JSON.parse(readFileSync(join(runsRoot(), runId, 'run.json'), 'utf-8')) as { status?: unknown };
-        return r?.status;
-      } catch (error) {
-        throw new Error(`Refusing to score campaign run ${runId}: its run.json is unreadable`, { cause: error });
-      }
-    },
-  });
-  console.log(`Campaign-loop ${result.decision}: ${result.reason}`);
-  console.log(`Directions explored: ${result.outcomes.map((o) => `${o.direction}=${o.rejected ? `REJECTED(${o.status})` : o.bestResult}`).join(', ') || '(none)'}`);
 }
 
 // Main
@@ -2419,9 +2144,6 @@ switch (command) {
   case 'campaign':
     cmdCampaign().catch((err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });
     break;
-  case 'campaign-loop':
-    cmdCampaignLoop().catch((err) => { console.error(err); process.exit(1); });
-    break;
   case 'daemon':
     import('./cli-daemon.js').then(({ cmdDaemon }) => cmdDaemon(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
     break;
@@ -2449,11 +2171,6 @@ switch (command) {
     break;
   case 'land':
     import('./cli-land.js').then(({ cmdLand }) => cmdLand(args))
-      .then((code) => { process.exitCode = code; })
-      .catch((err) => { console.error(err); process.exit(1); });
-    break;
-  case 'audit-report':
-    import('./cli-audit-report.js').then(({ cmdAuditReport }) => cmdAuditReport(args))
       .then((code) => { process.exitCode = code; })
       .catch((err) => { console.error(err); process.exit(1); });
     break;

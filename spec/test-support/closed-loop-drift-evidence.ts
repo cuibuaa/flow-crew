@@ -136,7 +136,7 @@ export function materializeClosedLoopDriftFixture(): MaterializedClosedLoopDrift
   const runDir = join(runsRoot, evidence.evidenceRunId);
   const projectDir = join(root, 'project');
   const registryPath = join(fcHome, 'tasks.jsonl');
-  const taskId = 2130;
+  const taskId = 9001;
   const unit = `flowcrew-task-${taskId}.service`;
   mkdirSync(runDir, { recursive: true });
   mkdirSync(projectDir, { recursive: true });

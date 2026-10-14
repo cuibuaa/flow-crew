@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
@@ -33,9 +33,11 @@ import {
   rebuildRunIndex,
 } from '../src/run-index.js';
 import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
+import { readRunStateView } from '../src/run-state-view.js';
 import {
   createRun,
   fcGlobalDir,
+  readOperationalRunState,
   readRunState,
   runDir,
   runsRoot,
@@ -173,43 +175,22 @@ function recoveryFixture(options: { maxRetries?: number; attempt?: number } = {}
 }
 
 describe('identity-bound dead scheduler recovery', () => {
-  it('queues one budgeted retry and relaunches only the exact existing run when scheduler.pid is missing', async () => {
+  it('ends a checkpointless missing-controller run explicitly without spending retry budget', async () => {
     const fixture = recoveryFixture();
-
+    const before = readRunState(projectDir, fixture.created.runId).stages;
     await fixture.orchestrator.tickOnce();
     expect(fixture.registry.get(fixture.task.id)).toMatchObject({
-      status: 'deferred',
-      attempt: 1,
-      defer_kind: 'retry',
-      run_id: fixture.created.runId,
+      status: 'stuck', attempt: 1, run_id: fixture.created.runId,
     });
-    expect(fixture.registry.get(fixture.task.id)?.defer_reason).toContain('scheduler is missing');
-    expect(fixture.units.launches).toHaveLength(0);
-
+    expect(fixture.registry.get(fixture.task.id)?.notes).toContain('RECOVERY_CHECKPOINT_MISSING');
+    const state = readRunState(projectDir, fixture.created.runId);
+    expect(state).toMatchObject({ status: 'failed', recovery: { kind: 'blocked' } });
+    expect(state.completedAt).toBeTruthy();
+    expect(state.stages).toEqual(before);
     clock += 31_000;
     await fixture.orchestrator.tickOnce();
-
-    const recovered = fixture.registry.get(fixture.task.id)!;
-    expect(recovered).toMatchObject({ status: 'running', attempt: 2, run_id: fixture.created.runId });
-    expect(fixture.units.launches).toHaveLength(1);
-    expect(fixture.units.launches[0].command).toContain(`'--existing-run-id' '${fixture.created.runId}'`);
+    expect(fixture.units.launches).toHaveLength(0);
     expect(readdirSync(runsRoot())).toEqual([fixture.created.runId]);
-
-    // The resumed scheduler consumes the exact recorded terminal candidate and
-    // reaches its declared status instead of leaving the daemon in a defer loop.
-    const state = readRunState(projectDir, fixture.created.runId);
-    const adapter = {
-      async run() { return { output: 'summary unavailable in replay', exitCode: 1, duration_ms: 1 }; },
-    } as Adapter;
-    const terminal = await tryTerminateOnTerminalState(state, {
-      projectDir,
-      runId: fixture.created.runId,
-      runDirPath: fixture.created.runDirPath,
-      iteration: state.currentIteration ?? 1,
-      adapter,
-    });
-    expect(terminal.decision).toBe('matched');
-    expect(readRunState(projectDir, fixture.created.runId).status).toBe('ceiling_hit');
     const exactRecordedTick = recordedEvidence('item5_nonterminal_state_before_crash');
     expect(readFileSync(fixture.task.tick_log_path).subarray(0, exactRecordedTick.byteLength))
       .toEqual(exactRecordedTick);
@@ -234,12 +215,14 @@ describe('identity-bound dead scheduler recovery', () => {
     await fixture.orchestrator.tickOnce();
 
     expect(fixture.registry.get(fixture.task.id)).toMatchObject({
-      status: 'deferred', attempt: 1, defer_kind: 'retry', run_id: fixture.created.runId,
+      status: 'stuck', attempt: 1, run_id: fixture.created.runId,
     });
-    expect(fixture.registry.get(fixture.task.id)?.defer_reason).toContain('scheduler is reused');
+    expect(fixture.registry.get(fixture.task.id)?.notes).toContain('RECOVERY_CHECKPOINT_MISSING');
+    expect(readRunState(projectDir, fixture.created.runId).status).toBe('failed');
+    expect(fixture.units.launches).toHaveLength(0);
   });
 
-  it('fails visibly on corrupt identity and on an exhausted retry budget, with executable remedies', async () => {
+  it('fails visibly on corrupt identity and unproved recovery even at the retry limit', async () => {
     const corrupt = recoveryFixture();
     writeFileSync(join(corrupt.created.runDirPath, 'scheduler.pid'), 'not-a-pid\n', 'utf-8');
     await corrupt.orchestrator.tickOnce();
@@ -249,7 +232,7 @@ describe('identity-bound dead scheduler recovery', () => {
     const exhausted = recoveryFixture({ maxRetries: 1, attempt: 1 });
     await exhausted.orchestrator.tickOnce();
     expect(exhausted.registry.get(exhausted.task.id)).toMatchObject({ status: 'stuck', attempt: 1 });
-    expect(exhausted.registry.get(exhausted.task.id)?.notes).toContain('retry budget exhausted (1/1)');
+    expect(exhausted.registry.get(exhausted.task.id)?.notes).toContain('RECOVERY_CHECKPOINT_MISSING');
     expect(exhausted.units.launches).toHaveLength(0);
   });
 
@@ -431,7 +414,7 @@ describe('compact atomic run projection', () => {
     writeRunState(projectDir, created.runId, state);
 
     const statePath = join(created.runDirPath, 'run.json');
-    const historyPath = join(created.runDirPath, 'run-history.v1.jsonl');
+    const historyPath = join(created.runDirPath, 'run-history.jsonl');
     const projectionBytes = readFileSync(statePath);
     const projection = JSON.parse(projectionBytes.toString('utf-8')) as StoreState;
     expect(projectionBytes.toString('utf-8').split('\n').filter(Boolean)).toHaveLength(1);
@@ -440,8 +423,11 @@ describe('compact atomic run projection', () => {
     expect(projection.supervisor?.attempts).toEqual([]);
     expect(projection.stateFormat).toMatchObject({
       version: 2,
-      history: { counts: { supervisorAttempts: 80, retiredStageUsage: 80, stageEvidence: 80 } },
+      history: { version: 1, path: 'run-history.jsonl', counts: { supervisorAttempts: 80, retiredStageUsage: 80, stageEvidence: 80 } },
     });
+    const records = readFileSync(historyPath, 'utf-8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(records).toHaveLength(240);
+    expect(records.every((record) => !Object.hasOwn(record, 'version'))).toBe(true);
     expect(projectionBytes.byteLength).toBeLessThan(2_000);
 
     const hydrated = readRunState(projectDir, created.runId);
@@ -472,7 +458,7 @@ describe('compact atomic run projection', () => {
       duration_ms: 1, startedAt: state.startedAt, attempts: [supervisorAttempt(1)],
     };
     writeRunState(projectDir, created.runId, state);
-    const historyPath = join(created.runDirPath, 'run-history.v1.jsonl');
+    const historyPath = join(created.runDirPath, 'run-history.jsonl');
     const acknowledged = readRunState(projectDir, created.runId).stateFormat!.history!.committedBytes;
     appendFileSync(historyPath, '{unacknowledged crash tail', 'utf-8');
 
@@ -515,6 +501,80 @@ describe('compact atomic run projection', () => {
       readFileSync(join(exportDir, `flowcrew-export-${created.runId}.json`), 'utf-8'),
     ) as { state?: StoreState };
     expect(bundle.state?.supervisor?.attempts).toEqual([supervisorAttempt(1)]);
+  });
+
+  it('loads, resumes and displays an old ref-named history with versioned records', () => {
+    const created = createRun(projectDir, 'history', 'name: history\nstages: []\n', []);
+    const projection = readRunState(projectDir, created.runId);
+    const historyPath = join(created.runDirPath, 'run-history.v1.jsonl');
+    const retired = { stageId: 'retired', iteration: 1, status: { status: 'complete' as const, retries: 0 } };
+    const histories = {
+      supervisorAttempts: [supervisorAttempt(1)],
+      retiredStageUsage: [retired],
+      stageEvidence: [evidence(1)],
+    };
+    const prefix = Object.entries(histories).map(([kind, values]) =>
+      JSON.stringify({ version: 1, kind, index: 0, value: values[0] }) + '\n').join('');
+    projection.supervisor = {
+      status: 'running', calls: 1, tokens_in: 10, tokens_out: 2, duration_ms: 500,
+      startedAt: projection.startedAt, attempts: [],
+    };
+    projection.stateFormat = { version: 2, revision: 1, history: {
+      version: 1, path: 'run-history.v1.jsonl', committedBytes: Buffer.byteLength(prefix),
+      counts: { supervisorAttempts: 1, retiredStageUsage: 1, stageEvidence: 1 },
+    } };
+    const statePath = join(created.runDirPath, 'run.json');
+    writeFileSync(statePath, JSON.stringify(projection) + '\n');
+    writeFileSync(historyPath, prefix);
+
+    expect(readOperationalRunState(projectDir, created.runId).stateFormat).toEqual(projection.stateFormat);
+    expect(readRunState(projectDir, created.runId)).toMatchObject({
+      supervisor: { attempts: histories.supervisorAttempts },
+      retiredStageUsage: histories.retiredStageUsage,
+      stageEvidence: histories.stageEvidence,
+    });
+    writeRunState(projectDir, created.runId, readRunState(projectDir, created.runId));
+    expect(readFileSync(statePath, 'utf-8')).toBe(JSON.stringify(projection) + '\n');
+    expect(readFileSync(historyPath, 'utf-8')).toBe(prefix);
+
+    appendFileSync(historyPath, '{unacknowledged crash tail');
+    updateRunState(projectDir, created.runId, (state) => {
+      state.supervisor!.attempts.push(supervisorAttempt(2));
+      state.supervisor!.calls = 2;
+      state.retiredStageUsage!.push({ ...retired, iteration: 2 });
+      state.stageEvidence!.push(evidence(2));
+    });
+    const after = readFileSync(historyPath, 'utf-8');
+    expect(after.startsWith(prefix)).toBe(true);
+    const appended = after.slice(prefix.length).trim().split('\n').map((line) => JSON.parse(line));
+    expect(appended).toHaveLength(3);
+    expect(appended.every((record) => !Object.hasOwn(record, 'version'))).toBe(true);
+    expect(existsSync(join(created.runDirPath, 'run-history.jsonl'))).toBe(false);
+    const snapshot = readRunStateView(projectDir, created.runId);
+    expect(snapshot.histories).toMatchObject({ retiredStageUsage: [retired, { ...retired, iteration: 2 }], stageEvidence: [evidence(1), evidence(2)] });
+    expect(snapshot.snapshot.sources.some((source) => source.path === historyPath && source.prefix === Buffer.byteLength(after))).toBe(true);
+    expect(readRunState(projectDir, created.runId).supervisor?.attempts).toEqual([supervisorAttempt(1), supervisorAttempt(2)]);
+  });
+
+  it('never truncates a history file outside the run directory named by run.json', () => {
+    const created = createRun(projectDir, 'history', 'name: history\nstages: []\n', []);
+    const projection = readRunState(projectDir, created.runId);
+    const outside = join(dirname(created.runDirPath), 'run-history-outside.jsonl');
+    writeFileSync(outside, 'keep these bytes\n');
+    projection.stateFormat = { version: 2, revision: 1, history: {
+      version: 1, path: '../run-history-outside.jsonl', committedBytes: 0,
+      counts: { supervisorAttempts: 0, retiredStageUsage: 0, stageEvidence: 0 },
+    } };
+    writeFileSync(join(created.runDirPath, 'run.json'), JSON.stringify(projection) + '\n');
+    projection.supervisor = {
+      status: 'running', calls: 0, tokens_in: 0, tokens_out: 0, duration_ms: 0,
+      startedAt: projection.startedAt, attempts: [],
+    };
+    writeFileSync(join(created.runDirPath, 'run.json'), JSON.stringify(projection) + '\n');
+    try {
+      updateRunState(projectDir, created.runId, (state) => { state.supervisor!.attempts.push(supervisorAttempt(1)); });
+    } catch { /* refusal is acceptable */ }
+    expect(readFileSync(outside, 'utf-8')).toBe('keep these bytes\n');
   });
 
   it('migrates and hydrates a pretty-printed legacy run without changing its history semantics', () => {

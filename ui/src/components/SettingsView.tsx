@@ -29,7 +29,7 @@ export default function SettingsView({ initialSettings }: { initialSettings?: Se
   }, [initialSettings]);
   return (
     <div data-testid="settings-view">
-      <div className="campaign-header"><div><h1>Settings</h1><div className="subtitle">flow-crew config + per-project defaults</div></div></div>
+      <div className="campaign-header"><div><h1>Settings</h1><div className="subtitle">FlowCrew engine configuration</div></div></div>
       {error ? <div className="empty-state error-state" role="alert">Settings unavailable: {error}</div> : null}
       {!error && loading ? <div className="empty-state">Loading settings…</div> : null}
       {!error && !loading && !settings ? <div className="empty-state">No settings data returned.</div> : null}
@@ -54,18 +54,11 @@ export default function SettingsView({ initialSettings }: { initialSettings?: Se
       </div></div>
       <div className="section"><h2>Campaign triggers</h2><div className="kpi settings-panel">
         <div className="sd-meta-row"><span className="k">enabled</span><span>{settings?.campaign_triggers?.enabled === false ? "off" : "on"}</span></div>
-        <div className="sd-meta-row"><span className="k">regression</span><span className="mono">{settings?.campaign_triggers?.regression_after ?? "—"} runs</span></div>
-        <div className="sd-meta-row"><span className="k">plateau</span><span className="mono">{settings?.campaign_triggers?.plateau_after ?? "—"} runs · threshold {settings?.campaign_triggers?.plateau_threshold ?? "—"}</span></div>
         <div className="sd-meta-row"><span className="k">failures</span><span className="mono">{settings?.campaign_triggers?.repeated_failure_after ?? "—"} runs</span></div>
-      </div></div>
-      <div className="section"><h2>Supervisor</h2><div className="kpi settings-panel">
-        <div className="sd-meta-row"><span className="k">default</span><span>{settings?.supervisor?.enabled === false ? "off" : "on"}</span></div>
-        <div className="sd-meta-row"><span className="k">threshold</span><span className="mono">{settings?.supervisor?.escalation_threshold ?? "default"}</span></div>
       </div></div>
       <details className="section advanced-settings"><summary>Advanced paths</summary><div className="kpi settings-panel">
         <div className="sd-meta-row"><span className="k">runs root</span><span className="mono">~/.fc/runs/</span></div>
         <div className="sd-meta-row"><span className="k">campaigns log</span><span className="mono">~/.fc/campaigns/</span></div>
-        <div className="sd-meta-row"><span className="k">cross-camp KG</span><span className="mono">~/.fc/cross-campaign-kg/</span></div>
       </div></details>
         </>
       ) : null}

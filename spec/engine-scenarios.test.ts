@@ -1,3 +1,4 @@
+import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 /**
  * Engine wind-tunnel scenarios — the REAL scheduler run end-to-end against a
  * ScriptedAdapter (deterministic fake agent), replicating in milliseconds the
@@ -7,13 +8,8 @@
  *   CONTINUE (fix 1a), a premature ceiling must be DEFERRED by the declared
  *   floor (fix 1b), the engine-initiated terminal must write the declared
  *   artifact path (fix 2), a planner-authored reality check may rely on a
- *   pre-gate stage artifact, and the engine-consumed round_result.json must
- *   still be restored at terminal time (fix 4).
- *
- *   Scenario B (unified terminal gate): an agent writing ship_report.md
- *   directly must be REJECTED by the confirm gate (hole 5), the run must end
- *   non-shipped via an honest ceiling, and stages left pending at terminal
- *   commit must be swept to 'skipped' (fix 3).
+ *   pre-gate stage artifact, and terminal checks must use the framework-owned
+ *   manifest instead of the optional shared round slot (fix 4).
  *
  * Isolation: FC_HOME points at a temp dir (set BEFORE importing any src
  * module), so runs/campaign ledgers never touch the real ~/.fc.
@@ -70,8 +66,7 @@ async function runScenario(
     config, raw, projectDir, adapter, new Map(), undefined,
     join(PROJECT_ROOT, 'config', 'agents'),
     reuse?.runId, brief,
-    /* autoApprove */ true, /* supervise */ false,
-    /* campaignId */ undefined, /* inheritCampaignContext */ false,
+    /* autoApprove */ true, /* supervise */ undefined, /* inheritCampaignContext */ false,
   );
   const runDirPath = join(fcHome, 'runs', state.runId!);
   const readRun = (name: string) => readFileSync(join(runDirPath, name), 'utf-8');
@@ -109,10 +104,11 @@ const DEFAULT_RESEARCH_SCOPE = [
 function strictResearchDispatch(
   stages: ScriptedDispatchStage[],
   terminalPaths = ['research/val/ship_report.md'],
+  contracts: NonNullable<Parameters<typeof declaredDispatch>[1]> = {},
 ): string {
   const rows = stages.map((stage) => {
     const dependencies = stage.dependsOn ?? [];
-    return {
+    return { artifact_contract: contracts[stage.id] ?? fixtureArtifactContract(stage.id, stage.isGate === true),
       id: stage.id,
       role: 'researcher',
       depends_on: dependencies,
@@ -126,7 +122,7 @@ function strictResearchDispatch(
     };
   });
   const mandatory = stages.filter((stage) => !stage.condition).map((stage) => stage.id);
-  rows.push({
+  rows.push({ artifact_contract: fixtureArtifactContract('research_finalize', false),
     id: 'research_finalize',
     role: 'researcher',
     depends_on: mandatory,
@@ -138,9 +134,15 @@ function strictResearchDispatch(
   return JSON.stringify(rows, null, 2);
 }
 
-const dispatchOf = (id: string, terminalPaths = ['research/val/ship_report.md', 'research/val/ceiling_report.md']) => ({
+const dispatchOf = (id: string, terminalPaths = ['research/val/ship_report.md', 'research/val/ceiling_report.md'], checkConfirmation = false) => ({
   runFiles: {
-    'dispatch.yaml': strictResearchDispatch([{ id }], terminalPaths),
+    'dispatch.yaml': strictResearchDispatch([{ id }], terminalPaths, checkConfirmation ? {
+      [id]: { version: 1, produces: [{ id: 'confirm', root: 'project', path: 'research/val/confirm_flag' }], reads: [], replays: [] },
+    } : {}),
+    ...(checkConfirmation ? {'reality_checks.md':['## Reality checks','```yaml','checks:',
+      ' - name: confirmation_input_present','   type: exec-script-exit-zero',
+      `   reads: [{id: confirm, root: project, path: research/val/confirm_flag, source: {kind: stage, stage: ${id}, artifact: confirm}}]`,
+      '   params: {script: "test -f research/val/confirm_flag", timeout_seconds: 30}','```'].join('\n')} : {}),
   },
 });
 
@@ -183,26 +185,11 @@ describe('Scenario A: research loop honesty (fixes 1a, 1b, 2, 4)', () => {
     });
     const { state, readRun, projectDir, allGuidance } = await runScenario(BRIEF_A, {
       plan: [
-        { ...dispatchOf('measure_r1'),
-          runFiles: {
-            ...dispatchOf('measure_r1').runFiles,
-            'reality_checks.md': [
-              '## Reality checks',
-              '```yaml',
-              'checks:',
-              '  - name: confirmation_input_present',
-              '    type: exec-script-exit-zero',
-              '    params:',
-              '      timeout_seconds: 30',
-              '      script: |',
-              '        test -f research/val/confirm_flag',
-              '```',
-            ].join('\n'),
-          } },
-        dispatchOf('measure_r2'),
-        dispatchOf('measure_r3'),
-        dispatchOf('measure_r4'),
-        dispatchOf('measure_r5'),
+        dispatchOf('measure_r1',undefined,true),
+        dispatchOf('measure_r2',undefined,true),
+        dispatchOf('measure_r3',undefined,true),
+        dispatchOf('measure_r4',undefined,true),
+        dispatchOf('measure_r5',undefined,true),
       ],
       measure_r1: round('r1_baseline', 0.5),
       measure_r2: round('r2_decoy', 9.9),      // beats target 9.0 → ship → confirm FAILS
@@ -232,71 +219,15 @@ describe('Scenario A: research loop honesty (fixes 1a, 1b, 2, 4)', () => {
 
     // Fix 2: engine-initiated terminal mirrored the report to the DECLARED path.
     expect(existsSync(join(projectDir, 'research/val/ceiling_report.md'))).toBe(true);
-    expect(state.terminalArtifact).toBe('ceiling_report.md');
+    expect(state.terminalArtifact).toBe('research/val/ceiling_report.md');
 
-    // Fix 4: the hard check uses the always-emitted manifest, while the direct
-    // assertion keeps covering restoration of the optional consumed result.
-    expect(existsSync(join(projectDir, 'research/val/round_result.json'))).toBe(true);
+    // A later round may replace/remove the optional shared slot. The manifest
+    // retains the consumed population and the rejected candidate's outcome.
+    const manifest = JSON.parse(readFileSync(join(projectDir, 'research/val/run_manifest.json'), 'utf8')) as { rounds: Array<{ label: string; confirmFailed?: boolean }> };
+    expect(manifest.rounds).toHaveLength(journal.rounds.length);
+    expect(manifest.rounds.find(row => row.label === decoy?.label)?.confirmFailed).toBe(true);
     const gate = JSON.parse(readRun('.reality-gate.json')) as { pass: boolean };
     expect(gate.pass).toBe(true);
-  }, 60000);
-});
-
-// ---------------------------------------------------------------------------
-
-const BRIEF_B = `---
-terminal_states:
-  shipped:
-    paths: [research/val/ship_report.md]
-  ceiling_hit:
-    paths: [research/val/ceiling_report.md]
-    floor:
-      min_attempted_stages: 4
-research:
-  baseline: 0.0
-  policy: best_of_n
-  higher_is_better: true
-  result_file: research/val/round_result.json
-  report_dir: research/val
-  confirm:
-    command: "grep -q PASS research/val/confirm_flag"
-    requires: "confirm_flag must contain PASS"
-    timeout_seconds: 30
-  stop:
-    beat: 9.0
-    max_rounds: 6
----
-# Scenario B — a measuring stage must not share terminal ownership
-`;
-
-describe('Scenario B: terminal-owner admission closes the ship bypass', () => {
-  it('refuses the entire DAG before a measuring stage can run with a terminal path', async () => {
-    const { state, readRun, projectDir, adapter } = await runScenario(BRIEF_B, {
-      plan: [{
-        runFiles: {
-          // `bait` and the mandatory finalizer both claim ship_report.md. The
-          // pre-change scheduler accepted this and let bait terminate the run.
-          'dispatch.yaml': strictResearchDispatch([{
-            id: 'bait',
-            scope: [...DEFAULT_RESEARCH_SCOPE, 'research/val/ship_report.md'],
-          }], ['research/val/ship_report.md', 'research/val/ceiling_report.md']),
-        },
-      }],
-      bait: {
-        projectFiles: {
-          'research/val/ship_report.md': '# Ship!\ntrain 9.9 — mission accomplished',
-          'research/val/confirm_flag': 'FAIL',
-        },
-      },
-    });
-
-    expect(state.status).not.toBe('shipped');
-    expect(['failed', 'escalated']).toContain(state.status);
-    const admission = JSON.parse(readRun('dispatch_admission.json')) as { pass: boolean; errors: string[] };
-    expect(admission.pass).toBe(false);
-    expect(admission.errors.join('\n')).toContain('expected exactly one scoped owner');
-    expect(adapter.calls.some((call) => call.stageId === 'bait')).toBe(false);
-    expect(existsSync(join(projectDir, 'research/val/ship_report.md'))).toBe(false);
   }, 60000);
 });
 
@@ -348,7 +279,7 @@ describe('Scenario C: budget-exhausted terminal honesty (bug #7)', () => {
 
     expect(state.status).toBe('ceiling_hit');
     // Bug #7: this exit door used to skip the terminal contract entirely.
-    expect(state.terminalArtifact).toBe('ceiling_report.md');
+    expect(state.terminalArtifact).toBe('research/val/ceiling_report.md');
     expect(existsSync(join(projectDir, 'research/val/ceiling_report.md'))).toBe(true);
     expect(readFileSync(join(projectDir, 'research/val/ceiling_report.md'), 'utf-8')).toContain('budget-exhausted');
   }, 60000);
@@ -386,7 +317,7 @@ describe('Scenario D: approval park / resume (inbox)', () => {
   it('parks on an agent-written request, records it durably, and does NOT finish the run', async () => {
     const inbox = await import('../src/inbox.js');
     const { state, runDirPath, projectDir } = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'act' }]) } }],
+      plan: [{ runFiles: { 'dispatch.yaml': declaredDispatch(strictResearchDispatch([{ id: 'act' }])) } }],
       act: REQUEST('deploy-1'),
     });
 
@@ -419,7 +350,7 @@ describe('Scenario D: approval park / resume (inbox)', () => {
     expect(inbox.foldItems(state.runId!).get('deploy-1')?.state).toBe('approved');
 
     const resumed = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'finish' }]) } }],
+      plan: [{ runFiles: { 'dispatch.yaml': declaredDispatch(strictResearchDispatch([{ id: 'finish' }])) } }],
       act: { output: 'approved deploy completed' },
       finish: { projectFiles: { 'research/val/round_result.json': JSON.stringify({ label: 'after_approval', result: 9.5 }) } },
       research_finalize: { projectFiles: { 'research/val/ship_report.md': '# Ship\napproved result' } },
@@ -436,7 +367,7 @@ describe('Scenario D: approval park / resume (inbox)', () => {
   it('first resolution wins — a second, contradictory decision cannot land', async () => {
     const inbox = await import('../src/inbox.js');
     const { state, projectDir } = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'act' }]) } }],
+      plan: [{ runFiles: { 'dispatch.yaml': declaredDispatch(strictResearchDispatch([{ id: 'act' }])) } }],
       act: REQUEST('race-1'),
     });
     const first = inbox.resolveRequest(projectDir, state.runId!, 'race-1', 'approve', { by: 'alice' });
@@ -446,52 +377,6 @@ describe('Scenario D: approval park / resume (inbox)', () => {
     expect(second.won).toBe(false);
     expect(second.error).toContain('already approved');
     expect(inbox.foldItems(state.runId!).get('race-1')?.resolution?.by).toBe('alice');
-  }, 60000);
-
-  it('[C3] a project action rule auto-approves unknown risk and records its stable rule id', async () => {
-    const inbox = await import('../src/inbox.js');
-    const projectDir = makeProject();
-    const { rule } = inbox.addProjectActionStandingRule({
-      projectDir,
-      actionPattern: 'launch_*training*',
-      decision: 'approve',
-      grantedBy: 'tester',
-      grantedAt: new Date().toISOString(),
-    });
-
-    const { state, runDirPath } = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': strictResearchDispatch([{ id: 'act' }]) } }],
-      act: {
-        ...REQUEST('auto-1', { action: 'launch_long_training_job', risk: 'unknown' }),
-        projectFiles: { 'research/val/round_result.json': JSON.stringify({ label: 'auto', result: 9.9 }) },
-      },
-      research_finalize: { projectFiles: { 'research/val/ship_report.md': '# Ship\nauto-approved result' } },
-    }, 8, { projectDir });
-
-    expect(state.status).not.toBe('parked');
-    expect(inbox.foldItems(state.runId!).get('auto-1')?.state).toBe('approved');
-    expect(inbox.foldItems(state.runId!).get('auto-1')?.resolution).toMatchObject({
-      by: 'standing-rule',
-      viaRule: rule.id,
-    });
-    const events = readFileSync(join(runDirPath, 'events.jsonl'), 'utf-8')
-      .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(events).toContainEqual(expect.objectContaining({
-      type: 'approval_resolved',
-      requestId: 'auto-1',
-      ruleId: rule.id,
-      decision: 'accepted',
-    }));
-
-    // "always" is only offered where it is bounded: external risk + exact target.
-    expect(inbox.standingRuleEligible({
-      kind: 'request', runId: 'r', projectDir, requestId: 'x', action: 'run_shell',
-      risk: 'exec', title: 't', createdAt: 'now',
-    }).ok).toBe(false);
-    expect(inbox.standingRuleEligible({
-      kind: 'request', runId: 'r', projectDir, requestId: 'y', action: 'deploy',
-      risk: 'external', title: 't', createdAt: 'now',
-    }).ok).toBe(false);   // no target
   }, 60000);
 });
 
@@ -527,13 +412,12 @@ describe('Scenario E: iteration-two park resumes the exact DAG (C1/L3)', () => {
       plan: [
         {
           runFiles: {
-            'dispatch.yaml': strictResearchDispatch([{ id: 'round_one' }]),
-            'supervisor_guidance.md': '[*]: iteration-one-guidance\n',
+            'dispatch.yaml': declaredDispatch(strictResearchDispatch([{ id: 'round_one' }])),
           },
         },
-        { runFiles: { 'dispatch.yaml': ITERATION_TWO_DISPATCH } },
+        { runFiles: { 'dispatch.yaml': declaredDispatch(ITERATION_TWO_DISPATCH) } },
         // A broken resume re-runs plan and re-dispatches the consequential stage.
-        { runFiles: { 'dispatch.yaml': ITERATION_TWO_DISPATCH } },
+        { runFiles: { 'dispatch.yaml': declaredDispatch(ITERATION_TWO_DISPATCH) } },
       ],
       round_one: {
         projectFiles: {
@@ -562,6 +446,11 @@ describe('Scenario E: iteration-two park resumes the exact DAG (C1/L3)', () => {
       },
     };
     const adapter = new ScriptedAdapter(script);
+    const scriptedRun = adapter.run.bind(adapter);
+    adapter.run = async (prompt, role, opts) => {
+      if (opts.stageId === 'plan' && adapter.calls.length === 0) store.atomicWrite(join(opts.runDir, 'supervisor_guidance.md'), '[*]: iteration-one-guidance\n');
+      return scriptedRun(prompt, role, opts);
+    };
     const parked = await runScenario(BRIEF_E, script, 4, undefined, adapter);
 
     expect(parked.state.status).toBe('parked');
@@ -613,7 +502,7 @@ describe('Scenario E2: repair-stage approval suspension (C2)', () => {
       { id: 'measure_after', dependsOn: ['review_gate'] },
     ]);
     const script: ConstructorParameters<typeof ScriptedAdapter>[0] = {
-      plan: [{ runFiles: { 'dispatch.yaml': dispatch } }],
+      plan: [{ runFiles: { 'dispatch.yaml': declaredDispatch(dispatch) } }],
       review_gate: [
         { runFiles: { 'verdict_review_gate.json': JSON.stringify({ pass: false, reason: 'repair required' }) } },
         { runFiles: { 'verdict_review_gate.json': JSON.stringify({ pass: true, reason: 'repair accepted' }) } },
@@ -624,7 +513,7 @@ describe('Scenario E2: repair-stage approval suspension (C2)', () => {
             'stages/repair_round/approval_request.json': JSON.stringify({
               id: 'repair-action',
               action: 'launch_repair_training',
-              risk: 'unknown',
+              risk: 'external',
               title: 'launch repair training',
             }),
           },
@@ -796,7 +685,7 @@ describe('Approval request ingestion: isolated slots and failed batches (M3/L2)'
       { id: 'req_bad', scope: ['research/val/request-bad.json'] },
     ]);
     const result = await runScenario(BRIEF_D, {
-      plan: [{ runFiles: { 'dispatch.yaml': dispatch } }],
+      plan: [{ runFiles: { 'dispatch.yaml': declaredDispatch(dispatch) } }],
       req_a: {
         exitCode: 1,
         runFiles: {

@@ -56,30 +56,76 @@ if $GLOBAL && [ -z "${HOME:-}" ]; then
   exit 1
 fi
 
-copy_and_verify() {
-  local source_file="$1"
-  local target_file="$2"
-  local target_dir="${target_file%/*}"
-  mkdir -p "$target_dir"
-  cp "$source_file" "$target_file"
-  if ! cmp -s "$source_file" "$target_file"; then
-    printf 'Installed file did not match its source: %s\n' "$target_file" >&2
-    return 1
-  fi
+install_bundles() {
+  "$NODE_BIN" --input-type=module - "$SCRIPT_DIR" "$1" "${2:-}" <<'NODE'
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, relative, resolve, sep } from 'node:path';
+
+const [sourceDir, targetRoot, legacyRoot] = process.argv.slice(2);
+const guideDir = resolve(sourceDir, '../guide');
+const linkPattern = /\[([^\]]+)\]\(([^\s)]+)\)/g;
+const external = (href) => /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href);
+
+function bundle(name) {
+  const files = new Map();
+  function collect(source, destination) {
+    if (files.has(destination)) return;
+    files.set(destination, ''); // Guide links may form cycles.
+    const content = readFileSync(source, 'utf8').replace(linkPattern, (link, label, href) => {
+      if (external(href) || href.startsWith('#')) return link;
+      const [path, fragment] = href.split('#');
+      const linkedSource = resolve(dirname(source), path);
+      if (!linkedSource.startsWith(guideDir + sep)) {
+        // Source code and examples remain identifiable without a checkout-only link.
+        return `${label} (\`${href}\`)`;
+      }
+      const linkedDestination = `references/${relative(guideDir, linkedSource)}`;
+      collect(linkedSource, linkedDestination);
+      const installedLink = relative(dirname(destination), linkedDestination).split(sep).join('/');
+      return `[${label}](${installedLink}${fragment ? '#' + fragment : ''})`;
+    });
+    files.set(destination, content);
+  }
+  collect(resolve(sourceDir, `${name}.md`), 'SKILL.md');
+  return { root: resolve(targetRoot, name), files };
+}
+
+// Read the complete sources before changing either installed definition.
+const bundles = ['ship', 'fc-status'].map(bundle);
+for (const { root, files } of bundles) {
+  for (const [path, content] of files) {
+    const target = resolve(root, path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, content, 'utf8');
+  }
+}
+for (const { root, files } of bundles) {
+  for (const [path, content] of files) {
+    const target = resolve(root, path);
+    const installed = readFileSync(target, 'utf8');
+    if (installed !== content) throw new Error(`Installed file did not match its source: ${target}`);
+    for (const [, , href] of installed.matchAll(linkPattern)) {
+      if (external(href)) continue;
+      const linked = resolve(dirname(target), href.split('#')[0] || path.split('/').at(-1));
+      if (!linked.startsWith(root + sep)) throw new Error(`Link leaves installed skill: ${href}`);
+      readFileSync(linked); // Refuse dangling links before retiring the old commands.
+    }
+  }
+}
+if (legacyRoot) {
+  for (const name of ['ship', 'fc-status']) {
+    try { unlinkSync(resolve(legacyRoot, `${name}.md`)); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+}
+NODE
 }
 
 verify_codex_enumeration() {
   local codex_bin="$1"
   local ship_path="$2"
   local status_path="$3"
-  local node_bin="${FLOWCREW_NODE:-}"
   local timeout_ms="${FLOWCREW_CODEX_VERIFY_TIMEOUT_MS:-20000}"
-  if [ -z "$node_bin" ]; then
-    if ! node_bin="$(command -v node 2>/dev/null)"; then
-      printf '%s\n' 'Codex verification requires Node.js, but node was not found on PATH.' >&2
-      return 1
-    fi
-  fi
   case "$timeout_ms" in
     ''|*[!0-9]*|0)
       printf '%s\n' 'FLOWCREW_CODEX_VERIFY_TIMEOUT_MS must be a positive integer.' >&2
@@ -87,7 +133,7 @@ verify_codex_enumeration() {
       ;;
   esac
 
-  "$node_bin" --input-type=module - "$codex_bin" "$PWD" "$ship_path" "$status_path" "$timeout_ms" <<'NODE'
+  "$NODE_BIN" --input-type=module - "$codex_bin" "$PWD" "$ship_path" "$status_path" "$timeout_ms" <<'NODE'
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 
@@ -223,14 +269,22 @@ fi
 INSTALLED_CLAUDE=false
 INSTALLED_CODEX=false
 
+NODE_BIN="${FLOWCREW_NODE:-}"
+if [ -n "$CLAUDE_BIN$CODEX_BIN" ] && [ -z "$NODE_BIN" ]; then
+  if ! NODE_BIN="$(command -v node 2>/dev/null)"; then
+    printf '%s\n' 'Skill bundle installation requires Node.js, but node was not found on PATH.' >&2
+    exit 1
+  fi
+fi
+
 if [ -n "$CLAUDE_BIN" ]; then
   if $GLOBAL; then
-    CLAUDE_TARGET="$HOME/.claude/commands"
+    CLAUDE_ROOT="$HOME/.claude"
   else
-    CLAUDE_TARGET=".claude/commands"
+    CLAUDE_ROOT=".claude"
   fi
-  copy_and_verify "$SCRIPT_DIR/ship.md" "$CLAUDE_TARGET/ship.md"
-  copy_and_verify "$SCRIPT_DIR/fc-status.md" "$CLAUDE_TARGET/fc-status.md"
+  CLAUDE_TARGET="$CLAUDE_ROOT/skills"
+  install_bundles "$CLAUDE_TARGET" "$CLAUDE_ROOT/commands"
   printf '✓ Claude Code skills installed and byte-verified at %s/\n' "$CLAUDE_TARGET"
   printf '%s\n' '  /ship       — hand off a plan to FlowCrew'
   printf '%s\n' '  /fc-status  — check run progress'
@@ -245,8 +299,7 @@ if [ -n "$CODEX_BIN" ]; then
   fi
   CODEX_SHIP="$CODEX_TARGET/ship/SKILL.md"
   CODEX_STATUS="$CODEX_TARGET/fc-status/SKILL.md"
-  copy_and_verify "$SCRIPT_DIR/ship.md" "$CODEX_SHIP"
-  copy_and_verify "$SCRIPT_DIR/fc-status.md" "$CODEX_STATUS"
+  install_bundles "$CODEX_TARGET"
   if ! verify_codex_enumeration "$CODEX_BIN" "$CODEX_SHIP" "$CODEX_STATUS"; then
     printf '%s\n' 'Codex skill verification failed; installation was not reported as successful.' >&2
     exit 1

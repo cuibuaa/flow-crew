@@ -1,24 +1,9 @@
+import { errorMessage, optionValue, within } from './source_services/cli-inputs.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import {
-  accessSync,
-  copyFileSync,
-  constants,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  readlinkSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  renameSync,
-  statSync,
-  symlinkSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from './engine-fs.js';
+import { accessSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -45,10 +30,10 @@ import {
   type BriefPathMention,
   type ShipInputFileSystem,
 } from './ship-inputs.js';
-import { loadProjectDefaults } from './config.js';
+import { loadEngineDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
-import { parseTapOutput } from './tap-output.js';
+import { withEngineIntegrity } from './engine-integrity.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -117,7 +102,7 @@ export const nodeShipSetupFileSystem: ShipSetupFileSystem = {
     mkdirSync(path);
   },
   createLink: (source, target, type) => symlinkSync(source, target, type),
-  copyFile: (source, target) => copyFileSync(source, target),
+  copyFile: (source, target) => copyFileSync(source, target, constants.COPYFILE_EXCL),
   removeEntry: (path) => rmSync(path, { recursive: true, force: true }),
   writeAtomic: nodeAtomicWrite,
 };
@@ -160,25 +145,6 @@ export interface GitCommandRequest {
 export type GitCommandRunner = (
   request: GitCommandRequest,
 ) => Promise<GitWorktreeResponse> | GitWorktreeResponse;
-
-export interface DependencyInstallRequest {
-  command: 'npm';
-  args: ['ci'];
-  display: 'npm ci';
-  cwd: string;
-}
-
-export interface DependencyInstallResponse {
-  exitCode: number | null;
-  stdout?: string;
-  stderr?: string;
-  error?: string;
-  durationMs?: number;
-}
-
-export type DependencyInstallRunner = (
-  request: DependencyInstallRequest,
-) => Promise<DependencyInstallResponse> | DependencyInstallResponse;
 
 function bounded(value: string, maximum = 24 * 1024): string {
   const bytes = Buffer.from(value, 'utf-8');
@@ -233,42 +199,6 @@ const runGitCommand: GitCommandRunner = (request) => new Promise((settle) => {
   });
 });
 
-const runDependencyInstallCommand: DependencyInstallRunner = (request) => new Promise((settle) => {
-  const started = Date.now();
-  const child = spawn(request.command, request.args, {
-    cwd: request.cwd,
-    env: process.env,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 15 * 60 * 1_000,
-  });
-  let stdout = '';
-  let stderr = '';
-  let launchError: string | undefined;
-  let settled = false;
-  child.stdout?.on('data', (chunk: Buffer | string) => {
-    stdout = bounded(stdout + chunk.toString());
-  });
-  child.stderr?.on('data', (chunk: Buffer | string) => {
-    stderr = bounded(stderr + chunk.toString());
-  });
-  child.once('error', (error) => {
-    launchError = error.message;
-  });
-  child.once('close', (code, signal) => {
-    if (settled) return;
-    settled = true;
-    settle({
-      exitCode: code,
-      stdout,
-      stderr,
-      durationMs: Math.max(0, Date.now() - started),
-      ...(launchError ? { error: launchError } : {}),
-      ...(!launchError && signal ? { error: `npm ci ended by signal ${signal}` } : {}),
-    });
-  });
-});
-
 /** Map the declared setup identity to one argv-safe Git operation. */
 export function createGitWorktree(
   request: GitWorktreeRequest,
@@ -290,7 +220,6 @@ export interface ShipSetupDependencies {
   fs?: ShipSetupFileSystem;
   createWorktree?: GitWorktreeCreator;
   runGitCommand?: GitCommandRunner;
-  runDependencyInstallCommand?: DependencyInstallRunner;
   runValidationCommand?: ValidationCommandRunner;
   runTestCollectionCommand?: ValidationCommandRunner;
   globalDir?: () => string;
@@ -305,7 +234,6 @@ interface ResolvedShipSetupDependencies {
   createWorktree: GitWorktreeCreator;
   managedWorktreeCreation: boolean;
   runGitCommand: GitCommandRunner;
-  runDependencyInstallCommand: DependencyInstallRunner;
   runValidationCommand?: ValidationCommandRunner;
   runTestCollectionCommand: ValidationCommandRunner;
   globalDir: () => string;
@@ -377,17 +305,6 @@ export interface TestPopulationParity {
   reason?: string;
 }
 
-export interface DependencyInstallObservation {
-  state: 'installed' | 'failed' | 'manual_required';
-  command: 'npm';
-  args: ['ci'];
-  display: 'npm ci';
-  cwd: string;
-  exitCode: number | null;
-  durationMs: number;
-  reason?: string;
-}
-
 export interface DeclaredInputSnapshotSummary {
   location: 'source' | 'target';
   path: string;
@@ -400,7 +317,7 @@ export interface DeclaredInputSnapshotSummary {
 }
 
 export interface DeclaredInputStabilityCheck {
-  phase: 'test_collection' | 'source_validation_fallback' | 'target_validation_baseline';
+  phase: 'input_materialization' | 'test_collection' | 'source_validation_fallback' | 'target_validation_baseline';
   state: 'stable' | 'changed' | 'unverified';
   before: DeclaredInputSnapshotSummary[];
   after?: DeclaredInputSnapshotSummary[];
@@ -413,7 +330,7 @@ export interface DeclaredInputStabilityCheck {
 }
 
 export interface ShipSetupBlocker {
-  phase: 'source' | 'worktree' | 'target' | 'dependency' | 'validation' | 'record';
+  phase: 'source' | 'worktree' | 'target' | 'validation' | 'record';
   reason: string;
   repair: string;
   input?: string;
@@ -441,7 +358,6 @@ interface ShipSetupFacts {
   targetVerification?: BriefInputVerification;
   targetOutputInventory?: BriefOutputInventory;
   testPopulation?: TestPopulationParity;
-  dependencyInstall?: DependencyInstallObservation;
   declaredInputStability: DeclaredInputStabilityCheck[];
   validationBaseline?: ProjectValidationBaseline;
   blockers: ShipSetupBlocker[];
@@ -465,10 +381,6 @@ export interface ShipSetupRefusedReport extends ShipSetupFacts {
 
 export type ShipSetupReport = ShipSetupReadyReport | ShipSetupRefusedReport;
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function resolveDependencies(overrides: ShipSetupDependencies): ResolvedShipSetupDependencies {
   const git = overrides.runGitCommand ?? runGitCommand;
   return {
@@ -478,7 +390,6 @@ function resolveDependencies(overrides: ShipSetupDependencies): ResolvedShipSetu
       ?? ((request) => createGitWorktree(request, git)),
     managedWorktreeCreation: overrides.createWorktree === undefined,
     runGitCommand: git,
-    runDependencyInstallCommand: overrides.runDependencyInstallCommand ?? runDependencyInstallCommand,
     ...(overrides.runValidationCommand ? { runValidationCommand: overrides.runValidationCommand } : {}),
     runTestCollectionCommand: overrides.runTestCollectionCommand
       ?? overrides.runValidationCommand
@@ -488,19 +399,6 @@ function resolveDependencies(overrides: ShipSetupDependencies): ResolvedShipSetu
     stdout: overrides.stdout ?? process.stdout,
     stderr: overrides.stderr ?? process.stderr,
   };
-}
-
-function optionValue(args: string[], index: number, option: string): { value: string; consumed: number } {
-  const current = args[index];
-  const prefix = `${option}=`;
-  if (current.startsWith(prefix)) {
-    const value = current.slice(prefix.length);
-    if (!value) throw new Error(`${option} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${option} requires a value`);
-  return { value, consumed: 2 };
 }
 
 export function parseShipSetupArgs(args: string[]): ParsedShipSetupArgs {
@@ -541,11 +439,6 @@ export function shipSetupUsage(): string {
     'Usage: flowcrew ship-setup --brief <path> --target <path> --base <ref> --branch <name> [--project <path>] [--json]',
     'Creates the exact worktree, overlays missing declared-input descendants, records available test-population evidence, rechecks assertions, and records the validation baseline.',
   ].join('\n');
-}
-
-function within(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 function verificationBlockers(
@@ -676,9 +569,6 @@ function shipSetupBlockerRepair(blocker: ShipSetupBlockerInput): string {
   }
   if (blocker.phase === 'target') {
     return `Reconcile the named target input${subject} without overwriting unique data, ensure it stays inside the worktree and is readable, then rerun ship-setup.`;
-  }
-  if (blocker.phase === 'dependency') {
-    return 'The target lacks node_modules; run npm ci successfully in that target, then rerun ship-setup with the same arguments.';
   }
   if (blocker.phase === 'validation') {
     return 'Correct the named validation declaration, command/environment, or test-population mismatch; run that command successfully from the target, then rerun ship-setup.';
@@ -871,7 +761,11 @@ function fingerprintDeclaredInputTree(
 ): { digest: string; entryCount: number } {
   const records: InputTreeRecord[] = [];
   const activeDirectories = new Set<string>();
+  const rootCanonical = fs.realpath(rootPath);
   const visit = (entryPath: string, displayPath: string): void => {
+    if (!within(rootCanonical, fs.realpath(entryPath))) {
+      throw new Error('Input member resolves outside the declared root');
+    }
     const lexicalStat = fs.lstat ? fs.lstat(entryPath) : fs.stat(entryPath);
     const symbolicLink = lexicalStat.isSymbolicLink?.() === true;
     if (symbolicLink) {
@@ -1298,76 +1192,6 @@ async function verifyReusableWorktree(
   return { reusable: true };
 }
 
-async function prepareNodeDependencies(
-  targetDir: string,
-  fs: ShipSetupFileSystem,
-  runner: DependencyInstallRunner,
-): Promise<{
-  observation?: DependencyInstallObservation;
-  blocker?: ShipSetupBlockerInput;
-}> {
-  const packagePath = join(targetDir, 'package.json');
-  if (!fs.exists(packagePath) || fs.entryExists(join(targetDir, 'node_modules'))) return {};
-  const request: DependencyInstallRequest = {
-    command: 'npm',
-    args: ['ci'],
-    display: 'npm ci',
-    cwd: targetDir,
-  };
-  const hasNpmLock = fs.exists(join(targetDir, 'package-lock.json'))
-    || fs.exists(join(targetDir, 'npm-shrinkwrap.json'));
-  if (!hasNpmLock) {
-    const reason = 'Target has package.json but no node_modules or npm lockfile, so ship-setup cannot safely run npm ci.';
-    return {
-      observation: {
-        state: 'manual_required',
-        ...request,
-        exitCode: null,
-        durationMs: 0,
-        reason,
-      },
-      blocker: {
-        phase: 'dependency',
-        reason,
-        repair: 'Restore the project npm lockfile and run npm ci, or install dependencies with the project\'s declared package manager, then rerun ship-setup with the same arguments.',
-      },
-    };
-  }
-
-  const started = Date.now();
-  let response: DependencyInstallResponse;
-  try {
-    response = await runner(request);
-  } catch (error) {
-    response = { exitCode: null, error: errorMessage(error) };
-  }
-  const durationMs = response.durationMs ?? Math.max(0, Date.now() - started);
-  if (!response.error && response.exitCode === 0) {
-    return {
-      observation: {
-        state: 'installed',
-        ...request,
-        exitCode: 0,
-        durationMs,
-      },
-    };
-  }
-  const diagnostic = bounded(response.stderr?.trim() || response.stdout?.trim() || 'no diagnostic output');
-  const reason = response.error
-    ? `Dependency installation failed: npm ci could not launch: ${response.error}`
-    : `Dependency installation failed: npm ci exited ${response.exitCode ?? 'without a status'}: ${diagnostic}`;
-  return {
-    observation: {
-      state: 'failed',
-      ...request,
-      exitCode: response.exitCode,
-      durationMs,
-      reason,
-    },
-    blocker: { phase: 'dependency', reason },
-  };
-}
-
 function reconcileInputs(
   sourceVerification: BriefInputVerification,
   projectDir: string,
@@ -1384,34 +1208,30 @@ function reconcileInputs(
   const addBlocker = (sourcePath: string, reason: string): void => {
     blockers.push({ phase: 'target', input: normalizedInputPath(sourcePath), reason });
   };
-  const createMissingLink = (source: string, target: string, directory: boolean): void => {
-    if (fs.entryExists(target)) {
-      addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
-      return;
+  const createTargetDirectory = (directory: string): void => {
+    let ancestor = directory;
+    while (!fs.entryExists(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+    if (!within(targetCanonical, fs.realpath(ancestor))) {
+      throw new Error('Target parent resolves outside the worktree');
     }
-    fs.createDirectory(dirname(target));
-    const parentCanonical = fs.realpath(dirname(target));
-    if (!within(targetCanonical, parentCanonical)) {
-      addBlocker(source, 'Target parent resolves outside the worktree');
-      return;
+    fs.createDirectory(directory);
+    if (!within(targetCanonical, fs.realpath(directory))) {
+      throw new Error('Materialized target directory resolves outside the worktree');
     }
-    fs.createLink(source, target, directory ? 'dir' : 'file');
-    links.push({
-      path: normalizedInputPath(source),
-      source,
-      target,
-      type: directory ? 'directory' : 'file',
-    });
   };
   const copyMissingFile = (source: string, target: string): void => {
     if (fs.entryExists(target)) {
       addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
       return;
     }
-    fs.createDirectory(dirname(target));
+    createTargetDirectory(dirname(target));
     const parentCanonical = fs.realpath(dirname(target));
     if (!within(targetCanonical, parentCanonical)) {
       addBlocker(source, 'Target parent resolves outside the worktree');
+      return;
+    }
+    if (fs.stat(source).isFile?.() === false) {
+      addBlocker(source, 'Declared source entry is not a regular file or directory');
       return;
     }
     fs.copyFile(source, target);
@@ -1428,6 +1248,7 @@ function reconcileInputs(
     sourceDirectory: string,
     targetDirectory: string,
     sourceRootCanonical: string,
+    targetRoot: string,
     ancestors: Set<string>,
   ): void => {
     let names: string[];
@@ -1456,11 +1277,30 @@ function reconcileInputs(
           continue;
         }
         if (!fs.exists(target)) {
+          // Preserve internal module/link topology in the target namespace.
+          // Flattening .bin links changes where relative imports resolve.
+          if (fs.lstat?.(source).isSymbolicLink?.()) {
+            if (fs.entryExists(target)) {
+              addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
+              continue;
+            }
+            createTargetDirectory(dirname(target));
+            const mappedSource = resolve(targetRoot, relative(sourceRootCanonical, sourceCanonical));
+            fs.createLink(relative(dirname(target), mappedSource) || '.', target, sourceDirectoryEntry ? 'dir' : 'file');
+            links.push({ path: normalizedInputPath(source), source: mappedSource, target,
+              type: sourceDirectoryEntry ? 'directory' : 'file' });
+            continue;
+          }
+
           if (!sourceDirectoryEntry) {
             copyMissingFile(source, target);
             continue;
           }
-          fs.createDirectory(target);
+          if (fs.entryExists(target)) {
+            addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
+            continue;
+          }
+          createTargetDirectory(target);
           const materializedCanonical = fs.realpath(target);
           if (!within(targetCanonical, materializedCanonical)) {
             addBlocker(source, 'Materialized target directory resolves outside the worktree');
@@ -1470,6 +1310,7 @@ function reconcileInputs(
             source,
             target,
             sourceRootCanonical,
+            targetRoot,
             new Set([...ancestors, sourceCanonical]),
           );
           continue;
@@ -1498,6 +1339,7 @@ function reconcileInputs(
             source,
             target,
             sourceRootCanonical,
+            targetRoot,
             new Set([...ancestors, sourceCanonical]),
           );
           continue;
@@ -1532,7 +1374,19 @@ function reconcileInputs(
     try {
       const sourceDirectory = fs.stat(source).isDirectory();
       if (!fs.exists(target)) {
-        createMissingLink(source, target, sourceDirectory);
+        if (!sourceDirectory) {
+          copyMissingFile(source, target);
+        } else if (fs.entryExists(target)) {
+          addBlocker(source, 'Target has an existing unreachable entry and will not be overwritten');
+        } else {
+          createTargetDirectory(target);
+          if (!within(targetCanonical, fs.realpath(target))) {
+            addBlocker(source, 'Materialized target directory resolves outside the worktree');
+            continue;
+          }
+          const sourceCanonical = fs.realpath(source);
+          reconcileExistingDirectory(source, target, sourceCanonical, target, new Set([sourceCanonical]));
+        }
         continue;
       }
       if (!fs.readable(target)) {
@@ -1547,13 +1401,12 @@ function reconcileInputs(
       const sourceCanonical = fs.realpath(source);
       const targetEntryCanonical = fs.realpath(target);
       if (!within(targetCanonical, targetEntryCanonical)) {
-        if (targetEntryCanonical !== sourceCanonical) {
-          blockers.push({ phase: 'target', input: input.path, reason: 'Existing declared target input resolves outside the worktree and does not reference the declared source' });
-        }
+        blockers.push({ phase: 'target', input: input.path,
+          reason: 'Existing declared target input resolves outside the worktree; recreate the target to materialize target-owned inputs' });
         continue;
       }
       if (sourceDirectory) {
-        reconcileExistingDirectory(source, target, sourceCanonical, new Set([sourceCanonical]));
+        reconcileExistingDirectory(source, target, sourceCanonical, target, new Set([sourceCanonical]));
       } else {
         const sourceBytes = Buffer.from(fs.readBytes(source));
         const targetBytes = Buffer.from(fs.readBytes(target));
@@ -1736,7 +1589,12 @@ async function discoverTestPopulationMethod(
   const validation = declaredCommands.length === 0
     ? discoverProjectValidation(projectDir, { exists: fs.exists, readText: fs.readText })
     : reconcileProjectValidation(projectDir, declaredCommands, { exists: fs.exists, readText: fs.readText });
-  const testCommand = validation.commands.find((command) => command.role === 'test');
+  const testCommands = validation.commands.filter(command => command.role === 'test');
+  if (testCommands.length > 1) return {
+    hasConfiguredTests: true, validationUnknown: validation.state === 'unknown',
+    reason: `Joint test population is unverified for configured commands: ${testCommands.map(command => command.display).join('; ')}. Every command still runs for validation; one collector cannot attest another runner's population`,
+  };
+  const testCommand = testCommands[0];
   if (!testCommand) {
     return {
       hasConfiguredTests: false,
@@ -1806,13 +1664,13 @@ async function discoverTestPopulationMethod(
           runner,
           method: {
             tool: 'vitest',
-            display: 'vitest list --filesOnly --json --passWithNoTests',
+            display: 'vitest list --filesOnly --json --passWithNoTests --configLoader runner',
             evidencePath: `${packagePath}#scripts.test`,
             request: {
               role: 'test',
               command: process.execPath,
-              args: [executable, 'list', '--filesOnly', '--json', '--passWithNoTests'],
-              display: 'vitest list --filesOnly --json --passWithNoTests',
+              args: [executable, 'list', '--filesOnly', '--json', '--passWithNoTests', '--configLoader', 'runner'],
+              display: 'vitest list --filesOnly --json --passWithNoTests --configLoader runner',
               evidencePath: packagePath,
               cwd: projectDir,
             },
@@ -1991,6 +1849,9 @@ async function compareTestPopulations(
   runner: ValidationCommandRunner,
   declaredCommands: readonly BriefValidationCommand[],
 ): Promise<TestPopulationComparison> {
+  const commandRunner = runner;
+  runner = (request) => withEngineIntegrity({ projectDir: request.cwd,
+    stageId: '_collection' }, () => Promise.resolve(commandRunner(request)));
   const sourceDiscovery = await discoverTestPopulationMethod(sourceDir, fs, declaredCommands, runner);
   const targetDiscovery = await discoverTestPopulationMethod(targetDir, fs, declaredCommands, runner);
   const discoveries = { sourceDiscovery, targetDiscovery };
@@ -2025,7 +1886,7 @@ async function compareTestPopulations(
         ...(populationRunner ? { runner: populationRunner } : {}),
         missingFromTarget: [],
         extraInTarget: [],
-        reason: reasons.join('; '),
+        reason: `${reasons.join('; ')}; source tests are not executed for population evidence. Declare package.json flowcrew.testPopulation.files or use a supported exact collector.`,
       },
     };
   }
@@ -2085,116 +1946,6 @@ async function compareTestPopulations(
   }
 }
 
-interface ObservedValidationRun {
-  response: ValidationRunResponse;
-  durationMs: number;
-}
-
-async function observeValidationRun(
-  request: ValidationRunRequest,
-  runner: ValidationCommandRunner,
-): Promise<ObservedValidationRun> {
-  const started = Date.now();
-  try {
-    const response = await runner(request);
-    return {
-      response,
-      durationMs: response.durationMs ?? Math.max(0, Date.now() - started),
-    };
-  } catch (error) {
-    return {
-      response: { exitCode: null, error: errorMessage(error) },
-      durationMs: Math.max(0, Date.now() - started),
-    };
-  }
-}
-
-interface TapPopulationParse {
-  observation?: TestPopulationObservation;
-  reason?: string;
-}
-
-function parseTapPopulation(
-  projectDir: string,
-  observed: ObservedValidationRun | undefined,
-): TapPopulationParse {
-  if (!observed) return { reason: 'the test command was not observed' };
-  const { response, durationMs } = observed;
-  if (response.error || response.exitCode === null) {
-    return { reason: response.error ?? 'the test command ended without an exit code' };
-  }
-  const output = [response.stdout, response.stderr]
-    .filter((value): value is string => typeof value === 'string' && value.length > 0)
-    .join('\n');
-  const parsed = parseTapOutput(output);
-  if (parsed.state !== 'complete') return { reason: parsed.reason };
-  const occurrences = new Map<string, number>();
-  const identities = parsed.records.map(({ name }) => {
-    const occurrence = (occurrences.get(name) ?? 0) + 1;
-    occurrences.set(name, occurrence);
-    return `${occurrence}:${name}`;
-  });
-  return {
-    observation: {
-      projectDir,
-      count: identities.length,
-      identities,
-      digest: createHash('sha256').update(identities.join('\0')).digest('hex'),
-      durationMs,
-    },
-  };
-}
-
-function derivePopulationFromBaselineOutput(
-  initial: TestPopulationParity,
-  sourceDir: string,
-  targetDir: string,
-  sourceRun: ObservedValidationRun | undefined,
-  targetRun: ObservedValidationRun | undefined,
-): TestPopulationParity {
-  const sourceParsed = parseTapPopulation(sourceDir, sourceRun);
-  const targetParsed = parseTapPopulation(targetDir, targetRun);
-  const collectorReason = initial.reason ?? 'an exact collector was unavailable';
-  if (sourceParsed.observation && targetParsed.observation) {
-    const sourceSet = new Set(sourceParsed.observation.identities);
-    const targetSet = new Set(targetParsed.observation.identities);
-    const missingFromTarget = sourceParsed.observation.identities
-      .filter((identity) => !targetSet.has(identity));
-    const extraInTarget = targetParsed.observation.identities
-      .filter((identity) => !sourceSet.has(identity));
-    const sourcePlusAdditions = missingFromTarget.length === 0 && extraInTarget.length > 0;
-    return {
-      version: 1,
-      state: missingFromTarget.length === 0 ? 'matched' : 'mismatched',
-      ...(initial.runner ? { runner: initial.runner } : {}),
-      method: {
-        source: 'baseline_output',
-        format: 'tap',
-        display: 'complete top-level TAP from source and target test executions',
-        evidencePath: 'source and target test command output',
-      },
-      source: sourceParsed.observation,
-      target: targetParsed.observation,
-      missingFromTarget,
-      extraInTarget,
-      reason: sourcePlusAdditions
-        ? `Exact collection was unavailable (${collectorReason}); SOURCE-PLUS-ADDITIONS: complete target TAP covers every source identity, with additions recorded in extraInTarget.`
-        : `Exact collection was unavailable (${collectorReason}); population parity was derived from complete TAP emitted by the source run and target baseline.`,
-    };
-  }
-  const runner = initial.runner?.source.display ?? initial.runner?.source.command ?? 'configured test command';
-  return {
-    version: 1,
-    state: 'unverified',
-    ...(initial.runner ? { runner: initial.runner } : {}),
-    ...(sourceParsed.observation ? { source: sourceParsed.observation } : {}),
-    ...(targetParsed.observation ? { target: targetParsed.observation } : {}),
-    missingFromTarget: [],
-    extraInTarget: [],
-    reason: `Population parity for runner "${runner}" is unverified: exact collection was unavailable (${collectorReason}); source output: ${sourceParsed.reason ?? 'complete TAP parsed'}; target baseline output: ${targetParsed.reason ?? 'complete TAP parsed'}.`,
-  };
-}
-
 /** Execute setup without rendering; operational refusals are returned as structured facts. */
 export async function runShipSetup(
   args: string[],
@@ -2222,7 +1973,7 @@ export async function runShipSetup(
   const declaredInputPaths = new Set(extractDeclaredBriefInputPaths(brief));
   const proseInputWarnings = extractBriefPathMentions(brief)
     .filter((mention) => !declaredInputPaths.has(mention.path));
-  const sourceOutputInventory = inspectBriefOutputs(brief, projectDir, deps.fs);
+  const sourceOutputInventory = inspectBriefOutputs(brief, projectDir, deps.fs, { stateRoot: deps.globalDir(), launchProject: targetDir });
   let facts = setupFacts(
     projectDir,
     targetDir,
@@ -2265,7 +2016,7 @@ export async function runShipSetup(
     }
     facts = { ...facts, worktreeReused: true };
   } else {
-    const configured = deps.managedWorktreeCreation ? loadProjectDefaults(projectDir) : undefined;
+    const configured = deps.managedWorktreeCreation ? loadEngineDefaults() : undefined;
     let ownership: ManagedWorktreeOwnership | undefined;
     let preparedRequest = worktreeRequest;
     if (deps.managedWorktreeCreation) {
@@ -2335,16 +2086,17 @@ export async function runShipSetup(
     }]);
   }
 
-  const dependencyPreparation = await prepareNodeDependencies(
-    targetDir,
-    deps.fs,
-    deps.runDependencyInstallCommand,
-  );
-  if (dependencyPreparation.observation) {
-    facts = { ...facts, dependencyInstall: dependencyPreparation.observation };
+  // A copy must bind one stable source tree, not assemble leaves observed
+  // across a source mutation. Reuse the existing content/member snapshot rule.
+  const sourceInputRoots: DeclaredInputSnapshotRoot[] = [
+    { location: 'source', verification: sourceVerification, rootDir: projectDir },
+  ];
+  const materializationBefore = captureDeclaredInputSnapshot(sourceInputRoots, deps.fs);
+  const unavailableSource = initialDeclaredInputSnapshotCheck('input_materialization', materializationBefore);
+  if (unavailableSource) {
+    facts = { ...facts, declaredInputStability: [...facts.declaredInputStability, unavailableSource] };
+    return refuse([declaredInputStabilityBlocker(unavailableSource)]);
   }
-  if (dependencyPreparation.blocker) return refuse([dependencyPreparation.blocker]);
-
   let reconciled: { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] };
   try {
     reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs);
@@ -2354,8 +2106,16 @@ export async function runShipSetup(
   facts = { ...facts, links: reconciled.links, copies: reconciled.copies };
   if (reconciled.blockers.length > 0) return refuse(reconciled.blockers);
 
+  const materializationCheck = compareDeclaredInputSnapshots(
+    'input_materialization', materializationBefore, captureDeclaredInputSnapshot(sourceInputRoots, deps.fs),
+  );
+  if (materializationCheck.state !== 'stable') {
+    facts = { ...facts, declaredInputStability: [...facts.declaredInputStability, materializationCheck] };
+    return refuse([declaredInputStabilityBlocker(materializationCheck)]);
+  }
+
   const targetVerification = verifyDeclaredBriefInputs(brief, targetDir, deps.fs);
-  const targetOutputInventory = inspectBriefOutputs(brief, targetDir, deps.fs);
+  const targetOutputInventory = inspectBriefOutputs(brief, targetDir, deps.fs, { stateRoot: deps.globalDir() });
   facts = { ...facts, targetVerification, targetOutputInventory };
   const targetBlockers = verificationBlockers('target', targetVerification);
   if (targetBlockers.length > 0) return refuse(targetBlockers);
@@ -2375,7 +2135,41 @@ export async function runShipSetup(
   const targetInputRoots: DeclaredInputSnapshotRoot[] = [
     { location: 'target', verification: targetVerification, rootDir: targetDir },
   ];
-  let stableInputSnapshot = captureDeclaredInputSnapshot(sourceAndTargetInputRoots, deps.fs);
+  const baselineInputSnapshot = captureDeclaredInputSnapshot(targetInputRoots, deps.fs);
+  const initialBaselineSnapshotCheck = initialDeclaredInputSnapshotCheck(
+    'target_validation_baseline',
+    baselineInputSnapshot,
+  );
+  if (initialBaselineSnapshotCheck) {
+    facts = {
+      ...facts,
+      declaredInputStability: [...facts.declaredInputStability, initialBaselineSnapshotCheck],
+    };
+    return refuse([declaredInputStabilityBlocker(initialBaselineSnapshotCheck)]);
+  }
+  const observedBaseline = await observeDeclaredInputStability(
+    'target_validation_baseline',
+    baselineInputSnapshot,
+    targetInputRoots,
+    deps.fs,
+    () => runProjectValidationBaseline(targetDir, {
+      fs: { exists: deps.fs.exists, readText: deps.fs.readText },
+      ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
+      declaredCommands: declaredValidation.commands,
+    }),
+  );
+  facts = {
+    ...facts,
+    declaredInputStability: [...facts.declaredInputStability, observedBaseline.check],
+  };
+  if (observedBaseline.check.state === 'changed') {
+    return refuse([declaredInputStabilityBlocker(observedBaseline.check)]);
+  }
+  if (!observedBaseline.outcome.ok) throw observedBaseline.outcome.error;
+  const validationBaseline = observedBaseline.outcome.value;
+  facts = { ...facts, validationBaseline };
+
+  const stableInputSnapshot = captureDeclaredInputSnapshot(sourceAndTargetInputRoots, deps.fs);
   const initialSnapshotCheck = initialDeclaredInputSnapshotCheck('test_collection', stableInputSnapshot);
   if (initialSnapshotCheck) {
     facts = {
@@ -2407,8 +2201,7 @@ export async function runShipSetup(
   }
   if (!observedCollection.outcome.ok) throw observedCollection.outcome.error;
   const populationComparison = observedCollection.outcome.value;
-  stableInputSnapshot = observedCollection.after;
-  let testPopulation = populationComparison.population;
+  const testPopulation = populationComparison.population;
   if (testPopulation) facts = { ...facts, testPopulation };
   if (testPopulation?.state === 'mismatched') {
     const missing = testPopulation.missingFromTarget.length > 0
@@ -2420,119 +2213,37 @@ export async function runShipSetup(
     const reason = testPopulation.reason ? `; ${testPopulation.reason}` : '';
     return refuse([{
       phase: 'validation',
-      reason: `Test population mismatch before baseline: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}${reason}`,
+      reason: `Test population mismatch: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}${reason}`,
     }]);
   }
 
-  const needsOutputFallback = testPopulation?.state === 'unverified';
-  const baselineRunner = deps.runValidationCommand ?? runValidationCommand;
-  let sourceTestRun: ObservedValidationRun | undefined;
-  if (needsOutputFallback && populationComparison.sourceDiscovery.testCommand) {
-    const observedSourceFallback = await observeDeclaredInputStability(
-      'source_validation_fallback',
-      stableInputSnapshot,
-      sourceAndTargetInputRoots,
-      deps.fs,
-      () => observeValidationRun({
-        ...populationComparison.sourceDiscovery.testCommand!,
-        cwd: projectDir,
-      }, baselineRunner),
-    );
-    facts = {
-      ...facts,
-      declaredInputStability: [...facts.declaredInputStability, observedSourceFallback.check],
-    };
-    if (observedSourceFallback.check.state === 'changed') {
-      return refuse([declaredInputStabilityBlocker(observedSourceFallback.check)]);
-    }
-    if (!observedSourceFallback.outcome.ok) throw observedSourceFallback.outcome.error;
-    sourceTestRun = observedSourceFallback.outcome.value;
-  }
-  let targetTestRun: ObservedValidationRun | undefined;
-  const observingBaselineRunner: ValidationCommandRunner = (request) => {
-    if (request.role !== 'test') return baselineRunner(request);
-    return observeValidationRun(request, baselineRunner).then((observed) => {
-      targetTestRun = observed;
-      return observed.response;
-    });
-  };
-  stableInputSnapshot = captureDeclaredInputSnapshot(targetInputRoots, deps.fs);
-  const initialBaselineSnapshotCheck = initialDeclaredInputSnapshotCheck(
-    'target_validation_baseline',
-    stableInputSnapshot,
-  );
-  if (initialBaselineSnapshotCheck) {
-    facts = {
-      ...facts,
-      declaredInputStability: [...facts.declaredInputStability, initialBaselineSnapshotCheck],
-    };
-    return refuse([declaredInputStabilityBlocker(initialBaselineSnapshotCheck)]);
-  }
-  const observedBaseline = await observeDeclaredInputStability(
-    'target_validation_baseline',
-    stableInputSnapshot,
-    targetInputRoots,
-    deps.fs,
-    () => runProjectValidationBaseline(targetDir, {
-      fs: { exists: deps.fs.exists, readText: deps.fs.readText },
-      ...(needsOutputFallback
-        ? { runCommand: observingBaselineRunner }
-        : deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
-      declaredCommands: declaredValidation.commands,
-    }),
-  );
-  facts = {
-    ...facts,
-    declaredInputStability: [...facts.declaredInputStability, observedBaseline.check],
-  };
-  if (observedBaseline.check.state === 'changed') {
-    return refuse([declaredInputStabilityBlocker(observedBaseline.check)]);
-  }
-  if (!observedBaseline.outcome.ok) throw observedBaseline.outcome.error;
-  const validationBaseline = observedBaseline.outcome.value;
-  facts = { ...facts, validationBaseline };
-  if (needsOutputFallback && testPopulation) {
-    testPopulation = derivePopulationFromBaselineOutput(
-      testPopulation,
-      projectDir,
-      targetDir,
-      sourceTestRun,
-      targetTestRun,
-    );
-    facts = { ...facts, testPopulation };
-  }
   const validationBlockers: ShipSetupBlockerInput[] = validationBaseline.discovery.state === 'unknown'
+      && declaredValidation.commands.length > 0
     ? [{
         phase: 'validation',
         reason: `Validation baseline is unknown: ${validationBaseline.discovery.reason ?? 'no build, test, or lint command could be inferred'}`,
       }]
     : [];
-  validationBlockers.push(...validationBaseline.results
-    .filter((result) => result.state === 'launch_error')
-    .map((result): ShipSetupBlockerInput => {
-      const command = validationBaseline.discovery.commands.find((candidate) => candidate.role === result.role);
-      const declaration = command?.provenance?.source === 'brief'
-        ? ` declared at ${command.provenance.evidencePath}`
-        : '';
-      return {
-        phase: 'validation',
-        reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}${declaration}: ${result.reason ?? 'command ended without an exit code'}`,
-      };
-    }));
-  if (validationBlockers.length > 0) return refuse(validationBlockers);
-  if (testPopulation?.state === 'mismatched') {
-    const missing = testPopulation.missingFromTarget.length > 0
-      ? `; missing from target: ${testPopulation.missingFromTarget.join(', ')}`
-      : '';
-    const extra = testPopulation.extraInTarget.length > 0
-      ? `; extra in target: ${testPopulation.extraInTarget.join(', ')}`
-      : '';
-    const reason = testPopulation.reason ? `; ${testPopulation.reason}` : '';
-    return refuse([{
+  // A project command that cannot run here while others do is an environment gap the baseline records, and it cannot
+  // show a regression; a declared command that cannot launch, or a project none of whose commands launch, is the
+  // operator's to correct. A runner only inferred from a legacy INI file (tox.ini, pytest.ini) that cannot launch is an
+  // environment gap even when nothing else runs: before INI inference such a project inferred no command and was set up
+  // unconfigured, so inferring one must not turn a missing tool into a refusal.
+  type BaselineResult = (typeof validationBaseline.results)[number];
+  const commandOf = (result: BaselineResult) => validationBaseline.discovery.commands
+    .find(candidate => candidate.role === result.role && candidate.display === result.display);
+  const iniGap = (result: BaselineResult): boolean => result.state === 'launch_error'
+    && commandOf(result)?.provenance?.source !== 'brief' && /(?:^|[\\/])(?:tox|pytest)\.ini$/.test(commandOf(result)?.evidencePath ?? '');
+  const noneLaunched = validationBaseline.results.every((result) => iniGap(result) || (result.state !== 'passed' && result.state !== 'failed'));
+  validationBlockers.push(...validationBaseline.results.flatMap((result): ShipSetupBlockerInput[] => {
+    const command = commandOf(result);
+    if (result.state !== 'launch_error' || iniGap(result) || (command?.provenance?.source !== 'brief' && !noneLaunched)) return [];
+    return [{
       phase: 'validation',
-      reason: `Test population mismatch from baseline output: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}${reason}`,
-    }]);
-  }
+      reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}${command?.provenance?.source === 'brief' ? ` declared at ${command.provenance.evidencePath}` : ''}: ${result.reason ?? 'command ended without an exit code'}`,
+    }];
+  }));
+  if (validationBlockers.length > 0) return refuse(validationBlockers);
   const readyRecordPath = shipSetupReadyRecordPath(
     targetCanonicalDir,
     measuredBrief.digest,
@@ -2579,7 +2290,7 @@ function renderInputVerification(label: string, verification: BriefInputVerifica
 function renderOutputInventory(label: string, inventory: BriefOutputInventory, writer: Writer): void {
   writer.write(`${label} outputs: ${inventory.entries.length} checked; ${inventory.blocking.length} blocking\n`);
   for (const entry of inventory.entries) {
-    writer.write(`  ${entry.blocking ? 'BLOCKED' : entry.exists ? 'EXISTS-ALLOWED' : 'ABSENT'} ${entry.path} (${entry.entryType}, on_existing=${entry.disposition})${entry.size === undefined ? '' : ` size=${entry.size}`}\n`);
+    writer.write(`  ${entry.blocking ? 'BLOCKED' : entry.exists ? 'EXISTS-ALLOWED' : 'ABSENT'} ${entry.path} (${entry.entryType}, on_existing=${entry.disposition})${entry.size === undefined ? '' : ` size=${entry.size}`}${entry.reason ? ` — ${entry.reason}` : ''}\n`);
   }
 }
 
@@ -2600,13 +2311,6 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
   writer.write(`Project: ${report.projectDir}\nTarget: ${report.targetDir}\n`);
   writer.write(`Brief digest: ${report.briefDigest}\n`);
   writer.write(`Git: branch ${report.branch} at base ${report.base}\n`);
-  if (report.dependencyInstall) {
-    writer.write(
-      `Dependencies: ${report.dependencyInstall.state.toUpperCase()} ${report.dependencyInstall.display} `
-      + `exit=${report.dependencyInstall.exitCode ?? 'none'} duration=${report.dependencyInstall.durationMs}ms\n`,
-    );
-    if (report.dependencyInstall.reason) writer.write(`  reason: ${report.dependencyInstall.reason}\n`);
-  }
   renderVerification(report, writer);
   if (report.testPopulation) {
     writer.write(

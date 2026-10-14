@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { ProjectValidationBaseline } from '../src/project-validation.js';
 import {
   readShipSetupReadyValidationBaseline,
+  inspectShipSetupRecord,
   shipSetupBriefDigest,
   shipSetupReadyRecordPath,
 } from '../src/ship-setup-record.js';
@@ -166,5 +167,16 @@ describe('ship-setup ready-record baseline reader', () => {
 
     expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot))
       .toBeUndefined();
+  });
+});
+
+
+describe('setup discovery shape refusal', () => {
+  it('treats non-string discovery state as an invalid record without coercing object properties', () => {
+    const item = fixture();
+    (item.validationBaseline.discovery as unknown as Record<string, unknown>).state = { toString: null };
+    writeFileSync(item.recordPath, JSON.stringify(item.record), 'utf-8');
+    expect(inspectShipSetupRecord(item.projectDir, item.brief, item.globalRoot)).toMatchObject({ state: 'invalid' });
+    expect(readShipSetupReadyValidationBaseline(item.projectDir, item.brief, item.globalRoot)).toBeUndefined();
   });
 });

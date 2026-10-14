@@ -32,6 +32,7 @@ beforeEach(() => {
   projectDir = join(sandboxRoot, 'project');
   isolatedRoot = join(sandboxRoot, 'state');
   mkdirSync(projectDir, { recursive: true });
+  mkdirSync(join(sandboxRoot, 'task'));
   setFcGlobalDir(isolatedRoot);
 });
 
@@ -70,16 +71,18 @@ function inlineCheck(options: {
   ].join('\n');
 }
 
-function declaration(script: string, name = 'artifact integrity'): CheckDecl {
-  return { name, type: 'exec-script-exit-zero', params: { script } };
+function declaration(script: string, name = 'artifact integrity', artifactPath = 'output/result.json'): CheckDecl {
+  return { name, type: 'exec-script-exit-zero', params: { script },
+    reads: [{ id: 'artifact', root: 'project', path: artifactPath, kind: 'file', source: { kind: 'input' } }] };
 }
 
-function checksMarkdown(script: string, name = 'artifact integrity'): string {
+function checksMarkdown(script: string, name = 'artifact integrity', artifactPath = 'output/result.json'): string {
   return [
     '## Reality checks',
     '```yaml',
     'checks:',
     `  - name: ${name}`,
+    `    reads: [{id: artifact, root: project, path: ${artifactPath}, source: {kind: input}}]`,
     '    type: exec-script-exit-zero',
     '    params:',
     '      script: |',
@@ -89,8 +92,8 @@ function checksMarkdown(script: string, name = 'artifact integrity'): string {
   ].join('\n');
 }
 
-async function run(script: string) {
-  return runAllChecks([declaration(script)], { projectDir, taskDir: join(sandboxRoot, 'task') });
+async function run(script: string, artifactPath = 'output/result.json') {
+  return runAllChecks([declaration(script, 'artifact integrity', artifactPath)], { projectDir, taskDir: join(sandboxRoot, 'task') });
 }
 
 function unboundMultiShapeScript(path?: string): string {
@@ -116,11 +119,8 @@ describe('late versioned-JSON reality-check admission', () => {
       advisory: true,
       evidence: {
         command: script,
-        code: 1,
-        signal: null,
         stdout: '',
         stderr: 'first shape is absent\n',
-        timedOut: false,
         exit: { code: 1, signal: null, timedOut: false },
         terminalAdmission: {
           classification: 'unbound-versioned-json-multi-shape-mismatch',
@@ -184,7 +184,7 @@ describe('late versioned-JSON reality-check admission', () => {
     });
     const created = createRun(projectDir, 'test', 'name: graph-integrity', []);
     const replayDir = runDir(projectDir, created.runId);
-    writeFileSync(join(replayDir, 'reality_checks.md'), checksMarkdown(script, 'graph references resolve'), 'utf8');
+    writeFileSync(join(replayDir, 'reality_checks.md'), checksMarkdown(script, 'graph references resolve', 'graph/graph.json'), 'utf8');
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
@@ -194,7 +194,6 @@ describe('late versioned-JSON reality-check admission', () => {
     expect(gate.report?.results[0]).toMatchObject({
       pass: false,
       evidence: {
-        code: 1,
         stderr: 'dangling graph link\n',
         exit: { code: 1, signal: null, timedOut: false },
       },
@@ -249,16 +248,17 @@ describe('late versioned-JSON reality-check admission', () => {
     const report = await run(unboundMultiShapeScript());
     expect(report.pass).toBe(false);
     expect(report.results[0].advisory).not.toBe(true);
-    expect(report.results[0].evidence).toMatchObject({ code: 1 });
+    expect(report.results[0].evidence).toMatchObject({ exit: { code: 1, signal: null, timedOut: false } });
   });
 
   it('does not admit a literal path that resolves outside the project', async () => {
     writeFileSync(join(sandboxRoot, 'outside.json'), JSON.stringify({
       artifact: 'generic.summary.v2',
     }), 'utf8');
-    const report = await run(unboundMultiShapeScript('../outside.json'));
+    const report = await run(unboundMultiShapeScript('../outside.json'), '../outside.json');
     expect(report.pass).toBe(false);
     expect(report.results[0].advisory).not.toBe(true);
+    expect(report.results[0].details).toContain('declare a literal, confined relative path');
   });
 
   it('does not admit value-only failures on fields that exist', async () => {

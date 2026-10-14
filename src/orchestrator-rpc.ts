@@ -1,5 +1,8 @@
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from './engine-fs.js';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { assertCommandSocketAuthority, assertUnixSocketPath } from './daemon-identity.js';
 import net from 'node:net';
 import type { Server } from 'node:net';
 import type { TaskCreateInput, TaskEntry, TaskListFilter } from './task-registry.js';
@@ -40,13 +43,14 @@ export function rpcErrorExitCode(error: unknown): number {
 }
 
 export type RpcRequest =
-  | { cmd: 'register'; task: TaskCreateInput }
+  | { cmd: 'register'; task: TaskCreateInput; acknowledgement?: 'persisted' }
   | { cmd: 'list'; filter?: TaskListFilter }
   | { cmd: 'show'; id: number; raw?: boolean }
   | { cmd: 'cancel'; id: number }
   | { cmd: 'cancel-run'; runId: string; unit?: string }
   | { cmd: 'cancel-status'; runId: string; unit?: string }
   | { cmd: 'retry'; id: number }
+  | { cmd: 'resume'; id: number }
   | { cmd: 'tail'; id: number; lines?: number; follow?: boolean }
   | { cmd: 'status' }
   | { cmd: 'stop' };
@@ -56,6 +60,8 @@ export interface RegisterRpcResponse {
   unit: string;
   pid: number;
   build: string;
+  /** New unbound task persisted; launch is drained independently by the daemon. */
+  acknowledgement?: 'persisted';
 }
 
 export interface TaskListRpcResponse {
@@ -123,6 +129,8 @@ export interface RpcHandlerError {
 }
 
 export interface RpcServerOptions {
+  /** Runs after the response has been queued, including a disconnected client. */
+  onResponse?: (request: RpcRequest, response: RpcResponse) => void;
   onHandlerError?: (failure: RpcHandlerError) => void;
 }
 
@@ -138,7 +146,17 @@ export function formatDaemonRegistration(
 }
 
 export function defaultSocketPath(): string {
-  return join(fcGlobalDir(), 'daemon.sock');
+  const path = join(fcGlobalDir(), 'daemon.sock');
+  assertUnixSocketPath(path);
+  return path;
+}
+
+/** Operator commands share endpoint selection; defaultSocketPath deliberately
+ * does not read the inherited fuse used by validation and core callers. */
+export function commandSocketPath(explicit?: string): string {
+  const path = explicit ?? process.env.FLOWCREW_DAEMON_SOCKET ?? defaultSocketPath();
+  assertCommandSocketAuthority(path, homedir(), fcGlobalDir());
+  return path;
 }
 
 export async function sendRpc<T extends RpcResponse = RpcResponse>(
@@ -146,6 +164,7 @@ export async function sendRpc<T extends RpcResponse = RpcResponse>(
   request: RpcRequest,
   timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
 ): Promise<T> {
+  assertUnixSocketPath(socketPath);
   return new Promise<T>((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let raw = '';
@@ -225,6 +244,7 @@ export async function startRpcServer(
   handler: (request: RpcRequest) => Promise<RpcResponse> | RpcResponse,
   opts: RpcServerOptions = {},
 ): Promise<Server> {
+  assertUnixSocketPath(socketPath);
   mkdirSync(dirname(socketPath), { recursive: true });
   if (existsSync(socketPath)) {
     const live = await probeSocket(socketPath);
@@ -259,6 +279,7 @@ export async function startRpcServer(
       try {
         const res = await handler(req);
         safeEnd(JSON.stringify(res));
+        try { opts.onResponse?.(req, res); } catch { /* durable queue survives notification failure */ }
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         try { opts.onHandlerError?.({ request: req, error }); } catch { /* logging must not hide the RPC error */ }

@@ -18,7 +18,6 @@ function runDetail(stage: RunStage, extra: Partial<RunDetailData> = {}): RunDeta
     workflowName: "observability-test",
     status: "complete",
     stages: [stage],
-    kg: { nodes: [], edges: [] },
     events: [],
     stage_outputs: {},
     ...extra,
@@ -115,7 +114,7 @@ describe("run-detail execution observability", () => {
 
     const usage = byTestId("run-cost-summary");
     expect(usage.textContent).toContain("21,110 tokens");
-    expect(usage.textContent).toContain("including recorded supervisor usage");
+    expect(usage.textContent).toContain("Known portion only");
 
     const dag = byTestId("stage-dag");
     expect(dag.querySelector('[data-testid="dag-node-build"]')).not.toBeNull();

@@ -1,12 +1,21 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendTextRecord } from './append-boundary.js';
-import { readJsonlFile } from './jsonl.js';
-import type { StageStatus, StoreState } from './store.js';
+import { readJsonlFile, type JsonlReadCursor } from './jsonl.js';
+import type { AttemptDisposition, StageAttempt, StageStatus, StoreState } from './store.js';
 import type { AdapterFailureKind } from './adapters/base.js';
+import type { ProviderFailure } from './provider-result.js';
 import { atomicWrite, isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
+  | 'stage_environment_wait_started'
+  | 'stage_environment_wait_finished'
+  | 'resource_lease_decided'
+  | 'resource_lease_retained'
+  | 'resource_lease_wait_started'
+  | 'resource_lease_wait_finished'
+  | 'plan_revision_decided'
+  | 'recovery_reconciled'
   | 'attempt_started'
   | 'attempt_finished'
   | 'attempt_failed'
@@ -54,8 +63,6 @@ export type RunEventType =
   | 'reality_gate_advisory'
   | 'parallel_scope_serialized'
   | 'parallel_write_conflict'
-  | 'writer_lease_wait_started'
-  | 'writer_lease_wait_finished'
   | 'attempt_summary_refresh_requested'
   // Approval inbox: the run suspended on a consequential action, and the
   // resolution that released it. Part of the run's audit narrative — the only
@@ -70,6 +77,8 @@ export interface RunEvent {
   runId: string;
   timestamp: string;
   iteration?: number;
+  role?: string;
+  disposition?: AttemptDisposition;
   stageId?: string;
   status?: StageStatus['status'];
   artifacts?: string[];
@@ -80,15 +89,15 @@ export interface RunEvent {
   attemptIndex?: number;
   attemptStartedAt?: string;
   exitCode?: number;
+  processExitCode?: number | null;
+  processSignal?: NodeJS.Signals | null;
+  providerFailure?: ProviderFailure;
   adapterFailure?: boolean;
   adapterFailureKind?: AdapterFailureKind;
   requestId?: string;
   ruleId?: string;
-  blockedByStageId?: string;
   requestingStageId?: string;
-  leasePartition?: string;
   waitStartedAt?: string;
-  waitedMs?: number;
   requestedAt?: string;
   detectedAt?: string;
   boundary?: 'attempt_start' | 'adapter_invocation' | 'tool_call_start' | 'tool_call_completion' | 'operator_interrupt';
@@ -123,78 +132,24 @@ export interface RunEvent {
   observationId?: string;
 }
 
-export interface AttemptSummaryRefreshState {
-  refreshVersion: number;
-  pending: boolean;
-  requestedAt?: string;
-  scheduledAt?: string;
-  reasons: string[];
-  sourceEventTypes: RunEventType[];
+/** One projection for every attempt publisher, including scheduler reclassification.
+ * Unknown/zero explicitly identify legacy ledgers; never infer a role from an ID
+ * or borrow the current plan's iteration for an older execution. */
+export function attemptEventFields(attempt: StageAttempt | undefined): Pick<RunEvent,
+  'attemptIndex' | 'attemptStartedAt' | 'role' | 'iteration' | 'disposition'> {
+  return {
+    attemptIndex: attempt?.index,
+    attemptStartedAt: attempt?.startedAt,
+    role: attempt?.role ?? 'unknown',
+    iteration: attempt?.iteration ?? 0,
+    disposition: attempt?.status === STAGE_STATUS.RUNNING ? 'pending'
+      : attempt?.status !== STAGE_STATUS.COMPLETE ? 'discarded'
+      : attempt.disposition ?? 'accepted',
+  };
 }
-
-const DEFAULT_DEBOUNCE_MS = 250;
-const debounceTimers = new Map<string, NodeJS.Timeout>();
 
 function eventsPath(projectDir: string, runId: string): string {
   return join(runDir(projectDir, runId), 'events.jsonl');
-}
-
-function refreshStatePath(projectDir: string, runId: string): string {
-  return join(runDir(projectDir, runId), 'attempt_summary_refresh.json');
-}
-
-function refreshTimerKey(projectDir: string, runId: string): string {
-  return `${projectDir}::${runId}`;
-}
-
-function inferSummaryRefreshReasons(event: RunEvent): string[] {
-  const reasons = new Set<string>();
-
-  switch (event.type) {
-    case 'stage_complete':
-    case 'stage_failed':
-    case 'stage_skipped':
-      reasons.add(event.type);
-      break;
-    case 'verdict_written':
-    case 'attempt_results_updated':
-    case 'iteration_completed':
-    case 'run_completed':
-    case 'run_status_changed':
-    case 'operator_wrap_up_required':
-      reasons.add(event.type);
-      break;
-    default:
-      break;
-  }
-
-  return [...reasons];
-}
-
-function readRefreshState(projectDir: string, runId: string): AttemptSummaryRefreshState {
-  try {
-    return JSON.parse(readFileSync(refreshStatePath(projectDir, runId), 'utf-8')) as AttemptSummaryRefreshState;
-  } catch { /* non-critical */
-    return {
-      refreshVersion: 0,
-      pending: false,
-      reasons: [],
-      sourceEventTypes: [],
-    };
-  }
-}
-
-function writeRefreshState(projectDir: string, runId: string, state: AttemptSummaryRefreshState): void {
-  requireRunArtifactDirectory(projectDir, runId);
-  atomicWrite(refreshStatePath(projectDir, runId), JSON.stringify(state, null, 2));
-}
-
-export function readAttemptSummaryRefreshState(
-  projectDir: string,
-  runId: string,
-): AttemptSummaryRefreshState | null {
-  if (!existsSync(refreshStatePath(projectDir, runId))) return null;
-  return readRefreshState(projectDir, runId);
 }
 
 export function appendRunEvent(projectDir: string, runId: string, event: RunEvent): void {
@@ -210,72 +165,12 @@ export function appendRunEventAtRunDir(runDirectory: string, event: RunEvent): v
   appendTextRecord(join(runDirectory, 'events.jsonl'), JSON.stringify(event));
 }
 
-export function readRunEvents(projectDir: string, runId: string): RunEvent[] {
+export function readRunEvents(projectDir: string, runId: string, cursor?: JsonlReadCursor): RunEvent[] {
   try {
-    return readJsonlFile<RunEvent>(eventsPath(projectDir, runId));
+    return readJsonlFile<RunEvent>(eventsPath(projectDir, runId), cursor);
   } catch { /* no events file yet */
     return [];
   }
-}
-
-export function requestAttemptSummaryRefresh(
-  projectDir: string,
-  runId: string,
-  sourceEvents: RunEvent[],
-  options?: { debounceMs?: number },
-): void {
-  if (sourceEvents.length === 0) return;
-  const relevantSourceEvents = sourceEvents.filter((event) => inferSummaryRefreshReasons(event).length > 0);
-  if (relevantSourceEvents.length === 0) return;
-
-  const key = refreshTimerKey(projectDir, runId);
-  const debounceMs = options?.debounceMs ?? DEFAULT_DEBOUNCE_MS;
-  const now = new Date().toISOString();
-  const existing = readRefreshState(projectDir, runId);
-  const reasons = new Set(existing.reasons);
-  const eventTypes = new Set(existing.sourceEventTypes);
-
-  for (const event of relevantSourceEvents) {
-    eventTypes.add(event.type);
-    for (const reason of inferSummaryRefreshReasons(event)) reasons.add(reason);
-  }
-
-  writeRefreshState(projectDir, runId, {
-    ...existing,
-    pending: true,
-    requestedAt: now,
-    reasons: [...reasons],
-    sourceEventTypes: [...eventTypes],
-  });
-
-  const activeTimer = debounceTimers.get(key);
-  if (activeTimer) clearTimeout(activeTimer);
-
-  const timer = setTimeout(() => {
-    debounceTimers.delete(key);
-    try {
-      const latest = readRefreshState(projectDir, runId);
-      const scheduledAt = new Date().toISOString();
-      const nextState: AttemptSummaryRefreshState = {
-        ...latest,
-        refreshVersion: latest.refreshVersion + 1,
-        pending: false,
-        scheduledAt,
-      };
-      writeRefreshState(projectDir, runId, nextState);
-      appendRunEvent(projectDir, runId, {
-        type: 'attempt_summary_refresh_requested',
-        runId,
-        timestamp: scheduledAt,
-        detail: nextState.reasons.join(', '),
-      });
-    } catch {
-      // A run may be cleaned after the refresh was scheduled. Never recreate
-      // the directory or turn that expected race into an uncaught exception.
-    }
-  }, debounceMs);
-
-  debounceTimers.set(key, timer);
 }
 
 function buildArtifactEvents(runId: string, event: RunEvent): RunEvent[] {
@@ -303,6 +198,10 @@ function buildArtifactEvents(runId: string, event: RunEvent): RunEvent[] {
       iteration: event.iteration,
       stageId: event.stageId,
       artifacts: resultArtifacts,
+      attemptIndex: event.attemptIndex,
+      attemptStartedAt: event.attemptStartedAt,
+      role: event.role,
+      disposition: event.disposition,
     });
   }
   return artifactEvents;
@@ -367,7 +266,8 @@ export function recordStageOutcome(
   stageId: string,
   iteration: number | undefined,
   status: StageStatus,
-  options?: { debounceMs?: number },
+  /** @deprecated Events append synchronously; no refresh is scheduled. */
+  _options?: { debounceMs?: number },
 ): void {
   if (!isSettledStageStatus(status.status) && status.status !== STAGE_STATUS.SKIPPED) {
     return;
@@ -387,49 +287,25 @@ export function recordStageOutcome(
     stageId,
     status: status.status,
     artifacts: status.artifacts,
-    attemptIndex: settledAttempt?.index,
-    attemptStartedAt: settledAttempt?.startedAt,
+    ...(settledAttempt ? attemptEventFields(settledAttempt) : {}),
   };
 
   const events = [stageEvent, ...buildArtifactEvents(runId, stageEvent)];
   for (const event of events) appendRunEvent(projectDir, runId, event);
-  const statusEvents = observeRunStatusChange(projectDir, runId);
-  for (const statusEvent of statusEvents) {
-    events.push(statusEvent);
-  }
-  requestAttemptSummaryRefresh(projectDir, runId, events, options);
+  observeRunStatusChange(projectDir, runId);
 }
 
 export function recordRunEvent(
   projectDir: string,
   runId: string,
   event: RunEvent,
-  options?: { debounceMs?: number },
+  /** @deprecated Events append synchronously; no refresh is scheduled. */
+  _options?: { debounceMs?: number },
 ): void {
   appendRunEvent(projectDir, runId, event);
-  const events = [event];
-  if (event.type !== 'run_status_changed') {
-    const statusEvents = observeRunStatusChange(projectDir, runId);
-    for (const statusEvent of statusEvents) {
-      events.push(statusEvent);
-    }
-  }
-  requestAttemptSummaryRefresh(projectDir, runId, events, options);
+  if (event.type !== 'run_status_changed') observeRunStatusChange(projectDir, runId);
 }
 
-export function clearAttemptSummaryRefreshDebounce(projectDir?: string, runId?: string): void {
-  if (projectDir && runId) {
-    const key = refreshTimerKey(projectDir, runId);
-    const timer = debounceTimers.get(key);
-    if (timer) {
-      clearTimeout(timer);
-      debounceTimers.delete(key);
-    }
-    return;
-  }
-
-  for (const [key, timer] of debounceTimers) {
-    clearTimeout(timer);
-    debounceTimers.delete(key);
-  }
-}
+// Compatibility for validation cleanup hooks. There are no deferred event
+// writes to cancel; historical maintenance events remain readable.
+export function clearAttemptSummaryRefreshDebounce(): void {}

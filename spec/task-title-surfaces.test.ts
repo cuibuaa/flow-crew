@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import type { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -53,6 +53,9 @@ async function runBackgroundSubmit(brief: string): Promise<{ code: number | null
         HOME: join(fixtureRoot, 'home'),
         FC_HOME: fcHome,
         TMPDIR: join(fixtureRoot, 'tmp'),
+        // Keep background registration inside this fixture when the caller is a FlowCrew stage.
+        FLOWCREW_DAEMON_SOCKET: join(fcHome, 'daemon.sock'),
+        FLOWCREW_LAUNCH_RESULT_PATH: undefined,
         NO_COLOR: '1',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -80,12 +83,6 @@ beforeEach(() => {
   for (const path of [projectDir, fcHome, join(fixtureRoot, 'home'), join(fixtureRoot, 'tmp'), join(projectDir, 'config')]) {
     mkdirSync(path, { recursive: true });
   }
-  writeFileSync(join(projectDir, 'config', 'defaults.yaml'), [
-    'default_timeout_ms: 3600000',
-    'default_max_iterations: 5',
-    'adapter: mock',
-    '',
-  ].join('\n'), 'utf-8');
 });
 
 afterEach(async () => {

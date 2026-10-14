@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { get } from 'node:http';
 import {
   existsSync,
   mkdirSync,
@@ -12,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { hasLiveDirectRunner, startDashboard } from '../src/dashboard.js';
+import { startDashboard } from '../src/dashboard.js';
 import { recordRequest } from '../src/inbox.js';
 import { RpcOutcomeUnknownError } from '../src/orchestrator-rpc.js';
 import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
@@ -39,6 +40,7 @@ let workflowLauncher: ReturnType<typeof vi.fn>;
 let registerTask: ReturnType<typeof vi.fn>;
 let listTasks: ReturnType<typeof vi.fn>;
 let cancelRun: ReturnType<typeof vi.fn>;
+let resumeTask: ReturnType<typeof vi.fn>;
 let inboxApprovals: ReturnType<typeof vi.fn>;
 let inboxCampaigns: ReturnType<typeof vi.fn>;
 let inboxReviews: ReturnType<typeof vi.fn>;
@@ -98,6 +100,7 @@ beforeEach(async () => {
   });
   listTasks = vi.fn(async (filter) => registry.list(filter));
   cancelRun = vi.fn(async (runId: string) => confirmedCancellation(runId));
+  resumeTask = vi.fn(async () => ({ new_attempt: 1, unit: 'mock-resumed-launch' }));
   inboxApprovals = vi.fn(() => []);
   inboxCampaigns = vi.fn(() => []);
   inboxReviews = vi.fn(() => []);
@@ -110,13 +113,15 @@ beforeEach(async () => {
       ...(campaign.staleRunId ? { staleRunId: campaign.staleRunId } : {}),
     })));
 
+  mkdirSync(join(projectDir, '.omx'));
+  writeFileSync(join(projectDir, '.omx', 'user.txt'), 'User state');
+
   app = await startDashboard(projectDir, 0, {
     isProjectBusy: busyProbe,
-    spawnDetachedRun: detachedSpawner,
-    runWorkflow: workflowLauncher,
     registerTask,
     listTasks,
     cancelRun,
+    resumeTask,
     inboxSources: {
       listApprovals: () => inboxApprovals(),
       listCampaigns: () => inboxCampaigns(),
@@ -199,7 +204,6 @@ async function admittedTaskPayload(brief: string, fields: Record<string, unknown
     ...fields,
     briefPreflightDigest: report.digest,
     briefPreflightReceipt: receipt,
-    ...(report.requiresAcknowledgement ? { acknowledgeBriefWarnings: true } : {}),
   };
 }
 
@@ -217,6 +221,11 @@ function snapshotTree(root: string): Record<string, string> {
 }
 
 describe('dashboard project admission is pre-mutation', () => {
+  it('starts without migrating project-local engine state', () => {
+    expect(readFileSync(join(projectDir, '.omx', 'user.txt'), 'utf8')).toBe('User state');
+    expect(existsSync(join(projectDir, '.fc'))).toBe(false);
+  });
+
   const cases = [
     {
       name: 'durable approval resume',
@@ -234,41 +243,7 @@ describe('dashboard project admission is pre-mutation', () => {
         createdAt: '2026-07-30T00:05:00.000Z',
       }),
     },
-    {
-      name: 'legacy approval resume',
-      status: RUN_STATUS.AWAITING_APPROVAL,
-      url: (runId: string) => `/api/tasks/${runId}/approve`,
-      payload: { maxIterations: 99 },
-      prepare: () => undefined,
-    },
-    {
-      name: 'execute',
-      status: RUN_STATUS.PENDING,
-      url: (runId: string) => `/api/tasks/${runId}/execute`,
-      payload: {},
-      prepare: () => undefined,
-    },
-    {
-      name: 'whole-run rerun',
-      status: RUN_STATUS.FAILED,
-      url: (runId: string) => `/api/tasks/${runId}/rerun`,
-      payload: {},
-      prepare: () => undefined,
-    },
-    {
-      name: 'stage rerun',
-      status: RUN_STATUS.FAILED,
-      url: (runId: string) => `/api/tasks/${runId}/stages/gate/rerun`,
-      payload: {},
-      prepare: () => undefined,
-    },
-    {
-      name: 'gate re-evaluation',
-      status: RUN_STATUS.FAILED,
-      url: (runId: string) => `/api/tasks/${runId}/stages/gate/reeval`,
-      payload: {},
-      prepare: () => undefined,
-    },
+
   ];
 
   it.each(cases)('$name returns 409 with zero launch and byte-for-byte zero side effects', async (testCase) => {
@@ -293,14 +268,12 @@ describe('dashboard project admission is pre-mutation', () => {
 });
 
 describe('dashboard stage-timeout ingress', () => {
-  it('rejects task, task-settings, and plan overrides with the defaults.yaml migration', async () => {
+  it('rejects task timeout overrides with the defaults.yaml migration', async () => {
     const runId = 'removed-timeout-ingress';
     const runPath = writeRun(runId, RUN_STATUS.PENDING);
     const before = snapshotTree(runPath);
     const requests = [
       { method: 'POST' as const, url: '/api/tasks', payload: { name: 'legacy task', timeoutMs: 1 } },
-      { method: 'PATCH' as const, url: `/api/tasks/${runId}`, payload: { timeoutMs: 1 } },
-      { method: 'PUT' as const, url: `/api/tasks/${runId}`, payload: { plan: [{ id: 'work', timeout_total_ms: 1 }] } },
     ];
 
     for (const request of requests) {
@@ -325,96 +298,9 @@ describe('dashboard terminal-state truth', () => {
     expect(response.statusCode).toBe(200);
     expect(snapshotTree(runPath)).toEqual(before);
   });
-
-  it('does not execute a non-complete/non-failed terminal run', async () => {
-    const runId = 'terminal-shipped';
-    const runPath = writeRun(runId, RUN_STATUS.SHIPPED);
-    const before = snapshotTree(runPath);
-
-    const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/execute` });
-
-    expect(response.statusCode).toBe(409);
-    expect(response.json().error).toContain('already finished');
-    expect(snapshotTree(runPath)).toEqual(before);
-    expect(detachedSpawner).not.toHaveBeenCalled();
-    expect(busyProbe).not.toHaveBeenCalled();
-  });
-});
-
-describe('dashboard direct-runner liveness', () => {
-  it('keeps signal-0 live runners alive when procfs is absent and treats EPERM as alive', () => {
-    const runId = 'portable-direct-runner';
-    const markerDir = join(projectDir, '.fc');
-    mkdirSync(markerDir, { recursive: true });
-    writeFileSync(join(markerDir, `direct-resume-${runId}.pid`), String(process.pid), 'utf-8');
-    const missingProc = join(fixtureRoot, 'no-procfs');
-
-    expect(hasLiveDirectRunner(projectDir, runId, { procRoot: missingProc })).toBe(true);
-    expect(hasLiveDirectRunner(projectDir, runId, {
-      procRoot: missingProc,
-      killProcess: () => { throw Object.assign(new Error('not permitted'), { code: 'EPERM' }); },
-    })).toBe(true);
-    expect(hasLiveDirectRunner(projectDir, runId, {
-      procRoot: missingProc,
-      killProcess: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
-    })).toBe(false);
-  });
-
-  it('rejects pid zero without probing the caller process group', () => {
-    const runId = 'invalid-zero-direct-runner';
-    const markerDir = join(projectDir, '.fc');
-    mkdirSync(markerDir, { recursive: true });
-    writeFileSync(join(markerDir, `direct-resume-${runId}.pid`), '0', 'utf-8');
-    const killProcess = vi.fn();
-
-    expect(hasLiveDirectRunner(projectDir, runId, { killProcess })).toBe(false);
-    expect(killProcess).not.toHaveBeenCalled();
-  });
-
-  it('uses readable Linux procfs metadata only as an additional recycled-pid check', () => {
-    const runId = 'direct-runner-proc-strengthening';
-    const markerDir = join(projectDir, '.fc');
-    const procRoot = join(fixtureRoot, 'proc');
-    const procPid = join(procRoot, String(process.pid));
-    mkdirSync(markerDir, { recursive: true });
-    mkdirSync(procPid, { recursive: true });
-    writeFileSync(join(markerDir, `direct-rerun-${runId}.pid`), String(process.pid), 'utf-8');
-    writeFileSync(join(procPid, 'cmdline'), 'unrelated-process\0', 'utf-8');
-    writeFileSync(join(procPid, 'environ'), `RUN_ID=${runId}\0`, 'utf-8');
-
-    expect(hasLiveDirectRunner(projectDir, runId, { procRoot })).toBe(process.platform !== 'linux');
-
-    writeFileSync(join(procPid, 'cmdline'), '/tmp/project/.fc/direct-rerun\0', 'utf-8');
-    expect(hasLiveDirectRunner(projectDir, runId, { procRoot })).toBe(true);
-  });
 });
 
 describe('dashboard E13 cancellation delegation', () => {
-  it('launches stage reruns out of process so run-id cancellation can stop their scheduler', async () => {
-    await app!.close();
-    blockingRunId = null;
-    app = await startDashboard(projectDir, 0, {
-      isProjectBusy: busyProbe,
-      spawnDetachedRun: detachedSpawner,
-      registerTask,
-      listTasks,
-      cancelRun,
-    });
-    const runId = 'dashboard-detached-stage-rerun';
-    writeRun(runId, RUN_STATUS.FAILED);
-    const payload = await admittedTaskPayload('# Dashboard mutation fixture\n', {});
-
-    const response = await app.inject({
-      method: 'POST',
-      url: `/api/tasks/${runId}/stages/gate/rerun`,
-      payload,
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(detachedSpawner).toHaveBeenCalledOnce();
-    expect(detachedSpawner).toHaveBeenCalledWith(expect.objectContaining({ runId, projectDir }));
-    expect(workflowLauncher).not.toHaveBeenCalled();
-  });
 
   it('delegates a live run by id without locally rewriting run.json', async () => {
     const runId = 'dashboard-shared-cancel';
@@ -426,39 +312,6 @@ describe('dashboard E13 cancellation delegation', () => {
     expect(response.statusCode).toBe(200);
     expect(cancelRun).toHaveBeenCalledOnce();
     expect(cancelRun).toHaveBeenCalledWith(runId);
-    expect(snapshotTree(runPath)).toEqual(before);
-  });
-
-  it('refuses a rerun when terminal metadata hides that same run\'s live scheduler PID', async () => {
-    const runId = 'dashboard-terminal-live';
-    const runPath = writeRun(runId, RUN_STATUS.FAILED);
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
-    writeSchedulerProcessIdentity(runPath, runId);
-    const before = snapshotTree(runPath);
-
-    const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/rerun` });
-
-    expect(response.statusCode).toBe(409);
-    expect(response.json().error).toContain(runId);
-    expect(response.json().error).toContain(`scheduler pid ${process.pid}`);
-    expect(snapshotTree(runPath)).toEqual(before);
-  });
-
-  it('preserves a live run directory when delete cannot confirm the stop', async () => {
-    const runId = 'dashboard-delete-pending';
-    const runPath = writeRun(runId, RUN_STATUS.RUNNING);
-    const before = snapshotTree(runPath);
-    cancelRun.mockResolvedValueOnce({
-      ...confirmedCancellation(runId),
-      ok: false,
-      status: 'cancelling',
-      message: 'scheduler is still exiting',
-    });
-
-    const response = await app!.inject({ method: 'DELETE', url: `/api/tasks/${runId}` });
-
-    expect(response.statusCode).toBe(409);
-    expect(existsSync(runPath)).toBe(true);
     expect(snapshotTree(runPath)).toEqual(before);
   });
 
@@ -484,6 +337,67 @@ describe('dashboard E13 cancellation delegation', () => {
   });
 });
 
+describe('dashboard registered task continuation', () => {
+  it.each([RUN_STATUS.STOPPED, RUN_STATUS.FAILED, RUN_STATUS.INCOMPLETE])('delegates a %s run to its registered task without rewriting run state', async status => {
+    const runId = 'dashboard-continuation';
+    const runPath = writeRun(runId, status);
+    const task = registry.create({ projectDir, run_id: runId, status: TASK_STATUS.CANCELLED });
+    const before = snapshotTree(runPath);
+
+    const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/resume` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ new_attempt: 1, unit: 'mock-resumed-launch' });
+    expect(listTasks).toHaveBeenCalledWith({ status: 'all' });
+    expect(resumeTask).toHaveBeenCalledWith(task.id);
+    expect(registerTask).not.toHaveBeenCalled();
+    expect(snapshotTree(runPath)).toEqual(before);
+  });
+
+  it('refuses an unregistered run and a task bound to another project', async () => {
+    const runId = 'dashboard-unregistered';
+    writeRun(runId, RUN_STATUS.STOPPED);
+    for (const registered of [false, true]) {
+      if (registered) registry.create({ projectDir: join(fixtureRoot, 'other-project'), run_id: runId });
+      const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/resume` });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error).toBe('run has no registered task to resume');
+    }
+    expect(resumeTask).not.toHaveBeenCalled();
+  });
+
+  it('resumes the latest task registered for the run and project', async () => {
+    const runId = 'dashboard-latest-registration';
+    writeRun(runId, RUN_STATUS.STOPPED);
+    registry.create({ projectDir, run_id: runId });
+    const latest = registry.create({ projectDir, run_id: runId });
+    registry.create({ projectDir: join(fixtureRoot, 'other-project'), run_id: runId });
+    const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/resume` });
+    expect(response.statusCode).toBe(200);
+    expect(resumeTask).toHaveBeenCalledWith(latest.id);
+  });
+
+  it.each([RUN_STATUS.RUNNING, RUN_STATUS.COMPLETE, RUN_STATUS.PARKED])('refuses a %s run without requesting a launch', async status => {
+    const runId = 'dashboard-resume-refused';
+    writeRun(runId, status);
+    const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/resume` });
+    expect(response.statusCode).toBe(409);
+    expect(resumeTask).not.toHaveBeenCalled();
+    expect(listTasks).not.toHaveBeenCalled();
+  });
+
+  it.each([['unavailable', 503], ['unknown', 502]])('reports an %s daemon result without starting a substitute run', async (failure, code) => {
+    const runId = 'dashboard-resume-outcome';
+    writeRun(runId, RUN_STATUS.FAILED);
+    registry.create({ projectDir, run_id: runId });
+    resumeTask.mockRejectedValueOnce(failure === 'unknown' ? new RpcOutcomeUnknownError('response lost') : new Error('daemon unavailable'));
+    const response = await app!.inject({ method: 'POST', url: `/api/tasks/${runId}/resume` });
+    expect(response.statusCode).toBe(code);
+    expect(response.json().error).toContain('could not request resume');
+    expect(registerTask).not.toHaveBeenCalled();
+  });
+});
+
 describe('dashboard daemon-backed task creation', () => {
   it('registers a real daemon task without creating a dashboard-owned run', async () => {
     const brief = '# Registered task\n\nDo the work.';
@@ -494,7 +408,6 @@ describe('dashboard daemon-backed task creation', () => {
         projectDir,
         workflow: 'research',
         maxIterations: 4,
-        supervise: false,
         campaignId: 'operator-campaign',
       }),
     });
@@ -511,7 +424,6 @@ describe('dashboard daemon-backed task creation', () => {
       launch_args: [
         '--workflow', 'research',
         '--max-iterations', '4',
-        '--no-supervise',
         '--campaign', 'operator-campaign',
       ],
     });
@@ -581,39 +493,15 @@ describe('dashboard daemon-backed task creation', () => {
 });
 
 describe('dashboard waiting-work data', () => {
-  it('returns deferred tasks with their reason and retry time', async () => {
-    const waiting = registry.create({ name: 'Wait for project', brief_text: 'wait', projectDir });
-    registry.update(waiting.id, {
-      status: TASK_STATUS.DEFERRED,
-      run_id: 'bound-run',
-      defer_reason: 'project busy (run active-run)',
-      not_before: '2026-07-31T17:30:00.000Z',
-      defer_kind: 'wait',
-    });
-    registry.create({ name: 'Not deferred', brief_text: 'run', projectDir, status: TASK_STATUS.RUNNING });
-
-    const response = await app!.inject({ method: 'GET', url: '/api/inbox/deferred' });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual([{
-      id: waiting.id,
-      name: 'Wait for project',
-      projectDir,
-      runId: 'bound-run',
-      status: TASK_STATUS.DEFERRED,
-      deferReason: 'project busy (run active-run)',
-      notBefore: '2026-07-31T17:30:00.000Z',
-    }]);
-    expect(listTasks).toHaveBeenCalledWith({ status: TASK_STATUS.DEFERRED });
-  });
 
   it('does not turn a daemon list failure into an empty inbox', async () => {
     listTasks.mockImplementationOnce(async () => { throw new Error('daemon socket offline'); });
 
-    const response = await app!.inject({ method: 'GET', url: '/api/inbox/deferred' });
+    const response = await app!.inject({ method: 'GET', url: '/api/inbox/overview' });
 
-    expect(response.statusCode).toBe(503);
-    expect(response.json().error).toContain('daemon socket offline');
+    expect(response.statusCode).toBe(200);
+    expect(response.json().deferred.status).toBe('unavailable');
+    expect(response.json().deferred.error).toContain('daemon socket offline');
   });
 
   it('surfaces a synthesized stale campaign with the run that can be inspected or marked failed', async () => {
@@ -633,10 +521,12 @@ describe('dashboard waiting-work data', () => {
     utimesSync(statePath, old, old);
     utimesSync(iterationsPath, old, old);
 
-    const response = await app!.inject({ method: 'GET', url: '/api/campaigns' });
+    await app!.close();
+    app = await startDashboard(projectDir, 0, { isProjectBusy: busyProbe, listTasks, cancelRun });
+    const response = await app.inject({ method: 'GET', url: '/api/inbox/overview' });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toContainEqual(expect.objectContaining({
+    expect(response.json().stale.items).toContainEqual(expect.objectContaining({
       id: 'stale-campaign',
       status: 'stale',
       staleRunId: runId,
@@ -655,13 +545,8 @@ describe('dashboard waiting-work data', () => {
     expect(marked.statusCode).toBe(200);
     expect(JSON.parse(readFileSync(join(runsRoot(), runId, 'run.json'), 'utf-8')).status).toBe(RUN_STATUS.STOPPED);
 
-    const refreshed = await app!.inject({ method: 'GET', url: '/api/campaigns' });
-    expect(refreshed.json()).toContainEqual(expect.objectContaining({
-      id: 'stale-campaign',
-      status: RUN_STATUS.STOPPED,
-    }));
-    expect(refreshed.json().find((campaign: { id: string }) => campaign.id === 'stale-campaign'))
-      .not.toHaveProperty('staleRunId');
+    const refreshed = await app!.inject({ method: 'GET', url: '/api/inbox/overview' });
+    expect(refreshed.json().stale.items).not.toContainEqual(expect.objectContaining({ id: 'stale-campaign' }));
   });
 });
 
@@ -846,5 +731,29 @@ describe('aggregate inbox overview', () => {
     });
     expect(inboxCampaigns).toHaveBeenCalledTimes(1);
     expect(inboxReviews).toHaveBeenCalledTimes(120);
+  });
+});
+
+// The mounted run page consumes this read-only stream through EventSource.
+it('serves positive live stage output through the mounted run-page stream', async () => {
+  const directory = join(runsRoot(), 'live-reader', 'stages', 'writer');
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 'live.log.txt'), 'current live reader output\n');
+  writeFileSync(join(directory, 'status.json'), JSON.stringify({ status: 'running' }));
+  const address = app!.server.address() as { port: number };
+  await new Promise<void>((resolve, reject) => {
+    const request = get({ host: '127.0.0.1', port: address.port, path: '/api/tasks/live-reader/stages/writer/live' }, response => {
+      response.once('data', chunk => {
+        try {
+          expect(response.statusCode).toBe(200);
+          expect(String(chunk)).toContain('current live reader output');
+          resolve();
+        } catch (error) { reject(error); }
+        finally { response.destroy(); request.destroy(); }
+      });
+      response.once('error', reject);
+    });
+    request.setTimeout(5000, () => { request.destroy(); reject(new Error('owned stream produced no output')); });
+    request.once('error', reject);
   });
 });

@@ -1,13 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
-import { resolve } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   discoverProjectValidation,
   evaluateValidationDelta,
   runProjectValidationBaseline,
+  runValidationCommand,
   type ProjectValidationBaseline,
   type ValidationCommandResult,
   type ValidationFileSystem,
 } from '../src/project-validation.js';
+import { validationEnvironment } from '../src/validation-environment.js';
+import { withEngineIntegrity } from '../src/engine-integrity.js';
+import { createRun, writeStageStatus } from '../src/store.js';
+import { bindReviewedGateValidation, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 
 function memoryFs(files: Record<string, string>): ValidationFileSystem {
   return {
@@ -21,6 +28,95 @@ function memoryFs(files: Record<string, string>): ValidationFileSystem {
 }
 
 const root = resolve('portable-project');
+
+describe('project command environment and observer authority', () => {
+  it.skipIf(process.platform === 'win32').each([
+    ['npm', 'npm@10.0.0', 'package-lock.json', '{}', ['ci']],
+    ['pnpm', 'pnpm@9.0.0', 'pnpm-lock.yaml', '', ['install', '--frozen-lockfile']],
+    ['yarn', 'yarn@1.22.0', 'yarn.lock', '', ['install', '--frozen-lockfile']],
+    ['yarn', 'yarn@4.0.0', 'yarn.lock', '__metadata:', ['install', '--immutable']],
+    ['yarn', undefined, 'yarn.lock', '# yarn lockfile v1', ['install', '--frozen-lockfile']],
+    ['yarn', undefined, 'yarn.lock', '__metadata:', ['install', '--immutable']],
+    ['bun', 'bun@1.0.0', 'bun.lock', '', ['install', '--frozen-lockfile']],
+  ])('prepares %s dependencies with frozen argv (%s)', async (manager, packageManager, lockfile, lock, expected) => {
+    const project = mkdtempSync(join(tmpdir(), 'validation-manager-'));
+    try {
+      const bin = join(project, 'bin'); mkdirSync(bin);
+      writeFileSync(join(project, 'package.json'), JSON.stringify({ packageManager }));
+      writeFileSync(join(project, String(lockfile)), String(lock));
+      const executable = join(bin, String(manager));
+      writeFileSync(executable, `#!${process.execPath}\nrequire('node:fs').writeFileSync('install.json', JSON.stringify(process.argv.slice(2)));\n`);
+      chmodSync(executable, 0o755);
+      const result = await runValidationCommand({ role: 'build', command: process.execPath,
+        args: ['-e', "process.stdout.write(require('node:fs').readFileSync('install.json'))"],
+        display: 'configured build', cwd: project, prepareDependencies: true,
+        env: { ...process.env, PATH: bin } });
+      expect(result.exitCode, result.error ?? result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout ?? '')).toEqual(expected);
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+  it('ends configured validation inside the enclosing attempt budget', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'validation-deadline-'));
+    try {
+      const result = await runValidationCommand({ role: 'test', command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], display: 'deadline probe', cwd: project, timeoutMs: 30 });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.error).toMatch(/30ms/);
+      expect(result.durationMs).toBeLessThan(1000);
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+  it('keeps project inputs and explicit home reads while isolating control and credential settings', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'validation-env-'));
+    try {
+      const inherited = { PATH: '/project/bin', PROJECT_INPUT: 'ordinary', HOME: '/ambient',
+        CODEX_HOME: '/ambient/codex', FLOWCREW_LAUNCH_RESULT_PATH: '/ambient/result',
+        FC_SESSION_REUSE: '1', OPENAI_API_KEY: 'fake', NODE_OPTIONS: '--no-warnings',
+        DBUS_SESSION_BUS_ADDRESS: 'fake-bus', XDG_RUNTIME_DIR: '/ambient/runtime' };
+      const ambient = validationEnvironment(scratch, inherited);
+      expect(ambient.env.PROJECT_INPUT).toBe('ordinary');
+      expect(ambient.env.PATH).toBe('/project/bin');
+      expect(ambient.env.HOME).toBe(join(scratch, 'home'));
+      expect(ambient.env.CODEX_HOME).toBe(join(scratch, 'codex'));
+      expect(ambient.env.FC_HOME).toBe(join(scratch, 'home', '.fc'));
+      expect(ambient.env.FLOWCREW_DAEMON_SOCKET).toBe(join(scratch, 'unavailable.sock'));
+      expect(ambient.removed).toEqual(['CODEX_HOME', 'DBUS_SESSION_BUS_ADDRESS', 'FC_SESSION_REUSE',
+        'FLOWCREW_LAUNCH_RESULT_PATH', 'NODE_OPTIONS', 'OPENAI_API_KEY', 'XDG_RUNTIME_DIR']);
+      for (const name of ['FLOWCREW_LAUNCH_RESULT_PATH', 'FC_SESSION_REUSE', 'OPENAI_API_KEY', 'NODE_OPTIONS', 'DBUS_SESSION_BUS_ADDRESS']) {
+        expect(ambient.env[name]).toBeUndefined();
+      }
+      const explicit = validationEnvironment(scratch, inherited, { HOME: '/read-home',
+        XDG_CONFIG_HOME: '/read-config', PROJECT_INPUT: 'explicit', PROJECT_API_KEY: 'fake' });
+      expect(explicit.env.HOME).toBe('/read-home');
+      expect(explicit.env.XDG_CONFIG_HOME).toBe('/read-config');
+      expect(explicit.env.PROJECT_INPUT).toBe('explicit');
+      expect(explicit.removed).toEqual(['PROJECT_API_KEY']);
+      if (process.platform !== 'win32') {
+        expect(() => validationEnvironment(join(scratch, 'x'.repeat(108)), {}))
+          .toThrow('Daemon socket path is too long');
+      }
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  });
+
+  it.skipIf(process.platform !== 'linux')('uses ordinary filesystem access for nested observer and project commands', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'validation-observer-'));
+    const output = join(project, 'output');
+    const request = { role: 'test' as const, command: process.execPath,
+      args: ['-e', "try{require('fs').writeFileSync('output','ok');console.log('ALLOWED')}catch(e){console.log(e.code)}"],
+      display: 'observer write control', cwd: project };
+    try {
+      await withEngineIntegrity({ projectDir: project, stageId: '_project' }, async () => {
+        const observed = await withEngineIntegrity({ projectDir: project, stageId: '_observer' },
+          () => Promise.resolve(runValidationCommand(request)));
+        expect(observed.exitCode, observed.error).toBe(0);
+        expect(observed.stdout?.trim()).toBe('ALLOWED');
+        expect(existsSync(output)).toBe(true);
+        const ordinary = await runValidationCommand(request);
+        expect(ordinary.exitCode, ordinary.error).toBe(0);
+        expect(ordinary.stdout?.trim()).toBe('ALLOWED');
+        expect(existsSync(output)).toBe(true);
+      });
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+});
 
 describe('configuration-driven project validation baseline', () => {
   it('discovers and runs exactly the declared build, test, and lint scripts with lockfile-selected argv', async () => {
@@ -119,6 +215,52 @@ describe('configuration-driven project validation baseline', () => {
     expect(discovery).toMatchObject({ state: 'unknown', commands: [] });
   });
 
+  it.each([
+    ['pytest.ini', '[pytest]\ntestpaths = checks\n', 'test', ['-m', 'pytest', '-q']],
+    ['tox.ini', '[pytest]\ntestpaths = checks\n', 'test', ['-m', 'pytest', '-q']],
+    ['pyproject.toml', '[tool.pytest.ini_options]\n', 'test', ['-m', 'pytest', '-q']],
+    ['pyproject.toml', '[build-system]\nrequires = ["hatchling"]\n', 'build', ['-m', 'build', '--wheel']],
+    ['pyproject.toml', '[tool.ruff]\n', 'lint', ['-m', 'ruff', 'check', 'checks']],
+  ] as const)('replaces a command inferred from %s with the brief declaration (%s, %s)', async (file, text, role, args) => {
+    const evidencePath = `${root}/task.md#validation.commands.${role}`;
+    const declaration = { role, command: '/opt/project-venv/bin/python', args: [...args], evidencePath };
+    const runner = vi.fn(() => ({ exitCode: 0 }));
+    const baseline = await runProjectValidationBaseline(root, {
+      fs: memoryFs({ [`${root}/${file}`]: text }),
+      runCommand: runner,
+      declaredCommands: [declaration],
+    });
+
+    expect(baseline.discovery).toMatchObject({
+      state: 'partial',
+      missingRoles: ['build', 'test', 'lint'].filter(candidate => candidate !== role),
+      commands: [{ ...declaration, provenance: { source: 'brief', evidencePath } }],
+    });
+    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      ...declaration, cwd: root, provenance: { source: 'brief', evidencePath },
+    }));
+    expect(baseline.results).toContainEqual(expect.objectContaining({ role, state: 'passed' }));
+  });
+
+  it.each([undefined, []])('keeps the inferred pytest.ini command without a brief declaration (%j)', async declaredCommands => {
+    const evidencePath = `${root}/pytest.ini`;
+    const runner = vi.fn(() => ({ exitCode: 0 }));
+    const baseline = await runProjectValidationBaseline(root, {
+      fs: memoryFs({ [evidencePath]: '[pytest]\ntestpaths = checks\n' }),
+      runCommand: runner,
+      declaredCommands,
+    });
+
+    expect(baseline.discovery).toMatchObject({
+      state: 'partial', missingRoles: ['build', 'lint'],
+      commands: [{ role: 'test', command: 'python', args: ['-m', 'pytest'], evidencePath }],
+    });
+    expect(baseline.discovery.commands[0].provenance).toBeUndefined();
+    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      role: 'test', command: 'python', args: ['-m', 'pytest'], evidencePath, cwd: root,
+    }));
+  });
+
   it('infers named Makefile targets without executing unrelated targets', async () => {
     const makefilePath = `${root}/Makefile`;
     const fs = memoryFs({
@@ -141,7 +283,7 @@ describe('configuration-driven project validation baseline', () => {
     ]);
   });
 
-  it('marks a zero-command baseline unknown and every role unresolved', async () => {
+  it('records every role of a zero-command discovery as not configured when nothing is declared', async () => {
     const runner = vi.fn(() => ({ exitCode: 0 }));
 
     const baseline = await runProjectValidationBaseline(root, { fs: memoryFs({}), runCommand: runner });
@@ -153,8 +295,8 @@ describe('configuration-driven project validation baseline', () => {
       reason: expect.stringContaining('No recognized'),
     });
     expect(runner).not.toHaveBeenCalled();
-    expect(baseline.results.every((result) => result.state === 'unresolved')).toBe(true);
-    expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'baseline_unresolved')).toBe(true);
+    expect(baseline.results.every((result) => result.state === 'not_configured')).toBe(true);
+    expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'not_configured')).toBe(true);
   });
 
   it('uses a brief declaration as an argv-literal fallback when project discovery is unknown', async () => {
@@ -257,18 +399,23 @@ describe('configuration-driven project validation baseline', () => {
     ]);
   });
 
-  it('refuses conflicting project and brief declarations without executing either command', async () => {
-    const packagePath = `${root}/package.json`;
+  it.each([
+    ['package.json', JSON.stringify({ scripts: { test: 'vitest run' } }), ['npm', 'run', 'test']],
+    ['Makefile', 'test:\n\tpython checks/runtests.py\n', ['make', 'test']],
+    ['tox.ini', '[testenv]\ncommands = python checks/runtests.py\n', ['tox']],
+  ])('refuses conflicting %s and brief declarations even when the brief matches a guess', async (file, text, projectArgv) => {
+    const projectPath = `${root}/${file}`;
     const evidencePath = `${root}/task.md#validation.commands.test`;
     const runner = vi.fn(() => ({ exitCode: 0 }));
     const baseline = await runProjectValidationBaseline(root, {
       fs: memoryFs({
-        [packagePath]: JSON.stringify({ scripts: { test: 'vitest run' } }),
+        [projectPath]: text,
         [`${root}/package-lock.json`]: '{}',
+        [`${root}/pytest.ini`]: '[pytest]\ntestpaths = checks\n',
       }),
       runCommand: runner,
       declaredCommands: [{
-        role: 'test', command: '/opt/project-venv/bin/python', args: ['-m', 'pytest'], evidencePath,
+        role: 'test', command: 'python', args: ['-m', 'pytest'], evidencePath,
       }],
     });
 
@@ -277,11 +424,11 @@ describe('configuration-driven project validation baseline', () => {
       state: 'unknown',
       commands: [],
       missingRoles: ['build', 'test', 'lint'],
-      reason: expect.stringContaining(packagePath),
+      reason: expect.stringContaining(projectPath),
     });
     expect(baseline.discovery.reason).toContain(evidencePath);
-    expect(baseline.discovery.reason).toContain('["npm","run","test"]');
-    expect(baseline.discovery.reason).toContain('["/opt/project-venv/bin/python","-m","pytest"]');
+    expect(baseline.discovery.reason).toContain(JSON.stringify(projectArgv));
+    expect(baseline.discovery.reason).toContain('["python","-m","pytest"]');
     expect(baseline.results.every((result) => result.state === 'unresolved')).toBe(true);
   });
 
@@ -359,6 +506,84 @@ describe('configuration-driven project validation baseline', () => {
       commands: [],
       reason: expect.stringContaining('disagree'),
     });
+  });
+
+  it('treats a role unconfigured in both baseline and current as a pass, not unresolved', () => {
+    const unconfigured = (role: 'build' | 'lint'): ValidationCommandResult => ({
+      role, state: 'not_configured', durationMs: 0, output: '',
+      failureIdentifiers: [], failureIdentity: 'none',
+    });
+    const red: ValidationCommandResult = {
+      role: 'test', state: 'failed', exitCode: 2, durationMs: 1, output: '',
+      failureIdentifiers: ['tests/old.py::t'], failureIdentity: 'known', failureCount: 1,
+    };
+    const baseline = {
+      version: 1,
+      projectDir: root,
+      discovery: { state: 'configured', configPath: `${root}/Makefile`, commands: [], missingRoles: ['build', 'lint'] },
+      results: [unconfigured('build'), red, unconfigured('lint')],
+      gateCriteria: [],
+    } satisfies ProjectValidationBaseline;
+
+    const unchanged = evaluateValidationDelta(baseline, [unconfigured('build'), red, unconfigured('lint')]);
+    expect(unchanged.map((entry) => entry.state)).toEqual(['pass', 'pass', 'pass']);
+
+    const launchError = evaluateValidationDelta(baseline, [{ ...unconfigured('build'), state: 'launch_error' }, red, unconfigured('lint')]);
+    expect(launchError.find((entry) => entry.role === 'build')?.state).toBe('unresolved');
+  });
+
+  it('passes absent roles, refuses receipt reuse after peer writes, and keeps command launch errors unresolved', async () => {
+    const roles = ['build', 'test', 'lint'] as const;
+    const absent = (role: typeof roles[number]): ValidationCommandResult => ({
+      role, state: 'not_configured', durationMs: 0, output: '',
+      failureIdentifiers: [], failureIdentity: 'none',
+    });
+    const baseline = {
+      version: 1,
+      projectDir: root,
+      discovery: { state: 'partial', configPath: 'fixture', commands: [], missingRoles: [...roles] },
+      results: roles.map(absent),
+      gateCriteria: [],
+    } satisfies ProjectValidationBaseline;
+    expect(evaluateValidationDelta(baseline, roles.map(absent)).map((entry) => entry.state))
+      .toEqual(['pass', 'pass', 'pass']);
+    const projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-validation-control-'));
+    try {
+      writeFileSync(join(projectDir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': {} } }));
+      for (const role of roles) {
+        const configure = (script: string) => writeFileSync(
+          join(projectDir, 'package.json'),
+          JSON.stringify({ scripts: { [role]: script } }),
+        );
+        configure(`${JSON.stringify(process.execPath)} -e "process.exit(0)"`);
+        const configuredBaseline = await runProjectValidationBaseline(projectDir);
+        const { runId, runDirPath } = createRun(projectDir, 'peer-validation', 'name: peer-validation\nstages: []\n', ['review', 'peer']);
+        writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline: configuredBaseline }));
+        const attempt = { index: 1, startedAt: 'fixture', writes: [], writeAttribution: 'structured' as const };
+        writeStageStatus(projectDir, runId, 'review', { status: 'running', retries: 0, attempts: [{ ...attempt, status: 'running' }] });
+        await recordGateValidationDelta(projectDir, runId, 'review', { runCommand: () => ({ exitCode: 0 }) });
+        writeStageStatus(projectDir, runId, 'review', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', completedAt: 'fixture-end' }] });
+        for (const writes of [['input.txt'], []]) {
+          writeStageStatus(projectDir, runId, 'peer', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', writes }] });
+          expect(bindReviewedGateValidation(projectDir, runId, 'review', ['review', 'peer'])).toBe(writes.length === 0);
+        }
+        configure(JSON.stringify(join(projectDir, `missing-${role}`)));
+        const current = await runProjectValidationBaseline(projectDir);
+        for (const discovery of [configuredBaseline.discovery, current.discovery]) {
+          expect(discovery.commands).toEqual([
+            expect.objectContaining({ role, command: 'npm', args: ['run', role] }),
+          ]);
+        }
+        expect(configuredBaseline.results.find((result) => result.role === role))
+          .toMatchObject({ state: 'passed', exitCode: 0 });
+        expect(current.results.find((result) => result.role === role))
+          .toMatchObject({ state: 'launch_error', exitCode: 127 });
+        expect(evaluateValidationDelta(configuredBaseline, current.results).map((entry) => entry.state))
+          .toEqual(roles.map((candidate) => candidate === role ? 'unresolved' : 'pass'));
+      }
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 
   it('evaluates green and known-red baselines as deltas in both directions', () => {

@@ -1,0 +1,98 @@
+{
+  "stages": [
+    {
+      "id": "implement",
+      "role": "coder",
+      "scope": [
+        "results/report.md",
+        "results/parity.json",
+        "results/benchmark.json"
+      ],
+      "task": "Create and verify the three requested outputs.",
+      "artifact_contract": {
+        "version": 1,
+        "produces": [
+          {
+            "root": "project",
+            "path": "results/report.md",
+            "id": "report",
+            "kind": "file",
+            "nonempty": true
+          },
+          {
+            "root": "project",
+            "path": "results/parity.json",
+            "id": "parity",
+            "kind": "file",
+            "nonempty": true
+          },
+          {
+            "root": "project",
+            "path": "results/benchmark.json",
+            "id": "benchmark",
+            "kind": "file",
+            "nonempty": true
+          }
+        ],
+        "reads": []
+      }
+    },
+    {
+      "id": "review",
+      "role": "qa",
+      "scope": [],
+      "depends_on": [
+        "implement"
+      ],
+      "is_gate": true,
+      "task": "Independently review every assigned report criterion.",
+      "artifact_contract": {
+        "version": 1,
+        "produces": [
+          {
+            "root": "run",
+            "path": "verdict_review.json",
+            "id": "verdict",
+            "kind": "file",
+            "nonempty": true
+          }
+        ],
+        "reads": [
+          {
+            "root": "project",
+            "path": "results/report.md",
+            "id": "report",
+            "kind": "file",
+            "source": {
+              "kind": "stage",
+              "stage": "implement",
+              "artifact": "report"
+            }
+          },
+          {
+            "root": "project",
+            "path": "results/parity.json",
+            "id": "parity",
+            "kind": "file",
+            "source": {
+              "kind": "stage",
+              "stage": "implement",
+              "artifact": "parity"
+            }
+          },
+          {
+            "root": "project",
+            "path": "results/benchmark.json",
+            "id": "benchmark",
+            "kind": "file",
+            "source": {
+              "kind": "stage",
+              "stage": "implement",
+              "artifact": "benchmark"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

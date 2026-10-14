@@ -1,12 +1,6 @@
-import {
-  closeSync,
-  existsSync,
-  openSync,
-  readFileSync,
-  readSync,
-  readdirSync,
-  statSync,
-} from 'node:fs';
+import { optionValue } from './source_services/cli-inputs.js';
+import { closeSync, openSync } from './engine-fs.js';
+import { existsSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { listOperationalRunIdsFromIndex } from './run-index.js';
 import { isRunningRunStatus } from './lifecycle-status.js';
@@ -71,21 +65,12 @@ export interface OperationalEventReason {
   detail: string;
 }
 
-export interface OperationalWriterLeaseWait {
-  stageId: string;
-  blockedByStageId?: string;
-  leasePartition?: string;
-  waitStartedAt?: string;
-  waitedMs?: number;
-}
-
 export interface OperationalStageExecution {
   id: string;
   status: string;
   execution: number;
   startedAt?: string;
   elapsedMs?: number;
-  writerLeaseWait?: OperationalWriterLeaseWait;
 }
 
 export interface OperationalPendingScope {
@@ -102,7 +87,6 @@ export interface OperationalProjection {
   runStatus: string;
   runElapsedMs?: number;
   activeStages: OperationalStageExecution[];
-  writerLeaseWaits: OperationalWriterLeaseWait[];
   latestReason?: OperationalEventReason;
   lastRejection?: OperationalEventReason;
   lastGuidance?: OperationalEventReason;
@@ -207,31 +191,6 @@ function reasonFromEvent(event: EventLike): OperationalEventReason | undefined {
   };
 }
 
-function activeWriterLeaseWaits(events: readonly EventLike[], nowMs: number): OperationalWriterLeaseWait[] {
-  const active = new Map<string, OperationalWriterLeaseWait>();
-  for (const event of events) {
-    const stageId = eventStage(event);
-    if (!stageId) continue;
-    const type = eventType(event);
-    if (type === 'writer_lease_wait_started') {
-      const blockedByStageId = text(event.blockedByStageId);
-      const leasePartition = text(event.leasePartition);
-      const waitStartedAt = text(event.waitStartedAt) ?? eventTimestamp(event);
-      const startedMs = timestampMs(waitStartedAt);
-      active.set(stageId, {
-        stageId,
-        ...(blockedByStageId ? { blockedByStageId } : {}),
-        ...(leasePartition ? { leasePartition } : {}),
-        ...(waitStartedAt ? { waitStartedAt } : {}),
-        ...(startedMs === undefined ? {} : { waitedMs: Math.max(0, nowMs - startedMs) }),
-      });
-    } else if (type === 'writer_lease_wait_finished') {
-      active.delete(stageId);
-    }
-  }
-  return [...active.values()];
-}
-
 /** Render reason provenance so historical failures cannot masquerade as live state. */
 export function formatOperationalReason(reason: OperationalEventReason): string {
   const provenance = [
@@ -328,8 +287,6 @@ export function buildOperationalProjection(
 ): OperationalProjection {
   const nowMs = options.nowMs ?? Date.now();
   const stageEntries = objectEntries(state?.stages);
-  const writerLeaseWaits = activeWriterLeaseWaits(events, nowMs);
-  const writerLeaseWaitByStage = new Map(writerLeaseWaits.map((wait) => [wait.stageId, wait]));
   const activeStages = stageEntries
     .filter(([, stage]) => text(stage.status) === 'running')
     .map(([id, stage]): OperationalStageExecution => {
@@ -341,7 +298,6 @@ export function buildOperationalProjection(
         execution: executionNumber(stage),
         ...(startedAt ? { startedAt } : {}),
         ...(elapsedMs === undefined ? {} : { elapsedMs }),
-        ...(writerLeaseWaitByStage.has(id) ? { writerLeaseWait: writerLeaseWaitByStage.get(id) } : {}),
       };
     });
 
@@ -390,7 +346,6 @@ export function buildOperationalProjection(
     runStatus,
     ...(runElapsedMs === undefined ? {} : { runElapsedMs }),
     activeStages,
-    writerLeaseWaits,
     ...(latestReason ? { latestReason } : {}),
     ...(lastRejection ? { lastRejection } : {}),
     ...(lastGuidance ? { lastGuidance } : {}),
@@ -505,18 +460,6 @@ export interface CliEventsDependencies {
   sleep?: (milliseconds: number) => Promise<void>;
   followPollMs?: number;
   maxFollowPolls?: number;
-}
-
-function optionValue(args: string[], index: number, name: string): { value: string; consumed: number } {
-  const current = args[index];
-  if (current.startsWith(`${name}=`)) {
-    const value = current.slice(name.length + 1);
-    if (!value) throw new Error(`${name} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${name} requires a value`);
-  return { value, consumed: 2 };
 }
 
 function safeRunId(value: string): boolean {

@@ -8,18 +8,17 @@ import {
   type TaskRegistry,
 } from './task-registry.js';
 import {
-  atomicWrite,
   isPendingStageStatus,
   isRunningStageStatus,
   isTerminalRunStatus,
-  requireKnownRunStatus,
   resolveRunStatus,
   RUN_STATUS,
   runsRoot,
   STAGE_STATUS,
-  updateRunState,
+  updateOperationalRunStateAtPath,
   type StoreState,
 } from './store.js';
+import { requireSafeRunId, resolveRunIdentity } from './cancellation-policy.js';
 import {
   invalidateRunLockCache,
   isLiveFlowcrewSchedulerForRun,
@@ -29,6 +28,14 @@ import {
   schedulerProcessIsAliveForCancellation,
 } from './run-lock.js';
 import type { SupervisorBackend, UnitStatus } from './supervision.js';
+import { checkpointCommandFateKnown, checkpointConsumers } from './restart-recovery.js';
+
+/** Blocked recovery ends the workflow without asserting consumer death. An
+ * explicit interrupt still closes control state and attempts owned cleanup. */
+function preservesTerminalRun(state: StoreState): boolean {
+  return isTerminalRunStatus(state.status)
+    && !(state.status === RUN_STATUS.FAILED && state.recovery?.kind === 'blocked');
+}
 
 export interface RunCancellationOptions {
   registry: TaskRegistry;
@@ -45,8 +52,6 @@ export interface RunCancellationOptions {
   canSignalScheduler?: (pid: number, runId: string, runPath: string) => boolean;
   signalScheduler?: (pid: number, signal: NodeJS.Signals) => void;
   isLaunchInFlight?: (taskId: number) => boolean;
-  maxUnobservableObservations?: number;
-  maxUnobservableDurationMs?: number;
 }
 
 export interface CancellationObservation {
@@ -56,6 +61,8 @@ export interface CancellationObservation {
   schedulerPid: number | null;
   schedulerAlive: boolean;
   launchInFlight: boolean;
+  activeCommandPids?: number[];
+  commandFateKnown?: boolean;
 }
 
 export interface CancellationResult {
@@ -81,18 +88,6 @@ interface CancellationTarget {
   run?: RunTarget;
   runBinding?: string;
   unit?: string;
-}
-
-const DEFAULT_MAX_UNOBSERVABLE_OBSERVATIONS = 10;
-const DEFAULT_MAX_UNOBSERVABLE_DURATION_MS = 5 * 60_000;
-const CANCELLATION_OBSERVATION_FILE = 'cancellation-observation.json';
-
-interface CancellationObservationBudget {
-  version: 1;
-  count: number;
-  firstObservedAt: string;
-  lastReason: string;
-  limitedAt?: string;
 }
 
 export function unitIsStopped(status: UnitStatus): boolean {
@@ -150,28 +145,8 @@ function describeUnitStatus(status: UnitStatus): string {
   }
 }
 
-export class CancellationObservationLimitError extends Error {
-  readonly code = 'FLOWCREW_CANCELLATION_OBSERVATION_LIMIT';
-  readonly unit: string | null;
-  readonly observations: number;
-
-  constructor(unit: string | null, observations: number, reason: string, action: string) {
-    super(
-      `Cancellation observation limit reached for ${unit ?? 'detached run'} after ${observations} `
-      + `consecutive nonterminal checks (${reason}). Automatic retries stopped; ${action}`,
-    );
-    this.name = 'CancellationObservationLimitError';
-    this.unit = unit;
-    this.observations = observations;
-  }
-}
-
 function defaultDelay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
-}
-
-function safeRunId(runId: string): boolean {
-  return runId.length > 0 && !runId.includes('..') && !runId.includes('/') && !runId.includes('\\');
 }
 
 function mutateCancelledRun(state: StoreState, completedAt: string): void {
@@ -186,8 +161,8 @@ function mutateCancelledRun(state: StoreState, completedAt: string): void {
 
 /**
  * One control-plane implementation for every external run cancellation.
- * Terminal records are written only after both the unit and scheduler PID are
- * confirmed stopped. Repeated callers join the same in-flight operation.
+ * The durable operator decision fences publication before bounded owned cleanup.
+ * Observations report execution evidence; they cannot veto that decision.
  */
 export class RunCancellationCoordinator {
   private readonly registry: TaskRegistry;
@@ -203,8 +178,6 @@ export class RunCancellationCoordinator {
   private readonly canSignalScheduler: (pid: number, runId: string, runPath: string) => boolean;
   private readonly signalScheduler: (pid: number, signal: NodeJS.Signals) => void;
   private readonly isLaunchInFlight: (taskId: number) => boolean;
-  private readonly maxUnobservableObservations: number;
-  private readonly maxUnobservableDurationMs: number;
   private readonly inFlight = new Map<string, Promise<CancellationResult>>();
 
   constructor(options: RunCancellationOptions) {
@@ -219,29 +192,22 @@ export class RunCancellationCoordinator {
     this.signalGraceMs = Math.max(0, options.signalGraceMs ?? 100);
     // Liveness and authority to signal are deliberately separate. An unreadable
     // start token makes the process unbound, but EPERM/token failure is not death
-    // evidence and must not open the schedulerAlive cancellation barrier.
+    // evidence and must remain visible in the cancellation observation.
     this.isSchedulerPidAlive = options.isSchedulerPidAlive ?? schedulerProcessIsAliveForCancellation;
     this.canSignalScheduler = options.canSignalScheduler ?? isLiveFlowcrewSchedulerForRun;
     this.signalScheduler = options.signalScheduler ?? ((pid, signal) => process.kill(pid, signal));
     this.isLaunchInFlight = options.isLaunchInFlight ?? (() => false);
-    this.maxUnobservableObservations = Math.max(
-      1,
-      options.maxUnobservableObservations ?? DEFAULT_MAX_UNOBSERVABLE_OBSERVATIONS,
-    );
-    this.maxUnobservableDurationMs = Math.max(
-      1,
-      options.maxUnobservableDurationMs ?? DEFAULT_MAX_UNOBSERVABLE_DURATION_MS,
-    );
   }
 
   cancelTask(taskId: number): Promise<CancellationResult> {
     const task = this.registry.get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
-    return this.coordinate({ task, run: this.readRunTarget(task.run_id), runBinding: task.run_id });
+    const run = this.readRunTarget(task.run_id);
+    return this.coordinate({ task, run, runBinding: run?.binding ?? task.run_id });
   }
 
   cancelRun(runId: string, unit?: string): Promise<CancellationResult> {
-    if (!safeRunId(runId)) throw new Error(`Invalid run id: ${runId}`);
+    requireSafeRunId(runId);
     const run = this.readRunTarget(runId);
     if (!run) throw new Error(`Run not found: ${runId}`);
     const task = this.registry.list({ status: TASK_LIST_STATUS.ALL })
@@ -256,7 +222,7 @@ export class RunCancellationCoordinator {
   /** Read-only convergence check used after a client loses the mutating RPC
    * response. It never sends another stop signal. */
   async statusRun(runId: string, unit?: string): Promise<CancellationResult> {
-    if (!safeRunId(runId)) throw new Error(`Invalid run id: ${runId}`);
+    requireSafeRunId(runId);
     const run = this.readRunTarget(runId);
     if (!run) throw new Error(`Run not found: ${runId}`);
     const task = this.registry.list({ status: TASK_LIST_STATUS.ALL })
@@ -265,8 +231,8 @@ export class RunCancellationCoordinator {
     const target: CancellationTarget = { task, run, runBinding: run.binding, unit };
     const observation = await this.observe(target);
     const current = this.readRunTarget(run.binding) ?? run;
-    const runAlreadyTerminal = isTerminalRunStatus(current.state.status);
-    if (runAlreadyTerminal) {
+    const runAlreadyTerminal = preservesTerminalRun(current.state);
+    if (runAlreadyTerminal && (current.state.status === RUN_STATUS.STOPPED || this.isStopped(observation))) {
       return {
         ok: true,
         status: current.state.status === RUN_STATUS.STOPPED ? 'cancelled' : 'already-terminal',
@@ -274,21 +240,7 @@ export class RunCancellationCoordinator {
         ...(task ? { taskId: task.id } : {}),
         observation,
         preservedRunStatus: current.state.status,
-        message: 'Execution was already terminal; terminal state was preserved.',
-      };
-    }
-    if (observation.unitState.kind === 'terminal-unknown') {
-      return { ok: false, status: 'outcome-unknown', runId, ...(task ? { taskId: task.id } : {}), observation, message: this.observationMessage('cancellation outcome remains unknown', observation) };
-    }
-    if (this.isStopped(observation) && isTerminalRunStatus(current.state.status)) {
-      return {
-        ok: true,
-        status: current.state.status === RUN_STATUS.STOPPED ? 'cancelled' : 'already-terminal',
-        runId,
-        ...(task ? { taskId: task.id } : {}),
-        observation,
-        preservedRunStatus: current.state.status,
-        message: this.observationMessage('cancellation convergence confirmed', observation),
+        message: this.observationMessage('Terminal control state was preserved', observation),
       };
     }
     return { ok: false, status: 'cancelling', runId, ...(task ? { taskId: task.id } : {}), observation, message: this.observationMessage('cancellation has not converged', observation) };
@@ -302,26 +254,25 @@ export class RunCancellationCoordinator {
     const key = boundRunId ? `run:${boundRunId}` : `task:${target.task!.id}`;
     const existing = this.inFlight.get(key);
     if (existing) return existing;
-    const operation = this.cancelAndConfirm(target).finally(() => {
+    const operation = this.cancelAndCleanUp(target).finally(() => {
       if (this.inFlight.get(key) === operation) this.inFlight.delete(key);
     });
     this.inFlight.set(key, operation);
     return operation;
   }
 
-  private async cancelAndConfirm(initial: CancellationTarget): Promise<CancellationResult> {
+  private async cancelAndCleanUp(initial: CancellationTarget): Promise<CancellationResult> {
     const task = initial.task ? (this.registry.get(initial.task.id) ?? initial.task) : undefined;
     const runBinding = initial.runBinding ?? initial.run?.binding ?? task?.run_id;
     const run = runBinding
       ? (this.readRunTarget(runBinding) ?? initial.run)
       : initial.run;
     const target: CancellationTarget = { task, run, runBinding, unit: initial.unit };
-    this.throwIfObservationLimitReached(target);
     const targetRunId = run?.runId ?? (task ? this.taskRunId(task) : undefined);
     const before = await this.observe(target);
     const taskAlreadyTerminal = task ? !isActiveTaskStatus(task.status) : true;
     const runAlreadyTerminal = run
-      ? isTerminalRunStatus(run.state.status)
+      ? preservesTerminalRun(run.state)
       : !runBinding;
     const lifecycleAlreadyTerminal = run
       ? runAlreadyTerminal
@@ -333,11 +284,13 @@ export class RunCancellationCoordinator {
     const preservedTaskResultStatus = task?.status === TASK_STATUS.CANCELLED
       ? 'cancelled' as const
       : 'already-terminal' as const;
-    // The run/task lifecycle is the authority for an already-finished
-    // execution. A missing shim exit record describes an observation race; it
-    // must not replace a durable terminal outcome with "outcome unknown".
-    if (lifecycleAlreadyTerminal) {
-      this.clearObservationBudget(target);
+    // An archived run verdict does not settle queued work or an unfinished
+    // cancellation. Those active task intents must close and clear the queue,
+    // even when the run itself remains terminal.
+    const taskNeedsSettlement = task && !taskAlreadyTerminal;
+    // A continuation can claim an owner while its archived verdict is still
+    // terminal. Attempt cleanup before preserving that verdict.
+    if (lifecycleAlreadyTerminal && this.isStopped(before) && !taskNeedsSettlement) {
       return {
         ok: true,
         status: preservedTaskResultStatus,
@@ -348,28 +301,12 @@ export class RunCancellationCoordinator {
         message: 'Execution was already terminal; terminal state was preserved.',
       };
     }
-    if (before.unitState.kind === 'terminal-unknown') {
-      return this.outcomeUnknown(target, before);
-    }
-    if (this.isStopped(before) && taskAlreadyTerminal && runAlreadyTerminal) {
-      this.clearObservationBudget(target);
-      return {
-        ok: true,
-        status: task?.status === TASK_STATUS.CANCELLED ? 'cancelled' : 'already-terminal',
-        ...(task ? { taskId: task.id } : {}),
-        ...(targetRunId ? { runId: targetRunId } : {}),
-        ...(run ? { preservedRunStatus: run.state.status } : {}),
-        observation: before,
-        message: 'Execution was already stopped; terminal state was preserved.',
-      };
-    }
-
     const requestedAt = this.now().toISOString();
     if (task && !preserveTerminalTask) {
       this.registry.update(task.id, {
         status: TASK_STATUS.CANCELLING,
         completed_at: undefined,
-        notes: 'cancellation requested; waiting for unit and scheduler process to stop',
+        notes: 'cancellation requested; attempting owned process cleanup',
         not_before: undefined,
         defer_reason: undefined,
         defer_kind: undefined,
@@ -382,21 +319,32 @@ export class RunCancellationCoordinator {
     }
 
     let stopError: string | undefined;
-    const targetUnit = task?.systemd_unit ?? target.unit;
+    const recordRunDecision = (current: RunTarget | undefined): string | undefined => {
+      if (!current) return undefined;
+      try { return this.updateRun(current, requestedAt); }
+      catch (error) {
+        if (!task) throw error; // An unregistered run has no alternate durable decision record.
+        const detail = error instanceof Error ? error.message : String(error);
+        stopError = stopError ? `${stopError}; run settlement: ${detail}` : `run settlement: ${detail}`;
+        return undefined;
+      }
+    };
+    const preservedRunStatus = recordRunDecision(run);
+    const targetUnit = (task ? this.registry.get(task.id)?.systemd_unit : undefined)
+      ?? task?.systemd_unit ?? target.unit;
     let unitStopFailed = false;
     let stopAttemptSettled = true;
     let stopAttempts = 0;
-    const dispatchUnitStop = (): Promise<void> => {
-      if (!targetUnit) return Promise.resolve();
+    const dispatchUnitStop = async (): Promise<void> => {
+      if (!targetUnit) return;
       stopAttempts += 1;
       stopAttemptSettled = false;
-      return this.units.stopUnit(targetUnit)
-        .catch((error) => {
-          unitStopFailed = true;
-          const detail = error instanceof Error ? error.message : String(error);
-          stopError = stopError ? `${stopError}; unit stop: ${detail}` : `unit stop: ${detail}`;
-        })
-        .finally(() => { stopAttemptSettled = true; });
+      try { await this.units.stopUnit(targetUnit); }
+      catch (error) {
+        unitStopFailed = true;
+        const detail = error instanceof Error ? error.message : String(error);
+        stopError = stopError ? `${stopError}; unit stop: ${detail}` : `unit stop: ${detail}`;
+      } finally { stopAttemptSettled = true; }
     };
     if (targetUnit) {
       const stopAttempt = dispatchUnitStop();
@@ -408,74 +356,63 @@ export class RunCancellationCoordinator {
     }
 
     const handledPids = new Set<number>();
-    const signalLiveScheduler = (current: CancellationObservation): void => {
-      if (
-        !current.schedulerAlive
-        || current.schedulerPid === null
-        || !targetRunId
-        || handledPids.has(current.schedulerPid)
-      ) return;
-      // systemd owns the graceful stop when a unit is still deactivating. The
-      // PID fallback is for a failed unit stop, an escaped scheduler after the
-      // unit stopped, or a detached run with no unit at all.
-      if (targetUnit && !unitStopFailed && unitOwnsGracefulStop(current.unitState)) return;
-      handledPids.add(current.schedulerPid);
-      const latestRun = runBinding ? this.readRunTarget(runBinding) : run;
-      if (
-        latestRun
-        && this.canSignalScheduler(current.schedulerPid, targetRunId, latestRun.runPath)
-      ) {
-        try {
-          this.signalScheduler(current.schedulerPid, 'SIGTERM');
-          if (task) {
-            this.registry.appendTick(task.id, {
-              status: TASK_STATUS.CANCELLING,
-              message: `graceful stop left scheduler pid ${current.schedulerPid} alive; sent SIGTERM fallback`,
-            });
+    const stopOwnedExecution = (current: CancellationObservation): void => {
+      try {
+        // Detached command groups can survive a portable unit's scheduler stop.
+        // Use the same checkpoint proof as recovery, after the controller closes.
+        if (!current.schedulerAlive && unitIsStopped(current.unitState)) {
+          const latest = runBinding ? this.readRunTarget(runBinding) : run;
+          const checkpoint = latest?.state.engineCheckpoint;
+          if (checkpoint && latest && checkpoint.runId === latest.runId
+              && typeof checkpoint.projectDir === 'string' && resolve(checkpoint.projectDir) === resolve(latest.projectDir)) {
+            checkpointConsumers(checkpoint, { retire: true });
           }
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          stopError = stopError ? `${stopError}; SIGTERM: ${detail}` : `SIGTERM: ${detail}`;
         }
-      } else {
-        const detail = `scheduler pid ${current.schedulerPid} is live but its command is not bound to run ${targetRunId}; refusing to signal it`;
-        stopError = stopError ? `${stopError}; ${detail}` : detail;
+        if (
+          !current.schedulerAlive
+          || current.schedulerPid === null
+          || !targetRunId
+          || handledPids.has(current.schedulerPid)
+        ) return;
+        // systemd owns the graceful stop when a unit is still deactivating. The
+        // PID fallback is for a failed unit stop, an escaped scheduler after the
+        // unit stopped, or a detached run with no unit at all.
+        if (targetUnit && !unitStopFailed && unitOwnsGracefulStop(current.unitState)) return;
+        handledPids.add(current.schedulerPid);
+        const latestRun = runBinding ? this.readRunTarget(runBinding) : run;
+        if (
+          latestRun
+          && this.canSignalScheduler(current.schedulerPid, targetRunId, latestRun.runPath)
+        ) {
+          try {
+            this.signalScheduler(current.schedulerPid, 'SIGTERM');
+            if (task) {
+              this.registry.appendTick(task.id, {
+                status: TASK_STATUS.CANCELLING,
+                message: `graceful stop left scheduler pid ${current.schedulerPid} alive; sent SIGTERM fallback`,
+              });
+            }
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            stopError = stopError ? `${stopError}; SIGTERM: ${detail}` : `SIGTERM: ${detail}`;
+          }
+        } else {
+          const detail = `scheduler pid ${current.schedulerPid} is live but its command is not bound to run ${targetRunId}; refusing to signal it`;
+          stopError = stopError ? `${stopError}; ${detail}` : detail;
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        stopError = stopError ? `${stopError}; owned cleanup: ${detail}` : `owned cleanup: ${detail}`;
       }
     };
 
     let observation = await this.observe(target);
-    if (observation.unitState.kind === 'terminal-unknown') {
-      return this.outcomeUnknown(target, observation);
-    }
-    signalLiveScheduler(observation);
-    const stoppedAfterRequest = (current: CancellationObservation): boolean => {
-      if (this.isStopped(current)) return true;
-      // A registered launch can be cancelled after its unit was created but
-      // before the child initialized run.json. Once the graceful unit stop has
-      // settled, the unit is confirmed stopped, and the orchestrator launch is
-      // no longer in flight, that absent run cannot later grow a scheduler.
-      return Boolean(
-        task
-        && runBinding
-        && targetUnit
-        && stopAttempts > 0
-        && stopAttemptSettled
-        && !unitStopFailed
-        && !this.isLaunchInFlight(task.id)
-        && !current.runReadable
-        && !current.schedulerAlive
-        && unitIsStopped(current.unitState)
-      );
-    };
-
+    stopOwnedExecution(observation);
     const deadline = this.clockMs() + this.timeoutMs;
-    while (!stoppedAfterRequest(observation) && this.clockMs() < deadline) {
+    while (!this.isStopped(observation) && this.clockMs() < deadline) {
       await this.delay(Math.min(this.pollMs, Math.max(1, deadline - this.clockMs())));
       observation = await this.observe(target);
-      if (observation.unitState.kind === 'terminal-unknown') {
-        return this.outcomeUnknown(target, observation);
-      }
-      signalLiveScheduler(observation);
+      stopOwnedExecution(observation);
       // The first stop can race a unit launch that was already in flight. Once
       // that launch becomes visible, stop the newly-created unit in this same
       // cancellation instead of waiting for the next daemon sweep.
@@ -489,60 +426,29 @@ export class RunCancellationCoordinator {
       }
     }
 
-    if (!stoppedAfterRequest(observation)) {
-      this.recordObservationBudget(target, observation);
-      const message = this.observationMessage(
-        `cancellation still in progress${stopError ? `; ${stopError}` : ''}`,
-        observation,
-      );
-      if (task && !preserveTerminalTask) {
-        this.registry.update(task.id, { status: TASK_STATUS.CANCELLING, notes: message });
-        this.registry.appendTick(task.id, { status: TASK_STATUS.CANCELLING, message });
-      }
-      return {
-        ok: false,
-        status: 'cancelling',
-        ...(task ? { taskId: task.id } : {}),
-        ...(targetRunId ? { runId: targetRunId } : {}),
-        observation,
-        message,
-      };
-    }
-
-    this.clearObservationBudget(target);
     const completedAt = this.now().toISOString();
-    let preservedRunStatus: string | undefined;
-    let unrecognizedRunStatusReason: string | undefined;
     const latestRun = runBinding ? this.readRunTarget(runBinding) : run;
-    if (latestRun) {
-      const latest = this.readRunTarget(latestRun.binding);
-      if (latest) {
-        const statusResolution = resolveRunStatus(latest.state.status);
-        if (statusResolution.kind === 'unknown') {
-          preservedRunStatus = typeof latest.state.status === 'string'
-            ? latest.state.status
-            : statusResolution.display;
-          unrecognizedRunStatusReason = statusResolution.reason;
-        } else if (isTerminalRunStatus(statusResolution.status)) {
-          preservedRunStatus = latest.state.status;
-        } else {
-          this.updateRun(latest, completedAt);
-        }
-      }
-    }
+    // The same decision fences a run that initialized during owned cleanup.
+    recordRunDecision(latestRun);
     const releaseProjectDir = latestRun?.projectDir ?? run?.projectDir ?? task?.projectDir;
     const releaseRunId = latestRun?.runId ?? targetRunId;
-    if (releaseProjectDir && releaseRunId) releaseLaunchIntent(releaseProjectDir, releaseRunId);
-    invalidateRunLockCache();
-    if (!observation.runReadable && observation.launchInFlight) {
-      observation = { ...observation, launchInFlight: false };
+    if (releaseProjectDir && releaseRunId) {
+      try { releaseLaunchIntent(releaseProjectDir, releaseRunId); }
+      catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        stopError = stopError ? `${stopError}; launch cleanup: ${detail}` : `launch cleanup: ${detail}`;
+      }
     }
-
+    invalidateRunLockCache();
+    const message = this.observationMessage(
+      `Cancellation recorded${preservedRunStatus ? '; archived run lifecycle was preserved' : ''}${stopError ? `; ${stopError}` : ''}`,
+      observation,
+    );
     if (task && !preserveTerminalTask) {
       this.registry.update(task.id, {
         status: TASK_STATUS.CANCELLED,
         completed_at: completedAt,
-        notes: 'cancelled by operator after unit and scheduler process stopped',
+        notes: message,
         not_before: undefined,
         defer_reason: undefined,
         defer_kind: undefined,
@@ -550,7 +456,7 @@ export class RunCancellationCoordinator {
       this.registry.appendTick(task.id, {
         ts: completedAt,
         status: TASK_STATUS.CANCELLED,
-        message: this.observationMessage('stop confirmed', observation),
+        message,
       });
     }
 
@@ -560,178 +466,14 @@ export class RunCancellationCoordinator {
       ...(task ? { taskId: task.id } : {}),
       ...(targetRunId ? { runId: targetRunId } : {}),
       observation,
-      message: preserveTerminalTask
-        ? 'Execution was already terminal; stop was confirmed and terminal state was preserved.'
-        : unrecognizedRunStatusReason
-          ? `Cancellation confirmed: unit and scheduler process are stopped; run lifecycle was preserved because ${unrecognizedRunStatusReason}.`
-          : 'Cancellation confirmed: unit and scheduler process are stopped.',
+      message,
       ...(preservedRunStatus ? { preservedRunStatus } : {}),
     };
   }
 
-  private outcomeUnknown(
-    target: CancellationTarget,
-    observation: CancellationObservation,
-  ): CancellationResult {
-    const reason = observation.unitState.kind === 'terminal-unknown'
-      ? observation.unitState.reason
-      : 'supervisor status was lost';
-    const message = `Cancellation outcome unknown (${reason}); one or more processes may still be running. Inspect task status and logs before intervening manually.`;
-    const task = target.task ? (this.registry.get(target.task.id) ?? target.task) : undefined;
-    if (task && isActiveTaskStatus(task.status)) {
-      const observedAt = this.now().toISOString();
-      this.registry.update(task.id, {
-        status: TASK_STATUS.STUCK,
-        completed_at: observedAt,
-        notes: message,
-        not_before: undefined,
-        defer_reason: undefined,
-        defer_kind: undefined,
-      });
-      this.registry.appendTick(task.id, {
-        ts: observedAt,
-        status: TASK_STATUS.STUCK,
-        message,
-      });
-    }
-    this.clearObservationBudget(target);
-    const runId = target.run?.runId
-      ?? (target.runBinding
-        ? (isAbsolute(target.runBinding) ? basename(target.runBinding) : target.runBinding)
-        : undefined);
-    return {
-      ok: false,
-      status: 'outcome-unknown',
-      ...(task ? { taskId: task.id } : {}),
-      ...(runId ? { runId } : {}),
-      observation,
-      message,
-    };
-  }
-
-  private throwIfObservationLimitReached(target: CancellationTarget): void {
-    const budget = this.readObservationBudget(target);
-    if (!budget?.limitedAt) return;
-    throw this.observationLimitError(target, budget);
-  }
-
-  private recordObservationBudget(
-    target: CancellationTarget,
-    observation: CancellationObservation,
-  ): void {
-    // This method is reached only after the full stop predicate failed. Count
-    // every such observation, including persistently active/deactivating units,
-    // so no observation state can create an infinite cancellation retry loop.
-    const previous = this.readObservationBudget(target);
-    const observedAt = this.now().toISOString();
-    const firstObservedAt = previous?.count ? previous.firstObservedAt : observedAt;
-    const count = (previous?.count ?? 0) + 1;
-    const firstMs = Date.parse(firstObservedAt);
-    const observedMs = Date.parse(observedAt);
-    const durationExceeded = Number.isFinite(firstMs)
-      && Number.isFinite(observedMs)
-      && observedMs - firstMs >= this.maxUnobservableDurationMs;
-    const limited = count >= this.maxUnobservableObservations || durationExceeded;
-    const budget: CancellationObservationBudget = {
-      version: 1,
-      count,
-      firstObservedAt,
-      lastReason: describeUnitStatus(observation.unitState),
-      ...(limited ? { limitedAt: observedAt } : {}),
-    };
-    this.writeObservationBudget(target, budget);
-    if (!limited) return;
-
-    const error = this.observationLimitError(target, budget);
-    const latestTask = target.task ? (this.registry.get(target.task.id) ?? target.task) : undefined;
-    if (latestTask && isActiveTaskStatus(latestTask.status)) {
-      this.registry.update(latestTask.id, {
-        status: TASK_STATUS.STUCK,
-        notes: error.message,
-        completed_at: undefined,
-      });
-      this.registry.appendTick(latestTask.id, {
-        ts: observedAt,
-        status: TASK_STATUS.STUCK,
-        message: error.message,
-      });
-    }
-    throw error;
-  }
-
-  private observationLimitError(
-    target: CancellationTarget,
-    budget: CancellationObservationBudget,
-  ): CancellationObservationLimitError {
-    const unit = target.task?.systemd_unit ?? target.unit ?? null;
-    const action = target.task
-      ? `run \`flowcrew task show ${target.task.id}\` and \`flowcrew task tail ${target.task.id}\` before intervening manually.`
-      : `inspect run ${target.run?.runId ?? target.runBinding ?? 'unknown'} before intervening manually.`;
-    return new CancellationObservationLimitError(unit, budget.count, budget.lastReason, action);
-  }
-
-  private readObservationBudget(target: CancellationTarget): CancellationObservationBudget | undefined {
-    if (target.task) {
-      const latest = this.registry.get(target.task.id) ?? target.task;
-      const count = latest.cancellation_unobservable_count;
-      if (!Number.isInteger(count) || (count ?? 0) <= 0) return undefined;
-      return {
-        version: 1,
-        count: count!,
-        firstObservedAt: latest.cancellation_unobservable_first_at ?? latest.created_at,
-        lastReason: latest.cancellation_unobservable_reason ?? 'unknown supervisor observation',
-        ...(latest.cancellation_observation_limit_reached_at
-          ? { limitedAt: latest.cancellation_observation_limit_reached_at }
-          : {}),
-      };
-    }
-    const runPath = target.run?.runPath;
-    if (!runPath) return undefined;
-    try {
-      const parsed = JSON.parse(
-        readFileSync(join(runPath, CANCELLATION_OBSERVATION_FILE), 'utf-8'),
-      ) as Partial<CancellationObservationBudget>;
-      if (parsed.version !== 1 || !Number.isInteger(parsed.count) || (parsed.count ?? 0) <= 0) return undefined;
-      if (typeof parsed.firstObservedAt !== 'string' || typeof parsed.lastReason !== 'string') return undefined;
-      return parsed as CancellationObservationBudget;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private writeObservationBudget(
-    target: CancellationTarget,
-    budget: CancellationObservationBudget | undefined,
-  ): void {
-    if (target.task) {
-      this.registry.update(target.task.id, {
-        cancellation_unobservable_count: budget?.count,
-        cancellation_unobservable_first_at: budget?.firstObservedAt,
-        cancellation_unobservable_reason: budget?.lastReason,
-        cancellation_observation_limit_reached_at: budget?.limitedAt,
-      });
-      return;
-    }
-    const runPath = target.run?.runPath;
-    if (!runPath) return;
-    const record = budget ?? {
-      version: 1 as const,
-      count: 0,
-      firstObservedAt: this.now().toISOString(),
-      lastReason: '',
-    };
-    atomicWrite(
-      join(runPath, CANCELLATION_OBSERVATION_FILE),
-      JSON.stringify(record, null, 2) + '\n',
-    );
-  }
-
-  private clearObservationBudget(target: CancellationTarget): void {
-    if (this.readObservationBudget(target) !== undefined) this.writeObservationBudget(target, undefined);
-  }
-
   private async observe(target: CancellationTarget): Promise<CancellationObservation> {
-    const unit = target.task?.systemd_unit ?? target.unit ?? null;
+    const unit = (target.task ? this.registry.get(target.task.id)?.systemd_unit : undefined)
+      ?? target.task?.systemd_unit ?? target.unit ?? null;
     let unitState: UnitStatus = { kind: 'absent' };
     if (unit) {
       try {
@@ -766,6 +508,12 @@ export class RunCancellationCoordinator {
       : target.task
         ? readLaunchIntent(target.task.projectDir, undefined, this.clockMs())
         : null;
+    let activeCommandPids: number[] = [];
+    let commandFateKnown = false;
+    try {
+      activeCommandPids = checkpointConsumers(latestRun?.state.engineCheckpoint);
+      commandFateKnown = checkpointCommandFateKnown(latestRun?.state);
+    } catch { /* invalid or unreadable ownership is unknown evidence */ }
     return {
       unit,
       unitState,
@@ -778,6 +526,8 @@ export class RunCancellationCoordinator {
         (target.task && this.isLaunchInFlight(target.task.id))
         || (expectedRunId && launchIntent?.ownerRunId === expectedRunId)
       ),
+      ...(activeCommandPids.length ? { activeCommandPids } : {}),
+      ...(!commandFateKnown ? { commandFateKnown: false } : {}),
     };
   }
 
@@ -785,47 +535,50 @@ export class RunCancellationCoordinator {
     return unitIsStopped(observation.unitState)
       && observation.runReadable
       && !observation.schedulerAlive
-      && !observation.launchInFlight;
+      && !observation.launchInFlight
+      && observation.commandFateKnown !== false
+      && !observation.activeCommandPids?.length;
   }
 
   private observationMessage(prefix: string, observation: CancellationObservation): string {
     const pid = observation.schedulerPid === null ? 'none' : String(observation.schedulerPid);
-    return `${prefix}; unit=${describeUnitStatus(observation.unitState)}; run_readable=${observation.runReadable}; scheduler pid=${pid} alive=${observation.schedulerAlive}; launch_in_flight=${observation.launchInFlight}`;
+    return `${prefix}; unit=${describeUnitStatus(observation.unitState)}; run_readable=${observation.runReadable}; scheduler pid=${pid} alive=${observation.schedulerAlive}; launch_in_flight=${observation.launchInFlight}`
+      + (observation.activeCommandPids?.length ? `; active command groups=${observation.activeCommandPids.length}` : '')
+      + (observation.commandFateKnown === false ? '; command fate is unknown' : '');
   }
 
   private taskRunId(task: TaskEntry): string | undefined {
     if (!task.run_id) return undefined;
-    if (!isAbsolute(task.run_id)) return task.run_id;
-    return this.readRunTarget(task.run_id)?.runId ?? basename(task.run_id);
+    return this.readRunTarget(task.run_id)?.runId ?? (isAbsolute(task.run_id) ? basename(task.run_id) : task.run_id);
   }
 
   private readRunTarget(runIdOrPath: string | undefined): RunTarget | undefined {
     if (!runIdOrPath) return undefined;
-    const runPath = isAbsolute(runIdOrPath) ? resolve(runIdOrPath) : join(this.runsDir, runIdOrPath);
     try {
+      if (!isAbsolute(runIdOrPath)) requireSafeRunId(runIdOrPath);
+      const identity = resolveRunIdentity(isAbsolute(runIdOrPath) ? resolve(runIdOrPath) : join(this.runsDir, runIdOrPath), isAbsolute(runIdOrPath) ? undefined : this.runsDir);
+      const runPath = identity.directory;
       const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as StoreState;
       if (!state || typeof state.projectDir !== 'string' || typeof state.status !== 'string') return undefined;
-      const runId = typeof state.runId === 'string' && state.runId ? state.runId : basename(runPath);
-      return { runId, binding: runIdOrPath, runPath, projectDir: state.projectDir, state };
+      const runId = identity.runId;
+      return { runId, binding: runPath, runPath, projectDir: state.projectDir, state };
     } catch {
+      // Unavailable evidence cannot grant run control or veto the task decision.
       return undefined;
     }
   }
 
-  private updateRun(run: RunTarget, completedAt: string): void {
-    const canonicalPath = resolve(join(runsRoot(), run.runId));
-    if (canonicalPath === resolve(run.runPath)) {
-      updateRunState(run.projectDir, run.runId, (state) => {
-        requireKnownRunStatus(state.status, `cancel run ${run.runId}`);
-        if (!isTerminalRunStatus(state.status)) mutateCancelledRun(state, completedAt);
-      });
-      return;
-    }
-    const state = JSON.parse(readFileSync(join(run.runPath, 'run.json'), 'utf-8')) as StoreState;
-    requireKnownRunStatus(state.status, `cancel run ${run.runId}`);
-    if (!isTerminalRunStatus(state.status)) {
-      mutateCancelledRun(state, completedAt);
-      atomicWrite(join(run.runPath, 'run.json'), JSON.stringify(state, null, 2));
-    }
+  private updateRun(run: RunTarget, completedAt: string): string | undefined {
+    let preservedRunStatus: string | undefined;
+    updateOperationalRunStateAtPath(run.runPath, state => {
+      // Archived verdicts remain evidence. The cancellation decision closes
+      // active control state regardless of unknown historical execution fate.
+      if (resolveRunStatus(state.status).kind === 'unknown' || preservesTerminalRun(state)) {
+        preservedRunStatus = state.status;
+      } else {
+        mutateCancelledRun(state, completedAt);
+      }
+    });
+    return preservedRunStatus;
   }
 }

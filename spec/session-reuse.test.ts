@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { captureCodexRollouts, codexRolloutInterval, sumInvocationUsage } from '../src/invocation-usage.js';
 import {
   buildCodexExecArgs,
   parseCodexJsonl,
@@ -9,11 +13,37 @@ import {
   StageConfigSchema,
   type StageConfig,
 } from '../src/scheduler.js';
-import type { StageStatus } from '../src/store.js';
+import type { StageStatus, StoreState } from '../src/store.js';
+import { clearGateContinuationsForStages, sessionResumeForStage, shouldPreserveSession } from '../src/scheduler/sched_admission/sessions.js';
 import { isSessionReuseEnabled } from '../src/config.js';
 import { classifyAdapterFailure } from '../src/worker.js';
 
 const UUID = '123e4567-e89b-42d3-a456-426614174000';
+
+describe('native invocation cost evidence', () => {
+  it('subtracts resumed cumulative counters, retains cached/reasoning counts and rejects resets', () => {
+    const home = mkdtempSync(join(tmpdir(),'fc-usage-'));
+    try {
+      const dir = join(home,'sessions','2026','10','06'); mkdirSync(dir,{recursive:true});
+      const file = join(dir,`rollout-test-${UUID}.jsonl`);
+      const counter = (input: number, output: number, cached: number, reasoning: number) => JSON.stringify({type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{input_tokens:input,output_tokens:output,cached_input_tokens:cached,reasoning_output_tokens:reasoning}}}})+'\n';
+      writeFileSync(file,counter(100,10,50,3));
+      const before = captureCodexRollouts(home);
+      expect(codexRolloutInterval(before,before,UUID)).toEqual({reason:'rollout_interval_unverified'});
+      appendFileSync(file,counter(160,18,90,5));
+      const after = captureCodexRollouts(home);
+      expect(codexRolloutInterval(before,after,UUID).usage).toEqual({tokens_in:60,tokens_out:8,tokens_cached:40,tokens_reasoning:2});
+      appendFileSync(file,counter(1,1,0,0));
+      expect(codexRolloutInterval(after,captureCodexRollouts(home),UUID)).toEqual({reason:'rollout_counter_reset'});
+      expect(sumInvocationUsage([{tokens_in:60,tokens_out:8,tokenUsage:'partial'},{}])).toMatchObject({tokens_in:60,tokens_out:8,tokenUsage:'partial'});
+    } finally { rmSync(home,{recursive:true,force:true}); }
+  });
+  it('does not turn missing retry usage into a complete aggregate', () => {
+    expect(sumInvocationUsage([{}, {tokens_in:20,tokens_out:2,tokenUsage:'known'}])).toEqual({tokens_in:20,tokens_out:2,tokenUsage:'partial'});
+    expect(sumInvocationUsage([{},{}])).toEqual({tokenUsage:'unknown'});
+    expect(sumInvocationUsage([{tokens_in:Number.MAX_SAFE_INTEGER,tokens_out:1},{tokens_in:1,tokens_out:1}])).toEqual({tokens_out:2,tokenUsage:'partial'});
+  });
+});
 
 function stage(id: string, input: Partial<StageConfig> = {}): StageConfig {
   return StageConfigSchema.parse({ id, role: 'coder', scope: [`${id}.ts`], ...input });
@@ -85,8 +115,10 @@ describe('UUID-only Codex sessions', () => {
   it.each([
     ['403 Forbidden', 'forbidden'],
     ['connection refused', 'connection_refused'],
+    ['ECONNREFUSED', 'connection_refused'],
     ['ECONNRESET', 'connection_reset'],
     ['429 Too Many Requests', 'rate_limited'],
+    ['rate limit', 'rate_limited'],
     ['ETIMEDOUT', 'transport_timeout'],
     ['502 Bad Gateway', 'bad_gateway'],
     ['503 Service Unavailable', 'service_unavailable'],
@@ -180,5 +212,57 @@ describe('UUID-only Codex sessions', () => {
       allStages: [build, next],
       destinationStatus: successfulStatus(),
     })).toBe(false);
+  });
+});
+
+
+describe('own-stage continuation', () => {
+  it('retains a settled stage UUID independently of predecessor reuse, without inheriting foreign or gate reasoning', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fc-own-session-'));
+    try {
+      const subject = stage('work');
+      const state = { stages: { work: successfulStatus({ status: 'pending', retries: 1 }) } } as StoreState;
+      const writeSession = (record: object) => { mkdirSync(join(root, 'stages', 'work'), { recursive: true }); writeFileSync(join(root, 'stages', 'work', 'session.json'), JSON.stringify(record)); };
+      writeSession({ version: 1, sessionId: UUID, ownerStageId: 'work', capturedAt: new Date().toISOString() });
+      expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
+      mkdirSync(join(root, 'stages', 'work', 'codex_home'), { recursive: true });
+      expect(sessionResumeForStage(subject, [subject], state, root, false)).toEqual({ sessionId: UUID, ownerStageId: 'work' });
+      expect(sessionResumeForStage({ ...subject, is_gate: true }, [subject], state, root, false)).toBeUndefined();
+      writeSession({ version: 1, sessionId: UUID, ownerStageId: 'builder', capturedAt: new Date().toISOString() });
+      expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe('repair continues its author', () => {
+  it('resumes the reviewed author only for a sole same-role repair route, keeps both homes for the loop, and clears them after it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fc-repair-session-'));
+    try {
+      const implement = stage('implement');
+      const review = stage('review', { role: 'qa', is_gate: true, depends_on: ['implement'] });
+      const repair = stage('repair', { depends_on: ['review'], retry_to: ['review'] });
+      const all = [implement, review, repair];
+      const state = { stages: { implement: successfulStatus() } } as StoreState;
+      mkdirSync(join(root, 'stages', 'implement', 'codex_home'), { recursive: true });
+      writeFileSync(join(root, 'stages', 'implement', 'session.json'), JSON.stringify({ version: 1, sessionId: UUID, ownerStageId: 'implement', capturedAt: new Date().toISOString() }));
+
+      // Independent of the predecessor-reuse opt-in, and never for the gate.
+      expect(sessionResumeForStage(repair, all, state, root, false)).toEqual({ sessionId: UUID, ownerStageId: 'implement' });
+      expect(sessionResumeForStage(review, all, state, root, false)).toBeUndefined();
+      expect(shouldPreserveSession(implement, all, false)).toBe(true);
+      expect(shouldPreserveSession(repair, all, false)).toBe(true);
+      expect(shouldPreserveSession(implement, [implement, review], false)).toBe(false);
+
+      // Ambiguous or foreign continuations start fresh.
+      const otherRole = [stage('implement', { role: 'doc_writer' }), review, repair];
+      expect(sessionResumeForStage(repair, otherRole, state, root, false)).toBeUndefined();
+      const secondRoute = [...all, stage('repair_scoped', { depends_on: ['review'], retry_to: ['review'] })];
+      expect(sessionResumeForStage(repair, secondRoute, state, root, false)).toBeUndefined();
+      expect(sessionResumeForStage(repair, all, { stages: { implement: successfulStatus({ status: 'failed' }) } } as StoreState, root, false)).toBeUndefined();
+
+      clearGateContinuationsForStages(root, all);
+      expect(existsSync(join(root, 'stages', 'implement', 'codex_home'))).toBe(false);
+      expect(sessionResumeForStage(repair, all, state, root, false)).toBeUndefined();
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

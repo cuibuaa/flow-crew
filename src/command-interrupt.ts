@@ -1,19 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import {
-  existsSync,
-  linkSync,
-  mkdirSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { linkSync, mkdirSync, unlinkSync, writeFileSync } from './engine-fs.js';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { CommandActivitySnapshot } from './command-activity.js';
-import { appendGuidanceEnvelope } from './guidance.js';
-import { appendRunEventAtRunDir } from './run-events.js';
 import { isRunningRunStatus, isRunningStageStatus } from './store.js';
 
 export const COMMAND_INTERRUPT_VERSION = 1;
+const DEFAULT_INTERRUPT_REASON = 'Operator requested interruption of the active command.';
 
 export interface StageCommandInterruptSignal {
   version: 1;
@@ -50,7 +43,7 @@ export function parseStageCommandInterrupt(text: string): ParsedStageCommandInte
   if (value.version !== COMMAND_INTERRUPT_VERSION) return { ok: false, error: 'unsupported version' };
   for (const field of [
     'requestId', 'stageId', 'attemptStartedAt', 'commandId', 'command',
-    'commandFingerprint', 'guidanceId', 'reason', 'requestedAt',
+    'commandFingerprint', 'guidanceId', 'requestedAt',
   ]) {
     if (!nonEmpty(value[field])) return { ok: false, error: `${field} must be a non-empty string` };
   }
@@ -58,6 +51,8 @@ export function parseStageCommandInterrupt(text: string): ParsedStageCommandInte
     return { ok: false, error: 'attemptIndex must be a non-negative safe integer' };
   }
   if (value.source !== 'operator') return { ok: false, error: 'source must be operator' };
+  if (value.reason !== undefined && typeof value.reason !== 'string') return { ok: false, error: 'reason must be a string' };
+  value.reason = (value.reason as string | undefined)?.trim() || DEFAULT_INTERRUPT_REASON;
   const signal = value as unknown as StageCommandInterruptSignal;
   if (commandFingerprint(signal.command) !== signal.commandFingerprint) {
     return { ok: false, error: 'command fingerprint mismatch' };
@@ -80,15 +75,14 @@ function publishCreateOnly(path: string, body: string): void {
 }
 
 /** Publish an operator interrupt bound to the one command proved active now.
- * Guidance is durable before the one-shot signal can stop the adapter. */
+ * The engine records validated guidance before the request can stop the adapter. */
 export function requestStageCommandInterrupt(input: {
   runDir: string;
   stageId: string;
-  reason: string;
+  reason?: string;
   requestedAt?: string;
 }): StageCommandInterruptSignal {
-  const reason = input.reason.trim();
-  if (!reason) throw new Error('Interrupt reason must not be empty');
+  const reason = input.reason?.trim() || DEFAULT_INTERRUPT_REASON;
   const runState = JSON.parse(readFileSync(join(input.runDir, 'run.json'), 'utf-8')) as {
     runId?: unknown;
     status?: unknown;
@@ -125,16 +119,7 @@ export function requestStageCommandInterrupt(input: {
   }
   const active = activity.active[0];
   if (!active.command?.trim()) throw new Error(`The active command for stage ${input.stageId} has no attributable command text`);
-  const knownStageIds = Object.keys(runState.stages ?? {});
   const requestedAt = input.requestedAt ?? new Date().toISOString();
-  const guidance = appendGuidanceEnvelope({
-    runDir: input.runDir,
-    target: input.stageId,
-    source: 'operator',
-    body: reason,
-    knownStageIds,
-    createdAt: requestedAt,
-  });
   const signal: StageCommandInterruptSignal = {
     version: COMMAND_INTERRUPT_VERSION,
     requestId: randomUUID(),
@@ -144,28 +129,13 @@ export function requestStageCommandInterrupt(input: {
     commandId: active.id,
     command: active.command,
     commandFingerprint: commandFingerprint(active.command),
-    guidanceId: guidance.id,
+    guidanceId: randomUUID(),
     reason,
     requestedAt,
     source: 'operator',
   };
-  // Keep the event ahead of the signal: once the worker can observe the
-  // interrupt, the request is already present in the durable event sequence.
-  appendRunEventAtRunDir(input.runDir, {
-    type: 'stage_command_interrupt_requested',
-    runId: typeof runState.runId === 'string' ? runState.runId : basename(input.runDir),
-    timestamp: requestedAt,
-    stageId: input.stageId,
-    attemptIndex: activity.attemptIndex,
-    attemptStartedAt: activity.attemptStartedAt,
-    requestId: signal.requestId,
-    guidanceId: guidance.id,
-    commandId: active.id,
-    command: active.command,
-    commandFingerprint: signal.commandFingerprint,
-    detail: reason,
-    source: 'operator',
-  });
+  // This is a request slot. The owning engine validates the active command
+  // and publishes guidance/events from its own memory before stopping it.
   publishCreateOnly(
     join(input.runDir, 'signals', `interrupt_${input.stageId}.json`),
     `${JSON.stringify(signal, null, 2)}\n`,

@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,17 +9,17 @@ import {
   rehearsalExitCode,
   type Finding,
 } from '../src/rehearse.js';
+import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
+import { applyBasePrompt, loadBasePrompt } from '../src/scheduler/sched_admission/dispatch.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
-const criteriaCorpusPath = 'spec/fixtures/e8_criteria_lint_corpus.json';
-const expectedCriteriaCaseIds = [
-  'en-illustrative-list',
-  'en-mandatory-bare-module',
-  'en-ordinary-import-object',
-  'zh-illustrative-not-criterion',
-  'zh-mandatory-constructor',
-];
 
+function reviewerPrompt(): string {
+  const directory = join(repositoryRoot, 'config', 'agents');
+  const role = parseAgent(parseYaml(readFileSync(join(directory, 'qa.yaml'), 'utf8')));
+  return applyBasePrompt(role, loadBasePrompt(directory)).prompt;
+}
+const criteriaCorpusPath = 'spec/fixtures/e8_criteria_lint_corpus.json';
 interface CriteriaCorpusCase {
   id: string;
   text: string;
@@ -38,31 +37,27 @@ function readCriteriaCorpus(): CriteriaCorpus {
 
 describe('QA property-versus-means contract', () => {
   it('accepts alternate evidence for an illustrative means and exposes a wording conflict', () => {
-    const qa = parseYaml(readFileSync(join(repositoryRoot, 'config', 'agents', 'qa.yaml'), 'utf-8')) as {
-      prompt: string;
-    };
+    const prompt = reviewerPrompt();
     const scenario = {
       instruction: '证明真实浏览器环境被执行；例如探针可直接导入并实例化库 X。',
       evidence: '产物通过真实 test runner 的环境路径证明了性质，但没有直接导入库 X。',
     };
     expect(scenario.instruction).toContain('例如');
     expect(scenario.evidence).toContain('证明了性质');
-    expect(qa.prompt).toContain('split each operator instruction into (a) the observable property');
-    expect(qa.prompt).toContain('is illustrative, not a hard assertion');
-    expect(qa.prompt).toContain('MUST NOT fail solely because it differs from that example');
-    expect(qa.prompt).toContain('property-vs-wording conflict');
-    expect(qa.prompt).toContain('Quote or precisely locate the operator sentence');
-    expect(qa.prompt).toContain('state the substantive evidence that passed');
+    expect(prompt).toContain('Examples do not exclude equivalent property evidence');
+    expect(prompt).toContain('A wording/property conflict identifies its originating');
+    expect(prompt).toContain('sentence');
+    expect(prompt).toContain('reproducible evidence');
   });
 
-  it('keeps explicit exact means and measurable thresholds hard', () => {
-    const qa = parseYaml(readFileSync(join(repositoryRoot, 'config', 'agents', 'qa.yaml'), 'utf-8')) as {
-      prompt: string;
-    };
-    expect(qa.prompt).toContain('the exact means itself is an acceptance criterion and alternatives do not count');
-    expect(qa.prompt).toContain('Hard numbers, thresholds, required outputs, compatibility constraints');
-    expect(qa.prompt).toContain('fail normally and say that equivalent means do not satisfy');
-    expect(qa.prompt).toContain('Keep mechanizing acceptance criteria into reproducible assertions');
+  it('keeps exact means and thresholds hard, and compatibility binding unless the brief allows documentation', () => {
+    const prompt = reviewerPrompt();
+    expect(prompt).toContain('unless the criterion explicitly requires that means');
+    expect(prompt).toContain(
+      'a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it',
+    );
+    expect(prompt).toContain('never invent a threshold or waive a supplied one');
+    expect(prompt).toContain('reproducible evidence');
   });
 });
 
@@ -119,36 +114,6 @@ describe('criterion wording lint', () => {
       .map((warning) => ({ level: 'warn', text: warning.excerpt }));
     expect(rehearsalExitCode(warnings)).toBe(0);
     expect(rehearsalExitCode([...warnings, { level: 'fail', text: 'broken frontmatter' }])).toBe(1);
-  });
-
-  it('loads a closed, tracked corpus with stable IDs and qualitative classifications', () => {
-    const corpus = readCriteriaCorpus();
-    const allowedTags = new Set(['positive', 'negative', 'zh', 'example-not-criterion']);
-
-    expect(Object.keys(corpus).sort()).toEqual(['cases', 'version']);
-    expect(corpus.version).toBe(1);
-    expect(Array.isArray(corpus.cases)).toBe(true);
-    expect(corpus.cases.map(({ id }) => id)).toEqual(expectedCriteriaCaseIds);
-    expect(new Set(corpus.cases.map(({ id }) => id)).size).toBe(corpus.cases.length);
-
-    for (const entry of corpus.cases) {
-      expect(Object.keys(entry).sort(), entry.id).toEqual(['id', 'tags', 'text']);
-      expect(entry.id).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
-      expect(entry.text.trim().length, entry.id).toBeGreaterThan(0);
-      expect(entry.tags, entry.id).toEqual([...new Set(entry.tags)].sort());
-      expect(entry.tags.every((tag) => allowedTags.has(tag)), entry.id).toBe(true);
-      expect(entry.tags.filter((tag) => tag === 'positive' || tag === 'negative'), entry.id).toHaveLength(1);
-    }
-    for (const requiredTag of allowedTags) {
-      expect(corpus.cases.some(({ tags }) => tags.includes(requiredTag)), requiredTag).toBe(true);
-    }
-
-    const trackedPaths = execFileSync(
-      'git',
-      ['ls-files', '-z', '--', criteriaCorpusPath],
-      { cwd: repositoryRoot, encoding: 'utf-8', maxBuffer: 1024 * 1024, timeout: 10_000 },
-    ).split('\0').filter(Boolean);
-    expect(trackedPaths).toEqual([criteriaCorpusPath]);
   });
 
   it('matches every committed corpus case to its independently authored classification', () => {

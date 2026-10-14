@@ -1,8 +1,70 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { appendFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { appendFileSync, mkdirSync, rmSync } from '../engine-fs.js';
+
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
+import { updateRunState } from '../store.js';
+import { processStartToken } from '../run-lock.js';
+import type { ProviderFailure } from '../provider-result.js';
+import { CommandActivityTracker } from '../command-activity.js';
+import type { InvocationUsage, NativeInvocationUsage } from '../invocation-usage.js';
 
 export type { ChildProcess } from 'node:child_process';
+
+interface RunProcessOwner {
+  projectDir: string; runId: string; abortSignal?: AbortSignal; onProgress?: () => void;
+  owners: Array<{ projectDir: string; runId: string }>;
+}
+const runOwner = new AsyncLocalStorage<RunProcessOwner>();
+export function withRunProcessOwnership<T>(projectDir: string, runId: string, action: () => Promise<T>, abortSignal = runOwner.getStore()?.abortSignal,
+  onProgress = runOwner.getStore()?.onProgress): Promise<T> {
+  const owners = [...(runOwner.getStore()?.owners ?? [])];
+  if (!owners.some(owner => owner.projectDir === projectDir && owner.runId === runId)) owners.push({ projectDir, runId });
+  return runOwner.run({ projectDir, runId, abortSignal, onProgress, owners }, action);
+}
+
+// Nested workflows inherit cancellation at the worker boundary, including role-selected adapters.
+// An adapter wrapper alone is bypassed by those overrides; reuse the run ownership context.
+export function runProcessAbortSignal(): AbortSignal | undefined { return runOwner.getStore()?.abortSignal; }
+
+/** Nested executions share their verified work with the enclosing stage's live
+ * carrier, just as they inherit cancellation. Unrelated observations cannot report it. */
+export function reportRunProcessProgress(projectDir: string, runId: string): void {
+  const owner = runOwner.getStore();
+  if (owner?.projectDir === projectDir && owner.runId === runId) owner.onProgress?.();
+}
+
+/** Keep the existing detached command groups, but bind them before execution.
+ * Deleting the boot restriction alone cannot exclude orphan writers. The pipe
+ * gate closes the spawn/publication crash window without another supervisor or
+ * a process registry: ownership lives in the existing engine checkpoint. */
+function spawnRunCommand(command: string, args: string[], options: SpawnOptions): ChildProcess {
+  const owner = runOwner.getStore();
+  if (!owner || process.platform === 'win32') return spawn(command, args, options);
+  if (!Array.isArray(options.stdio)) throw new Error('RUN_PROCESS_STDIO: owned commands require explicit descriptors');
+  const child = spawn('/bin/sh', ['-c', 'read -r ready <&3 || exit 125; exec 3<&-; exec "$@"', 'flowcrew-command', command, ...args], {
+    ...options, stdio: [...options.stdio, 'pipe'],
+  });
+  const gate = child.stdio[3] as import('node:stream').Writable;
+  gate.on('error', () => {});
+  try {
+    // Enclosing runs must retire every nested consumer before recovering their
+    // interrupted stage. Publish all ownership before opening the existing gate.
+    if (child.pid) for (const enclosing of owner.owners) updateRunState(enclosing.projectDir, enclosing.runId, state => {
+      if (!state.engineCheckpoint?.processes || state.engineCheckpoint.pid !== process.pid) throw new Error('RUN_PROCESS_OWNER_CHANGED: command requires the current checkpoint');
+      state.engineCheckpoint.processes.push({ pid: child.pid!, processStart: processStartToken(child.pid!) });
+    });
+    gate.end('start\n');
+  } catch (error) {
+    gate.end();
+    child.kill('SIGKILL');
+    throw error;
+  }
+  return child;
+}
 
 export type AdapterFailureKind =
   | 'forbidden'
@@ -15,9 +77,14 @@ export type AdapterFailureKind =
   | 'overloaded'
   | 'capacity';
 
-export interface RunResult {
+export interface RunResult extends InvocationUsage {
   output: string;
   exitCode: number;
+  /** Direct child close facts, before timeout/control/adapter outcome overrides. */
+  processExitCode?: number | null;
+  processSignal?: NodeJS.Signals | null;
+  /** Provider-owned refusal attribution; does not enable transport retries. */
+  providerFailure?: ProviderFailure;
   duration_ms: number;
   timedOut?: boolean;
   adapterError?: boolean;
@@ -27,10 +94,12 @@ export interface RunResult {
   friendlyError?: string;
   tokens_in?: number;
   tokens_out?: number;
+  /** Small native-call ledger, including calls superseded by parameter repairs. */
+  invocations?: NativeInvocationUsage[];
   /** Structured adapter attribution for files written during this invocation. */
   writes?: string[];
   writeAttribution?: 'structured' | 'snapshot' | 'unknown';
-  /** Generated writes observed only while configured validation commands ran. */
+  /** Writes to ignored outputs proven by the admitted validation baseline. */
   validationGeneratedWrites?: string[];
   /** Exact conversation UUID captured from adapter event output. */
   sessionId?: string;
@@ -43,6 +112,20 @@ export interface RunResult {
   suspensionReason?: 'scope_revision' | 'approval';
   suspensionRequestId?: string;
   suspensionRequestingStageId?: string;
+  /** Original launch failure; ENOENT can name a missing cwd or interpreter too. */
+  spawnError?: {
+    message: string;
+    code?: string;
+    syscall?: string;
+    path?: string;
+    cwd: string;
+  };
+}
+
+/** Raw streams are for adapter parsing, not downstream handoff context. */
+export interface ExecResult extends RunResult {
+  stdout?: string;
+  stderr?: string;
 }
 
 export type CommandLifecyclePhase = 'started' | 'completed';
@@ -58,6 +141,18 @@ export interface CommandLifecycleEvent {
 }
 
 export interface RunOpts {
+  /** One JSON Schema shared by generation-capable adapters and return validation. */
+  outputSchema?: import('../reality-gate/checks/json-schema-match.js').Schema;
+  /** Final credential-free transport boundary, called before every internal retry. */
+  onInvocationInput?: (input: {
+    systemPrompt: string;
+    userPrompt: string;
+    model?: string;
+    resumeSessionId?: string;
+    transport?: { kind: 'stdin' | 'argv' | 'request'; payload: string };
+  }) => void;
+  /** Complete duties and delivered guidance if an explicit resume is unavailable. */
+  freshSessionPrompt?: string;
   /** Attempt-local budget. The worker's abort signal enforces the same deadline across all phases. */
   timeout_ms: number;
   workDir: string;
@@ -68,13 +163,13 @@ export interface RunOpts {
   attemptStartedAt?: string;
   /** Resume only this explicit UUID; global-most-recent selection is forbidden. */
   resumeSessionId?: string;
-  /** Stage whose isolated adapter home owns resumeSessionId. */
+  /** Closed stage whose conversation is copied into this stage's private home. */
   sessionOwnerStageId?: string;
-  /** Keep the owning adapter home for one eligible direct successor. */
+  /** Retain the isolated home across this stage lifecycle or an eligible successor. */
   preserveSession?: boolean;
   /** When triggered, the spawned POSIX process group receives a bounded graceful
    *  termination attempt and the adapter returns exitCode=137 ("Aborted by
-   *  supervisor"). Used by worker.ts to honor supervisor ABORT verdicts that
+   *  engine"). Used by worker.ts to honor stage abort verdicts that
    *  previously only wrote a signal file with no consumer. */
   abortSignal?: AbortSignal;
   /** Trustworthy command boundaries emitted by the selected adapter. */
@@ -95,20 +190,13 @@ export interface AgentConfig {
 }
 
 export interface Adapter {
+  /** Calls onInvocationInput before every native call, including internal retries.
+   * Other adapters are recorded at their public run boundary. */
+  readonly capturesInvocationInput?: boolean;
   run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult>;
 }
 
-type ExecOpts = {
-  cwd: string;
-  timeout_ms: number;
-  liveLogPath?: string;
-  onStdout?: (text: string) => void;
-  env?: NodeJS.ProcessEnv;
-  abortSignal?: AbortSignal;
-  terminationTiming?: ChildTerminationTiming;
-};
-
-/** Bounded cleanup opportunity after an attempt deadline or supervisor abort. */
+/** Bounded cleanup opportunity after an attempt deadline or engine abort. */
 export const ATTEMPT_TERMINATION_GRACE_MS = 5_000;
 export const ATTEMPT_TERMINATION_POLL_MS = 25;
 
@@ -130,6 +218,8 @@ export function resolveChildTerminationTiming(
 }
 
 function hardKillChild(child: ChildProcess): void {
+  // A failed spawn has no owned process to signal, even before its error event.
+  if (!child.pid) return;
   try {
     if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
     else child.kill('SIGKILL');
@@ -178,6 +268,10 @@ function createChildTerminator(
   const terminateGracefully = (): void => {
     if (terminationStarted) return;
     terminationStarted = true;
+    if (!child.pid) {
+      completeTermination();
+      return;
+    }
 
     // Node maps signal names to forceful process termination on Windows and
     // cannot signal a Windows process group. Waiting after "SIGTERM" there
@@ -201,7 +295,10 @@ function createChildTerminator(
   };
 
   const settleAfterChildClose = (): Promise<void> => {
-    if (!terminationStarted || terminationCompleted || !groupIsAlive()) {
+    // A normal leader exit can leave children with closed/ignored stdio alive.
+    // Retire that owned group before the adapter can remove its credentials.
+    if (!terminationStarted && groupIsAlive()) terminateGracefully();
+    if (terminationCompleted || !groupIsAlive()) {
       completeTermination();
       return Promise.resolve();
     }
@@ -225,83 +322,15 @@ function createChildTerminator(
   };
 }
 
-function execChild(cmd: string, args: string[], opts: ExecOpts): Promise<RunResult> {
-  const start = Date.now();
-  if (opts.liveLogPath) {
-    mkdirSync(dirname(opts.liveLogPath), { recursive: true });
-  }
-  return new Promise((resolve) => {
-    let settled = false;
-    let timedOut = false;
-    const child = spawn(cmd, args, {
-      cwd: opts.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-      detached: process.platform !== 'win32',
-      env: { ...process.env, ...opts.env },
-    });
-    const terminator = createChildTerminator(child, opts.terminationTiming);
-    const chunks: Buffer[] = [];
-    let aborted = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      terminator.terminateGracefully();
-    }, Math.max(1, opts.timeout_ms));
-
-    // Honor cancellation via AbortSignal (worker.ts polls signals/abort_<stageId>.json
-    // and aborts the controller it owns; we then begin bounded group termination).
-    const onAbort = () => {
-      aborted = true;
-      clearTimeout(timer);
-      terminator.terminateGracefully();
-    };
-    if (opts.abortSignal) {
-      if (opts.abortSignal.aborted) onAbort();
-      else opts.abortSignal.addEventListener('abort', onAbort, { once: true });
-    }
-
-    const finish = (code: number | null, output?: string) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      void terminator.settleAfterChildClose().then(() => {
-        if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
-        resolve({
-          output: aborted
-            ? ((output ?? Buffer.concat(chunks).toString('utf-8')) + '\n[stage cancelled by control plane]\n')
-            : (output ?? Buffer.concat(chunks).toString('utf-8')),
-          exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
-          duration_ms: Date.now() - start,
-          timedOut,
-        });
-      });
-    };
-
-    child.stdout.on('data', (d: Buffer) => {
-      chunks.push(d);
-      opts.onStdout?.(d.toString('utf-8'));
-      if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* ignore */ }
-    });
-    child.stderr.on('data', (d: Buffer) => {
-      chunks.push(d);
-      if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* ignore */ }
-    });
-    child.on('close', (code) => finish(code));
-    child.on('error', (error) => {
-      const msg = error.message.includes('ENOENT')
-        ? `Command not found: ${cmd}. Install the adapter CLI and try again.`
-        : error.message;
-      finish(1, msg);
-    });
-  });
-}
-
-export function execWithTimeout(
-  cmd: string,
-  args: string[],
-  opts: { cwd: string; timeout_ms: number; liveLogPath?: string; env?: NodeJS.ProcessEnv; onStdout?: (text: string) => void; abortSignal?: AbortSignal; terminationTiming?: ChildTerminationTiming },
-): Promise<RunResult> {
-  return execChild(cmd, args, opts);
+/** Every command gets invocation-private scratch; callers retain their own
+ * credential/configuration policy and close scratch after retiring the child. */
+function commandEnvironment(inherited: NodeJS.ProcessEnv = process.env) {
+  const scratch = join(tmpdir(), `flowcrew-invocation-${randomUUID()}`);
+  mkdirSync(scratch, { mode: 0o700 });
+  const env: NodeJS.ProcessEnv = { ...inherited, TMPDIR: scratch, TMP: scratch, TEMP: scratch };
+  // Daemon transport belongs to the scheduler/operator, never a command child.
+  delete env.FLOWCREW_DAEMON_SOCKET;
+  return { env, cleanup: () => rmSync(scratch, { recursive: true, force: true }) };
 }
 
 export function execWithStdin(
@@ -313,37 +342,50 @@ export function execWithStdin(
     timeout_ms: number;
     liveLogPath?: string;
     env?: NodeJS.ProcessEnv;
-    onStdout?: (text: string) => void;
+    onStdout?: (text: string, activity?: CommandActivityTracker) => void;
+    /** The executable owner binds and closes command evidence with its child;
+     * adapters only translate their native events into lifecycle records. */
+    execution?: Pick<RunOpts, 'runDir' | 'stageId' | 'attemptIndex' | 'attemptStartedAt' | 'onCommandLifecycle'>;
+    /** Opt in when the adapter parses stdout separately from diagnostics. */
+    captureStreams?: boolean;
     /** Invoked once the child is spawned, gives caller a kill handle (e.g. to
      *  force-exit a hung subprocess after detecting a success event in stdout). */
-    onChild?: (handles: { kill: () => void }) => void;
+    onChild?: (handles: { kill: () => void; pid?: number }) => void;
     abortSignal?: AbortSignal;
     terminationTiming?: ChildTerminationTiming;
   },
-): Promise<RunResult> {
+): Promise<ExecResult> {
   const start = Date.now();
   if (opts.liveLogPath) {
     mkdirSync(dirname(opts.liveLogPath), { recursive: true });
   }
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let settled = false;
     let timedOut = false;
     let aborted = false;
-    const child = spawn(cmd, args, {
-      cwd: opts.cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      shell: false,
-      detached: process.platform !== 'win32',
-      env: { ...process.env, ...opts.env },
-    });
+    const execution = opts.execution;
+    const activity = execution?.attemptIndex !== undefined && execution.attemptStartedAt
+      ? new CommandActivityTracker({ ...execution, attemptIndex: execution.attemptIndex,
+          attemptStartedAt: execution.attemptStartedAt, onLifecycle: execution.onCommandLifecycle }) : undefined;
+    let environment: ReturnType<typeof commandEnvironment> | undefined;
+    let child: ChildProcess;
+    try {
+      environment = commandEnvironment({ ...process.env, ...opts.env });
+      child = spawnRunCommand(cmd, args, {
+        cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
+        detached: process.platform !== 'win32', env: environment.env,
+      });
+    } catch (error) {
+      try { activity?.close(); } finally { environment?.cleanup(); }
+      throw error;
+    }
     const terminator = createChildTerminator(child, opts.terminationTiming);
     // This handle is used after Claude's separate post-result grace, so it
     // intentionally remains an immediate hard stop rather than adding another.
-    if (opts.onChild) opts.onChild({ kill: terminator.hardKill });
     const timer = setTimeout(() => {
       timedOut = true;
       terminator.terminateGracefully();
-    }, Math.max(1, opts.timeout_ms));
+    }, Math.max(1, opts.timeout_ms - (Date.now() - start)));
     const onAbort = () => {
       aborted = true;
       clearTimeout(timer);
@@ -366,30 +408,76 @@ export function execWithStdin(
       } catch { /* child already gone; close/error event will settle the promise */ }
     }
     const chunks: Buffer[] = [];
-    const finish = (code: number | null) => {
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let spawnError: RunResult['spawnError'];
+    let executionError: unknown;
+    const finish = (code: number | null, signal?: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       void terminator.settleAfterChildClose().then(() => {
+        // The deadline and command evidence cover group retirement after close.
+        clearTimeout(timer);
         if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort);
+        try { activity?.close(); } finally { environment?.cleanup(); }
+        if (executionError !== undefined) throw executionError;
         resolve({
           output: Buffer.concat(chunks).toString('utf-8') + (aborted ? '\n[stage cancelled by control plane]\n' : ''),
           exitCode: aborted ? 137 : timedOut ? 124 : code ?? 1,
+          ...(!spawnError ? { processExitCode: code, processSignal: signal ?? null } : {}),
           duration_ms: Date.now() - start,
           timedOut,
+          ...(opts.captureStreams ? {
+            stdout: Buffer.concat(stdout).toString('utf-8'),
+            stderr: Buffer.concat(stderr).toString('utf-8'),
+          } : {}),
+          ...(spawnError ? { spawnError } : {}),
         });
-      });
+      }).catch(reject);
     };
-    child.stdout.on('data', (d: Buffer) => {
+    child.stdout!.on('data', (d: Buffer) => {
       chunks.push(d);
+      if (opts.captureStreams) stdout.push(d);
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* non-critical */ }
-      opts.onStdout?.(d.toString('utf-8'));
+      opts.onStdout?.(d.toString('utf-8'), activity);
     });
-    child.stderr.on('data', (d: Buffer) => {
+    child.stderr!.on('data', (d: Buffer) => {
       chunks.push(d);
+      if (opts.captureStreams) stderr.push(d);
       if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, d); } catch { /* non-critical */ }
     });
-    child.on('close', (code) => finish(code));
-    child.on('error', () => finish(1));
+    child.on('close', (code, signal) => finish(code, signal));
+    child.on('error', (error: NodeJS.ErrnoException & { path?: string }) => {
+      spawnError = {
+        message: error.message,
+        code: error.code,
+        syscall: error.syscall,
+        path: error.path,
+        cwd: opts.cwd,
+      };
+      const diagnostic = `\n[process launch failed: ${error.message}; cwd=${JSON.stringify(opts.cwd)}]\n`;
+      chunks.push(Buffer.from(diagnostic));
+      if (opts.liveLogPath) try { appendFileSync(opts.liveLogPath, diagnostic); } catch { /* non-critical */ }
+      finish(1);
+    });
+    try {
+      activity?.bindProcess(child.pid, 'provider');
+      opts.onChild?.({ kill: terminator.hardKill, pid: child.pid });
+    } catch (error) { executionError = error; terminator.hardKill(); finish(1); }
   });
+}
+
+/** Raw command owner; close retires only descendants of the process we started. */
+export function spawnOwnedCommand(command: string, args: string[], options: { cwd: string; env?: NodeJS.ProcessEnv }) {
+  const environment = commandEnvironment(options.env);
+  let child: ChildProcess;
+  try {
+    child = spawnRunCommand(command, args, { ...options, env: environment.env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) { environment.cleanup(); throw error; }
+  const stop = (): void => {
+    try { if (child.pid && process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch { /* already closed */ }
+  };
+  child.once('close', stop);
+  child.once('close', environment.cleanup);
+  return { child, stop };
 }

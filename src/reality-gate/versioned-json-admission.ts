@@ -5,11 +5,8 @@ import type { RealityGateExit } from './types.js';
 
 interface FailedExecution {
   command: string;
-  code: number | null;
-  signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
-  timedOut: boolean;
   exit: RealityGateExit;
 }
 
@@ -84,11 +81,8 @@ export function classifyVersionedJsonShapeFailure(input: {
   preflightArtifactSha256?: string;
 }): VersionedJsonAdmission | undefined {
   const { execution } = input;
-  if (execution.code !== 1
-      || execution.exit.code !== 1
-      || execution.signal !== null
+  if (execution.exit.code !== 1
       || execution.exit.signal !== null
-      || execution.timedOut
       || execution.exit.timedOut
       || execution.stdout.trim().length !== 0) return undefined;
 

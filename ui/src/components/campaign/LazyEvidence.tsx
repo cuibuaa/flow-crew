@@ -1,11 +1,8 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useState } from "react";
 import {
   fetchCampaignBriefDiff,
   fetchCampaignBriefRevisions,
-  fetchCampaignResearchKnowledge,
   type CampaignBriefRevision,
-  type CampaignResearchKnowledgeItem,
 } from "./client";
 
 export function BriefHistoryDisclosure({ campaignId }: { campaignId: string }) {
@@ -52,41 +49,5 @@ export function BriefHistoryDisclosure({ campaignId }: { campaignId: string }) {
         {diff ? <pre aria-label={`${diff.label} brief diff`}>{diff.text}</pre> : null}
       </div>
     </details>
-  );
-}
-
-function KnowledgeGroup({ title, items }: { title: string; items: CampaignResearchKnowledgeItem[] }) {
-  if (!items.length) return null;
-  return (
-    <div className="campaign-knowledge-group">
-      <strong>{title} · {items.length}</strong>
-      <ul>{items.slice(0, 3).map((item) => <li key={item.id}>{item.runId ? <Link to={`/run/${encodeURIComponent(item.runId)}`}>{item.text}</Link> : item.text}</li>)}</ul>
-      {items.length > 3 ? <span>{items.length - 3} more retained in the complete run and knowledge graph records</span> : null}
-    </div>
-  );
-}
-
-export function ResearchKnowledgeSummary({ campaignId, active }: { campaignId: string; active: boolean }) {
-  const [items, setItems] = useState<CampaignResearchKnowledgeItem[] | null>(null);
-  const [requested, setRequested] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!active || requested) return;
-    setRequested(true);
-    void fetchCampaignResearchKnowledge(campaignId)
-      .then(setItems)
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, [active, campaignId, requested]);
-  const findings = items?.filter((item) => item.type === "finding" || item.type === "insight") ?? [];
-  const deadEnds = items?.filter((item) => item.type === "dead_end") ?? [];
-  return (
-    <div className="campaign-research-knowledge" aria-live="polite">
-      {active && !items && !error ? <span>Loading findings and dead ends…</span> : null}
-      {error ? <span className="campaign-inline-error" role="alert">Research knowledge summary unavailable: {error}</span> : null}
-      {items?.length === 0 ? <span>No findings or dead-end records</span> : null}
-      <KnowledgeGroup title="Key findings" items={findings} />
-      <KnowledgeGroup title="Disproved approaches" items={deadEnds} />
-    </div>
   );
 }

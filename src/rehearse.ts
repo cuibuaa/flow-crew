@@ -17,7 +17,8 @@
  * committed honestly.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from './engine-fs.js';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { inspectBrief, type BriefPreflightContext } from './brief-preflight.js';
@@ -38,6 +39,8 @@ export interface Finding {
 export interface IsolatedRehearsalOptions {
   /** Used only for project-aware static inspection; the simulated run uses its own temp project. */
   projectDir?: string;
+  /** Known launch project; source-only discovery leaves this unset. */
+  targetDir?: string;
   staticOnly?: boolean;
   keep?: boolean;
   label?: string;
@@ -50,7 +53,6 @@ export interface IsolatedRehearsalResult {
   preflight: {
     digest: string;
     contractReady: boolean;
-    requiresAcknowledgement: boolean;
   };
   outputInventory: {
     entries: number;
@@ -230,22 +232,6 @@ function initializeTemporaryGitRepository(projectDir: string, stateDir: string):
   });
 }
 
-async function settleDeferredRunWrites(runDirectory: string): Promise<void> {
-  const refreshPath = join(runDirectory, 'attempt_summary_refresh.json');
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    try {
-      const refresh = JSON.parse(readFileSync(refreshPath, 'utf-8')) as { pending?: unknown };
-      if (refresh.pending !== true) return;
-    } catch {
-      // No refresh request means this run has no debounced write to drain.
-      return;
-    }
-    await new Promise<void>((resolvePoll) => setTimeout(resolvePoll, 25));
-  }
-  throw new Error('rehearsal run-event summary refresh did not settle within 5000 ms');
-}
-
 export async function cmdRehearse(argv: string[]): Promise<void> {
   try {
     const result = await runRehearsal(argv);
@@ -259,9 +245,21 @@ export async function cmdRehearse(argv: string[]): Promise<void> {
 }
 
 async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): Promise<IsolatedRehearsalResult> {
-  const briefPath = argv.find((a) => !a.startsWith('--'));
+  let briefPath: string | undefined;
+  let explicitProject: string | undefined;
+  let targetDir = options.targetDir;
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === '--target' || arg === '--project' || arg.startsWith('--target=') || arg.startsWith('--project=')) {
+      const [flag, inline] = arg.split(/=(.*)/s);
+      const value = inline ?? argv[++index];
+      if (!value || value.startsWith('--')) throw new Error(`${flag} requires a path`);
+      if (flag === '--target') targetDir = value;
+      else explicitProject = value;
+    } else if (!arg.startsWith('--') && !briefPath) briefPath = arg;
+  }
   if (!briefPath || (options.briefText === undefined && !existsSync(briefPath))) {
-    throw new Error('Usage: flowcrew rehearse <brief.md> [--keep] [--static-only]');
+    throw new Error('Usage: flowcrew rehearse <brief.md> [--keep] [--static-only] [--project <path>] [--target <path>]');
   }
   const keep = options.keep ?? argv.includes('--keep');
   const staticOnly = options.staticOnly ?? argv.includes('--static-only');
@@ -280,7 +278,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   const add = (level: Finding['level'], text: string) => findings.push({ level, text });
 
   // ---------- static contract checks ----------
-  const projectDir = options.projectDir ?? process.env.PROJECT_DIR ?? process.cwd();
+  const projectDir = explicitProject ?? options.projectDir ?? process.env.PROJECT_DIR ?? process.cwd();
   const preflightContext = projectBriefPreflightContext(projectDir, brief);
   const preflight = inspectBrief(brief, preflightContext);
   for (const finding of preflight.findings) {
@@ -288,13 +286,19 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       + (finding.risk ? `\n  Risk: ${finding.risk}` : '')
       + (finding.suggestion ? `\n  Suggestion: ${finding.suggestion}` : ''));
   }
-  const outputInventory = inspectBriefOutputs(brief, projectDir);
+  const outputInventory = inspectBriefOutputs(brief, projectDir, undefined,
+    { launchProject: targetDir ?? explicitProject ?? null });
   for (const entry of outputInventory.blocking) {
     add('fail', `Declared output ${entry.path} is already occupied (${entry.entryType}${entry.size === undefined ? '' : `, ${entry.size} bytes`}): ${entry.reason}`
       + '\n  Declare an explicit on_existing disposition only when the existing artifact is intentionally consumed; otherwise choose a fresh path.');
   }
   if (outputInventory.entries.length > 0 && outputInventory.blocking.length === 0) {
     add('ok', `Declared output inventory: ${outputInventory.entries.length} path(s), no implicit overwrite`);
+  }
+  const externalOutputs = outputInventory.entries.filter(entry => isAbsolute(entry.path));
+  for (const entry of externalOutputs.filter(entry => !entry.blocking)) {
+    if (entry.warning) add('warn', entry.warning);
+    add('ok', `${entry.path}: ${entry.reason}; rehearsal uses a temporary substitute`);
   }
   add('ok', `Exact brief digest: ${preflight.digest}`);
   const fm = scheduler.parseBriefFrontmatter(brief);
@@ -315,8 +319,8 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   let simulated = false;
   let tempFcHome = '';
   let tempProject = '';
+  let tempExternalOutputs = '';
   let noCandidateProject = '';
-  let rehearsalRunDir = '';
   let noCandidateRunDir = '';
   let retainedArtifacts: IsolatedRehearsalResult['retainedArtifacts'];
   let retainedOutcomeArtifacts: IsolatedRehearsalResult['retainedOutcomeArtifacts'];
@@ -327,6 +331,13 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
     simulated = true;
     tempFcHome = mkdtempSync(join(tmpdir(), 'fc-rehearse-home-'));
     tempProject = mkdtempSync(join(tmpdir(), 'fc-rehearse-proj-'));
+    let simulationBrief = brief;
+    if (externalOutputs.length) {
+      tempExternalOutputs = mkdtempSync(join(tmpdir(), 'fc-rehearse-outputs-'));
+      for (const [index, entry] of [...externalOutputs].sort((a, b) => b.path.length - a.path.length).entries()) {
+        simulationBrief = simulationBrief.replaceAll(entry.path, join(tempExternalOutputs, String(index)));
+      }
+    }
     const realFcHome = store.fcGlobalDir();
     store.setFcGlobalDir(tempFcHome);
     let simulationPhase: 'git' | 'scheduler' = 'git';
@@ -335,6 +346,10 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       simulationPhase = 'scheduler';
 
       const resultRel = rc.resultFile ?? 'docs/research_round_result.json';
+      const terminalOutputs = [...new Set(Object.values(ts ?? {}).flatMap((entry) => entry.paths ?? []))]
+        .map((path, index) => ({ id: `terminal_${index}`, root: 'project' as const, path }));
+      const terminalContract = { version: 1, produces: terminalOutputs, reads: [], replays: [], groups: terminalOutputs.length > 1
+        ? [{ id: 'terminal_outcome', mode: 'exactly_one', members: terminalOutputs.map((output) => output.id) }] : [] };
       const criterionIds = extractBriefCriteria(brief).criteria.map((criterion) => criterion.id);
       mkdirSync(join(tempProject, dirname(resultRel)), { recursive: true });
 
@@ -390,6 +405,22 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
         }
         return JSON.stringify(payload);
       };
+      const reviewStages = (measureId: string): Array<Record<string, unknown>> => criterionIds.length > 0 ? [
+        {
+          id: 'rehearsal_gate',
+          role: 'qa',
+          depends_on: [measureId],
+          dependency_reasons: { [measureId]: 'verify the synthetic round against every canonical criterion' },
+          scope: [],
+          is_gate: true,
+          criterion_refs: criterionIds,
+          prompt_template: 'verify the rehearsal round and report canonical criterion evidence',
+          artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_rehearsal_gate.json' }], reads: [], replays: [] },
+        },
+        { id: 'rehearsal_repair', role: 'researcher', depends_on: ['rehearsal_gate'], retry_to: ['rehearsal_gate'],
+          scope: [resultRel, `${resultRel}.no_candidate.json`], criterion_refs: criterionIds,
+          prompt_template: 'correct the rejected synthetic round within the admitted scope' },
+      ] : [];
       const script: Record<string, import('./adapters/scripted.js').StageScript> = {
         plan: seq.map((r, i) => {
           const measureId = `measure_${i + 1}`;
@@ -403,20 +434,10 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
               scope: [resultRel, `${resultRel}.no_candidate.json`],
               criterion_refs: criterionIds,
               prompt_template: `rehearsal round ${r.label}`,
+              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: resultRel }], reads: [], replays: [] },
             },
           ];
-          if (criterionIds.length > 0) {
-            stages.push({
-              id: 'rehearsal_gate',
-              role: 'qa',
-              depends_on: [measureId],
-              dependency_reasons: { [measureId]: 'verify the synthetic round against every canonical criterion' },
-              scope: [],
-              is_gate: true,
-              criterion_refs: criterionIds,
-              prompt_template: 'verify the rehearsal round and report canonical criterion evidence',
-            });
-          }
+          stages.push(...reviewStages(measureId));
           stages.push({
             id: 'research_finalize',
             role: 'researcher',
@@ -425,6 +446,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
             scope: [...new Set(Object.values(ts ?? {}).flatMap((entry) => entry.paths ?? []))],
             condition: 'research.decision != continue',
             prompt_template: 'write only the terminal path selected by research_decision.json',
+            artifact_contract: terminalContract,
           });
           return { runFiles: { 'dispatch.yaml': JSON.stringify(stages, null, 2) } };
         }),
@@ -486,7 +508,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
           mkdirSync(dirname(target), { recursive: true });
           writeFileSync(target, `# Rehearsal ${terminalStatus}\n\nSelected mechanically by the simulated research policy.\n`, 'utf-8');
           return {
-            output: `wrote ${terminalPath}`,
+            output: JSON.stringify({ status: 'delivered', summary: `wrote ${terminalPath}`, checks: [], caveats: [] }),
             exitCode: 0,
             duration_ms: 1,
             writes: [terminalPath],
@@ -498,11 +520,10 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       const t0 = Date.now();
       const state = await scheduler.runWorkflow(
         config, raw, tempProject, adapter, new Map(), undefined, agentsDir,
-        undefined, brief, true, false, undefined, false,
+        undefined, simulationBrief, true, undefined, false,
       );
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
       const runDirPath = join(tempFcHome, 'runs', state.runId!);
-      rehearsalRunDir = runDirPath;
 
       // ---------- verdicts on the simulated run ----------
       const statusResolution = resolveRunStatus(state.status);
@@ -585,19 +606,9 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
               prompt_template: round.noCandidate
                 ? 'write the declared no-candidate sidecar with outcome, label, and reason'
                 : `rehearsal round ${round.label}`,
+              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: round.noCandidate ? `${resultRel}.no_candidate.json` : resultRel }], reads: [], replays: [] },
             }];
-            if (criterionIds.length > 0) {
-              stages.push({
-                id: 'rehearsal_gate',
-                role: 'qa',
-                depends_on: [measureId],
-                dependency_reasons: { [measureId]: 'verify the synthetic round against every canonical criterion' },
-                scope: [],
-                is_gate: true,
-                criterion_refs: criterionIds,
-                prompt_template: 'verify the rehearsal round and report canonical criterion evidence',
-              });
-            }
+            stages.push(...reviewStages(measureId));
             stages.push({
               id: 'research_finalize',
               role: 'researcher',
@@ -606,6 +617,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
               scope: [...declaredTerminalPaths],
               condition: 'research.decision != continue',
               prompt_template: 'write only the terminal path selected by research_decision.json',
+              artifact_contract: terminalContract,
             });
             return { runFiles: { 'dispatch.yaml': JSON.stringify(stages, null, 2) } };
           }),
@@ -643,9 +655,8 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
           undefined,
           agentsDir,
           undefined,
-          brief,
+          simulationBrief,
           true,
-          false,
           undefined,
           false,
         );
@@ -680,20 +691,11 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
         add('fail', `The isolated scheduler rehearsal could not complete: ${conciseError(error)}\n  Next: ${retry}`);
       }
     } finally {
-      for (const deferredRunDir of [rehearsalRunDir, noCandidateRunDir].filter(Boolean)) {
-        // Keep the rehearsal home active until framework-owned debounced writes
-        // settle. Restoring the caller's FC home first redirects their mutable
-        // global path lookup into the caller after rehearsal returns.
-        try {
-          await settleDeferredRunWrites(deferredRunDir);
-        } catch (error) {
-          add('fail', `The isolated scheduler rehearsal left deferred writes pending: ${conciseError(error)}`);
-        }
-      }
       store.setFcGlobalDir(realFcHome);
       if (!keep) {
         rmSync(tempFcHome, { recursive: true, force: true });
         rmSync(tempProject, { recursive: true, force: true });
+        if (tempExternalOutputs) rmSync(tempExternalOutputs, { recursive: true, force: true });
         if (noCandidateProject) rmSync(noCandidateProject, { recursive: true, force: true });
       }
     }
@@ -707,9 +709,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   if (options.render !== false) {
     console.log(`\nRehearsal report — ${briefLabel}${simulated ? '' : ' (static checks only)'}\n`);
     for (const f of findings) console.log(`${mark[f.level]} ${f.text}`);
-    console.log(`\nBrief admission: ${preflight.requiresAcknowledgement
-      ? `explicit acknowledgement required for exact digest ${preflight.digest}`
-      : `no explicit acknowledgement required for exact digest ${preflight.digest}`}`);
+    console.log(`\nBrief admission: launch binds exact digest ${preflight.digest}; preflight findings are advisory.`);
     console.log(`\n${fails === 0 ? '✅ Contract ready' : `❌ ${fails} contract problem${fails === 1 ? '' : 's'}`}${warns ? ` · ${warns} warning${warns === 1 ? '' : 's'}` : ''}`);
     console.log(`Engine diagnostics (not part of the verdict): ${diagnosticLogPath}`);
   }
@@ -720,7 +720,6 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
     preflight: {
       digest: preflight.digest,
       contractReady: preflight.contractReady,
-      requiresAcknowledgement: preflight.requiresAcknowledgement,
     },
     outputInventory: {
       entries: outputInventory.entries.length,
@@ -746,6 +745,3 @@ export async function rehearseBriefIsolated(
     render: false,
   });
 }
-
-/** Short alias for callers which already establish that generated rehearsal is isolated. */
-export const rehearseBrief = rehearseBriefIsolated;

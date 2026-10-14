@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   inspectDispatchAdmission,
+  selectRunnableBatch,
   parseDispatchedStageConfig,
   type StageConfig,
 } from '../src/scheduler.js';
@@ -16,6 +17,7 @@ function stage(id: string, scope: string[], dependsOn: string[] = []): StageConf
     dependency_reasons: Object.fromEntries(dependsOn.map((dependency) => [dependency, `Consumes ${dependency}.`])),
     criterion_refs: [],
     prompt_template: 'work',
+    artifact_contract: { version: 1, produces: [], reads: [], replays: [] },
   });
 }
 
@@ -54,6 +56,7 @@ describe('parallel scope dispatch admission', () => {
     ])).toEqual([]);
 
     const plannerPrompt = readFileSync(join(import.meta.dirname, '..', 'config', 'agents', 'planner.yaml'), 'utf-8');
-    expect(plannerPrompt).toContain('Stages eligible to run together MUST have disjoint `scope` entries.');
+    expect(plannerPrompt).toContain('Overlapping writes are serialized by the scheduler');
+    expect(selectRunnableBatch([stage('left', ['src/shared/**']), stage('right', ['src/shared/file.ts'])]).selected).toHaveLength(1);
   });
 });

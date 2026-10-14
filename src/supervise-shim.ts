@@ -1,4 +1,5 @@
-import { closeSync, openSync } from 'node:fs';
+import { closeSync, openSync } from './engine-fs.js';
+
 import { constants } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -9,6 +10,7 @@ import {
   atomicWriteJson,
   readLaunchRefusal,
   readSupervisionLaunch,
+  supervisionEnvironment,
   type SupervisionExitRecord,
   type SupervisionRunningRecord,
 } from './supervision.js';
@@ -220,18 +222,13 @@ function main(): void {
 
   logFd = openSync(logPath, 'a');
   try {
-    // Login shell, not a bare -c. The user's agent CLIs live in per-user
-    // directories (nvm, ~/.local/bin) that the systemd user manager's PATH does
-    // not contain; only the login profile puts them there. v0.5.0 used
-    // `bash -lc` and v0.6.0 dropped the -l, which made every launch fail with
-    // "No adapter CLI is installed or visible on PATH" on a machine where the
-    // adapter was plainly installed. CI never caught it because a runner's PATH
-    // is already complete.
-    agent = spawn(launch.shellPath, ['-lc', launch.command], {
+    // Both backends consume the daemon's snapshot. Login profiles must not
+    // rebuild PATH or other operator settings from the manager's environment.
+    agent = spawn(launch.shellPath, ['-c', launch.command], {
       cwd: launch.workingDirectory,
       detached: true,
       stdio: ['ignore', logFd, logFd],
-      env: { ...process.env, [FLOWCREW_LAUNCH_RESULT_PATH_ENV]: launchResultPath },
+      env: { ...supervisionEnvironment(launch.environment ?? process.env), [FLOWCREW_LAUNCH_RESULT_PATH_ENV]: launchResultPath },
     });
   } catch (error) {
     failBeforeAgent(`fallback spawn failed: ${error instanceof Error ? error.message : String(error)}`);

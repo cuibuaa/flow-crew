@@ -1,4 +1,6 @@
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   evaluateValidationDelta,
@@ -97,6 +99,23 @@ describe('baseline failure identity extraction', () => {
     expect(result.output).toMatch(/^\[\.\.\. \d+ earlier bytes omitted \.\.\.\]/);
     expect(result.output).not.toContain('not ok 1 - early native failure');
     expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(maxOutputBytes + 64);
+  });
+
+  it.each(['stdout', 'stderr'])('compares complete native %s beyond the former stream cap', async (stream) => {
+    const root = mkdtempSync(join(tmpdir(), 'validation-output-'));
+    try {
+      const baseline = await baselineFor({ exitCode: 0 });
+      const current = await runProjectValidationBaseline(root, {
+        commands: [{ role: 'test', command: process.execPath, args: ['-e',
+          `process.${stream}.write(['TAP version 13', 'not ok 1 - early failure', '# '+ 'diagnostic '.repeat(30_000),
+            'not ok 2 - late failure', '1..2', '# fail 2'].join(${JSON.stringify('\n')}), () => { process.exitCode = 1; });`], display: 'native failure output' }],
+      });
+      expect(testResult(current)).toMatchObject({ exitCode: 1, failureEvidence: 'complete',
+        failureCount: 2, failureIdentifiers: ['early failure', 'late failure'] });
+      expect(testResult(current).output).toContain('earlier bytes omitted');
+      expect(evaluateValidationDelta(baseline, current.results).find(({ role }) => role === 'test'))
+        .toMatchObject({ state: 'regression', newFailureIdentifiers: ['early failure', 'late failure'] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it('does not promote TODO records into baseline failures', async () => {

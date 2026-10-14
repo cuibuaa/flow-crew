@@ -1,11 +1,5 @@
-import {
-  closeSync,
-  existsSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-  readSync,
-} from 'node:fs';
+import { closeSync, openSync } from './engine-fs.js';
+import { existsSync, lstatSync, readFileSync, readSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { REGISTRY_COMPACTION_THRESHOLDS } from './task-registry.js';
 import { supervisionPaths } from './supervision.js';

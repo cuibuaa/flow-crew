@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import { stageArtifacts } from './spec_contracts/declared-fixtures.js';
+import { inputFile } from './spec_contracts/declared-fixtures.js';
 import {
   existsSync,
   mkdirSync,
@@ -10,10 +11,11 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { stringify as stringifyYaml } from 'yaml';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Adapter } from '../src/adapters/base.js';
-import type { BriefCriteriaArtifact } from '../src/brief-criteria.js';
+import { extractBriefCriteria } from '../src/brief-criteria.js';
+import { buildRoleRegistry } from '../src/scheduler/sched_admission/dispatch.js';
 import { inspectRealityChecks } from '../src/reality-check-preflight.js';
 import {
   inspectDispatchAdmission,
@@ -25,10 +27,11 @@ import {
 } from '../src/scheduler.js';
 import type { ResearchConfig, StoreState, TerminalStatesConfig } from '../src/store.js';
 
-const FIXTURE_ROOT = fileURLToPath(new URL('./fixtures/fresh-campaign-bootstrap/', import.meta.url));
-const CAMPAIGN_DIR = 'docs/happymj_explore7';
+const AGENTS_DIR = fileURLToPath(new URL('../config/agents/', import.meta.url));
+const CAMPAIGN_DIR = 'reports/campaign';
 const RESULT_FILE = `${CAMPAIGN_DIR}/round_result.json`;
 const MANIFEST_FILE = `${CAMPAIGN_DIR}/run_manifest.json`;
+const criteria = extractBriefCriteria('# Acceptance criteria\n1. Measure one mechanism and report its independently verified outcome.\n');
 
 const terminalStates: TerminalStatesConfig = {
   shipped: { paths: [`${CAMPAIGN_DIR}/ship_report.md`] },
@@ -47,58 +50,51 @@ const inertAdapter: Adapter = {
 };
 const temporaryRoots: string[] = [];
 
-interface ArchivedAdmission {
-  version: 1;
-  pass: false;
-  errors: string[];
-  terminalOwners: Record<string, string>;
-  criterionGateRefs: Record<string, string[]>;
-  criteriaDigest: string;
-  proposalDigest: string;
-}
+const terminalOwners = {
+  [`${CAMPAIGN_DIR}/ship_report.md`]: 'final_ship',
+  [`${CAMPAIGN_DIR}/ceiling_report.md`]: 'final_ceiling',
+  [`${CAMPAIGN_DIR}/escalation_note.md`]: 'final_escalate',
+};
 
-function fixture(name: string): Buffer {
-  return readFileSync(join(FIXTURE_ROOT, name));
-}
-
-function stagesFromFixture(): StageConfig[] {
-  const parsed = parseYaml(fixture('dispatch.yaml').toString('utf8')) as unknown;
-  const rows = Array.isArray(parsed) ? parsed : [];
-  const stages = rows.map((row) => parseDispatchedStageConfig(row));
+function campaignStages(): StageConfig[] {
+  const measuredScopes = [RESULT_FILE, `${RESULT_FILE}.no_candidate.json`];
+  const rows = [
+    { id: 'run_round', role: 'coder', scope: measuredScopes,
+      prompt_template: 'Measure one research mechanism or emit no-candidate evidence.' },
+    { id: 'audit_round', role: 'qa', scope: [], depends_on: ['run_round'], is_gate: true,
+      dependency_reasons: { run_round: 'Independently inspect the measured outcome.' },
+      prompt_template: 'Verify the research evidence and outcome contract.' },
+    { id: 'fix_round', role: 'coder', scope: measuredScopes, depends_on: ['audit_round'], retry_to: ['audit_round'],
+      dependency_reasons: { audit_round: 'Repair the rejected research evidence.' },
+      prompt_template: 'Fix the defects identified by the rejecting gate.' },
+    ...Object.entries(terminalOwners).map(([path, id]) => ({
+      id, role: 'doc_writer', scope: [path], depends_on: ['audit_round'],
+      dependency_reasons: { audit_round: 'Report the independently accepted research outcome.' },
+      condition: `research.terminalPath == ${path}`,
+      prompt_template: `Report the research outcome at ${path}.`,
+    })),
+  ];
+  const stages = rows.map((row) => {
+    return parseDispatchedStageConfig({ ...row, artifact_contract: stageArtifacts(row.id, 'is_gate' in row && row.is_gate) });
+  });
   resolveDispatchDependencies(stages, 'plan');
   return stages;
 }
 
-function archivedAdmission(): ArchivedAdmission {
-  return JSON.parse(fixture('dispatch_admission.json').toString('utf8')) as ArchivedAdmission;
-}
-
-function evidenceCriteria(archived: ArchivedAdmission): BriefCriteriaArtifact {
-  return {
-    version: 1,
-    briefDigest: archived.criteriaDigest,
-    criteria: archived.criterionGateRefs.audit_round.map((id, index) => ({
-      id,
-      text: `quarantined criterion ${index + 1}`,
-      line: index + 1,
-      section: 'What each round report must show',
-    })),
-  };
-}
-
 function checksMarkdown(...checks: Array<Record<string, unknown>>): string {
-  return ['## Reality checks', '```yaml', stringifyYaml({ checks }).trimEnd(), '```'].join('\n');
+  return ['## Reality checks', '```yaml', stringifyYaml({ checks: checks.map((check) => ({ reads: [], ...check })) }).trimEnd(), '```'].join('\n');
 }
 
 function manifestChecks(): string {
   return checksMarkdown(
-    {
+    { reads: [inputFile('file_0', MANIFEST_FILE)],
       name: 'round_result_and_no_candidate_are_mutually_exclusive',
       type: 'file-exists-nonempty',
       params: { paths: [MANIFEST_FILE] },
     },
     {
       name: 'shipped_result_survives_confirmation',
+      reads: [inputFile('manifest', MANIFEST_FILE)],
       type: 'exec-script-exit-zero',
       params: {
         script: [
@@ -114,7 +110,7 @@ function manifestChecks(): string {
 }
 
 function onePathCheck(name: string, path: string): string {
-  return checksMarkdown({ name, type: 'file-exists-nonempty', params: { paths: [path] } });
+  return checksMarkdown({ reads: [inputFile('file_0', path)], name, type: 'file-exists-nonempty', params: { paths: [path] } });
 }
 
 function temporaryRoot(): string {
@@ -158,48 +154,20 @@ afterEach(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('quarantined attempt-2 replay', () => {
-  it('pins the exact proposal, admission, and rejection bytes', () => {
-    const expected = {
-      'dispatch.yaml': [9_106, 'dde0e6a7c148b4be5c3fe22e32ac9b85434d9df234b7fb1d296445f1df1ab97b'],
-      'dispatch_admission.json': [2_403, '4f46108932c301864ae99b670714c819e463a3d563ee133125c32c42b628d692'],
-      'rejection.json': [868, 'ea2b3a77c7015fab0c192b9e1cf0f08a6752a0457b6492b66d23266531e52fd4'],
-    } as const;
-    for (const [name, [bytes, sha256]] of Object.entries(expected)) {
-      const content = fixture(name);
-      expect(content.byteLength, name).toBe(bytes);
-      expect(createHash('sha256').update(content).digest('hex'), name).toBe(sha256);
-    }
-
-    const archived = archivedAdmission();
-    expect(archived).toMatchObject({
-      pass: false,
-      proposalDigest: expected['dispatch.yaml'][1],
-      errors: [
-        expect.stringContaining(`references absent ${MANIFEST_FILE}`),
-        expect.stringContaining(`references absent ${MANIFEST_FILE}`),
-        expect.stringContaining(`references absent ${CAMPAIGN_DIR}/*`),
-      ],
-    });
-    expect(JSON.parse(fixture('rejection.json').toString('utf8'))).toMatchObject({
-      attemptIndex: 2,
-      proposalDigest: expected['dispatch.yaml'][1],
-      errors: archived.errors,
-    });
-  });
-
+describe('first research round with generic roles', () => {
   it('refuses manifest-only confirmation checks before the first round is consumed', () => {
-    const archived = archivedAdmission();
-    const stages = stagesFromFixture();
+    const stages = campaignStages();
+    const roles = buildRoleRegistry(AGENTS_DIR);
+    expect(stages.every((stage) => roles.has(stage.role))).toBe(true);
     const topology = inspectDispatchAdmission({
       dispatched: stages,
       baseStages: [],
       dispatchStageId: 'plan',
       terminalStates,
       research,
-      criteria: evidenceCriteria(archived),
+      criteria,
     });
-    expect(topology).toMatchObject({ pass: true, errors: [], terminalOwners: archived.terminalOwners });
+    expect(topology).toMatchObject({ pass: true, errors: [], terminalOwners });
 
     const projectDir = temporaryRoot();
     expect(existsSync(join(projectDir, CAMPAIGN_DIR))).toBe(false);
@@ -210,22 +178,24 @@ describe('quarantined attempt-2 replay', () => {
       terminalStates,
       research,
     })).toEqual([
-      expect.stringContaining('references post-consumption framework manifest'),
-      expect.stringContaining('references post-consumption framework manifest'),
+      expect.stringContaining('ARTIFACT_INPUT_ABSENT'), expect.stringContaining('references post-consumption framework manifest'),
+      expect.stringContaining('ARTIFACT_INPUT_ABSENT'), expect.stringContaining('references post-consumption framework manifest'),
     ]);
   });
 
-  it('still refuses the recorded wildcard, the optional result, and a never-written sibling', () => {
+  it('refuses a wildcard, the optional result, and a never-written sibling', () => {
     const projectDir = temporaryRoot();
-    const stages = stagesFromFixture();
+    const stages = campaignStages();
     const wildcard = inspectRealityCheckReachability({
-      markdown: onePathCheck('recorded bare wildcard', `${CAMPAIGN_DIR}/*`),
+      markdown: onePathCheck('bare wildcard', `${CAMPAIGN_DIR}/*`),
       projectDir,
       stages,
       terminalStates,
       research,
     });
-    expect(wildcard).toEqual([expect.stringContaining(`references absent ${CAMPAIGN_DIR}/*`)]);
+    expect(wildcard).toEqual([
+      expect.stringContaining('ARTIFACT_INPUT_ABSENT'),
+    ]);
 
     const optional = inspectRealityCheckReachability({
       markdown: onePathCheck('optional measured result', RESULT_FILE),
@@ -234,7 +204,7 @@ describe('quarantined attempt-2 replay', () => {
       terminalStates,
       research,
     });
-    expect(optional).toEqual([expect.stringContaining('valid no-candidate round writes only its sidecar')]);
+    expect(optional).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT'), expect.stringContaining('valid no-candidate round writes only its sidecar')]);
 
     const neverWritten = `${CAMPAIGN_DIR}/never_written.json`;
     const novel = inspectRealityCheckReachability({
@@ -244,12 +214,12 @@ describe('quarantined attempt-2 replay', () => {
       terminalStates,
       research,
     });
-    expect(novel).toEqual([expect.stringContaining(`references absent ${neverWritten}`)]);
+    expect(novel).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT')]);
+    expect(novel[0]).toContain(neverWritten);
   });
 
   it('keeps the resolved manifest framework-owned instead of assigning it to a terminal writer', () => {
-    const archived = archivedAdmission();
-    const stages = stagesFromFixture();
+    const stages = campaignStages();
     const finalShip = stages.find((stage) => stage.id === 'final_ship');
     expect(finalShip).toBeDefined();
     finalShip!.scope = [...finalShip!.scope, MANIFEST_FILE];
@@ -259,11 +229,10 @@ describe('quarantined attempt-2 replay', () => {
       dispatchStageId: 'plan',
       terminalStates,
       research,
-      criteria: evidenceCriteria(archived),
+      criteria,
     });
-    expect(report.errors).toContain(
-      `terminal owner final_ship.scope: research result producer path ${MANIFEST_FILE} cannot be owned by a terminal writer; separate measurement from terminalization`,
-    );
+    expect(report.pass, report.errors.join('\n')).toBe(true);
+    expect(report.frameworkReservedScopes).toEqual({ final_ship: [MANIFEST_FILE] });
   });
 });
 
@@ -313,13 +282,13 @@ describe('single resolved framework output contract', () => {
       projectDir: temporaryRoot(),
       stages: [],
       research: explicit,
-    })).toEqual([expect.stringContaining('references post-consumption framework manifest')]);
+    })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT'), expect.stringContaining('references post-consumption framework manifest')]);
     expect(inspectRealityCheckReachability({
       markdown: onePathCheck('inferred path loses when explicit wins', 'docs/fresh-campaign/run_manifest.json'),
       projectDir: temporaryRoot(),
       stages: [],
       research: explicit,
-    })).toEqual([expect.stringContaining('no admitted stage or framework emitter owns it')]);
+    })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT')]);
   });
 
   it('makes static preflight and reachability agree on exact and novel manifest paths', () => {
@@ -345,13 +314,13 @@ describe('single resolved framework output contract', () => {
       projectDir,
       stages: [],
       research,
-    })).toEqual([expect.stringContaining('references post-consumption framework manifest')]);
+    })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT'), expect.stringContaining('references post-consumption framework manifest')]);
     expect(inspectRealityCheckReachability({
       markdown: novel,
       projectDir,
       stages: [],
       research,
-    })).toEqual([expect.stringContaining(`references absent ${novelPath}`)]);
+    })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT')]);
   });
 
   it('keeps an inferred project-root manifest exact instead of granting its basename', () => {
@@ -384,13 +353,13 @@ describe('single resolved framework output contract', () => {
       projectDir,
       stages: [],
       research: rootResearch,
-    })).toEqual([expect.stringContaining('references post-consumption framework manifest')]);
+    })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT'), expect.stringContaining('references post-consumption framework manifest')]);
     expect(inspectRealityCheckReachability({
       markdown: novel,
       projectDir,
       stages: [],
       research: rootResearch,
-    })).toEqual([expect.stringContaining(`references absent ${novelPath}`)]);
+    })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT')]);
   });
 
   it('credits an explicit project-root report_dir on both admission sides', () => {
@@ -425,12 +394,12 @@ describe('single resolved framework output contract', () => {
       projectDir,
       stages: [],
       research: explicitRoot,
-    })).toEqual([expect.stringContaining('references post-consumption framework manifest')]);
+    })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT'), expect.stringContaining('references post-consumption framework manifest')]);
     expect(inspectRealityCheckReachability({
       markdown: inferred,
       projectDir,
       stages: [],
       research: explicitRoot,
-    })).toEqual([expect.stringContaining(`references absent ${inferredPath}`)]);
+    })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT')]);
   });
 });

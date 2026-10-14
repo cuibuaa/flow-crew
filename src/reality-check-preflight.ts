@@ -1,26 +1,17 @@
+import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import { posix } from 'node:path';
 import { parseDocument } from 'yaml';
 import { parseChecksFromMarkdown, type CheckDecl } from './reality-gate/index.js';
 import { inspectVersionedJsonShapeCheck } from './reality-gate/versioned-json-admission.js';
 import { resolveResearchPaths } from './research-paths.js';
-import type {
-  ProjectValidationBaseline,
-  ValidationCommand,
-  ValidationCommandResult,
-  ValidationGateCriterion,
-} from './project-validation.js';
+import type { ArtifactContract } from './artifact-declarations.js';
 
 export type RealityCheckPreflightCode =
   | 'presentation_proxy_heading_literal'
   | 'contract_exception_conflict'
   | 'undeclared_artifact_existence'
-  | 'copy_byte_equivalence'
   | 'hard_check_cannot_fail'
-  | 'hard_check_cannot_pass'
-  | 'versioned_json_shape_mismatch'
-  | 'invalid_reality_check_declaration';
-
-export type RealityCheckPreflightTier = 'blocking' | 'advisory' | 'structural';
+  | 'versioned_json_shape_mismatch';
 
 export interface RealityCheckPreflightFinding {
   code: RealityCheckPreflightCode;
@@ -28,8 +19,7 @@ export interface RealityCheckPreflightFinding {
   checkName: string;
   checkType: string;
   message: string;
-  tier: RealityCheckPreflightTier;
-  blocking: boolean;
+  tier: 'advisory';
   evidence?: string;
 }
 
@@ -37,23 +27,14 @@ export interface RealityCheckPreflightReport {
   version: 1;
   checksInspected: number;
   findings: RealityCheckPreflightFinding[];
-  /**
-   * Backward-compatible name for findings emitted from planner-authored hard
-   * declarations. Use the tier-specific collections for admission decisions.
-   * @deprecated Use blockingTierFindings, advisoryFindings, or structuralFindings.
-   */
-  blockingFindings: RealityCheckPreflightFinding[];
-  blockingTierFindings: RealityCheckPreflightFinding[];
   advisoryFindings: RealityCheckPreflightFinding[];
-  structuralFindings: RealityCheckPreflightFinding[];
-  refusingFindings: RealityCheckPreflightFinding[];
 }
 
 export interface RealityCheckPreflightContext {
-  /** Exact identity-bound ship-setup baseline supplied by orchestration. */
-  validationBaseline?: ProjectValidationBaseline;
   /** Canonical project root used only for contained, already-present artifact evidence. */
   projectDir?: string;
+  /** Versioned declarations parsed from this exact candidate, never prompt text. */
+  artifactContracts?: readonly ArtifactContract[];
 }
 
 export interface RealityCheckAdvisoryRewrite {
@@ -72,7 +53,6 @@ interface BriefContractModel {
   artifactDeclarationsComplete: boolean;
   requiredHeadingLiterals: string[];
   exceptions: ExceptionStatement[];
-  requiresByteEquivalence: boolean;
 }
 
 const PATH_EXTENSION = /\.(?:[cm]?[jt]sx?|py|rs|go|java|rb|php|sh|bash|ya?ml|json|jsonl|toml|md|txt|csv|tsv|parquet|db|sqlite|html|css|svg|png|jpe?g|webp|pdf|arrow)$/i;
@@ -87,7 +67,6 @@ const OUTPUT_ASSIGNMENT = /^(?:[-*+]\s*)?(?:result_file|output_file|report_file|
 const OBLIGATION_LIST_INTRO = /\b(?:required|deliverables?|outputs?|artifacts?|files?\s+to\s+(?:write|create|produce))\b.{0,80}(?::|\bfollow(?:s|ing)\b)|(?:交付物|产出|输出|验收文件|必须生成|必须写入|须写入).{0,50}[：:]?$/i;
 const EXCEPTION_DIRECTIVE = /\b(?:must|shall|required(?:\s+to)?)\s+(?:be\s+)?(?:preserved|retained|kept|left unchanged)|\b(?:must|shall)\s+not\s+(?:be\s+)?(?:removed|deleted|edited|changed|rewritten)|\b(?:explicit(?:ly)?\s+)?(?:except|exception|exempt|allowed|permitted)\b|\bpreserve\b.{0,50}\b(?:history|historical|existing|legacy)\b/i;
 const REVOKED_EXCEPTION_DIRECTIVE = /\b(?:delete|remove|eliminate|drop|retire)\b.{0,80}\b(?:exception|exemption|allowance|permission)\b|\b(?:exception|exemption|allowance|permission)\b.{0,80}\b(?:must|shall|should|will)\s+(?:be\s+)?(?:deleted|removed|eliminated|dropped|retired)\b/i;
-const BYTE_EQUIVALENCE_CONTRACT = /\b(?:must|shall|required)\b.{0,120}\b(?:byte[- ](?:equal|equality|identical)|bytes?\s+(?:unchanged|preserved|identical)|bit[- ]for[- ]bit|exact byte (?:copy|identity))\b|\b(?:byte[- ](?:equal|equality|identical)|bytes?\s+(?:unchanged|preserved|identical)|preserve(?:d)?\s+bytes?|bit[- ]for[- ]bit|exact byte (?:copy|identity))\b.{0,120}\b(?:must|shall|required|contract)\b/i;
 const EXACT_HEADING_CONTRACT = /\b(?:must|shall|required)\b.{0,100}\bexact\b.{0,60}\b(?:markdown\s+)?heading\b|\bexact\b.{0,60}\b(?:markdown\s+)?heading\b.{0,100}\b(?:must|shall|required|violat(?:e|es|ion))\b/i;
 const CEILING_DELIVERABLE = /\b(?:ceiling|rigorous\s+negative)\b.{0,140}\b(?:valid|real|accepted|acceptable)\s+(?:terminal\s+)?deliverable\b|\b(?:valid|real|accepted|acceptable)\s+(?:terminal\s+)?deliverable\b.{0,140}\b(?:ceiling|rigorous\s+negative)\b/i;
 
@@ -103,12 +82,12 @@ function leadingFrontmatter(brief: string): {
   bodyLineOffset: number;
   declarationsComplete: boolean;
 } {
-  const match = /^(?:\uFEFF)?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(brief);
-  if (!match) return { body: brief, bodyLineOffset: 0, declarationsComplete: true };
+  const frontmatter = splitBriefFrontmatter(brief);
+  if (!frontmatter) return { body: brief, bodyLineOffset: 0, declarationsComplete: true };
   let parsed: Record<string, unknown> | undefined;
   let declarationsComplete = false;
   try {
-    const document = parseDocument(match[1]);
+    const document = parseDocument(frontmatter.yaml);
     parsed = record(document.toJS());
     declarationsComplete = document.errors.length === 0 && parsed !== undefined;
   } catch {
@@ -118,8 +97,8 @@ function leadingFrontmatter(brief: string): {
   }
   return {
     parsed,
-    body: brief.slice(match[0].length),
-    bodyLineOffset: match[0].split(/\r?\n/).length - 1,
+    body: frontmatter.body,
+    bodyLineOffset: frontmatter.bodyLineOffset,
     declarationsComplete,
   };
 }
@@ -388,9 +367,6 @@ function deriveBriefContract(brief: string): BriefContractModel {
   if (researchReportDir && CEILING_DELIVERABLE.test(frontmatter.body)) {
     rawArtifacts.push(posix.join(researchReportDir, 'ceiling_report.md'));
   }
-  if (/(?:\b(?:update|write|record|persist)\b.{0,80}\b(?:knowledge\s+graph|KG)\b)|(?:\b(?:knowledge\s+graph|KG)\b.{0,80}\b(?:must|required|update|write|record|persist)\b)|(?:更新|写入|记录).{0,40}(?:knowledge\s+graph|知识图谱|\bKG\b)/i.test(frontmatter.body)) {
-    rawArtifacts.push('**/knowledge_graph.json');
-  }
   const requiredArtifacts = [...new Set(
     rawArtifacts
       .map(normalizeArtifactPath)
@@ -401,7 +377,6 @@ function deriveBriefContract(brief: string): BriefContractModel {
     artifactDeclarationsComplete: frontmatter.declarationsComplete,
     requiredHeadingLiterals: exactRequiredHeadings(frontmatter.body),
     exceptions: exceptionStatements(frontmatter.body, frontmatter.bodyLineOffset),
-    requiresByteEquivalence: BYTE_EQUIVALENCE_CONTRACT.test(brief),
   };
 }
 
@@ -563,103 +538,11 @@ function exactHeadingProxy(script: string): HeadingProxy | undefined {
   return undefined;
 }
 
-function shellWords(segment: string): string[] {
-  return [...segment.matchAll(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g)]
-    .map((match) => match[0].replace(/^(['"])([\s\S]*)\1$/, '$2'));
-}
-
-function comparisonOperands(script: string, command: 'cmp' | 'diff'): string[] | undefined {
-  for (const clause of script.split(/\r?\n|;/)) {
-    const neutralized = new RegExp(`\\b${command}\\b[^\\r\\n;]*\\|\\|\\s*(?:true|:)(?:\\s|$)`).test(clause);
-    if (neutralized) continue;
-    for (const segment of clause.split(/&&|\|\||\|/)) {
-      const words = shellWords(segment.trim());
-      const commandIndex = words.findIndex((word) => word === command);
-      if (commandIndex !== 0 && !(commandIndex === 1 && words[0] === 'command')) continue;
-      const tail = words.slice(commandIndex + 1);
-      if (command === 'diff' && !tail.some((word) => word === '-q' || word === '--brief' || /^-[A-Za-z]*q/.test(word))) continue;
-      const operands = tail.filter((word) => !word.startsWith('-') && !/^(?:<|>|2>|1>)/.test(word));
-      if (operands.length >= 2) return operands.slice(0, 2);
-    }
-  }
-  return undefined;
-}
-
 function readFileVariables(script: string): Map<string, string> {
   const variables = new Map<string, string>();
   const assignment = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[A-Za-z_$][\w$]*\.)?readFileSync\s*\(\s*(['"])([^'"\r\n]+)\2(?:\s*,[^)]*)?\)/g;
   for (const match of script.matchAll(assignment)) variables.set(match[1], match[3]);
   return variables;
-}
-
-function readFileBufferVariables(script: string): Map<string, string> {
-  const variables = new Map<string, string>();
-  const assignment = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[A-Za-z_$][\w$]*\.)?readFileSync\s*\(\s*(['"])([^'"\r\n]+)\2\s*\)/g;
-  for (const match of script.matchAll(assignment)) variables.set(match[1], match[3]);
-  return variables;
-}
-
-function variableBufferEquivalence(script: string): string | undefined {
-  const buffers = readFileBufferVariables(script);
-  if (buffers.size < 2) return undefined;
-  const equalityFailure = /\bif\s*\(\s*!\s*([A-Za-z_$][\w$]*)\.equals\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\)\s*(?:\{[\s\S]{0,240}?(?:process\.exit\s*\(\s*[1-9]|throw\b)|(?:process\.exit\s*\(\s*[1-9]|throw\b))/g;
-  for (const match of script.matchAll(equalityFailure)) {
-    if (buffers.has(match[1]) && buffers.has(match[2])) {
-      return `${match[1]}.equals(${match[2]}) for ${buffers.get(match[1])} and ${buffers.get(match[2])}`;
-    }
-  }
-  return undefined;
-}
-
-type ByteSource = 'file' | 'command';
-
-function commandBufferEquivalence(script: string): string | undefined {
-  const sources = new Map<string, ByteSource>();
-  const assignment = /(?:^|[;{}]\s*|\n\s*)(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]+)/gm;
-  for (const match of script.matchAll(assignment)) {
-    const expression = match[2];
-    if (/\breadFileSync\s*\(/.test(expression)) sources.set(match[1], 'file');
-    else if (/\b(?:execFileSync|spawnSync)\s*\(/.test(expression)) sources.set(match[1], 'command');
-  }
-
-  const sourceOf = (operand: string): ByteSource | undefined => {
-    if (/\breadFileSync\s*\(/.test(operand)) return 'file';
-    const variable = /^([A-Za-z_$][\w$]*)(?:\.stdout)?$/.exec(operand)?.[1];
-    return variable ? sources.get(variable) : undefined;
-  };
-
-  const equality = /((?:[A-Za-z_$][\w$]*\.)?readFileSync\s*\([^)]*\)|[A-Za-z_$][\w$]*)\.equals\s*\(\s*([A-Za-z_$][\w$]*(?:\.stdout)?)\s*\)/g;
-  for (const match of script.matchAll(equality)) {
-    if (match.index === undefined) continue;
-    const left = sourceOf(match[1]);
-    const right = sourceOf(match[2]);
-    if (!left || !right || left === right) continue;
-    const prefix = script.slice(Math.max(0, match.index - 240), match.index);
-    const suffix = script.slice(match.index + match[0].length, match.index + match[0].length + 260);
-    if (!/!\s*$/.test(prefix) || !/(?:throw\b|process\.exit\s*\(\s*[1-9])/.test(suffix)) continue;
-    return `${match[1]}.equals(${match[2]}) compares file bytes with command output`;
-  }
-  return undefined;
-}
-
-function copyEquivalenceEvidence(script: string): string | undefined {
-  const cmp = comparisonOperands(script, 'cmp');
-  if (cmp) return `cmp ${cmp.join(' ')}`;
-  const diff = comparisonOperands(script, 'diff');
-  if (diff) return `diff --brief ${diff.join(' ')}`;
-  const catEquality = script.match(/(?:test\s+)?["']?\$\(\s*cat\s+[^)]+\)["']?\s*(?:=|==)\s*["']?\$\(\s*cat\s+[^)]+\)["']?/m)?.[0];
-  if (catEquality) return catEquality;
-  const variableBuffers = variableBufferEquivalence(script);
-  if (variableBuffers) return variableBuffers;
-  const commandBuffer = commandBufferEquivalence(script);
-  if (commandBuffer) return commandBuffer;
-  const bufferEquality = script.match(/Buffer\.compare\s*\([^)]*readFileSync[\s\S]{0,240}readFileSync|readFileSync\s*\([^)]*\)\.equals\s*\(\s*readFileSync/m)?.[0];
-  if (bufferEquality) return bufferEquality;
-  const digestCommands = script.match(/\b(?:sha(?:1|224|256|384|512)sum|md5sum|cksum)\b/g) ?? [];
-  if (digestCommands.length >= 2 && /(?:^|\s)(?:=|==)(?:\s|$)/m.test(script)) {
-    return `${digestCommands[0]} / ${digestCommands[1]} equality`;
-  }
-  return undefined;
 }
 
 function literalFragments(pattern: string): string[] {
@@ -778,14 +661,6 @@ function forbiddenSearches(script: string): ForbiddenSearch[] {
 
 function exceptionConflict(declaration: Exclude<CheckDecl, { kind: 'invalid' }>, contract: BriefContractModel): ExceptionStatement | undefined {
   const params = record(declaration.params) ?? {};
-  if (declaration.type === 'static-ast-scan'
-      && typeof params.forbid_pattern === 'string'
-      && typeof params.glob === 'string') {
-    const fragments = literalFragments(params.forbid_pattern);
-    return contract.exceptions.find((statement) =>
-      fragments.some((fragment) => statement.text.includes(fragment))
-      && scopeCoversStatement(params.glob as string, statement));
-  }
   if (declaration.type !== 'exec-script-exit-zero' || typeof params.script !== 'string') return undefined;
   for (const search of forbiddenSearches(params.script)) {
     const fragments = search.patterns.flatMap(literalFragments);
@@ -811,279 +686,6 @@ function infallibleHardScript(script: string): string | undefined {
   return undefined;
 }
 
-interface FailingValidationCommand {
-  command: ValidationCommand;
-  result: ValidationCommandResult;
-  criterion: ValidationGateCriterion;
-}
-
-interface RawValidationStatusEvidence extends FailingValidationCommand {
-  controlFlow: 'script-final-command' | 'captured-status-reexit' | 'terminal-if-branch';
-}
-
-function failingValidationCommands(
-  baseline: ProjectValidationBaseline | undefined,
-): FailingValidationCommand[] {
-  if (!baseline) return [];
-  return baseline.discovery.commands.flatMap((command) => {
-    const result = baseline.results.find((candidate) => candidate.role === command.role);
-    const criterion = baseline.gateCriteria.find((candidate) => candidate.role === command.role);
-    return result?.state === 'failed' && criterion?.rule === 'no_regression_from_baseline'
-      ? [{ command, result, criterion }]
-      : [];
-  });
-}
-
-/** Split only newline/semicolon simple-command boundaries. More general shell
- * grammar is intentionally left unresolved instead of guessed at. */
-function simpleShellStatements(body: string): string[] | undefined {
-  const statements: string[] = [];
-  let current = '';
-  let quote: "'" | '"' | undefined;
-  let escaped = false;
-  let comment = false;
-  const flush = () => {
-    const value = current.trim();
-    if (value) statements.push(value);
-    current = '';
-  };
-
-  for (let index = 0; index < body.length; index += 1) {
-    const character = body[index];
-    if (comment) {
-      if (character === '\n' || character === '\r') {
-        comment = false;
-        flush();
-      }
-      continue;
-    }
-    if (quote) {
-      current += character;
-      if (escaped) escaped = false;
-      else if (character === '\\' && quote === '"') escaped = true;
-      else if (character === quote) quote = undefined;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      current += character;
-      continue;
-    }
-    if (character === '\\') {
-      if (index + 1 >= body.length) return undefined;
-      current += character + body[index + 1];
-      index += 1;
-      continue;
-    }
-    if (character === '#' && (current.length === 0 || /\s/.test(current.at(-1) ?? ''))) {
-      comment = true;
-      continue;
-    }
-    if (character === ';' || character === '\n' || character === '\r') {
-      flush();
-      continue;
-    }
-    current += character;
-  }
-  if (quote || escaped) return undefined;
-  flush();
-  return statements;
-}
-
-/** Remove only trailing stream redirections. Redirections before or between
- * argv remain ambiguous and therefore do not match. */
-function withoutTrailingRedirections(segment: string): string {
-  let remaining = segment.trim();
-  const redirection = /\s*(?:\d*(?:>>?|<<?|<>|>\|)\s*(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\s;&|<>]+)|\d*(?:>&|<&)\s*(?:\d+|-))\s*$/;
-  while (true) {
-    const match = redirection.exec(remaining);
-    if (!match || match.index === remaining.length) return remaining;
-    remaining = remaining.slice(0, match.index).trimEnd();
-  }
-}
-
-/** Lex literal shell argv without expansion or evaluation. */
-function literalShellWords(segment: string): string[] | undefined {
-  const words: string[] = [];
-  let current = '';
-  let started = false;
-  let quote: "'" | '"' | undefined;
-  const flush = () => {
-    if (started) words.push(current);
-    current = '';
-    started = false;
-  };
-
-  for (let index = 0; index < segment.length; index += 1) {
-    const character = segment[index];
-    if (quote === "'") {
-      if (character === "'") quote = undefined;
-      else current += character;
-      continue;
-    }
-    if (quote === '"') {
-      if (character === '"') {
-        quote = undefined;
-      } else if (character === '\\') {
-        const next = segment[index + 1];
-        if (next === undefined) return undefined;
-        if (/[$`"\\\n]/.test(next)) current += next;
-        else current += character + next;
-        index += 1;
-      } else {
-        current += character;
-      }
-      continue;
-    }
-    if (/\s/.test(character)) {
-      flush();
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      started = true;
-      continue;
-    }
-    if (character === '\\') {
-      const next = segment[index + 1];
-      if (next === undefined) return undefined;
-      current += next;
-      started = true;
-      index += 1;
-      continue;
-    }
-    if (/[;&|<>(){}]/.test(character)) return undefined;
-    current += character;
-    started = true;
-  }
-  if (quote) return undefined;
-  flush();
-  return words;
-}
-
-function unwrapStatusTransparentCommands(words: readonly string[]): string[] | undefined {
-  let remaining = [...words];
-  while (remaining.length > 0) {
-    if (remaining[0] === 'command') {
-      remaining = remaining.slice(1);
-      if (remaining[0] === '-p' || remaining[0] === '--') remaining = remaining.slice(1);
-      else if (remaining[0]?.startsWith('-')) return undefined;
-      continue;
-    }
-    if (remaining[0] === 'exec') {
-      remaining = remaining.slice(1);
-      if (remaining[0] === '--') remaining = remaining.slice(1);
-      else if (remaining[0]?.startsWith('-')) return undefined;
-      continue;
-    }
-    if (remaining[0] !== 'env' && !remaining[0]?.endsWith('/env')) break;
-    let index = 1;
-    for (; index < remaining.length; index += 1) {
-      const word = remaining[index];
-      if (word === '--') {
-        index += 1;
-        break;
-      }
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
-      if (word === '-i' || word === '--ignore-environment') continue;
-      if (word === '-u' || word === '--unset' || word === '-C' || word === '--chdir') {
-        index += 1;
-        if (index >= remaining.length) return undefined;
-        continue;
-      }
-      if (/^--(?:unset|chdir)=/.test(word)) continue;
-      if (word.startsWith('-')) return undefined;
-      break;
-    }
-    remaining = remaining.slice(index);
-  }
-  return remaining.length > 0 ? remaining : undefined;
-}
-
-function simpleCommandArgv(segment: string): string[] | undefined {
-  const words = literalShellWords(withoutTrailingRedirections(segment));
-  return words ? unwrapStatusTransparentCommands(words) : undefined;
-}
-
-function isValidationCommand(segment: string, command: ValidationCommand): boolean {
-  const actual = simpleCommandArgv(segment);
-  const expected = [command.command, ...command.args];
-  return actual?.length === expected.length
-    && actual.every((word, index) => word === expected[index]);
-}
-
-function exitedStatusVariable(statement: string): string | undefined {
-  const match = /^exit\s+(?:"\$(?:\{([A-Za-z_][\w]*)\}|([A-Za-z_][\w]*))"|\$(?:\{([A-Za-z_][\w]*)\}|([A-Za-z_][\w]*)))$/.exec(statement);
-  return match?.slice(1).find((value): value is string => Boolean(value));
-}
-
-function capturedStatusVariable(statement: string): string | undefined {
-  return /^([A-Za-z_][\w]*)=(?:\$\?|"\$\?")$/.exec(statement)?.[1];
-}
-
-function rawCommandFlowAtEnd(
-  body: string,
-  command: ValidationCommand,
-): 'direct' | 'captured-status-reexit' | undefined {
-  const statements = simpleShellStatements(body);
-  if (!statements || statements.length === 0) return undefined;
-  if (isValidationCommand(statements.at(-1) ?? '', command)) return 'direct';
-  if (statements.length < 3) return undefined;
-  const statusVariable = capturedStatusVariable(statements.at(-2) ?? '');
-  const exitVariable = exitedStatusVariable(statements.at(-1) ?? '');
-  return statusVariable
-      && exitVariable === statusVariable
-      && isValidationCommand(statements.at(-3) ?? '', command)
-    ? 'captured-status-reexit'
-    : undefined;
-}
-
-function rawValidationStatus(
-  script: string,
-  baseline: ProjectValidationBaseline | undefined,
-): RawValidationStatusEvidence | undefined {
-  for (const candidate of failingValidationCommands(baseline)) {
-    const scriptFlow = rawCommandFlowAtEnd(script, candidate.command);
-    if (scriptFlow) {
-      return {
-        ...candidate,
-        controlFlow: scriptFlow === 'direct' ? 'script-final-command' : 'captured-status-reexit',
-      };
-    }
-    // Narrowly recognize a terminal if/else compound. A validation command is
-    // decisive only when it is the final simple command in one branch and the
-    // other branch is itself mechanically guaranteed to return success.
-    const terminalIf = /(?:^|[;\n])\s*if\b[\s\S]*?\bthen\b([\s\S]*?)\belse\b([\s\S]*?)\bfi\s*;?\s*$/i.exec(script);
-    if (!terminalIf) continue;
-    const [thenBody, elseBody] = [terminalIf[1], terminalIf[2]];
-    if ((rawCommandFlowAtEnd(thenBody, candidate.command) && infallibleHardScript(elseBody))
-        || (rawCommandFlowAtEnd(elseBody, candidate.command) && infallibleHardScript(thenBody))) {
-      return { ...candidate, controlFlow: 'terminal-if-branch' };
-    }
-  }
-  return undefined;
-}
-
-function rawValidationEvidence(item: RawValidationStatusEvidence): string {
-  const count = item.result.failureCount ?? item.criterion.baselineFailureCount;
-  const identities = item.result.failureIdentifiers.length > 0
-    ? item.result.failureIdentifiers
-    : item.criterion.baselineFailureIdentifiers;
-  const evidence = item.result.failureIdentity === 'known'
-    ? item.result.failureEvidence ?? item.criterion.baselineFailureEvidence ?? 'complete'
-    : 'unknown';
-  const shown = identities.slice(0, 20);
-  const omitted = identities.length - shown.length;
-  return [
-    `control_flow=${item.controlFlow}`,
-    `role=${item.command.role}`,
-    `command=${JSON.stringify(item.command.display.slice(0, 240))}`,
-    `baseline_failure_evidence=${evidence}`,
-    `${evidence === 'partial' ? 'baseline_observed_failure_count' : 'baseline_failure_count'}=${count ?? 'unknown'}`,
-    `${evidence === 'partial' ? 'baseline_failure_identities_lower_bound' : 'baseline_failure_identities'}=${JSON.stringify(shown.map((identity) => identity.slice(0, 240)))}${omitted > 0 ? ` (+${omitted} more)` : ''}`,
-  ].join('; ');
-}
-
 function finding(
   declaration: CheckDecl,
   checkIndex: number,
@@ -1091,21 +693,13 @@ function finding(
   message: string,
   evidence?: string,
 ): RealityCheckPreflightFinding {
-  const tier: RealityCheckPreflightTier = code === 'copy_byte_equivalence'
-      || code === 'hard_check_cannot_fail'
-      || code === 'hard_check_cannot_pass'
-    ? 'blocking'
-    : code === 'invalid_reality_check_declaration'
-      ? 'structural'
-      : 'advisory';
   return {
     code,
     checkIndex,
     checkName: declaration.name,
     checkType: declaration.type,
     message,
-    tier,
-    blocking: tier !== 'advisory',
+    tier: 'advisory',
     ...(evidence ? { evidence } : {}),
   };
 }
@@ -1155,7 +749,6 @@ export function demoteRealityCheckAdvisories(
   findings: readonly RealityCheckPreflightFinding[],
 ): RealityCheckAdvisoryRewrite {
   const indexes = [...new Set(findings
-    .filter((item) => item.tier === 'advisory')
     .map((item) => item.checkIndex)
     .filter((index) => Number.isInteger(index) && index > 0))]
     .sort((left, right) => left - right);
@@ -1174,7 +767,7 @@ export function demoteRealityCheckAdvisories(
   for (const checkIndex of indexes) {
     const check = record(parsed.checks[checkIndex - 1]);
     if (!check || typeof check.name !== 'string' || typeof check.type !== 'string') continue;
-    const checkFindings = findings.filter((item) => item.tier === 'advisory' && item.checkIndex === checkIndex);
+    const checkFindings = findings.filter((item) => item.checkIndex === checkIndex);
     const versionedShape = checkFindings.find((item) => item.code === 'versioned_json_shape_mismatch');
     let reboundVersionedShape = false;
     if (versionedShape?.evidence) {
@@ -1213,9 +806,9 @@ export function demoteRealityCheckAdvisories(
  * This function is deterministic and performs no process work. When a canonical
  * project root is supplied, it may read one statically named, project-contained
  * JSON artifact using the same narrow analyzer as terminal admission.
- * It refuses only mechanically decisive relations; intent-dependent relations
- * remain visible advisory findings. Arbitrary shell semantics remain out of
- * scope.
+ * Findings are advisory. Declaration shape belongs to parser/reachability
+ * admission; runtime validates input bindings. Arbitrary shell semantics are
+ * outside this inspector.
  */
 export function inspectRealityChecks(
   taskBrief: string,
@@ -1224,19 +817,18 @@ export function inspectRealityChecks(
 ): RealityCheckPreflightReport {
   const declarations = parseChecksFromMarkdown(realityChecksMarkdown);
   const contract = deriveBriefContract(taskBrief);
+  for (const artifacts of context.artifactContracts ?? []) {
+    for (const output of artifacts.produces) {
+      if (output.root === 'project' && !output.when && !artifacts.groups.some((group) => group.members.includes(output.id))) {
+        contract.requiredArtifacts.push(output.path);
+      }
+    }
+  }
   const findings: RealityCheckPreflightFinding[] = [];
 
   declarations.forEach((declaration, offset) => {
     const checkIndex = offset + 1;
-    if (declaration.kind === 'invalid') {
-      findings.push(finding(
-        declaration,
-        checkIndex,
-        'invalid_reality_check_declaration',
-        `The declaration would fail independently of any contract property: ${declaration.diagnostic}. Fix the named Reality-check item and its YAML fields before dispatch.`,
-      ));
-      return;
-    }
+    if (declaration.kind === 'invalid') return;
     if (declaration.advisory === true) return;
     const params = record(declaration.params) ?? {};
 
@@ -1260,34 +852,6 @@ export function inspectRealityChecks(
           'hard_check_cannot_fail',
           'The hard script is mechanically guaranteed to exit zero, so it cannot test the property named by the check. Make the script exit nonzero when the named property is false, or remove the hard check.',
           infallible,
-        ));
-      }
-
-      const cannotPass = rawValidationStatus(params.script, context.validationBaseline);
-      if (cannotPass) {
-        const count = cannotPass.result.failureCount ?? cannotPass.criterion.baselineFailureCount;
-        const identities = cannotPass.result.failureIdentifiers.length > 0
-          ? cannotPass.result.failureIdentifiers
-          : cannotPass.criterion.baselineFailureIdentifiers;
-        const evidence = cannotPass.result.failureIdentity === 'known'
-          ? cannotPass.result.failureEvidence ?? cannotPass.criterion.baselineFailureEvidence ?? 'complete'
-          : 'unknown';
-        const partial = evidence === 'partial';
-        const shownIdentities = identities.slice(0, 20);
-        const identitySummary = shownIdentities.length === 0
-          ? ''
-          : ` ${partial ? 'Retained failing identities (lower bound)' : 'Recorded failing identities'}: ${shownIdentities.map((identity) => JSON.stringify(identity.slice(0, 240))).join(', ')}${identities.length > shownIdentities.length ? ` (+${identities.length - shownIdentities.length} more)` : ''}.`;
-        const countSummary = count === undefined
-          ? ''
-          : partial
-            ? ` and an observed partial-evidence count of ${count} (not a proven whole-run count)`
-            : ` and ${count} failure${count === 1 ? '' : 's'}`;
-        findings.push(finding(
-          declaration,
-          checkIndex,
-          'hard_check_cannot_pass',
-          `The hard check makes its verdict the raw exit status of recorded ${cannotPass.command.role} command ${JSON.stringify(cannotPass.command.display.slice(0, 240))}, but that command has a failing recorded baseline with ${evidence} failure evidence${countSummary} under no_regression_from_baseline.${identitySummary}${partial ? ' The recorded failure evidence is partial, so a red-to-red comparison must remain unresolved.' : ''} Compare current failure identities with the recorded baseline, or omit the redundant validation check.`,
-          rawValidationEvidence(cannotPass),
         ));
       }
 
@@ -1337,35 +901,13 @@ export function inspectRealityChecks(
         ));
       }
     }
-
-    if (declaration.type === 'exec-script-exit-zero'
-        && typeof params.script === 'string'
-        && !contract.requiresByteEquivalence) {
-      const evidence = copyEquivalenceEvidence(params.script);
-      if (evidence) {
-        findings.push(finding(
-          declaration,
-          checkIndex,
-          'copy_byte_equivalence',
-          'The check makes equivalence between copies decisive even though the brief does not contract for byte identity. Replace byte comparison with the required semantic property, or declare byte identity in the brief.',
-          evidence,
-        ));
-      }
-    }
   });
 
   return {
     version: 1,
     checksInspected: declarations.length,
     findings,
-    // Kept for consumers written before the severity split. Every entry here
-    // originated in a declaration the planner made hard; its disposition is
-    // carried by `tier`/`blocking` and by the collections below.
-    blockingFindings: findings,
-    blockingTierFindings: findings.filter((item) => item.tier === 'blocking'),
-    advisoryFindings: findings.filter((item) => item.tier === 'advisory'),
-    structuralFindings: findings.filter((item) => item.tier === 'structural'),
-    refusingFindings: findings.filter((item) => item.tier === 'blocking' || item.tier === 'structural'),
+    advisoryFindings: findings,
   };
 }
 

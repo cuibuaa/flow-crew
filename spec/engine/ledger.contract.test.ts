@@ -2,7 +2,7 @@
  * Phase-0 safety net — Ledger primitive guard contract.
  *
  * Guard paths (no store fixtures needed): an absent/empty campaign yields 'none', so the planner
- * injection degrades cleanly. The cross-run aggregation (dedup of tried labels + dead-ends) is
+ * injection degrades cleanly. The cross-run aggregation (best result per tried label) is
  * smoke-validated against real campaign data during the refactor; this pins the safe-fallback
  * contract the injection relies on.
  */

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { emptyArtifactContract, gateArtifactContract } from './spec_presentation/declared-fixtures.js';
 import {
   mkdirSync,
   mkdtempSync,
@@ -9,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
   deriveCriterionDischarges,
   inspectDispatchAdmission,
@@ -58,7 +60,7 @@ const expectedRecordedSourceFiles = {
   },
   'reality_checks.md': {
     bytes: 1238,
-    sha256: 'e234bd2f6322308f2004156981aa5424b7abd115451a4419a492011c784f53cf',
+    sha256: '00de1821d3617157c857199ebc9065f797d65671532f84905294821b89871002',
   },
   'stages/audit_terminal/metric.json': {
     bytes: 851,
@@ -98,6 +100,7 @@ function stage(raw: Record<string, unknown>) {
     skills: [],
     is_gate: false,
     criterion_refs: [],
+    artifact_contract: raw.is_gate === true ? gateArtifactContract(String(raw.id)) : emptyArtifactContract(),
     ...raw,
   });
 }
@@ -197,7 +200,7 @@ describe('recorded research settlement replay', () => {
     });
     const decision = JSON.parse(readFileSync(join(replay.runDirPath, 'research_decision.json'), 'utf8'));
     expect(decision).toMatchObject(projection!);
-    expect(decision.terminalPath).toBe('docs/happymj_incumbent/ceiling_report.md');
+    expect(decision.terminalPath).toBe('docs/example_incumbent/ceiling_report.md');
     expect(readFileSync(join(replay.runDirPath, 'signals', 'research_terminal_ready.json'), 'utf8'))
       .toContain('write_ceiling');
   });
@@ -245,7 +248,9 @@ describe('criterion discharge boundary', () => {
   };
 
   it('admits settlement-only coverage only with a matching engine discharge', () => {
-    const stages = settlementStages().map((entry) => ({ ...entry, criterion_refs: [] }));
+    const stages = [...settlementStages().map((entry) => ({ ...entry, criterion_refs: ['other'] })),
+      stage({ id: 'repair_terminal', depends_on: ['audit_terminal'], retry_to: ['audit_terminal'],
+        dependency_reasons: { audit_terminal: 'Correct rejected terminal evidence.' }, scope: [], criterion_refs: [] })];
     const input = {
       dispatched: stages,
       baseStages: [],
@@ -255,7 +260,7 @@ describe('criterion discharge boundary', () => {
       criteria: {
         version: 1 as const,
         briefDigest: recorded.briefDigest,
-        criteria: [{ id: recorded.criterionId, text: 'Choose the terminal path by outcome.', line: 1, section: 'Report' }],
+        criteria: [{ id: recorded.criterionId, text: 'Choose the terminal path by outcome.', line: 1, section: 'Report' }, {id:'other',text:'Write the terminal report.',line:2,section:'Report'}],
       },
     };
     const before = inspectDispatchAdmission(input);
@@ -359,18 +364,29 @@ describe('admitted check reuse boundary', () => {
     expect(readFileSync(checksPath, 'utf8')).toBe(checks);
 
     const projectDir = join(root, 'project');
-    const manifest = join(projectDir, 'docs', 'happymj_incumbent', 'run_manifest.json');
+    const manifest = join(projectDir, 'docs', 'example_incumbent', 'run_manifest.json');
     mkdirSync(dirname(manifest), { recursive: true });
     writeFileSync(manifest, '{"rounds":[]}\n', 'utf8');
     for (const name of ['ship_report.md', 'ceiling_report.md', 'escalation_note.md']) {
       writeFileSync(join(dirname(manifest), name), 'terminal fixture\n', 'utf8');
     }
-    expect(inspectRealityCheckReachability({
+    const errors = inspectRealityCheckReachability({
       markdown: checks,
       projectDir,
       stages: [],
       terminalStates: recorded.terminalStates,
       research: recorded.research,
-    })).toEqual([]);
+    });
+    expect(errors).toHaveLength(2);
+    expect(errors.every((error) => error.includes('REALITY_READ_DECLARATION_REQUIRED'))).toBe(true);
+    // Historical admitted bytes stay exact; a new proposal authors its reads.
+    const document = parseYaml(checks.split('```yaml\n')[1].split('```')[0]);
+    document.checks[0].reads = ['ship_report.md', 'ceiling_report.md', 'escalation_note.md'].map((name, index) => ({
+      id: `terminal_${index}`, root: 'project', path: `docs/example_incumbent/${name}`, source: { kind: 'input' },
+    }));
+    document.checks[1].reads = [{ id: 'manifest', root: 'project',
+      path: 'docs/example_incumbent/run_manifest.json', source: { kind: 'input' } }];
+    expect(inspectRealityCheckReachability({ markdown: stringifyYaml(document), projectDir, stages: [],
+      terminalStates: recorded.terminalStates, research: recorded.research })).toEqual([]);
   });
 });

@@ -1,3 +1,4 @@
+import { splitBriefFrontmatter as leadingFrontmatter } from './brief-frontmatter.js';
 import { createHash } from 'node:crypto';
 import {
   accessSync,
@@ -10,7 +11,11 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { fcGlobalDir } from './store.js';
+import { containsEngineOwnedGlobalPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
+import { gitCommonDirectory } from './project-identity.js';
 import { parse as parseYaml } from 'yaml';
 import {
   isNegatedPathMention,
@@ -137,6 +142,7 @@ export interface BriefOutputInventoryEntry extends BriefOutputDeclaration {
   symlinkTarget?: string;
   blocking: boolean;
   reason?: string;
+  warning?: string;
 }
 
 export interface BriefOutputInventory {
@@ -152,16 +158,6 @@ const INPUT_KEY = /(?:^|_)(?:input|inputs|required_input|required_inputs|input_m
 const OUTPUT_KEY = /(?:^|_)(?:output|outputs|deliverable|deliverables|artifact|artifacts|result_file|report|reports|write|writes|writable_paths|terminal_states)(?:_|$)/i;
 const ASSERTION_KEY = /^(?:rows?|row_count|files?|file_count|sha_?256|digest|span|time_span|start|end|description|note|type|format|role|name|label|encoding|delimiter)$/i;
 
-function leadingFrontmatter(brief: string): { yaml: string; body: string; bodyLineOffset: number } | undefined {
-  const match = /^(?:\uFEFF)?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(brief);
-  if (!match) return undefined;
-  const body = brief.slice(match[0].length);
-  return {
-    yaml: match[1],
-    body,
-    bodyLineOffset: match[0].split(/\r?\n/).length - 1,
-  };
-}
 
 interface NormalizedBriefInputPath {
   path?: string;
@@ -988,16 +984,6 @@ function verifyParsedBriefInputs(
   };
 }
 
-/** Verify all legacy structured/prose input references. Retained for callers
- * whose contract explicitly treats prose as input evidence. */
-export function verifyBriefInputs(
-  brief: string,
-  projectRoot: string,
-  fs: ShipInputFileSystem = nodeShipInputFileSystem,
-): BriefInputVerification {
-  return verifyParsedBriefInputs(parseBriefInputs(brief), projectRoot, fs);
-}
-
 /** Verify only the launch-blocking frontmatter input declaration. */
 export function verifyDeclaredBriefInputs(
   brief: string,
@@ -1031,7 +1017,8 @@ export function extractBriefOutputDeclarations(brief: string): BriefOutputDeclar
     expectedType: BriefOutputDeclaration['expectedType'] = 'file',
   ): void => {
     if (typeof raw !== 'string') return;
-    const normalized = normalizedBriefInputPath(raw, true);
+    // Keep absolute declarations, including invalid ones, for explicit refusal.
+    const normalized = isAbsolute(raw) ? { path: raw } : normalizedBriefInputPath(raw, true);
     if (!normalized.path) return;
     declarations.push({
       path: normalized.path,
@@ -1104,6 +1091,85 @@ export function extractBriefOutputDeclarations(brief: string): BriefOutputDeclar
   return [...deduped.values()];
 }
 
+/** Absolute output directories are durable capabilities, not project artifacts.
+ * Inspect only their pathname components; never enumerate or hash their members. */
+export function externalOutputDirectory(
+  declaration: BriefOutputDeclaration,
+  projectRoot: string,
+  fs: ShipInputFileSystem = nodeShipInputFileSystem,
+  context: { engineRoot?: string; stateRoot?: string; runDir?: string; inputPaths?: readonly string[] } = {},
+): string {
+  return validateExternalOutputDirectory(declaration, projectRoot, fs, context);
+}
+
+function validateExternalOutputDirectory(
+  declaration: BriefOutputDeclaration,
+  projectRoot: string,
+  fs: ShipInputFileSystem,
+  context: NonNullable<Parameters<typeof externalOutputDirectory>[3]>,
+  checkProjectOverlap = true,
+  gitCommon = gitCommonDirectory(projectRoot),
+): string {
+  const path = declaration.path;
+  const refuse = (reason: string): never => { throw new Error(`EXTERNAL_OUTPUT_REFUSED: ${path}: ${reason}`); };
+  if (!isAbsolute(path) || declaration.expectedType !== 'directory'
+    || !/^(?:outputs?|deliverables?|artifacts?)(?:\.|$)/.test(declaration.source)) {
+    refuse('declare an absolute path with type: directory in outputs');
+  }
+  const controls = Array.from(path).some(character => {
+    const code = character.charCodeAt(0);
+    return code < 32 || (code >= 127 && code <= 159);
+  });
+  if (path !== path.trim() || controls || /[\\$*?{}[\]<>]/.test(path)
+    || path.split('/').some(part => part === '.' || part === '..') || path.includes('//')) {
+    refuse('use one literal absolute directory without traversal, templates, or control characters');
+  }
+  const target = resolve(path);
+  if (dirname(target) === '/' || target === '/') refuse('root-level trees cannot be output capabilities');
+  if (!fs.lstat) refuse('cannot check pathname components without lstat');
+  let cursor = '/';
+  for (const part of target.slice(1).split('/')) {
+    cursor = join(cursor, part);
+    let entry: ShipInputStat;
+    try { entry = fs.lstat!(cursor); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      refuse(`cannot inspect ${cursor}: ${String(error)}`);
+    }
+    if (entry!.isSymbolicLink?.()) refuse(`symlinked pathname component ${cursor}`);
+    if (!entry!.isDirectory()) refuse(`pathname component is not a directory: ${cursor}`);
+  }
+  const overlaps = (root: string): boolean => within(root, target) || within(target, root);
+  const engineRoot = context.engineRoot ?? resolve(import.meta.dirname, '..');
+  const protectedRoots = [
+    ...(checkProjectOverlap ? [['project', projectRoot]] : []),
+    ['engine root', engineRoot],
+    ['engine dist', join(engineRoot, 'dist')],
+    ['engine build generations', join(engineRoot, '.cache', 'build-generations')],
+    ['FC_HOME/run storage', context.stateRoot ?? fcGlobalDir()],
+    ...(context.runDir ? [['run storage', context.runDir]] : []),
+    ...['.git', '.fc', '.github', '.codex', '.claude'].map(name => ['project protected path', join(projectRoot, name)]),
+    ...(gitCommon ? [['project Git storage', gitCommon]] : []),
+    ...(context.inputPaths ?? []).map(path => ['declared input', resolve(projectRoot, path)]),
+  ];
+  // $HOME holds projects, so only it, its ancestors, and its hidden configuration trees are refused.
+  const home = resolve(homedir());
+  if (within(target, home)) refuse(`overlaps $HOME: ${home}`);
+  if (within(home, target) && relative(home, target).split(sep)[0].startsWith('.')) {
+    refuse(`hidden configuration trees under $HOME cannot be output capabilities: ${home}`);
+  }
+  if (containsEngineOwnedGlobalPath(target, context.stateRoot ?? fcGlobalDir())) refuse('contains an engine database');
+  for (const [label, root] of protectedRoots) {
+    // Protected paths may themselves be references to external trees.
+    const physical = prospectivePhysicalPath(resolve(root), { lstat: fs.lstat!, readlink: path => {
+      if (!fs.readlink) refuse(`cannot inspect protected symlink ${path}`);
+      return fs.readlink!(path);
+    } });
+    if (overlaps(resolve(root)) || overlaps(physical)) refuse(`overlaps ${label}: ${root}`);
+  }
+  return target;
+}
+
 /** Inventory declared outputs before setup copies a worktree. A non-empty file
  * or any symlink is closed by default: the brief must explicitly declare how
  * existing content is consumed or updated. */
@@ -1111,11 +1177,36 @@ export function inspectBriefOutputs(
   brief: string,
   projectRoot: string,
   fs: ShipInputFileSystem = nodeShipInputFileSystem,
+  context: Parameters<typeof externalOutputDirectory>[3] & {
+    /** External capabilities are checked against the launch project. null means
+     * source discovery: defer only checkout overlap until the target is known. */
+    launchProject?: string | null;
+  } = {},
 ): BriefOutputInventory {
   const root = resolve(projectRoot);
   const declarations = extractBriefOutputDeclarations(brief);
   const entries = declarations.map((declaration): BriefOutputInventoryEntry => {
     const resolvedPath = resolve(root, declaration.path);
+    if (isAbsolute(declaration.path)) {
+      try {
+        const launchProject = resolve(context.launchProject ?? root);
+        validateExternalOutputDirectory(declaration, launchProject, fs,
+          { ...context, inputPaths: extractDeclaredBriefInputPaths(brief) }, context.launchProject !== null,
+          gitCommonDirectory(launchProject) ?? gitCommonDirectory(root));
+        const sourceOverlap = context.launchProject === null && [root,
+          prospectivePhysicalPath(root, { lstat: fs.lstat!, readlink: path => fs.readlink!(path) }),
+        ].some(source => within(source, resolvedPath) || within(resolvedPath, source));
+        const exists = fs.exists(resolvedPath);
+        return { ...declaration, resolvedPath, exists, entryType: exists ? 'directory' : 'absent', blocking: false,
+          ...(context.launchProject === null && sourceOverlap ? {
+            warning: `Overlaps source checkout: ${root}; acceptable only for a worktree launch outside this directory; blocks if launched in place. Setup must check the launch project.`,
+          } : {}),
+          reason: 'External directory write capability; contents are not inventoried or archived' };
+      } catch (error) {
+        return { ...declaration, resolvedPath, exists: fs.exists(resolvedPath), entryType: 'other', blocking: true,
+          reason: error instanceof Error ? error.message : String(error) };
+      }
+    }
     if (!within(root, resolvedPath)) {
       return { ...declaration, resolvedPath, exists: false, entryType: 'other', blocking: true, reason: 'Declared output escapes the project root' };
     }
@@ -1129,10 +1220,20 @@ export function inspectBriefOutputs(
         : stat.isFile?.() === true ? 'file' : 'other';
     const size = typeof stat.size === 'number' ? stat.size : undefined;
     const permitted = declaration.disposition !== 'create';
-    const shapeMismatch = (declaration.expectedType === 'file' && entryType === 'directory')
-      || (declaration.expectedType === 'directory' && entryType === 'file');
-    const blocking = symlink
-      || entryType === 'other'
+    let aliasReason: string | undefined;
+    let existingType = entryType;
+    if (symlink) {
+      try {
+        if (declaration.disposition !== 'replace') {
+          const target = fs.stat(resolvedPath);
+          existingType = target.isDirectory() ? 'directory' : target.isFile?.() ? 'file' : 'other';
+        }
+      } catch (error) { aliasReason = error instanceof Error ? error.message : String(error); }
+    }
+    const shapeMismatch = (declaration.expectedType === 'file' && existingType === 'directory')
+      || (declaration.expectedType === 'directory' && existingType === 'file');
+    const blocking = (symlink && (!permitted || !!aliasReason))
+      || existingType === 'other'
       || shapeMismatch
       || (entryType === 'file' && (size === undefined || size > 0) && !permitted);
     let sha256: string | undefined;
@@ -1153,13 +1254,13 @@ export function inspectBriefOutputs(
       ...(symlinkTarget ? { symlinkTarget } : {}),
       blocking,
       ...(blocking ? {
-        reason: symlink
+        reason: aliasReason ?? (symlink && !permitted
           ? 'Declared output is already occupied by a symlink; replacement is never implicit'
           : shapeMismatch
             ? `Declared ${declaration.expectedType} output is occupied by a ${entryType}`
           : entryType === 'file'
             ? 'Declared create-only output already contains data; add an explicit on_existing disposition or choose a fresh path'
-            : 'Declared output is occupied by an unsupported entry type',
+            : 'Declared output is occupied by an unsupported entry type'),
       } : {}),
     };
   });

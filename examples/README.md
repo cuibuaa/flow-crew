@@ -1,94 +1,48 @@
-# FlowCrew examples
+# Examples
 
-These examples provide two token-free ways to inspect FlowCrew before allowing
-a real agent to run, plus a campaign configuration that is safe to validate in
-dry-run mode.
+For a new user: which complete example can I run without a model?
+Run from the repository root after the [local build](../guide/getting-started.md#install-in-a-development-checkout).
 
-| File | Purpose | Safe first command |
-|---|---|---|
-| `hello-research.brief.md` | Minimal research contract with a metric, stop policy, confirmation command, and terminal paths | `flowcrew rehearse examples/hello-research.brief.md` |
-| `example_campaign.yaml` | Minimal campaign schema wired to the research brief | `flowcrew campaign run examples/example_campaign.yaml --dry-run` |
-| `mock-fixtures/` | Deterministic `plan` and `single` stage responses for the mock adapter | See the isolated mock loop below |
-
-## Rehearse the research brief
-
-From the repository root:
+## Rehearse a research contract
 
 ```bash
-flowcrew rehearse examples/hello-research.brief.md
+node dist/cli.js rehearse examples/hello-research.brief.md
 ```
 
-Rehearsal uses the real scheduler with an in-process scripted adapter in
-temporary directories. It launches no agent process or model, consumes no
-tokens, and writes nothing into your project. It does leave one directory
-behind on purpose — the engine diagnostics log named at the end of the report,
-kept so a failed rehearsal can still be inspected afterwards. Those accumulate
-under the system temp directory; delete them when you no longer need them. The
-command should exit 0 and its rehearsal report should include:
+The [brief](hello-research.brief.md) counts tracked TypeScript with a numeric baseline, round
+schema, stop budget, confirmation command and terminal paths. Rehearsal uses a scripted
+adapter in a disposable project/state and calls no model. It deliberately exercises a false
+ship candidate whose confirmation fails, then a ceiling. Exit zero with Contract ready checks
+wiring; it does not measure a real result for your project. The engine log path printed by
+rehearsal remains available after temporary project/state cleanup.
 
-```text
-✅ Contract ready
-```
-
-This verdict means the brief parsed and the scheduler exercised its research
-round, result schema, stop decision, confirmation gate, and terminal artifact
-path. It does not validate a real research conclusion. The scripted rehearsal
-deliberately presents a false ship candidate in an empty temporary repository;
-the confirmation command rejects it, proving that the loop continues to an
-honest terminal result.
-
-## Inspect the campaign plan
+Inspect only the static contract when you do not want its shell confirmation executed:
 
 ```bash
-flowcrew campaign run examples/example_campaign.yaml --dry-run
+node dist/cli.js rehearse examples/hello-research.brief.md --static-only
 ```
 
-Expected output starts with `Campaign dry run:`, shows the resolved paths and
-one-run budget, and ends with:
+## Inspect an isolated run archive
 
-```text
-Campaign hello-research-example: dry_run
-```
-
-`--dry-run` does not start a campaign or an agent. The example's
-`launch.systemdUnit` and `launch.launchScript` are placeholders; replace both
-with values for your own launcher before attempting a live campaign.
-
-## Run a complete mock loop
-
-The mock adapter reads `<stage-id>.json` from `MOCK_FIXTURE_DIR`. The supplied
-`plan.json` writes a one-stage dispatch, and `single.json` completes that stage.
-Run it against temporary project and state directories so even the normal
-`quick` brief write stays outside your clone:
+With `FC_HOME` set by you to a disposable empty state directory, this reads the selected
+project and reports no runs:
 
 ```bash
-demo_root="$(mktemp -d)"
-mkdir -p "$demo_root/project"
-
-FC_HOME="$demo_root/fc-home" \
-MOCK_FIXTURE_DIR="$PWD/examples/mock-fixtures" \
-flowcrew quick "show the zero-token execution loop" \
-  --adapter mock \
-  --project "$demo_root/project" \
-  --max-iterations 1 \
-  --no-supervise \
-  --no-campaign \
-  --acknowledge-brief-warnings
+node dist/cli.js status --project "$PWD"
 ```
 
-This one-line task string has no structured brief contract, so the brief preflight
-that every launch path runs (see [Zero-token rehearsal](../guide/rehearse.md)) flags it
-and pauses before creating a run. `--acknowledge-brief-warnings` is the explicit,
-scriptable way past that pause — it is not bypassing a check, it is answering the
-question the check raised. Omit it and the command prints the same preflight report
-a real launch would, then stops.
+Without that environment choice it reads normal operator history. Read [configuration](../guide/configuration.md#runtime-environment)
+and [operations](../guide/operations.md) before using live controls.
 
-The run should exit 0, identify `Adapter: mock`, and finish with
-`Workflow "default" complete`; both `plan` and `single` should be marked
-complete. The fixtures report zero input and output tokens and cannot invoke a
-model. Demo artifacts, including the normal `docs/task_brief.md` write, remain
-under the path stored in `demo_root`.
+## Mock fixtures
 
-Only `rehearse` is the no-agent contract preflight. A normal `quick` command
-with the `codex` or `claude` adapter grants that unattended agent shell access
-and can run for hours.
+[plan.json](mock-fixtures/plan.json) and [single.json](mock-fixtures/single.json) are deterministic
+adapter fixtures. `MOCK_FIXTURE_DIR` selects per-stage JSON; the mock adapter can write fixture
+files under the run root and returns typed records without calling a model. The shipped
+one-author plan lacks a downstream independent gate. It is not a current complete quick-launch
+example, and a one-line task with no criteria cannot be admitted by acknowledgment alone.
+Use rehearsal above for the supported first result; no live quick recipe is implied by these
+fixtures.
+
+Sources: [mock](../src/adapters/mock.ts), [scripted results](../src/adapters/scripted.ts),
+[rehearsal](../src/rehearse.ts), [launch admission](../src/cli.ts).

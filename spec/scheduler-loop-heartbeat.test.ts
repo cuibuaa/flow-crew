@@ -12,10 +12,10 @@ import {
 import { createRun } from '../src/store.js';
 import { removeSchedulerProcessIdentity, writeSchedulerProcessIdentity } from '../src/run-lock.js';
 
-async function waitFor(path: string, timeoutMs: number): Promise<void> {
+async function waitFor(path: string, timeoutMs: number, ready: (text: string) => boolean = () => true): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try { readFileSync(path); return; } catch { /* wait */ }
+    try { if (ready(readFileSync(path, 'utf-8'))) return; } catch { /* wait */ }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`timed out waiting for ${path}`);
@@ -61,7 +61,7 @@ describe('independent scheduler-loop heartbeat', () => {
   it('an independent observer thread fires while an unrelated synchronous operation blocks the scheduler loop', async () => {
     const root = join(process.env.FLOWCREW_VITEST_ROOT!, 'generic-block');
     const projectDir = join(root, 'project');
-    const runPath = join(root, 'run');
+    const runPath = join(root, 'generic-block-run');
     const readyPath = join(root, 'ready');
     mkdirSync(projectDir, { recursive: true });
     mkdirSync(runPath, { recursive: true });
@@ -79,23 +79,38 @@ describe('independent scheduler-loop heartbeat', () => {
       `writeFileSync(runPath + '/scheduler.pid', String(process.pid));`,
       `writeSchedulerProcessIdentity(runPath, runId);`,
       `const heartbeat=startSchedulerHeartbeat({runPath,runId,intervalMs:20,stallThresholdMs:100,observerPollMs:10});`,
-      `writeFileSync(${JSON.stringify(readyPath)}, 'ready');`,
+      `await heartbeat.ready; writeFileSync(${JSON.stringify(readyPath)}, 'ready');`,
       `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);`,
-      `heartbeat.stop(); removeSchedulerProcessIdentity(runPath, process.pid);`,
+      `await heartbeat.stop(); removeSchedulerProcessIdentity(runPath, process.pid);`,
     ].join('\n');
     const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], {
       cwd: process.cwd(),
       env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc-home') },
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'pipe'],
     });
-    await waitFor(readyPath, 2_000);
-    await waitFor(join(runPath, SCHEDULER_LOOP_STALL_FILE), 2_000);
-    const warning = JSON.parse(readFileSync(join(runPath, SCHEDULER_LOOP_STALL_FILE), 'utf-8')) as { active: boolean; thresholdMs: number };
-    expect(warning).toMatchObject({ active: true, thresholdMs: 100 });
-    expect(readFileSync(join(runPath, 'events.jsonl'), 'utf-8')).toContain('scheduler_loop_stalled');
-    await new Promise<void>((resolvePromise, rejectPromise) => {
-      child.once('exit', (code) => code === 0 ? resolvePromise() : rejectPromise(new Error(`fixture exited ${code}`)));
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+    const completion = new Promise<void>((resolvePromise, rejectPromise) => {
+      child.once('error', rejectPromise);
+      child.once('close', (code) => code === 0 ? resolvePromise() : rejectPromise(new Error(`fixture exited ${code}: ${stderr}`)));
     });
+    void completion.catch(() => undefined);
+    try {
+      // Allow the TypeScript child and observer to initialize under suite load;
+      // the actual stall threshold below remains 100 ms.
+      await Promise.race([waitFor(readyPath, 10_000), completion.then(() => { throw new Error('fixture exited before readiness'); })]);
+      await waitFor(join(runPath, SCHEDULER_LOOP_STALL_FILE), 2_000);
+      // The warning is published before its event. Wait for that separate fact,
+      // including its content when earlier events already created the file.
+      await waitFor(join(runPath, 'events.jsonl'), 2_000, (text) => text.includes('scheduler_loop_stalled'));
+      const warning = JSON.parse(readFileSync(join(runPath, SCHEDULER_LOOP_STALL_FILE), 'utf-8')) as { active: boolean; thresholdMs: number };
+      expect(warning).toMatchObject({ active: true, thresholdMs: 100 });
+      expect(readFileSync(join(runPath, 'events.jsonl'), 'utf-8')).toContain('scheduler_loop_stalled');
+      await completion;
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await completion.catch(() => undefined);
+    }
   });
 
   it('does not alarm for unsupported legacy, parked, terminal, or mismatched identity cases', () => {
@@ -124,7 +139,10 @@ describe('independent scheduler-loop heartbeat', () => {
       expect(observeSchedulerHeartbeatOnce({
         runPath: created.runDirPath, runId: created.runId, thresholdMs: 1, nowMs: Date.now() + 10,
       })).toBe('inactive');
-      writeSchedulerProcessIdentity(created.runDirPath, 'different-run');
+      expect(() => writeSchedulerProcessIdentity(created.runDirPath, 'different-run')).toThrow('RUN_IDENTITY_BINDING');
+      const identityPath = join(created.runDirPath, 'scheduler.identity.json');
+      const identity = JSON.parse(readFileSync(identityPath, 'utf-8'));
+      writeFileSync(identityPath, JSON.stringify({ ...identity, runId: 'different-run' }));
       expect(observeSchedulerHeartbeatOnce({
         runPath: created.runDirPath, runId: created.runId, thresholdMs: 1, nowMs: Date.now() + 10,
       })).toBe('identity_mismatch');

@@ -1,4 +1,5 @@
-import { appendFileSync, closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, openSync, writeSync } from './engine-fs.js';
+import { fstatSync, readSync } from 'node:fs';
 
 /**
  * Append one complete text record without joining it to bytes left by a torn
@@ -17,7 +18,13 @@ export function appendTextRecord(path: string, record: string): void {
         || finalByte[0] !== 0x0a;
     }
     const completeRecord = record.endsWith('\n') ? record : `${record}\n`;
-    appendFileSync(path, `${needsBoundary ? '\n' : ''}${completeRecord}`, 'utf-8');
+    const bytes = Buffer.from(`${needsBoundary ? '\n' : ''}${completeRecord}`, 'utf-8');
+    let written = 0;
+    while (written < bytes.length) {
+      const count = writeSync(descriptor, bytes, written, bytes.length - written);
+      if (count <= 0) throw new Error(`Append made no progress for ${path}`);
+      written += count;
+    }
   } finally {
     closeSync(descriptor);
   }

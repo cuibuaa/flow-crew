@@ -1,26 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import {
-  appendFileSync,
-  closeSync,
-  constants,
-  copyFileSync,
-  existsSync,
-  fstatSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readSync,
-  renameSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-  writeSync,
-} from 'node:fs';
+import { appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from './engine-fs.js';
+import { constants, existsSync, fstatSync, fsyncSync, readFileSync, readSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { fcGlobalDir } from './store.js';
-import { TASK_STATUS, isActiveTaskStatus, type TaskStatus } from './lifecycle-status.js';
+import { TASK_STATUS, isActiveTaskStatus, isKnownTaskStatus, type TaskStatus } from './lifecycle-status.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
 export { TASK_STATUS, isActiveTaskStatus } from './lifecycle-status.js';
 export type { TaskStatus } from './lifecycle-status.js';
@@ -34,6 +18,7 @@ export const TASK_LIST_STATUS = {
   ALL: 'all',
 } as const;
 export type TaskListStatus = TaskStatus | typeof TASK_LIST_STATUS[keyof typeof TASK_LIST_STATUS];
+/** Legacy campaign rows remain readable; new tasks are always quick launches. */
 export type TaskKind = 'quick' | 'campaign';
 export type TaskSummaryVerdict = 'PASS' | 'FAIL' | 'ESCALATE';
 
@@ -76,16 +61,11 @@ export interface TaskEntry {
    *  failed, so the drain must consume an attempt and mint a fresh unit name (systemd
    *  refuses to reuse a transient unit name, and that refusal degrades silently). */
   defer_kind?: 'wait' | 'retry';
-  /** Durable ceiling for consecutive supervisor observations that cannot be verified. */
-  cancellation_unobservable_count?: number;
-  cancellation_unobservable_first_at?: string;
-  cancellation_unobservable_reason?: string;
-  cancellation_observation_limit_reached_at?: string;
 }
 
 export interface TaskCreateInput {
   name?: string;
-  kind?: TaskKind;
+  kind?: 'quick';
   brief_path?: string;
   brief_text?: string;
   brief_admission?: BriefAdmissionRecord;
@@ -225,7 +205,9 @@ interface RegistryLockObservation {
 }
 
 interface RegistryReadResult extends TaskRegistryHealth {
-  tasks: Map<number, TaskEntry>;
+  tasks: ReadonlyMap<number, TaskEntry>;
+  activeTasks: ReadonlyMap<number, TaskEntry>;
+  unknownTaskStatuses: boolean;
   /** True only when the unreadable record is the unacknowledged final fragment. */
   unreadableTail: boolean;
 }
@@ -244,6 +226,8 @@ interface RegistryCache {
   completeUnreadableRecords: number;
   completeRecords: number;
   tasks: Map<number, TaskEntry>;
+  activeTasks: Map<number, TaskEntry>;
+  unknownTaskIds: Set<number>;
 }
 
 interface TickProjection {
@@ -335,6 +319,9 @@ export class TaskRegistry {
   }
 
   create(input: TaskCreateInput): TaskEntry {
+    if ((input.kind !== undefined && input.kind !== 'quick') || input.config_path !== undefined) {
+      throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
+    }
     return this.withLock(() => {
       const registry = this.readLatestUnlocked();
       // A complete damaged historical row cannot be mistaken for a partially
@@ -346,7 +333,7 @@ export class TaskRegistry {
       const id = this.nextIdUnlocked();
       const taskDir = join(this.tasksDir, String(id));
       mkdirSync(taskDir, { recursive: true });
-      const brief = input.brief_text ?? input.brief_path ?? input.config_path ?? '';
+      const brief = input.brief_text ?? input.brief_path ?? '';
       const name = input.name ?? (brief.split(/\r?\n/)[0]?.replace(/^#+\s*/, '').slice(0, 80) || `Task ${id}`);
       const briefPath = input.brief_text === undefined
         ? input.brief_path
@@ -354,10 +341,9 @@ export class TaskRegistry {
       const entry: TaskEntry = {
         id,
         name,
-        kind: input.kind ?? (input.config_path ? 'campaign' : 'quick'),
+        kind: 'quick',
         brief_path: briefPath,
         brief_admission: input.brief_admission,
-        config_path: input.config_path,
         projectDir: input.projectDir,
         systemd_unit: input.systemd_unit ?? `flowcrew-task-${id}.service`,
         run_id: input.run_id,
@@ -379,14 +365,19 @@ export class TaskRegistry {
   }
 
   list(filter: TaskListFilter = {}): TaskEntry[] {
-    let tasks = this.snapshot().tasks;
-    if (filter.status && filter.status !== TASK_LIST_STATUS.ALL) {
-      // 'deferred' MUST be in the active set — it is the queue the tick sweep drains.
-      if (filter.status === TASK_LIST_STATUS.ACTIVE) tasks = tasks.filter((t) => isActiveTaskStatus(t.status));
-      else tasks = tasks.filter((t) => t.status === filter.status);
-    }
-    if (filter.limit && filter.limit > 0) tasks = tasks.slice(-filter.limit);
-    return tasks;
+    return this.withLock(() => {
+      // Select inside the coherent locked cache; only mutable public results
+      // need copies. Terminal payloads never cross an active-list boundary.
+      const registry = this.readLatestUnlocked();
+      const selected = filter.status === TASK_LIST_STATUS.ACTIVE ? registry.activeTasks : registry.tasks;
+      let tasks = Array.from(selected.values()).filter((task) => (
+        !filter.status || filter.status === TASK_LIST_STATUS.ALL
+          || (filter.status === TASK_LIST_STATUS.ACTIVE
+            ? isActiveTaskStatus(task.status) : task.status === filter.status)
+      )).sort((a, b) => a.id - b.id);
+      if (filter.limit && filter.limit > 0) tasks = tasks.slice(-filter.limit);
+      return tasks.map((task) => structuredClone(task));
+    });
   }
 
   get(id: number): TaskEntry | undefined {
@@ -429,6 +420,43 @@ export class TaskRegistry {
           .map((task) => structuredClone(task)),
         unreadableRecords: registry.unreadableRecords,
       };
+    });
+  }
+
+  /** A writer cannot infer missing ownership from an unknown task lifecycle. */
+  hasUnknownTaskStatuses(): boolean {
+    return this.withLock(() => this.readLatestUnlocked().unknownTaskStatuses);
+  }
+
+  /** Serialize orphan recovery with binding writers. Acquire registry before
+   * run-state locks; recover must be synchronous and must not reenter registry
+   * methods. Refresh at each publication to veto observed non-locking appends.
+   * A released list/health snapshot cannot authorize a run-state write. */
+  withUnboundRun(
+    runId: string,
+    resolveBinding: (binding: string) => string,
+    recover: (assertUnbound: () => void) => void,
+  ): void {
+    this.withLock(() => {
+      const token = this.inspectLock()?.owner?.token;
+      const assertUnbound = (): void => {
+        if (!token || this.inspectLock()?.owner?.token !== token) {
+          throw new Error('RECOVERY_REGISTRY_CHANGED: registry lock ownership changed');
+        }
+        const registry = this.readLatestUnlocked();
+        if (registry.unreadableRecords || registry.unknownTaskStatuses) {
+          throw new Error('RECOVERY_REGISTRY_UNKNOWN: registry cannot establish orphan ownership');
+        }
+        for (const task of registry.activeTasks.values()) {
+          if (!task.run_id) continue;
+          let bound: string;
+          try { bound = resolveBinding(task.run_id); }
+          catch { throw new Error('RECOVERY_REGISTRY_UNKNOWN: active run binding is unreadable'); }
+          if (bound === runId) throw new Error('RECOVERY_REGISTRY_BOUND: run acquired an active task binding');
+        }
+      };
+      assertUnbound();
+      recover(assertUnbound);
     });
   }
 
@@ -693,15 +721,14 @@ export class TaskRegistry {
 
   private metricsFromCache(registry: RegistryReadResult): TaskRegistryMetrics {
     const cache = this.registryCache;
-    const tasks = Array.from(registry.tasks.values());
     const hasPendingRecord = Boolean(cache && cache.pending.toString('utf-8').trim().length > 0);
     const records = (cache?.completeRecords ?? 0) + (hasPendingRecord ? 1 : 0);
     const bytes = cache?.fileSize ?? 0;
     return {
       bytes,
       records,
-      tasks: tasks.length,
-      activeTasks: tasks.filter((task) => isActiveTaskStatus(task.status)).length,
+      tasks: registry.tasks.size,
+      activeTasks: registry.activeTasks.size,
       unreadableRecords: registry.unreadableRecords,
       compactRecommended: bytes >= REGISTRY_COMPACTION_THRESHOLDS.bytes
         || records >= REGISTRY_COMPACTION_THRESHOLDS.records,
@@ -900,7 +927,7 @@ export class TaskRegistry {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       if (this.registryCache) this.cacheGeneration += 1;
       this.registryCache = undefined;
-      return { tasks: new Map(), unreadableRecords: 0, unreadableTail: false };
+      return { tasks: new Map(), activeTasks: new Map(), unknownTaskStatuses: false, unreadableRecords: 0, unreadableTail: false };
     }
 
     try {
@@ -933,6 +960,8 @@ export class TaskRegistry {
           completeUnreadableRecords: 0,
           completeRecords: 0,
           tasks: new Map(),
+          activeTasks: new Map(),
+          unknownTaskIds: new Set(),
         };
       }
 
@@ -956,11 +985,23 @@ export class TaskRegistry {
       cache.mtimeMs = after.mtimeMs;
       cache.ctimeMs = after.ctimeMs;
 
-      const tasks = new Map(cache.tasks);
-      if (cache.pendingTask) tasks.set(cache.pendingTask.id, cache.pendingTask);
+      // No cache reference escapes the lock/public cloning boundary. A valid
+      // unterminated tail remains an overlay until completed by an append.
+      const tasks = cache.pendingTask ? new Map(cache.tasks) : cache.tasks;
+      const activeTasks = cache.pendingTask ? new Map(cache.activeTasks) : cache.activeTasks;
+      if (cache.pendingTask) {
+        tasks.set(cache.pendingTask.id, cache.pendingTask);
+        if (isActiveTaskStatus(cache.pendingTask.status)) activeTasks.set(cache.pendingTask.id, cache.pendingTask);
+        else activeTasks.delete(cache.pendingTask.id);
+      }
       const pendingUnreadable = cache.pending.length > 0 && !cache.pendingReadable ? 1 : 0;
       return {
         tasks,
+        activeTasks,
+        unknownTaskStatuses: cache.pendingTask
+          ? cache.unknownTaskIds.size - Number(cache.unknownTaskIds.has(cache.pendingTask.id))
+            + Number(!isKnownTaskStatus(cache.pendingTask.status)) > 0
+          : cache.unknownTaskIds.size > 0,
         unreadableRecords: cache.completeUnreadableRecords + pendingUnreadable,
         unreadableTail: pendingUnreadable > 0,
       };
@@ -1028,6 +1069,11 @@ export class TaskRegistry {
         if (value && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'number') {
           const task = value as TaskEntry;
           cache.tasks.set(task.id, task);
+          // The same parsed row updates both views; no independent history scan.
+          if (isActiveTaskStatus(task.status)) cache.activeTasks.set(task.id, task);
+          else cache.activeTasks.delete(task.id);
+          if (isKnownTaskStatus(task.status)) cache.unknownTaskIds.delete(task.id);
+          else cache.unknownTaskIds.add(task.id);
         }
       }
     }

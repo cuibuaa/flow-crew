@@ -1,19 +1,13 @@
-import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { describe, expect, it } from 'vitest';
-import { parse as parseYaml } from 'yaml';
-import { evaluateCondition } from '../src/condition.js';
 import {
   inspectDispatchAdmission,
   parseDispatchedStageConfig,
 } from '../src/scheduler.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
-type AdmissionInput = Parameters<typeof inspectDispatchAdmission>[0];
 
 const makeStage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({
+  artifact_contract: fixtureArtifactContract(String(raw.id), raw.is_gate === true),
   prompt_template: 'independent QA probe',
   skills: [],
   is_gate: false,
@@ -21,63 +15,7 @@ const makeStage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({
   ...raw,
 });
 
-function fixture(name: string): { raw: string; input: AdmissionInput } {
-  const root = join(import.meta.dirname, 'fixtures', 'dispatch-admission', name);
-  const raw = readFileSync(join(root, 'dispatch.yaml'), 'utf8');
-  const context = JSON.parse(readFileSync(join(root, 'context.json'), 'utf8')) as {
-    source: { dispatchSha256: string; dispatchBytes: number };
-    terminalStates?: AdmissionInput['terminalStates'];
-    research?: AdmissionInput['research'];
-    criteria?: AdmissionInput['criteria'];
-  };
-  expect(Buffer.byteLength(raw)).toBe(context.source.dispatchBytes);
-  expect(createHash('sha256').update(raw).digest('hex')).toBe(context.source.dispatchSha256);
-  return {
-    raw,
-    input: {
-      dispatched: (parseYaml(raw) as unknown[]).map((stage) => parseDispatchedStageConfig(stage)),
-      baseStages: [],
-      dispatchStageId: 'plan',
-      terminalStates: context.terminalStates,
-      research: context.research,
-      criteria: context.criteria,
-    },
-  };
-}
-
 describe('independent dispatch-admission QA probes', () => {
-  it('binds every supplied dispatch fixture to its declared bytes and digest', () => {
-    for (const name of [
-      'research_multi_writer',
-      'research_measuring_owner',
-      'diagram_extra_dist',
-      'diagram_extra_directory',
-      'admitted_single_owner',
-    ]) fixture(name);
-
-    const recordedResearch = fixture('research_multi_writer').raw;
-    expect(Buffer.byteLength(recordedResearch)).toBe(6_857);
-    expect(createHash('sha256').update(recordedResearch).digest('hex'))
-      .toBe('d817f46b93f50d70bb29ca7dc1cd6d4e8c4282e065058525bc7816f01e6064db');
-  });
-
-  it('admits the three recoverable recorded classes and preserves the admitted control', () => {
-    for (const name of [
-      'research_multi_writer',
-      'diagram_extra_dist',
-      'admitted_single_owner',
-    ]) {
-      const report = inspectDispatchAdmission(fixture(name).input);
-      expect(report.pass, `${name}: ${report.errors.join('\n')}`).toBe(true);
-    }
-  });
-
-  it('rejects the recorded empty-criteria fixture instead of vacuously admitting it', () => {
-    const report = inspectDispatchAdmission(fixture('diagram_extra_directory').input);
-    expect(report.pass).toBe(false);
-    expect(report.errors).toContain('brief_criteria.json contains zero criteria; dispatch cannot prove coverage');
-  });
-
   it('rejects terminal ownership of research output through exact, tree, and glob scopes', () => {
     for (const scope of [
       ['docs/round.json', 'docs/final.md'],
@@ -138,39 +76,6 @@ describe('independent dispatch-admission QA probes', () => {
     }
   });
 
-  it('releases the exact recorded writers when the framework publishes terminal policy facts', () => {
-    const root = mkdtempSync(join(tmpdir(), 'flowcrew-admission-liveness-'));
-    const previousFcRoot = fcGlobalDir();
-    setFcGlobalDir(root);
-    try {
-      const runRoot = join(root, 'runs', 'run');
-      mkdirSync(runRoot, { recursive: true });
-      const stages = fixture('research_multi_writer').input.dispatched;
-      for (const expected of [
-        {
-          id: 'write_ship',
-          decision: 'ship',
-          terminalStatus: 'shipped',
-          terminalPath: 'docs/happymj_incumbent/ship_report.md',
-        },
-        {
-          id: 'write_ceiling',
-          decision: 'stop_ceiling',
-          terminalStatus: 'ceiling_hit',
-          terminalPath: 'docs/happymj_incumbent/ceiling_report.md',
-        },
-      ]) {
-        writeFileSync(join(runRoot, 'research_decision.json'), JSON.stringify(expected));
-        const condition = stages.find((stage) => stage.id === expected.id)?.condition;
-        expect(condition, expected.id).toBeTypeOf('string');
-        expect(evaluateCondition(condition!, 'unused-project', 'run'), `${expected.id}: ${condition}`).toBe(true);
-      }
-    } finally {
-      setFcGlobalDir(previousFcRoot);
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
   it('rejects duplicate ownership independently for each terminal path', () => {
     const first = makeStage({
       id: 'first', role: 'writer', scope: ['docs/final.md'], depends_on: [], dependency_reasons: {},
@@ -182,7 +87,7 @@ describe('independent dispatch-admission QA probes', () => {
       dispatched: [first, second], baseStages: [], dispatchStageId: 'plan',
       terminalStates: { complete: { paths: ['docs/final.md'] } },
     });
-    expect(report.errors.join('\n')).toContain('expected exactly one scoped owner, found 2');
+    expect(report.errors.join('\n')).toContain('expected exactly one final producer, found 2');
   });
 
   it('transports a terminal-only criterion without requiring an impossible downstream gate', () => {
@@ -202,7 +107,7 @@ describe('independent dispatch-admission QA probes', () => {
     expect(report.criterionTerminalRefs).toEqual({ finalize: [criterion] });
   });
 
-  it('keeps gate-only and ungated ordinary criterion transport rejected', () => {
+  it('accepts audit-only coverage while refusing ungated ordinary work', () => {
     const criterion = 'criterion_work_1_deadbeef';
     const criteria = { version: 1 as const, briefDigest: 'qa', criteria: [
       { id: criterion, text: 'Audit the produced work.', line: 1, section: 'Report' },
@@ -218,13 +123,14 @@ describe('independent dispatch-admission QA probes', () => {
     });
 
     const gateOnly = inspectDispatchAdmission({
-      dispatched: [{ ...work, criterion_refs: [] }, gate], baseStages: [],
+      dispatched: [{ ...work, criterion_refs: [] }, gate, makeStage({ id: 'repair', role: 'coder', scope: ['src/**'],
+        depends_on: ['verify'], dependency_reasons: { verify: 'Correct rejected work.' }, retry_to: ['verify'], criterion_refs: [] })], baseStages: [],
       dispatchStageId: 'plan', criteria,
     });
-    expect(gateOnly.errors.join('\n')).toContain('not assigned to a capable work/finalizer stage');
+    expect(gateOnly.pass, gateOnly.errors.join('\n')).toBe(true);
 
     const ungated = inspectDispatchAdmission({
-      dispatched: [work, { ...gate, criterion_refs: [] }], baseStages: [],
+      dispatched: [work], baseStages: [],
       dispatchStageId: 'plan', criteria,
     });
     expect(ungated.errors.join('\n')).toContain('not assigned to a gate');

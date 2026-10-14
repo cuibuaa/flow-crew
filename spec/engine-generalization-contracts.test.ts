@@ -1,3 +1,4 @@
+import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
 import {
   mkdirSync,
   mkdtempSync,
@@ -15,19 +16,27 @@ import {
   decideScopeRevision,
   deriveCriterionDischarges,
   inspectDispatchAdmission,
+  findAllRetryToStages,
   parseBriefFrontmatter,
   parseDispatchedStageConfig,
   resolveDeclaredInputWriteBindings,
+  scopeContainsPath,
+  StageConfigSchema,
+  normalizeStageContracts,
   type StageConfig,
 } from '../src/scheduler.js';
 import { scopePathDigest, type ScopeRevisionRequestV1 } from '../src/runtime-negotiation.js';
 import {
   STAGE_STATUS,
   fcGlobalDir,
+  createRun,
+  updateRunState,
   runDir,
   setFcGlobalDir,
   type StoreState,
 } from '../src/store.js';
+import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { recordAdmittedPlan } from '../src/plan-revisions.js';
 
 const roots: string[] = [];
 const originalFcRoot = fcGlobalDir();
@@ -44,7 +53,7 @@ afterEach(() => {
 });
 
 function stage(raw: Record<string, unknown>): StageConfig {
-  return parseDispatchedStageConfig({
+  return parseDispatchedStageConfig({ artifact_contract: stageArtifacts(String(raw.id), raw.is_gate === true),
     role: 'worker',
     prompt_template: 'bounded contract fixture',
     scope: [],
@@ -85,6 +94,91 @@ function admission(stages: StageConfig[], extra: Partial<Parameters<typeof inspe
 }
 
 describe('engine generalization binding contracts', () => {
+  it('keeps retry target dependencies while allowing independent accepting prerequisites', () => {
+    const review = stage({ id: 'review', role: 'qa', is_gate: true });
+    const accepted = stage({ id: 'accepted', role: 'qa', is_gate: true });
+    const repair = stage({ id: 'repair', depends_on: ['review', 'accepted'], retry_to: ['review'] });
+    const repairAccepted = stage({ id: 'repair_accepted', depends_on: ['accepted'], retry_to: ['accepted'] });
+    const stages = [review, accepted, repair, repairAccepted];
+    expect(admission(stages).pass).toBe(true);
+    expect(findAllRetryToStages(stages, ['review'])).toEqual([repair]);
+    expect(findAllRetryToStages(stages, ['accepted'])).toEqual([repairAccepted]);
+    expect(admission([review, accepted, { ...repair, depends_on: ['accepted'] }, repairAccepted]).errors.join(';')).toContain('missing retry gate review');
+    expect(admission([stage({ id: 'work' }), { ...repair, depends_on: ['work'], retry_to: ['work'] }]).errors.join(';')).toContain('work is not declared is_gate: true');
+  });
+
+  it('keeps terminal production with an ordinary finalizer rather than a gate or repair', () => {
+    const work = stage({ id: 'work', role: 'coder', scope: ['src/work.ts'] });
+    const review = stage({ id: 'review', role: 'qa', is_gate: true, depends_on: ['work'] });
+    const repair = stage({ id: 'repair', scope: ['src/work.ts'], depends_on: ['review'], retry_to: ['review'] });
+    const finish = stage({ id: 'finish', scope: ['docs/final.md'], depends_on: ['work', 'review'] });
+    const terminalStates = { complete: { paths: ['docs/final.md'] } };
+    const ordinary = admission([work, review, repair, finish], { terminalStates });
+    expect(ordinary.pass, ordinary.errors.join(';')).toBe(true);
+    expect(ordinary.terminalOwners).toEqual({ 'docs/final.md': 'finish' });
+    for (const owner of [
+      stage({ ...finish, role: 'qa', is_gate: true }),
+      { ...finish, retry_to: ['review'] },
+    ]) {
+      const rejected = admission([work, review, repair, owner], { terminalStates });
+      expect(rejected.pass).toBe(false);
+      expect(rejected.errors.join(';')).toContain('expected exactly one final producer, found 0');
+    }
+  });
+
+  it('derives canonical gate production for static, dynamic and retry-promoted gates while requiring the published verdict', () => {
+    const empty = { version: 1, produces: [], reads: [], groups: [], replays: [] };
+    const dynamic = parseDispatchedStageConfig({ id: 'audit', role: 'qa', is_gate: true, artifact_contract: empty });
+    const omitted = parseDispatchedStageConfig({ id: 'audit', role: 'qa', is_gate: true });
+    const configured = normalizeStageContracts([StageConfigSchema.parse({ id: 'audit', role: 'qa', is_gate: true, artifact_contract: empty })])[0];
+    const promoted = stage({ id: 'audit', role: 'qa', artifact_contract: empty });
+    const repair = stage({ id: 'repair', depends_on: ['audit'], retry_to: ['audit'] });
+    normalizeStageContracts([promoted, repair]);
+    for (const gate of [dynamic, omitted, configured, promoted]) {
+      expect(gate.artifact_contract?.produces).toEqual([{ id: 'verdict', root: 'run', path: 'verdict_audit.json', kind: 'file', nonempty: false }]);
+      expect(admission([gate, repair]).pass).toBe(true);
+    }
+    const collisions = parseDispatchedStageConfig({ id: 'audit', role: 'qa', is_gate: true, artifact_contract: {
+      ...empty, produces: [{ id: 'verdict', root: 'project', path: 'docs/report.md' }, { id: 'verdict_1', root: 'run', path: 'notes.md' }],
+    } });
+    expect(collisions.artifact_contract?.produces.at(-1)?.id).toBe('verdict_2');
+    expect(admission([collisions, repair]).pass).toBe(true);
+    const reader = stage({ id: 'reader', depends_on: ['audit'], artifact_contract: artifacts([], [{ id: 'review', root: 'run', path: 'verdict_audit.json', source: { kind: 'stage', stage: 'audit', artifact: 'verdict' } }]) });
+    expect(admission([dynamic, repair, reader]).pass).toBe(true);
+    const root = temporaryRoot(), projectDir = join(root, 'project'), runDir = join(root, 'run');
+    mkdirSync(projectDir); mkdirSync(runDir);
+    const input = { stageId: dynamic.id, template: '', isGate: true, artifactContract: dynamic.artifact_contract, projectDir, runDir };
+    expect(inspectStageArtifactContract(input).violations[0]?.reason).toContain('ARTIFACT_OUTPUT_ABSENT');
+    writeFileSync(join(runDir, 'verdict_audit.json'), '{"pass":true}');
+    const observed = inspectStageArtifactContract({ ...input, writes: ['run:verdict_audit.json'] });
+    expect(observed.violations).toEqual([]);
+    expect(observed.observations).toEqual([expect.objectContaining({ path: join(runDir, 'verdict_audit.json'), fresh: true, bytes: 13 })]);
+  });
+
+  it('allows a declared output to acquire prospective scope while keeping writes closed and output settlement required', () => {
+    const root = temporaryRoot(), projectDir = join(root, 'project'); mkdirSync(projectDir); setFcGlobalDir(join(root, 'store'));
+    const plan = stage({ id: 'plan', role: 'planner', dynamic_dispatch: true });
+    const writer = stage({ id: 'writer', scope: ['src/work.ts'], artifact_contract: artifacts([{ id: 'result', root: 'project', path: 'docs/result.md' }]) });
+    const created = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['plan', 'writer']);
+    const directory = created.runDirPath;
+    writeFileSync(join(directory, 'task_brief.md'), '# Work\nProduce the declared report.\n');
+    expect(admission([writer], { baseStages: [plan], projectDir, runDir: directory }).pass).toBe(true);
+    expect(scopeContainsPath(writer.scope, 'docs/result.md', projectDir, [])).toBe(false);
+    expect(inspectStageArtifactContract({ stageId: writer.id, template: '', artifactContract: writer.artifact_contract, projectDir, runDir: directory }).violations[0]?.reason).toContain('ARTIFACT_OUTPUT_ABSENT');
+    updateRunState(projectDir, created.runId, (state) => {
+      state.dispatchedStages = [writer];
+      state.stages.writer = { status: STAGE_STATUS.RUNNING, retries: 0 };
+      recordAdmittedPlan(state, [plan, writer], directory, 'Prospective output fixture', true);
+    });
+    const requestedPaths = ['docs/result.md'];
+    const decision = decideScopeRevision({
+      request: { version: 1, kind: 'scope_revision', requestId: 'output', runId: created.runId, stageId: writer.id, attemptIndex: 1, requestedBy: 'stage', requestedPaths, pathDigest: scopePathDigest(requestedPaths), reason: 'Acquire the report path before production.' },
+      stage: writer, priorScope: writer.scope, activePeers: [], projectDir, runId: created.runId, attemptIndex: 1,
+    });
+    expect(decision, decision.rejectionReason).toMatchObject({ accepted: true, effectiveScope: ['src/work.ts', 'docs/result.md'] });
+    expect(scopeContainsPath(decision.effectiveScope, 'docs/result.md', projectDir, [])).toBe(true);
+  });
+
   it('1 — reserves the framework research manifest at every stage binding while retaining outcome producers', () => {
     const research = researchConfig();
     const ordinary = admission([
@@ -119,8 +213,11 @@ describe('engine generalization binding contracts', () => {
     expect(effectiveOrdinary.scope).toEqual([]);
     expect(nonSubtractable.pass).toBe(false);
     expect(nonSubtractable.errors.join('\n')).toContain('contains framework-owned research manifest');
-    expect(terminal.pass).toBe(false);
-    expect(terminal.errors.join('\n')).toContain('cannot be owned by a terminal writer');
+    expect(terminal.pass, terminal.errors.join('\n')).toBe(true);
+    expect(terminal.frameworkReservedScopes).toEqual({ finish: ['artifacts/run_manifest.json'] });
+    const effectiveTerminal = stage({ id: 'finish', scope: ['docs/final.md', 'artifacts/run_manifest.json'] });
+    applyFrameworkScopeReservations([effectiveTerminal], terminal.frameworkReservedScopes);
+    expect(effectiveTerminal.scope).toEqual(['docs/final.md']);
     expect(resultProducer.pass, resultProducer.errors.join('\n')).toBe(true);
     expect(unrelated.pass, unrelated.errors.join('\n')).toBe(true);
   });
@@ -165,7 +262,7 @@ describe('engine generalization binding contracts', () => {
     mkdirSync(taskRunDir, { recursive: true });
     const criterionId = 'criterion_fixture';
     const work = stage({ id: 'work', criterion_refs: [criterionId] });
-    const gate = stage({
+    const gate = stage({ artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []),
       id: 'qa', role: 'qa', is_gate: true, criterion_refs: [criterionId],
       depends_on: ['work'], dependency_reasons: { work: 'Judges the completed work.' },
     });
@@ -174,8 +271,9 @@ describe('engine generalization binding contracts', () => {
       briefDigest: 'fixture-digest',
       criteria: [{ id: criterionId, text: 'Judge the work.', line: 1, section: 'Report' }],
     };
-    const admitted = admission([work, gate], { criteria });
-    const noWorker = admission([{ ...gate, depends_on: [], dependency_reasons: {} }], { criteria });
+    const repair = stage({ id: 'repair', depends_on: ['qa'], dependency_reasons: { qa: 'Correct rejected work.' }, retry_to: ['qa'] });
+    const admitted = admission([work, gate, repair], { criteria });
+    const noWorker = admission([{ ...gate, depends_on: [], dependency_reasons: {} }, repair], { criteria });
     const noGate = admission([work], { criteria });
     const state: StoreState = {
       runId: 'fixture-run', workflowName: 'fixture', projectDir, status: 'running',
@@ -197,7 +295,7 @@ describe('engine generalization binding contracts', () => {
     })}\n`);
 
     expect(admitted.pass, admitted.errors.join('\n')).toBe(true);
-    expect(noWorker.errors.join('\n')).toContain('not assigned to a capable work/finalizer stage');
+    expect(noWorker.pass, noWorker.errors.join('\n')).toBe(true);
     expect(noGate.errors.join('\n')).toContain('not assigned to a gate');
     expect(checkGates([work, gate], state, projectDir, state.runId)).toEqual({
       allPass: false,
@@ -275,8 +373,9 @@ describe('engine generalization binding contracts', () => {
 
     for (const scope of ['recordings/real.csv', 'recordings/', 'recordings/**', 'alias/real.csv']) {
       const report = inspect(scope);
-      expect(report.pass, `${scope}: ${report.errors.join('\n')}`).toBe(false);
-      expect(report.errors.join('\n')).toContain('declared read-only input recordings/real.csv');
+      expect(report.pass, `${scope}: ${report.errors.join('\n')}`).toBe(true);
+      expect(scopeContainsPath([scope], 'recordings/real.csv', projectDir, declaredInputs)).toBe(false);
+      expect(scopeContainsPath([scope], 'alias/real.csv', projectDir, declaredInputs)).toBe(false);
     }
     expect(inspect('artifacts/result.json').pass).toBe(true);
     expect(inspect('*.ts').pass).toBe(true);
@@ -293,8 +392,8 @@ describe('engine generalization binding contracts', () => {
       stage({ id: 'tree_writer', scope: ['recordings/manufactured.csv'] }),
     ], { declaredInputs: declaredTree, projectDir });
     expect(declaredTree).toEqual([expect.objectContaining({ path: 'recordings', kind: 'tree' })]);
-    expect(manufacturedChild.pass).toBe(false);
-    expect(manufacturedChild.errors.join('\n')).toContain('declared read-only input recordings (tree');
+    expect(manufacturedChild.pass).toBe(true);
+    expect(scopeContainsPath(['recordings/**'], 'recordings/manufactured.csv', projectDir, declaredTree)).toBe(false);
 
     const stateRoot = join(root, 'state');
     setFcGlobalDir(stateRoot);

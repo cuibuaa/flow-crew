@@ -2,6 +2,9 @@
 # once an attempt starts; a timeout retry gets a larger derived attempt budget.
 # Longer values reduce premature timeouts but also delay terminal failure.
 default_timeout_ms: 10800000
+# Minimum observed silence before deterministic idle abort, including local commands.
+# Changed output, artifact, CPU/I/O or provider socket receive counters advance progress.
+default_stage_idle_timeout_ms: 600000
 
 # Wall clock a single validation command (build/test/lint) may take before it is
 # killed. ship-setup runs the suite twice -- source baseline and target baseline
@@ -43,18 +46,12 @@ default_stage_technical_retries: 1
 # plan stage with a specific re-prompt, until exhausted (then escalate with the
 # parse/unknown-role specifics). Generic engine mechanism, not task logic.
 default_plan_stage_retries: 2
-# Max times the supervisor's REJECT verdict can force a single deliverable to be
-# re-worked before the engine stops re-rejecting and lets the run proceed (so a
-# mis-firing supervisor can't trap a run in an infinite reject loop). Generic
-# bound; the per-task "what counts as a valid deliverable" lives in the brief.
-default_supervisor_max_rejects: 2
 # Runtime resolution is read-only: one installed CLI wins; with both installed,
 # Codex is the recommended execution backend. Use `flowcrew adapter <name>` to pin.
 adapter: auto
 # Resume only an explicitly captured per-stage UUID along one proven dependency
-# edge. The replicated same-brief A/B measured only 8.999% lower wall time
-# (below the 10% enable threshold) while output tokens increased 28.938%, so
-# reuse is opt-in; FC_SESSION_REUSE=1 enables an explicit measurement/run.
+# edge. Reuse is opt-in. This settlement establishes compatible routing, not
+# a measured wall-clock benefit that would justify enabling it by default.
 session_reuse: false
 # model/reasoning_effort resolution (adapter, since 7aa5818): explicit value
 # here > user's global ~/.codex/config.toml > CLI built-in default. 'default'
@@ -62,34 +59,5 @@ session_reuse: false
 # model here only to lock an experiment.
 model: default   # Inherit ~/.codex/config.toml; set a model here to override it.
 reasoning_effort: default   # Inherit model_reasoning_effort from the adapter config.
-paths:
-  agents: config/agents
-  workflows: config/workflows
-campaign_triggers:
-  enabled: true
-  regression_after: 2
-  plateau_after: 3
-  plateau_threshold: 5
-  repeated_failure_after: 3
-
-supervisor:
-  # The nominal 30s heartbeat collects deterministic events. Stage output
-  # reaches a semantic review at min_delta_bytes changed bytes. After a
-  # successful WAIT on an artifact event involving at least two running stages
-  # and two changed paths, routine_assessment_interval_ms defers further such
-  # events; the pending event is reviewed when the interval expires. A first
-  # artifact review, single-stage output, previously guided active attempts,
-  # and non-artifact events remain immediate. Several stages or artifact files
-  # can reach 98304 bytes in less than three minutes. The per-iteration maximum
-  # is telemetry only and does not suppress supervisor calls.
-  poll_interval_ms: 30000
-  routine_assessment_interval_ms: 180000
-  min_delta_bytes: 98304
-  max_assessments_per_iteration: 20
-  # Minimum idle duration (ms) before the supervisor may abort a stage as stuck.
-  # Override this per project when a workload has predictably long quiet phases.
-  stuck_threshold_ms: 600000
-
-# Keep a stable campaign name when related tasks should inherit prior campaign
-# context and knowledge-graph findings instead of planning each task in isolation.
-campaign: flow-crew-refactor-2026h2
+# Role files may pin their own effort, which wins over this value. The shipped
+# coder, qa, planner, doc_writer and doc_reviewer roles pin high.

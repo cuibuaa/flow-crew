@@ -287,7 +287,7 @@ describe('daemon status local diagnosis', () => {
       terminal_status_mismatch: {
         lifecycle_status: 'running',
         terminal_status: 'complete',
-        terminal_artifact: 'final_verification.md',
+        terminal_artifact: 'docs/final_verification.md',
       },
     });
     expect(merged.completed_at).toBeUndefined();

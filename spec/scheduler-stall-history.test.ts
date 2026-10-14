@@ -41,7 +41,7 @@ describe('scheduler history polling boundary', () => {
     expect(operational.supervisor?.attempts).toEqual([]);
     expect(readRunState(projectDir, created.runId).supervisor?.attempts).toHaveLength(1);
 
-    const historyPath = join(created.runDirPath, 'run-history.v1.jsonl');
+    const historyPath = join(created.runDirPath, 'run-history.jsonl');
     const acknowledged = operational.stateFormat!.history!.committedBytes;
     truncateSync(historyPath, acknowledged - 1);
     expect(readOperationalRunState(projectDir, created.runId).supervisor?.attempts).toEqual([]);
@@ -57,7 +57,7 @@ describe('scheduler history polling boundary', () => {
       duration_ms: 100, startedAt: state.startedAt, attempts: [attempt(1)],
     };
     writeRunState(projectDir, created.runId, state);
-    const historyPath = join(created.runDirPath, 'run-history.v1.jsonl');
+    const historyPath = join(created.runDirPath, 'run-history.jsonl');
     const oneAttemptBytes = statSync(historyPath).size;
 
     for (let index = 0; index < 10; index += 1) writeRunState(projectDir, created.runId, state);

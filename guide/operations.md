@@ -1,0 +1,241 @@
+# Operations
+
+For an operator: how do I prepare, inspect, steer and preserve engine work?
+Command syntax belongs to [CLI](cli.md); typed stage requests belong to [agent protocol](agent-protocol.md).
+
+## Identities and lifecycle
+
+A daemon **task** has a numeric registry ID. A **run** has its own persistent identity and
+stage graph. A stage **execution** is one attempt under a deadline; a gate **re-evaluation**
+is a separate counter. A **campaign** groups run history. A conversation **ledger entry**
+expresses human wrap-up intent and may link to an exact daemon task; it is optional.
+
+| Run status | Meaning |
+|---|---|
+| `pending` | Queued, not executing |
+| `running` | Executing; inspect process identity as well as stored status |
+| `parked` | Paused for a decision or proven resumable interruption; not terminal |
+| `awaiting_approval` | Legacy approval state, retained separately from parked |
+| `complete` | Successful terminal engineering completion |
+| `shipped` | Successful terminal research ship decision |
+| `ceiling_hit` | Successful process-level research ceiling; not a metric win |
+| `failed`, `reality_gate_failed` | Terminal execution/check failure |
+| `escalated` | Terminal unresolved or irreparable outcome |
+| `phase_complete` | Terminal phase boundary; not classified as process success |
+| `stopped` | Terminal stop |
+| `incomplete` | Terminal insufficient completion |
+
+Unknown archived status values remain unknown; consequential actions refuse inferred semantics.
+Stages separately use pending/running/complete/failed/skipped. A daemon task can be pending,
+deferred, running, cancelling, done, stuck, needs_summary, cancelled, failed or reality_gate_failed.
+Deferred does not mean rejected; cancelling does not prove that children have closed.
+
+The daemon serializes tasks by canonical project guard and queues conflicts; different projects
+can run concurrently. A parked run releases its execution slot. A foreground quick run also
+uses the project lock. Do not edit an active run's project: scope restoration cannot distinguish
+an unrelated human edit from every stage-caused change.
+
+Sources: [lifecycle vocabulary](../src/lifecycle-status.ts), [task registry](../src/task-registry.ts),
+[orchestrator](../src/orchestrator.ts), [run lock](../src/run-lock.ts).
+
+## Setup validation
+
+`ship-preflight` gathers prior-run/campaign/input/output/build facts and discovers validation
+commands. It runs no project build, test or lint; `--no-baseline` is compatibility syntax.
+Exit zero means collection completed, not that launch is ready.
+
+`ship-setup` requires the exact brief, source project, base, new branch and target. It checks
+source/base inputs, creates or proves the reusable managed worktree, materializes missing
+input descendants and rechecks content/assertions. Target-owned copies of regular files/directories
+isolate target writes; internal
+links are relocated within the target tree. Existing target entries resolving outside it or
+content/type collisions refuse. Do not replace a refusal with manual source symlinks.
+
+Setup discovers validation from configuration or the brief's explicit argv declarations.
+It executes the target baseline under the configured command bound and writes a ready record
+bound to the exact brief digest and canonical target. A failed setup can leave a diagnostic
+worktree; it does not publish a ready record for a blocker.
+
+Exact Vitest, pytest and explicitly declared-file collectors compare normalized source/target
+identities, not just counts. Unsupported, failed or incompatible collection is `unverified`
+with a reason; source suites are not run to infer generic TAP population parity. An exact
+mismatch refuses. Unverified population does not prove source coverage and does not relax
+the target validation baseline.
+
+Ordinary red checks can establish `no_regression_from_baseline`. Failure extraction uses
+complete joined output before bounding persisted text. Complete structural TAP and recognized
+FAIL/FAILED, cross-mark and compiler diagnostic lines can supply identities. Truncated recovered
+identities are partial lower bounds. Partial red-to-red comparisons stay unresolved;
+green-to-red needs a known complete failure inventory to establish regression; unknown/partial
+current failures stay unresolved. Red-to-green passes. If both baseline and current results
+cannot run or fail without identifiable failures, the delta passes and the gate judges its own
+checks. Missing/unlaunchable tools are environment problems; inspect the record's readiness and reasons rather than
+assuming every nonzero child exit has the same setup outcome.
+
+Exit 127 is not universally a refusal: an unlaunchable brief-declared command or a project
+whose commands cannot launch blocks readiness. A discovered missing command can remain an
+environment gap when other commands launch; a runner inferred only from a legacy INI file
+can remain a gap even when nothing launches. Inspect provenance, not just the exit number.
+
+Sources: [preflight](../src/cli-ship-preflight.ts), [setup](../src/cli-ship-setup.ts),
+[validation and deltas](../src/project-validation.ts),
+[gate validation](../src/scheduler/sched_settlement/gate-validation.ts).
+
+## Inspect, guide and stop
+
+`status` selects the latest run for the current project; `--all` selects across projects.
+`task show` reads daemon detail. `state` reads admitted plan/attempt/artifact/evidence facts;
+`--summary` bounds the projection and `--prompts` includes retained immutable invocation inputs.
+An observation grants neither permission nor a pass. Older `input.md` aliases cannot reconstruct
+every historical retry or hidden provider instruction.
+
+`events` reads the canonical feed; `watch` gives a first heartbeat and edge-triggered stalls,
+drift and evidence gaps. Watch reports terminal indecision after its quiet grace and rejected
+gate plateau/regression using bound numeric history. It is an operator observer, separate from
+the deterministic stage watchdog described in [architecture](architecture.md#deadlines-and-idle-progress).
+No watcher opinion establishes that a model result is correct.
+
+`guide` writes to a named running run and optional stage. Without a run ID it refuses unless
+exactly one readable run is executing. Guidance targets the selected stage or explicit run-wide
+`*`; workers consume filtered envelopes at command boundaries. `interrupt` requests a stop of
+the exact active stage command and delivers its reason as guidance. Neither resets the attempt
+deadline. Changes to admitted criteria or authority need revised brief bytes and admission.
+
+Use daemon `task cancel` or the dashboard Cancel control to stop registered work. Cancellation
+records the operator decision and closes active control state before bounded worker cleanup.
+Unknown process evidence is retained in the cancellation result and task notes; it neither
+vetoes cancellation nor authorizes a signal. A retained running marker alone proves neither
+life nor death. Use `task resume` or the adjacent dashboard Resume control to continue a
+stopped, failed or incomplete registered run. A task retry requests another launch attempt;
+after terminal settlement it starts a fresh run. Foreground operation stays attached to the
+caller; process supervision and hard-kill limits are in
+[architecture](architecture.md#process-supervision-and-recovery).
+
+Sources: [state](../src/run-state-access.ts), [status/guide/interrupt](../src/cli.ts),
+[events](../src/cli-events.ts), [watch](../src/watch.ts),
+[cancellation](../src/cancellation-policy.ts), [task CLI](../src/cli-task.ts).
+
+## Approvals
+
+Human approval supplies authority outside the run: other repositories, credentials,
+outward network effects, deletion of user data, shared devices, or git history outside
+the run branch. Admitted writes, private scratch, run-local tool environment setup and
+framework-owned isolated validation proceed under their existing execution owners.
+Scope and contract errors receive engine decisions; approval cannot override those guards.
+
+A worker that needs external authorization writes one request to its injected stage slot
+`stages/<id>/approval_request.json` and stops before the action. Required fields are `id`
+(or alias `requestId`), nonblank `action`, and `risk: external`; `target`, `title`, `body`
+describe the external effect and exact authority needed. IDs match `[A-Za-z0-9._-]{1,64}`.
+The stage slot determines the requesting stage, even if its JSON names another stage.
+
+Legacy exec/write/unknown requests receive a deterministic answer without parking.
+A target physically inside the requesting stage's run subtree, excluding engine records,
+acknowledges existing scratch authority. Symlinks, traversal, another stage's work and
+engine records cannot expand it. Other non-external requests are denied: use the existing
+execution/scope mechanism, or explicitly describe an external effect with `risk: external`.
+Refusal of this grant leaves existing admitted capabilities unchanged. The answer grants
+no device, credential or network authority. Engine answers use the same
+append-only decision transport and identify their source as the scheduler.
+
+The scheduler watches active batches as well as inspecting completed ones. It persists the
+request, chooses the oldest unresolved external item, parks the run without `completedAt`, suspends
+workers and closes children before releasing ownership. Requests are idempotent by run and
+ID; resolutions are append-only, first-responder-wins. The decision is projected at
+`approvals/<id>.decision.json`; read it before acting. An external approval authorizes
+that effect; its denial forbids it. An engine answer changes no existing capabilities.
+
+CLI approve and deny both resume a parked run through daemon registration by default,
+preserving run/DAG/iteration identity. `--no-resume` records a decision without relaunch.
+Resume still checks brief admission. Standing rules, `--always`, `rules` and `revoke` are
+retired. Root request variants remain historical compatibility inputs. Full shell access
+means this request protocol is not a host-wide interception of arbitrary side effects.
+
+Exhausted research gates use their admitted escalation terminal owner. Without that owner,
+the run finishes incomplete with the failing criteria and missing-owner evidence. It does
+not ask a person to repeat the gate decision. Proven resumable host interruptions retain their
+orchestration checkpoints without requesting human approval.
+
+To hold registered work, use `flowcrew task cancel <task-id>`. Cancellation closes
+active control state as `stopped` and attempts to stop its owned workers. Cancellation
+acknowledges the decision; task notes report any unresolved process evidence. Hold preserves
+completed work; daemon restart, recovery and automatic retry leave a stopped run stopped.
+
+Explicitly continue a registered task's stopped, failed or incomplete run by task ID:
+
+```bash
+flowcrew task resume <task-id>
+```
+
+The daemon launches a scheduler for that run. Failed stages receive a new attempt,
+whether the earlier attempt executed or was refused before execution. Skipped
+stages become runnable again and their conditions are checked anew. Completed
+authoring and planning stages, attempt history, the admitted workflow and plan,
+and the remaining iteration budget are preserved. Pending stages continue when
+their dependencies are ready. An incomplete run with a completed nonpassing gate
+reopens that gate in the next iteration; further rejection uses the admitted repair
+route. Resume reports exhausted iteration budget before queuing work. Stopped or
+failed work continues in its interrupted iteration without replenishing repair rounds.
+An unfinished repair continues its admitted gate round; the related gates review
+the new repair without restarting earlier authoring or planning work.
+The task registry supplies the run ID and project directory; the dashboard Resume
+control beside Cancel requests the same continuation. Resume still checks brief
+admission, scheduler ownership and unresolved approvals. Only explicit continuation
+resumes stopped work. `flowcrew task retry <task-id>` requests another launch attempt:
+before terminal settlement it retains any existing run binding, and after settlement
+it starts a fresh run with a new plan, stage history and iteration budget. Retry does
+not resume stopped work. Parked approval requests use the Inbox decision controls.
+
+For a run without a registered task, the existing continuation command remains
+`flowcrew quick --background --project <project-dir> --existing-run-id <run-id>`.
+Omit `--background` to continue that run in the foreground.
+
+Sources: [inbox](../src/inbox.ts), [request paths](../src/approval-artifacts.ts),
+[active monitoring](../src/scheduler/sched_policy/approvals.ts), [decision CLI](../src/cli-inbox.ts),
+[continuation admission](../src/scheduler/sched_loop/launch.ts), [daemon queue](../src/orchestrator.ts).
+
+## Campaigns
+
+Campaign selection is explicit `--campaign`, then the main-worktree
+basename slug; Git failure/non-repository selection falls back to the project directory.
+`--no-campaign` detaches. Explicit display name and canonical storage identity are distinct.
+Global campaign telemetry and directory records live under the state root's `campaigns`.
+Program phase ledgers are instead declared project products.
+
+`--campaign-context=inherit|skip` controls verbose planner history independently of grouping.
+Skip still permits the compact tried-direction ledger. The legacy `--no-inherit-campaign`
+alias selects skip. Without an explicit context flag, at least three adverse endings among
+the ten most recent completed tasks select skip; explicit choice wins and continuation
+retains its stored choice. A history instruction to avoid repeated directions does not
+mechanically guarantee model novelty.
+
+Campaign status/pending/review inspect directory state and proposed brief patches; the CLI
+has no campaign launch subcommand. Review accepts/rejects/skips/quits patches, with versioned
+brief head/diff/log/rollback inspection. Campaign health can request research/pivots;
+research policy owns numeric keep/stop decisions. Current telemetry does not create a
+principal metric merely because a gate passes.
+
+Sources: [selection](../src/config.ts), [launch context](../src/cli.ts),
+[hygiene](../src/campaign-hygiene.ts), [ledger](../src/campaign-ledger.ts),
+[campaign policy](../src/scheduler/sched_policy/campaign.ts), [patch review](../src/campaign-review.ts).
+
+## Preserve and reclaim
+
+Read the report and durable rejected verdicts before accepting a result. `land --run` audits
+declared terminal products, tracked changes/deletions, untracked and ignored paths, unpushed
+commits and commits whose last surviving ref would be removed. Unknown/source/data/state/
+symlink items are named; proven regenerable outputs are counted. Audit mode is read-only.
+
+Removal requires `--remove` and the exact `--acknowledge-regenerable` count when regenerable
+paths exist. It refuses nonterminal runs, incomplete inspection and unique ungraded ignored content.
+It proves a linked attached worktree, then uses non-force removal/prune/branch deletion;
+Git refuses tracked/untracked changes and unmerged branch deletion while preserving the branch.
+Account for unique work elsewhere and rerun; acknowledgment is not permission to discard it.
+`land` does not decide whether the report answers the task.
+
+Optional exact ledger closure uses `--complete-fc-task` with `--fc-task-session` only during
+removal. The engine verifies the ledger/run/worktree binding, leaves the entry unchanged
+until all Git steps succeed, then atomically closes it. Omission leaves it open. A final
+ledger write failure remains nonzero with a guarded repair; see [ledger](fc_tasks.md).
+
+Source: [landing audit](../src/cli-land.ts).
