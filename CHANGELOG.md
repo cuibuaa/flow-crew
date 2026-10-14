@@ -8,6 +8,37 @@ retained as reported release history, not current guarantees or benchmark eviden
 
 # Changelog
 
+## [0.10.1] - 2026-10-14
+
+The Claude adapter now does what the Codex adapter does, and a few engine records that
+were lost or missing are kept.
+
+### Changed
+
+- **Claude adapter parity with Codex.** A stage on the Claude adapter keeps its native
+  session: retries, repairs and corrections resume it instead of resending the whole
+  prompt, and session ownership and cleanup use the same path as Codex. Results honour
+  the stage's output schema; timeouts and cancellation keep their exit status after a
+  result; errors reported after progress are classified and kept in the output; token,
+  cache and cost usage is read from the native events in the same shape as Codex. An
+  empty role tool list means read-only inspection on both adapters. User settings, MCP
+  servers and hooks do not reach stages.
+- The Claude adapter uses the operator's normal login. It no longer moves the CLI to a
+  private configuration directory, which left it without credentials.
+- An authentication failure is classified for both adapters and is not retried.
+
+### Fixed
+
+- Each execution attempt keeps its own native stage log. A later attempt, repair or gate
+  re-evaluation no longer deletes the earlier attempt's stream, so its result and usage
+  stay readable. Runs written by older releases are still read.
+- Every attempt publishes its wall-clock deadline in the stage status, including retries
+  and resumed runs.
+- A file published by rename could be adopted as trusted state after a child process had
+  replaced or deleted it. The integrity check now verifies the published bytes instead.
+- Test suite: removed duplicate and timing-dependent specs; the suite runs about a quarter
+  faster.
+
 ## [0.10.0] - 2026-10-14
 
 This release removes more than it adds: about 26,000 fewer lines across 661 files. The
