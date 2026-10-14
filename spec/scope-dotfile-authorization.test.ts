@@ -114,6 +114,29 @@ describe('path-wise scope admission', () => {
       expect(readFileSync(join(project, 'input.txt'), 'utf8')).toBe('read-only evidence');
     } finally { closeRepairRoundSnapshot(snapshot); }
   });
+  it('grants a declared output inside an input tree while withholding its preserved sibling', () => {
+    mkdirSync(join(project, 'fixtures', 'source'), { recursive: true });
+    writeFileSync(join(project, 'fixtures', 'source', 'evidence.txt'), 'read-only evidence');
+    const output = 'fixtures/source/report.md';
+    const sibling = 'fixtures/source/evidence.txt';
+    const { created, input } = setup([output, sibling]);
+    writeFileSync(join(created.runDirPath, 'task_brief.md'), [
+      '---', 'inputs: [fixtures/source]', `outputs: [${output}]`, '---', 'Write the declared report.',
+    ].join('\n'));
+    const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage], { runDirPath: created.runDirPath });
+    try {
+      const decision = scheduler.decideScopeRevision({ ...input, snapshot });
+      expect(decision).toMatchObject({ accepted: true, authorizedPaths: [output], effectiveScope: [output],
+        rejectedPaths: [sibling], conflicts: [expect.objectContaining({
+          path: sibling, reason: expect.stringContaining('declared read-only input'),
+        })] });
+      const bindings = scheduler.resolveDeclaredInputWriteBindings(project,
+        readFileSync(join(created.runDirPath, 'task_brief.md'), 'utf8'));
+      expect(scheduler.scopeContainsPath(decision.effectiveScope, output, project, bindings)).toBe(true);
+      expect(scheduler.scopeContainsPath(['**'], sibling, project, bindings)).toBe(false);
+      expect(snapshot.files.has(output)).toBe(true);
+    } finally { closeRepairRoundSnapshot(snapshot); }
+  });
   it('admits exact failed-rollback recovery without ratifying unrecorded or subsequently changed writes', () => {
     const parent = ['docs', '.comparison', 'node_modules'].join('/');
     const paths = ['recorded.txt', 'tampered.txt', 'unrecorded.txt'].map(name => `${parent}/${name}`);

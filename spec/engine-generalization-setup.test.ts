@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BUILD_MANIFEST_FILENAME, createBuildManifest } from '../src/build-manifest.js';
 import {
   cmdShipPreflightWithDeps,
+  collectShipPreflight,
   type DaemonLoadedBuildProbe,
   type ShipPreflightDependencies,
 } from '../src/cli-ship-preflight.js';
@@ -23,6 +24,7 @@ import {
   type GitWorktreeCreator,
 } from '../src/cli-ship-setup.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
+import { rehearseBriefIsolated } from '../src/rehearse.js';
 
 class Capture {
   value = '';
@@ -192,6 +194,90 @@ function creatingWorktree(): ReturnType<typeof vi.fn<GitWorktreeCreator>> {
 }
 
 describe('item 14: declared-input stability binding', () => {
+  it.each([false, true])('admits a declared output inside an input directory (existing=%s) through preflight, rehearsal, and setup', async existing => {
+    mkdirSync(join(fixture.project, 'fixtures', 'source'), { recursive: true });
+    writeFileSync(join(fixture.project, 'fixtures', 'source', 'evidence.txt'), 'preserved evidence\n');
+    if (existing) writeFileSync(join(fixture.project, 'fixtures', 'source', 'report.md'), 'earlier report\n');
+    const brief = [
+      '---',
+      'inputs: [fixtures/source]',
+      'outputs:',
+      '  - path: fixtures/source/report.md',
+      ...(existing ? ['    on_existing: replace'] : []),
+      '---',
+      '# Goal',
+      'Write a report using the source evidence.',
+      '',
+      '## Acceptance criteria',
+      '1. Create fixtures/source/report.md using fixtures/source/evidence.txt.',
+    ].join('\n');
+    writeFileSync(join(fixture.project, 'brief.md'), brief);
+    const preflight = await collectShipPreflight(['ship-preflight', '--brief', 'brief.md'],
+      preflightDependencies(join(fixture.state, 'runs'), validationRunner()));
+    expect(preflight.report.outputInventory.inventory.blocking).toEqual([]);
+    expect(await cmdShipPreflightWithDeps(['ship-preflight', '--brief', 'brief.md'],
+      preflightDependencies(join(fixture.state, 'runs'), validationRunner(), {
+        stdout: new Capture().writer, stderr: new Capture().writer,
+      }))).toBe(0);
+    const rehearsal = await rehearseBriefIsolated(brief, { projectDir: fixture.project, staticOnly: true });
+    try {
+      expect(rehearsal.exitCode, JSON.stringify(rehearsal.findings)).toBe(0);
+      expect(rehearsal.preflight.contractReady).toBe(true);
+      expect(rehearsal.outputInventory.blocking).toBe(0);
+    } finally { rmSync(join(rehearsal.diagnosticsLogPath, '..'), { recursive: true, force: true }); }
+    const target = join(fixture.root, 'overlap-target');
+    const create = vi.fn<GitWorktreeCreator>((request) => {
+      materializeTrackedTarget(request.targetDir);
+      mkdirSync(join(request.targetDir, 'fixtures', 'source'), { recursive: true });
+      copyFileSync(join(fixture.project, 'fixtures', 'source', 'evidence.txt'),
+        join(request.targetDir, 'fixtures', 'source', 'evidence.txt'));
+      if (existing) copyFileSync(join(fixture.project, 'fixtures', 'source', 'report.md'),
+        join(request.targetDir, 'fixtures', 'source', 'report.md'));
+      return { exitCode: 0 };
+    });
+    const setup = await runShipSetup(setupArgs(target, 'overlap-output'), {
+      createWorktree: create, runValidationCommand: validationRunner(), globalDir: () => fixture.state,
+    });
+    expect(setup.state, JSON.stringify(setup.blockers)).toBe('ready');
+    expect(readFileSync(join(target, 'fixtures', 'source', 'evidence.txt'), 'utf8')).toBe('preserved evidence\n');
+  });
+
+  it('refuses an existing create-only output inside its declared input at every admission surface', async () => {
+    mkdirSync(join(fixture.project, 'fixtures', 'source'), { recursive: true });
+    writeFileSync(join(fixture.project, 'fixtures', 'source', 'report.md'), 'existing report\n');
+    const brief = [
+      '---', 'inputs: [fixtures/source]', 'outputs: [fixtures/source/report.md]', '---',
+      '# Goal', 'Produce a fresh report.', '', '## Acceptance criteria',
+      '1. Create fixtures/source/report.md from the input evidence.',
+    ].join('\n');
+    writeFileSync(join(fixture.project, 'brief.md'), brief);
+    const preflight = await collectShipPreflight(['ship-preflight', '--brief', 'brief.md'],
+      preflightDependencies(join(fixture.state, 'runs'), validationRunner()));
+    expect(preflight.report.outputInventory.inventory.blocking).toEqual([
+      expect.objectContaining({ path: 'fixtures/source/report.md', reason: expect.stringContaining('create-only') }),
+    ]);
+    const preflightOutput = new Capture();
+    expect(await cmdShipPreflightWithDeps(['ship-preflight', '--brief', 'brief.md'],
+      preflightDependencies(join(fixture.state, 'runs'), validationRunner(), {
+        stdout: preflightOutput.writer, stderr: new Capture().writer,
+      }))).toBe(0);
+    expect(preflightOutput.value).toContain('BLOCKED fixtures/source/report.md');
+    const rehearsal = await rehearseBriefIsolated(brief, { projectDir: fixture.project, staticOnly: true });
+    try {
+      expect(rehearsal.exitCode).toBe(1);
+      expect(rehearsal.outputInventory.blocking).toBe(1);
+    } finally { rmSync(join(rehearsal.diagnosticsLogPath, '..'), { recursive: true, force: true }); }
+    const create = creatingWorktree();
+    const setup = await runShipSetup(setupArgs(join(fixture.root, 'create-only-target'), 'create-only-output'), {
+      createWorktree: create, runValidationCommand: validationRunner(), globalDir: () => fixture.state,
+    });
+    expect(setup.state).toBe('refused');
+    expect(setup.blockers).toContainEqual(expect.objectContaining({
+      input: 'fixtures/source/report.md', reason: expect.stringContaining('create-only'),
+    }));
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('refuses content and tree-membership mutations but permits generated-output writes', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     mkdirSync(join(fixture.project, 'fixtures', 'frozen'), { recursive: true });

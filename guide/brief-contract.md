@@ -58,6 +58,9 @@ Absolute external outputs require an explicit directory declaration: protected/r
 overlaps and aliases are refused.
 Their contents are not recursively inventoried by preflight. Rehearsal substitutes temporary
 locations. A declaration is authority for its named location, not permission for siblings.
+Project outputs may lie inside declared input directories: input preservation excludes the
+declared output file or directory tree, while other input paths stay protected. Stage write
+scope and existing-content rules still apply.
 
 `validation.commands` is a nonempty mapping of `build`, `test` and/or `lint` to
 `{command: string, args: string[]}`. These declarations supply shell-free argv; unknown roles,

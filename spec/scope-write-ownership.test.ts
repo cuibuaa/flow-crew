@@ -75,6 +75,52 @@ async function scan(context: ScopeBatchContext, writer: ReturnType<typeof stage>
 }
 
 describe('observed existence owns dependency comparison', () => {
+  it.each([false, true])('keeps a declared output inside a preserved input writable at live and settlement boundaries (existing=%s)', async existing => {
+    const output = 'fixtures/source/report.md';
+    const evidence = 'fixtures/source/evidence.txt';
+    const undeclared = 'fixtures/source/undeclared.txt';
+    write(evidence, 'preserved evidence\n');
+    if (existing) write(output, 'previous report\n');
+    commitFixture();
+    const writer = stage('writer', ['**']);
+    const created = createRun(project, 'nested-output', '', [writer.id]);
+    runPath = created.runDirPath;
+    writeFileSync(join(runPath, 'task_brief.md'), [
+      '---', 'inputs: [fixtures/source]', 'outputs:',
+      `  - path: ${output}`, ...(existing ? ['    on_existing: replace'] : []),
+      '---', '# Goal', 'Write the declared report from preserved evidence.',
+    ].join('\n'));
+    const context = createScopeBatchContext(project, [writer], undefined, created.runId);
+    beginStageAttempt(project, created.runId, writer.id, 0);
+    write(output, 'authorized report\n');
+    const allowed = await scan(context, writer, created.runId, [output]);
+    expect(allowed.result.incidents).toEqual([]);
+    expect(allowed.aborts).toEqual([]);
+    completeStageAttempt(project, created.runId, writer.id, 0, {
+      exitCode: 0, duration_ms: 1, writes: [output], writeAttribution: 'structured',
+    });
+    const reconciled = createScopeReconciler().reconcileStageScope({
+      stage: writer, projectDir: project, runId: created.runId, context, attemptIndex: 1,
+    });
+    expect(reconciled.violation).toBe(false);
+    expect(readFileSync(join(project, output), 'utf8')).toBe('authorized report\n');
+    const audit = JSON.parse(readFileSync(join(runPath, reconciled.status.attempts![0].constraintAudit!.path), 'utf8'));
+    expect(audit.durableWrites).toContain(output);
+    expect(audit.rollbackFailures).toEqual([]);
+
+    // A sibling remains a preserved input even under the same unrestricted scope.
+    write(evidence, 'unauthorized evidence replacement\n');
+    write(undeclared, 'unauthorized new sibling\n');
+    const protectedWrites = await scan(context, writer, created.runId, [evidence, undeclared]);
+    expect(protectedWrites.result.incidents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: evidence, restored: true }),
+      expect.objectContaining({ path: undeclared, restored: true }),
+    ]));
+    expect(readFileSync(join(project, evidence), 'utf8')).toBe('preserved evidence\n');
+    expect(() => readFileSync(join(project, undeclared), 'utf8')).toThrow();
+    expect(readFileSync(join(project, output), 'utf8')).toBe('authorized report\n');
+  });
+
   it('does not accuse an omitted dependency merely because a scan nominates it', async () => {
     const dependency = join('.venv', 'library', 'index.js');
     write(dependency, 'pre-existing dependency\n');
