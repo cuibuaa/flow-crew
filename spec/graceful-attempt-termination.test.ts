@@ -1,4 +1,5 @@
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { retireRunScratch } from '../src/invocation-scratch.js';
 import {
   existsSync,
   mkdirSync,
@@ -680,7 +681,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       expect(existsSync(join(scratch.path, 'private-work'))).toBe(true);
       controller.abort();
       expect((await pending).exitCode).toBe(137);
-      expect(existsSync(scratch.path)).toBe(false);
+      expect(existsSync(scratch.path)).toBe(true);
       expect(readFileSync(cleanupPath, 'utf8')).toBe('false');
       expect(JSON.parse(readFileSync(activityPath, 'utf8'))).toMatchObject({ streamClosed: true, active: [] });
       const failed = await execWithStdin(join(root, 'absent-executable'), [], '', {
@@ -695,7 +696,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       })).rejects.toThrow('fixture binding refused');
       expect(processSurvived(startedPid)).toBe(false);
       expect(JSON.parse(readFileSync(activityPath, 'utf8'))).toMatchObject({ attemptIndex: 3, streamClosed: true });
-    } finally { controller.abort(); await pending?.catch(() => undefined); rmSync(root, { recursive: true, force: true }); }
+    } finally { controller.abort(); await pending?.catch(() => undefined); retireRunScratch(root); rmSync(root, { recursive: true, force: true }); }
   });
 
 });

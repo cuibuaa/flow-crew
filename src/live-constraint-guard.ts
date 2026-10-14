@@ -45,7 +45,7 @@ export function scopeRevisionContract(input: ScopeRevisionContractInput): string
     ? ' Gate project writes remain subject to isolation policy; if rejected, use a planner-predeclared path in a later iteration or the private temporary directory.'
     : '';
   return `Declared project-write scope: ${JSON.stringify(input.scope)} (declaration ${input.scopePresence}). `
-    + `Every invocation, including a read-only stage, has writable private scratch at $TMPDIR (also $TMP and $TEMP), separate from project and run storage and removed when the invocation closes. `
+    + `Every invocation, including a read-only stage, has writable private scratch at $TMPDIR (also $TMP and $TEMP), separate from project files and retained with run history until that history is cleaned. `
     + `Use mktemp -d "$TMPDIR/probe-XXXXXX" for temporary copies and probes; shared /tmp is outside this grant. Check creation succeeded before copying. `
     + `An explicit empty declaration grants no project writes; an omitted legacy declaration has no live scope guard. Before any project write outside admitted capability, produce `
     + `exactly one JSON request to ${join(input.runDir, 'stages', input.stageId, SCOPE_REVISION_REQUEST_FILE)} `

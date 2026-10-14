@@ -96,6 +96,7 @@ export function engineOwnedGlobalCarriers(storeRoot: string): string[] {
  * and request slots are capabilities; acknowledged history never is.
  */
 export function isEngineOwnedRunPath(path: string, stage: { id: string; is_gate?: boolean; dynamic_dispatch?: boolean }): boolean {
+  if (path === 'scratch' || path === 'scratch/.tmpdir') return true;
   if (!path || /^run-history(?:[./]|$)/.test(path) || /^(?:\.run-reservation\.json|\.run-state\.lock)(?:\/|$)/.test(path)) return true;
   if (/^(?:run\.json|events\.jsonl|workflow\.yaml|task_brief\.md|brief_criteria\.json|validation_baseline\.json|validation_delta_[^/]+\.json|dispatch_admission\.json|run_history\.jsonl|plan_history|audit_findings|signals|resource_leases|stage_watchdog\.json|supervisor_state\.json|supervisor_usage\.json)(?:\/|$)/.test(path)) return true;
   if (/^(?:stage_evidence|gate_reevaluation|dispatch_rejections|plan_retry|declared_outputs|terminal_snapshots|guidance_history|supervisor_rejections|discarded|approvals|\.rollback-preimages)(?:\/|$)/.test(path)

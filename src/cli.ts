@@ -1771,7 +1771,7 @@ function cmdInterrupt() {
   }
 }
 
-function cmdClean() {
+async function cmdClean() {
   if (args.includes('--help') || args.includes('-h')) {
     console.log('Usage: flowcrew clean [--keep N]');
     console.log('');
@@ -1814,6 +1814,15 @@ function cmdClean() {
       }
     } catch { /* no validated live scheduler; historical run is cleanable */ }
     try {
+      // A crashed scheduler can leave owned commands alive. History (including
+      // scratch citations) remains readable until every consumer has retired.
+      const { checkpointConsumers } = await import('./restart-recovery.js');
+      if (readableRuns.includes(runId) && checkpointConsumers(readRunState('', runId).engineCheckpoint).length > 0) {
+        skippedLive += 1;
+        continue;
+      }
+      const { retireRunScratch } = await import('./invocation-scratch.js');
+      retireRunScratch(join(root, runId));
       rmSync(join(root, runId), { recursive: true, force: true });
       cleaned += 1;
     } catch { /* non-critical */ }
@@ -2136,7 +2145,7 @@ switch (command) {
     cmdInterrupt();
     break;
   case 'clean':
-    cmdClean();
+    await cmdClean();
     break;
   case 'export':
     cmdExport();

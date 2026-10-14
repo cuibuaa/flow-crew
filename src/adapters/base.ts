@@ -1,12 +1,11 @@
-import { appendFileSync, mkdirSync, rmSync } from '../engine-fs.js';
+import { appendFileSync, mkdirSync } from '../engine-fs.js';
 
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 
-import { dirname, join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { dirname } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
-import { updateRunState } from '../store.js';
+import { runDir, updateRunState } from '../store.js';
+import { createInvocationScratch } from '../invocation-scratch.js';
 import { processStartToken } from '../run-lock.js';
 import type { ProviderFailure } from '../provider-result.js';
 import { CommandActivityTracker } from '../command-activity.js';
@@ -325,16 +324,16 @@ function createChildTerminator(
   };
 }
 
-/** Every command gets invocation-private scratch; callers retain their own
- * credential/configuration policy and close scratch after retiring the child. */
-function commandEnvironment(inherited: NodeJS.ProcessEnv = process.env, unsetEnv: readonly string[] = []) {
-  const scratch = join(tmpdir(), `flowcrew-invocation-${randomUUID()}`);
-  mkdirSync(scratch, { mode: 0o700 });
-  const env: NodeJS.ProcessEnv = { ...inherited, TMPDIR: scratch, TMP: scratch, TEMP: scratch };
+/** Every command gets invocation-private scratch, retained with its run history.
+ * Callers retain their own credential/configuration policy. */
+function commandEnvironment(inherited: NodeJS.ProcessEnv = process.env, unsetEnv: readonly string[] = [], runDirectory?: string) {
+  const owner = runOwner.getStore();
+  const scratch = createInvocationScratch(runDirectory ?? (owner && runDir(owner.projectDir, owner.runId)));
+  const env: NodeJS.ProcessEnv = { ...inherited, TMPDIR: scratch.path, TMP: scratch.path, TEMP: scratch.path };
   for (const name of unsetEnv) delete env[name];
   // Daemon transport belongs to the scheduler/operator, never a command child.
   delete env.FLOWCREW_DAEMON_SOCKET;
-  return { env, cleanup: () => rmSync(scratch, { recursive: true, force: true }) };
+  return { env, cleanup: scratch.cleanup };
 }
 
 export function execWithStdin(
@@ -376,7 +375,7 @@ export function execWithStdin(
     let environment: ReturnType<typeof commandEnvironment> | undefined;
     let child: ChildProcess;
     try {
-      environment = commandEnvironment({ ...process.env, ...opts.env }, opts.unsetEnv);
+      environment = commandEnvironment({ ...process.env, ...opts.env }, opts.unsetEnv, opts.execution?.runDir);
       child = spawnRunCommand(cmd, args, {
         cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'], shell: false,
         detached: process.platform !== 'win32', env: environment.env,

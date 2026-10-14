@@ -17,6 +17,7 @@ import {
 import { readRunEvents } from '../src/run-events.js';
 import { execWithStdin } from '../src/adapters/base.js';
 import { runValidationCommand } from '../src/project-validation.js';
+import { retireRunScratch } from '../src/invocation-scratch.js';
 import type { CheckContext, CheckDecl } from '../src/reality-gate/types.js';
 
 let projectDir: string;
@@ -31,6 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  retireRunScratch(taskDir);
   vi.unstubAllEnvs();
   setFcGlobalDir(previousFcGlobalDir);
   rmSync(projectDir, { recursive: true, force: true });
@@ -269,8 +271,8 @@ describe('reality gate parser and aggregation', () => {
 });
 
 describe('store integration', () => {
-  it.each([0, 7])('shares private scratch with stage commands and cleans it after gate exit %s', async exitCode => {
-    for (const name of ['TMPDIR', 'TMP', 'TEMP']) vi.stubEnv(name, undefined);
+  it.each([0, 7])('retains run-owned scratch and retires standalone check scratch after exit %s', async exitCode => {
+    for (const name of ['TMP', 'TEMP']) vi.stubEnv(name, undefined);
     vi.stubEnv('FLOWCREW_DAEMON_SOCKET', join(taskDir, 'unavailable.sock'));
     const node = "'" + process.execPath.replaceAll("'", "'\"'\"'") + "'";
     const script = [
@@ -288,7 +290,7 @@ describe('store integration', () => {
     });
     expect(authored.exitCode).toBe(exitCode);
     const stageEnvironment = JSON.parse(authored.output);
-    expect(existsSync(stageEnvironment.scratch)).toBe(false);
+    expect(existsSync(stageEnvironment.scratch)).toBe(true);
 
     const created = createRun(projectDir, 'test', 'name: test', []);
     writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'),
@@ -306,8 +308,13 @@ describe('store integration', () => {
     const validationEnvironment = JSON.parse(validation.stdout ?? '');
     for (const environment of [stageEnvironment, gateEnvironment, validationEnvironment]) {
       expect(environment).toEqual({ scratch: expect.any(String), tmp: environment.scratch, temp: environment.scratch, socket: null });
-      expect(dirname(environment.scratch)).toBe(tmpdir());
-      expect(existsSync(environment.scratch)).toBe(false);
+      if (environment === stageEnvironment) {
+        expect(dirname(dirname(environment.scratch))).toBe(tmpdir());
+        expect(existsSync(environment.scratch)).toBe(true);
+      } else {
+        expect(dirname(environment.scratch)).toBe(tmpdir());
+        expect(existsSync(environment.scratch)).toBe(false);
+      }
     }
     expect(new Set([stageEnvironment.scratch, gateEnvironment.scratch, validationEnvironment.scratch]).size).toBe(3);
   });
