@@ -1814,8 +1814,8 @@ async function cmdClean() {
       }
     } catch { /* no validated live scheduler; historical run is cleanable */ }
     try {
-      // A crashed scheduler can leave owned commands alive. History (including
-      // scratch citations) remains readable until every consumer has retired.
+      // A crashed scheduler can leave owned commands alive. Keep their run
+      // records until every consumer has retired.
       const { checkpointConsumers } = await import('./restart-recovery.js');
       if (readableRuns.includes(runId) && checkpointConsumers(readRunState('', runId).engineCheckpoint).length > 0) {
         skippedLive += 1;

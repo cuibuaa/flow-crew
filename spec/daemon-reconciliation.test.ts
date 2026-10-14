@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { createInvocationScratch } from '../src/invocation-scratch.js';
 import { createDaemonReconciler } from '../src/daemon-reconciliation.js';
 import { Orchestrator, type SupervisorBackend } from '../src/orchestrator.js';
 import { TaskRegistry } from '../src/task-registry.js';
@@ -11,6 +12,7 @@ import { beginStageAttempt, createRun, fcGlobalDir, readRunState, runsRoot, setF
 import { listRunningRunIdsFromIndex, removeRunIndexFiles } from '../src/run-index.js';
 
 let root: string, project: string, previousStore: string, registry: TaskRegistry;
+const scratchAliases: string[] = [];
 const noUnits: SupervisorBackend = {
   async runUnit() { throw new Error('unexpected launch'); }, async isActive() { throw new Error('unexpected probe'); },
   async stopUnit() { throw new Error('unexpected stop'); }, async journalTail() { return ''; },
@@ -24,7 +26,10 @@ beforeEach(() => {
   vi.spyOn(recovery, 'engineGeneration').mockReturnValue('fixture-generation');
   vi.spyOn(runLock, 'inspectRunScheduler').mockReturnValue({ kind: 'missing' });
 });
-afterEach(() => { removeRunIndexFiles(project); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  for (const alias of scratchAliases.splice(0)) rmSync(alias, { force: true });
+  removeRunIndexFiles(project); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true });
+});
 function orphan() {
   const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runId;
   writeStageStatus(project, id, 'work', { status: 'pending', retries: 0 });
@@ -39,6 +44,9 @@ function orphan() {
 describe('daemon-owned previous-boot orphan recovery', () => {
   it('leaves default constructors/ticks read-only, then retains interrupted work under daemon ownership', async () => {
     const id = orphan();
+    const scratch = createInvocationScratch(join(runsRoot(), id));
+    scratchAliases.push(dirname(scratch.path));
+    writeFileSync(join(scratch.path, 'evidence.txt'), 'available to resumed stages');
     await new Orchestrator({ registry, systemd: noUnits, git: {} as never }).tickOnce();
     expect(readRunState(project, id).status).toBe('running');
     const warn = vi.fn();
@@ -47,7 +55,27 @@ describe('daemon-owned previous-boot orphan recovery', () => {
       recovery: { kind: 'resumable' }, recoveryIntent: { phase: 'committed' }, stages: { work: { status: 'pending', retries: 0 } } });
     expect(readRunState(project, id).stages.work.attempts!.at(-1)).toMatchObject({ status: 'failed', exitCode: 143, tokenUsage: 'unknown' });
     expect(readFileSync(join(runsRoot(), id, 'events.jsonl'), 'utf8')).toContain('recovery_reconciled');
+    expect(readFileSync(join(scratch.path, 'evidence.txt'), 'utf8')).toBe('available to resumed stages');
+    expect(existsSync(join(runsRoot(), id, 'scratch'))).toBe(true);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('retires scratch when orphan reconciliation reaches a terminal refusal and preserves run history', () => {
+    const id = orphan();
+    const runDir = join(runsRoot(), id);
+    const scratch = createInvocationScratch(runDir);
+    const alias = dirname(scratch.path);
+    scratchAliases.push(alias);
+    writeFileSync(join(scratch.path, 'evidence.txt'), 'interrupted invocation payload');
+    updateRunState(project, id, state => { delete state.engineCheckpoint; });
+    const ledger = readFileSync(join(runDir, 'stages/work/status.json'), 'utf8');
+
+    createDaemonReconciler(registry, vi.fn())();
+
+    expect(readRunState(project, id)).toMatchObject({ status: 'failed', recovery: { kind: 'blocked' } });
+    expect(() => lstatSync(alias)).toThrow(/ENOENT/);
+    expect(existsSync(join(runDir, 'scratch'))).toBe(false);
+    expect(readFileSync(join(runDir, 'stages/work/status.json'), 'utf8')).toBe(ledger);
   });
 
   it.each(['live', 'corrupt', 'unverifiable', 'same-boot', 'unknown-boot', 'legacy', 'bound', 'unknown-task-status', 'unreadable-binding', 'damaged-registry'])('retains %s records without inferring interruption', kind => {

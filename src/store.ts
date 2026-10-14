@@ -1,4 +1,5 @@
 import { writeFileSync, appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, renameSync, rmdirSync, unlinkSync, writeSync } from './engine-fs.js';
+import { retireRunScratch } from './invocation-scratch.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -1776,6 +1777,7 @@ function publishRunProjection(projectDir: string, runPath: string, projection: S
     assertProjectionUnchanged();
   }
   atomicWrite(join(runPath, 'run.json'), JSON.stringify(projection) + '\n');
+  if (isTerminalRunStatus(projection.status)) retireRunScratch(runPath);
   if (canonicalRunDirectory(runPath) === canonicalRunDirectory(runDir(projectDir, projection.runId))) {
     try { upsertRunIndex(projectDir, projection); } catch { /* index is best-effort */ }
     emitCampaignEnvelopeEvents(projectDir, projection.runId, summaryState);

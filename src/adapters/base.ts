@@ -324,7 +324,7 @@ function createChildTerminator(
   };
 }
 
-/** Every command gets invocation-private scratch, retained with its run history.
+/** Every command gets invocation-private scratch, retained until its run becomes terminal.
  * Callers retain their own credential/configuration policy. */
 function commandEnvironment(inherited: NodeJS.ProcessEnv = process.env, unsetEnv: readonly string[] = [], runDirectory?: string) {
   const owner = runOwner.getStore();

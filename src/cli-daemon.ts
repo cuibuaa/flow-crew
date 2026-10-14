@@ -1,3 +1,4 @@
+import { sweepRunScratch } from './invocation-scratch.js';
 import { appendFileSync, closeSync, mkdirSync, openSync, rmSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -263,6 +264,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
   const warn = (message: string) => {
     appendFileSync(logPath, `${new Date().toISOString()} WARN ${message}\n`, 'utf-8');
   };
+  sweepRunScratch(runsRoot(), warn);
   const registry = new TaskRegistry({ baseDir: dirname(socketPath), warn });
   const orchestrator = new Orchestrator({
     registry,
