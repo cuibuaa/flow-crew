@@ -6,7 +6,7 @@ import { writeFileSync, appendFileSync, mkdirSync, unlinkSync } from './engine-f
 // Module: worker
 import { withEngineIntegrity } from './engine-integrity.js';
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { hashRollbackFileSync } from './rollback-content-store.js';
 import { recordInvocationInput } from './run-state-view.js';
 import { finalizeStageSessions, isSessionUuid, readSession } from './adapter-session.js';
 import { declaredOutputFacts, runStateContext } from './run-state-access.js';
@@ -267,7 +267,7 @@ export interface AttemptEvidenceGeneration {
 }
 
 function attemptArtifactFingerprint(path: string): string | null {
-  try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return null; }
+  try { return hashRollbackFileSync(path).sha256; } catch { return null; }
 }
 
 /** Mark the attempt stream so the watchdog excludes its bookkeeping bytes. */

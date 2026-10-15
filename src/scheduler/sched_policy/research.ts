@@ -1,6 +1,7 @@
 /** Research artifact identity, round ingestion/advancement, confirmation and best-effort terminal hooks; file inventory, rollback settlement and campaign writer are supplied. */
 import { type ResearchRound, evaluateResearch, evaluateResearchCeilingFloor } from '../../research-policy.js';
 import { createHash } from 'node:crypto';
+import { updateFileHashSync } from '../../rollback-content-store.js';
 import { basename, join, dirname } from 'node:path';
 import { copyFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { lstatSync, readFileSync, existsSync, statSync } from 'node:fs';
@@ -167,7 +168,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       const hash = createHash('sha256');
       for (const path of [...paths].sort()) {
         hash.update(path === resultAbs ? resultRel : `${resultRel}.no_candidate.json`, 'utf8');
-        try { hash.update(readFileSync(path)); } catch { hash.update('<unreadable>', 'utf8'); }
+        try { updateFileHashSync(path, hash); } catch { hash.update('<unreadable>', 'utf8'); }
       }
       return hash.digest('hex');
     };

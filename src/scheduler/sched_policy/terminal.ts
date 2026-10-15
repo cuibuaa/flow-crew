@@ -3,6 +3,7 @@ import { type Adapter } from '../../adapters/base.js';
 import { type ProjectValidationDependencies } from '../../project-validation.js';
 import { type StoreState, type PostTerminateHook, RUN_STATUS, STAGE_STATUS, enforceRealityGateBeforeTerminal, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName } from '../../store.js';
 import { createHash } from 'node:crypto';
+import { hashRollbackFileSync, updateFileHashSync } from '../../rollback-content-store.js';
 import { renameSync, copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -137,7 +138,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     }
 
     const validationStageId = `terminal_${input.ownerStageId.replace(/[^A-Za-z0-9_-]+/g, '_')}`;
-    const baselineSha256 = createHash('sha256').update(readFileSync(baselinePath)).digest('hex');
+    const baselineSha256 = hashRollbackFileSync(baselinePath).sha256;
     const laterDeltas: GateValidationDeltaArtifact[] = [];
     for (const file of readdirSync(input.runDirPath)) {
       if (!/^validation_delta_.+\.json$/.test(file)) continue;
@@ -256,7 +257,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
         const evidence = createHash('sha256');
         for (const candidate of freshLogicalCandidates.sort((left, right) => left.path.localeCompare(right.path))) {
           evidence.update(`${candidate.terminalStatus}:${candidate.path}\n`, 'utf8');
-          try { evidence.update(readFileSync(candidate.sources[0])); } catch { evidence.update('<unreadable>', 'utf8'); }
+          try { updateFileHashSync(candidate.sources[0], evidence); } catch { evidence.update('<unreadable>', 'utf8'); }
         }
         const ownerIds = [...new Set(freshLogicalCandidates
           .map((candidate) => admittedTerminalOwner(ctx.runDirPath, candidate.path))

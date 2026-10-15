@@ -1,7 +1,7 @@
 import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync } from './engine-fs.js';
 import { createReadStream, existsSync, fstatSync, lstatSync, readSync } from 'node:fs';
 import { constants as fsConstants } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, type Hash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
@@ -73,14 +73,13 @@ function descriptorIdentity(descriptor: number): RollbackStatIdentity {
   };
 }
 
-/** Constant-memory synchronous hashing, used only during initial/preimage capture. */
-export function hashRollbackFileSync(path: string): RollbackHashResult {
+/** Feed exact file bytes into a digest with bounded memory and stable identity. */
+export function updateFileHashSync(path: string, hash: Hash): Omit<RollbackHashResult, 'sha256'> {
   let descriptor: number | undefined;
   try {
     descriptor = openSync(path, 'r');
     const before = descriptorIdentity(descriptor);
     if (before.type !== 'file') throw new Error(`${path} is not a regular file`);
-    const hash = createHash('sha256');
     const chunk = Buffer.allocUnsafe(256 * 1024);
     let byteLength = 0;
     while (true) {
@@ -93,10 +92,17 @@ export function hashRollbackFileSync(path: string): RollbackHashResult {
     if (!rollbackStatIdentitiesEqual(before, after) || byteLength !== Number(after.size)) {
       throw new Error(`${path} changed while its content was hashed`);
     }
-    return { sha256: hash.digest('hex'), byteLength, statIdentity: after };
+    return { byteLength, statIdentity: after };
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
+}
+
+/** Constant-memory synchronous content identity. */
+export function hashRollbackFileSync(path: string): RollbackHashResult {
+  const hash = createHash('sha256');
+  const result = updateFileHashSync(path, hash);
+  return { ...result, sha256: hash.digest('hex') };
 }
 
 /**
@@ -128,9 +134,14 @@ export class RollbackContentStore {
   private sequence = 0;
 
   constructor(runDirPath?: string) {
-    this.root = runDirPath
-      ? join(runDirPath, '.rollback-preimages')
-      : mkdtempSync(join(tmpdir(), 'flowcrew-rollback-preimages-'));
+    if (runDirPath) this.root = join(runDirPath, '.rollback-preimages');
+    else {
+      // Keep private allocation beneath its own parent: mkdtemp publishes
+      // that tree, so the shared temporary directory must not be its parent.
+      const parent = join(tmpdir(), `flowcrew-rollback-preimages-${process.getuid?.() ?? process.pid}`);
+      mkdirSync(parent, { recursive: true, mode: 0o700 });
+      this.root = mkdtempSync(join(parent, 'capture-'));
+    }
     mkdirSync(this.root, { recursive: true });
   }
 

@@ -1,5 +1,5 @@
 import { splitBriefFrontmatter as leadingFrontmatter } from './brief-frontmatter.js';
-import { createHash } from 'node:crypto';
+import { hashRollbackFileSync } from './rollback-content-store.js';
 import {
   accessSync,
   constants,
@@ -94,6 +94,7 @@ export interface ShipInputFileSystem {
   readable(path: string): boolean;
   readText(path: string): string;
   readBytes(path: string): Uint8Array;
+  hashFile(path: string): { sha256: string; byteLength: number };
   readDirectory(path: string): string[];
   stat(path: string): ShipInputStat;
   lstat?(path: string): ShipInputStat;
@@ -113,6 +114,7 @@ export const nodeShipInputFileSystem: ShipInputFileSystem = {
   },
   readText: (path) => readFileSync(path, 'utf-8'),
   readBytes: (path) => readFileSync(path),
+  hashFile: hashRollbackFileSync,
   readDirectory: (path) => readdirSync(path),
   stat: (path) => statSync(path),
   lstat: (path) => lstatSync(path),
@@ -895,7 +897,7 @@ function evaluateAssertion(
   try {
     if (assertion.kind === 'sha256') {
       if (fs.stat(path).isDirectory()) return unbound(assertion, 'SHA-256 assertions require a file input');
-      const observed = createHash('sha256').update(fs.readBytes(path)).digest('hex');
+      const observed = fs.hashFile(path).sha256;
       return {
         ...assertion,
         observed,
@@ -1238,7 +1240,7 @@ export function inspectBriefOutputs(
       || (entryType === 'file' && (size === undefined || size > 0) && !permitted);
     let sha256: string | undefined;
     if (entryType === 'file') {
-      try { sha256 = createHash('sha256').update(fs.readBytes(resolvedPath)).digest('hex'); } catch { /* unreadable is visible through missing digest */ }
+      try { sha256 = fs.hashFile(resolvedPath).sha256; } catch { /* unreadable is visible through missing digest */ }
     }
     let symlinkTarget: string | undefined;
     if (symlink && fs.readlink) {

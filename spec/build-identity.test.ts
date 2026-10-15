@@ -397,7 +397,7 @@ describe('one backend and UI build identity', () => {
     const fakeVitePackage = join(root, 'ui', 'node_modules', 'vite');
     for (const dir of ['src', 'scripts', 'ui/src']) mkdirSync(join(root, dir), { recursive: true });
     mkdirSync(join(fakeVitePackage, 'bin'), { recursive: true });
-    for (const file of ['build-manifest.ts', 'engine-fs.ts', 'engine-owned-carriers.ts', 'daemon-identity.ts', 'process-liveness.ts']) copyFileSync(join(repository, 'src', file), join(root, 'src', file));
+    for (const file of ['build-manifest.ts', 'engine-fs.ts', 'engine-owned-carriers.ts', 'rollback-content-store.ts', 'daemon-identity.ts', 'process-liveness.ts']) copyFileSync(join(repository, 'src', file), join(root, 'src', file));
     copyFileSync(join(repository, 'scripts/build.ts'), join(root, 'scripts/build.ts'));
     copyFileSync(join(repository, 'tsconfig.json'), join(root, 'tsconfig.json'));
     writeFileSync(join(root, 'package.json'), '{"type":"module"}');

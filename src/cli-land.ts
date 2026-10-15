@@ -1,3 +1,4 @@
+import { hashRollbackFileSync } from './rollback-content-store.js';
 import { errorMessage, within, optionValue } from './source_services/cli-inputs.js';
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
@@ -53,7 +54,7 @@ export type LandGitRunner = (
 
 export interface LandFileSystem {
   exists(path: string): boolean;
-  readBytes?(path: string): Uint8Array;
+  hashFile?(path: string): { sha256: string; byteLength: number };
   readText(path: string): string;
   readLink(path: string): string;
   realpath(path: string): string;
@@ -207,7 +208,7 @@ export interface LandReport {
 
 const nodeLandFileSystem: LandFileSystem = {
   exists: existsSync,
-  readBytes: (path) => readFileSync(path),
+  hashFile: hashRollbackFileSync,
   readText: (path) => readFileSync(path, 'utf-8'),
   readLink: (path) => readlinkSync(path),
   realpath: (path) => realpathSync.native(path),
@@ -642,15 +643,15 @@ function copiedBuildInputMatches(
   buildRootIndex: number,
   fs: LandFileSystem,
 ): boolean {
-  if (!fs.readBytes) return false;
+  if (!fs.hashFile) return false;
   const parts = pathParts(path);
   const prefix = parts.slice(0, buildRootIndex);
   const output = parts.slice(buildRootIndex + 1);
   const packageRoot = join(projectDir, ...prefix);
   const outputPath = join(projectDir, ...parts);
-  let outputBytes: Uint8Array;
+  let outputIdentity: { sha256: string; byteLength: number };
   try {
-    outputBytes = fs.readBytes(outputPath);
+    outputIdentity = fs.hashFile(outputPath);
   } catch {
     return false;
   }
@@ -658,7 +659,8 @@ function copiedBuildInputMatches(
     .some((candidate) => {
       if (!fs.exists(candidate)) return false;
       try {
-        return Buffer.from(fs.readBytes?.(candidate) ?? []).equals(Buffer.from(outputBytes));
+        const identity = fs.hashFile!(candidate);
+        return identity.byteLength === outputIdentity.byteLength && identity.sha256 === outputIdentity.sha256;
       } catch {
         return false;
       }

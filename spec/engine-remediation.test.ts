@@ -1,3 +1,4 @@
+import { hashRollbackFileSync } from '../src/rollback-content-store.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
 import {
@@ -291,11 +292,11 @@ describe('engine behaviour contracts', () => {
     const archivedPath = join(created.runDirPath, 'declared_outputs', outputPath);
     const manifest = JSON.parse(readFileSync(join(created.runDirPath, 'declared_outputs_manifest.json'), 'utf-8')) as { outputs: unknown[] };
     const safe = isPathSafelyArchived(projectDir, created.runDirPath, outputPath, {
-      exists: existsSync, readBytes: (path) => readFileSync(path),
+      hashFile: hashRollbackFileSync,
     });
     write(join(projectDir, outputPath), 'changed after archive\n');
     const changedSafe = isPathSafelyArchived(projectDir, created.runDirPath, outputPath, {
-      exists: existsSync, readBytes: (path) => readFileSync(path),
+      hashFile: hashRollbackFileSync,
     });
     expect(result.decision).toBe('matched');
     expect(readFileSync(archivedPath, 'utf-8')).toBe('archived report\n');

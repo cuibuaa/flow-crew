@@ -1,3 +1,5 @@
+import { RollbackContentStore } from '../src/rollback-content-store.js';
+import { renameSync as publishRename } from '../src/engine-fs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,6 +66,35 @@ describe('structural engine state protection', () => {
     let called = false;
     await expect(withEngineIntegrity(args, async () => { called = true; })).rejects.toThrow('ENGINE_STATE_REFUSED');
     expect(called).toBe(false);
+  });
+
+  it('restores a parent-published carrier moved from the project', async () => {
+    const source = join(project, 'result.json'), carrier = join(run, 'goal_met.json');
+    write(source, 'trusted result');
+    await voided(async () => {
+      publishRename(source, carrier);
+      writeFileSync(carrier, 'child edit');
+    });
+    expect(readFileSync(carrier, 'utf8')).toBe('trusted result');
+  });
+
+  it('never restores corrupted disk backing as trusted engine state', async () => {
+    const carrier = join(run, 'stage_watchdog.json');
+    write(carrier, 'trusted state');
+    const capture = RollbackContentStore.prototype.capture;
+    let backing: string | undefined;
+    vi.spyOn(RollbackContentStore.prototype, 'capture').mockImplementation(function (source, logical) {
+      const captured = capture.call(this, source, logical);
+      if (source === carrier) backing = captured.backingPath;
+      return captured;
+    });
+    await voided(async () => {
+      expect(backing).toBeDefined();
+      writeFileSync(backing!, 'forged restoration');
+      writeFileSync(carrier, 'child edit');
+    });
+    expect(readFileSync(carrier, 'utf8')).not.toBe('forged restoration');
+    expect(existsSync(backing!)).toBe(false);
   });
 
   it.each(['run.json', 'events.jsonl', 'run-history.jsonl', 'run-history.v1.jsonl', 'workflow.yaml', 'validation_baseline.json',

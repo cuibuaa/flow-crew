@@ -12,7 +12,7 @@ import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isRunningStage
 import { IterationDisposition } from './iteration-outcome.js';
 import { executeIteration } from './iteration.js';
 import { appendIterationLog, concludeRepeatedBlockage, tryAdvanceResearch, writeCampaignEntry } from './services.js';
-import { createHash } from 'node:crypto';
+import { hashRollbackFileSync } from '../../rollback-content-store.js';
 import { unlinkSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -105,7 +105,7 @@ export async function advanceSettledResearch(
             detail: finalized.stages[finalizer.id]?.error ?? 'terminal finalizer failed',
             evidenceDigest: (() => {
               const path = join(runDirPath, 'stages', finalizer.id, 'output.md');
-              try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return undefined; }
+              try { return hashRollbackFileSync(path).sha256; } catch { return undefined; }
             })(),
             threshold: state.campaignTriggers?.repeatedFailureAfter,
           });

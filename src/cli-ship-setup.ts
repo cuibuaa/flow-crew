@@ -1,5 +1,6 @@
 import { errorMessage, optionValue, within } from './source_services/cli-inputs.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { hashRollbackFileSync } from './rollback-content-store.js';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { copyFileSync, mkdirSync, rmSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from './engine-fs.js';
@@ -93,6 +94,7 @@ export const nodeShipSetupFileSystem: ShipSetupFileSystem = {
   readable: nodeReadable,
   readText: (path) => readFileSync(path, 'utf-8'),
   readBytes: (path) => readFileSync(path),
+  hashFile: hashRollbackFileSync,
   readDirectory: (path) => readdirSync(path),
   stat: (path) => statSync(path),
   lstat: (path) => lstatSync(path),

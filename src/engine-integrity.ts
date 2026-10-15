@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
+import { hashRollbackFileSync, rollbackStatIdentity, rollbackStatIdentitiesEqual, type RollbackStatIdentity, RollbackContentStore } from './rollback-content-store.js';
 import { isSessionHomeName } from './adapter-session.js';
 import { observeEnginePublications, publishEngineFiles } from './engine-fs.js';
 export { publishEngineFiles } from './engine-fs.js';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fcGlobalDir } from './store.js';
@@ -10,9 +10,9 @@ import { engineOwnedDatabasePaths, isEngineOwnedRunPath, prospectivePhysicalPath
 import { producesEngineOwnedArtifact, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
 import { externalOutputDirectory, extractBriefOutputDeclarations, extractDeclaredBriefInputPaths } from './ship-inputs.js';
 
-type Entry = { identity: string; bytes?: Buffer; link?: string; mode?: number };
+type Entry = { identity: string; backingPath?: string; sha256?: string; link?: string; mode?: number };
 type Snapshot = Map<string, Entry>;
-interface Guard { scan: () => Snapshot; owns: (path: string) => boolean; expected: Snapshot; error?: string }
+interface Guard { scan: () => Snapshot; retain: (path: string, destination?: string) => Entry | undefined; owns: (path: string) => boolean; expected: Snapshot; error?: string }
 const guards = new Set<Guard>();
 const activeOutputs = new Set<string>();
 const inside = (root: string, path: string): boolean => {
@@ -23,7 +23,7 @@ const privateNames = new Set(['auth.json', 'credentials.json', 'installation_id'
 const privateName = (name: string): boolean => privateNames.has(name) || isSessionHomeName(name);
 const same = (a?: Entry, b?: Entry): boolean => a?.identity === b?.identity;
 
-function entry(path: string): Entry | undefined {
+function entry(path: string, store?: RollbackContentStore): Entry | undefined {
   try {
     const stat = lstatSync(path), inode = `${stat.dev}:${stat.ino}:${stat.mode}`;
     if (stat.isSymbolicLink()) {
@@ -32,8 +32,9 @@ function entry(path: string): Entry | undefined {
     }
     if (stat.isDirectory()) return { identity: `directory:${inode}`, mode: stat.mode };
     if (!stat.isFile()) throw new Error(`ENGINE_STATE_REFUSED: unsupported engine carrier ${path}`);
-    const bytes = readFileSync(path);
-    return { identity: `file:${inode}:${createHash('sha256').update(bytes).digest('hex')}`, bytes, mode: stat.mode };
+    const content = store ? store.capture(path, path) : hashRollbackFileSync(path);
+    return { identity: `file:${inode}:${content.sha256}`,
+      ...('backingPath' in content && typeof content.backingPath === 'string' ? { backingPath: content.backingPath } : {}), sha256: content.sha256, mode: stat.mode };
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
 }
 
@@ -78,7 +79,7 @@ observeEnginePublications((paths, tree, transfer) => {
       const snapshot: Snapshot = new Map();
       const capture = (source: string, destination: string): void => {
         if (!guard.owns(destination) && !guard.expected.has(destination)) return;
-        const value = entry(source);
+        const value = guard.retain(source, destination);
         if (!value) return;
         snapshot.set(destination, value);
         if (value.identity.startsWith('directory:')) {
@@ -101,13 +102,14 @@ observeEnginePublications((paths, tree, transfer) => {
       if (!relevant(guard)) continue;
       const snapshot = postimages.get(guard);
       const published = (path: string, actual?: Entry): Entry | undefined => {
-        if (!moved || !snapshot) return actual;
-        if (inside(moved[0], path) || inside(moved[1], path)) {
+        if (moved && snapshot && (inside(moved[0], path) || inside(moved[1], path))) {
           const value = snapshot.get(path);
           notice(guard, same(value, actual) ? [] : [path]);
           return value;
         }
-        return actual;
+        const retained = actual ? guard.retain(path) : undefined;
+        notice(guard, same(actual, retained) ? [] : [path]);
+        return same(actual, retained) ? retained : guard.expected.get(path);
       };
       if (descendants) {
         const current = guard.scan();
@@ -199,120 +201,156 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     }
     return inside(distribution, path);
   };
-  const scan = (): Snapshot => {
-    const result: Snapshot = new Map(), visited = new Set<string>(), ancestors = new Set<string>();
-    const separate = (path: string): void => {
-      if ([project, ...activeOutputs].some(root => inside(root, path))) throw new Error(`ENGINE_STATE_REFUSED: engine carrier consults authored work ${path}`);
+  const preimages = new RollbackContentStore();
+  try {
+    const retainedFiles = new Map<string, { statIdentity: RollbackStatIdentity; value: Entry }>();
+    const retain = (path: string, destination = path): Entry | undefined => {
+      if (!run || !inside(run, destination)) return entry(path);
+      const before = rollbackStatIdentity(path);
+      const cached = retainedFiles.get(path);
+      // This cache only reuses restoration backing. Actual comparisons always
+      // stream content through scan/entry, regardless of metadata equality.
+      if (cached && rollbackStatIdentitiesEqual(before, cached.statIdentity)) return cached.value;
+      const value = entry(path, preimages);
+      if (value?.backingPath && before && rollbackStatIdentitiesEqual(before, rollbackStatIdentity(path))) {
+        retainedFiles.set(path, { statIdentity: before, value });
+      } else retainedFiles.delete(path);
+      return value;
     };
-    const walk = (path: string, owned = true): void => {
-      if (owned) separate(path);
-      if (path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path) || [...activeOutputs].some(root => inside(root, path))) return;
-      if (!owned && !lstatSync(path).isDirectory()) return;
-      const value = entry(path);
-      if (!value) return;
-      if (owned) result.set(path, run && inside(run, path) ? value : { identity: value.identity, link: value.link });
-      if (value.link !== undefined) {
-        const target = prospectivePhysicalPath(path, {
-          lstat(component) {
-            if (component.split('/').some(privateName)) throw new Error('ENGINE_STATE_REFUSED: private adapter state cannot carry engine records');
-            const stat = lstatSync(component);
-            if (stat.isSymbolicLink()) { separate(component); result.set(component, entry(component)!); }
-            return stat;
-          }, readlink: readlinkSync,
-        });
-        if (ancestors.has(target)) throw new Error(`ENGINE_STATE_REFUSED: cyclic protected directory link ${path}`);
-        if (target === path || !existsSync(target)) throw new Error(`ENGINE_STATE_REFUSED: unresolved protected link ${path}`);
-        if (!visited.has(path)) {
-          visited.add(path);
-          walk(target, owned);
+    const scan = (): Snapshot => {
+      const result: Snapshot = new Map(), visited = new Set<string>(), ancestors = new Set<string>();
+      const separate = (path: string): void => {
+        if ([project, ...activeOutputs].some(root => inside(root, path))) throw new Error(`ENGINE_STATE_REFUSED: engine carrier consults authored work ${path}`);
+      };
+      const walk = (path: string, owned = true): void => {
+        if (owned) separate(path);
+        if (path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path) || [...activeOutputs].some(root => inside(root, path))) return;
+        if (!owned && !lstatSync(path).isDirectory()) return;
+        const value = entry(path);
+        if (!value) return;
+        if (owned) result.set(path, run && inside(run, path) ? value : { identity: value.identity, link: value.link });
+        if (value.link !== undefined) {
+          const target = prospectivePhysicalPath(path, {
+            lstat(component) {
+              if (component.split('/').some(privateName)) throw new Error('ENGINE_STATE_REFUSED: private adapter state cannot carry engine records');
+              const stat = lstatSync(component);
+              if (stat.isSymbolicLink()) { separate(component); result.set(component, entry(component)!); }
+              return stat;
+            }, readlink: readlinkSync,
+          });
+          if (ancestors.has(target)) throw new Error(`ENGINE_STATE_REFUSED: cyclic protected directory link ${path}`);
+          if (target === path || !existsSync(target)) throw new Error(`ENGINE_STATE_REFUSED: unresolved protected link ${path}`);
+          if (!visited.has(path)) {
+            visited.add(path);
+            walk(target, owned);
+          }
+        } else if (value.identity.startsWith('directory:') && !visited.has(path)) {
+          visited.add(path); ancestors.add(path);
+          for (const name of readdirSync(path)) {
+            const child = join(path, name);
+            walk(child, run && inside(run, child) ? owns(child) : owned);
+          }
+          ancestors.delete(path);
         }
-      } else if (value.identity.startsWith('directory:') && !visited.has(path)) {
-        visited.add(path); ancestors.add(path);
-        for (const name of readdirSync(path)) {
-          const child = join(path, name);
-          walk(child, run && inside(run, child) ? owns(child) : owned);
+      };
+      if (run) walk(run);
+      // Shared store databases serve concurrent runs and CLI readers. Their
+      // bytes are not this attempt's facts; admission still reserves their paths.
+      walk(distribution);
+      for (const root of [run, distribution].filter((root): root is string => Boolean(root))) {
+        for (let parent = dirname(root); ; parent = dirname(parent)) {
+          const value = entry(parent);
+          if (value) result.set(parent, { identity: value.identity });
+          if (dirname(parent) === parent) break;
         }
-        ancestors.delete(path);
       }
+      return result;
     };
-    if (run) walk(run);
-    // Shared store databases serve concurrent runs and CLI readers. Their
-    // bytes are not this attempt's facts; admission still reserves their paths.
-    walk(distribution);
-    for (const root of [run, distribution].filter((root): root is string => Boolean(root))) {
-      for (let parent = dirname(root); ; parent = dirname(parent)) {
-        const value = entry(parent);
-        if (value) result.set(parent, { identity: value.identity });
-        if (dirname(parent) === parent) break;
-      }
-    }
-    return result;
-  };
-  let expected: Snapshot;
-  try { expected = scan(); } catch (error) {
-    for (const path of exclusions) activeOutputs.delete(path);
-    throw new Error(`ENGINE_STATE_REFUSED: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-  }
-  const guard: Guard = { scan, owns, expected };
-  guards.add(guard);
-  let result: T | undefined, failure: unknown;
-  try { result = await action(); } catch (error) { failure = error; } finally {
-    try { notice(guard, changed(guard, scan())); } catch (error) { guard.error ??= `ENGINE_STATE_TAMPERED: stage result voided; ${String(error)}`; }
-    guards.delete(guard);
-    for (const path of exclusions) activeOutputs.delete(path);
-    for (const other of guards) {
-      const current = other.scan();
-      for (const [path, value] of current) if (exclusions.some(root => inside(root, path))) other.expected.set(path, value);
-    }
-  }
-  if (guard.error) {
-    // Rebuild parent directories first; restore the projection last so all
-    // acknowledged histories exist before it becomes readable again.
-    const records = [...guard.expected].filter(([path]) => run && inside(run, path));
-    records.sort(([a], [b]) => a.split('/').length - b.split('/').length);
-    for (const [path, value] of records) {
-      if (!value.identity.startsWith('directory:') || prospectivePhysicalPath(dirname(path)) !== dirname(path)) continue;
-      try {
-        const current = entry(path);
-        if (current && !current.identity.startsWith('directory:')) rmSync(path, { force: true });
-        mkdirSync(path, { recursive: true, mode: value.mode });
-        if (value.mode !== undefined) chmodSync(path, value.mode);
-      } catch { /* namespace damage remains a failure */ }
-    }
+    let expected: Snapshot;
     try {
-      for (const path of [...scan().keys()].sort((a, b) => b.length - a.length)) {
-        if (run && inside(run, path) && !guard.expected.has(path) && prospectivePhysicalPath(dirname(path)) === dirname(path)) rmSync(path, { recursive: true, force: true });
+      expected = scan();
+      for (const [path, value] of expected) {
+        if (!run || !inside(run, path)) continue;
+        const retained = retain(path);
+        if (!same(value, retained)) throw new Error(`engine carrier changed while its preimage was captured: ${path}`);
+        expected.set(path, retained!);
       }
-    } catch { /* unresolved namespace changes still void the result */ }
-    // Restore ordinary run records for honest failure settlement. Never
-    // follow a stage-installed parent link when restoring a carrier.
-    records.sort(([a], [b]) => Number(a === join(run!, 'run.json')) - Number(b === join(run!, 'run.json')));
-    for (const [path, value] of records) {
-      if (!run || !inside(run, path) || prospectivePhysicalPath(dirname(path)) !== dirname(path) || same(value, entry(path))) continue;
-      try {
-        if (value.bytes) {
-          const temporary = `${path}.integrity-restore`;
-          rmSync(temporary, { recursive: true, force: true });
-          writeFileSync(temporary, value.bytes, { mode: value.mode, flag: 'wx' });
-          if (entry(path)?.identity.startsWith('directory:')) rmSync(path, { recursive: true, force: true });
-          renameSync(temporary, path);
-          if (value.mode !== undefined) chmodSync(path, value.mode);
-        } else if (value.link !== undefined) { rmSync(path, { recursive: true, force: true }); symlinkSync(value.link, path); }
-      } catch { /* namespace damage cannot turn a voided result into success */ }
+    } catch (error) {
+      for (const path of exclusions) activeOutputs.delete(path);
+      throw new Error(`ENGINE_STATE_REFUSED: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
-    // Restoration is a parent publication too. Other active attempts retain
-    // their own latched errors, but must not re-accuse the repaired namespace.
-    for (const other of guards) {
-      try {
-        for (const path of new Set([...guard.expected.keys(), ...other.expected.keys()])) {
-          if (!run || !inside(run, path) || !other.owns(path)) continue;
-          const value = entry(path);
-          if (value) other.expected.set(path, value); else other.expected.delete(path);
+    const guard: Guard = { scan, retain, owns, expected };
+    guards.add(guard);
+    let result: T | undefined, failure: unknown;
+    try { result = await action(); } catch (error) { failure = error; } finally {
+      try { notice(guard, changed(guard, scan())); } catch (error) { guard.error ??= `ENGINE_STATE_TAMPERED: stage result voided; ${String(error)}`; }
+      guards.delete(guard);
+      for (const path of exclusions) activeOutputs.delete(path);
+      for (const other of guards) {
+        const current = other.scan();
+        for (const [path, value] of current) {
+          if (!exclusions.some(root => inside(root, path))) continue;
+          const retained = other.retain(path);
+          notice(other, same(value, retained) ? [] : [path]);
+          if (same(value, retained)) other.expected.set(path, retained!);
         }
-      } catch { /* the surviving guard will fail closed */ }
+      }
     }
-    throw new Error(guard.error);
-  }
-  if (failure !== undefined) throw failure;
-  return result as T;
+    if (guard.error) {
+      // Rebuild parent directories first; restore the projection last so all
+      // acknowledged histories exist before it becomes readable again.
+      const records = [...guard.expected].filter(([path]) => run && inside(run, path));
+      records.sort(([a], [b]) => a.split('/').length - b.split('/').length);
+      for (const [path, value] of records) {
+        if (!value.identity.startsWith('directory:') || prospectivePhysicalPath(dirname(path)) !== dirname(path)) continue;
+        try {
+          const current = entry(path);
+          if (current && !current.identity.startsWith('directory:')) rmSync(path, { force: true });
+          mkdirSync(path, { recursive: true, mode: value.mode });
+          if (value.mode !== undefined) chmodSync(path, value.mode);
+        } catch { /* namespace damage remains a failure */ }
+      }
+      try {
+        for (const path of [...scan().keys()].sort((a, b) => b.length - a.length)) {
+          if (run && inside(run, path) && !guard.expected.has(path) && prospectivePhysicalPath(dirname(path)) === dirname(path)) rmSync(path, { recursive: true, force: true });
+        }
+      } catch { /* unresolved namespace changes still void the result */ }
+      // Restore ordinary run records for honest failure settlement. Never
+      // follow a stage-installed parent link when restoring a carrier.
+      records.sort(([a], [b]) => Number(a === join(run!, 'run.json')) - Number(b === join(run!, 'run.json')));
+      for (const [path, value] of records) {
+        if (!run || !inside(run, path) || prospectivePhysicalPath(dirname(path)) !== dirname(path) || same(value, entry(path))) continue;
+        try {
+          if (value.backingPath) {
+            const temporary = `${path}.integrity-restore`;
+            rmSync(temporary, { recursive: true, force: true });
+            copyFileSync(value.backingPath, temporary, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+            // Disk backing is child-writable; never restore bytes that differ
+            // from the parent's retained digest.
+            if (hashRollbackFileSync(temporary).sha256 !== value.sha256) {
+              rmSync(temporary, { force: true });
+              throw new Error('ENGINE_STATE_TAMPERED: restoration preimage changed');
+            }
+            if (entry(path)?.identity.startsWith('directory:')) rmSync(path, { recursive: true, force: true });
+            renameSync(temporary, path);
+            if (value.mode !== undefined) chmodSync(path, value.mode);
+          } else if (value.link !== undefined) { rmSync(path, { recursive: true, force: true }); symlinkSync(value.link, path); }
+        } catch { /* namespace damage cannot turn a voided result into success */ }
+      }
+      // Restoration is a parent publication too. Other active attempts retain
+      // their own latched errors, but must not re-accuse the repaired namespace.
+      for (const other of guards) {
+        try {
+          for (const path of new Set([...guard.expected.keys(), ...other.expected.keys()])) {
+            if (!run || !inside(run, path) || !other.owns(path)) continue;
+            const value = other.retain(path);
+            if (value) other.expected.set(path, value); else other.expected.delete(path);
+          }
+        } catch { /* the surviving guard will fail closed */ }
+      }
+      throw new Error(guard.error);
+    }
+    if (failure !== undefined) throw failure;
+    return result as T;
+  } finally { preimages.cleanup(); }
 }
