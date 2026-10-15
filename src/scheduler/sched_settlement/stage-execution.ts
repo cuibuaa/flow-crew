@@ -25,7 +25,6 @@ import { parse as parseYaml } from 'yaml';
 import { appendUnresolvedStageObligationContext } from './completion.js';
 import { gateArchiveArtifactPath, buildGateFixCorrectionContract, gateArchiveCoordinate } from './gate-archives.js';
 import { isGateReviewed, isResearchOutcomeGate } from './gate-recovery.js';
-import { recordGateValidationDelta, bindReviewedGateValidation } from './gate-validation.js';
 
 export function stageInitialTimeout(): number {
   return loadDefaults().timeout_ms;
@@ -275,9 +274,6 @@ export async function executeSingleStage(
   // Record the outcome event using the authoritative per-stage file.
   try {
     const stageStatus = readStageStatus(projectDir, runId, stage.id);
-    if (stage.is_gate && (stageStatus.status === STAGE_STATUS.COMPLETE || stageStatus.status === STAGE_STATUS.FAILED)) {
-      if (!bindReviewedGateValidation(projectDir, runId, stage.id)) await recordGateValidationDelta(projectDir, runId, stage.id);
-    }
     // Batch reconciliation owns stage_complete/stage_failed emission because a
     // just-accepted scope request or approval may convert this settlement into
     // a suspension before downstream dependencies are released.

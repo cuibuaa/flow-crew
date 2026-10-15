@@ -1,5 +1,5 @@
 import { runStageWave } from '../stage-wave.js';
-import { recordGateValidationDelta } from '../sched_settlement/gate-validation.js';
+import { bindReviewedGateValidation, recordGateValidationDelta } from '../sched_settlement/gate-validation.js';
 // Boundary: Run admitted disjoint batches, coordinate existing approval/revision monitors, settle audits, suspension and thrown attempts; stage execution is a supplied callback.
 import { StageAttemptSettlementError, STAGE_STATUS, type StoreState, type AttemptAttribution, readRunState, readStageStatus, runDir, type StageStatus, completeStageAttempt, isPausedRunStatus, writeRunState } from "../../store.js";
 import { join } from "node:path";
@@ -198,7 +198,9 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
       for (const stage of selected) {
         const finalStatus = readStageStatus(projectDir, runId, stage.id);
         if (finalStatus.status === STAGE_STATUS.COMPLETE || finalStatus.status === STAGE_STATUS.FAILED) {
-          if (stage.is_gate && finalStatus.status === STAGE_STATUS.COMPLETE) await recordGateValidationDelta(projectDir, runId, stage.id);
+          if (stage.is_gate && !bindReviewedGateValidation(projectDir, runId, stage.id, selected.map(peer => peer.id))) {
+            await recordGateValidationDelta(projectDir, runId, stage.id);
+          }
           recordStageOutcome(projectDir, runId, stage.id, iteration, finalStatus);
         }
       }
