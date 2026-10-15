@@ -32,7 +32,6 @@ import {
   type ShipInputFileSystem,
 } from './ship-inputs.js';
 import { loadEngineDefaults } from './config.js';
-import { hashRollbackFileSync } from './rollback-content-store.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
 import { withEngineIntegrity } from './engine-integrity.js';
