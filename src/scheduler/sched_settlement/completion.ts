@@ -119,8 +119,8 @@ export function appendUnresolvedStageObligationContext(prompt: string, state: St
 }
 
 export function recoverTerminalStudyCompletion(projectDir: string, runId: string, state: StoreState): StoreState | null {
-  // This is an authored gate terminal contract, not a plain-complete exit. Like
-  // brief terminal_states, it intentionally outranks unresolved DAG work.
+  // Recover an already authored gate terminal contract from its settled
+  // evidence; terminal-file selection has its own required-settlement barrier.
   const gateIds = orderedGateIdsForState(projectDir, state);
   for (const gateId of gateIds) {
     const evidence = readTerminalStudyCompletionEvidence(projectDir, runId, gateId);

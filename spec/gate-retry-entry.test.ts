@@ -364,10 +364,11 @@ describe('gate retry loop entry', () => {
   it('audits and refuses unauthorized escalation-finalizer work after gate exhaustion', async () => {
     const result = await runScenario({ gatePasses: [false], escalationTerminal: true, unauthorizedEscalationWrite: true,
       gateCriteria: { criterion_fail: { status: 'fail', evidence: 'still unsatisfied' } } });
-    expect(result.final.status).not.toBe(RUN_STATUS.ESCALATED);
+    const finalizer = result.final.stages.escalation_finalize;
+    expect(result.final.status, JSON.stringify({ status: finalizer.status, constraintAudit: finalizer.constraintAudit })).not.toBe(RUN_STATUS.ESCALATED);
     expect(result.escalationCalls).toBeGreaterThan(0);
     expect(existsSync(join(projectDir, 'outside.txt'))).toBe(false);
-    const attempt = result.final.stages.escalation_finalize.attempts?.at(-1);
+    const attempt = finalizer.attempts?.at(-1);
     expect(attempt?.status).toBe('failed');
     expect(attempt?.constraintAudit).toBeDefined();
     expect(readFileSync(join(result.runDirPath, attempt!.constraintAudit!.path), 'utf8')).toContain('outside.txt');

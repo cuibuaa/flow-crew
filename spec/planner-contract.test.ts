@@ -66,7 +66,7 @@ describe('planner dispatch contract', () => {
       const repair = parseDispatchedStageConfig({ id: 'repair', role: 'coder', scope: ['src/**'], depends_on: ['audit'], retry_to: ['audit'] });
       const planner = parseDispatchedStageConfig({ id: 'plan', role: 'planner', dynamic_dispatch: true });
       const admit = (dispatched: typeof audit[]) => inspectDispatchAdmission({ dispatched, baseStages: [], dispatchStageId: 'plan', criteria });
-      expect(admit([{ ...audit, scope: ['src/**'] }]).errors.join(';')).toContain('not assigned to a capable work/finalizer stage');
+      expect(admit([{ ...audit, scope: ['src/**'] }]).errors.join(';')).toContain('product-writing gate requires an independent work stage');
       expect(admit([audit, { ...repair, scope: [] }]).pass).toBe(true);
       expect(admit([audit, repair]).pass).toBe(true);
       expect(admit([{ ...audit, scope: ['docs/report.md'] }, repair]).pass).toBe(false);
@@ -81,7 +81,7 @@ describe('planner dispatch contract', () => {
       });
       const denied = revise(audit, ['src/**']);
       expect(denied.accepted).toBe(false);
-      expect(denied.rejectionReason).toContain('not assigned to a capable work/finalizer stage');
+      expect(denied.rejectionReason).toContain('product-writing gate requires an independent work stage');
       expect(revise(repair, ['src/other.js']).accepted).toBe(true);
       const work = parseDispatchedStageConfig({ id: 'work', role: 'coder', scope: ['src/**'] });
       const downstream = { ...audit, depends_on: ['work'] };

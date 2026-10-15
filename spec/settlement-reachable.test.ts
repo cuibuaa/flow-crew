@@ -265,7 +265,7 @@ describe('criterion discharge boundary', () => {
     };
     const before = inspectDispatchAdmission(input);
     expect(before.pass).toBe(false);
-    expect(before.errors.join('\n')).toContain('not assigned to a capable work/finalizer stage');
+    expect(before.errors.join('\n')).toContain('not assigned to a work stage or gate');
 
     const after = inspectDispatchAdmission({ ...input, criterionDischarges: [discharge] });
     expect(after.pass, after.errors.join('\n')).toBe(true);

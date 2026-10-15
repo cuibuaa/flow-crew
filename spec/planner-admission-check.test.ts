@@ -106,15 +106,13 @@ describe('planner checks real admission before its first result', () => {
     expect(renderPlanInterface()).toContain('dispatch.yaml');
   });
 
-  it('diagnoses terminal and six-criterion topology refusals in one read-only pass', async () => {
+  it('reports the missing repair route while admitting report then review topology', async () => {
     const ctx = setup();
     const before = Object.fromEntries(readdirSync(ctx.directory, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => [entry.name, readFileSync(join(ctx.directory, entry.name), 'utf8')]));
     const { exitCode, report } = await check(ctx);
     expect(exitCode).toBe(1);
-    expect(report.errors).toHaveLength(8);
+    expect(report.errors).toHaveLength(1);
     expect(report.errors).toContain('review: missing repair route; declare an ordinary repair stage with retry_to: [review], depends_on: [review], and scope for the permitted repairs. The engine bounds repair rounds by default_gate_retry_loops without re-planning.');
-    expect(report.errors).toContain('terminal owner implement.depends_on: mandatory stage review is not an ancestor');
-    for (const criterion of extractBriefCriteria(brief).criteria) expect(report.errors).toContain(`criterion ${criterion.id}: assigned gate review must be an ancestor of terminal owner(s) implement`);
     expect(Object.fromEntries(readdirSync(ctx.directory, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => [entry.name, readFileSync(join(ctx.directory, entry.name), 'utf8')]))).toEqual(before);
     expect(report.errors).toEqual(inject(ctx).errors);
     mkdirSync(join(ctx.directory, 'stages/plan'), { recursive: true });
@@ -149,7 +147,7 @@ describe('planner checks real admission before its first result', () => {
     expect(readRunState(ctx.project, ctx.runId).stages).not.toHaveProperty('repair');
   });
 
-  it('reports malformed stages, prose conditions and terminal topology together', async () => {
+  it('reports malformed stages and prose conditions together', async () => {
     const candidate = structuredClone(rejected);
     candidate.stages.push({ id: 'bad_scope', role: 'coder', scope: 12 });
     candidate.stages.push({ id: 'bad_gate', role: 'qa', is_gate: true, retry_to: ['review'], depends_on: ['review'] });

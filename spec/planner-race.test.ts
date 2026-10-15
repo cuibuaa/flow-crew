@@ -208,7 +208,7 @@ describe('planner-selected stage races', () => {
     expect(['failed', 'escalated', 'incomplete']).toContain(state.status);
     expect(calls.every(call => call.id === 'plan')).toBe(true);
     const admission = readFileSync(join(runDir(state.projectDir, state.runId), 'dispatch_admission.json'), 'utf8');
-    expect(admission).toContain('not assigned to a capable work/finalizer stage');
+    expect(admission).toContain('not assigned to a work stage or gate');
   });
   it('preserves the owned final criterion and its nested duties in compiled author prompts', async () => {
     const { state, calls } = await fixture({ race: true, separateReport: true, lastCriterion: true });

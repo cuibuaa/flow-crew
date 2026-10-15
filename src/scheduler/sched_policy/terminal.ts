@@ -1,7 +1,7 @@
 /** Terminal selection, floor/owner/freshness/reality enforcement and quiescent conclusion; receives validation, campaign and escalation services. */
 import { type Adapter } from '../../adapters/base.js';
 import { type ProjectValidationDependencies } from '../../project-validation.js';
-import { type StoreState, type PostTerminateHook, RUN_STATUS, STAGE_STATUS, enforceRealityGateBeforeTerminal, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName } from '../../store.js';
+import { type StoreState, type PostTerminateHook, RUN_STATUS, STAGE_STATUS, enforceRealityGateBeforeTerminal, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName, isSuccessfulRunStatus } from '../../store.js';
 import { createHash } from 'node:crypto';
 import { hashRollbackFileSync, updateFileHashSync } from '../../rollback-content-store.js';
 import { renameSync, copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
@@ -17,6 +17,8 @@ import { runAllChecks } from '../../reality-gate/index.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
 import { lastAttributedStageWriteMs, admittedTerminalOwner, stageAttemptWroteProjectPath } from './terminal-ownership.js';
 import { appendSchedulerGuidanceOnce, observeStableBlockage } from './guidance.js';
+import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
+import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { runPostTerminateHook } from './research.js';
 
 type GateValidationDeltaArtifact = NonNullable<Awaited<ReturnType<typeof import('../../scheduler.js').recordGateValidationDelta>>>;
@@ -301,6 +303,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
       }
     }
     for (const [terminalStatus, entry] of Object.entries(state.terminalStates)) {
+      const accepting = isSuccessfulRunStatus(terminalStatus) || terminalStatus === RUN_STATUS.PHASE_COMPLETE;
       for (const path of entry.paths) {
         
         const projPath = join(ctx.projectDir, path);
@@ -342,9 +345,13 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           continue;
         }
         const sourcePath = source.path;
-        if (admittedOwner && !stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path)) {
+        const ownerWrote = admittedOwner && (
+          stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path)
+          || (!accepting && stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path, STAGE_STATUS.FAILED))
+        );
+        if (admittedOwner && !ownerWrote) {
           const marker = `[scheduler-hint:${terminalStatus}:${path}:owner]`;
-          const reason = `${path} is owned by terminal stage '${admittedOwner}', but that stage has no completed-attempt write attribution for the path`;
+          const reason = `${path} is owned by terminal stage '${admittedOwner}', but that stage has no eligible settled-attempt write attribution for the path`;
           appendSchedulerGuidanceOnce(
             ctx.runDirPath,
             admittedOwner,
@@ -431,6 +438,30 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           continue;
         }
         
+        // A terminal artifact selects the outcome; required settlement owns
+        // permission to finish, regardless of where the producer sits in the DAG.
+        const stages = state.planControl?.stages ?? (state.dispatchedStages as StageConfig[] | undefined) ?? [];
+        const obligations = reconcileUnresolvedStageObligations(
+          state, stages, state.currentIteration ?? ctx.iteration, ctx.runDirPath,
+        );
+        if (obligations.changed) writeRunState(ctx.projectDir, ctx.runId, state);
+        const unresolved = obligations.stageIds.filter((id) => accepting || state.stages[id]?.status !== STAGE_STATUS.FAILED);
+        const gates = collectGateRuntimeFacts(stages, state, ctx.projectDir, ctx.runId);
+        const unsettledGates = gates.evaluations.filter((gate) => (
+          gate.status !== STAGE_STATUS.COMPLETE && gate.status !== STAGE_STATUS.FAILED
+        ));
+        const failedWork = accepting ? Object.entries(state.stages)
+          .filter(([, stage]) => stage.status === STAGE_STATUS.FAILED).map(([id]) => id) : [];
+        // Settled research policy can conclude rejected rounds honestly. An
+        // ordinary report, including a blocker report, must pass its own review.
+        const rejectedGates = accepting || !researchSelection ? gates.failedGateIds : [];
+        if (unresolved.length > 0 || unsettledGates.length > 0 || failedWork.length > 0 || rejectedGates.length > 0) {
+          deferredReasons.push(`${terminalStatus}: required settlement is pending or rejected (${[...new Set([
+            ...unresolved, ...unsettledGates.map((gate) => gate.id), ...failedWork, ...rejectedGates,
+          ])].join(', ')})`);
+          continue;
+        }
+
         if (terminalStatus === RUN_STATUS.SHIPPED && state.research?.confirm) {
           let confirmReport: { pass: boolean; results: Array<{ details: string }> };
           try {

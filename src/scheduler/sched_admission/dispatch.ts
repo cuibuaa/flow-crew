@@ -452,7 +452,18 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
             return !/[?*]/.test(normalized) && dispatchGlobRegex(glob)?.test(normalized) === true;
           });
         });
-        if (nonTerminalScopes.length > 0) {
+        // A producer reviewed downstream retains ordinary product authority.
+        // A finalizer after review may only touch other scopes for validation.
+        const reviewedDownstream = input.dispatched.some((gate) => gate.is_gate
+          && transitivelyDependsOn(gate.id, owner.id, byId)
+          && !all.some((ancestor) => (
+            // An author's executed prerequisites cannot skip its reviewer.
+            // Optional branches introduced afterward or alongside it can.
+            (ancestor.condition?.trim() || ancestor.retry_to?.length)
+            && (ancestor.id === gate.id || transitivelyDependsOn(gate.id, ancestor.id, byId))
+            && ancestor.id !== owner.id && !transitivelyDependsOn(owner.id, ancestor.id, byId)
+          )));
+        if (nonTerminalScopes.length > 0 && !reviewedDownstream) {
           const existing = terminalValidationScopeSets.get(owner.id) ?? new Set<string>();
           for (const scope of nonTerminalScopes) existing.add(scope);
           terminalValidationScopeSets.set(owner.id, existing);
@@ -472,12 +483,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
             if (stageScopeOwnsPath(owner, researchOutput)) {
               errors.push(`terminal owner ${owner.id}.scope: research result producer path ${researchOutput} cannot be owned by a terminal writer; separate measurement from terminalization`);
             }
-          }
-        }
-        for (const required of input.dispatched) {
-          if (required.id === owner.id || required.condition?.trim() || (!required.is_gate && required.retry_to?.length)) continue;
-          if (!transitivelyDependsOn(owner.id, required.id, byId)) {
-            errors.push(`terminal owner ${owner.id}.depends_on: mandatory stage ${required.id} is not an ancestor`);
           }
         }
     }
@@ -508,9 +513,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       if (!stage.dynamic_dispatch && !stage.retry_to?.length && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
     }
     errors.push(...input.dispatched.flatMap(stage => raceAdmissionErrors(stage, all)));
-    // Existing-work audits cannot author the product they certify. Repairs
-    // remain separate authors whose retry gates independently check the change.
-    const auditOnly = input.dispatched.every(stage => stage.is_gate ? !stage.scope?.length : stage.retry_to?.length);
     for (const stage of input.dispatched) {
       for (const ref of stage.criterion_refs ?? []) {
         if (!criterionIds.has(ref)) errors.push(`${stage.id}.criterion_refs: unknown criterion ${JSON.stringify(ref)}`);
@@ -522,8 +524,13 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       const terminalWorkers = workers.filter((stage) => ownerIds.has(stage.id));
       const ordinaryWorkers = workers.filter((stage) => !ownerIds.has(stage.id));
       const gates = input.dispatched.filter((stage) => stage.is_gate && stage.criterion_refs.includes(criterion.id));
-      if (workers.length === 0 && !discharged.has(criterion.id) && !(auditOnly && gates.length > 0)) {
-        errors.push(`criterion ${criterion.id}: not assigned to a capable work/finalizer stage`);
+      if (workers.length === 0 && gates.length === 0 && !discharged.has(criterion.id)) {
+        errors.push(`criterion ${criterion.id}: not assigned to a work stage or gate`);
+      }
+      // Review duties need no fictitious author. A gate with project write
+      // authority still cannot stand in for the independent product author.
+      if (workers.length === 0 && gates.some((gate) => gate.scope?.length)) {
+        errors.push(`criterion ${criterion.id}: product-writing gate requires an independent work stage`);
       }
       for (const owner of terminalWorkers) {
         const refs = criterionTerminalRefs.get(owner.id) ?? [];
@@ -541,13 +548,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
         errors.push(`criterion ${criterion.id}: not assigned to a gate${hint}`);
       } else if (ordinaryWorkers.length > 0 && !gates.some((gate) => ordinaryWorkers.some((worker) => transitivelyDependsOn(gate.id, worker.id, byId)))) {
         errors.push(`criterion ${criterion.id}: no assigned gate is downstream of an assigned work stage`);
-      } else if (ordinaryWorkers.length === 0 && terminalWorkers.length > 0 && gates.length > 0) {
-        for (const gate of gates) {
-          const unreachableOwners = terminalWorkers.filter((owner) => !transitivelyDependsOn(owner.id, gate.id, byId));
-          if (unreachableOwners.length > 0) {
-            errors.push(`criterion ${criterion.id}: assigned gate ${gate.id} must be an ancestor of terminal owner(s) ${unreachableOwners.map((owner) => owner.id).join(', ')}`);
-          }
-        }
       }
     }
 
@@ -558,7 +558,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       errors,
       warnings,
       terminalOwners,
-      ...(revision ? { capabilityConflicts } : {}),
       terminalValidationScopes: Object.fromEntries(
         [...terminalValidationScopeSets].map(([ownerId, scopes]) => [ownerId, [...scopes]]),
       ),
@@ -570,6 +569,7 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       criterionTerminalRefs: Object.fromEntries(criterionTerminalRefs),
       dischargedCriteria: [...discharged.values()],
       frameworkReservedScopes: Object.fromEntries(frameworkReservedScopes),
+      ...(revision ? { capabilityConflicts } : {}),
       configuredCommandScopes,
       configuredCommandStageRoles: Object.fromEntries(configuredCommandStageRoles),
       ...(input.criteria ? { criteriaDigest: input.criteria.briefDigest } : {}),

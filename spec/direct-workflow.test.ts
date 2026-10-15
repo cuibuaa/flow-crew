@@ -155,7 +155,6 @@ describe('direct workflow', () => {
     const refusals: Array<[string, string]> = [
       ['workflow: direct\nresearch:\n  baseline: 0.5', 'direct cannot run the research loop'],
       ['workflow: direct\nprogram:\n  name: study\n  phase: first', 'direct cannot run the program loop'],
-      ['terminal_states:\n  complete:\n    paths: [docs/report.md]', 'terminal owner implement.depends_on: mandatory stage review is not an ancestor'],
     ];
     for (const [frontmatter, reason] of refusals) {
       const calls: string[] = [];
