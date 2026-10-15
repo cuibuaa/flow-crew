@@ -13,6 +13,7 @@ import { runWorkflow, type StageConfig, type WorkflowConfig } from '../src/sched
 import { readRunEvents } from '../src/run-events.js';
 import { createRun, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState } from '../src/store.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
+import { readLiveConstraintIncidents } from '../src/live-constraint-guard.js';
 
 const put = (path: string, content: string): void => {
   mkdirSync(dirname(path), { recursive: true });
@@ -101,7 +102,7 @@ async function scopeBoundaryCase(deliverToolBoundary: boolean): Promise<{
 
 async function ignoredFileCase(writeKind: 'none' | 'known-tree' | 'ignored-tree' | 'peer-writes'): Promise<{
   runStatus: string; incidents: string[]; readerIncidents: string[];
-  originalBytes: string; escapedExists: boolean;
+  originalBytes: string; escapedExists: boolean; rollbackFailures: string[];
 }> {
   const root = mkdtempSync(join(tmpdir(), 'fc-boundary-d-'));
   const project = join(root, 'project');
@@ -158,6 +159,10 @@ async function ignoredFileCase(writeKind: 'none' | 'known-tree' | 'ignored-tree'
       incidents: violations.flatMap((event) => event.files ?? []),
       readerIncidents: violations.filter((event) => event.stageId === 'reader')
         .flatMap((event) => event.files ?? []),
+      rollbackFailures: selectedStages.flatMap(stage => final.stages[stage.id].attempts?.flatMap(attempt =>
+        readLiveConstraintIncidents(created.runDirPath, stage.id, attempt.index)
+          .filter(incident => incident.changeObserved && !incident.restored && incident.rollbackFailure)
+          .map(incident => incident.path)) ?? []),
       originalBytes: readFileSync(join(project, '.venv', 'pkg', 'preexisting.dat'), 'utf8'),
       escapedExists: existsSync(join(project, 'src', 'escaped.ts')) };
   } finally {
@@ -220,11 +225,12 @@ describe('engine boundary promises', () => {
     expect(result.escapedExists).toBe(false);
   });
 
-  it('still detects and restores a real change to an ignored preexisting file', async () => {
+  it('still refuses a real change to an uncaptured preexisting file without claiming restoration', async () => {
     const result = await ignoredFileCase('ignored-tree');
     expect(result.runStatus).toBe('failed');
     expect(result.incidents).toContain('.venv/pkg/preexisting.dat');
-    expect(result.originalBytes).toBe('preexisting\n');
+    expect(result.rollbackFailures).toContain('.venv/pkg/preexisting.dat');
+    expect(result.originalBytes).toBe('changed\n');
   });
 
   it('can deliver an incident to a no-write reader when a concurrent peer writes outside both scopes', async () => {

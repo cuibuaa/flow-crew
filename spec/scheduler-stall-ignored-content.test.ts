@@ -20,8 +20,8 @@ import {
 } from '../src/scheduler.js';
 import { createRun } from '../src/store.js';
 
-function stage(): StageConfig {
-  return { id: 'writer', role: 'coder', depends_on: [], scope: [] };
+function stage(...scope: string[]): StageConfig {
+  return { id: 'writer', role: 'coder', depends_on: [], scope };
 }
 
 describe('ignored-content rollback reconciliation', () => {
@@ -31,18 +31,19 @@ describe('ignored-content rollback reconciliation', () => {
     const target = join(projectDir, 'model.bin');
     writeFileSync(target, Buffer.alloc(1024 * 1024, 0x41));
     const created = createRun(projectDir, 'preimages', 'name: preimages', ['writer']);
-    const first = captureRepairRoundSnapshot(projectDir, [{ ...stage(), scope: ['model.bin'] }], { runDirPath: created.runDirPath });
+    const first = captureRepairRoundSnapshot(projectDir, [stage('model.bin')], { runDirPath: created.runDirPath });
     try {
       const original = first.files.get('model.bin')!;
       chmodSync(target, 0o600);
-      const second = captureRepairRoundSnapshot(projectDir, [{ ...stage(), scope: ['model.bin'] }], { runDirPath: created.runDirPath });
+      const second = captureRepairRoundSnapshot(projectDir, [stage('model.bin')], { runDirPath: created.runDirPath });
       const metadata = second.files.get('model.bin')!;
       expect(metadata.backingPath).toBe(original.backingPath);
       expect(metadata.mode).toBe(0o600);
       expect(metadata.statIdentity).not.toEqual(original.statIdentity);
-      expect(second.allFileImages.get('model.bin')).toBe(original);
+      expect(second.allFileImages.get('model.bin')).toBe(metadata);
+      expect(first.files.get('model.bin')).toBe(original);
       writeFileSync(target, Buffer.alloc(1024 * 1024, 0x42));
-      const third = captureRepairRoundSnapshot(projectDir, [{ ...stage(), scope: ['model.bin'] }], { runDirPath: created.runDirPath });
+      const third = captureRepairRoundSnapshot(projectDir, [stage('model.bin')], { runDirPath: created.runDirPath });
       expect(third.files.get('model.bin')!.backingPath).not.toBe(original.backingPath);
       expect(restoreProjectPath(projectDir, 'model.bin', original)).toEqual({ restored: true });
       expect(readFileSync(target)[0]).toBe(0x41);
@@ -56,9 +57,9 @@ describe('ignored-content rollback reconciliation', () => {
     const original = Buffer.alloc(4 * 1024 * 1024, 0x41);
     writeFileSync(target, original);
     const created = createRun(projectDir, 'ignored-content', 'name: ignored-content', ['writer']);
-    const snapshot = captureRepairRoundSnapshot(projectDir, [stage()], { runDirPath: created.runDirPath });
+    const snapshot = captureRepairRoundSnapshot(projectDir, [stage('model.bin')], { runDirPath: created.runDirPath });
     try {
-      const before = snapshot.allFileImages.get('model.bin')!;
+      const before = snapshot.files.get('model.bin')!;
       expect(before.byteLength).toBe(original.byteLength);
       expect(before.bytes).toBeUndefined();
       expect(before.text).toBeUndefined();
@@ -84,9 +85,9 @@ describe('ignored-content rollback reconciliation', () => {
     const target = join(projectDir, 'weights.bin');
     writeFileSync(target, Buffer.alloc(2 * 1024 * 1024, 0x23));
     const created = createRun(projectDir, 'metadata-control', 'name: metadata-control', ['writer']);
-    const snapshot = captureRepairRoundSnapshot(projectDir, [stage()], { runDirPath: created.runDirPath });
+    const snapshot = captureRepairRoundSnapshot(projectDir, [stage('weights.bin')], { runDirPath: created.runDirPath });
     try {
-      const before = snapshot.allFileImages.get('weights.bin')!;
+      const before = snapshot.files.get('weights.bin')!;
       snapshot.rollbackBaseline.reliable = false;
       chmodSync(target, 0o744);
       const future = new Date(Date.now() + 60_000);
@@ -115,10 +116,10 @@ describe('ignored-content rollback reconciliation', () => {
     const link = join(projectDir, 'link.txt');
     symlinkSync('first.txt', link);
     const created = createRun(projectDir, 'symlink-control', 'name: symlink-control', ['writer']);
-    const snapshot = captureRepairRoundSnapshot(projectDir, [stage()], { runDirPath: created.runDirPath });
+    const snapshot = captureRepairRoundSnapshot(projectDir, [stage('link.txt')], { runDirPath: created.runDirPath });
     try {
       snapshot.rollbackBaseline.reliable = false;
-      expect(snapshot.allFileImages.get('link.txt')).toMatchObject({
+      expect(snapshot.files.get('link.txt')).toMatchObject({
         exists: true,
         type: 'symlink',
         symlink: true,

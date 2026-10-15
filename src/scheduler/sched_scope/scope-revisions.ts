@@ -10,7 +10,7 @@ import { normalizedProjectPath, scopeMatchesProjectPath } from "../sched_admissi
 import { resolveResearchPaths } from "../../research-paths.js";
 import { stableGeneratedScope } from "../../generated-path-policy.js";
 import { declaredInputScopeConflict, listProjectFilesAt, resolveDeclaredInputWriteBindings, scopeRequestAlreadyAuthorized } from './path-capabilities.js';
-import { type RepairRoundSnapshot, changedProjectPathsSinceSnapshot } from './snapshots.js';
+import { type RepairRoundSnapshot, captureRepairRoundSnapshot, changedProjectPathsSinceSnapshot } from './snapshots.js';
 import { baselineImage, readRollbackCurrentImage } from './rollback-baseline.js';
 import { compareRepairFileContents } from './file-images.js';
 import { createDispatchAdmission, readBriefCriteriaForAdmission, validatedCriterionDischarges } from '../sched_admission/dispatch.js';
@@ -253,8 +253,10 @@ export function decideScopeRevision(input: {
   }
   // Capture only the admitted subset before publication. Withheld capabilities
   // never become inherited scope or retrospective write authorization.
-  if (snapshot) for (const path of authorizedPaths) {
-    snapshot.files.set(path, readRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path));
+  if (snapshot) {
+    const admitted = captureRepairRoundSnapshot(projectDir, [{ ...stage, scope: authorizedPaths }],
+      { runDirPath: snapshot.rollbackBaseline.runDirPath });
+    for (const [path, image] of admitted.files) snapshot.files.set(path, image);
   }
   return {
     requestedPaths,

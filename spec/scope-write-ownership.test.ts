@@ -105,13 +105,22 @@ describe('observed existence owns dependency comparison', () => {
     for (const path of originals.keys()) write(path, 'real edit\n');
     write(newData, 'new data member\n');
     const protectedPaths = [...originals.keys(), newData];
+    const restorablePaths = [source, trackedCache, newData];
+    const unrestorablePaths = [ignoredData, omittedData];
     const writes = [cache, ...protectedPaths];
     if (boundary === 'live') {
       const { result, aborts } = await scan(context, writer, created.runId, writes, attributed);
       if (attributed) expect(result.exemptedPaths).toContain(cache);
       expect(result.incidents.map(incident => incident.path).sort()).toEqual(protectedPaths.sort());
-      expect(result.incidents.every(incident => incident.restored)).toBe(true);
-      expect(aborts.length).toBeGreaterThan(0);
+      expect(result.incidents.every(incident => incident.changeObserved)).toBe(true);
+      expect(result.incidents.filter(incident => incident.restored).map(incident => incident.path).sort())
+        .toEqual(restorablePaths.sort());
+      expect(result.incidents.filter(incident => !incident.restored).map(incident => incident.path).sort())
+        .toEqual(unrestorablePaths.sort());
+      for (const incident of result.incidents.filter(incident => !incident.restored)) {
+        expect(incident.rollbackFailure).toContain('preimage content is unavailable');
+      }
+      expect(aborts).toContain('live_constraint_rollback_failure');
     } else {
       completeStageAttempt(project, created.runId, writer.id, 0, {
         exitCode: 0, duration_ms: 1, writes: attributed ? writes : [],
@@ -123,11 +132,14 @@ describe('observed existence owns dependency comparison', () => {
       expect(reconciled.violation).toBe(attributed);
       const audit = JSON.parse(readFileSync(join(runPath, reconciled.status.attempts![0].constraintAudit!.path), 'utf8'));
       if (attributed) expect(audit.exemptedWrites).toContain(cache);
-      expect(audit.rolledBackWrites.sort()).toEqual(protectedPaths.sort());
-      expect(audit.rollbackFailures).toEqual([]);
+      expect(audit.violations.map((violation: { path: string }) => violation.path).sort()).toEqual(protectedPaths.sort());
+      expect(audit.rolledBackWrites.sort()).toEqual(restorablePaths.sort());
+      expect(audit.rollbackFailures.sort()).toEqual(unrestorablePaths.sort());
     }
     expect(readFileSync(join(project, cache), 'utf8')).toBe('interpreter output\n');
-    for (const [path, contents] of originals) expect(readFileSync(join(project, path), 'utf8')).toBe(contents);
+    for (const [path, contents] of originals) {
+      expect(readFileSync(join(project, path), 'utf8')).toBe(unrestorablePaths.includes(path) ? 'real edit\n' : contents);
+    }
     expect(() => readFileSync(join(project, newData), 'utf8')).toThrow();
   });
 
@@ -315,7 +327,7 @@ describe('observed existence owns dependency comparison', () => {
     { protection: 'tracked files', alias: false, attributed: false },
     { protection: 'declared inputs', alias: true, attributed: false },
     { protection: 'declared inputs', alias: true, attributed: true },
-  ])('restores dependency content and link-target changes protected by $protection (aliases=$alias, attributed=$attributed)', async ({ alias, attributed }) => {
+  ])('detects dependency content and link-target changes protected by $protection and restores available preimages (aliases=$alias, attributed=$attributed)', async ({ alias, attributed }) => {
     const prefixes = ['', 'ui/'];
     const dependencyDirectory = 'node_modules';
     const paths = prefixes.flatMap(prefix => [
@@ -347,12 +359,16 @@ describe('observed existence owns dependency comparison', () => {
       } else write(path, 'changed dependency content');
     }
     const { result, aborts } = await scan(context, writer, created.runId, paths, attributed);
-    expect(result.incidents).toHaveLength(6);
-    expect(result.incidents.every(incident => incident.changeObserved && incident.restored)).toBe(true);
-    expect(aborts).toContain('live_constraint_violation');
+    expect(result.incidents.map(incident => incident.path).sort()).toEqual([...paths].sort());
+    expect(result.incidents.every(incident => incident.changeObserved)).toBe(true);
+    expect(result.incidents.every(incident => incident.restored === !alias)).toBe(true);
+    if (alias) {
+      expect(result.incidents.every(incident => !!incident.rollbackFailure)).toBe(true);
+    }
+    expect(aborts).toContain(alias ? 'live_constraint_rollback_failure' : 'live_constraint_violation');
     for (const path of paths) {
-      if (path.endsWith('/.bin/tool')) expect(readlinkSync(join(project, path))).toBe('../tool/bin/tool.js');
-      else expect(readFileSync(join(project, path), 'utf8')).toBe(`original ${path}\n`);
+      if (path.endsWith('/.bin/tool')) expect(readlinkSync(join(project, path))).toBe(alias ? '../wrong/bin.js' : '../tool/bin/tool.js');
+      else expect(readFileSync(join(project, path), 'utf8')).toBe(alias ? 'changed dependency content' : `original ${path}\n`);
     }
   });
 
@@ -435,8 +451,12 @@ describe('enforcement owns batch audit outcomes', () => {
       stage: observer, projectDir: project, runId: created.runId, context, attemptIndex: 1,
     });
     expect(reconciled.status.attempts![0].constraintAudit).toMatchObject({
-      unverifiedCount: 1, violationCount: 0, rolledBackWriteCount: 1,
+      unverifiedCount: 1, violationCount: 0, rolledBackWriteCount: 0,
     });
-    expect(readFileSync(join(project, 'src/unowned.ts'), 'utf8')).toBe('unowned preimage\n');
+    const audit = JSON.parse(readFileSync(join(runPath, reconciled.status.attempts![0].constraintAudit!.path), 'utf8'));
+    expect(audit.violations).toContainEqual(expect.objectContaining({ path: 'src/unowned.ts', certainty: 'unverified' }));
+    expect(audit.rollbackFailures).toEqual(['src/unowned.ts']);
+    expect(audit.rollbackFailureReasons['src/unowned.ts']).toContain('preimage content is unavailable');
+    expect(readFileSync(join(project, 'src/unowned.ts'), 'utf8')).toBe('unverified trespass\n');
   });
 });

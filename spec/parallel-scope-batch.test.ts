@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { stringify } from 'yaml';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import {
@@ -43,6 +44,16 @@ function seedProject(project = projectDir): string {
   ].join('\n'));
   const protectedPath = join(project, 'protected.txt');
   writeFileSync(protectedPath, 'operator preimage\n');
+  // Concurrency restoration reuses Git's immutable source preimage without
+  // requiring rollback payloads for either read-only stage.
+  execFileSync(process.execPath, ['--input-type=module', '-e', String.raw`
+    import { execFileSync } from 'node:child_process';
+    const git = args => execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    git(['init', '-q']);
+    git(['add', 'protected.txt']);
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '-qm', 'Record protected source']);
+  `], { cwd: project, env: { ...process.env, HOME: stateDir, FC_HOME: stateDir }, stdio: ['ignore', 'pipe', 'pipe'] });
   return protectedPath;
 }
 

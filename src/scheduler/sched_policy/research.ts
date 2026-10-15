@@ -205,7 +205,8 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         [resultAbs, noCandidateAbs],
       );
     }
-    const sourceAbs = freshNoCandidate ? noCandidateAbs : resultAbs;
+    const sourceRel = freshNoCandidate ? `${resultRel}.no_candidate.json` : resultRel;
+    const sourceAbs = join(ctx.projectDir, sourceRel);
     let round: { label?: string; result?: number; outcome?: string; status?: string; reason?: string; evidence?: unknown };
     try {
       round = JSON.parse(readFileSync(sourceAbs, 'utf-8'));
@@ -308,7 +309,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         evidenceDigest: sourceEvidenceDigest,
         threshold: state.campaignTriggers?.repeatedFailureAfter,
       });
-      try { unlinkSync(sourceAbs); } catch { /* non-critical */ }
+      try { unlinkSync(sourceAbs); settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, sourceRel); } catch { /* non-critical */ }
       appendSchedulerGuidanceOnce(
         ctx.runDirPath,
         RUN_WIDE_GUIDANCE_TARGET,
@@ -465,6 +466,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     try {
       if (confirmNeedsResult) copyFileSync(sourceAbs, consumedPath);
       else renameSync(sourceAbs, consumedPath);
+      settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, sourceRel);
     } catch { /* non-critical */ }
 
     log.info({ runId: ctx.runId, iteration: ctx.iteration, label, result: measuredResult, outcome: noCandidate ? 'no_candidate' : 'measured', runningBest: evalResult.runningBest, decision: evalResult.decision }, 'Research round evaluated');
@@ -508,7 +510,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       }
       // The confirm command has settled. Consume the mutable slot even on a
       // refusal, so the next iteration cannot observe the same round as new.
-      try { unlinkSync(sourceAbs); } catch { /* duplicate journal identity still prevents a replay */ }
+      try { unlinkSync(sourceAbs); settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, sourceRel); } catch { /* duplicate journal identity still prevents a replay */ }
       try { writeFileSync(join(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: rc.confirm.command, requires: rc.confirm.requires }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
       if (!confirmReport.pass) {
         const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
@@ -608,6 +610,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         const lastConsumed = join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
         if (lastRound?.outcome !== 'no_candidate' && !existsSync(resultAbs) && existsSync(lastConsumed)) {
           copyFileSync(lastConsumed, resultAbs);
+          settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, resultRel);
         }
       } catch { /* terminal owner will expose missing decision evidence */ }
       appendSchedulerGuidanceOnce(
@@ -637,7 +640,10 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     
     try {
       const lastConsumed = join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
-      if (!existsSync(resultAbs) && existsSync(lastConsumed)) copyFileSync(lastConsumed, resultAbs);
+      if (!existsSync(resultAbs) && existsSync(lastConsumed)) {
+        copyFileSync(lastConsumed, resultAbs);
+        settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, resultRel);
+      }
     } catch { /* non-critical */ }
 
     const reportBody = `# Research ${terminalDecision === 'ship' ? 'Ship' : 'Ceiling'} Report\n\n`

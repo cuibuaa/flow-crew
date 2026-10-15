@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
@@ -179,11 +180,35 @@ describe('direct workflow', () => {
     expect(readFileSync(join(projectDir, 'evidence', 'source.md'), 'utf8')).toBe('frozen evidence\n');
   });
 
+  it('keeps an unrestored input violation blocking completion across repairs', async () => {
+    writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
+    const final = await runDirect(brief('workflow: direct\ninputs: [notes.md]\noutputs: [docs/report.md]'), [], false, (_prompt, _role, opts) => {
+      if (opts.stageId === 'implement' || opts.stageId === 'repair') {
+        writeFileSync(join(projectDir, 'notes.md'), 'unauthorized\n');
+      }
+    });
+    expect(final.status).not.toBe('complete');
+    expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('unauthorized\n');
+    const audits = Object.values(final.stages).flatMap(stage => stage.attempts ?? [])
+      .flatMap(attempt => attempt.constraintAudit
+        ? [JSON.parse(readFileSync(join(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
+    expect(audits.flatMap(audit => audit.rollbackFailures)).toContain('notes.md');
+    expect(audits.flatMap(audit => audit.rolledBackWrites)).not.toContain('notes.md');
+  });
+
   it.each(['notes.md', 'evidence/source.md', 'evidence/new.md', 'alias/source.md'])('restores an input write to %s despite broad scope', async (path) => {
     mkdirSync(join(projectDir, 'evidence'));
     writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
     writeFileSync(join(projectDir, 'evidence', 'source.md'), 'frozen evidence\n');
     symlinkSync('evidence', join(projectDir, 'alias'));
+    // Existing Git objects provide rollback without copying read-only inputs.
+    execFileSync(process.execPath, ['--input-type=module', '-e', `
+      import { execFileSync } from 'node:child_process';
+      for (const args of [
+        ['init', '-q'], ['add', '.'],
+        ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline'],
+      ]) execFileSync('git', args);
+    `], { cwd: projectDir, env: { ...process.env, HOME: fixtureRoot, FC_HOME: join(fixtureRoot, 'private-store') } });
     const final = await runDirect(brief('workflow: direct\ninputs: [notes.md, evidence]\noutputs: [docs/report.md]'), [], false, (_prompt, _role, opts) => {
       if (opts.stageId === 'implement' || opts.stageId === 'repair') writeFileSync(join(projectDir, path), 'unauthorized\n');
     });
@@ -192,5 +217,10 @@ describe('direct workflow', () => {
     expect(readFileSync(join(projectDir, 'evidence', 'source.md'), 'utf8')).toBe('frozen evidence\n');
     expect(existsSync(join(projectDir, 'evidence', 'new.md'))).toBe(false);
     expect(final.stages.implement.attempts?.length).toBeGreaterThan(0);
+    const audits = final.stages.implement.attempts!.flatMap(attempt => attempt.constraintAudit
+      ? [JSON.parse(readFileSync(join(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
+    const canonicalPath = path.replace(/^alias\//, 'evidence/');
+    expect(audits.flatMap(audit => audit.rolledBackWrites)).toContain(canonicalPath);
+    expect(audits.flatMap(audit => audit.rollbackFailures)).toEqual([]);
   });
 });

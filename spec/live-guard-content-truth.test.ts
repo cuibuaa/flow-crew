@@ -314,6 +314,9 @@ describe('live guard content truth', () => {
         commitProject();
         rmSync(link);
         symlinkSync(preimage, link);
+        // Keep the operator's dirty target in Git's index so its exact raw
+        // bytes are available without copying unadmitted content into rollback.
+        git(['add', 'tracked-link']);
       }
 
       let invocationCount = 0;
@@ -355,6 +358,7 @@ describe('live guard content truth', () => {
 
   it('diagnoses a replacement failure without deleting the changed file', async () => {
     const target = seedProject();
+    commitProject();
     let invocationCount = 0;
     let result: Awaited<ReturnType<typeof run>>;
     try {

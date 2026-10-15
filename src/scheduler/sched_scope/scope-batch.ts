@@ -5,11 +5,11 @@ import { runDir } from '../../store.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { publishConstraintDecision } from '../../runtime-negotiation.js';
-import type { RepairFileImage } from './file-images.js';
+import { type RepairFileImage, repairFileIdentity } from './file-images.js';
+import { baselineImage, readRollbackCurrentImage } from './rollback-baseline.js';
 import { type RepairRoundSnapshot, captureRepairRoundSnapshot } from './snapshots.js';
 import { acceptedInheritedScope } from './scope-revisions.js';
 import { scopeContainsPath, resolveDeclaredInputWriteBindings, listProjectFilesAt, type DeclaredInputWriteBinding } from './path-capabilities.js';
-import { captureRollbackCurrentImage } from './rollback-baseline.js';
 import { isLiveConstraintExemptDirectory, isLiveConstraintExemptPath } from '../../live-constraint-guard.js';
 import { loadEngineDefaults } from '../../config.js';
 import { normalizedProjectContentPath } from '../sched_admission/scope-services.js';
@@ -60,8 +60,14 @@ export class ScopeBatchContext {
     // enforcement, including declared data omitted by the project inventory.
     this.initialInputPaths = new Set(this.inputContentPaths());
     for (const path of this.initialInputPaths) {
-      if (!snapshot.files.has(path)) snapshot.files.set(path,
-        captureRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path));
+      if (snapshot.files.has(path)) continue;
+      const baseline = snapshot.rollbackBaseline;
+      const before = baselineImage(baseline, path);
+      const known = baseline.images.has(path) || baseline.cleanTracked.has(path);
+      const image = repairFileIdentity(known && before.provenance !== 'unknown'
+        ? before : readRollbackCurrentImage(baseline, projectDir, path, before));
+      snapshot.rollbackBaseline.images.set(path, image);
+      snapshot.files.set(path, image);
     }
     for (const stage of stages) {
       const declared = snapshot.declaredScopes[stage.id] ?? stage.scope ?? null;
@@ -91,7 +97,9 @@ export class ScopeBatchContext {
       if (this.initialInputPaths && !this.initialInputPaths.has(path) && !this.snapshot.files.has(path)) {
         // The complete admitted input inventory proves this member was absent,
         // even when the generic project baseline omitted its directory.
-        this.snapshot.files.set(path, { exists: false, provenance: 'observed' });
+        const absent: RepairFileImage = { exists: false, provenance: 'observed' };
+        this.snapshot.files.set(path, absent);
+        this.snapshot.rollbackBaseline.images.set(path, absent);
       }
     }
     return members;

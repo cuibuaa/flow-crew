@@ -282,6 +282,8 @@ describe('Scenario C: budget-exhausted terminal honesty (bug #7)', () => {
     expect(state.terminalArtifact).toBe('research/val/ceiling_report.md');
     expect(existsSync(join(projectDir, 'research/val/ceiling_report.md'))).toBe(true);
     expect(readFileSync(join(projectDir, 'research/val/ceiling_report.md'), 'utf-8')).toContain('budget-exhausted');
+    // A later terminal writer must not resurrect a scheduler-consumed slot.
+    expect(existsSync(join(projectDir, 'research/val/round_result.json'))).toBe(false);
   }, 60000);
 });
 

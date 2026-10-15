@@ -3,7 +3,7 @@ import { createReadStream, existsSync, fstatSync, lstatSync, readSync } from 'no
 import { constants as fsConstants } from 'node:fs';
 import { createHash, type Hash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 
 export interface RollbackStatIdentity {
   type: 'file' | 'symlink' | 'other';
@@ -131,30 +131,22 @@ export async function hashRollbackFileCooperatively(path: string): Promise<Rollb
 
 export class RollbackContentStore {
   readonly root: string;
-  private sequence = 0;
 
   constructor(runDirPath?: string) {
-    if (runDirPath) this.root = join(runDirPath, '.rollback-preimages');
-    else {
-      // Keep private allocation beneath its own parent: mkdtemp publishes
-      // that tree, so the shared temporary directory must not be its parent.
-      const parent = join(tmpdir(), `flowcrew-rollback-preimages-${process.getuid?.() ?? process.pid}`);
-      mkdirSync(parent, { recursive: true, mode: 0o700 });
-      this.root = mkdtempSync(join(parent, 'capture-'));
-    }
+    this.root = runDirPath
+      ? join(runDirPath, '.rollback-preimages')
+      : mkdtempSync(join(tmpdir(), 'flowcrew-rollback-preimages-'));
     mkdirSync(this.root, { recursive: true });
   }
 
-  capture(sourcePath: string, logicalPath: string): RollbackCaptureResult {
+  capture(sourcePath: string, _logicalPath: string): RollbackCaptureResult {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const before = rollbackStatIdentity(sourcePath);
       if (!before || before.type !== 'file') throw new Error(`${sourcePath} is not a regular file`);
-      this.sequence += 1;
-      const key = createHash('sha256')
-        .update(`${logicalPath}\0${this.sequence}`)
-        .digest('hex');
-      const target = join(this.root, `${key}-${basename(logicalPath) || 'preimage'}`);
+      const hashed = hashRollbackFileSync(sourcePath);
+      const target = join(this.root, hashed.sha256);
+      if (existsSync(target)) return { ...hashed, backingPath: target };
       try {
         // COPYFILE_FICLONE requests copy-on-write but portably falls back to a
         // kernel copy. Neither route retains the file in a JavaScript Buffer.
@@ -163,7 +155,10 @@ export class RollbackContentStore {
         if (!rollbackStatIdentitiesEqual(before, after)) {
           throw new Error(`${sourcePath} changed while its rollback preimage was captured`);
         }
-        const hashed = hashRollbackFileSync(target);
+        const copied = hashRollbackFileSync(target);
+        if (copied.sha256 !== hashed.sha256 || copied.byteLength !== hashed.byteLength) {
+          throw new Error(`${sourcePath} changed while its rollback preimage was captured`);
+        }
         return { ...hashed, statIdentity: after!, backingPath: target };
       } catch (error) {
         lastError = error;

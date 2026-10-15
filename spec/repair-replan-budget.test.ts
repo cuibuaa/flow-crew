@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -17,6 +18,14 @@ beforeEach(() => {
   projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-repair-budget-'));
   setEngineDefaults({ gate_retry_loops: 3, plan_stage_retries: 0 });
   writeFileSync(join(projectDir, 'input.txt'), 'frozen evidence\n');
+  // Existing Git content restores a forbidden input write without eager backup.
+  execFileSync(process.execPath, ['--input-type=module', '-e', `
+    import { execFileSync } from 'node:child_process';
+    for (const args of [['init', '-q'], ['add', 'input.txt'],
+      ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']]) {
+      execFileSync('git', args);
+    }
+  `], { cwd: projectDir, env: { ...process.env, HOME: projectDir, FC_HOME: projectDir } });
 });
 afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
