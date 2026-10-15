@@ -7,7 +7,6 @@ import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 import { renderCriterionRulings, renderGateControlContract } from './verdict-controls.js';
 import { validate, type Schema } from './reality-gate/checks/json-schema-match.js';
 import { captureResearchGateCandidate } from './research-candidate.js';
-import { ARTIFACT_PATH_PATTERN } from './artifact-location.js';
 
 export const MAX_PREDECESSOR_CONTEXT_BYTES = 8_000;
 const SKILLS_DIR = 'config/skills';
@@ -67,7 +66,7 @@ export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionR
   };
   const audit_findings = object({ version: { type: 'integer', enum: [1] }, findings: { type: 'array', items: object({
     id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,80}$' },
-    paths: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1, pattern: `(?=\\s*\\S)${ARTIFACT_PATH_PATTERN}` } }, reason: text,
+    paths: { type: 'array', minItems: 1, items: text }, reason: text,
     criterion_ids: strings, invalidates_plan: { type: 'boolean' }, repair_role: text,
   }) } });
   const pass = object({ reason: text, criteria: criteria(true), audit_findings: { ...audit_findings,

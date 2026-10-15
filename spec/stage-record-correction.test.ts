@@ -9,6 +9,7 @@ import { AuditFindingsSchema } from '../src/scoped-audit-repair.js';
 import { clearAttemptSummaryRefreshDebounce, readRunEvents } from '../src/run-events.js';
 import { createRun, fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
+import { readGateVerdict } from '../src/scheduler/sched_settlement/gate-verdict.js';
 
 let root: string, projectDir: string, runDir: string, runId: string, previousStore: string;
 const role = { name: 'reviewer', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Review independently.' };
@@ -31,10 +32,9 @@ beforeEach(() => {
 afterEach(() => { clearAttemptSummaryRefreshDebounce(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
 describe('stage record constraints before settlement', () => {
-  it.each(['/outside', ['..', 'outside'].join('/'), 'docs/../outside', 'docs//report.md', './report.md', 'docs/', 'docs\\report.md', 'docs/\0report.md', ''])('rejects the unsafe path %j in the supplied schema and at use', path => {
-    const record = rejected(); record.audit_findings.findings[0].paths = [path];
-    expect(() => parseStageRecord(JSON.stringify(record), schema())).toThrow();
+  it.each(['/outside', ['..', 'outside'].join('/'), 'docs/../outside', 'docs//report.md', './report.md', 'docs/', 'docs\\report.md', 'docs/\0report.md', ''])('rejects the unsafe artifact path %j at declaration and use', path => {
     expect(ArtifactPathSchema.safeParse(path).success).toBe(false);
+    expect(() => resolveArtifactLocation({ root: 'project', path }, projectDir, runDir)).toThrow();
   });
 
   it.each(['docs/report.md', '.config/report.json', 'docs/..report', 'docs/report name.md'])('accepts the confined literal path %j', path => {
@@ -68,9 +68,39 @@ describe('stage record constraints before settlement', () => {
   });
 });
 
+describe('informational citations preserve independent refusals', () => {
+  it.each(['validation receipt', 'external determinism evidence', 'external performance evidence'])('accepts a negative review citing %s without a second invocation', async evidence => {
+    // Scrubbed audit incidents: a run receipt, admitted external smoke results,
+    // and external benchmark results showing 0.923x against a required 4x.
+    const path = evidence === 'validation receipt' ? join(runDir, 'validation_delta_review.json')
+      : join(root, 'external-evidence', evidence === 'external determinism evidence' ? 'smoke_determinism.json' : 'hybrid_stats.json');
+    const record = rejected();
+    record.reason = evidence === 'external performance evidence' ? 'Measured speed ratio is 0.923x; the brief requires 4x.'
+      : 'Required GPU and same-device parity evidence are missing.';
+    record.audit_findings.findings[0].paths = [path];
+    record.audit_findings.findings[0].reason = record.reason;
+    let calls = 0;
+    const adapter: Adapter = { async run() {
+      calls++;
+      return { output: JSON.stringify(record), exitCode: 0, duration_ms: 1 };
+    } };
+    const result = await runStage(adapter, options());
+    expect(result.exitCode, result.friendlyError).toBe(0);
+    expect(calls).toBe(1);
+    expect(AuditFindingsSchema.parse(record.audit_findings)).toEqual(record.audit_findings);
+    expect(JSON.parse(readFileSync(join(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
+    // Accepting the citation must preserve the real unmet-outcome rejection.
+    expect(readGateVerdict(projectDir, 'review', runId)).toMatchObject({ pass: false, reason: record.reason });
+    expect(readRunEvents(projectDir, runId).filter(event => event.type === 'attempt_failed')).toHaveLength(0);
+    // The same string remains unusable as a writable artifact capability.
+    expect(ArtifactPathSchema.safeParse(path).success).toBe(false);
+    expect(() => resolveArtifactLocation({ root: 'run', path }, projectDir, runDir)).toThrow();
+  });
+});
+
 describe('record correction uses the existing attempt', () => {
   const malformed: Array<[string, () => string]> = [
-    ['traversal', () => { const record = rejected(); record.audit_findings.findings[0].paths.push('docs/../report.md'); return JSON.stringify(record); }],
+    ['blank citation', () => { const record = rejected(); record.audit_findings.findings[0].paths.push('   '); return JSON.stringify(record); }],
     ['empty paths', () => { const record = rejected(); record.audit_findings.findings[0].paths = []; return JSON.stringify(record); }],
     ['blank evidence', () => { const record = rejected(); record.criteria.criterion.evidence = '   '; return JSON.stringify(record); }],
     ['missing criterion', () => JSON.stringify({ ...rejected(), criteria: {} })],
