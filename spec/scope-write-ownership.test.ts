@@ -131,6 +131,26 @@ describe('observed existence owns dependency comparison', () => {
     expect(() => readFileSync(join(project, newData), 'utf8')).toThrow();
   });
 
+  it.each([
+    { path: 'fixtures/input.csv', scope: ['**'], declared: true },
+    { path: 'src/shared.ts', scope: ['src/owned.ts'], declared: false },
+  ])('refuses and restores an attributed write to $path after setup admission', async ({ path, scope, declared }) => {
+    write(path, 'authoritative input\n');
+    commitFixture();
+    const writer = stage('writer', scope);
+    const created = createRun(project, 'protected-write', '', [writer.id]);
+    runPath = created.runDirPath;
+    if (declared) writeFileSync(join(runPath, 'task_brief.md'),
+      `---\ninputs: [${path}]\n---\n# Goal\nRead the input.\n`);
+    const context = createScopeBatchContext(project, [writer], undefined, created.runId);
+    beginStageAttempt(project, created.runId, writer.id, 0);
+    write(path, 'attributed overwrite\n');
+    const { result, aborts } = await scan(context, writer, created.runId, [path]);
+    expect(result.incidents).toContainEqual(expect.objectContaining({ path, restored: true }));
+    expect(aborts).toContain('live_constraint_violation');
+    expect(readFileSync(join(project, path), 'utf8')).toBe('authoritative input\n');
+  });
+
   it('preserves tracked cache content reached through a declared directory alias', async () => {
     const path = 'tools/parity/__pycache__/nested/evidence.pyc';
     write(path, 'authored bytes\n');

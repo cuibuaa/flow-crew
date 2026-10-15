@@ -1416,7 +1416,35 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(readFileSync(join(fixture.target, 'tools', '.bin', 'tool'), 'utf8')).toBe('export {};');
   });
 
-  it('refuses source membership changes while materializing a declared directory', async () => {
+  it.each([false, true])('compares large declared input bytes without whole-file reads (existing=%s)', async existing => {
+    const source = join(fixture.project, 'data', 'records.bin');
+    const target = join(fixture.target, 'data', 'records.bin');
+    mkdirSync(join(fixture.project, 'data'), { recursive: true });
+    const contents = Buffer.alloc(1024 * 1024 + 13, 91);
+    writeFileSync(source, contents);
+    writeBrief(['---', 'inputs: [data/records.bin]', '---', '# Goal', 'Read the declared dataset.']);
+    const readBytes = vi.fn((path: string) => {
+      if (path === source || path === target) throw new Error('whole-file input read');
+      return nodeShipSetupFileSystem.readBytes(path);
+    });
+    const runner = validationRunner();
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(request => {
+        if (existing) {
+          mkdirSync(join(request.targetDir, 'data'));
+          copyFileSync(source, target);
+        }
+      }),
+      runValidationCommand: runner,
+      fs: { ...nodeShipSetupFileSystem, readBytes },
+    });
+    expect(report.state, JSON.stringify(report.blockers)).toBe('ready');
+    expect(readFileSync(target).equals(contents)).toBe(true);
+    expect(readBytes.mock.calls.some(([path]) => path === source || path === target)).toBe(false);
+    expect(runner).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not blame materialization for an independent source membership update', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'a.txt'), 'A');
     writeBrief(['---', 'inputs: [data]', '---', '# Goal', 'Read the stable input.']);
@@ -1429,9 +1457,10 @@ describe('ship-setup fail-closed worktree transaction', () => {
         writeFileSync(join(fixture.project, 'data', 'added.txt'), 'new member');
       } },
     });
-    expect(report.state).toBe('refused');
-    expect(report.declaredInputStability).toContainEqual(expect.objectContaining({ phase: 'input_materialization', state: 'changed' }));
-    expect(runner).not.toHaveBeenCalled();
+    expect(report.state).toBe('ready');
+    expect(readFileSync(join(fixture.target, 'data', 'a.txt'), 'utf8')).toBe('A');
+    expect(existsSync(join(fixture.target, 'data', 'added.txt'))).toBe(false);
+    expect(runner).toHaveBeenCalledTimes(3);
   });
 
   it('reconciles missing descendants when a declared directory already has tracked target content', async () => {

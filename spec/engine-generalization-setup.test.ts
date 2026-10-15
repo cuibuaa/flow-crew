@@ -9,11 +9,11 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BUILD_MANIFEST_FILENAME, createBuildManifest } from '../src/build-manifest.js';
-import * as engineConfig from '../src/config.js';
 import {
   cmdShipPreflightWithDeps,
   collectShipPreflight,
@@ -195,7 +195,7 @@ function creatingWorktree(): ReturnType<typeof vi.fn<GitWorktreeCreator>> {
   });
 }
 
-describe('item 14: declared-input stability binding', () => {
+describe('declared-input materialization and live producers', () => {
   function pythonInputFixture(options: { ignoredData?: boolean; trackedCache?: boolean } = {}): {
     brief: string;
     create: GitWorktreeCreator;
@@ -279,10 +279,6 @@ describe('item 14: declared-input stability binding', () => {
       runValidationCommand: runner, runTestCollectionCommand: collector, globalDir: () => fixture.state,
     });
     expect(setup.state, JSON.stringify(setup.blockers)).toBe('ready');
-    expect(setup.declaredInputStability).toEqual(expect.arrayContaining([
-      expect.objectContaining({ phase: 'target_validation_baseline', state: 'stable', changedInputs: [] }),
-      expect.objectContaining({ phase: 'test_collection', state: 'stable', changedInputs: [] }),
-    ]));
     expect(setup.testPopulation?.state).toBe('matched');
     expect(collector).toHaveBeenCalledTimes(4);
     expect(runner.mock.calls).toContainEqual([expect.objectContaining({
@@ -290,31 +286,6 @@ describe('item 14: declared-input stability binding', () => {
     })]);
     expect(existsSync(join(target, 'tools', 'parity', '__pycache__', 'main.cpython.pyc'))).toBe(true);
     expect(existsSync(join(fixture.project, 'tools', 'parity', '__pycache__', 'collection.pyc'))).toBe(true);
-  });
-
-  it.each([
-    { name: 'tracked source', path: 'tools/parity/main.py' },
-    { name: 'declared ignored data', path: 'tools/parity/values.csv' },
-    { name: 'tracked cache', path: 'tools/parity/__pycache__/committed.pyc' },
-    { name: 'tracked source nested inside a cache', path: 'tools/parity/__pycache__/nested/reference.py' },
-  ])('still refuses a baseline edit to $name inside an input', async ({ path }) => {
-    const python = pythonInputFixture({ ignoredData: true, trackedCache: true });
-    const target = join(fixture.root, 'python-edit-target');
-    const setup = await runShipSetup(setupArgs(target, 'python-edit'), {
-      createWorktree: python.create, runGitCommand: python.git, globalDir: () => fixture.state,
-      runValidationCommand: validationRunner((role, cwd) => {
-        if (role === 'test') writeFileSync(join(cwd, path), 'changed during validation\n');
-      }),
-    });
-    expect(setup.state).toBe('refused');
-    expect(setup.blockers).toContainEqual(expect.objectContaining({
-      phase: 'validation', input: 'target:tools/parity',
-      reason: expect.stringContaining('Declared read-only input changed during target validation baseline'),
-    }));
-    expect(setup.declaredInputStability).toContainEqual(expect.objectContaining({
-      phase: 'target_validation_baseline', state: 'changed',
-      changedInputs: [expect.objectContaining({ path: 'tools/parity' })],
-    }));
   });
 
   it.each([
@@ -349,31 +320,7 @@ describe('item 14: declared-input stability binding', () => {
       expect(runner).not.toHaveBeenCalled();
     } else {
       expect(setup.copies.some(copy => copy.path === cachePath)).toBe(false);
-      expect(setup.declaredInputStability.every(check => check.state === 'stable')).toBe(true);
     }
-  });
-
-  it('uses configured cache exemptions rather than a fixed input cache list', async () => {
-    const defaults = engineConfig.loadEngineDefaults();
-    const configuredDefaults = vi.spyOn(engineConfig, 'loadEngineDefaults')
-      .mockReturnValue({ ...defaults, live_constraint_exempt_patterns: [] });
-    try {
-      const python = pythonInputFixture();
-      const target = join(fixture.root, 'no-cache-exemption-target');
-      const setup = await runShipSetup(setupArgs(target, 'no-cache-exemption'), {
-        createWorktree: python.create, runGitCommand: python.git, globalDir: () => fixture.state,
-        runValidationCommand: validationRunner((role, cwd) => {
-          if (role !== 'test') return;
-          mkdirSync(join(cwd, 'tools', 'parity', '__pycache__'), { recursive: true });
-          writeFileSync(join(cwd, 'tools', 'parity', '__pycache__', 'main.pyc'), 'generated cache\n');
-        }),
-      });
-      expect(setup.state).toBe('refused');
-      expect(setup.declaredInputStability).toContainEqual(expect.objectContaining({
-        phase: 'target_validation_baseline', state: 'changed',
-        changedInputs: [expect.objectContaining({ path: 'tools/parity' })],
-      }));
-    } finally { configuredDefaults.mockRestore(); }
   });
 
   it.each([false, true])('admits a declared output inside an input directory (existing=%s) through preflight, rehearsal, and setup', async existing => {
@@ -460,7 +407,7 @@ describe('item 14: declared-input stability binding', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it('refuses content and tree-membership mutations but permits generated-output writes', async () => {
+  it('keeps prepared inputs isolated from live source updates and permits generated outputs', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     mkdirSync(join(fixture.project, 'fixtures', 'frozen'), { recursive: true });
     const frozenFile = join(fixture.project, 'data', 'frozen.csv');
@@ -481,10 +428,11 @@ describe('item 14: declared-input stability binding', () => {
     ].join('\n'));
 
     const mutatingTarget = join(fixture.root, 'mutating-target');
-    const mutatingRunner = validationRunner((role, cwd) => {
+    const mutatingRunner = validationRunner((role) => {
       if (role !== 'test') return;
-      writeFileSync(join(cwd, 'data', 'frozen.csv'), 'id,value\n1,mutated\n');
-      writeFileSync(join(cwd, 'fixtures', 'frozen', 'added.json'), '{"added":true}\n');
+      // Simulate an independent producer updating the live source while validation runs.
+      writeFileSync(frozenFile, 'id,value\n1,producer update\n');
+      writeFileSync(join(fixture.project, 'fixtures', 'frozen', 'added.json'), '{"added":true}\n');
     });
     const mutated = await runShipSetup(setupArgs(mutatingTarget, 'mutating-branch'), {
       createWorktree: creatingWorktree(),
@@ -493,23 +441,11 @@ describe('item 14: declared-input stability binding', () => {
       timestamp: () => '2030-01-02T03:04:05.000Z',
     });
 
-    expect(mutated.state).toBe('refused');
-    expect(mutated.blockers).toContainEqual(expect.objectContaining({
-      phase: 'validation',
-      reason: expect.stringContaining('Declared read-only input changed during target validation baseline'),
-    }));
-    expect(mutated.declaredInputStability).toEqual([
-      expect.objectContaining({
-        phase: 'target_validation_baseline',
-        state: 'changed',
-        changedInputs: [
-          expect.objectContaining({ path: 'data/frozen.csv' }),
-          expect.objectContaining({ path: 'fixtures/frozen' }),
-        ],
-      }),
-    ]);
-    expect(readFileSync(frozenFile, 'utf8')).toContain('original');
-    expect(existsSync(join(fixture.project, 'fixtures', 'frozen', 'added.json'))).toBe(false);
+    expect(mutated.state).toBe('ready');
+    expect(mutated.blockers).toEqual([]);
+    expect(readFileSync(frozenFile, 'utf8')).toContain('producer update');
+    expect(readFileSync(join(mutatingTarget, 'data', 'frozen.csv'), 'utf8')).toContain('original');
+    expect(existsSync(join(mutatingTarget, 'fixtures', 'frozen', 'added.json'))).toBe(false);
 
     writeFileSync(frozenFile, 'id,value\n1,original\n');
     rmSync(join(fixture.project, 'fixtures', 'frozen', 'added.json'), { force: true });
@@ -526,15 +462,11 @@ describe('item 14: declared-input stability binding', () => {
     });
 
     expect(stable.state).toBe('ready');
-    expect(stable.declaredInputStability).toEqual([
-      expect.objectContaining({ phase: 'target_validation_baseline', state: 'stable', changedInputs: [] }),
-      expect.objectContaining({ phase: 'test_collection', state: 'stable', changedInputs: [] }),
-    ]);
     expect(readFileSync(frozenFile, 'utf8')).toContain('original');
     expect(readFileSync(join(stableTarget, 'generated', 'cache.txt'), 'utf8')).toBe('generated\n');
   });
 
-  it('protects declared inputs during test collection after baseline execution', async () => {
+  it('accepts an independent live input update during test collection', async () => {
     writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
       scripts: { build: 'compile', test: 'vitest run', lint: 'style' },
       devDependencies: { vitest: 'fixture' },
@@ -576,7 +508,12 @@ describe('item 14: declared-input stability binding', () => {
       return { exitCode: 0 };
     });
     const collector = vi.fn<ValidationCommandRunner>((request) => {
-      if (request.cwd === target) writeFileSync(join(target, 'data', 'frozen.csv'), 'changed by collection\n');
+      // This producer is independent of the collection command. An ambient
+      // source notification supplies no command ownership evidence.
+      if (request.cwd === target) execFileSync(process.execPath, ['-e',
+        "require('node:fs').writeFileSync(process.argv[1], 'producer update during collection\\n')",
+        join(fixture.project, 'data', 'frozen.csv'),
+      ], { cwd: fixture.project, env: { ...process.env, HOME: fixture.root, FC_HOME: fixture.state } });
       return {
         exitCode: 0,
         stdout: JSON.stringify([{ file: join(request.cwd, 'spec', 'example.test.ts') }]),
@@ -591,17 +528,8 @@ describe('item 14: declared-input stability binding', () => {
       globalDir: () => fixture.state,
     });
 
-    expect(report.state).toBe('refused');
-    expect(report.declaredInputStability).toEqual([
-      expect.objectContaining({ phase: 'target_validation_baseline', state: 'stable', changedInputs: [] }),
-      expect.objectContaining({
-        phase: 'test_collection',
-        state: 'changed',
-        changedInputs: expect.arrayContaining([
-          expect.objectContaining({ path: 'data/frozen.csv' }),
-        ]),
-      }),
-    ]);
+    expect(report.state).toBe('ready');
+    expect(readFileSync(join(target, 'data', 'frozen.csv'), 'utf8')).toBe('original\n');
     expect(collector).toHaveBeenCalledTimes(2);
     expect(baseline).toHaveBeenCalledTimes(3);
   });
@@ -642,10 +570,6 @@ describe('item 14: declared-input stability binding', () => {
 
     expect(report.state).toBe('ready');
     expect(report.testPopulation?.state).toBe('unverified');
-    expect(report.declaredInputStability).toEqual([
-      expect.objectContaining({ phase: 'target_validation_baseline', state: 'stable' }),
-      expect.objectContaining({ phase: 'test_collection', state: 'stable' }),
-    ]);
     expect(runner).toHaveBeenCalledTimes(3);
     expect(runner.mock.calls.every(([request]) => request.cwd === target)).toBe(true);
     expect(readFileSync(join(fixture.project, 'data', 'frozen.csv'), 'utf8')).toBe('original\n');
