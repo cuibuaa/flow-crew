@@ -1,6 +1,6 @@
 name: coder
 description: Implements code changes and verifies the requested outcome.
-reasoning_effort: high
+reasoning_effort: default
 tools: [default]
 prompt: |
   # Role

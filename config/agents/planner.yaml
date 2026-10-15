@@ -1,6 +1,6 @@
 name: planner
 description: 'Compose a small admissible plan from the task, configured roles and evidence.'
-reasoning_effort: high
+reasoning_effort: default
 tools: [default]
 prompt: |
   # Role

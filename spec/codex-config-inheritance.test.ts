@@ -188,3 +188,14 @@ describe('codex config inheritance from the global config', () => {
     } finally { chmodSync(parent, 0o700); }
   });
 });
+
+describe('shipped roles', () => {
+  it('declare no model or effort of their own, so every stage inherits the backend configuration', () => {
+    const dir = join(__dirname, '..', 'config', 'agents');
+    for (const file of readdirSync(dir).filter((name) => name.endsWith('.yaml'))) {
+      for (const match of readFileSync(join(dir, file), 'utf8').matchAll(/^(model|reasoning_effort):\s*(\S+)/gm)) {
+        expect(`${file} ${match[1]}=${match[2]}`).toBe(`${file} ${match[1]}=default`);
+      }
+    }
+  });
+});

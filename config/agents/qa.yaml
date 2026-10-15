@@ -1,6 +1,6 @@
 name: qa
 description: 'Reviews implementations independently; returns criterion status and reproducible evidence.'
-reasoning_effort: high
+reasoning_effort: default
 tools: [default]
 prompt: |
   # Role
