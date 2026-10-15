@@ -21,7 +21,6 @@ export function createScopeReconciler() {
     runId: string;
     context: ScopeBatchContext;
     attemptIndex: number;
-    terminalDurableScope?: string[];
   }): { status: StageStatus; violation: boolean; acceptedRevisionDuringAttempt: boolean } {
     const status = readStageStatus(input.projectDir, input.runId, input.stage.id);
     const attempt = status.attempts?.find((candidate) => candidate.index === input.attemptIndex);
@@ -73,15 +72,7 @@ export function createScopeReconciler() {
     // declaration still grants nothing in the negotiation path, so a request can only ever
     // authorize the exact paths it names.
     const negotiated = attemptContext.decisionPaths.size > 0 || attemptContext.mismatchPaths.size > 0;
-    const ordinaryGovernedScope: string[] | null = declaredScope === null && !negotiated ? null : effectiveScope;
-    // A terminal finalizer may declare generated/report-support paths so it can
-    // rerun validation after authoring the terminal candidate. Those paths are
-    // touch-only: a content-object delta would be new work performed after
-    // the last gate. Reconcile against the terminal/evidence subset so any such
-    // durable delta is restored from the pre-attempt snapshot and fails the
-    // attempt before terminal evaluation.
-    const governedScope: string[] | null = input.terminalDurableScope ?? ordinaryGovernedScope;
-    const terminalValidationOnly = input.terminalDurableScope !== undefined;
+    const governedScope: string[] | null = declaredScope === null && !negotiated ? null : effectiveScope;
     const restoredLivePaths = new Set(liveWriteIncidents
       .filter((incident) => incident.restored)
       .map((incident) => normalizedProjectPath(incident.path) ?? incident.path));
@@ -131,12 +122,8 @@ export function createScopeReconciler() {
           ? 'live enforcement restored the unauthorized project write before the adapter invocation ended; post-attempt audit verified the preimage remained restored'
           : definitelyAttributed
           ? enforcement.rolledBackWrites.includes(normalizedProjectPath(rawPath) ?? rawPath)
-            ? terminalValidationOnly
-              ? 'terminal finalizer left a durable non-terminal validation-scope delta; enforcement restored its preimage before terminal evaluation'
-              : 'adapter attributed an unauthorized project write; enforcement restored its preimage before durable apply'
-            : terminalValidationOnly
-              ? 'terminal finalizer left a durable non-terminal validation-scope delta that could not be restored'
-              : 'adapter attributed a project write outside the accepted effective scope'
+            ? 'adapter attributed an unauthorized project write; enforcement restored its preimage before durable apply'
+            : 'adapter attributed a project write outside the accepted effective scope'
           : enforcement.rolledBackWrites.includes(normalizedProjectPath(rawPath) ?? rawPath)
             ? 'snapshot observed a change outside the complete batch capability; enforcement restored its preimage while ownership remains unverified'
             : 'snapshot observed a change outside effective scope but cannot prove ownership',
@@ -237,7 +224,6 @@ export function createScopeReconciler() {
       scopeApprover: 'scheduler-policy',
       declaredScope,
       effectiveScope,
-      ...(terminalValidationOnly ? { terminalDurableScope: input.terminalDurableScope } : {}),
       decisionPaths: decisions,
       mismatchPaths: mismatches,
       decisions: decisionRecords,
@@ -279,9 +265,7 @@ export function createScopeReconciler() {
       rejectedDigestCount: planningDigests.length,
     };
     const error = unresolvedDefinite.length > 0
-      ? terminalValidationOnly
-        ? `terminal_scope_violation: ${unresolvedDefinite.map((violation) => violation.path).join(', ')} left a durable non-terminal delta after the finalizer's gates. ${postAttemptInstruction}`
-        : `scope_violation: ${unresolvedDefinite.map((violation) => violation.path).join(', ')} attempted outside accepted effective scope. ${postAttemptInstruction}`
+      ? `scope_violation: ${unresolvedDefinite.map((violation) => violation.path).join(', ')} attempted outside accepted effective scope. ${postAttemptInstruction}`
       : undefined;
     return {
       status: attachStageConstraintAudit(input.projectDir, input.runId, input.stage.id, attempt.index, summary, error),
@@ -295,7 +279,6 @@ export function createScopeReconciler() {
     projectDir: string;
     runId: string;
     context: ScopeBatchContext;
-    terminalDurableScope?: string[];
   }): { status: StageStatus; violation: boolean; acceptedRevisionDuringAttempt: boolean; attemptIndex?: number } {
     let status = readStageStatus(input.projectDir, input.runId, input.stage.id);
     let violation = false;

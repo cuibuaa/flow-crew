@@ -100,7 +100,6 @@ interface ScopeSafeStageServices {
 export function createStageSettlementBoundary(input: {
   stage: StageConfig; selected: StageConfig[]; activeStageIds: Set<string>;
   projectDir: string; runId: string; context: ScopeBatchContext;
-  terminalDurableScope?: string[];
 }, services: Pick<ScopeSafeStageServices, 'monitorScopeRevisionRequests' | 'reconcileCompletedStageAttempts'>): (phase: 'child_closed' | 'attempt_closed') => Promise<boolean> {
   return async phase => {
     await new Promise<void>(resolve => setImmediate(resolve));

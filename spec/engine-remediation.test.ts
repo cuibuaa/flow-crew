@@ -59,6 +59,7 @@ import {
   inspectDispatchAdmission,
   loadWorkflow,
   parseBriefFrontmatter,
+  parseDispatchedStageConfig,
   readGateVerdict,
   recordGateValidationDelta,
   restoreProjectPath,
@@ -263,7 +264,7 @@ describe('engine behaviour contracts', () => {
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
     setFcGlobalDir(join(root, 'fc-home'));
-    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalize']);
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalize', 'review']);
     const terminalPath = 'docs/final.md';
     const outputPath = 'docs/report.md';
     write(join(projectDir, terminalPath), '# final\n');
@@ -276,10 +277,19 @@ describe('engine behaviour contracts', () => {
     state.declaredOutputs = [{
       path: outputPath, line: 2, source: 'outputs', disposition: 'create', expectedType: 'file',
     }];
+    const producedAt = new Date(Date.now() - 500).toISOString();
+    const reviewedAt = new Date(Date.now() - 250).toISOString();
     state.stages.finalize = {
       status: 'complete', retries: 0,
-      attempts: [{ index: 1, status: 'complete', startedAt, writes: [terminalPath, outputPath] }],
+      attempts: [{ index: 1, status: 'complete', startedAt, completedAt: producedAt, writes: [terminalPath, outputPath] }],
     };
+    state.stages.review = { status: 'complete', retries: 0,
+      attempts: [{ index: 1, status: 'complete', startedAt: reviewedAt, completedAt: reviewedAt }] };
+    state.dispatchedStages = [
+      parseDispatchedStageConfig({ id: 'finalize', role: 'writer', scope: [terminalPath, outputPath] }),
+      parseDispatchedStageConfig({ id: 'review', role: 'qa', is_gate: true, depends_on: ['finalize'], scope: [] }),
+    ];
+    write(join(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Accepted the produced report.' }));
     writeRunState(projectDir, created.runId, state);
     write(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
       version: 1, pass: true, checkedAt: new Date().toISOString(), errors: [],

@@ -2,7 +2,7 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { parseCondition } from '../../condition.js';
-import { join, posix } from 'node:path';
+import { join } from 'node:path';
 import { type AgentConfig } from '../../adapters/base.js';
 import { z } from 'zod';
 import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type TerminalStatesConfig, type ResearchConfig } from '../../store.js';
@@ -140,7 +140,6 @@ export interface DispatchAdmissionReport {
   proposalDigest?: string;
   terminalOwners: Record<string, string>;
   /** Declared finalizer capability that may be touched for validation but may not leave a durable delta. */
-  terminalValidationScopes?: Record<string, string[]>;
   criteriaDigest?: string;
   criterionGateRefs?: Record<string, string[]>;
   criterionTerminalRefs?: Record<string, string[]>;
@@ -217,18 +216,6 @@ export function validatedCriterionDischarges(
       return false;
     }
   });
-}
-
-function dispatchGlobRegex(raw: string): RegExp | undefined {
-  const normalized = normalizedProjectPath(raw);
-  if (!normalized) return undefined;
-  const globstarSentinel = '__FLOWCREW_GLOBSTAR__';
-  const escaped = normalized.replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*/g, globstarSentinel)
-    .replace(/\*/g, '[^/]*')
-    .replace(/\?/g, '[^/]')
-    .replaceAll(globstarSentinel, '.*');
-  try { return new RegExp(`^${escaped}$`); } catch { return undefined; }
 }
 
 export function stageScopeOwnsPath(stage: StageConfig, rawPath: string): boolean {
@@ -402,23 +389,9 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
 
     const terminalOwners: Record<string, string> = {};
     const ownerIds = new Set<string>();
-    const terminalValidationScopeSets = new Map<string, Set<string>>();
     const checkedResearchOwnerIds = new Set<string>();
     const terminalDeclarations = Object.entries(input.terminalStates ?? {})
       .flatMap(([status, entry]) => entry.paths.map((path) => ({ status, path })));
-    const declaredTerminalPaths = new Set(terminalDeclarations
-      .map((entry) => normalizedProjectPath(entry.path))
-      .filter((path): path is string => Boolean(path)));
-    const declaredTerminalEvidenceGlobs = Object.values(input.terminalStates ?? {}).flatMap((entry) => {
-      if (entry.floor?.minAttemptedStages === undefined) return [];
-      if (entry.stageGlob) return [entry.stageGlob];
-      const first = entry.paths[0];
-      if (!first) return [];
-      const normalized = normalizedProjectPath(first);
-      if (!normalized) return [];
-      const directory = posix.dirname(normalized);
-      return [`${directory === '.' ? '' : `${directory}/`}stage_*_verdict.md`];
-    });
     const declarationsByPath = new Map<string, Array<{ status: string; path: string }>>();
     for (const declaration of terminalDeclarations) {
       const normalized = normalizedProjectPath(declaration.path) ?? declaration.path;
@@ -442,32 +415,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
         const owner = owners[0];
         terminalOwners[rawPath] = owner.id;
         ownerIds.add(owner.id);
-        const nonTerminalScopes = (owner.scope ?? []).filter((scope) => {
-          const normalized = normalizedProjectPath(scope);
-          if (!normalized || declaredTerminalPaths.has(normalized)) return !normalized;
-          return !declaredTerminalEvidenceGlobs.some((glob) => {
-            const normalizedGlob = normalizedProjectPath(glob);
-            if (!normalizedGlob) return false;
-            if (normalized === normalizedGlob) return true;
-            return !/[?*]/.test(normalized) && dispatchGlobRegex(glob)?.test(normalized) === true;
-          });
-        });
-        // A producer reviewed downstream retains ordinary product authority.
-        // A finalizer after review may only touch other scopes for validation.
-        const reviewedDownstream = input.dispatched.some((gate) => gate.is_gate
-          && transitivelyDependsOn(gate.id, owner.id, byId)
-          && !all.some((ancestor) => (
-            // An author's executed prerequisites cannot skip its reviewer.
-            // Optional branches introduced afterward or alongside it can.
-            (ancestor.condition?.trim() || ancestor.retry_to?.length)
-            && (ancestor.id === gate.id || transitivelyDependsOn(gate.id, ancestor.id, byId))
-            && ancestor.id !== owner.id && !transitivelyDependsOn(owner.id, ancestor.id, byId)
-          )));
-        if (nonTerminalScopes.length > 0 && !reviewedDownstream) {
-          const existing = terminalValidationScopeSets.get(owner.id) ?? new Set<string>();
-          for (const scope of nonTerminalScopes) existing.add(scope);
-          terminalValidationScopeSets.set(owner.id, existing);
-        }
         if (input.research && !researchTerminalConditionExcludesContinue(owner.condition, declaration)) {
           errors.push(`terminal owner ${owner.id}.condition: must be mechanically false when research.decision is continue; use research.terminalPath == ${JSON.stringify(rawPath)} (preferred), matching research.terminalStatus, or another narrow non-continue equality`);
         }
@@ -558,9 +505,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       errors,
       warnings,
       terminalOwners,
-      terminalValidationScopes: Object.fromEntries(
-        [...terminalValidationScopeSets].map(([ownerId, scopes]) => [ownerId, [...scopes]]),
-      ),
       criterionGateRefs: Object.fromEntries(
         input.dispatched
           .filter((stage) => stage.is_gate && stage.criterion_refs.length > 0)

@@ -313,7 +313,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(archived.errors.join('\n')).toContain('separate measurement from terminalization');
   }, 60_000);
 
-  it('rolls back a durable non-terminal delta from an admitted validation-capable finalizer', async () => {
+  it('refuses terminal settlement for a finalizer product delta with no independent review', async () => {
     const runId = setupPlainRun();
     const rd = runDir(projectDir, runId);
     const agentsDir = writeRoles(['planner', 'qa']);
@@ -369,13 +369,13 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(finalizerCalls).toBeGreaterThan(0);
     expect(final.status).not.toBe('complete');
     expect(readFileSync(join(projectDir, 'src', 'generated.ts'), 'utf-8'))
-      .toBe('export const value = "before";\n');
-    expect(final.stages.finalize.error).toContain('terminal_scope_violation');
+      .toBe('export const value = "after gate";\n');
+    expect(final.failureReason).toContain('unreviewed product writes (src/generated.ts)');
     const audit = JSON.parse(readFileSync(join(rd, 'stages', 'finalize', `constraint_audit_attempt_${finalizerCalls}.json`), 'utf-8')) as {
       rolledBackWrites: string[];
-      terminalDurableScope?: string[];
+      durableWrites: string[];
     };
-    expect(audit.rolledBackWrites).toContain('src/generated.ts');
-    expect(audit.terminalDurableScope).toEqual(['docs/final.md']);
+    expect(audit.rolledBackWrites).toEqual([]);
+    expect(audit.durableWrites).toContain('src/generated.ts');
   }, 60_000);
 });

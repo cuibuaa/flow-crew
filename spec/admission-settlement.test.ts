@@ -71,7 +71,7 @@ describe('terminal outcome waits for required settlement', () => {
     expect(final.stages.review.status).toBe('complete');
   });
 
-  it('does not grant ordinary product authority through a reviewer in a skippable branch', async () => {
+  it('does not settle product writes through a reviewer in a skipped branch', async () => {
     const project = setup();
     const work = stage({ id: 'work', role: 'coder', scope: ['report.md', 'value.json'], artifact_contract: artifacts([
       { id: 'report', root: 'project', path: 'report.md' }, { id: 'value', root: 'project', path: 'value.json' },
@@ -86,8 +86,8 @@ describe('terminal outcome waits for required settlement', () => {
     const final = await runWorkflow(workflow, '', project, adapter, new Map(), undefined, join(root, 'config/agents'), undefined,
       '---\nterminal_states:\n  complete:\n    paths: [report.md]\n---\n# Review the product.\n', true);
     expect(final.status).not.toBe('complete');
-    expect(final.stages.work.error).toContain('terminal_scope_violation');
-    expect(() => readFileSync(join(project, 'value.json'))).toThrow();
+    expect(final.failureReason).toContain('unreviewed product writes (value.json)');
+    expect(readFileSync(join(project, 'value.json'), 'utf8')).toBe('{}');
     expect(adapter.calls.some(call => call.stageId === 'review')).toBe(false);
   });
 

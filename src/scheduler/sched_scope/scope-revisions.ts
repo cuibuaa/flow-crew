@@ -6,10 +6,10 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { readStageStatus, runningStageAttempt, readRunState, runDir } from "../../store.js";
 import { type StageConfig } from "../sched_admission/configuration.js";
 import { parseDeclaredScope } from "../sched_admission/frontier.js";
-import { normalizedProjectPath, scopeMatchesProjectPath } from "../sched_admission/scope-services.js";
+import { normalizedProjectContentPath, normalizedProjectPath, scopeMatchesProjectPath } from "../sched_admission/scope-services.js";
 import { listProjectFiles, listProjectFilesAt, resolveDeclaredInputWriteBindings, scopeRequestAlreadyAuthorized } from './path-capabilities.js';
 import { type RepairRoundSnapshot } from './snapshots.js';
-import { captureRollbackCurrentImage } from './rollback-baseline.js';
+import { captureRollbackCurrentImage, trackedGitlinkAncestor } from './rollback-baseline.js';
 import { createDispatchAdmission, inspectCapabilityAdmission, readBriefCriteriaForAdmission, validatedCriterionDischarges } from '../sched_admission/dispatch.js';
 import { firstDeclaredInputScopeConflict } from './path-capabilities.js';
 
@@ -172,10 +172,20 @@ export function decideScopeRevision(input: {
   if (snapshot) for (const path of authorizedPaths) {
     const scope = parseDeclaredScope(path);
     const root = scope.kind === 'glob' ? scope.directoryPrefix : scope.kind === 'unknown' ? undefined : scope.value;
-    const members = root ? listProjectFilesAt(projectDir, root, true, { complete: true }) : listProjectFiles(projectDir, { complete: true });
+    const inventory = { complete: true, skipDirectory: (directory: string) => !normalizedProjectContentPath(directory) };
+    const members = root ? listProjectFilesAt(projectDir, root, true, inventory) : listProjectFiles(projectDir, inventory);
+    members.push(...snapshot.rollbackBaseline.trackedPaths);
     if (scope.kind === 'exact') members.push(path);
-    for (const member of new Set(members)) if (scopeMatchesProjectPath(scope, member)) {
-      snapshot.files.set(member, captureRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, member, snapshot.files.get(member)));
+    const captured = new Set<string>();
+    for (const member of new Set(members)) if (normalizedProjectContentPath(member) && scopeMatchesProjectPath(scope, member)) {
+      const target = trackedGitlinkAncestor(snapshot.rollbackBaseline, member) ?? member;
+      if (captured.has(target)) continue;
+      const image = captureRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, target, snapshot.files.get(target));
+      if (image.inspectionFailure || (image.materializationFailure && !image.gitObjectId)) {
+        throw new Error(image.inspectionFailure ?? image.materializationFailure);
+      }
+      snapshot.files.set(target, image);
+      captured.add(target);
     }
   }
   return {

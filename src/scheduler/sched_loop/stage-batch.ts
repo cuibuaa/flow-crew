@@ -8,7 +8,6 @@ import { recordRunEvent, recordStageOutcome } from '../../run-events.js';
 import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit } from '../sched_admission/configuration.js';
 import { detectParallelWriteConflicts, selectRunnableBatch } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
-import { admittedTerminalDurableScope } from '../sched_policy/terminal-ownership.js';
 import { createScopeBatchContext } from '../sched_scope/scope-batch.js';
 import { stageWithInheritedScope } from '../sched_scope/scope-revisions.js';
 import { readmitScopeContinuation, recordThrownStageAttempt, createStageSettlementBoundary } from '../sched_scope/stage-group.js';
@@ -99,7 +98,6 @@ export async function executeReadyBatch(
       while (true) {
         const boundary = createStageSettlementBoundary({ stage, selected: toRun, activeStageIds: activeScopeStageIds,
           projectDir, runId, context: ordinaryScopeContext,
-          terminalDurableScope: admittedTerminalDurableScope(runDirPath, stage.id, state.terminalStates),
         }, { monitorScopeRevisionRequests, reconcileCompletedStageAttempts });
         const item = await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, ordinaryScopeContext, skills, taskDescription, availableSkills, attemptDeadlineClockFactory, boundary, workflow.defaults);
         if (!item.result.suspended) return item;

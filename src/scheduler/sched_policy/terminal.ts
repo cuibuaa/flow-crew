@@ -14,8 +14,9 @@ import { evaluateResearchCeilingFloor } from '../../research-policy.js';
 import { log } from '../sched_admission/shared.js';
 import { recordRunEvent } from '../../run-events.js';
 import { runAllChecks } from '../../reality-gate/index.js';
+import { isStageInSkippedBranch, transitivelyDependsOn } from '../sched_admission/frontier.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
-import { lastAttributedStageWriteMs, admittedTerminalOwner, stageAttemptWroteProjectPath } from './terminal-ownership.js';
+import { lastAttributedStageWriteMs, admittedTerminalOwner, stageAttemptWroteProjectPath, terminalProductWrites } from './terminal-ownership.js';
 import { appendSchedulerGuidanceOnce, observeStableBlockage } from './guidance.js';
 import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
@@ -101,6 +102,7 @@ function terminalDagHasNoRemainingTransition(
       stageState.status === STAGE_STATUS.COMPLETE
       || stageState.status === STAGE_STATUS.FAILED
       || stageState.status === STAGE_STATUS.SKIPPED
+      || isStageInSkippedBranch(stageId, byId, state)
     ) {
       return true;
     }
@@ -459,6 +461,20 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           deferredReasons.push(`${terminalStatus}: required settlement is pending or rejected (${[...new Set([
             ...unresolved, ...unsettledGates.map((gate) => gate.id), ...failedWork, ...rejectedGates,
           ])].join(', ')})`);
+          continue;
+        }
+
+        // Authorized product changes still need an executed independent review.
+        // Settlement, not a prediction about optional DAG branches, proves it.
+        const productWrites = admittedOwner ? terminalProductWrites(ctx.runDirPath, state, admittedOwner) : [];
+        const byId = new Map(stages.map(stage => [stage.id, stage]));
+        const unreviewed = productWrites.filter(write => !gates.evaluations.some(gate => (
+          gate.status === STAGE_STATUS.COMPLETE && gate.effectiveVerdict?.pass === true
+          && transitivelyDependsOn(gate.id, admittedOwner!, byId)
+          && Date.parse(state.stages[gate.id]?.attempts?.at(-1)?.startedAt ?? state.stages[gate.id]?.startedAt ?? '') >= write.completedAt
+        )));
+        if (unreviewed.length > 0) {
+          deferredReasons.push(`${terminalStatus}: terminal producer ${admittedOwner} has unreviewed product writes (${[...new Set(unreviewed.map(write => write.path))].join(', ')})`);
           continue;
         }
 

@@ -147,7 +147,6 @@ describe('canonical criteria and atomic dispatch admission', () => {
     });
     expect(accepted.pass, accepted.errors.join('\n')).toBe(true);
     expect(accepted.terminalOwners).toEqual({ 'docs/final.md': 'finalize' });
-    expect(accepted.terminalValidationScopes).toEqual({ finalize: ['dist/**'] });
 
     const badOwner = stage({ ...work, scope: ['src/**', 'docs/final.md'] });
     const shared = inspectDispatchAdmission({
