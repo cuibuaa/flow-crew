@@ -78,28 +78,28 @@ describe('structural engine state protection', () => {
     expect(readFileSync(carrier, 'utf8')).toBe('trusted result');
   });
 
-  it('never restores corrupted disk backing as trusted engine state', async () => {
+  it('restores engine decisions from memory without creating rollback backing', async () => {
     const carrier = join(run, 'stage_watchdog.json');
     write(carrier, 'trusted state');
-    const capture = RollbackContentStore.prototype.capture;
-    let backing: string | undefined;
-    vi.spyOn(RollbackContentStore.prototype, 'capture').mockImplementation(function (source, logical) {
-      const captured = capture.call(this, source, logical);
-      if (source === carrier) backing = captured.backingPath;
-      return captured;
-    });
-    await voided(async () => {
-      expect(backing).toBeDefined();
-      writeFileSync(backing!, 'forged restoration');
-      writeFileSync(carrier, 'child edit');
-    });
-    expect(readFileSync(carrier, 'utf8')).not.toBe('forged restoration');
-    expect(existsSync(backing!)).toBe(false);
+    const capture = vi.spyOn(RollbackContentStore.prototype, 'capture');
+    await voided(async () => { writeFileSync(carrier, 'child edit'); });
+    expect(readFileSync(carrier, 'utf8')).toBe('trusted state');
+    expect(capture).not.toHaveBeenCalled();
+    expect(existsSync(join(run, '.rollback-preimages'))).toBe(false);
+  });
+
+  it('refuses a decision record carried by an unscanned rollback payload', async () => {
+    const payload = join(run, '.rollback-preimages', 'blob');
+    write(payload, 'counterfeit decision');
+    symlinkSync(payload, join(run, 'verdict_previous.json'));
+    let called = false;
+    await expect(withEngineIntegrity(input(), async () => { called = true; })).rejects.toThrow('engine record aliases rollback payload');
+    expect(called).toBe(false);
   });
 
   it.each(['run.json', 'events.jsonl', 'run-history.jsonl', 'run-history.v1.jsonl', 'workflow.yaml', 'validation_baseline.json',
     'validation_delta_review.json', 'verdict_review.json', 'summary.md', 'goal_met.json',
-    'approvals/decision.json', 'stages/work/status.json', 'stages/work/invocations/attempt/input.json.gz',
+    'rollback_change_journal.jsonl', 'approvals/decision.json', 'stages/work/status.json', 'stages/work/invocations/attempt/input.json.gz',
     'stage_evidence/review/verdict.json', 'dispatch.yaml', 'handoff_previous.md', 'scheduler.identity.json', 'scheduler.pid'])('voids a successful child overwriting %s', async local => {
     const path = join(run, local); write(path);
     await voided(() => command(`require('node:fs').writeFileSync(${JSON.stringify(path)},'counterfeit pass')`));
