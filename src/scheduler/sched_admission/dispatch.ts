@@ -15,7 +15,7 @@ import { discoverProjectValidation } from '../../project-validation.js';
 import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, EMITTED_RESEARCH_DECISIONS, raceAdmissionErrors } from './configuration.js';
 import { finiteStatusConditionDomainError, researchTerminalConditionExcludesContinue, assessTerminalConditionCoverage } from './condition-coverage.js';
 import { normalizedProjectPath, scopeMatchesProjectPath } from './scope-services.js';
-import { inspectStageGraph, parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
+import { inspectStageGraph, parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn, findScopeConflict } from './frontier.js';
 import { discoverConfiguredCommandScopes, configuredCommandRolesForStage } from './project-capabilities.js';
 import type { DeclaredInputScopeServices } from './scope-services.js';
 import type { DeclaredInputWriteBinding } from '../../scheduler.js';
@@ -151,6 +151,7 @@ export interface DispatchAdmissionReport {
   /** Closed planning-time relation between configured-command runners and generated outputs. */
   configuredCommandScopes?: string[];
   configuredCommandStageRoles?: Record<string, string[]>;
+  capabilityConflicts?: CapabilityAdmissionConflict[];
   /** Same candidate's structured check findings; no second refusal pipeline. */
   realityPreflight?: RealityCheckPreflightReport;
 }
@@ -239,6 +240,42 @@ export function stageScopeOwnsPath(stage: StageConfig, rawPath: string): boolean
   });
 }
 
+export interface CapabilityAdmissionConflict {
+  path: string;
+  reason: string;
+  conflictingStageId?: string;
+}
+
+/** One prospective ownership decision, shared by static and dispatched revisions. */
+export function inspectCapabilityAdmission(
+  input: {
+    stage: StageConfig;
+    paths: readonly string[];
+    activePeers: readonly StageConfig[];
+    declaredInputs: readonly DeclaredInputWriteBinding[];
+    projectDir: string;
+    research?: ResearchConfig;
+  },
+  firstDeclaredInputScopeConflict: DeclaredInputScopeServices['firstDeclaredInputScopeConflict'],
+): CapabilityAdmissionConflict[] {
+  const conflicts: CapabilityAdmissionConflict[] = [];
+  const manifest = input.research && normalizedProjectPath(resolveResearchPaths(input.research).manifestFile);
+  for (const path of input.paths) {
+    if (manifest && scopeMatchesProjectPath(parseDeclaredScope(path), manifest)) {
+      conflicts.push({ path, reason: `requested capability contains framework-owned research manifest ${manifest}, which the scheduler rewrites between rounds` });
+    }
+    const preservedInput = firstDeclaredInputScopeConflict([path], input.declaredInputs, input.projectDir);
+    if (preservedInput) conflicts.push({ path, reason: `requested write capability ${JSON.stringify(preservedInput.scope)} overlaps declared read-only input ${preservedInput.inputPath} (${preservedInput.inputKind}, ${preservedInput.comparison})` });
+    for (const peer of input.activePeers) {
+      for (const peerScope of peer.scope ?? [undefined]) {
+        const conflict = findScopeConflict({ ...input.stage, scope: [...(input.stage.scope ?? []), path] }, { ...peer, scope: peerScope === undefined ? undefined : [peerScope] });
+        if (conflict) conflicts.push({ path, reason: `scope revision conflicts with running peer ${peer.id}: ${conflict.reason}`, conflictingStageId: peer.id });
+      }
+    }
+  }
+  return conflicts;
+}
+
 export function createDispatchAdmission(firstDeclaredInputScopeConflict: DeclaredInputScopeServices['firstDeclaredInputScopeConflict']) {
   return (function inspectDispatchAdmission(input: {
     dispatched: StageConfig[];
@@ -251,16 +288,27 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
     declaredInputs?: readonly DeclaredInputWriteBinding[];
     projectDir?: string;
     runDir?: string;
+    scopeRevision?: { stageId: string; paths: string[]; priorScope: string[]; activePeers: StageConfig[] };
   }): DispatchAdmissionReport {
     const errors: string[] = [];
-    const warnings = parallelScopeAdmissionWarnings(input.dispatched);
     const all = [...input.baseStages, ...input.dispatched];
-    const byId = new Map(all.map((stage) => [stage.id, stage]));
-    errors.push(...inspectArtifactDeclarations({
-      stages: all,
-      projectDir: input.projectDir,
-      runDir: input.runDir,
-    }));
+    const byId = new Map(all.map(stage => [stage.id, stage]));
+    const revision = input.scopeRevision;
+    const revisionStage = revision && byId.get(revision.stageId);
+    const capabilityConflicts = revision && revisionStage && input.projectDir
+      ? inspectCapabilityAdmission({ stage: { ...revisionStage, scope: revision.priorScope }, paths: revision.paths,
+        activePeers: revision.activePeers, declaredInputs: input.declaredInputs ?? [],
+        projectDir: input.projectDir, research: input.research }, firstDeclaredInputScopeConflict)
+      : [];
+    if (revision && revisionStage) {
+      const rejected = new Set(capabilityConflicts.map(conflict => conflict.path));
+      revisionStage.scope = [...new Set([...revision.priorScope, ...revision.paths.filter(path => !rejected.has(path))])];
+      if (revision.paths.every(path => rejected.has(path))) {
+        errors.push(...capabilityConflicts.map(conflict => `${conflict.path}: ${conflict.reason}`));
+      }
+    }
+    const warnings = parallelScopeAdmissionWarnings(input.dispatched);
+    errors.push(...inspectArtifactDeclarations({ stages: all, projectDir: input.projectDir, runDir: input.runDir }));
     errors.push(...inspectStageGraph(all).errors);
     const frameworkReservedScopes = new Map<string, string[]>();
     const frameworkManifest = input.research
@@ -307,7 +355,7 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
         const parsed = parseDeclaredScope(scope);
         if (parsed.kind === 'unknown') errors.push(`${stage.id}.scope.${index}: ${parsed.reason}`);
       }
-      if (frameworkManifest && stageScopeOwnsPath(stage, frameworkManifest)) {
+      if (stage.id !== revision?.stageId && frameworkManifest && stageScopeOwnsPath(stage, frameworkManifest)) {
         const matchingScopes = (stage.scope ?? []).filter((rawScope) => (
           scopeMatchesProjectPath(parseDeclaredScope(rawScope), frameworkManifest)
         ));
@@ -510,6 +558,7 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       errors,
       warnings,
       terminalOwners,
+      ...(revision ? { capabilityConflicts } : {}),
       terminalValidationScopes: Object.fromEntries(
         [...terminalValidationScopeSets].map(([ownerId, scopes]) => [ownerId, [...scopes]]),
       ),

@@ -56,8 +56,7 @@ export function listProjectFilesAt(projectDir: string, rawRoot: string, followRo
   return listProjectFiles(absoluteRoot, options).map((path) => `${root}/${path}`);
 }
 
-/** A request already contained by a stable declared tree is a no-op, not a
- * new capability whose generated literal must retain an unchanged preimage. */
+/** A request already contained by an admitted tree is a no-op and needs no new preimage. */
 export function scopeRequestAlreadyAuthorized(
   requested: ParsedScope,
   priorScopes: readonly ParsedScope[],
