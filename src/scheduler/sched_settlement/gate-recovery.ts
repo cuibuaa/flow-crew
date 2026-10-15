@@ -4,7 +4,7 @@ import { recordRunEvent } from '../../run-events.js';
 import { GateVerdict, RUN_STATUS, ResearchConfig, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir, stageDir, writeRunState } from '../../store.js';
 import { RESEARCH_DECISION_STATUS_ALIASES, StageConfig } from '../sched_admission/configuration.js';
 import { DispatchAdmissionReport, stageScopeOwnsPath } from '../sched_admission/dispatch.js';
-import { transitivelyDependsOn } from '../sched_admission/frontier.js';
+import { isStageInSkippedBranch, transitivelyDependsOn } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
 import { appendSchedulerGuidanceOnce } from '../sched_policy/guidance.js';
 import { createHash } from 'node:crypto';
@@ -177,7 +177,8 @@ export function gateRetryDiagnosticSnapshot(
 }
 
 export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): GateRuntimeFacts {
-  const gateStages = uniqueGateStages(allStages);
+  const stagesById = new Map(allStages.map(stage => [stage.id, stage]));
+  const gateStages = uniqueGateStages(allStages).filter(stage => !isStageInSkippedBranch(stage.id, stagesById, state));
   if (gateStages.length === 0) {
     return { allPass: true, failedGateIds: [], rejectedGateIds: [], contractRefusals: [], evaluations: [] };
   }
@@ -191,7 +192,7 @@ export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreSt
     const gateStatus = state.stages[g.id]?.status;
     const validation = gateStatus === STAGE_STATUS.FAILED && runId ? gateValidationRefusal(projectDir, runId, g.id) : undefined;
     // A gate only passes after it completed and wrote an explicit pass verdict.
-    // Pending/running/skipped/missing gates must block run completion.
+    // Pending/running/skipped/missing gates in executable branches block completion.
     if (gateStatus !== STAGE_STATUS.COMPLETE && !validation?.repairability) {
       failedGateIds.push(g.id);
       evaluations.push({
@@ -481,7 +482,7 @@ export function lastGatePassed(state: StoreState, dispatchedStageIds: string[], 
   // If there are is_gate stages, use verdict-based checking
   const gateStages = allStages.filter(s => s.is_gate && dispatchedStageIds.includes(s.id));
   if (gateStages.length > 0 && projectDir) {
-    const { allPass } = checkGates(gateStages, state, projectDir, runId);
+    const { allPass } = checkGates(allStages, state, projectDir, runId);
     return allPass;
   }
 

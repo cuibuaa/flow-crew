@@ -8,7 +8,7 @@ import { log } from "../sched_admission/shared.js";
 import { type RunResult } from '../../adapters/base.js';
 import { type LiveConstraintGuardFactory } from "../../live-constraint-guard.js";
 import { type StageConfig } from "../sched_admission/configuration.js";
-import { detectParallelWriteConflicts, selectRunnableBatch } from "../sched_admission/frontier.js";
+import { detectParallelWriteConflicts, isStageInSkippedBranch, selectRunnableBatch } from "../sched_admission/frontier.js";
 import { type RepairRoundSnapshot } from './snapshots.js';
 import { type ScopeBatchContext, createScopeBatchContext } from './scope-batch.js';
 import { acceptedInheritedScope, stageWithInheritedScope } from './scope-revisions.js';
@@ -17,11 +17,13 @@ import { type createScopeRevisionMonitor } from './revision-monitor.js';
 import { type createLiveGuardFactory } from './write-enforcement.js';
 import { type createScopeReconciler } from './reconciliation.js';
 
-export function allDone(state: StoreState): boolean {
-  return Object.values(state.stages).every(
+export function allDone(state: StoreState, stages: StageConfig[]): boolean {
+  const stagesById = new Map(stages.map(stage => [stage.id, stage]));
+  return Object.entries(state.stages).every(
     // A skip is a terminal disposition for whole-DAG settlement, but it is not
     // successful production and therefore cannot satisfy a dependency.
-    (s) => s.status === STAGE_STATUS.COMPLETE || s.status === STAGE_STATUS.SKIPPED,
+    ([id, s]) => s.status === STAGE_STATUS.COMPLETE || s.status === STAGE_STATUS.SKIPPED
+      || isStageInSkippedBranch(id, stagesById, state),
   );
 }
 
