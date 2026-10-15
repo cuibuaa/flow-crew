@@ -17,7 +17,7 @@ export interface EngineDefaults {
    * exceed the slowest of them under whatever else the machine is doing. See
    * defaults.yaml. */
   validation_timeout_ms: number;
-  /** Regenerated-tool output ignored by the live guard only when untracked. */
+  /** Untracked tool output excluded from input content and write enforcement. */
   live_constraint_exempt_patterns: string[];
   /** Portable full-tree reconciliation cadence when recursive watching is unavailable. */
   live_constraint_fallback_scan_ms: number;

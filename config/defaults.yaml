@@ -15,8 +15,8 @@ default_stage_idle_timeout_ms: 600000
 # load.
 default_validation_timeout_ms: 2700000
 
-# Regenerated tool caches are outside the project-write contract only while
-# untracked. A matching path present in Git's index is always guarded.
+# Untracked tool caches are outside input content and the project-write contract.
+# A matching path present in Git's index is always guarded.
 live_constraint_exempt_patterns:
   - "**/__pycache__/**"
   - "**/*.pyc"

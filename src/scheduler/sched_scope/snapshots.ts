@@ -44,9 +44,10 @@ export interface RepairRoundSnapshot {
 export function changedProjectPathsSinceSnapshot(
   snapshot: RepairRoundSnapshot,
   projectDir: string,
+  additionalPaths: readonly string[] = [],
 ): string[] {
   const baseline = snapshot.rollbackBaseline;
-  return snapshotCandidatePaths(snapshot, projectDir).filter((path) => {
+  return [...new Set([...snapshotCandidatePaths(snapshot, projectDir), ...additionalPaths])].filter((path) => {
     const before = snapshot.files.get(path) ?? baselineImage(baseline, path);
     const after = readRollbackCurrentImage(baseline, projectDir, path, before);
     return compareRepairFileContents(before, after) === 'different';

@@ -463,6 +463,8 @@ export function matchesLiveConstraintExemptPattern(path: string, pattern: string
   return compiled.test(normalizedPath);
 }
 
+/** Shared content boundary for setup, live preservation and settlement.
+ * Git-tracked content always wins over configured tool-cache exemptions. */
 export function isLiveConstraintExemptPath(
   path: string,
   patterns: readonly string[],

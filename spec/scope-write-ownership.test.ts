@@ -75,6 +75,79 @@ async function scan(context: ScopeBatchContext, writer: ReturnType<typeof stage>
 }
 
 describe('observed existence owns dependency comparison', () => {
+  it.each([
+    { boundary: 'live', attributed: true }, { boundary: 'live', attributed: false },
+    { boundary: 'settlement', attributed: true }, { boundary: 'settlement', attributed: false },
+  ])('uses the shared cache rule during $boundary (attributed=$attributed)', async ({ boundary, attributed }) => {
+    const source = 'tools/parity/module.py';
+    const trackedCache = 'tools/parity/__pycache__/tracked.pyc';
+    const cache = 'tools/parity/__pycache__/module.pyc';
+    const ignoredData = 'tools/parity/data/frozen.csv';
+    const omittedData = 'tools/parity/.venv/evidence.csv';
+    const newData = 'tools/parity/.venv/added.csv';
+    write('.gitignore', '**/__pycache__/\n**/data/\n**/.venv/\n');
+    write(source, 'VALUE = 1\n');
+    write(trackedCache, 'authored cache fixture\n');
+    commitFixture(true);
+    write(ignoredData, 'id\n1\n');
+    write(omittedData, 'id\n2\n');
+    const writer = stage('writer', ['**']);
+    const created = createRun(project, 'input-preservation', '', [writer.id]);
+    runPath = created.runDirPath;
+    writeFileSync(join(runPath, 'task_brief.md'), '---\ninputs: [tools/parity]\n---\n# Goal\nRead the Python source.\n');
+    const context = createScopeBatchContext(project, [writer], undefined, created.runId);
+    beginStageAttempt(project, created.runId, writer.id, 0);
+    const originals = new Map([
+      [source, 'VALUE = 1\n'], [trackedCache, 'authored cache fixture\n'],
+      [ignoredData, 'id\n1\n'], [omittedData, 'id\n2\n'],
+    ]);
+    write(cache, 'interpreter output\n');
+    for (const path of originals.keys()) write(path, 'real edit\n');
+    write(newData, 'new data member\n');
+    const protectedPaths = [...originals.keys(), newData];
+    const writes = [cache, ...protectedPaths];
+    if (boundary === 'live') {
+      const { result, aborts } = await scan(context, writer, created.runId, writes, attributed);
+      if (attributed) expect(result.exemptedPaths).toContain(cache);
+      expect(result.incidents.map(incident => incident.path).sort()).toEqual(protectedPaths.sort());
+      expect(result.incidents.every(incident => incident.restored)).toBe(true);
+      expect(aborts.length).toBeGreaterThan(0);
+    } else {
+      completeStageAttempt(project, created.runId, writer.id, 0, {
+        exitCode: 0, duration_ms: 1, writes: attributed ? writes : [],
+        writeAttribution: attributed ? 'structured' : 'unknown',
+      });
+      const reconciled = createScopeReconciler().reconcileStageScope({
+        stage: writer, projectDir: project, runId: created.runId, context, attemptIndex: 1,
+      });
+      expect(reconciled.violation).toBe(attributed);
+      const audit = JSON.parse(readFileSync(join(runPath, reconciled.status.attempts![0].constraintAudit!.path), 'utf8'));
+      if (attributed) expect(audit.exemptedWrites).toContain(cache);
+      expect(audit.rolledBackWrites.sort()).toEqual(protectedPaths.sort());
+      expect(audit.rollbackFailures).toEqual([]);
+    }
+    expect(readFileSync(join(project, cache), 'utf8')).toBe('interpreter output\n');
+    for (const [path, contents] of originals) expect(readFileSync(join(project, path), 'utf8')).toBe(contents);
+    expect(() => readFileSync(join(project, newData), 'utf8')).toThrow();
+  });
+
+  it('preserves tracked cache content reached through a declared directory alias', async () => {
+    const path = 'tools/parity/__pycache__/nested/evidence.pyc';
+    write(path, 'authored bytes\n');
+    commitFixture();
+    symlinkSync('tools/parity', join(project, 'input-alias'), 'dir');
+    const writer = stage('writer', ['**']);
+    const created = createRun(project, 'input-alias-preservation', '', [writer.id]);
+    runPath = created.runDirPath;
+    writeFileSync(join(runPath, 'task_brief.md'), '---\ninputs: [input-alias]\n---\n# Goal\nPreserve the source.\n');
+    const context = createScopeBatchContext(project, [writer], undefined, created.runId);
+    beginStageAttempt(project, created.runId, writer.id, 0);
+    write('input-alias/__pycache__/nested/evidence.pyc', 'real edit\n');
+    const { result } = await scan(context, writer, created.runId, ['input-alias/__pycache__/nested/evidence.pyc'], false);
+    expect(result.incidents).toContainEqual(expect.objectContaining({ path, restored: true }));
+    expect(readFileSync(join(project, path), 'utf8')).toBe('authored bytes\n');
+  });
+
   it.each([false, true])('keeps a declared output inside a preserved input writable at live and settlement boundaries (existing=%s)', async existing => {
     const output = 'fixtures/source/report.md';
     const evidence = 'fixtures/source/evidence.txt';

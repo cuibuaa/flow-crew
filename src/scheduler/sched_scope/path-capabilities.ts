@@ -10,14 +10,14 @@ export const REPAIR_DIFF_SKIP_DIRS = ROLLBACK_INVENTORY_EXCLUDED_DIRECTORIES;
 
 export function listProjectFiles(
   projectDir: string,
-  options: { skipDirectory?: (relativePath: string) => boolean } = {},
+  options: { skipDirectory?: (relativePath: string) => boolean; complete?: boolean } = {},
 ): string[] {
   const files: string[] = [];
   const walk = (dir: string, prefix: string): void => {
     let names: string[];
-    try { names = readdirSync(dir); } catch { return; }
+    try { names = readdirSync(dir); } catch (error) { if (options.complete) throw error; return; }
     for (const name of names) {
-      if (REPAIR_DIFF_SKIP_DIRS.has(name)) continue;
+      if (!options.complete && REPAIR_DIFF_SKIP_DIRS.has(name)) continue;
       const absolute = join(dir, name);
       const relative = prefix ? `${prefix}/${name}` : name;
       try {
@@ -27,14 +27,15 @@ export function listProjectFiles(
           if (!options.skipDirectory?.(relative)) walk(absolute, relative);
         }
         else if (stat.isFile()) files.push(relative);
-      } catch { /* file changed while being enumerated */ }
+      } catch (error) { if (options.complete) throw error; /* file changed while being enumerated */ }
     }
   };
   walk(projectDir, '');
   return files.sort();
 }
 
-export function listProjectFilesAt(projectDir: string, rawRoot: string, followRootAlias = false): string[] {
+export function listProjectFilesAt(projectDir: string, rawRoot: string, followRootAlias = false,
+  options: Parameters<typeof listProjectFiles>[1] = {}): string[] {
   const root = normalizedProjectContentPath(rawRoot);
   if (!root) return [];
   const absoluteRoot = join(projectDir, root);
@@ -42,16 +43,17 @@ export function listProjectFilesAt(projectDir: string, rawRoot: string, followRo
     const stat = lstatSync(absoluteRoot);
     if (stat.isSymbolicLink()) {
       try {
-        if (followRootAlias && statSync(absoluteRoot).isDirectory()) return [root, ...listProjectFiles(absoluteRoot).map(path => `${root}/${path}`)];
-      } catch { /* retain a dangling alias as a leaf */ }
+        if (followRootAlias && statSync(absoluteRoot).isDirectory()) return [root, ...listProjectFiles(absoluteRoot, options).map(path => `${root}/${path}`)];
+      } catch (error) { if (options.complete) throw error; /* retain a dangling alias as a leaf */ }
       return [root];
     }
     if (stat.isFile()) return [root];
     if (!stat.isDirectory()) return [];
-  } catch {
+  } catch (error) {
+    if (options.complete && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     return [];
   }
-  return listProjectFiles(absoluteRoot).map((path) => `${root}/${path}`);
+  return listProjectFiles(absoluteRoot, options).map((path) => `${root}/${path}`);
 }
 
 /** A request already contained by a stable declared tree is a no-op, not a

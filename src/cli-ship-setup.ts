@@ -34,6 +34,7 @@ import { loadEngineDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
 import { withEngineIntegrity } from './engine-integrity.js';
+import { isLiveConstraintExemptDirectory, isLiveConstraintExemptPath } from './live-constraint-guard.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -753,20 +754,34 @@ interface DeclaredInputSnapshotRoot {
   location: DeclaredInputSnapshotSummary['location'];
   verification: BriefInputVerification;
   rootDir: string;
+  trackedPaths?: ReadonlySet<string>;
+}
+
+async function declaredInputTrackedPaths(rootDir: string, git: GitCommandRunner): Promise<ReadonlySet<string> | undefined> {
+  const result = await git({ command: 'git', args: ['ls-files', '-z', '--cached'], cwd: rootDir });
+  // Without an index inventory, retain every member rather than exempting a
+  // potentially tracked file. Freeze the inventory before validation can run.
+  return result.exitCode === 0 ? new Set((result.stdout ?? '').split('\0').filter(Boolean)) : undefined;
 }
 
 function fingerprintDeclaredInputTree(
   rootPath: string,
   fs: ShipSetupFileSystem,
+  root: DeclaredInputSnapshotRoot,
 ): { digest: string; entryCount: number } {
   const records: InputTreeRecord[] = [];
   const activeDirectories = new Set<string>();
   const rootCanonical = fs.realpath(rootPath);
+  const patterns = loadEngineDefaults().live_constraint_exempt_patterns;
   const visit = (entryPath: string, displayPath: string): void => {
+    const lexicalStat = fs.lstat ? fs.lstat(entryPath) : fs.stat(entryPath);
+    const projectPath = relative(root.rootDir, entryPath).split(sep).join('/');
+    if (root.trackedPaths && (lexicalStat.isDirectory()
+      ? isLiveConstraintExemptDirectory(projectPath, patterns, root.trackedPaths)
+      : isLiveConstraintExemptPath(projectPath, patterns, root.trackedPaths))) return;
     if (!within(rootCanonical, fs.realpath(entryPath))) {
       throw new Error('Input member resolves outside the declared root');
     }
-    const lexicalStat = fs.lstat ? fs.lstat(entryPath) : fs.stat(entryPath);
     const symbolicLink = lexicalStat.isSymbolicLink?.() === true;
     if (symbolicLink) {
       records.push({
@@ -811,18 +826,13 @@ function captureDeclaredInputSnapshot(
   roots: DeclaredInputSnapshotRoot[],
   fs: ShipSetupFileSystem,
 ): DeclaredInputSnapshotSummary[] {
-  const fingerprints = new Map<string, { digest: string; entryCount: number }>();
   return roots.flatMap((root) => root.verification.inputs
     .filter((input) => root.location !== 'source' || input.sourceExists !== false)
     .map((input): DeclaredInputSnapshotSummary => {
       const lexicalPath = resolve(root.rootDir, input.path);
       try {
         const resolvedPath = fs.realpath(lexicalPath);
-        let fingerprint = fingerprints.get(resolvedPath);
-        if (!fingerprint) {
-          fingerprint = fingerprintDeclaredInputTree(resolvedPath, fs);
-          fingerprints.set(resolvedPath, fingerprint);
-        }
+        const fingerprint = fingerprintDeclaredInputTree(resolvedPath, fs, root);
         return {
           location: root.location,
           path: input.path,
@@ -1197,6 +1207,7 @@ function reconcileInputs(
   projectDir: string,
   targetDir: string,
   fs: ShipSetupFileSystem,
+  trackedPaths?: ReadonlySet<string>,
 ): { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] } {
   const links: ShipSetupLink[] = [];
   const copies: ShipSetupCopy[] = [];
@@ -1205,6 +1216,17 @@ function reconcileInputs(
   const normalizedInputPath = (sourcePath: string): string => relative(projectDir, sourcePath)
     .split(sep)
     .join('/');
+  const patterns = loadEngineDefaults().live_constraint_exempt_patterns;
+  const exempt = (sourcePath: string, directory: boolean): boolean => {
+    if (!trackedPaths) return false;
+    const path = normalizedInputPath(sourcePath);
+    if (directory) {
+      return isLiveConstraintExemptDirectory(path, patterns, trackedPaths)
+        && isLiveConstraintExemptDirectory(normalizedInputPath(fs.realpath(sourcePath)), patterns, trackedPaths);
+    }
+    return isLiveConstraintExemptPath(path, patterns, trackedPaths)
+      && !trackedPaths.has(normalizedInputPath(fs.realpath(sourcePath)));
+  };
   const addBlocker = (sourcePath: string, reason: string): void => {
     blockers.push({ phase: 'target', input: normalizedInputPath(sourcePath), reason });
   };
@@ -1235,11 +1257,13 @@ function reconcileInputs(
       return;
     }
     fs.copyFile(source, target);
-    const sourceBytes = Buffer.from(fs.readBytes(source));
-    const targetBytes = Buffer.from(fs.readBytes(target));
-    if (!sourceBytes.equals(targetBytes)) {
-      addBlocker(source, 'Copied target descendant does not match the declared source bytes');
-      return;
+    if (!exempt(source, false)) {
+      const sourceBytes = Buffer.from(fs.readBytes(source));
+      const targetBytes = Buffer.from(fs.readBytes(target));
+      if (!sourceBytes.equals(targetBytes)) {
+        addBlocker(source, 'Copied target descendant does not match the declared source bytes');
+        return;
+      }
     }
     copies.push({ path: normalizedInputPath(source), source, target });
   };
@@ -1262,6 +1286,7 @@ function reconcileInputs(
       const source = join(sourceDirectory, name);
       const target = join(targetDirectory, name);
       try {
+        if (exempt(source, (fs.lstat ? fs.lstat(source) : fs.stat(source)).isDirectory())) continue;
         if (!fs.exists(source) || !fs.readable(source)) {
           addBlocker(source, 'Source descendant is missing or unreadable');
           continue;
@@ -1407,7 +1432,7 @@ function reconcileInputs(
       }
       if (sourceDirectory) {
         reconcileExistingDirectory(source, target, sourceCanonical, target, new Set([sourceCanonical]));
-      } else {
+      } else if (!exempt(source, false)) {
         const sourceBytes = Buffer.from(fs.readBytes(source));
         const targetBytes = Buffer.from(fs.readBytes(target));
         if (!sourceBytes.equals(targetBytes)) {
@@ -2089,8 +2114,14 @@ export async function runShipSetup(
   // A copy must bind one stable source tree, not assemble leaves observed
   // across a source mutation. Reuse the existing content/member snapshot rule.
   const sourceInputRoots: DeclaredInputSnapshotRoot[] = [
-    { location: 'source', verification: sourceVerification, rootDir: projectDir },
+    { location: 'source', verification: sourceVerification, rootDir: projectDir,
+      trackedPaths: sourceVerification.inputs.length ? await declaredInputTrackedPaths(projectDir, deps.runGitCommand) : undefined },
   ];
+  const targetTrackedPaths = sourceVerification.inputs.length
+    ? await declaredInputTrackedPaths(targetDir, deps.runGitCommand) : undefined;
+  // A member tracked on either side remains authored content during copying.
+  const materializationTrackedPaths = sourceInputRoots[0].trackedPaths && targetTrackedPaths
+    ? new Set([...sourceInputRoots[0].trackedPaths, ...targetTrackedPaths]) : undefined;
   const materializationBefore = captureDeclaredInputSnapshot(sourceInputRoots, deps.fs);
   const unavailableSource = initialDeclaredInputSnapshotCheck('input_materialization', materializationBefore);
   if (unavailableSource) {
@@ -2099,7 +2130,7 @@ export async function runShipSetup(
   }
   let reconciled: { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] };
   try {
-    reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs);
+    reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs, materializationTrackedPaths);
   } catch (error) {
     return refuse([{ phase: 'target', reason: `Cannot inspect target worktree: ${errorMessage(error)}` }]);
   }
@@ -2128,13 +2159,11 @@ export async function runShipSetup(
     })));
   }
 
-  const sourceAndTargetInputRoots: DeclaredInputSnapshotRoot[] = [
-    { location: 'source', verification: sourceVerification, rootDir: projectDir },
-    { location: 'target', verification: targetVerification, rootDir: targetDir },
-  ];
   const targetInputRoots: DeclaredInputSnapshotRoot[] = [
-    { location: 'target', verification: targetVerification, rootDir: targetDir },
+    { location: 'target', verification: targetVerification, rootDir: targetDir,
+      trackedPaths: targetTrackedPaths },
   ];
+  const sourceAndTargetInputRoots = [...sourceInputRoots, ...targetInputRoots];
   const baselineInputSnapshot = captureDeclaredInputSnapshot(targetInputRoots, deps.fs);
   const initialBaselineSnapshotCheck = initialDeclaredInputSnapshotCheck(
     'target_validation_baseline',

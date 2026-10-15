@@ -35,7 +35,9 @@ export function createScopeReconciler() {
     const liveIncidents = readLiveConstraintIncidents(runDirPath, input.stage.id, attempt.index);
     const liveWriteIncidents = liveIncidents.filter((incident) => incident.changeObserved !== false);
     const attributedWrites = attempt.writes ?? [];
-    const schedulerObservedWrites = changedProjectPathsSinceSnapshot(input.context.snapshot, input.projectDir);
+    const schedulerObservedWrites = changedProjectPathsSinceSnapshot(
+      input.context.snapshot, input.projectDir, input.context.inputContentPaths(),
+    );
     const canonicalAttributedWrites = attributedWrites.map((rawPath) => {
       const normalized = normalizedProjectPath(rawPath);
       return normalized

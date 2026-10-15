@@ -89,9 +89,9 @@ export function enforceStageScopeWrites(input: {
       && current.mode !== undefined
       && before.mode !== current.mode;
     const changed = contentChanged || attributedModeChange || attributedUncomparableWrite;
-    const generated = !readOnly && (ignored.has(normalized) || isLiveConstraintExemptPath(
+    const generated = (!readOnly && ignored.has(normalized)) || isLiveConstraintExemptPath(
       normalized, input.exemptPatterns ?? [], input.snapshot.rollbackBaseline.trackedPaths,
-    ));
+    );
     if (generated) {
       exemptedWrites.push(normalized);
       continue;
@@ -229,6 +229,7 @@ export function createLiveGuardFactory() {
             candidates.add(path);
           };
           for (const path of definiteWrites) addCandidate(path);
+          for (const path of input.context.inputContentPaths()) addCandidate(path);
           const fullReconciliation = trigger === 'fallback' || trigger === 'phase_boundary';
           if (fullReconciliation) {
             for (const path of listProjectFiles(input.projectDir, {
@@ -267,8 +268,9 @@ export function createLiveGuardFactory() {
           const ignored = ignoredGeneratedPaths(input.projectDir, [...candidates]);
           const nominated = new Set([...candidatePaths, ...definiteWrites]);
           for (const path of [...candidates].sort()) {
-            if (!firstDeclaredInputScopeConflict([path], input.context.declaredInputs, input.projectDir)
-                && (ignored.has(path) || isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths))) {
+            if (isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths)
+                || (!firstDeclaredInputScopeConflict([path], input.context.declaredInputs, input.projectDir)
+                  && ignored.has(path))) {
               exemptedPaths.add(path);
               if (nominated.has(path)) validationGeneratedPaths.add(path);
               continue;
