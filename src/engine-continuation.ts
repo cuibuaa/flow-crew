@@ -77,34 +77,48 @@ export function assertContinuationCompatible(projectDir: string, runId: string):
         if (checkpoint || existsSync(join(runDir(projectDir, runId), 'stages', id, 'status.json'))) errors.push(`missing stage projection for ${id}; admitted execution state must not be reset`);
         continue;
       }
-      if (!Object.values(STAGE_STATUS).includes(stage.status)
-          || !Number.isSafeInteger(stage.retries) || stage.retries < 0) errors.push(`invalid stage projection ${id}`);
+      if (!Number.isSafeInteger(stage.retries) || stage.retries < 0) errors.push(`invalid stage projection ${id}`);
       const ledgerExists = existsSync(join(runDir(projectDir, runId), 'stages', id, 'status.json'));
       const ledger = ledgerExists ? readStageStatus(projectDir, runId, id) : undefined;
       if (ledger) ledgers.set(id, digest(ledger));
       const attempts = stage.attempts ?? [];
-      // The old cancellation changed only running -> failed in the projection.
-      // Compare the entire retained record so no other disagreement is repaired.
-      if (state.status === RUN_STATUS.STOPPED && state.failureReason === 'Cancelled by user'
-          && Number.isFinite(Date.parse(state.completedAt ?? '')) && stage.status === STAGE_STATUS.FAILED
-          && ['running', 'closed'].includes(attempts.at(-1)?.status ?? '')
-          && attempts.slice(0, -1).every(attempt => [STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED, 'suspended'].includes(attempt.status))
-          && ledger && (digest({ ...stage, status: STAGE_STATUS.RUNNING }) === digest(ledger)
-            // A split publication may already have written exactly this settlement.
-            || digest(interruptedStageStatus(stage, state.completedAt!, 'CANCELLED_INTERRUPTED: Cancelled by user')) === digest(ledger))) {
-        if (Date.parse(state.completedAt!) < Date.parse(attempts.at(-1)!.startedAt)) errors.push(`invalid cancellation timing in ${id}`);
-        stage = interruptedStageStatus(stage, state.completedAt!, 'CANCELLED_INTERRUPTED: Cancelled by user');
-        settlements.push(id);
+      const settled = (status: string) => ['complete', 'failed', 'suspended'].includes(status);
+      const unsettled = (record: typeof stage) => record.status === STAGE_STATUS.RUNNING
+        || (record.attempts ?? []).some(attempt => !settled(attempt.status));
+      // Either carrier can retain interrupted work. Only positive owner death
+      // evidence allows admission to treat it as stopped; projection settlement
+      // is published under the run lock after every compatibility check passes.
+      if (unsettled(stage) || (ledger && unsettled(ledger))) {
+        if (state.status !== RUN_STATUS.STOPPED || state.failureReason !== 'Cancelled by user'
+            || !Number.isFinite(Date.parse(state.completedAt ?? ''))) {
+          errors.push(`unsettled attempt in ${id}; restart recovery is required`);
+        } else {
+          assertCancelledOwnerAbsent(state, projectDir, runId);
+          if (unsettled(stage)) {
+            if (Date.parse(state.completedAt!) < Date.parse(attempts.at(-1)?.startedAt ?? '')) errors.push(`invalid cancellation timing in ${id}`);
+            stage = interruptedStageStatus(stage, state.completedAt!, 'CANCELLED_INTERRUPTED: Cancelled by user');
+            settlements.push(id);
+            if (unsettled(stage)) errors.push(`unsettled attempt in ${id}; restart recovery is required`);
+          }
+        }
       }
-      const checkedAttempts = stage.attempts ?? [];
-      if (stage.status === STAGE_STATUS.RUNNING || checkedAttempts.some(attempt => ![STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED, 'suspended'].includes(attempt.status))) errors.push(`unsettled attempt in ${id}; restart recovery is required`);
-      if (attempts.some((attempt, index) => attempt.index !== index + 1 || !Number.isFinite(Date.parse(attempt.startedAt)))) errors.push(`invalid attempt history in ${id}`);
-      if (attempts.length || existsSync(join(runDir(projectDir, runId), 'stages', id, 'status.json'))) {
-        const checkedLedger = settlements.includes(id) ? stage : ledger!;
-        // The existing iteration driver can repend a projection while its
-        // ledger still describes the preceding settled execution. Its immutable
-        // attempts and retry counter must still agree; pending is not success.
-        if ((checkedLedger.status !== stage.status && stage.status !== STAGE_STATUS.PENDING) || checkedLedger.retries !== stage.retries || digest(checkedLedger.attempts ?? []) !== digest(checkedAttempts)) errors.push(`stage projection and attempt ledger disagree for ${id}`);
+      for (const record of [state.stages[id], ...(ledgerExists ? [ledger!] : [])]) {
+        if (!record || !Object.values(STAGE_STATUS).includes(record.status)) {
+          errors.push(`invalid stage record ${id}`);
+          continue;
+        }
+        if ((record.attempts ?? []).some((attempt, index) => attempt.index !== index + 1
+            || !['running', 'closed', 'complete', 'failed', 'suspended'].includes(attempt.status)
+            || !Number.isFinite(Date.parse(attempt.startedAt)))) errors.push(`invalid attempt history in ${id}`);
+      }
+      if (attempts.length && !ledger) errors.push(`missing attempt ledger for ${id}`);
+      // Repend resets projection status and retry budgets without erasing work.
+      // Refuse only settled execution outcomes missing from the projection, not
+      // incidental counters, timing, usage, or the stage's scheduling status.
+      if (ledger?.attempts?.some(attempt => settled(attempt.status)
+          && !stage.attempts?.some(projected => projected.index === attempt.index
+            && projected.status === attempt.status && projected.exitCode === attempt.exitCode))) {
+        errors.push(`attempt ledger is ahead of stage projection for ${id}`);
       }
     }
     if (errors.length) throw new Error(errors.join('; '));

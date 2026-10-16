@@ -84,7 +84,7 @@ it.each([false, true])('settles old cancellation and executes only a new work at
 });
 
 it.each(['live controller', 'unknown controller identity', 'malformed controller identity', 'live scheduler', 'unverifiable scheduler', 'missing ownership', 'missing command groups',
-  'unknown race consumers', 'wrong cancellation', 'not stopped', 'retry disagreement', 'attempt disagreement', 'other stage disagreement', 'invalid budget', 'invalid timing'] as const)(
+  'unknown race consumers', 'wrong cancellation', 'not stopped', 'attempt disagreement', 'invalid budget', 'invalid timing', 'missing completion time', 'invalid completion time'] as const)(
   'refuses %s without changing either execution record', kind => {
     const created = cancelled(false, state => {
       const checkpoint = state.engineCheckpoint!;
@@ -95,11 +95,11 @@ it.each(['live controller', 'unknown controller identity', 'malformed controller
       if (kind === 'missing command groups') checkpoint.processes = undefined;
       if (kind === 'wrong cancellation') state.failureReason = 'Independent rejection';
       if (kind === 'not stopped') state.status = 'failed';
-      if (kind === 'retry disagreement') state.stages.work.retries++;
       if (kind === 'attempt disagreement') state.stages.work.attempts![0].index++;
-      if (kind === 'other stage disagreement') state.stages.done.retries++;
       if (kind === 'invalid budget') state.maxIterations = 0;
       if (kind === 'invalid timing') state.completedAt = '2000-01-01T00:00:00.000Z';
+      if (kind === 'missing completion time') state.completedAt = undefined;
+      if (kind === 'invalid completion time') state.completedAt = 'invalid';
     });
     if (kind === 'unknown controller identity') vi.spyOn(ownership, 'processStartToken').mockReturnValue(undefined);
     if (kind === 'live scheduler' || kind === 'unverifiable scheduler') vi.spyOn(ownership, 'inspectRunScheduler').mockReturnValue({
@@ -133,14 +133,190 @@ it.each([false, true])('refuses an owned live command group after its controller
   expect(readStageStatus(project, created.runId, 'work')).toEqual(ledger);
 });
 
-it('does not accept a fabricated cancelled projection with an already changed ledger', () => {
+it.each(['live', 'unknown', 'dead'] as const)('checks %s ownership when only the ledger is unsettled', owner => {
+  const created = cancelled();
+  const rawPath = join(created.runDirPath, 'run.json');
+  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  raw.stages.work = interruptedStageStatus(raw.stages.work, raw.completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
+  if (owner === 'live') {
+    raw.engineCheckpoint.pid = process.pid;
+    raw.engineCheckpoint.processStart = ownership.processStartToken(process.pid);
+  }
+  if (owner === 'unknown') delete raw.engineCheckpoint;
+  writeFileSync(rawPath, JSON.stringify(raw));
+  const before = readFileSync(join(created.runDirPath, 'stages/work/status.json'), 'utf8');
+  if (owner === 'dead') expect(() => assertContinuationCompatible(project, created.runId)).not.toThrow();
+  else expect(() => assertContinuationCompatible(project, created.runId)).toThrow(
+    owner === 'live' ? 'controller may still be alive' : 'ownership is unknown',
+  );
+  expect(readRunState(project, created.runId).stages).toEqual(raw.stages);
+  expect(readFileSync(join(created.runDirPath, 'stages/work/status.json'), 'utf8')).toBe(before);
+});
+
+it.each(['not stopped', 'wrong cancellation', 'missing completion time', 'invalid completion time'] as const)(
+  'refuses ledger-only interruption with %s despite proven owner death', boundary => {
+    const created = cancelled();
+    const rawPath = join(created.runDirPath, 'run.json');
+    const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+    const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+    raw.stages.work = interruptedStageStatus(raw.stages.work, raw.completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
+    if (boundary === 'not stopped') raw.status = 'failed';
+    if (boundary === 'wrong cancellation') raw.failureReason = 'Independent rejection';
+    if (boundary === 'missing completion time') delete raw.completedAt;
+    if (boundary === 'invalid completion time') raw.completedAt = 'invalid';
+    writeFileSync(rawPath, JSON.stringify(raw));
+    const ledger = readFileSync(ledgerPath, 'utf8');
+    expect(() => assertContinuationCompatible(project, created.runId)).toThrow('unsettled attempt');
+    expect(readRunState(project, created.runId).stages).toEqual(raw.stages);
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(ledger);
+  },
+);
+
+it('refuses historical running attempts remaining after interruption settlement', () => {
+  const created = cancelled(true);
+  const rawPath = join(created.runDirPath, 'run.json');
+  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  const ledger = readStageStatus(project, created.runId, 'work');
+  raw.stages.work.attempts[0].status = 'running';
+  ledger.attempts![0].status = 'running';
+  writeFileSync(rawPath, JSON.stringify(raw));
+  writeFileSync(ledgerPath, JSON.stringify(ledger));
+  expect(() => assertContinuationCompatible(project, created.runId)).toThrow('unsettled attempt');
+  expect(readRunState(project, created.runId).stages).toEqual(raw.stages);
+  expect(readStageStatus(project, created.runId, 'work')).toEqual(ledger);
+});
+
+it.each(['index', 'start time'] as const)('refuses matching malformed %s history in both carriers', field => {
+  const created = cancelled();
+  const rawPath = join(created.runDirPath, 'run.json');
+  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  const stage = interruptedStageStatus(raw.stages.work, raw.completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
+  if (field === 'index') stage.attempts![0].index = 2;
+  else stage.attempts![0].startedAt = 'invalid';
+  raw.stages.work = stage;
+  writeFileSync(rawPath, JSON.stringify(raw));
+  writeFileSync(ledgerPath, JSON.stringify(stage));
+  expect(() => assertContinuationCompatible(project, created.runId)).toThrow('invalid attempt history');
+  expect(readRunState(project, created.runId).stages).toEqual(raw.stages);
+  expect(readStageStatus(project, created.runId, 'work')).toEqual(stage);
+});
+
+it.each(['stage', 'attempt'] as const)('refuses an unknown ledger %s status despite proven owner death', carrier => {
+  const created = cancelled();
+  const rawPath = join(created.runDirPath, 'run.json');
+  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  raw.stages.work = interruptedStageStatus(raw.stages.work, raw.completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
+  const ledger = structuredClone(raw.stages.work);
+  if (carrier === 'stage') ledger.status = 'unknown';
+  else ledger.attempts[0].status = 'unknown';
+  writeFileSync(rawPath, JSON.stringify(raw));
+  writeFileSync(ledgerPath, JSON.stringify(ledger));
+  expect(() => assertContinuationCompatible(project, created.runId)).toThrow(
+    carrier === 'stage' ? 'invalid stage record' : 'invalid attempt history',
+  );
+  expect(readRunState(project, created.runId).stages).toEqual(raw.stages);
+  expect(readStageStatus(project, created.runId, 'work')).toEqual(ledger);
+});
+
+it('refuses an unsupported projection status before normalizing its interrupted attempt', () => {
+  const created = cancelled();
+  const rawPath = join(created.runDirPath, 'run.json');
+  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  raw.stages.work.status = 'unknown';
+  writeFileSync(rawPath, JSON.stringify(raw));
+  const ledger = readFileSync(ledgerPath, 'utf8');
+  expect(() => assertContinuationCompatible(project, created.runId)).toThrow('invalid stage record');
+  expect(readRunState(project, created.runId).stages).toEqual(raw.stages);
+  expect(readFileSync(ledgerPath, 'utf8')).toBe(ledger);
+});
+
+it.each([null, false, 0, ''])('refuses an existing falsy JSON ledger %j for an unstarted stage', ledger => {
+  const created = cancelled();
+  const rawPath = join(created.runDirPath, 'run.json');
+  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  raw.stages.work.status = 'pending';
+  raw.stages.work.attempts = [];
+  delete raw.engineCheckpoint;
+  writeFileSync(rawPath, JSON.stringify(raw));
+  const persistedLedger = JSON.stringify(ledger);
+  writeFileSync(ledgerPath, persistedLedger);
+  expect(() => assertContinuationCompatible(project, created.runId)).toThrow('invalid stage record');
+  expect(readRunState(project, created.runId).stages).toEqual(raw.stages);
+  expect(readFileSync(ledgerPath, 'utf8')).toBe(persistedLedger);
+});
+
+it('refuses running summary-only records without owner evidence', () => {
+  const created = cancelled();
+  const rawPath = join(created.runDirPath, 'run.json');
+  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  raw.stages.work.status = 'running';
+  raw.stages.work.attempts = [];
+  delete raw.engineCheckpoint;
+  writeFileSync(rawPath, JSON.stringify(raw));
+  writeFileSync(ledgerPath, JSON.stringify(raw.stages.work));
+  expect(() => assertContinuationCompatible(project, created.runId)).toThrow('ownership is unknown');
+  expect(readRunState(project, created.runId).stages).toEqual(raw.stages);
+  expect(readStageStatus(project, created.runId, 'work')).toEqual(raw.stages.work);
+});
+
+it('rechecks scheduler death under the settlement lock', () => {
+  const created = cancelled();
+  const before = readRunState(project, created.runId);
+  const ledger = readStageStatus(project, created.runId, 'work');
+  const inspect = vi.spyOn(ownership, 'inspectRunScheduler')
+    .mockReturnValueOnce({ kind: 'missing' })
+    .mockReturnValue({ kind: 'live', pid: process.pid });
+  expect(() => assertContinuationCompatible(project, created.runId)).toThrow('scheduler identity is live');
+  expect(inspect).toHaveBeenCalledTimes(2);
+  expect(readRunState(project, created.runId)).toEqual(before);
+  expect(readStageStatus(project, created.runId, 'work')).toEqual(ledger);
+});
+
+it.each(['projection', 'ledger'] as const)('refuses a %s changed between preflight and locked settlement', carrier => {
+  const created = cancelled();
+  const rawPath = join(created.runDirPath, 'run.json');
+  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  let changedProjection = readFileSync(rawPath, 'utf8');
+  let changedLedger = readFileSync(ledgerPath, 'utf8');
+  let changed = false;
+  vi.spyOn(ownership, 'inspectRunScheduler').mockImplementation(() => {
+    if (!changed) {
+      changed = true;
+      if (carrier === 'projection') {
+        const raw = JSON.parse(changedProjection);
+        raw.currentIteration = 2;
+        changedProjection = JSON.stringify(raw);
+        writeFileSync(rawPath, changedProjection);
+      } else {
+        const ledger = JSON.parse(changedLedger);
+        ledger.error = 'Concurrent ledger publication';
+        changedLedger = JSON.stringify(ledger);
+        writeFileSync(ledgerPath, changedLedger);
+      }
+    }
+    return { kind: 'missing' };
+  });
+  expect(() => assertContinuationCompatible(project, created.runId)).toThrow(
+    carrier === 'projection' ? 'cancelled run changed before settlement' : 'stage ledger changed before settlement',
+  );
+  expect(readFileSync(rawPath, 'utf8')).toBe(changedProjection);
+  expect(readFileSync(ledgerPath, 'utf8')).toBe(changedLedger);
+});
+
+it('settles a cancelled projection despite incidental ledger metadata', () => {
   const created = cancelled();
   // Exercise a ledger mismatch independently from its projection.
   const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
   const ledger = readStageStatus(project, created.runId, 'work');
   writeFileSync(ledgerPath, JSON.stringify({ ...ledger, error: 'Unrelated ledger change' }));
-  expect(() => assertContinuationCompatible(project, created.runId)).toThrow('stage projection and attempt ledger disagree');
-  expect(JSON.parse(readFileSync(ledgerPath, 'utf8')).error).toBe('Unrelated ledger change');
+  expect(() => assertContinuationCompatible(project, created.runId)).not.toThrow();
+  expect(readStageStatus(project, created.runId, 'work').attempts![0]).toMatchObject({ status: 'failed', exitCode: 143 });
 });
 
 
@@ -172,12 +348,12 @@ it.each(['closed child', 'reused controller', 'split ledger'] as const)('continu
   expect(assertContinuationCompatible(project, created.runId)).toEqual(settled);
 });
 
-it('refuses a terminal ledger differing from the exact interrupted settlement', () => {
+it('accepts a split interrupted settlement with incidental timing differences', () => {
   const created = cancelled();
   const before = readRunState(project, created.runId);
   const terminal = interruptedStageStatus(before.stages.work, before.completedAt!, 'CANCELLED_INTERRUPTED: Cancelled by user');
   terminal.attempts![0].duration_ms!++;
   writeFileSync(join(created.runDirPath, 'stages/work/status.json'), JSON.stringify(terminal));
-  expect(() => assertContinuationCompatible(project, created.runId)).toThrow('stage projection and attempt ledger disagree');
-  expect(readRunState(project, created.runId).stages).toEqual(before.stages);
+  expect(() => assertContinuationCompatible(project, created.runId)).not.toThrow();
+  expect(readRunState(project, created.runId).stages.work.attempts![0]).toMatchObject({ status: 'failed', exitCode: 143 });
 });

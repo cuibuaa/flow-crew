@@ -70,7 +70,7 @@ it.each([true, false])(
       kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString(),
     });
     writeReadySetupRecord(fixture.project, brief, fixture.root);
-    const workflow = WorkflowConfigSchema.parse({ name: 'cancel-repended-fixture', defaults: { max_iterations: 2, max_retries: 0 }, stages: [
+    const workflow = WorkflowConfigSchema.parse({ name: 'cancel-repended-fixture', defaults: { max_iterations: 2, max_retries: 1 }, stages: [
       { id: 'done', role: 'coder', depends_on: [], scope: [], prompt_template: 'Earlier completed work.',
         artifact_contract: { version: 1, produces: [], reads: [] } },
       { id: 'done2', role: 'coder', depends_on: ['done'], scope: [], prompt_template: 'Earlier completed companion.',
@@ -85,20 +85,25 @@ it.each([true, false])(
       state.briefAdmission = admission;
       state.currentIteration = 1;
       state.maxIterations = 2;
-      state.maxRetries = 0;
+      state.maxRetries = 1;
       recordAdmittedPlan(state, workflow.stages, run.runDirPath, 'Admitted fixture before cancellation.');
     });
     for (const id of ['done', 'done2', 'work']) {
       beginStageAttempt(fixture.project, run.runId, id, 0);
-      completeStageAttempt(fixture.project, run.runId, id, 0, { exitCode: 0, duration_ms: 1 });
+      if (id === 'work') {
+        completeStageAttempt(fixture.project, run.runId, id, 0, { exitCode: 124, duration_ms: 1 });
+        beginStageAttempt(fixture.project, run.runId, id, 1);
+      }
+      completeStageAttempt(fixture.project, run.runId, id, id === 'work' ? 1 : 0, { exitCode: 0, duration_ms: 1 });
     }
     const done = readStageStatus(fixture.project, run.runId, 'done');
     const done2 = readStageStatus(fixture.project, run.runId, 'done2');
     const priorWork = readStageStatus(fixture.project, run.runId, 'work');
+    expect(priorWork.retries).toBe(1);
     // terminal.ts/research-progress.ts publish a pending ledger this way; the
     // iteration driver can also retain the previous settled ledger.
-    if (matching) writeStageStatus(fixture.project, run.runId, 'work', rependStageStatus(priorWork));
-    else updateRunState(fixture.project, run.runId, state => { state.stages.work = rependStageStatus(state.stages.work); });
+    if (matching) writeStageStatus(fixture.project, run.runId, 'work', rependStageStatus(priorWork, 0));
+    else updateRunState(fixture.project, run.runId, state => { state.stages.work = rependStageStatus(state.stages.work, 0); });
     const ledgerPath = join(run.runDirPath, 'stages/work/status.json');
     const ledgerBeforeCancel = readFileSync(ledgerPath, 'utf8');
     const registry = new TaskRegistry({ baseDir: fixture.root });
@@ -126,8 +131,9 @@ it.each([true, false])(
     expect(readStageStatus(fixture.project, run.runId, 'done')).toEqual(done);
     expect(readRunState(fixture.project, run.runId).stages.done2).toEqual(done2);
     expect(readStageStatus(fixture.project, run.runId, 'done2')).toEqual(done2);
-    expect(readStageStatus(fixture.project, run.runId, 'work').attempts).toHaveLength(2);
-    expect(readStageStatus(fixture.project, run.runId, 'work').attempts?.[0]).toMatchObject({ ...priorWork.attempts?.[0], disposition: 'superseded' });
+    expect(readStageStatus(fixture.project, run.runId, 'work').attempts).toHaveLength(3);
+    expect(readStageStatus(fixture.project, run.runId, 'work').attempts?.[0]).toMatchObject(priorWork.attempts![0]);
+    expect(readStageStatus(fixture.project, run.runId, 'work').attempts?.[1]).toMatchObject({ ...priorWork.attempts?.[1], disposition: 'superseded' });
     const exitPath = join(fixture.root, 'supervise', current.systemd_unit.replace(/[^a-zA-Z0-9_.-]/g, '_'), 'exit.json');
     expect(await waitUntil(() => existsSync(exitPath), 3_000)).toBe(true);
     expect(JSON.parse(readFileSync(exitPath, 'utf8'))).toMatchObject({ exitCode: 0 });

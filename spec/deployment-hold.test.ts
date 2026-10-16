@@ -248,7 +248,7 @@ it.each(['checkpoint', 'plan', 'plan_version', 'ledger', 'missing_projection', '
     if (invalid === 'checkpoint') Object.assign(state.engineCheckpoint!, { version: 99 });
     if (invalid === 'plan') state.planControl!.stages[0].role = 'inconsistent_plan';
     if (invalid === 'plan_version') Object.assign(state.planControl!, { version: 99 });
-    if (invalid === 'ledger') state.stages.producer.retries++;
+    if (invalid === 'ledger') delete state.stages.producer.attempts;
     if (invalid === 'missing_projection' || invalid === 'missing_plan_projection' || invalid === 'missing_projection_and_ledger') delete state.stages.producer;
   });
   if (invalid === 'missing_projection_and_ledger') rmSync(join(root, 'store/runs', held.runId, 'stages/producer/status.json'));
