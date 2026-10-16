@@ -53,11 +53,8 @@ adapter: auto
 # edge. Reuse is opt-in. This settlement establishes compatible routing, not
 # a measured wall-clock benefit that would justify enabling it by default.
 session_reuse: false
-# model/reasoning_effort resolution (adapter, since 7aa5818): explicit value
-# here > user's global ~/.codex/config.toml > CLI built-in default. 'default'
-# auto-follows the user's own codex setup across CLI upgrades — pin an explicit
-# model here only to lock an experiment.
-model: default   # Inherit ~/.codex/config.toml; set a model here to override it.
-reasoning_effort: default   # Inherit model_reasoning_effort from the adapter config.
-# Role files may pin their own effort, which wins over this value. The shipped
-# coder, qa, planner, doc_writer and doc_reviewer roles pin high.
+# Model/effort: explicit role or engine value > adapter user settings read at
+# invocation time > CLI built-in default. Codex reads config.toml; Claude reads
+# only model/effort from settings.json while keeping other settings isolated.
+model: default
+reasoning_effort: default

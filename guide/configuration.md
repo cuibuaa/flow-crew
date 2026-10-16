@@ -60,8 +60,13 @@ writing that runtime resolution back. `mock` is a registered test adapter; `scri
 
 Role `model` and `reasoning_effort` pins win over engine defaults; missing or `default` role
 values resolve to engine defaults. For Codex, remaining `default` values inherit its global
-configuration, then its CLI defaults. Claude receives an explicit model when configured
-and forwards an explicit effort to its CLI; otherwise its native default is unresolved.
+configuration, then its CLI defaults. Claude reads `$CLAUDE_CONFIG_DIR/settings.json`
+(or `~/.claude/settings.json`) at every invocation: `model` supplies the model, and
+`modelSettings[model].effortLevel` takes precedence over `effortLevel` for the selected
+model key. Model aliases are passed unchanged. Explicit model and effort pins each win
+over settings; missing or invalid settings leave the corresponding CLI flag unset.
+Claude keeps other user settings isolated. Its invocation transport records each passed
+value and source (`role`, `user-settings`, or `cli-default`), with `null` for an omitted flag.
 Both adapters keep model choice an operator policy: they do not force a cheaper model or
 translate another provider's model name. Rejected model/effort parameters can be removed by
 bounded native-error repair; that does not verify the suitability of the resulting model.

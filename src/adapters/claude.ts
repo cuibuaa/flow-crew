@@ -1,5 +1,7 @@
 import { stageLiveLogPath } from '../stage-live-log.js';
 import { writeFileSync, mkdirSync } from '../engine-fs.js';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { isSessionUuid, settleSession } from '../adapter-session.js';
@@ -13,24 +15,59 @@ import { generationCompatibleSchema } from '../reality-gate/checks/json-schema-m
 import { AdapterParameterRepair, CLI_BUILTIN_DEFAULT, diagnoseAdapterFailure, resolveAdapterCapabilityIdentity,
   type NativeParameterRejection } from './diagnose.js';
 
+interface ClaudeParameter {
+  value: string | null;
+  source: 'role' | 'user-settings' | 'cli-default';
+}
+
+interface ClaudeSettings {
+  model?: unknown;
+  effortLevel?: unknown;
+  modelSettings?: Record<string, { effortLevel?: unknown }>;
+}
+
+/** Inherit only model/effort, keeping hooks, tools and permissions isolated.
+ * Read on every invocation so edits to the operator's settings take effect. */
+function readClaudeSettings(): ClaudeSettings {
+  try {
+    return JSON.parse(readFileSync(join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'settings.json'), 'utf8')) ?? {};
+  } catch { return {}; }
+}
+
+function resolveClaudeSettings(role: AgentConfig, settings: ClaudeSettings): { model: ClaudeParameter; effort: ClaudeParameter } {
+  const string = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value : undefined;
+  const resolve = (value: string | undefined, inherited: unknown): ClaudeParameter => {
+    if (value === CLI_BUILTIN_DEFAULT) return { value: null, source: 'cli-default' };
+    if (value && value !== 'default') return { value, source: 'role' };
+    const userValue = string(inherited);
+    return userValue ? { value: userValue, source: 'user-settings' } : { value: null, source: 'cli-default' };
+  };
+  const model = resolve(role.model, settings.model);
+  // Keep aliases intact for the CLI; per-model entries use the selected key.
+  const effort = resolve(role.reasoning_effort,
+    (model.value && string(settings.modelSettings?.[model.value]?.effortLevel)) || settings.effortLevel);
+  return { model, effort };
+}
+
 /** Keep the CLI's ambient authentication routing; flags isolate stage settings and tools.
  * Resume always names the stage's captured UUID, never the operator's latest session. */
 export function buildClaudeInvocation(role: AgentConfig, opts: Pick<RunOpts, 'outputSchema'>,
-  systemPromptPath: string, resumeSessionId?: string): { args: string[]; unsetEnv: string[] } {
+  systemPromptPath: string, resumeSessionId?: string, settings = readClaudeSettings()): { args: string[]; unsetEnv: string[]; model: ClaudeParameter; effort: ClaudeParameter } {
+  const { model, effort } = resolveClaudeSettings(role, settings);
   const args = ['-p', '--output-format', 'stream-json', '--verbose',
     '--safe-mode', '--setting-sources', '', '--strict-mcp-config'];
   // Like Codex, an empty list permits inspection. Native file tools are the
   // only available tools; restricted mode confines their working directories.
   if (role.tools.length === 0) args.push('--restricted', '--tools', 'Read,Glob,Grep', '--permission-mode', 'plan', '--permission-prompts', 'none');
   else args.push('--dangerously-skip-permissions');
-  if (role.model && !['default', CLI_BUILTIN_DEFAULT].includes(role.model)) args.push('--model', role.model);
-  if (role.reasoning_effort && !['default', CLI_BUILTIN_DEFAULT].includes(role.reasoning_effort)) args.push('--effort', role.reasoning_effort);
+  if (model.value) args.push('--model', model.value);
+  if (effort.value) args.push('--effort', effort.value);
   if (role.prompt) args.push('--append-system-prompt-file', systemPromptPath);
   if (opts.outputSchema && generationCompatibleSchema(opts.outputSchema)) args.push('--json-schema', JSON.stringify(opts.outputSchema));
 
   if (resumeSessionId) args.push('--resume', resumeSessionId);
 
-  return { args, unsetEnv: ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT'] };
+  return { args, unsetEnv: ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT'], model, effort };
 }
 
 /** Native print transport. Ambient authentication remains owned by the CLI;
@@ -58,26 +95,35 @@ export class ClaudeAdapter implements Adapter {
       process.env.ANTHROPIC_MODEL, process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
       process.env.ANTHROPIC_DEFAULT_SONNET_MODEL, process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,
     ])).digest('hex');
-    const identity = resolveAdapterCapabilityIdentity(role, { executable: 'claude', provider, cwd: opts.workDir });
-    const repair = new AdapterParameterRepair(role, opts.runDir, identity);
+    let repair: AdapterParameterRepair<AgentConfig> | undefined;
+    let selectionKey: string | undefined;
     const invocations: NativeInvocationUsage[] = [];
     const started = Date.now();
     for (;;) {
+      const settings = readClaudeSettings();
+      const selection = resolveClaudeSettings(role, settings);
+      const key = JSON.stringify([selection.model.value, selection.effort.value]);
+      if (!repair || key !== selectionKey) {
+        const identity = resolveAdapterCapabilityIdentity(role, { executable: 'claude', provider, cwd: opts.workDir,
+          model: selection.model.value ?? 'cli_builtin_default', reasoningEffort: selection.effort.value ?? 'cli_builtin_default' });
+        repair = new AdapterParameterRepair(role, opts.runDir, identity);
+        selectionKey = key;
+      }
       const effectiveRole = repair.role;
-      const { args, unsetEnv } = buildClaudeInvocation(effectiveRole, opts, systemPromptPath, resumeSessionId);
+      const { args, unsetEnv, model, effort } = buildClaudeInvocation(effectiveRole, opts, systemPromptPath, resumeSessionId, settings);
 
       const summary = new NativeEventSummary(opts.workDir);
       const usage = new NativeUsageAccumulator();
       let sessionId: string | undefined;
       let inputCaptured = false;
       let inputCaptureError: unknown;
-      const captureInput = (model?: string): void => {
+      const captureInput = (nativeModel?: string): void => {
         if (inputCaptured) return;
         inputCaptured = true;
         try { opts.onInvocationInput?.({ systemPrompt: role.prompt, userPrompt: invocationPrompt,
-          model: model || (args.includes('--model') ? effectiveRole.model : 'provider-default-unresolved'),
+          model: nativeModel || model.value || 'provider-default-unresolved',
           resumeSessionId,
-          transport: { kind: 'request', payload: JSON.stringify({ executable: 'claude', argv: args, stdin: invocationPrompt, appendedSystemPrompt: role.prompt }) } });
+          transport: { kind: 'request', payload: JSON.stringify({ executable: 'claude', argv: args, stdin: invocationPrompt, appendedSystemPrompt: role.prompt, model, effort }) } });
         } catch (error) { inputCaptureError = error; }
       };
       let carry = '';
