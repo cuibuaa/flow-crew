@@ -79,9 +79,10 @@ export function readHostBootId(): string | undefined {
 }
 
 
-export function engineGeneration(): string | undefined {
-  return (readBuildManifest(import.meta.dirname) ?? readBuildManifest(join(import.meta.dirname, '..', 'dist')))?.generation;
-}
+// Capture at module load, as daemon identity does. A later disk replacement is
+// never evidence of which modules this process loaded.
+const loadedGeneration = (readBuildManifest(import.meta.dirname) ?? readBuildManifest(join(import.meta.dirname, '..', 'dist')))?.generation;
+export function engineGeneration(): string | undefined { return loadedGeneration; }
 export function captureEngineCheckpoint(projectDir: string, runId: string): EngineCheckpoint {
   runId = canonicalRunId(runsRoot(projectDir), runId);
   return { version: 2, runId, projectDir: resolve(projectDir), bootId: readHostBootId(), generation: engineGeneration(), pid: process.pid, processStart: processStartToken(process.pid), at: new Date().toISOString(), ...(process.platform !== 'win32' ? { processes: [] } : {}) };
@@ -117,6 +118,19 @@ export function checkpointConsumers(checkpoint?: EngineCheckpoint, options: { cu
     }
   }
   return active;
+}
+
+/** Shared by interrupted recovery and every settled continuation entrance. */
+export function persistedPlanErrors(state: StoreState): string[] {
+  const errors: string[] = [];
+  if ((state.planControl?.version !== undefined && state.planControl.version !== 1)
+      || (state.queryState?.version !== undefined && state.queryState.version !== 1)) errors.push('RECOVERY_PLAN_INCOMPATIBLE: unsupported persisted plan/query format');
+  if (Boolean(state.planControl) !== Boolean(state.queryState?.planRevision) || (state.planControl && planDigest(state.planControl.stages) !== state.queryState?.planRevision?.digest)) errors.push('RECOVERY_PLAN_UNBOUND: admitted plan revision is unavailable or does not match the persisted plan');
+  for (const stage of state.planControl?.stages ?? []) {
+    const parsed = StageConfigSchema.safeParse(stage);
+    if (!parsed.success || artifactDeclarationErrors(stage.artifact_contract, stage.id).length) errors.push(`RECOVERY_PLAN_INCOMPATIBLE: ${stage.id} does not satisfy the current execution contract`);
+  }
+  return errors;
 }
 
 /** The caller has already excluded a live scheduler/direct runner. PID absence alone is insufficient. */
@@ -156,11 +170,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       }
     }
   }
-  if (Boolean(state.planControl) !== Boolean(state.queryState?.planRevision) || (state.planControl && planDigest(state.planControl.stages) !== state.queryState?.planRevision?.digest)) errors.push('RECOVERY_PLAN_UNBOUND: admitted plan revision is unavailable or does not match the persisted plan');
-  for (const stage of state.planControl?.stages ?? []) {
-    const parsed = StageConfigSchema.safeParse(stage);
-    if (!parsed.success || artifactDeclarationErrors(stage.artifact_contract, stage.id).length) errors.push(`RECOVERY_PLAN_INCOMPATIBLE: ${stage.id} does not satisfy the current execution contract`);
-  }
+  errors.push(...persistedPlanErrors(state));
   let intent: RecoveryIntent | undefined;
   if (state.recoveryIntent) {
     const parsed = RecoveryIntentSchema.safeParse(state.recoveryIntent);

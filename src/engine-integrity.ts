@@ -189,10 +189,17 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
   // Admission still reserves their namespace; they are not engine decisions.
   const rollbackBlobs = run && join(run, '.rollback-preimages');
   const isRollbackBlob = (path: string): boolean => Boolean(rollbackBlobs && inside(rollbackBlobs, path));
+  const excluded = (path: string): boolean => {
+    const root = run && inside(run, path) ? run : inside(distribution, path) ? distribution : undefined;
+    // A temporary ancestor does not make an entire nested engine disposable.
+    // Only temporary entries inside the protected carrier tree are exempt.
+    const local = root === undefined ? '' : relative(root, path).split('\\').join('/');
+    return path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|(?:^|\/)\.run-state\.lock$/.test(local)
+      || [...activeOutputs].some(root => inside(root, path));
+  };
   const owns = (path: string): boolean => {
     if (isRollbackBlob(path)) return false;
-    if (path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path)
-      || [...activeOutputs].some(root => inside(root, path))) return false;
+    if (excluded(path)) return false;
     if (run && inside(run, path)) {
       const local = relative(run, path).split('\\').join('/');
       if (/^gate_reevaluation\/verdict_correction_[^/]+\.json$/.test(local)) return false;
@@ -219,7 +226,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
         return;
       }
       if (owned) separate(path);
-      if (path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path) || [...activeOutputs].some(root => inside(root, path))) return;
+      if (excluded(path)) return;
       if (!owned && !lstatSync(path).isDirectory()) return;
       const value = retain(path);
       if (!value) return;

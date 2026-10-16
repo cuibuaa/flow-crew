@@ -608,6 +608,10 @@ export interface RunStateFormat {
 }
 
 export interface StoreState {
+  deploymentHold?: import('./deployment-hold.js').RunDeploymentHold;
+  continuationFailure?: { at: string; reason: string; generation?: string };
+  /** Observed scheduler admissions only; legacy starts are never fabricated. */
+  engineHistory?: Array<{ kind: 'start' | 'resume'; at: string; generation?: string; pid: number; processStart?: import('./run-lock.js').ProcessStartToken }>;
   engineCheckpoint?: import('./restart-recovery.js').EngineCheckpoint;
   recovery?: import('./restart-recovery.js').RestartRecovery;
   /** Durable authority for reconciling a partially published interruption. */
@@ -1705,6 +1709,7 @@ function persistRunStateUnlocked(
     }
     // A fresh locked transition can continue admitted work. Compatibility
     // snapshots and stage publishers cannot resurrect acknowledged cancellation.
+    // Explicit continuation uses the fresh locked stopped -> running transition.
     if (!expectation || state.status !== 'running') throw cancelledRunPublicationError(runId);
   }
 
@@ -1714,6 +1719,10 @@ function persistRunStateUnlocked(
   normalizeHistoryTail(join(runPath, historyPath), committedBytes);
   const committedHistories = readRunHistories(runPath, currentRef);
   const merged = mergeStateHistories(currentState, state);
+  // Compatibility snapshot writers cannot drop admissions published by the
+  // scheduler. Admission appends itself under this same run-local lock.
+  merged.engineHistory = [...new Map([...(currentState?.engineHistory ?? []), ...(merged.engineHistory ?? [])]
+    .map(entry => [JSON.stringify(entry), entry])).values()];
   // Command ownership is append-only within one checkpoint. Compatibility
   // writers may carry an older snapshot while another stage starts a child.
   if (currentState?.engineCheckpoint?.at === merged.engineCheckpoint?.at && currentState?.engineCheckpoint?.pid === merged.engineCheckpoint?.pid && merged.engineCheckpoint?.processes) {

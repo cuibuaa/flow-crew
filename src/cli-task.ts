@@ -153,7 +153,7 @@ export function taskUsage(subcommand?: string): string {
     '  list                Run, stage execution, elapsed time, and latest reason',
     '  show <id> [--raw]   Bounded detail; raw tick JSON is opt-in',
     '  cancel <id>         Stop an active task',
-    '  resume <id>         Continue stopped, failed or incomplete work in the same run',
+    '  resume <id>         Explicitly continue compatible stopped, failed or incomplete work after settlement',
     '  retry <id>          Request another launch; terminal runs start fresh',
     '  tail <id> [-f]      Read or follow supervisor output',
   ].join('\n');
@@ -224,6 +224,8 @@ function printTask(
   if (unitStatus?.kind === 'terminal' && unitStatus.signal) stdout.write(`Signal: ${unitStatus.signal}\n`);
   stdout.write(`Launch: ${task.attempt}/${task.max_retries}\n`);
   stdout.write(`Run: ${task.run_id ?? 'not started'}\n`);
+  for (const entry of task.engine_history ?? []) stdout.write(`Engine ${entry.kind}: ${entry.generation ?? 'UNVERIFIED'} at ${entry.at} (scheduler pid=${entry.pid})\n`);
+  if (task.continuation_failure) stdout.write(`Continuation refused: ${task.continuation_failure.reason}\n`);
   const operational = task.operational;
   if (operational) {
     stdout.write(`Run elapsed: ${formatHumanDuration(operational.runElapsedMs)}\n`);

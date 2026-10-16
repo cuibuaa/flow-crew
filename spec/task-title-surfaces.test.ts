@@ -77,7 +77,7 @@ async function runBackgroundSubmit(brief: string): Promise<{ code: number | null
 }
 
 beforeEach(() => {
-  fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-title-surfaces-'));
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'fc-ts-'));
   projectDir = join(fixtureRoot, 'project');
   fcHome = join(fixtureRoot, 'state');
   for (const path of [projectDir, fcHome, join(fixtureRoot, 'home'), join(fixtureRoot, 'tmp'), join(projectDir, 'config')]) {

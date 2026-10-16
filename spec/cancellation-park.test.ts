@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -47,7 +46,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  fixtureRoot = mkdtempSync(join(tmpdir(), `flowcrew-e13b-${randomBytes(4).toString('hex')}-`));
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'fc-cp-'));
   projectDir = join(fixtureRoot, 'project');
   mkdirSync(projectDir, { recursive: true });
   setFcGlobalDir(fixtureRoot);

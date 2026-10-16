@@ -1,8 +1,8 @@
 import { inputFile } from './spec_contracts/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parseChecksFromBrief, parseChecksFromMarkdown, runAllChecks, listCheckTypes, readRealityGateReport } from '../src/reality-gate/index.js';
 import {
@@ -306,13 +306,18 @@ describe('store integration', () => {
       display: 'scratch check', cwd: projectDir, timeoutMs: 5000 });
     expect(validation.exitCode, validation.error).toBe(exitCode);
     const validationEnvironment = JSON.parse(validation.stdout ?? '');
+    // Nested engines share their owner's stable alias parent, which may be
+    // outside the caller's disposable invocation TMPDIR.
+    const scratchAlias = readFileSync(join(taskDir, 'scratch', '.tmpdir'), 'utf8');
     for (const environment of [stageEnvironment, gateEnvironment, validationEnvironment]) {
       expect(environment).toEqual({ scratch: expect.any(String), tmp: environment.scratch, temp: environment.scratch, socket: null });
       if (environment === stageEnvironment) {
-        expect(dirname(dirname(environment.scratch))).toBe(tmpdir());
+        expect(dirname(environment.scratch)).toBe(scratchAlias);
+        expect(realpathSync(environment.scratch)).toBe(join(realpathSync(join(taskDir, 'scratch')), basename(environment.scratch)));
+        expect(readFileSync(join(environment.scratch, 'probe'), 'utf8')).toBe('fixture');
         expect(existsSync(environment.scratch)).toBe(true);
       } else {
-        expect(dirname(environment.scratch)).toBe(tmpdir());
+        expect(dirname(environment.scratch)).toBe(dirname(scratchAlias));
         expect(existsSync(environment.scratch)).toBe(false);
       }
     }

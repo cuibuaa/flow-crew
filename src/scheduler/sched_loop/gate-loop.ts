@@ -16,6 +16,7 @@ import { runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRou
 import { mkdirSync, unlinkSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { parkAtDeploymentBoundary } from '../../deployment-hold.js';
 
 export async function settleGateRetries(
   state: StoreState, sorted: StageConfig[], iteration: number,
@@ -30,6 +31,8 @@ export async function settleGateRetries(
   kind: 'continue'; state: StoreState; maxInnerRetries: number; innerRetriesUsed: number;
 }> {
     state = readRunState(projectDir, runId);
+    const held = parkAtDeploymentBoundary(projectDir, runId);
+    if (held) return { kind: 'settled', state: held };
     if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };
 
     // === INNER LOOP (retry_to) ===
@@ -125,6 +128,8 @@ export async function settleGateRetries(
 
             // Check for cancellation between retries
             state = readRunState(projectDir, runId);
+            const heldAtRound = parkAtDeploymentBoundary(projectDir, runId);
+            if (heldAtRound) return { kind: 'settled', state: heldAtRound };
             if (isTerminalRunStatus(state.status)) break;
 
             // Determine which retry stages need to run based on current failed gates

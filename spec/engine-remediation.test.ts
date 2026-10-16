@@ -343,6 +343,7 @@ describe('engine behaviour contracts', () => {
   it('re-queries cancellation convergence after an ambiguous response', async () => {
     const requests: string[] = [];
     const result = await cancelRunThroughControlPlane('cancel-after', undefined, {
+      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
       sendRequest: async (request) => {
         requests.push(request.cmd);
         if (request.cmd === 'cancel-run') throw new RpcOutcomeUnknownError('response lost after delivery.');
@@ -357,6 +358,7 @@ describe('engine behaviour contracts', () => {
     });
     const unresolvedCalls: string[] = [];
     const unresolved = await cancelRunThroughControlPlane('cancel-control', undefined, {
+      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
       sendRequest: async (request) => {
         unresolvedCalls.push(request.cmd);
         throw new RpcOutcomeUnknownError('both responses lost.');

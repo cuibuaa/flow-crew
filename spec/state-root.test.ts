@@ -13,7 +13,7 @@ function moduleUrl(path: string): string {
 
 describe('FC_HOME state-root isolation', () => {
   it('keeps global state under FC_HOME when HOME and projectDir are different roots', () => {
-    const root = mkdtempSync(join(tmpdir(), 'flowcrew-p10-state-'));
+    const root = mkdtempSync(join(tmpdir(), 'fc-sr-'));
     const home = join(root, 'home');
     const fcHome = join(root, 'state');
     const projectDir = join(root, 'project');

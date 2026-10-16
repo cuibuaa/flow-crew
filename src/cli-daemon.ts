@@ -13,7 +13,7 @@ import {
   type DaemonIdentity,
 } from './daemon-identity.js';
 import { TaskRegistry, TASK_STATUS, type TaskEntry } from './task-registry.js';
-import { Orchestrator } from './orchestrator.js';
+import { Orchestrator, type DeploymentStatus } from './orchestrator.js';
 import { createDaemonReconciler } from './daemon-reconciliation.js';
 import {
   DaemonUnavailableError,
@@ -76,6 +76,23 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
     delay,
     ...opts.controls,
   };
+
+    if (sub === 'hold' || sub === 'hold-status' || sub === 'continue') {
+      const timeoutMs = Number(valueAfter(args, '--timeout-ms') ?? '60000');
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 86_400_000) throw new Error('--timeout-ms must be an integer from 0 to 86400000');
+      const deadline = Date.now() + timeoutMs;
+      const request = sub === 'hold' ? 'deploy-hold' : sub === 'continue' ? 'deploy-continue' : 'deploy-status';
+      let result = await controls.sendRpc(socketPath, { cmd: request }) as DeploymentStatus;
+      if (!Array.isArray(result.tasks) || !Array.isArray(result.errors)) throw new Error('Daemon does not support deployment hold');
+      while (sub === 'hold' && !result.ready && Date.now() < deadline) {
+        await controls.delay(Math.min(200, Math.max(1, deadline - Date.now())));
+        if (Date.now() >= deadline) break;
+        result = await controls.sendRpc(socketPath, { cmd: 'deploy-status' }, Math.max(1, Math.min(2000, deadline - Date.now()))) as DeploymentStatus;
+      }
+      stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      if (sub === 'hold' && !result.ready) stderr.write('HOLD NOT SETTLED: timeout/refusal; hold remains active. Do not deploy. No running attempt was killed.\n');
+      return sub === 'continue' ? (result.released && !result.errors.length ? 0 : 1) : result.ready ? 0 : 1;
+    }
 
     if (sub === 'start') {
       if (await isRunning(socketPath, controls.sendRpc)) {
@@ -143,6 +160,9 @@ export function daemonUsage(): string {
       'Usage: flowcrew daemon <command> [options]',
       '  restart [--force]  Reload the background orchestrator (operator entry point)',
       '  status             Prove listener pid, loaded build, and registry health',
+      '  hold [--timeout-ms N]  Fence launches; wait for settled stage groups (default 60000ms)',
+      '  hold-status        Observe hold and scheduler/unit/command retirement',
+      '  continue           Release hold; continue compatible held runs automatically',
       '  start [--force]    Compatibility: start only when no daemon is listening',
       '  stop               Stop the background orchestrator',
       '  serve              Run the orchestrator in the foreground (internal/service entry)',
@@ -200,6 +220,8 @@ export function mergeTaskWithRunState(
       realityGate?: unknown;
       terminalArtifact?: unknown;
       terminalStates?: unknown;
+      engineHistory?: import('./store.js').StoreState['engineHistory'];
+      continuationFailure?: import('./store.js').StoreState['continuationFailure'];
     };
     if (typeof state.status !== 'string' || !state.status) return { ...task };
     const verdict = runVerdict(state.verdict, state.realityGate);
@@ -208,6 +230,8 @@ export function mergeTaskWithRunState(
     return {
       ...task,
       status: state.status,
+      engine_history: state.engineHistory,
+      continuation_failure: state.continuationFailure,
       ...(scheduler.kind === 'live' ? { scheduler_live: { pid: scheduler.pid } } : {}),
       operational: readOperationalProjection(runPath, { state, includeDrift: options.includeDrift }),
       // A terminal registry timestamp may record a later control-plane action
@@ -278,6 +302,9 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     if (req.cmd === 'register') {
       return handleDaemonRegistrationRequest(orchestrator, req, identity);
     }
+    if (req.cmd === 'deploy-hold') return orchestrator.holdDeployment();
+    if (req.cmd === 'deploy-status') return orchestrator.deploymentStatus();
+    if (req.cmd === 'deploy-continue') return orchestrator.continueDeployment();
     if (req.cmd === 'list') {
       return {
         tasks: registry.list(req.filter).map((task) => mergeTaskWithRunState(task, runsRoot(), { includeDrift: false })),
@@ -325,7 +352,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
   const server = await startRpcServer(socketPath, handler, {
     onHandlerError: createDaemonRpcErrorLogger(logPath),
     onResponse: (req, response) => {
-      if (req.cmd === 'register' && 'acknowledgement' in response) {
+      if ((req.cmd === 'register' && 'acknowledgement' in response) || req.cmd === 'deploy-hold' || req.cmd === 'deploy-continue') {
         setImmediate(() => void orchestrator.tickOnce());
       }
     },

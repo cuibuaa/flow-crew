@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import type { Server } from 'node:net';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
@@ -18,7 +17,7 @@ let server: Server | undefined;
 let requests: RpcRequest[];
 
 beforeEach(() => {
-  tempDir = mkdtempSync(join(tmpdir(), `flowcrew-cli-task-${randomBytes(4).toString('hex')}-`));
+  tempDir = mkdtempSync(join(tmpdir(), 'fc-ct-'));
   socketPath = join(tempDir, 'daemon.sock');
   requests = [];
 });

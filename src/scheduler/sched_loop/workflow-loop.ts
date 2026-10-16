@@ -14,6 +14,7 @@ import { executeIteration } from './iteration.js';
 import { advanceSettledResearch } from './research-progress.js';
 import { createResearchBudgetFinalizer, settleExhaustedResearchGates } from './research-terminal.js';
 import { archiveDeclaredOutputsBeforePlainCompletion, writeCampaignEntry } from './services.js';
+import { parkAtDeploymentBoundary } from '../../deployment-hold.js';
 
 export async function runWorkflowIterations(
   baseStages: StageConfig[], workflowYaml: string, maxIterations: number,
@@ -26,6 +27,8 @@ export async function runWorkflowIterations(
 ): Promise<StoreState> {
   const finishResearchCeiling = createResearchBudgetFinalizer(projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
   for (let iteration = resumeAtIteration; iteration <= maxIterations; iteration++) {
+    const held = parkAtDeploymentBoundary(projectDir, runId);
+    if (held) return held;
     const prepared = await prepareWorkflowIteration(iteration, resumeAtIteration, resumingExistingRun, projectDir, runId, runDirPath, adapter, baseStages, workflowYaml);
     if (prepared.kind === 'settled') return prepared.state;
     const {sorted, injectedDispatchStages, planStageRetries} = prepared;
@@ -37,6 +40,8 @@ export async function runWorkflowIterations(
     );
 
     let state = readRunState(projectDir, runId);
+    const heldAfterBatch = parkAtDeploymentBoundary(projectDir, runId);
+    if (heldAfterBatch) return heldAfterBatch;
 
     // If the eager post-batch gate inside executeIteration already terminated
     // the run (set a terminal status + fired the hook), exit now — do NOT fall
@@ -67,6 +72,8 @@ export async function runWorkflowIterations(
       .map(s => s.id);
     const retried = await settleGateRetries(state, sorted, iteration, injectedDispatchStages, planStageRetries, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
     if (retried.kind === 'settled') return retried.state;
+    const heldAfterRetries = parkAtDeploymentBoundary(projectDir, runId);
+    if (heldAfterRetries) return heldAfterRetries;
     const {maxInnerRetries, innerRetriesUsed} = retried;
     // No gate session is useful beyond this iteration's bounded repair loop.
     // Passed, exhausted, and outer-replan paths all converge here.

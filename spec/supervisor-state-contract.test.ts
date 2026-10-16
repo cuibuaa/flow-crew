@@ -112,6 +112,7 @@ describe('closed supervisor state contract', () => {
     };
 
     const result = await cancelRunThroughControlPlane(remote.runId!, undefined, {
+      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
       sendRequest: vi.fn(async () => remote),
       localControl: local,
     });
@@ -137,6 +138,7 @@ describe('closed supervisor state contract', () => {
     };
 
     const result = await cancelRunThroughControlPlane('unobservable-run', undefined, {
+      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
       sendRequest: vi.fn(async () => remote),
       localControl: local,
     });
@@ -155,7 +157,7 @@ describe('closed supervisor state contract', () => {
     expect(isCancellationResult(legacy, { runId: 'daemon-owned' })).toBe(false);
   });
 
-  it('routes all six production backend calls through the shared contract', () => {
+  it('routes all seven production backend calls through the shared contract', () => {
     const runControl = source('src/run-control.ts');
     const orchestrator = source('src/orchestrator.ts');
     const count = (text: string, needle: string): number => text.split(needle).length - 1;
@@ -164,7 +166,9 @@ describe('closed supervisor state contract', () => {
     expect(count(runControl, 'this.units.stopUnit(')).toBe(1);
     expect(count(runControl, 'this.units.isActive(')).toBe(1);
     expect(count(orchestrator, 'this.systemd.journalTail(')).toBe(1);
-    expect(count(orchestrator, 'this.systemd.isActive(')).toBe(2);
+    expect(count(orchestrator, 'this.systemd.isActive(')).toBe(3);
+    const deployment = orchestrator.slice(orchestrator.indexOf('async deploymentStatus'), orchestrator.indexOf('async continueDeployment'));
+    expect(deployment).toContain('unitIsStopped(unit)');
     expect(count(orchestrator, 'this.systemd.runUnit(')).toBe(1);
   });
 

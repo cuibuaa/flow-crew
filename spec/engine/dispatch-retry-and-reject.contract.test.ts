@@ -21,17 +21,20 @@ import { artifacts } from '../spec_contracts/declared-fixtures.js';
  * Both fixes are GENERIC engine mechanism (no domain/trading logic).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
 import { runWorkflow, diagnoseEmptyDispatch, decideEmptyDispatchAction, buildRetryPreamble, type WorkflowConfig } from '../../src/scheduler.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
-import { createRun, readRunState, runDir, writeRunState } from '../../src/store.js';
+import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, writeRunState } from '../../src/store.js';
 
-let projectDir: string;
-beforeEach(() => { projectDir = join(tmpdir(), 'fc-dr-' + randomBytes(6).toString('hex')); mkdirSync(projectDir, { recursive: true }); });
-afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
+let fixtureRoot: string, projectDir: string, previousStore: string;
+beforeEach(() => {
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'fc-dr-'));
+  projectDir = join(fixtureRoot, 'project'); mkdirSync(projectDir);
+  previousStore = fcGlobalDir(); setFcGlobalDir(join(fixtureRoot, 'state'));
+});
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(fixtureRoot, { recursive: true, force: true }); });
 
 const planWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: plan-only', 'defaults:', '  max_iterations: 4', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),

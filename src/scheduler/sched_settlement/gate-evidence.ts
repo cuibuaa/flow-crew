@@ -7,6 +7,7 @@ import { STAGE_STATUS } from '../../store.js';
 import type { StageArtifactContractAudit } from '../../stage-artifact-contract.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { canonicalRunDirectory } from '../../cancellation-policy.js';
 
 const repairabilitySchema = z.object({
   version: z.literal(1),
@@ -37,9 +38,11 @@ export function validateSettledGateVerdict(base: string, runId: string, stageId:
     const verdictPath = join(base, `verdict_${stageId}.json`);
     const audit = JSON.parse(readFileSync(join(base, 'stages', stageId, 'artifact_contract.json'), 'utf8')) as StageArtifactContractAudit;
     const production = audit.production;
-    const observation = audit.observations?.find((entry) => entry.path === verdictPath);
+    // Resume resolves the physical run directory; store readers may retain its
+    // scratch alias. Authenticate the same location, execution and bytes.
+    const observation = audit.observations?.find((entry) => canonicalRunDirectory(entry.path) === canonicalRunDirectory(verdictPath));
     if (attempt?.status === STAGE_STATUS.COMPLETE && attempt.completedAt && audit.stageId === stageId
-        && production?.runId === runId && production.runDir === base
+        && production?.runId === runId && canonicalRunDirectory(production.runDir) === canonicalRunDirectory(base)
         && production.attemptIndex === attempt.index && production.attemptStartedAt === attempt.startedAt
         && !audit.completionDeferred && audit.violations.length === 0
         && observation?.fresh && observation.sha256 === capturedDigest

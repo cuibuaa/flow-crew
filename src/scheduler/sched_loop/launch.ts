@@ -15,6 +15,8 @@ import { RUN_STATUS, STAGE_STATUS, StoreState, atomicWrite, initializeReservedRu
 import { mkdirSync, rmSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { deploymentHeld } from '../../deployment-hold.js';
+import { assertContinuationCompatible } from '../../engine-continuation.js';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 function isContinuationStatus(status: string): boolean {
@@ -51,7 +53,7 @@ export function prepareWorkflowLaunch(
     const archived = readRunState(projectDir, existingRunId);
     launchState = archived;
     if ((!isPausedRunStatus(archived.status) && isContinuationStatus(archived.status))
-      || archived.recovery?.kind === 'resumable' || (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint)) {
+      || archived.deploymentHold || archived.recovery?.kind === 'resumable' || (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint)) {
       // Resume the admitted contract, validated by this engine's ordinary
       // parser, even if engine configuration changed during the redeploy.
       const admitted = WorkflowConfigSchema.parse(parseYaml(readFileSync(join(runDir(projectDir, existingRunId), 'workflow.yaml'), 'utf8')));
@@ -115,9 +117,11 @@ export function prepareWorkflowLaunch(
       if (archived.recovery?.kind === 'blocked') throw new Error(archived.recovery.reason);
       if (!launchUnchanged(archived)) return { kind: 'settled', state: archived };
       if (isContinuationStatus(archived.status)) {
+        assertContinuationCompatible(projectDir, runId);
         ({ iteration: resumeAtIteration, gateIds } = workflowContinuation(archived, projectDir, runId, workflow));
       }
     }
+    if (deploymentHeld()) throw new Error('Deployment hold is active; no scheduler may launch');
     const launchClaim = claimLaunchIntent(projectDir, runId);
     if (!launchClaim.claimed) {
       if (hasRunState) return { kind: 'settled', state: readRunState(projectDir, runId) };
@@ -198,6 +202,7 @@ export function prepareWorkflowLaunch(
     }
     launchState = prepared;
   } else {
+    if (deploymentHeld()) throw new Error('Deployment hold is active; no scheduler may launch');
     const reserved = reserveRun(projectDir);
     runId = reserved.runId;
     runDirPath = reserved.runDirPath;
@@ -315,7 +320,13 @@ export function prepareWorkflowLaunch(
       delete current.parked;
       delete current.completedAt;
       delete current.failureReason;
-      writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
+      delete current.continuationFailure;
+      // Release is authority for this parked continuation only, never for a
+      // later failure/approval or a future manual retry of the same run.
+      delete current.deploymentHold;
+      // The admitted workflow already exists. A replacement parser can reorder
+      // serialized defaults without changing meaning; continuation must retain
+      // the original input bytes instead of republishing that normalization.
       resumed = true;
     });
     if (!resumed) {

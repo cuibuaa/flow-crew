@@ -10,6 +10,7 @@ import { fcGlobalDir } from './store.js';
 import type { CancellationResult } from './run-control.js';
 import type { SupervisorLogSource, UnitStatus } from './supervision.js';
 import type { OperationalProjection } from './cli-events.js';
+import type { DeploymentStatus } from './orchestrator.js';
 
 export const DEFAULT_RPC_TIMEOUT_MS = 2_000;
 /** Cancellation convergence itself may consume 1.5s; leave transport room for
@@ -53,6 +54,7 @@ export type RpcRequest =
   | { cmd: 'resume'; id: number }
   | { cmd: 'tail'; id: number; lines?: number; follow?: boolean }
   | { cmd: 'status' }
+  | { cmd: 'deploy-hold' | 'deploy-status' | 'deploy-continue' }
   | { cmd: 'stop' };
 
 export interface RegisterRpcResponse {
@@ -71,6 +73,8 @@ export interface TaskListRpcResponse {
 
 /** Registry fields plus authoritative run.json fields merged by the daemon read path. */
 export interface TaskShowEntry extends Omit<TaskEntry, 'status'> {
+  engine_history?: import('./store.js').StoreState['engineHistory'];
+  continuation_failure?: import('./store.js').StoreState['continuationFailure'];
   status: string;
   /** A scheduler identity verified against the bound run, independent of the launch unit. */
   scheduler_live?: { pid: number };
@@ -113,6 +117,7 @@ export interface DaemonStatusRpcResponse {
 }
 
 export type RpcResponse =
+  | DeploymentStatus
   | RegisterRpcResponse
   | TaskListRpcResponse
   | TaskShowRpcResponse

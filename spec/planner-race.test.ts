@@ -10,7 +10,7 @@ import { loadWorkflow, runWorkflow, parseDispatchedStageConfig, inspectDispatchA
 import { raceAdmissionErrors } from '../src/scheduler/sched_admission/configuration.js';
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
 import { renderPlanInterface } from '../src/plan-interface.js';
-import { atomicWrite, runDir, type StoreState } from '../src/store.js';
+import { atomicWrite, fcGlobalDir, runDir, setFcGlobalDir, type StoreState } from '../src/store.js';
 import { createReadyFinder } from '../src/scheduler/sched_admission/frontier.js';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
@@ -34,8 +34,12 @@ const good = 'exports.twice = n => n * 2;\n', bad = 'exports.twice = n => n;\n';
 const record = (summary: string, files: string[] = []) => JSON.stringify({ status: 'delivered', summary,
   files_modified: files, checks: [], caveats: [] });
 let directory: string;
-beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'flowcrew-planner-race-')); roleAdapters.clear(); baselineFixture.enabled = false; });
-afterEach(() => rmSync(directory, { recursive: true, force: true }));
+let previousStore: string;
+beforeEach(() => {
+  directory = mkdtempSync(join(tmpdir(), 'flowcrew-planner-race-')); roleAdapters.clear(); baselineFixture.enabled = false;
+  previousStore = fcGlobalDir(); setFcGlobalDir(join(directory, 'state'));
+});
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(directory, { recursive: true, force: true }); });
 
 function doubles(source: string): boolean {
   const exports: { twice?: (n: number) => number } = {};

@@ -106,7 +106,8 @@ records the operator decision and closes active control state before bounded wor
 Unknown process evidence is retained in the cancellation result and task notes; it neither
 vetoes cancellation nor authorizes a signal. A retained running marker alone proves neither
 life nor death. Use `task resume` or the adjacent dashboard Resume control to continue a
-stopped, failed or incomplete registered run. A task retry requests another launch attempt;
+compatible stopped (including cancelled), failed or incomplete registered run after settlement.
+Cancellation alone grants no automatic continuation. A task retry requests another launch attempt;
 after terminal settlement it starts a fresh run. Foreground operation stays attached to the
 caller; process supervision and hard-kill limits are in
 [architecture](architecture.md#process-supervision-and-recovery).
@@ -156,10 +157,11 @@ the run finishes incomplete with the failing criteria and missing-owner evidence
 not ask a person to repeat the gate decision. Proven resumable host interruptions retain their
 orchestration checkpoints without requesting human approval.
 
-To hold registered work, use `flowcrew task cancel <task-id>`. Cancellation closes
-active control state as `stopped` and attempts to stop its owned workers. Cancellation
-acknowledges the decision; task notes report any unresolved process evidence. Hold preserves
-completed work; daemon restart, recovery and automatic retry leave a stopped run stopped.
+Cancellation closes active control state as `stopped` and attempts to stop its owned
+workers. It acknowledges a terminal decision; task notes report any unresolved process
+evidence. Daemon restart, recovery and deployment release leave that cancellation stopped.
+Explicit resume can continue safely settled work after ownership and compatibility checks.
+Use the deployment hold below to let current stage work settle normally before deployment.
 
 Explicitly continue a registered task's stopped, failed or incomplete run by task ID:
 
@@ -180,8 +182,10 @@ An unfinished repair continues its admitted gate round; the related gates review
 the new repair without restarting earlier authoring or planning work.
 The task registry supplies the run ID and project directory; the dashboard Resume
 control beside Cancel requests the same continuation. Resume still checks brief
-admission, scheduler ownership and unresolved approvals. Only explicit continuation
-resumes stopped work. `flowcrew task retry <task-id>` requests another launch attempt:
+admission, scheduler ownership, persisted execution compatibility and unresolved approvals.
+Only explicit continuation resumes stopped work, including acknowledged cancellation.
+An unsettled attempt or unretired owner refuses continuation; resume cannot recover unfinished stage work.
+`flowcrew task retry <task-id>` requests another launch attempt:
 before terminal settlement it retains any existing run binding, and after settlement
 it starts a fresh run with a new plan, stage history and iteration budget. Retry does
 not resume stopped work. Parked approval requests use the Inbox decision controls.
@@ -193,6 +197,80 @@ Omit `--background` to continue that run in the foreground.
 Sources: [inbox](../src/inbox.ts), [request paths](../src/approval-artifacts.ts),
 [active monitoring](../src/scheduler/sched_policy/approvals.ts), [decision CLI](../src/cli-inbox.ts),
 [continuation admission](../src/scheduler/sched_loop/launch.ts), [daemon queue](../src/orchestrator.ts).
+
+## Deploy while tasks are in flight
+
+Use an engine with deployment-hold support for this procedure. Upgrading an older engine
+that lacks the command still requires retiring its consumers first. Select the same
+`FC_HOME` and daemon socket for every command. The hold is durable in that state root,
+survives daemon restart, and fences both registered launches and foreground schedulers.
+
+```bash
+flowcrew daemon hold --timeout-ms 60000
+flowcrew daemon hold-status
+flowcrew daemon stop
+# Wait for the owned daemon process to exit; stop's RPC acknowledgement alone is insufficient.
+# Stop any other old-build dashboard/CLI consumers you own, then publish the combined build:
+npm run build
+flowcrew daemon start
+flowcrew daemon status
+flowcrew daemon continue
+flowcrew task show <task-id>
+```
+
+Run the build from the intended deployment checkout only after retiring its consumers.
+The builder refuses publication if any live daemon, scheduler or other importer of that
+distribution remains. Do not use `--force` or overwrite modules to bypass this check.
+A hold's `ready: true` proves its registered units, schedulers and checkpoint-owned command
+groups have stopped; the daemon itself remains live until the separate stop. Unregistered
+old consumers are also covered by the build publication guard. A failed build is not a deploy.
+
+A hold waits for the already admitted group to settle: ordinary disjoint peers finish
+together; a gate repair round includes its serialized repair waves, evidence settlement
+and gate re-evaluation. Scope continuations and technical retries already inside that group
+use their ordinary bounds. The scheduler then parks before admitting another group or
+iteration. Completed stages and their artifacts, attempt ledgers, admitted plan, rollback
+audits, gate rejection evidence and budgets are retained. This does not checkpoint a live
+process. No attempt is killed to obtain a deployment hold; an ordinary attempt timeout
+still applies its existing TERM/5-second grace/KILL policy and records failure honestly.
+
+There is no finite universal successful-hold bound: stage deadlines differ, groups may have
+several bounded attempts, and audit/validation cleanup may itself fail to settle. For a
+single running attempt, the wait includes its remaining immutable deadline, up to 5 seconds
+of termination grace, then owned command closure and settlement. `hold --timeout-ms N`
+bounds the operator's polling window (default 60 seconds), plus at most the initial 2-second
+RPC timeout. A missing response can report unknown delivery. Exit 1/2 or `ready: false`
+means **do not deploy**: the fence remains active, current work continues to its normal
+boundary, and no timeout fallback cancels it. Recheck `hold-status` later. If abandoning
+the deployment, wait for settlement and use `continue` on the existing build.
+
+After restart, the latch still blocks queued tasks. `continue` validates every held run
+before granting launch authority, releases compatible runs into the existing queue, and
+returns per-run refusals with a failing exit if any cannot continue. Those tasks become
+`stuck`; their run retains `continuationFailure`, original attempts and parked state for
+inspection. One refused run does not block the compatible runs from continuing. Repeated
+continue does not grant attempts twice. Approval parks still require their own decisions;
+cancellation takes precedence. Task launch retry budgets are not charged for the hold.
+If a scheduler is lost while the hold is pending, existing restart recovery must first
+prove owner/command fate and reconcile its ledger. A proven resumable interruption joins
+the same hold without spending a task retry; its interrupted attempt remains in history
+and can restart after release. Unprovable recovery is reported and cannot launch work.
+Foreground runs without registered tasks also observe the fence. After `daemon continue`,
+continue those explicitly with `flowcrew quick --project <project-dir> --existing-run-id <run-id>`;
+the same compatibility and ownership checks apply before execution.
+
+`task show` displays the scheduler generation at actual start and each actual resume,
+with timestamp and PID. `run.json` retains the same `engineHistory`. Legacy runs may lack
+their initial identity; the engine does not invent one. Daemon `status` separately proves
+the listener's loaded build. Different generations are allowed when their workflow,
+checkpoint, plan binding, stage ledgers and persisted formats are supported. Unsupported or
+inconsistent state fails closed before a new attempt or successful resume admission.
+A missing admitted-stage projection in a checkpointed run, or one with a retained ledger,
+is inconsistent: continuation reports it instead of recreating pending work. Attemptless
+legacy preparations without checkpoints or ledgers remain supported.
+
+Sources: [hold](../src/deployment-hold.ts), [continuation validation](../src/engine-continuation.ts),
+[deployment control](../src/orchestrator.ts), [publication guard](../src/build-manifest.ts).
 
 ## Campaigns
 

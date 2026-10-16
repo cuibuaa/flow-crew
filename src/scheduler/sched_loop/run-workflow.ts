@@ -18,6 +18,7 @@ import { runWorkflowIterations } from './workflow-loop.js';
 import { publishRunCompletion } from './iteration-outcome.js';
 import { join } from 'node:path';
 import { engineConfigDir } from '../../config.js';
+import { recordContinuationRefusal } from '../../engine-continuation.js';
 
 export async function runWorkflow(
   workflow: WorkflowConfig,
@@ -35,7 +36,14 @@ export async function runWorkflow(
   briefAdmission?: BriefAdmissionRecord,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
 ): Promise<StoreState> {
-  const launch = prepareWorkflowLaunch(workflow, workflowYaml, projectDir, existingRunId, taskDescription, briefAdmission);
+  let launch;
+  try { launch = prepareWorkflowLaunch(workflow, workflowYaml, projectDir, existingRunId, taskDescription, briefAdmission); }
+  catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const policyRefusal = reason.startsWith('Deployment hold is active') || reason.startsWith('Cannot resume: iteration budget exhausted');
+    if (existingRunId && !policyRefusal) recordContinuationRefusal(projectDir, existingRunId, reason);
+    throw error;
+  }
   if (launch.kind === 'settled') return launch.state;
   const {runId, runDirPath, maxIterations, baseStages, resumingExistingRun, resumeAtIteration, schedulerPidPath, launchIntentOwned} = launch;
   workflowYaml = launch.workflowYaml;
@@ -48,6 +56,10 @@ export async function runWorkflow(
   const checkpointState = updateRunState(projectDir, runId, (state) => {
     if (state.status === RUN_STATUS.STOPPED) return;
     state.engineCheckpoint = captureEngineCheckpoint(projectDir, runId);
+    const checkpoint = state.engineCheckpoint;
+    state.engineHistory ??= [];
+    state.engineHistory.push({ kind: resumingExistingRun ? 'resume' : 'start', at: checkpoint.at,
+      generation: checkpoint.generation, pid: checkpoint.pid, processStart: checkpoint.processStart });
     if (state.recovery?.kind === 'resumable') state.recovery.kind = 'resuming';
   });
   if (checkpointState.status === RUN_STATUS.STOPPED) return checkpointState;

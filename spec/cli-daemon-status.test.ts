@@ -28,7 +28,7 @@ describe('daemon status local diagnosis', () => {
   let trackedServers: TrackedServer[];
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'flowcrew-daemon-status-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'fc-ds-'));
     previousFcDir = fcGlobalDir();
     setFcGlobalDir(tempDir);
     trackedServers = [];

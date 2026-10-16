@@ -54,7 +54,7 @@ export function canonicalRunId(root: string, runId: string): string {
 }
 
 export function cancelledRunPublicationError(runId: string): Error {
-  return new Error(`RUN_CANCELLED: run ${runId} has acknowledged cancellation; start a new run instead of publishing or resuming this one`);
+  return new Error(`RUN_CANCELLED: run ${runId} has acknowledged cancellation; stale publication is forbidden; use explicit resume after settlement to continue`);
 }
 
 export function canonicalRunDirectory(directory: string): string {

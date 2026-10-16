@@ -54,6 +54,20 @@ const command = (code: string) => execWithStdin(process.execPath, ['-e', code], 
 const voided = (action: () => Promise<unknown>) => expect(withEngineIntegrity(input(), action)).rejects.toThrow('ENGINE_STATE_TAMPERED');
 
 describe('structural engine state protection', () => {
+  it('protects a nested run beneath an invocation temporary ancestor', async () => {
+    const parent = join(root, '.tmp-owner');
+    project = join(parent, 'project'); mkdirSync(project, { recursive: true });
+    store = join(parent, 'store'); setFcGlobalDir(store);
+    run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runDirPath;
+    const path = join(run, 'run.json');
+    const before = readFileSync(path, 'utf8');
+    await voided(async () => {
+      const result = await command(`require('node:fs').writeFileSync(${JSON.stringify(path)}, 'counterfeit')`);
+      expect(result.exitCode).toBe(0);
+    });
+    expect(readFileSync(path, 'utf8')).toBe(before);
+  });
+
   it.each(['run', 'store', 'project-link', 'future-database', 'live-distribution', 'project-inside-run', 'project-inside-distribution'])('refuses engine storage inside authored work: %s', async mode => {
     let args = input();
     if (mode === 'project-inside-distribution') args = { ...args, projectDir: join(import.meta.dirname, '../dist/future-project') };

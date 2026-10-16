@@ -37,8 +37,10 @@ independent reviews and retained evidence. **You probably don't need FlowCrew** 
   `ceiling_hit` ends research without a metric win; `incomplete` means insufficient completion. `failed` and
   `reality_gate_failed` record execution/check failures; `escalated` is unresolved or irreparable;
   `phase_complete` ends a phase; `stopped` records a stop.
-- **Interruptible work.** `task cancel` stops registered work; `task resume` continues stopped, failed or incomplete
-  runs with completed stages, plan, history and remaining budget. `task retry` requests another launch attempt,
+- **Interruptible work.** `daemon hold` parks in-flight work at settled stage groups for deployment;
+  `daemon continue` resumes compatible runs with completed stages, plan, history and remaining budget.
+  `task cancel` stops work. Explicit `task resume` continues compatible stopped, failed or incomplete work after settlement.
+  `task retry` requests another launch attempt,
   starting a fresh run after terminal settlement.
 
 See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
@@ -112,19 +114,19 @@ The [ship procedure](skills/ship.md) calls for exact-byte rehearsal and digest c
 and launch into an isolated worktree with a measured validation baseline. Skills are instructions to
 the coding agent; the engine does not guarantee that it follows them.
 
-### 5. Watch, cancel and resume
+### 5. Watch and control tasks
 
 ```bash
 flowcrew start
 flowcrew watch
 flowcrew status
-flowcrew task cancel <numeric-id>
-flowcrew task resume <numeric-id>
+flowcrew task show <numeric-id>
 ```
 
 `start` runs the dashboard at `http://localhost:3000/` by default; use another terminal for `watch` and `status`.
-Use task controls as needed with the registered task's numeric ID. Dashboard Resume sits beside Cancel;
-it preserves completed work and remaining budget. Retry starts fresh after terminal settlement.
+Use `daemon hold` and `daemon continue` for the [deployment procedure](guide/operations.md#deploy-while-tasks-are-in-flight).
+`task resume` (and Dashboard Resume) explicitly continues compatible stopped, failed or incomplete work,
+preserving completed work and remaining budget. Cancellation stays stopped until explicit continuation; retry starts fresh after settlement.
 Parked approvals use Inbox decisions. [CLI](guide/cli.md#services-and-tasks) · [Operations](guide/operations.md#inspect-guide-and-stop).
 
 ## What you can run

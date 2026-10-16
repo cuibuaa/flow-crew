@@ -11,11 +11,15 @@ import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { parseDispatchedStageConfig, WorkflowConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { runWorkflow } from '../src/scheduler/sched_loop/run-workflow.js';
 import { stageRaceAdapter } from '../src/scheduler/sched_loop/stage-race.js';
-import { initializeReservedRun, readRunState, reserveRun, runDir } from '../src/store.js';
+import { fcGlobalDir, initializeReservedRun, readRunState, reserveRun, runDir, setFcGlobalDir } from '../src/store.js';
 
 let directory: string;
-beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'flowcrew-race-artifact-links-')); });
-afterEach(() => rmSync(directory, { recursive: true, force: true }));
+let previousStore: string;
+beforeEach(() => {
+  directory = mkdtempSync(join(tmpdir(), 'flowcrew-race-artifact-links-'));
+  previousStore = fcGlobalDir(); setFcGlobalDir(join(directory, 'state'));
+});
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(directory, { recursive: true, force: true }); });
 const agentsDir = join(import.meta.dirname, '../config/agents');
 const brief = '# Deliver an answer\n\n## Acceptance criteria\n1. answer.txt contains the current generated answer.\n';
 const criterion = extractBriefCriteria(brief).criteria[0].id;

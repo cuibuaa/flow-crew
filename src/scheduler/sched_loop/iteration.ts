@@ -6,6 +6,7 @@ import { RUN_STATUS, StoreState, isAwaitingApprovalRunStatus, isPausedRunStatus,
 import { admitPlannerDispatches } from './planner-dispatch.js';
 import { consumePlanRevisions } from './services.js';
 import { executeReadyBatch } from './stage-batch.js';
+import { parkAtDeploymentBoundary } from '../../deployment-hold.js';
 
 export async function executeIteration(
   sorted: StageConfig[],
@@ -26,6 +27,8 @@ export async function executeIteration(
 ): Promise<StoreState> {
   const technicalRetries = new Map<string, TechnicalRetryBudgetState>();
   while (true) {
+    const held = parkAtDeploymentBoundary(projectDir, runId);
+    if (held) return held;
     let state = readRunState(projectDir, runId);
     if (state.status === RUN_STATUS.RUNNING) state = consumePlanRevisions(sorted, state, projectDir, runId, runDirPath, workflow, roleRegistry);
 

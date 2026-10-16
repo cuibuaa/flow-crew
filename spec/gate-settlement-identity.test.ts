@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
@@ -72,4 +72,31 @@ describe('gate settlement binds one authored fact', () => {
       expect(evaluation.effectiveVerdict?.repairability).toBeUndefined();
     }
   });
+
+  it.skipIf(process.platform === 'win32').each(['same', 'foreign-production', 'foreign-observation'])(
+    'authenticates a resumed physical receipt through a store alias (%s)', location => {
+      const verdict = { pass: false, reason: 'repair the retained finding', repairability: { version: 1, disposition: 'repairable', evidence: 'fixture finding' } };
+      const f = fixture(verdict, verdict);
+      writeFileSync(carrier.path, carrier.first);
+      const physical = realpathSync(f.base);
+      const aliasStore = join(f.base, '..', '..', '..', 'store-alias');
+      symlinkSync(realpathSync(join(f.base, '..', '..')), aliasStore, 'dir');
+      setFcGlobalDir(aliasStore);
+      carrier.path = join(runDir(f.projectDir, f.runId), 'verdict_gate.json');
+      const foreign = join(f.base, '..', 'foreign'); mkdirSync(foreign);
+      writeFileSync(join(foreign, 'verdict_gate.json'), carrier.first);
+      const attempt = f.state.stages.gate.attempts![0];
+      writeFileSync(join(f.base, 'stages', 'gate', 'artifact_contract.json'), JSON.stringify({
+        stageId: 'gate', violations: [], completionDeferred: false,
+        production: { runId: f.runId, runDir: location === 'foreign-production' ? foreign : physical,
+          attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt },
+        observations: [{ path: join(location === 'foreign-observation' ? foreign : physical, 'verdict_gate.json'),
+          fresh: true, sha256: createHash('sha256').update(carrier.first).digest('hex') }],
+      }));
+      const evaluation = readGateEvaluation(f.projectDir, f.stage, f.state, f.runId);
+      expect(evaluation.authoredVerdict).toMatchObject({ pass: false, repairability: { disposition: 'repairable' } });
+      if (location === 'same') expect(evaluation.effectiveVerdict).toMatchObject({ pass: false, repairability: { disposition: 'repairable' } });
+      else expect(evaluation.effectiveVerdict).toMatchObject({ pass: false, contractViolation: 'repairability' });
+    },
+  );
 });

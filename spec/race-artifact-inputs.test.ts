@@ -10,14 +10,18 @@ import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { parseDispatchedStageConfig, WorkflowConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { runWorkflow } from '../src/scheduler/sched_loop/run-workflow.js';
-import { readRunState, runDir } from '../src/store.js';
+import { fcGlobalDir, readRunState, runDir, setFcGlobalDir } from '../src/store.js';
 
 const agentsDir = join(import.meta.dirname, '../config/agents');
 const brief = '---\noutputs: [report.md]\n---\n# Deliver an answer\n\n## Acceptance criteria\n1. answer.txt contains the new answer and literal $&.\n2. report.md describes the answer.\n';
 const refs = extractBriefCriteria(brief).criteria.map(criterion => criterion.id);
 let directory: string;
-beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'flowcrew-race-inputs-')); });
-afterEach(() => rmSync(directory, { recursive: true, force: true }));
+let previousStore: string;
+beforeEach(() => {
+  directory = mkdtempSync(join(tmpdir(), 'flowcrew-race-inputs-'));
+  previousStore = fcGlobalDir(); setFcGlobalDir(join(directory, 'state'));
+});
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(directory, { recursive: true, force: true }); });
 
 async function fixture(conditional?: 'active' | 'inactive', customPrompt: boolean | 'full-brief' = false, gateFact?: 'work' | 'prepare', gateStatus = 'complete') {
   const project = join(directory, 'project'); mkdirSync(project);

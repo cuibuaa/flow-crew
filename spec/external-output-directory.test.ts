@@ -35,11 +35,12 @@ const brief = (path: string, type = 'directory') => `---\noutputs:\n  - path: ${
 beforeEach(() => {
   installation.install();
   root = mkdtempSync(join(tmpdir(), 'fc-external-output-'));
+  const home = join(root, 'home'); mkdirSync(home); vi.stubEnv('HOME', home);
   project = join(root, 'project'); mkdirSync(project);
   output = join(root, 'durable', 'items');
   stateRoot = join(root, 'state'); previousStore = fcGlobalDir(); setFcGlobalDir(stateRoot);
 });
-afterEach(() => { clearAttemptSummaryRefreshDebounce(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { clearAttemptSummaryRefreshDebounce(); setFcGlobalDir(previousStore); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
 function boundaryFixture(source = brief(output)) {
   const created = createRun(project, 'external-output', 'name: fixture\nstages: []\n', ['work']);

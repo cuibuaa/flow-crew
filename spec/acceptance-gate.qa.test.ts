@@ -69,7 +69,7 @@ describe('acceptance gate: dashboard mutation peers', () => {
   let previousHome: string | undefined;
 
   beforeEach(async () => {
-    sandbox = mkdtempSync(join(tmpdir(), 'flowcrew-acceptance-dashboard-'));
+    sandbox = mkdtempSync(join(tmpdir(), 'fc-ad-'));
     projectDir = join(sandbox, 'project');
     previousFcDir = fcGlobalDir();
     previousHome = process.env.HOME;

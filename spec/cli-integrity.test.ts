@@ -196,6 +196,7 @@ describe('doctor tells port occupancy apart from your own dashboard', () => {
 describe('command help before side effects', () => {
   it.each([
     ['start', '--help'],
+    ['daemon', 'hold', '--timeout-ms', '0', '--help'],
     ['inbox', 'approve', 'missing', '--always', '--help'],
     ['guide', '--run', '2000-01-01T00-00-00-help', 'operator text', '--help'],
   ])('prints help for %s without changing the run', (...args) => {
@@ -212,6 +213,11 @@ describe('command help before side effects', () => {
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain('Usage:');
+    if (args[0] === 'daemon') {
+      expect(result.stdout).toContain('hold|hold-status|continue');
+      expect(result.stdout).toContain('--timeout-ms N');
+      expect(existsSync(join(isolated.fcHome, 'deployment-hold.json'))).toBe(false);
+    }
     expect(readFileSync(join(run, 'run.json'), 'utf8')).toBe(record);
     expect(existsSync(join(run, 'user_input.md'))).toBe(false);
     expect(existsSync(join(run, 'supervisor_guidance.md'))).toBe(false);

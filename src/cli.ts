@@ -27,7 +27,7 @@ function earlyCommandHelp(input: string[]): string | undefined {
     if (subcommand === 'show') return 'Usage: flowcrew task show <id> [--summary-only | --raw]\nShows bounded run/stage detail; raw tick JSON is opt-in.';
     return 'Usage: flowcrew task list|show|cancel|resume|retry|tail ...';
   }
-  if (command === 'daemon') return 'Usage: flowcrew daemon start|serve|stop|restart|status|logs [options]';
+  if (command === 'daemon') return 'Usage: flowcrew daemon start|serve|stop|restart|status|hold|hold-status|continue|logs [options]\n  hold [--timeout-ms N] fences launches and waits for settled groups (default 60000ms).\n  hold-status reports settlement; continue releases compatible held runs.';
   if (command === 'quick') return 'Usage: flowcrew quick <task|brief path|-> [--project <path>] [--max-iterations N]';
   if (command === 'rehearse') return 'Usage: flowcrew rehearse <brief> [--project <path>] [--json]';
   if (command === 'interrupt') return 'Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"';
@@ -2065,7 +2065,7 @@ Commands:
   clean     Delete old runs (keeps 5 most recent by default)
   export    Export a run as JSON bundle
   campaign  Inspect recorded campaign state and review pending brief patches
-  daemon    Operate the background orchestrator (restart/status; serve is foreground/internal)
+  daemon    Operate the background orchestrator (hold/continue, restart/status; serve is internal)
   dashboard Query the running web dashboard (status)
   task      List and manage background tasks
   fc_tasks  Render and safely update a conversational task ledger

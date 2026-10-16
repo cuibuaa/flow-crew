@@ -10,7 +10,7 @@ import { computeBuildFingerprint, createDaemonIdentity } from '../src/daemon-ide
 
 const roots: string[] = [];
 function fixture() {
-  const scratch = mkdtempSync(join(tmpdir(), 'flowcrew-build-identity-')); roots.push(scratch);
+  const scratch = mkdtempSync(join(tmpdir(), 'fc-bi-')); roots.push(scratch);
   const root = join(scratch, 'project');
   const stagedDistDir = join(scratch, 'staged'), stagedUiDir = join(scratch, 'staged-ui');
   for (const dir of ['src', 'ui/src', 'ui/public', 'dist', 'ui/dist']) mkdirSync(join(root, dir), { recursive: true });
