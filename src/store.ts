@@ -1886,9 +1886,6 @@ function updateOperationalRunState(directory: string, mutator: (state: StoreStat
       if (isJsonPersistedEqual(previous.stages[id], status)) continue;
       const stagePath = join(identity.directory, 'stages', id);
       if (interruption === 'cancellation') {
-        // Pending projections have no current execution to settle, including
-        // repended stages whose ledger retains the preceding settled attempt.
-        if (previous.stages[id].status === STAGE_STATUS.PENDING) continue;
         let ledger: unknown;
         try { ledger = JSON.parse(readFileSync(join(stagePath, 'status.json'), 'utf8')); }
         catch { continue; } // Missing or unreadable evidence cannot authorize a ledger write.
@@ -1928,7 +1925,8 @@ export function cancelRunStateAtPath(directory: string, completedAt: string): { 
     state.completedAt = completedAt;
     for (const [id, stage] of Object.entries(state.stages)) {
       state.stages[id] = interruptedStageStatus(stage, completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
-      if (state.stages[id].status === STAGE_STATUS.PENDING) state.stages[id] = { ...state.stages[id], status: STAGE_STATUS.SKIPPED };
+      // Pending stages have no current execution to settle. Keep them runnable
+      // for explicit continuation; the stopped run fences ordinary publication.
     }
   }, 'cancellation');
   return { state, preservedRunStatus };

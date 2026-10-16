@@ -602,7 +602,7 @@ describe('cancel-and-confirm coordinator', () => {
       reason: 'Cancelled by user',
     });
     expect(state.stages.work.status).toBe(STAGE_STATUS.FAILED);
-    expect(state.stages.later.status).toBe(STAGE_STATUS.SKIPPED);
+    expect(state.stages.later.status).toBe(STAGE_STATUS.PENDING);
   });
 
   it('closes cancellation at the cleanup timeout and retains live process evidence', async () => {
