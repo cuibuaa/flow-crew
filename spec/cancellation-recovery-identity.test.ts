@@ -124,10 +124,10 @@ describe('canonical cancellation and committed publication fences', () => {
 
   it('preserves an acknowledged stop against stale writers while allowing lifecycle-neutral ownership claims', async () => {
     const stale = readRunState(project, runId);
-    const beforeLedger = readFileSync(join(directory, 'stages/work/status.json'), 'utf8');
     const c = new RunCancellationCoordinator({ registry: { list: () => [] } as never, units: { isActive: async () => ({ kind: 'absent' }), stopUnit: async () => {} } as never });
     expect((await c.cancelRun(runId)).status).toBe('cancelled');
     const acknowledged = readFileSync(join(directory, 'run.json'), 'utf8');
+    const beforeLedger = readFileSync(join(directory, 'stages/work/status.json'), 'utf8');
     expect(() => writeRunState(project, runId, stale)).toThrow('RUN_CANCELLED');
     expect(() => writeStageStatus(project, runId, 'work', { status: 'running', retries: 0 })).toThrow('RUN_CANCELLED');
     expect(claimLaunchIntent(project, runId).claimed).toBe(true);

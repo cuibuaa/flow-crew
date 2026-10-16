@@ -204,7 +204,7 @@ The task registry supplies the run ID and project directory; the dashboard Resum
 control beside Cancel requests the same continuation. Resume still checks brief
 admission, scheduler ownership, persisted execution compatibility and unresolved approvals.
 Only explicit continuation resumes stopped work, including acknowledged cancellation.
-An unsettled attempt or unretired owner refuses continuation; resume cannot recover unfinished stage work.
+Cancellation settles interrupted attempts and their stage ledgers. Explicit resume also settles the matching unfinished attempt left by an older cancellation when the existing ownership evidence proves its scheduler, controller and commands are no longer alive. Other unsettled attempts, unknown or live owners, and unrelated ledger disagreements still refuse continuation.
 `flowcrew task retry <task-id>` requests another launch attempt:
 before terminal settlement it retains any existing run binding, and after settlement
 it starts a fresh run with a new plan, stage history and iteration budget. Retry does

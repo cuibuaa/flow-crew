@@ -6,7 +6,7 @@ import { readBuildManifest } from './build-manifest.js';
 import { inspectRunScheduler, processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './run-lock.js';
 import { processGroupIsAlive } from './process-liveness.js';
 
-import { RUN_STATUS, STAGE_STATUS, completedStageAttemptStatus, settledStageAttemptStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
+import { RUN_STATUS, STAGE_STATUS, interruptedStageStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
 import { planDigest } from './plan-revisions.js';
 import { canonicalRunId } from './cancellation-policy.js';
@@ -232,12 +232,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       evidence.assertSchedulerAbsent?.();
       assertIntentAuthority(current, authority);
       // A closed failed143 attempt is retained, never completed a second time.
-      return ledger.attempts!.at(-1)!.status === 'closed'
-        ? settledStageAttemptStatus(ledger, stage.attempt.index, false, { exitCode: 143, error: interruptionError(previous) })
-        : ledger.attempts!.at(-1)!.status === STAGE_STATUS.RUNNING
-        ? completedStageAttemptStatus(ledger, stage.retries, {
-          exitCode: 143, duration_ms: stage.durationMs, completedAt: stage.completedAt, error: interruptionError(previous),
-        }) : ledger;
+      return interruptedStageStatus(ledger, stage.completedAt, interruptionError(previous));
     });
     if (state.status !== RUN_STATUS.RUNNING) return state;
     state = updateStageStatusUnderRunLock(projectDir, runId, stage.stageId, (current, ledger) => {

@@ -24,6 +24,9 @@ Thumbs.db
 *.tsbuildinfo
 ui/*.d.ts.map
 docs/*
+!docs/continue-legacy-cancel/
+docs/continue-legacy-cancel/*
+!docs/continue-legacy-cancel/report.md
 tests/
 ui/tests/
 design/*

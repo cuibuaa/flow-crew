@@ -20,6 +20,7 @@ import type { ProviderFailure } from './provider-result.js';
 import { invocationUsageFields, sumInvocationUsage, usageComplete, type InvocationUsage, type NativeInvocationUsage, type TokenUsage } from './invocation-usage.js';
 
 import {
+  RUN_STATUS,
   UnknownRunStatusError,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
@@ -1857,6 +1858,12 @@ export function updateRunStateAtPath(directory: string, mutator: (state: StoreSt
 /** Mutate control state without requiring historical evidence. History bytes,
  * references and inline records remain untouched, even when evidence is lost. */
 export function updateOperationalRunStateAtPath(directory: string, mutator: (state: StoreState) => void): StoreState {
+  return updateOperationalRunState(directory, mutator);
+}
+
+/** The two interruption entrances publish their changed stage ledgers under
+ * the same cancellation lock. Ordinary operational writers retain the stopped fence. */
+function updateOperationalRunState(directory: string, mutator: (state: StoreState) => void, interruptedStages = false): StoreState {
   const identity = resolveRunIdentity(directory);
   if (!identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: run has no project directory');
   return withRunStateLock(identity.directory, () => {
@@ -1872,13 +1879,62 @@ export function updateOperationalRunStateAtPath(directory: string, mutator: (sta
     }
     if (isJsonPersistedEqual(previous, state)) return state;
     requireKnownRunStatus(state.status, `write operational run state ${identity.runId}`);
-    if (previous.status === 'stopped') throw cancelledRunPublicationError(identity.runId);
+    if (previous.status === 'stopped' && !interruptedStages) throw cancelledRunPublicationError(identity.runId);
+    if (interruptedStages) for (const [id, status] of Object.entries(state.stages)) {
+      if (isJsonPersistedEqual(previous.stages[id], status)) continue;
+      const stagePath = join(identity.directory, 'stages', id);
+      mkdirSync(stagePath, { recursive: true });
+      atomicWrite(join(stagePath, 'status.json'), JSON.stringify(status, null, 2));
+    }
     if (state.stateFormat) state.stateFormat.revision += 1;
     publishRunProjection(identity.projectDir, identity.directory, state, state, () => {
       if (readFileSync(path, 'utf8') !== raw) throw new RunStateProjectionConflictError(`Run state changed during operational mutation for ${identity.runId}`);
     });
     return state;
   });
+}
+
+/** Close exactly the current interrupted execution without inventing another attempt. */
+export function interruptedStageStatus(previous: StageStatus, completedAt: string, error: string): StageStatus {
+  const attempt = previous.attempts?.at(-1);
+  if (attempt?.status === 'closed') return settledStageAttemptStatus(previous, attempt.index, false, { exitCode: 143, error });
+  if (attempt?.status === 'running') return completedStageAttemptStatus(previous, previous.retries, {
+    exitCode: 143, completedAt, duration_ms: Math.max(0, Date.parse(completedAt) - Date.parse(attempt.startedAt)), error,
+  });
+  return previous.status === STAGE_STATUS.RUNNING ? { ...previous, status: STAGE_STATUS.FAILED } : previous;
+}
+
+/** Native cancellation fences the run and closes its interrupted stage ledgers together. */
+export function cancelRunStateAtPath(directory: string, completedAt: string): { state: StoreState; preservedRunStatus?: string } {
+  let preservedRunStatus: string | undefined;
+  const state = updateOperationalRunState(directory, state => {
+    if (resolveRunStatus(state.status).kind === 'unknown' || isTerminalRunStatus(state.status) && !(state.status === RUN_STATUS.FAILED && state.recovery?.kind === 'blocked')) {
+      preservedRunStatus = state.status;
+      return;
+    }
+    state.status = RUN_STATUS.STOPPED;
+    state.failureReason = 'Cancelled by user';
+    state.completedAt = completedAt;
+    for (const [id, stage] of Object.entries(state.stages)) {
+      state.stages[id] = interruptedStageStatus(stage, completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
+      if (state.stages[id].status === STAGE_STATUS.PENDING) state.stages[id] = { ...state.stages[id], status: STAGE_STATUS.SKIPPED };
+    }
+  }, true);
+  return { state, preservedRunStatus };
+}
+
+/** An explicit continuation may settle only its proven stopped interruption.
+ * Admission supplies fresh ownership and exact ledger/projection evidence while
+ * the run lock prevents a concurrent cancellation or scheduler publication. */
+export function settleInterruptedRunStagesAtPath(directory: string, stageIds: string[], completedAt: string, error: string, assertAuthority: (state: StoreState) => void): StoreState {
+  return updateOperationalRunState(directory, state => {
+    if (state.status !== RUN_STATUS.STOPPED) throw new Error('INTERRUPTION_STATE_CHANGED: run is no longer stopped');
+    assertAuthority(state);
+    for (const id of stageIds) {
+      if (!state.stages[id]) throw new Error(`INTERRUPTION_STATE_CHANGED: missing stage ${id}`);
+      state.stages[id] = interruptedStageStatus(state.stages[id], completedAt, error);
+    }
+  }, true);
 }
 
 function updateRunStateInDirectory(projectDir: string, runId: string, runPath: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState) => void): StoreState {
