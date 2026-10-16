@@ -1,12 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { assertContinuationCompatible } from '../src/engine-continuation.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import type { SupervisorBackend } from '../src/supervision.js';
 import {
   beginStageAttempt, closeStageAttempt, completeStageAttempt, createRun, fcGlobalDir,
-  readRunState, readStageStatus, RUN_STATUS, setFcGlobalDir, STAGE_STATUS, updateRunState,
+  readRunState, readStageStatus, rependStageStatus, RUN_STATUS, setFcGlobalDir, STAGE_STATUS, updateRunState,
 } from '../src/store.js';
 import { TASK_STATUS, TaskRegistry } from '../src/task-registry.js';
 
@@ -69,9 +70,70 @@ describe('cancellation settles interrupted execution', () => {
     expect(state.stages.done).toEqual(done);
     expect(readStageStatus(projectDir, run.runId, 'done')).toEqual(done);
     expect(state.stages.later.status).toBe(STAGE_STATUS.SKIPPED);
-    expect(readStageStatus(projectDir, run.runId, 'later')).toEqual(state.stages.later);
+    expect(existsSync(join(run.runDirPath, 'stages/later/status.json'))).toBe(false);
     expect(() => completeStageAttempt(projectDir, run.runId, 'work', work.retries, { exitCode: 0, duration_ms: 1 })).toThrow(/cancel/i);
     expect(readStageStatus(projectDir, run.runId, 'work')).toEqual(work);
     expect(readRunState(projectDir, run.runId)).toEqual(state);
+  });
+});
+
+describe('cancellation preserves ledger evidence', () => {
+  it.each(['ahead', 'other disagreement', 'missing', 'malformed'] as const)('leaves a %s ledger untouched and continuation refuses it', async kind => {
+    const run = createRun(projectDir, 'fixture', 'name: fixture\nstages:\n  - id: work\n    role: coder\n    scope: []\n    prompt_template: Complete fixture.\n', ['work']);
+    updateRunState(projectDir, run.runId, state => { state.status = RUN_STATUS.RUNNING; });
+    beginStageAttempt(projectDir, run.runId, 'work', 0, startedAt);
+    const projection = readRunState(projectDir, run.runId).stages.work;
+    const ledgerPath = join(run.runDirPath, 'stages/work/status.json');
+    if (kind === 'ahead') {
+      // writeStageStatus publishes the ledger first. Restore only run.json to
+      // reproduce a crash before the corresponding projection was published.
+      const raw = readFileSync(join(run.runDirPath, 'run.json'), 'utf8');
+      completeStageAttempt(projectDir, run.runId, 'work', 0, { exitCode: 0, duration_ms: 5, completedAt });
+      writeFileSync(join(run.runDirPath, 'run.json'), raw);
+    }
+    if (kind === 'other disagreement') writeFileSync(ledgerPath, JSON.stringify({ ...projection, error: 'Independent ledger evidence' }));
+    if (kind === 'missing') rmSync(ledgerPath);
+    if (kind === 'malformed') writeFileSync(ledgerPath, '{unreadable ledger');
+    const before = existsSync(ledgerPath) ? readFileSync(ledgerPath, 'utf8') : undefined;
+    const registry = new TaskRegistry({ baseDir: root });
+    const task = registry.create({ projectDir, run_id: run.runId, status: TASK_STATUS.RUNNING });
+
+    const result = await new RunCancellationCoordinator({ registry, units,
+      now: () => new Date(completedAt), timeoutMs: 0, signalGraceMs: 0,
+    }).cancelTask(task.id);
+
+    expect(result).toMatchObject({ ok: true, status: 'cancelled' });
+    const state = readRunState(projectDir, run.runId);
+    expect(state.status).toBe(RUN_STATUS.STOPPED);
+    expect(state.stages.work.attempts!.at(-1)).toMatchObject({ status: 'failed', exitCode: 143 });
+    expect(existsSync(ledgerPath) ? readFileSync(ledgerPath, 'utf8') : undefined).toBe(before);
+    expect(() => assertContinuationCompatible(projectDir, run.runId)).toThrow(
+      kind === 'ahead' || kind === 'other disagreement' ? 'stage projection and attempt ledger disagree' : 'CONTINUATION_INCOMPATIBLE',
+    );
+    expect(existsSync(ledgerPath) ? readFileSync(ledgerPath, 'utf8') : undefined).toBe(before);
+    expect(readRunState(projectDir, run.runId)).toEqual(state);
+  });
+
+  it.each([false, true])('keeps repended execution ledgers byte-for-byte (matching pending ledger=%s)', async matching => {
+    const run = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['work']);
+    beginStageAttempt(projectDir, run.runId, 'work', 0, startedAt);
+    completeStageAttempt(projectDir, run.runId, 'work', 0, { exitCode: 0, duration_ms: 5, completedAt });
+    updateRunState(projectDir, run.runId, state => {
+      state.status = RUN_STATUS.RUNNING;
+      state.stages.work = rependStageStatus(state.stages.work);
+    });
+    const ledgerPath = join(run.runDirPath, 'stages/work/status.json');
+    if (matching) writeFileSync(ledgerPath, JSON.stringify(readRunState(projectDir, run.runId).stages.work));
+    const before = readFileSync(ledgerPath, 'utf8');
+    const attempts = readRunState(projectDir, run.runId).stages.work.attempts;
+    const registry = new TaskRegistry({ baseDir: root });
+    const task = registry.create({ projectDir, run_id: run.runId, status: TASK_STATUS.RUNNING });
+
+    expect(await new RunCancellationCoordinator({ registry, units,
+      now: () => new Date(completedAt), timeoutMs: 0, signalGraceMs: 0,
+    }).cancelTask(task.id)).toMatchObject({ ok: true, status: 'cancelled' });
+
+    expect(readRunState(projectDir, run.runId).stages.work).toMatchObject({ status: STAGE_STATUS.SKIPPED, attempts });
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
   });
 });

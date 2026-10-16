@@ -1862,8 +1862,10 @@ export function updateOperationalRunStateAtPath(directory: string, mutator: (sta
 }
 
 /** The two interruption entrances publish their changed stage ledgers under
- * the same cancellation lock. Ordinary operational writers retain the stopped fence. */
-function updateOperationalRunState(directory: string, mutator: (state: StoreState) => void, interruptedStages = false): StoreState {
+ * the same cancellation lock. Cancellation preserves pre-existing disagreements;
+ * continuation supplies its own exact ledger and ownership proof under this lock.
+ * Ordinary operational writers retain the stopped fence. */
+function updateOperationalRunState(directory: string, mutator: (state: StoreState) => void, interruption?: 'cancellation' | 'continuation'): StoreState {
   const identity = resolveRunIdentity(directory);
   if (!identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: run has no project directory');
   return withRunStateLock(identity.directory, () => {
@@ -1879,10 +1881,19 @@ function updateOperationalRunState(directory: string, mutator: (state: StoreStat
     }
     if (isJsonPersistedEqual(previous, state)) return state;
     requireKnownRunStatus(state.status, `write operational run state ${identity.runId}`);
-    if (previous.status === 'stopped' && !interruptedStages) throw cancelledRunPublicationError(identity.runId);
-    if (interruptedStages) for (const [id, status] of Object.entries(state.stages)) {
+    if (previous.status === 'stopped' && !interruption) throw cancelledRunPublicationError(identity.runId);
+    if (interruption) for (const [id, status] of Object.entries(state.stages)) {
       if (isJsonPersistedEqual(previous.stages[id], status)) continue;
       const stagePath = join(identity.directory, 'stages', id);
+      if (interruption === 'cancellation') {
+        // Pending projections have no current execution to settle, including
+        // repended stages whose ledger retains the preceding settled attempt.
+        if (previous.stages[id].status === STAGE_STATUS.PENDING) continue;
+        let ledger: unknown;
+        try { ledger = JSON.parse(readFileSync(join(stagePath, 'status.json'), 'utf8')); }
+        catch { continue; } // Missing or unreadable evidence cannot authorize a ledger write.
+        if (!isJsonPersistedEqual(previous.stages[id], ledger)) continue;
+      }
       mkdirSync(stagePath, { recursive: true });
       atomicWrite(join(stagePath, 'status.json'), JSON.stringify(status, null, 2));
     }
@@ -1919,7 +1930,7 @@ export function cancelRunStateAtPath(directory: string, completedAt: string): { 
       state.stages[id] = interruptedStageStatus(stage, completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
       if (state.stages[id].status === STAGE_STATUS.PENDING) state.stages[id] = { ...state.stages[id], status: STAGE_STATUS.SKIPPED };
     }
-  }, true);
+  }, 'cancellation');
   return { state, preservedRunStatus };
 }
 
@@ -1934,7 +1945,7 @@ export function settleInterruptedRunStagesAtPath(directory: string, stageIds: st
       if (!state.stages[id]) throw new Error(`INTERRUPTION_STATE_CHANGED: missing stage ${id}`);
       state.stages[id] = interruptedStageStatus(state.stages[id], completedAt, error);
     }
-  }, true);
+  }, 'continuation');
 }
 
 function updateRunStateInDirectory(projectDir: string, runId: string, runPath: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState) => void): StoreState {

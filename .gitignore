@@ -27,6 +27,9 @@ docs/*
 !docs/continue-legacy-cancel/
 docs/continue-legacy-cancel/*
 !docs/continue-legacy-cancel/report.md
+!docs/cancel-ledger-guard/
+docs/cancel-ledger-guard/*
+!docs/cancel-ledger-guard/report.md
 tests/
 ui/tests/
 design/*
