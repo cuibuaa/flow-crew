@@ -1,7 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { requestDeploymentHold } from '../src/deployment-hold.js';
 import { NodeSystemd, Orchestrator } from '../src/orchestrator.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { TaskRegistry, type TaskEntry, type TaskStatus } from '../src/task-registry.js';
@@ -145,3 +146,56 @@ it('keeps a manager failure fail closed instead of treating it as owner absence'
   writeFileSync(join(root, 'bin', 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
   expect((await orchestrator.holdDeployment()).ready).toBe(false);
 });
+
+// Include directory names as well as file bytes so an observation cannot hide
+// a repair by creating, replacing or deleting a different state artifact.
+function stateBytes(path = fcGlobalDir()): Record<string, Buffer | null> {
+  const snapshot: Record<string, Buffer | null> = {};
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      snapshot[entry.name + '/'] = null;
+      for (const [name, bytes] of Object.entries(stateBytes(join(path, entry.name)))) {
+        snapshot[entry.name + '/' + name] = bytes;
+      }
+    } else snapshot[entry.name] = readFileSync(join(path, entry.name));
+  }
+  return snapshot;
+}
+
+it.each(['absent', 'failed', 'unavailable', 'loaded-probe-failed'] as const)(
+  'reads legacy fallback records without changing any state bytes (manager=%s)', async manager => {
+    const records = [
+      { bytes: '{ "pid": 2147483632, "state": "active", "command": "fixture" }\n', kind: 'terminal-unknown' },
+      { bytes: '{malformed legacy record\n', kind: 'terminal-unknown' },
+      { bytes: '{ "state": "inactive", "reason": "fixture ended" }\n', kind: 'terminal-unknown' },
+      { bytes: JSON.stringify({ pid: process.pid, state: 'active' }), kind: 'active' },
+      { bytes: JSON.stringify({ pid: process.pid, state: 'deactivating' }), kind: 'deactivating' },
+    ];
+    for (const record of records) {
+      const { task } = seed('cancelled', 'stopped');
+      writeFileSync(join(fcGlobalDir(), 'systemd-fallback', task.systemd_unit + '.json'), record.bytes);
+    }
+    publish();
+    if (manager === 'failed') writeFileSync(join(root, 'inventory.json'), 'invalid\n');
+    if (manager === 'unavailable') rmSync(join(root, 'bin', 'systemctl'));
+    if (manager === 'loaded-probe-failed') {
+      writeFileSync(join(root, 'inventory.json'), JSON.stringify(rows.map(task => ({ unit: task.systemd_unit }))) + '\n');
+    }
+    requestDeploymentHold(); // Only the request owns this write; status must not.
+    const before = stateBytes();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const status = await orchestrator.deploymentStatus();
+      expect(stateBytes()).toEqual(before);
+      expect(status.errors).toEqual([]);
+      expect(status.ready).toBe(false); // The live owners still veto readiness.
+      expect(status.tasks.map(task => task.id)).toEqual(
+        manager === 'absent' || manager === 'unavailable' ? [4, 5] : [1, 2, 3, 4, 5],
+      );
+      const observed = await backend.isActiveMany(rows.map(task => task.systemd_unit));
+      expect([...observed.values()].map(unit => unit.kind)).toEqual(records.map(record =>
+        (manager === 'failed' || manager === 'loaded-probe-failed') && record.kind === 'terminal-unknown'
+          ? 'unobservable' : record.kind));
+      expect(stateBytes()).toEqual(before);
+    }
+  },
+);

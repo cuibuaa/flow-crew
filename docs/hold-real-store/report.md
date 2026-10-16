@@ -86,3 +86,37 @@ entry; it does not reproduce Docker's network-disabled image, as documented by t
 validator. Final success checks require no nonzero stage code, `DONE`, and a clean
 working tree. No runtime source changed after this full validation; this final edit
 only records its result.
+
+
+## Read-only status follow-up
+
+Review issue 3 exposed a write in the new inventory path: observing a stale or
+malformed legacy fallback record could repair it on disk. Batch observations now
+explicitly disable legacy repair, including the loaded-unit path if its detailed
+probe subsequently fails. Settlement still uses the same observed status, live
+owners still veto readiness, and inventory errors remain fail closed. Existing
+single-unit callers keep their repair behavior. The inventory optimization and
+historical settlement rules are unchanged; no new state, files or backend contract
+methods were added.
+
+The regression fixture seeds stale, malformed, terminal, live and deactivating
+legacy records. It snapshots every file's bytes and directory entries under the
+private state root after requesting the hold, then compares them after repeated
+status and batch observations. Four manager cases cover absent inventory entries,
+invalid inventory, a missing executable, and loaded units whose detailed probes
+fail. The hold request is outside the read-only comparison because it owns the
+latch write.
+
+Focused validation passed 159 tests across the history, deployment lifecycle,
+orchestrator and portable-supervision safety suites, including the existing
+single-unit repair regression. On the identical new fixture, restoring the original
+source caused all four byte-preservation cases to fail with changed legacy record
+bytes. Rebuilding the restored fix passed all four cases. These are byte-level
+mutation checks rather than timing claims.
+
+All follow-up commands and their helpers ran at nice 19 on cores 6–11, with at most
+two Vitest workers. The required full validator is reserved for one invocation
+against the committed follow-up; its external summary records the final result.
+A temporary Node launcher supplies the two-worker limit even to the validator's
+empty-environment isolation stages. No real manager or deployed daemon is used
+by the new fixtures.

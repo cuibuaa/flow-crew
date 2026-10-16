@@ -1406,15 +1406,15 @@ export class NodeSystemd implements SupervisorBackend {
       }
     }
     return new Map(await Promise.all([...new Set(units)].map(async unit => {
-      if (loaded?.has(unit)) return [unit, await this.isActive(unit)] as const;
-      // Local supervision still owns a unit that the manager has retired.
-      const local = this.fallbackState(unit);
+      if (loaded?.has(unit)) return [unit, await this.isActive(unit, false)] as const;
+      // Readiness observes local owners without repairing legacy records.
+      const local = this.fallbackState(unit, false);
       if (loaded || unavailable || local.kind === 'terminal') return [unit, local] as const;
       return [unit, mergeSupervisorStatuses(local, failure!)] as const;
     })));
   }
 
-  async isActive(unit: string): Promise<UnitStatus> {
+  async isActive(unit: string, repairLegacyRecords = true): Promise<UnitStatus> {
     const portable = this.portableState(unit);
     // An atomically-written exit status is the only backend-independent result
     // and therefore outranks even a systemd unit that has not been reaped yet.
@@ -1437,12 +1437,12 @@ export class NodeSystemd implements SupervisorBackend {
       if (failure.killed || failure.signal === 'SIGTERM' || failure.code === 'ETIMEDOUT') {
         return { kind: 'unobservable', reason: 'systemctl probe timed out' };
       }
-      if (failure.code === 'ENOENT') return this.fallbackState(unit);
+      if (failure.code === 'ENOENT') return this.fallbackState(unit, repairLegacyRecords);
       // A bound live shim is conservative positive evidence. Terminal-unknown
       // and absent cannot prove that a real unit stopped while systemctl itself
       // is unobservable, so those cases preserve the Phase 1 fail-closed rule.
       if (portable.kind === 'active' || portable.kind === 'deactivating') return portable;
-      const legacy = this.legacyFallbackState(unit);
+      const legacy = this.legacyFallbackState(unit, repairLegacyRecords);
       if (legacy.kind === 'active' || legacy.kind === 'deactivating') return legacy;
       return { kind: 'unobservable', reason: 'systemctl probe failed' };
     }
@@ -1703,9 +1703,9 @@ export class NodeSystemd implements SupervisorBackend {
     return { kind: 'journal', unit };
   }
 
-  private fallbackState(unit: string): UnitStatus {
+  private fallbackState(unit: string, repairLegacyRecords = true): UnitStatus {
     if (hasSupervisionEvidence(this.baseDir, unit)) return this.portableState(unit);
-    return this.legacyFallbackState(unit);
+    return this.legacyFallbackState(unit, repairLegacyRecords);
   }
 
   private portableState(unit: string): UnitStatus {
@@ -1715,7 +1715,7 @@ export class NodeSystemd implements SupervisorBackend {
     }).status;
   }
 
-  private legacyFallbackState(unit: string): UnitStatus {
+  private legacyFallbackState(unit: string, repairLegacyRecords: boolean): UnitStatus {
     const path = this.fallbackPath(unit);
     if (!existsSync(path)) return { kind: 'absent' };
     try {
@@ -1730,14 +1730,14 @@ export class NodeSystemd implements SupervisorBackend {
       if (parsed.pid && processIsAlive(parsed.pid)) {
         return parsed.state === 'deactivating' ? { kind: 'deactivating' } : { kind: 'active' };
       }
-      this.writeFallbackRecord(unit, {
+      if (repairLegacyRecords) this.writeFallbackRecord(unit, {
         ...parsed,
         state: 'inactive',
         completedAt: parsed.completedAt ?? new Date().toISOString(),
       });
       return { kind: 'terminal-unknown', reason: 'fallback process ended without an exit status' };
     } catch {
-      this.writeFallbackRecord(unit, {
+      if (repairLegacyRecords) this.writeFallbackRecord(unit, {
         state: 'failed',
         reason: 'fallback state record is malformed',
         completedAt: new Date().toISOString(),
