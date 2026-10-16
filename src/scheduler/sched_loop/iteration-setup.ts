@@ -164,7 +164,15 @@ export async function prepareWorkflowIteration(
       for (const sid of retiringStageIds) {
         delete state.stages[sid];
       }
+      // Static research stages name already executed measurements. Replanning
+      // replaces the dynamic DAG, not these completed round identities: replay
+      // would overwrite the shared result with an older measurement. Planners
+      // still reset, and newly dispatched stages may reuse their prior IDs.
+      const preservedStageIds = new Set(baseStages.filter((s) =>
+        state.research && !s.dynamic_dispatch && state.stages[s.id]?.status === STAGE_STATUS.COMPLETE,
+      ).map((s) => s.id));
       for (const s of baseStages) {
+        if (preservedStageIds.has(s.id)) continue;
         state.stages[s.id] = rependStageStatus(state.stages[s.id], 0);
         mkdirSync(join(runDirPath, 'stages', s.id), { recursive: true });
       }
@@ -175,7 +183,8 @@ export async function prepareWorkflowIteration(
       // Clean stale verdict files from previous iteration so new gates start fresh
       try {
         for (const f of readdirSync(runDirPath)) {
-          if (f.startsWith('verdict') && f.endsWith('.json')) {
+          if (f.startsWith('verdict') && f.endsWith('.json')
+              && ![...preservedStageIds].some((id) => f === `verdict_${id}.json`)) {
             unlinkSync(join(runDirPath, f));
           }
         }
