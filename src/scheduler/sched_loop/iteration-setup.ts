@@ -1,4 +1,9 @@
 // Boundary: Consume settled terminal signals and reset the iteration DAG with immutable obligation/evidence retirement and campaign health projections.
+import { createHash } from 'node:crypto';
+import { resolveResearchPaths } from '../../research-paths.js';
+import { stageScopeOwnsPath } from '../sched_admission/dispatch.js';
+import { gateReviewedAuthorIds } from '../sched_settlement/gate-recovery.js';
+import { readResearchGateCandidate } from '../../research-candidate.js';
 import { Adapter } from '../../adapters/base.js';
 import { readCampaignEntries, resolveCampaignStorageKey } from '../../campaigns.js';
 import { recordRunEvent } from '../../run-events.js';
@@ -11,7 +16,7 @@ import { deriveCriterionDischarges } from '../sched_settlement/gate-verdict.js';
 import { STAGE_STATUS, StoreState, captureStageEvidence, isTerminalRunStatus, readRunState, rependStageStatus, requireKnownRunStatus, runDir, writeRunState } from '../../store.js';
 import { concludeRepeatedBlockage, tryParkOnApprovalRequest, tryTerminateOnTerminalState } from './services.js';
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 export async function prepareWorkflowIteration(
@@ -164,13 +169,9 @@ export async function prepareWorkflowIteration(
       for (const sid of retiringStageIds) {
         delete state.stages[sid];
       }
-      // Static research stages name already executed measurements. Replanning
-      // replaces the dynamic DAG, not these completed round identities: replay
-      // would overwrite the shared result with an older measurement. Planners
-      // still reset, and newly dispatched stages may reuse their prior IDs.
-      const preservedStageIds = new Set(baseStages.filter((s) =>
-        state.research && !s.dynamic_dispatch && state.stages[s.id]?.status === STAGE_STATUS.COMPLETE,
-      ).map((s) => s.id));
+      // Only durable round identities survive reset. An otherwise accepted
+      // round blocked by another gate is unjournaled and must be measured again.
+      const preservedStageIds = consumedResearchStages(state, baseStages, runDirPath);
       for (const s of baseStages) {
         if (preservedStageIds.has(s.id)) continue;
         state.stages[s.id] = rependStageStatus(state.stages[s.id], 0);
@@ -235,4 +236,45 @@ export async function prepareWorkflowIteration(
       }
     }
   return {kind: 'ready', state, sorted, injectedDispatchStages, planStageRetries};
+}
+
+/** Only a consumed outcome producer and its reviewing gate survive reset.
+ * Other fixed stages (including recurring checks and planners) still repeat. */
+function consumedResearchStages(state: StoreState, stages: StageConfig[], directory: string): Set<string> {
+  const preserved = new Set<string>();
+  if (!state.research) return preserved;
+  const journalLabels = new Set<string>();
+  const consumedDigests = new Set<string>();
+  const journalPath = join(directory, 'research_journal.json');
+  if (existsSync(journalPath)) {
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { rounds: { label: string }[] };
+    for (const round of journal.rounds) journalLabels.add(round.label);
+  }
+  for (const name of readdirSync(directory)) {
+    if (/^research_round_\d+_(?:no_candidate_)?consumed\.json$/.test(name)) {
+      consumedDigests.add(createHash('sha256').update(readFileSync(join(directory, name))).digest('hex'));
+    }
+  }
+  const byId = new Map(stages.map(stage => [stage.id, stage]));
+  const result = resolveResearchPaths(state.research).resultFile;
+  const complete = (stage: StageConfig): boolean => !stage.dynamic_dispatch
+    && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE;
+  for (const gate of stages.filter(stage => stage.is_gate && complete(stage))) {
+    const candidate = readResearchGateCandidate(directory, gate.id);
+    if (!candidate || !((candidate.label && journalLabels.has(candidate.label))
+        || (candidate.sha256 && consumedDigests.has(candidate.sha256)))) continue;
+    // Stop at preceding gates: their producers represent separate rounds.
+    // A downstream recurring gate can capture the same consumed bytes without
+    // reviewing a new producer; that alone must not freeze it or other inputs.
+    const reviewed = gateReviewedAuthorIds(gate, stages);
+    const producers = reviewed.map(id => byId.get(id)!)
+      .filter(stage => complete(stage) && !stage.retry_to?.length
+        && [result, `${result}.no_candidate.json`].some(path => stageScopeOwnsPath(stage, path)));
+    if (producers.length) {
+      for (const producer of producers) preserved.add(producer.id);
+      // Repeating inputs require a fresh review before downstream work proceeds.
+      if (reviewed.every(id => preserved.has(id))) preserved.add(gate.id);
+    }
+  }
+  return preserved;
 }

@@ -11,7 +11,7 @@ import { applyBasePrompt, buildRoleRegistry, listAvailableSkills, loadBasePrompt
 import { log } from '../sched_admission/shared.js';
 import { removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
 import { closeRollbackBaseline } from '../sched_scope/rollback-baseline.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, isTerminalRunStatus, readRunState, runDir, updateRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir, updateRunState } from '../../store.js';
 import { StageWatchdog } from '../../stage-watchdog.js';
 import { configureWorkflowBrief } from './brief.js';
 import { prepareWorkflowLaunch } from './launch.js';
@@ -20,6 +20,16 @@ import { publishRunCompletion } from './iteration-outcome.js';
 import { join } from 'node:path';
 import { engineConfigDir } from '../../config.js';
 import { recordContinuationRefusal } from '../../engine-continuation.js';
+
+/** Candidate settlement is research-only and must not change the run's outcome. */
+function settleTerminalResearchCandidates(projectDir: string, state: StoreState | undefined): void {
+  if (!state?.research || !isTerminalRunStatus(state.status)) return;
+  try {
+    rejectPendingResearchGateCandidates(projectDir, runDir(projectDir, state.runId), `Run ended ${state.status} before captured outcome ingestion: ${state.failureReason ?? 'terminal outcome settled'}`);
+  } catch (error) {
+    log.error({ err: error, runId: state.runId }, 'Failed to settle pending research gate candidates');
+  }
+}
 
 export async function runWorkflow(
   workflow: WorkflowConfig,
@@ -46,15 +56,14 @@ export async function runWorkflow(
     throw error;
   }
   if (launch.kind === 'settled') {
-    if (isTerminalRunStatus(launch.state.status)) {
-      rejectPendingResearchGateCandidates(projectDir, runDir(projectDir, launch.state.runId), `Run ended ${launch.state.status} before captured outcome ingestion: ${launch.state.failureReason ?? 'terminal outcome settled'}`);
-    }
+    settleTerminalResearchCandidates(projectDir, launch.state);
     return launch.state;
   }
   const {runId, runDirPath, maxIterations, baseStages, resumingExistingRun, resumeAtIteration, schedulerPidPath, launchIntentOwned} = launch;
   workflowYaml = launch.workflowYaml;
   // Watchdog and pid cleanup cover every return after admission, including
   // brief/frontmatter validation failures before the iteration loop.
+  let settled: StoreState | undefined;
   let watchdog: StageWatchdog | undefined;
   let schedulerHeartbeat: SchedulerHeartbeatHandle | undefined;
   return withRunProcessOwnership(projectDir, runId, async () => {
@@ -68,7 +77,7 @@ export async function runWorkflow(
       generation: checkpoint.generation, pid: checkpoint.pid, processStart: checkpoint.processStart });
     if (state.recovery?.kind === 'resumable') state.recovery.kind = 'resuming';
   });
-  if (checkpointState.status === RUN_STATUS.STOPPED) return checkpointState;
+  if (checkpointState.status === RUN_STATUS.STOPPED) return settled = checkpointState;
   const heartbeatDefaults = loadDefaults();
   schedulerHeartbeat = startSchedulerHeartbeat({
     runPath: runDirPath,
@@ -80,7 +89,7 @@ export async function runWorkflow(
   await schedulerHeartbeat.ready.catch((err) => log.warn({ err }, 'Scheduler observer unavailable'));
   log.info({ runId, workflow: workflow.name }, 'Run started');
   const configured = configureWorkflowBrief(workflow, projectDir, runId, runDirPath, maxIterations, resumingExistingRun, taskDescription, autoApprove, campaignId, inheritCampaignContext, briefAdmission);
-  if (configured.kind === 'settled') return configured.state;
+  if (configured.kind === 'settled') return settled = configured.state;
   taskDescription = configured.taskDescription;
 
   const resolvedAgentsDir = agentsDir ?? join(engineConfigDir, 'agents');
@@ -92,11 +101,11 @@ export async function runWorkflow(
 
   watchdog = new StageWatchdog(projectDir, runId, { idleThresholdMs: heartbeatDefaults.stage_idle_timeout_ms });
   watchdog.start();
-  return await runWorkflowIterations(baseStages, workflowYaml, maxIterations, resumeAtIteration, resumingExistingRun, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
+  return settled = await runWorkflowIterations(baseStages, workflowYaml, maxIterations, resumeAtIteration, resumingExistingRun, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
   } catch (error) {
     const reason = `Scheduler failed: ${error instanceof Error ? error.message : String(error)}`;
     log.error({ err: error }, reason);
-    const settled = updateRunState(projectDir, runId, state => {
+    settled = updateRunState(projectDir, runId, state => {
       if (state.status !== RUN_STATUS.RUNNING) return;
       state.status = RUN_STATUS.FAILED;
       state.failureReason = reason;
@@ -109,10 +118,13 @@ export async function runWorkflow(
       }
     });
     if (settled.status === RUN_STATUS.FAILED && settled.failureReason === reason) {
-      publishRunCompletion(settled, projectDir, runId, () => ({ iteration: settled.currentIteration, detail: reason }));
+      const failed = settled;
+      publishRunCompletion(failed, projectDir, runId, () => ({ iteration: failed.currentIteration, detail: reason }));
     }
     return settled;
   } finally {
+    // Complete research bookkeeping while this scheduler still owns the run.
+    settleTerminalResearchCandidates(projectDir, settled);
     closeRollbackBaseline(projectDir, runDirPath);
     await schedulerHeartbeat?.stop();
     watchdog?.stop();
@@ -120,10 +132,6 @@ export async function runWorkflow(
     if (launchIntentOwned) {
       releaseLaunchIntent(projectDir, runId);
       invalidateRunLockCache();
-    }
-    const settled = readRunState(projectDir, runId);
-    if (isTerminalRunStatus(settled.status)) {
-      rejectPendingResearchGateCandidates(projectDir, runDirPath, `Run ended ${settled.status} before captured outcome ingestion: ${settled.failureReason ?? 'terminal outcome settled'}`);
     }
   }
   });
