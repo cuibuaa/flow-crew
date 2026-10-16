@@ -1,3 +1,4 @@
+import { publishRunCompletion, settleTerminalResearchCandidates } from './run-completion.js';
 /** Research artifact identity, round ingestion/advancement, confirmation and best-effort terminal hooks; file inventory, rollback settlement and campaign writer are supplied. */
 import { type ResearchRound, evaluateResearch, evaluateResearchCeilingFloor } from '../../research-policy.js';
 import { createHash } from 'node:crypto';
@@ -7,7 +8,7 @@ import { basename, join, dirname } from 'node:path';
 import { copyFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { lstatSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { type Adapter } from '../../adapters/base.js';
-import { RUN_STATUS, type StoreState, enforceRealityGateBeforeTerminal, writeRunState, type PostTerminateHook } from '../../store.js';
+import { RUN_STATUS, type StoreState, enforceRealityGateBeforeTerminal, type PostTerminateHook } from '../../store.js';
 import { RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
 import { log } from '../sched_admission/shared.js';
 import { markLeftoverStagesSkipped, recordConfirmNotRun } from '../sched_admission/brief-contract.js';
@@ -382,10 +383,12 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         state.completedAt = new Date().toISOString();
         const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
         
-        if (!gate.allowed) { writeCampaignEntry(ctx.projectDir, gate.state); return gate.state; }
-        writeRunState(ctx.projectDir, ctx.runId, state);
-        writeCampaignEntry(ctx.projectDir, state);
-        recordRunEvent(ctx.projectDir, ctx.runId, { type: 'run_completed', runId: ctx.runId, timestamp: state.completedAt, iteration: ctx.iteration, detail: `Research ceiling: ${totalRej} integrity-gate rejections (reasons: ${Object.keys(rejData).join(',')})` });
+        if (!gate.allowed) {
+          settleTerminalResearchCandidates(ctx.projectDir, gate.state);
+          writeCampaignEntry(ctx.projectDir, gate.state);
+          return gate.state;
+        }
+        publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({ iteration: ctx.iteration, detail: `Research ceiling: ${totalRej} integrity-gate rejections (reasons: ${Object.keys(rejData).join(',')})` }), writeCampaignEntry);
         return state;
       }
       try {
@@ -709,18 +712,14 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         try { renameSync(source, join(ctx.runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
       };
       if (wroteDeclaredCandidate && declaredPath) quarantine(join(ctx.projectDir, declaredPath), declaredPath.split('/').pop() ?? 'terminal_candidate');
+      settleTerminalResearchCandidates(ctx.projectDir, gate.state);
       writeCampaignEntry(ctx.projectDir, gate.state);
       return gate.state;
     }
-    writeRunState(ctx.projectDir, ctx.runId, state);
-    writeCampaignEntry(ctx.projectDir, state);
-    recordRunEvent(ctx.projectDir, ctx.runId, {
-      type: 'run_completed',
-      runId: ctx.runId,
-      timestamp: state.completedAt,
+    publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
       iteration: ctx.iteration,
       detail: `Research ${terminalDecision}: ${finalEval.reason}`,
-    });
+    }), writeCampaignEntry);
     log.info({ runId: ctx.runId, decision: terminalDecision, runningBest: finalEval.runningBest }, 'Research loop terminated');
     return state;
   }

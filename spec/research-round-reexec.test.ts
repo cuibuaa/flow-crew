@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { captureResearchGateCandidate, readResearchGateCandidate } from '../src/research-candidate.js';
+import { captureResearchGateCandidate, readResearchGateCandidate, settleResearchGateCandidate } from '../src/research-candidate.js';
 import { advanceSettledResearch } from '../src/scheduler/sched_loop/research-progress.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-setup.js';
@@ -58,7 +58,10 @@ function seed(research: boolean) {
   writeFileSync(join(directory, 'research_journal.json'), JSON.stringify({ rounds }));
   rounds.forEach((round, index) => {
     writeFileSync(join(project, resultPath), JSON.stringify(round));
-    if (research) captureResearchGateCandidate(project, directory, `review_${index ? 'beta' : 'alpha'}`);
+    if (research) {
+      const candidate = captureResearchGateCandidate(project, directory, `review_${index ? 'beta' : 'alpha'}`);
+      settleResearchGateCandidate(project, directory, candidate, 'ingested', 'Synthetic reviewed outcome ingested.');
+    }
     writeFileSync(join(directory, `research_round_${index + 1}_consumed.json`), JSON.stringify(round));
   });
   // A downstream gate can recapture consumed beta without owning a new round.
@@ -123,12 +126,64 @@ describe('research round identity across outer iteration resets', () => {
     expect(ready.map(stage => stage.id)).not.toContain('round_gamma');
   });
 
+  it('remeasures a round whose own verdict failed even when its capture was ingested', async () => {
+    seed(true);
+    writeFileSync(join(directory, 'verdict_review_beta.json'), JSON.stringify({ pass: false, reason: 'Review failed.' }));
+    const prepared = await reset();
+    expect(prepared.kind).toBe('ready');
+    expect(prepared.state.stages.round_alpha.status).toBe('complete');
+    expect(prepared.state.stages.round_beta.status).toBe('pending');
+    expect(prepared.state.stages.review_beta.status).toBe('pending');
+    expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
+    const ready = createReadyFinder({ loadGateContract: () => null,
+      readGateVerdict: (dir, id, run, contract) => readGateVerdict(dir, id, run, contract, false, false),
+    })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
+    expect(ready.map(stage => stage.id)).toContain('round_beta');
+  });
+
+  it.each(['pending', 'rejected'] as const)('remeasures a round whose passing gate captured a consumed fallback (%s)', async settlement => {
+    seed(true);
+    writeFileSync(join(directory, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'measurement-alpha', result: 0.1 }] }));
+    unlinkSync(join(directory, 'research_round_2_consumed.json'));
+    unlinkSync(join(project, resultPath));
+    const fallback = captureResearchGateCandidate(project, directory, 'review_beta');
+    expect(fallback.source).toBe('research_round_1_consumed.json');
+    expect(fallback.sha256).toBe(readResearchGateCandidate(directory, 'review_alpha')?.sha256);
+    if (settlement === 'rejected') {
+      settleResearchGateCandidate(project, directory, fallback, 'rejected', 'Already-journaled immutable identity.');
+    }
+    const prepared = await reset();
+    expect(prepared.kind).toBe('ready');
+    expect(prepared.state.stages.round_alpha.status).toBe('complete');
+    expect(prepared.state.stages.round_beta.status).toBe('pending');
+    expect(prepared.state.stages.review_beta.status).toBe('pending');
+    expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
+    const ready = createReadyFinder({ loadGateContract: () => null,
+      readGateVerdict: (dir, id, run, contract) => readGateVerdict(dir, id, run, contract, false, false),
+    })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
+    expect(ready.map(stage => stage.id)).toContain('round_beta');
+  });
+
+  it.each(['{broken', '{}', '{"rounds":null}', 'null'])('continues iteration setup with a corrupt journal: %s', async journal => {
+    seed(true);
+    writeFileSync(join(directory, 'research_journal.json'), journal);
+    const prepared = await reset();
+    expect(prepared.kind).toBe('ready');
+    expect(prepared.state.status).toBe('running');
+    // The independently consumed bytes still prove the ingested rounds.
+    expect(prepared.state.stages.round_beta.status).toBe('complete');
+    expect(prepared.state.stages.round_gamma.status).toBe('pending');
+  });
+
   it('remeasures a passing round excluded by another gate, then journals its fresh outcome once', async () => {
     seed(true);
     // Alpha was consumed; beta passed its own gate but an independent gate failed.
     const alpha = { label: 'measurement-alpha', result: 0.1 };
     writeFileSync(join(directory, 'research_journal.json'), JSON.stringify({ rounds: [alpha] }));
     unlinkSync(join(directory, 'research_round_2_consumed.json'));
+    // A prior consumed beta is not the capture rejected by this iteration.
+    writeFileSync(join(project, resultPath), JSON.stringify({ label: 'measurement-beta', result: 0.2 }));
+    captureResearchGateCandidate(project, directory, 'review_beta');
     const otherGate = StageConfigSchema.parse({ id: 'other_review', role: 'qa', is_gate: true });
     const active = [...stages, otherGate];
     updateRunState(project, runId, state => { state.stages.other_review = { status: 'complete', retries: 0 }; });

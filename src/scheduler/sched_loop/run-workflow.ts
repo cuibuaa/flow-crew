@@ -1,5 +1,4 @@
 // Boundary: Manage admitted run lifetime, verified checkpoint, heartbeat, deterministic watchdog and unconditional owned cleanup around the iteration driver.
-import { rejectPendingResearchGateCandidates } from '../../research-candidate.js';
 import { Adapter, AgentConfig, withRunProcessOwnership } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
 import { BriefAdmissionRecord } from '../../brief-preflight.js';
@@ -11,25 +10,16 @@ import { applyBasePrompt, buildRoleRegistry, listAvailableSkills, loadBasePrompt
 import { log } from '../sched_admission/shared.js';
 import { removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
 import { closeRollbackBaseline } from '../sched_scope/rollback-baseline.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir, updateRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, updateRunState } from '../../store.js';
 import { StageWatchdog } from '../../stage-watchdog.js';
 import { configureWorkflowBrief } from './brief.js';
 import { prepareWorkflowLaunch } from './launch.js';
 import { runWorkflowIterations } from './workflow-loop.js';
 import { publishRunCompletion } from './iteration-outcome.js';
+import { settleTerminalResearchCandidates } from '../sched_policy/run-completion.js';
 import { join } from 'node:path';
 import { engineConfigDir } from '../../config.js';
 import { recordContinuationRefusal } from '../../engine-continuation.js';
-
-/** Candidate settlement is research-only and must not change the run's outcome. */
-function settleTerminalResearchCandidates(projectDir: string, state: StoreState | undefined): void {
-  if (!state?.research || !isTerminalRunStatus(state.status)) return;
-  try {
-    rejectPendingResearchGateCandidates(projectDir, runDir(projectDir, state.runId), `Run ended ${state.status} before captured outcome ingestion: ${state.failureReason ?? 'terminal outcome settled'}`);
-  } catch (error) {
-    log.error({ err: error, runId: state.runId }, 'Failed to settle pending research gate candidates');
-  }
-}
 
 export async function runWorkflow(
   workflow: WorkflowConfig,

@@ -70,7 +70,7 @@ export async function advanceSettledResearch(
         rejectPendingResearchGateCandidates(projectDir, runDirPath, 'Verified terminal settlement superseded unconsumed round evidence');
       } else if (candidates.length) {
         for (const candidate of candidates) {
-          if (researchResult || existsSync(join(runDirPath, 'signals', 'research_terminal_ready.json'))) {
+          if (existsSync(join(runDirPath, 'signals', 'research_terminal_ready.json'))) {
             settleResearchGateCandidate(projectDir, runDirPath, candidate, 'rejected', 'Research policy already reached a terminal outcome');
             continue;
           }
@@ -79,6 +79,7 @@ export async function advanceSettledResearch(
             continue;
           }
           researchResult = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter, candidate });
+          if (researchResult) return { kind: 'settled', state: researchResult };
         }
       } else {
         // Legacy workflows without an outcome gate still submit the mutable slot.

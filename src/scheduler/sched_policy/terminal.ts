@@ -1,3 +1,4 @@
+import { publishRunCompletion } from './run-completion.js';
 /** Terminal selection, floor/owner/freshness/reality enforcement and quiescent conclusion; receives validation, campaign and escalation services. */
 import { type Adapter } from '../../adapters/base.js';
 import { type ProjectValidationDependencies } from '../../project-validation.js';
@@ -572,15 +573,10 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           }
           return { decision: 'matched', state: gate.state, reasons: [] };
         }
-        writeRunState(ctx.projectDir, ctx.runId, state);
-        writeCampaignEntry(ctx.projectDir, state);
-        recordRunEvent(ctx.projectDir, ctx.runId, {
-          type: 'run_completed',
-          runId: ctx.runId,
-          timestamp: state.completedAt,
+        publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
           iteration: ctx.iteration,
           detail: `Terminal state '${terminalStatus}' reached via ${path}`,
-        });
+        }), writeCampaignEntry);
         log.info({ runId: ctx.runId, iteration: ctx.iteration, terminalStatus, path }, 'Terminal-state file detected; ending iteration loop');
         // Auto-append ledger row only on phase_complete (other terminal states
         // are program-level, not phase-level).
@@ -650,15 +646,10 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     state.failureReason = conclusion;
     state.completedAt = new Date().toISOString();
     markLeftoverStagesSkipped(state, conclusion);
-    writeRunState(ctx.projectDir, ctx.runId, state);
-    writeCampaignEntry(ctx.projectDir, state);
-    recordRunEvent(ctx.projectDir, ctx.runId, {
-      type: 'run_completed',
-      runId: ctx.runId,
-      timestamp: state.completedAt,
+    publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
       iteration: ctx.iteration,
       detail: `terminal evaluation ${evaluation.decision}: ${conclusion}`,
-    });
+    }), writeCampaignEntry);
     log.warn({
       runId: ctx.runId,
       iteration: ctx.iteration,

@@ -1,7 +1,7 @@
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 // Boundary: Collect gate facts and choose exact recovery routes; project verified research settlement. Contract refusal receives only the campaign publisher.
 import { resolveResearchPaths } from '../../research-paths.js';
-import { recordRunEvent } from '../../run-events.js';
-import { GateVerdict, RUN_STATUS, ResearchConfig, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir, stageDir, writeRunState } from '../../store.js';
+import { GateVerdict, RUN_STATUS, ResearchConfig, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir, stageDir } from '../../store.js';
 import { RESEARCH_DECISION_STATUS_ALIASES, StageConfig } from '../sched_admission/configuration.js';
 import { DispatchAdmissionReport, stageScopeOwnsPath } from '../sched_admission/dispatch.js';
 import { isStageInSkippedBranch, transitivelyDependsOn } from '../sched_admission/frontier.js';
@@ -536,15 +536,10 @@ export function createGateContractRefusalHandler(writeCampaignEntry: (projectDir
     state.status = irreparable.length > 0 ? RUN_STATUS.ESCALATED : RUN_STATUS.FAILED;
     state.failureReason = `${irreparable.length > 0 ? 'Irreparable gate rejection' : 'Gate contract refusal'} before repair dispatch — ${detail}`;
     state.completedAt = new Date().toISOString();
-    writeRunState(projectDir, runId, state);
-    writeCampaignEntry(projectDir, state);
-    recordRunEvent(projectDir, runId, {
-      type: 'run_completed',
-      runId,
-      timestamp: state.completedAt,
+    publishRunCompletion(state, projectDir, runId, () => ({
       iteration,
       detail: state.failureReason,
-    });
+    }), writeCampaignEntry);
     log.error({ runId, iteration, contractRefusals: facts.contractRefusals }, 'Gate contract refused before product repair');
     return true;
   }

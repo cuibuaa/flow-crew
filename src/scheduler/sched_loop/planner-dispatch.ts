@@ -1,3 +1,4 @@
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 // Boundary: Admit complete planner proposals through one refusal path with exact preflight and bounded retry evidence.
 import { PreparedPlanRetryCandidate, planRetryPairDigest, planRetryRequirement, preparePlanRetryCandidate, recordPlanRetryAdmission, recordPlanRetryRefusal } from '../../plan-retry-monotone.js';
 import { demoteRealityCheckAdvisories, formatRealityCheckPreflightFindings, type RealityCheckPreflightReport } from '../../reality-check-preflight.js';
@@ -215,15 +216,11 @@ export function admitPlannerDispatches(
             state.status = decision.status;
             state.failureReason = decision.reason;
             state.completedAt = new Date().toISOString();
-            writeRunState(projectDir, runId, state);
-            recordRunEvent(projectDir, runId, {
-              type: 'run_completed',
-              runId,
-              timestamp: state.completedAt,
+            publishRunCompletion(state, projectDir, runId, () => ({
               iteration: state.currentIteration ?? 1,
               stageId: stage.id,
               detail: `${decision.status}: ${decision.reason}`,
-            });
+            }));
             return { kind: 'settled', state };
           }
           log.info({ stage: stage.id }, 'No dispatch.yaml — falling back to static stages');

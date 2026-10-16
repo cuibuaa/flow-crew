@@ -1,3 +1,4 @@
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 // Boundary: Own bounded gate repair and re-evaluation cycles from fresh runtime facts; resume admitted successors and required rework without bypassing rejection.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
@@ -10,7 +11,6 @@ import { classifyGateRecoveryFact, collectGateRuntimeFacts, findGateRecoveryStag
 import { executeSingleStage } from '../sched_settlement/stage-execution.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isPendingStageStatus, isTerminalRunStatus, readRunState, rependStageStatus, writeRunState } from '../../store.js';
 import { readRunValidationBaseline, settleGateValidationEvidence } from '../sched_settlement/gate-validation.js';
-import { recordRunEvent } from '../../run-events.js';
 import { executeIteration } from './iteration.js';
 import { runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
 import { mkdirSync, unlinkSync } from '../../engine-fs.js';
@@ -80,8 +80,7 @@ export async function settleGateRetries(
             state.status = RUN_STATUS.FAILED;
             state.failureReason = validation.reason;
             state.completedAt = new Date().toISOString();
-            writeRunState(projectDir, runId, state);
-            recordRunEvent(projectDir, runId, { type: 'run_completed', runId, timestamp: state.completedAt, iteration, detail: validation.reason });
+            publishRunCompletion(state, projectDir, runId, () => ({ iteration, detail: validation.reason }));
             return { kind: 'settled', state };
           }
         }

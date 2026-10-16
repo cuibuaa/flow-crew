@@ -1,3 +1,4 @@
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 import { isRetryableAdapterFailure } from '../../adapters/failure.js';
 import { appendGateEvidenceInstruction } from './gate-archives.js';
 // Boundary: Technical attempt budgets and one repair/re-evaluation stage execution; uses existing worker and typed prompt/session/validation boundaries.
@@ -6,7 +7,6 @@ import { loadAdapterByName } from '../../adapters/loader.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, nextTechnicalRetryBudget, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
 import { isSessionReuseEnabled } from '../../config.js';
 import { LiveConstraintGuardFactory } from '../../live-constraint-guard.js';
-import { recordRunEvent } from '../../run-events.js';
 import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { appendTraceEvent } from '../../trace.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
@@ -242,17 +242,13 @@ export async function executeSingleStage(
         state.failureReason = detail;
         state.completedAt = new Date().toISOString();
         markLeftoverStagesSkipped(state, detail);
-        writeRunState(projectDir, runId, state);
-        recordRunEvent(projectDir, runId, {
-          type: 'run_completed',
-          runId,
-          timestamp: state.completedAt,
+        publishRunCompletion(state, projectDir, runId, () => ({
           iteration: state.currentIteration ?? 1,
           stageId: stage.id,
           detail,
           source: 'scheduler',
           level: 'warning',
-        });
+        }));
         return;
       }
       transitionTechnicalRetryBudget(technicalRetry, { type: 'retry_exhausted' });

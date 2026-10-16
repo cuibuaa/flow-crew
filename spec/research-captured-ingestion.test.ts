@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
@@ -69,6 +69,29 @@ describe('captured research evidence is the ingestion source', () => {
     await advance();
     expect(read('research_journal.json').rounds).toHaveLength(2);
     expect(readRunEvents(project, runId).filter(event => event.type === 'research_gate_candidate_settled')).toHaveLength(1);
+  });
+
+  it('settles every leftover capture before the policy terminal completion is published', async () => {
+    const state = readRunState(project, runId);
+    state.research!.stop = { maxRounds: 1 };
+    writeRunState(project, runId, state);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      capture({ label: 'accepted-measurement', result: 0.2, admissible: true });
+      vi.setSystemTime(Date.now() + 1);
+      captureResearchGateCandidate(project, directory, 'unaccepted-review');
+    } finally {
+      vi.useRealTimers();
+    }
+    const outcome = await advance();
+    expect(outcome.state.status).toBe('ceiling_hit');
+    expect(readResearchGateCandidate(directory, 'unaccepted-review')?.settlement?.disposition).toBe('rejected');
+    const events = readRunEvents(project, runId);
+    const completionIndex = events.findIndex(event => event.type === 'run_completed');
+    const settlementIndices = events.flatMap((event, index) => event.type === 'research_gate_candidate_settled' ? [index] : []);
+    expect(completionIndex).toBeGreaterThan(-1);
+    expect(settlementIndices).toHaveLength(2);
+    expect(settlementIndices.every(index => index < completionIndex)).toBe(true);
   });
 
   it('checks the captured integrity fields and records their rejection even after replacement', async () => {

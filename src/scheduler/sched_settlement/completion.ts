@@ -1,6 +1,6 @@
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 // Boundary: Reconcile exact-ID outstanding obligations, guard plain completion, archive declared outputs and read existing study completion; receives only campaign publication.
 import { archiveDeclaredOutputs } from '../../declared-output-archive.js';
-import { recordRunEvent } from '../../run-events.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, runDir, writeRunState } from '../../store.js';
 import { StageConfig } from '../sched_admission/configuration.js';
 import { isStageInSkippedBranch } from '../sched_admission/frontier.js';
@@ -164,17 +164,12 @@ export function createPlainCompletionArchiver(writeCampaignEntry: (projectDir: s
       state.status = RUN_STATUS.FAILED;
       state.failureReason = `Declared output archival refused plain completion (${completionPath}): ${detail}`;
       state.completedAt = new Date().toISOString();
-      writeRunState(context.projectDir, context.runId, state);
-      writeCampaignEntry(context.projectDir, state);
-      recordRunEvent(context.projectDir, context.runId, {
-        type: 'run_completed',
-        runId: context.runId,
-        timestamp: state.completedAt,
+      publishRunCompletion(state, context.projectDir, context.runId, () => ({
         iteration: context.iteration,
         detail: state.failureReason,
         level: 'warning',
         source: 'scheduler',
-      });
+      }), writeCampaignEntry);
       log.error({ runId: context.runId, completionPath, detail }, 'Plain completion refused because declared outputs could not be archived');
       return false;
     }

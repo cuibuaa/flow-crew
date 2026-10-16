@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { resolveResearchPaths } from '../../research-paths.js';
 import { stageScopeOwnsPath } from '../sched_admission/dispatch.js';
 import { gateReviewedAuthorIds } from '../sched_settlement/gate-recovery.js';
+import { readGateVerdictDocument } from '../sched_settlement/gate-evidence.js';
 import { readResearchGateCandidate } from '../../research-candidate.js';
 import { Adapter } from '../../adapters/base.js';
 import { readCampaignEntries, resolveCampaignStorageKey } from '../../campaigns.js';
@@ -247,8 +248,12 @@ function consumedResearchStages(state: StoreState, stages: StageConfig[], direct
   const consumedDigests = new Set<string>();
   const journalPath = join(directory, 'research_journal.json');
   if (existsSync(journalPath)) {
-    const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { rounds: { label: string }[] };
-    for (const round of journal.rounds) journalLabels.add(round.label);
+    try {
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { rounds: { label: string }[] };
+      if (journal && Array.isArray(journal.rounds)) {
+        for (const round of journal.rounds) journalLabels.add(round.label);
+      }
+    } catch { /* reset on corruption */ }
   }
   for (const name of readdirSync(directory)) {
     if (/^research_round_\d+_(?:no_candidate_)?consumed\.json$/.test(name)) {
@@ -261,7 +266,9 @@ function consumedResearchStages(state: StoreState, stages: StageConfig[], direct
     && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE;
   for (const gate of stages.filter(stage => stage.is_gate && complete(stage))) {
     const candidate = readResearchGateCandidate(directory, gate.id);
-    if (!candidate || !((candidate.label && journalLabels.has(candidate.label))
+    if (candidate?.settlement?.disposition !== 'ingested'
+        || readGateVerdictDocument(directory, gate.id, false)?.project().pass !== true) continue;
+    if (!((candidate.label && journalLabels.has(candidate.label))
         || (candidate.sha256 && consumedDigests.has(candidate.sha256)))) continue;
     // Stop at preceding gates: their producers represent separate rounds.
     // A downstream recurring gate can capture the same consumed bytes without

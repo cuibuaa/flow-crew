@@ -1,4 +1,5 @@
 import { invocationUsageFields } from '../../invocation-usage.js';
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 import { isRetryableAdapterFailure } from '../../adapters/failure.js';
 import { runStageWave } from '../stage-wave.js';
 // Boundary: Select and execute one scope-safe ready wave, coordinate live monitors and settle technical/failure/validation outcomes before terminal decisions.
@@ -276,17 +277,13 @@ export async function executeReadyBatch(
       state.status = RUN_STATUS.FAILED;
       state.failureReason = detail;
       state.completedAt = new Date().toISOString();
-      writeRunState(projectDir, runId, state);
-      recordRunEvent(projectDir, runId, {
-        type: 'run_completed',
-        runId,
-        timestamp: state.completedAt,
+      publishRunCompletion(state, projectDir, runId, () => ({
         iteration: state.currentIteration ?? 1,
         stageId: exhaustedAdapterFailure.stageId,
         detail,
         source: 'scheduler',
         level: 'warning',
-      });
+      }));
       return { kind: 'settled', state };
     }
     if (parkedDuringExecution || isPausedRunStatus(state.status)) return { kind: 'settled', state };
