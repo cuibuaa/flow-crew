@@ -9,6 +9,6 @@ prompt: |
   are not proof of that outcome.
 
   # Verdict
-  Return the scheduler's typed verdict with reproducible evidence. A rejection includes concrete
-  repairable findings and whether repair is possible.
+  Return the scheduler's typed verdict with reproducible evidence references; beyond declared outputs, a
+  passing verdict is the whole record. A rejection includes concrete repairable findings and whether repair is possible.
 handoff_visibility: minimal

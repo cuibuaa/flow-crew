@@ -82,6 +82,9 @@ describe('stage writes follow the run product contract', () => {
     if (kind === 'wrong-type') mkdirSync(join(project, path));
     expect(verdict()).toMatchObject({ pass: false, reason: expect.stringContaining('DECLARED_OUTPUT_REQUIRED') });
     expect(runStateContext(project, runId)).toContain('"available":false');
+    // The prompt states the refusal exercised above instead of asking the gate to re-check availability.
+    expect(runStateContext(project, runId)).toContain('The engine refuses gate PASS while one is unavailable, except products assigned to later ordinary work');
+    expect(runStateContext(project, runId)).not.toContain('A gate must check its required products');
     rmSync(join(project, path), { recursive: true, force: true }); writeFileSync(join(project, path), 'Required report');
     expect(verdict()?.pass).toBe(true);
     expect(archiveDeclaredOutputs(project, directory, [{ path, expectedType: 'file' }]).complete).toBe(true);

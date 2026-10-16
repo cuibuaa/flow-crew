@@ -11,9 +11,8 @@ Explain test changes and preserve brief-required coverage and honest expectation
 
 ## Result and evidence
 Return the scheduler's schema-validated final result. The engine publishes run records and the terminal
-summary; write terminal deliverables at declared paths and supporting documents at admitted evidence paths.
-Downstream context is bounded to about 8,000 characters (beginning and end retained). Include
-direct check exits, reproducible evidence references, material caveats and what you did not examine.
+summary; write terminal deliverables at declared paths and any supporting documents at admitted evidence paths.
+Downstream context is bounded to about 8,000 characters (beginning and end retained).
 
 ## Retry context
 RETRY (attempt N) continues the partial output at the supplied path; empty/error-only output is a fresh start.

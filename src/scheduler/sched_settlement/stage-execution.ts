@@ -17,7 +17,7 @@ import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, buildRoleRegistry, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { gateContinuationSessionForStage, sessionResumeForStage, shouldPreserveSession } from '../sched_admission/sessions.js';
 import { log } from '../sched_admission/shared.js';
-import { appendApprovalRequestContract, appendAttemptDeadlineContract, appendGateConstraintAuditContext, appendPlannerAdmissionContract, appendResearchPathContract, appendScopeRevisionContract } from '../sched_policy/prompt-contracts.js';
+import { appendApprovalRequestContract, appendAttemptDeadlineContract, appendGateConstraintAuditContext, appendPlannerAdmissionContract, appendRaceCandidateEvidenceContext, appendResearchPathContract, appendScopeRevisionContract } from '../sched_policy/prompt-contracts.js';
 import { appendScopePlanningInput } from '../sched_scope/scope-planning.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -317,7 +317,9 @@ export function appendStageExecutionContracts(
     resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
   }
 
-  resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, allStages, readRunState(projectDir, runId), runDirPath);
+  const current = readRunState(projectDir, runId);
+  resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, allStages, current, runDirPath);
+  resolvedPrompt = appendRaceCandidateEvidenceContext(resolvedPrompt, stage, allStages, current, runDirPath);
 
   return resolvedPrompt;
 }

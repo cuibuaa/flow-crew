@@ -117,6 +117,32 @@ describe('direct workflow', () => {
     expect(receipts).toHaveLength(1);
   });
 
+  // A no-regression receipt can still carry commands that failed or never ran
+  // (a red baseline that stays red); only passing commands make a rerun redundant.
+  it.each([
+    { state: 'passed', probe: 'process.exit(0);\n', rerunAdvised: false },
+    { state: 'failed', probe: 'process.exit(1);\n', rerunAdvised: true },
+  ])('advises against rerunning configured commands only when they $state', async ({ state, probe, rerunAdvised }) => {
+    const task = brief('outputs:\n  - docs/report.md');
+    const readyPath = writeReadySetupRecord(projectDir, task, fcGlobalDir());
+    const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
+    ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
+    if (state === 'failed') {
+      ready.validationBaseline.results[0] = { ...ready.validationBaseline.results[0], state: 'failed', exitCode: 1, failureIdentity: 'unknown' };
+      ready.validationBaseline.gateCriteria[0] = { role: 'build', rule: 'no_regression_from_baseline', baselineFailureIdentifiers: [], description: 'Fixture build failed at baseline' };
+    }
+    writeFileSync(readyPath, JSON.stringify(ready));
+    writeFileSync(join(projectDir, 'validation-probe.mjs'), probe);
+    const prompts: string[] = [];
+    const final = await runDirect(task, [], false, (prompt, _role, opts) => { if (opts.stageId === 'review') prompts.push(prompt); });
+    expect(final.status, final.failureReason).toBe('complete');
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Engine validation: pass=true');
+    expect(prompts[0]).toContain(`exit=${state === 'passed' ? 0 : 1}, state=${state}`);
+    expect(prompts[0]).toContain("(each command's result and output tail)");
+    expect(prompts[0].includes('Do not rerun configured commands')).toBe(!rerunAdvised);
+  });
+
   it('cannot accept a missing declared output even when the reviewer accepts', async () => {
     const { config, raw } = loadWorkflow(join(root, 'config', 'workflows', 'direct.yaml'));
     const accepting = adapter([], false);

@@ -259,6 +259,15 @@ describe('planner-selected stage races', () => {
     expect(calls.filter(call => call.id === 'implement')).toHaveLength(1);
     expect(race.candidates).toHaveLength(1);
     expect(doubles(readFileSync(join(project, 'twice.js'), 'utf8'))).toBe(true);
+    // The parent gate is pointed at the winner's own run, where its repaired
+    // output lives; candidate gates review their own run and get no pointer.
+    const winnerRun = runDir(project, race.candidates[0].runId);
+    const parentReviews = calls.filter(call => call.id === 'review' && call.target === project);
+    expect(parentReviews).toHaveLength(1);
+    expect(parentReviews[0].prompt).toContain(`# Race candidate evidence\nThese authors were integrated from the winning candidate of a race, which ran as a child run of this run:\n- implement: candidate A, run directory ${winnerRun}\n`);
+    expect(parentReviews[0].prompt).toContain('a report may cite them. Judge the integrated project tree independently.');
+    expect(readFileSync(join(winnerRun, 'stages/repair/output.md'), 'utf8')).toContain('Repaired doubling.');
+    expect(calls.filter(call => call.id === 'review' && call.target !== project).every(call => !call.prompt.includes('# Race candidate evidence'))).toBe(true);
   }, 90_000);
 
   it.each([false, true])('preserves per-role adapters with gate override=%s', async gateAdapter => {

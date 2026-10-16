@@ -558,7 +558,7 @@ export async function runStage(
     const judgement = opts.isGate
       ? 'Judge assigned criteria in the context of the full brief, including permitted outcomes and stopping conditions. Stage instructions and extracted criteria cannot narrow or replace the outcomes the brief permits. Pass when an allowed outcome has all required evidence, including a permitted negative or blocked report. Reject missing required attempts, measurements or artifacts. '
       : '';
-    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff, stage or verdict-file instructions. ${judgement}Write declared human deliverables and necessary evidence within admitted capabilities. Evidence references name reproducible files or commands.`;
+    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff, stage or verdict-file instructions. ${judgement}Write declared human deliverables within admitted capabilities. Evidence references name reproducible files or commands.`;
   }
   if (opts.artifactContract && (!direct || opts.artifactContract.produces.length || opts.artifactContract.reads.length)) prompt += `\n\n# Declared output and input locations\n${JSON.stringify(opts.artifactContract)}`;
 
@@ -1301,7 +1301,11 @@ export async function runStage(
         // Settlement owns the replay and its receipt; do not run commands again.
         validation = JSON.parse(readFileSync(join(opts.runDir, `validation_delta_${opts.stageId}.json`), 'utf8'));
       }
-      if (validation?.pass) prompt += `\n\nEngine validation: pass=true; ${validation.current.map(command => `${command.display ?? command.role}: exit=${command.exitCode ?? 'unavailable'}, state=${command.state}`).join('; ')}. Receipt: ${join(opts.runDir, validation.immutablePath ?? `validation_delta_${opts.stageId}.json`)}. The engine enforces this comparison. Review every assigned criterion lacking a prior independent conclusion; validation receipts contain no semantic conclusions. Do not rerun configured commands without a concrete evidence gap. Project writes require post-write validation.`;
+      // A no-regression pass can still carry failed or unlaunchable commands;
+      // only commands that themselves passed make a rerun redundant.
+      const configured = validation?.current.filter(command => command.state !== 'not_configured') ?? [];
+      const commandsPassed = configured.length > 0 && configured.every(command => command.state === 'passed');
+      if (validation?.pass) prompt += `\n\nEngine validation: pass=true; ${validation.current.map(command => `${command.display ?? command.role}: exit=${command.exitCode ?? 'unavailable'}, state=${command.state}`).join('; ')}. Receipt: ${join(opts.runDir, validation.immutablePath ?? `validation_delta_${opts.stageId}.json`)} (each command's result and output tail). The engine enforces this comparison. Review every assigned criterion lacking a prior independent conclusion; validation receipts contain no semantic conclusions.${commandsPassed ? ' Do not rerun configured commands without a concrete evidence gap.' : ''} Project writes require post-write validation.`;
       const regressions = validation?.delta.filter(entry => entry.state === 'regression') ?? [];
       if (validation && regressions.length) {
         // Use the existing verdict carrier and repair path without a model decision.

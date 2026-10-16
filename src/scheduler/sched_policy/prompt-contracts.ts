@@ -1,6 +1,7 @@
 /** Scheduler-owned execution and admission prompt contracts; builds strings only and changes no contract bytes. */
 import { APPROVAL_REQUEST_FILE } from '../../approval-artifacts.js';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { type StageConfig } from '../sched_admission/configuration.js';
 import { scopeRevisionContract } from '../../live-constraint-guard.js';
 import { type ResearchConfig, type TerminalStatesConfig, type StoreState } from '../../store.js';
@@ -9,16 +10,16 @@ import type { AgentConfig } from '../../adapters/base.js';
 
 const SHARED_ROLE_CONTRACT = `## Review contract
 An independent review decides whether the change achieves the brief's outcome and what it breaks.
-Give every assigned criterion and every score required by the brief or role/gate contract its own result
+Reviewers give every assigned criterion and every score required by the brief or role/gate contract its own result
 and evidence. Pass only when all meet their acceptance lines. Disclose missing or ambiguous lines;
 never invent a threshold or waive a supplied one. Examples do not exclude equivalent property evidence
 unless the criterion explicitly requires that means. A wording/property conflict identifies its originating
-sentence; a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it. Say briefly what you did not examine and why.
-Independent reviewers must not durably modify the reviewed target or authoritative inputs; isolated temporary probes and declared evidence generation are allowed within admitted capabilities. Target repairs belong to an author.
+sentence; a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it. Reviewers say briefly in their reason what they did not examine and why.
+Independent reviewers must not durably modify the reviewed target or authoritative inputs (the engine guards reviewer writes, so this needs no reviewer proof); isolated temporary probes and declared evidence generation are allowed within admitted capabilities. Target repairs belong to an author.
 
 ## Run-directory safety
 Never write, move, delete, or otherwise modify any run directory other than this task's own run directory. This prohibition is absolute; read authorization never grants mutation authority.
-By default, do not read, browse, or list other \`.fc/runs/\` directories. Explicit brief authorization allows a bounded set as read-only evidence and governs default read restrictions for that evidence only; it grants no permission to modify those runs.`;
+By default, do not read, browse, or list other \`.fc/runs/\` directories, except a race candidate run the engine names in your input as read-only evidence. Explicit brief authorization allows a bounded set as read-only evidence and governs default read restrictions for that evidence only; it grants no permission to modify those runs.`;
 
 /** Raw roles and base-loaded roles share the same policy, including when _base.md is absent. */
 export function applySharedRoleContract(agent: AgentConfig): AgentConfig {
@@ -104,16 +105,7 @@ export function appendGateConstraintAuditContext(
   runDirPath: string,
 ): string {
   if (!stage.is_gate) return prompt;
-  const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
-  const closure = new Set<string>();
-  const queue = [...(stage.depends_on ?? [])];
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    if (closure.has(id)) continue;
-    closure.add(id);
-    queue.push(...(byId.get(id)?.depends_on ?? []));
-  }
-  const rows = [...closure].flatMap((id) => {
+  const rows = [...dependencyClosure(stage, allStages)].flatMap((id) => {
     const status = state.stages[id];
     return (status?.attempts ?? []).flatMap((attempt) => {
       if (!attempt.constraintAudit) return [];
@@ -127,3 +119,43 @@ export function appendGateConstraintAuditContext(
   return `${prompt}\n\n# Runtime Constraint Audits\nRead these dependency-closure audits as gate evidence:\n${rows.join('\n')}`;
 }
 
+function dependencyClosure(stage: StageConfig, allStages: StageConfig[]): Set<string> {
+  const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
+  const closure = new Set<string>();
+  const queue = [...(stage.depends_on ?? [])];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (closure.has(id)) continue;
+    closure.add(id);
+    queue.push(...(byId.get(id)?.depends_on ?? []));
+  }
+  return closure;
+}
+
+/** A raced author's winner, including its repairs, ran as a child run beside
+ * this one. Naming it lets the gate read the evidence a report cites. */
+export function appendRaceCandidateEvidenceContext(
+  prompt: string,
+  stage: StageConfig,
+  allStages: StageConfig[],
+  state: StoreState,
+  runDirPath: string,
+): string {
+  if (!stage.is_gate) return prompt;
+  const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
+  const rows = [...dependencyClosure(stage, allStages)].flatMap((id) => {
+    const attempt = state.stages[id]?.attempts?.at(-1)?.index;
+    if (!byId.get(id)?.race || attempt === undefined) return [];
+    try {
+      const record = JSON.parse(readFileSync(join(runDirPath, 'stages', id, `race_${attempt}.json`), 'utf8')) as {
+        decision?: { choice?: string }; candidates?: Array<{ label?: string; runId?: string }>;
+      };
+      const winner = record.candidates?.find((candidate) => candidate.label === record.decision?.choice);
+      if (!winner?.runId || basename(winner.runId) !== winner.runId) return [];
+      return [`- ${id}: candidate ${winner.label}, run directory ${join(dirname(runDirPath), winner.runId)}`];
+    } catch { return []; }
+  });
+  if (rows.length === 0) return prompt;
+  return `${prompt}\n\n# Race candidate evidence\nThese authors were integrated from the winning candidate of a race, which ran as a child run of this run:\n${rows.join('\n')}\n`
+    + 'Their builds, stage outputs, verdicts and repairs there are read-only evidence for this gate, and a report may cite them. Judge the integrated project tree independently.';
+}
