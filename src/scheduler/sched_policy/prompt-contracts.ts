@@ -1,6 +1,5 @@
 /** Scheduler-owned execution and admission prompt contracts; builds strings only and changes no contract bytes. */
 import { APPROVAL_REQUEST_FILE } from '../../approval-artifacts.js';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type StageConfig } from '../sched_admission/configuration.js';
 import { scopeRevisionContract } from '../../live-constraint-guard.js';

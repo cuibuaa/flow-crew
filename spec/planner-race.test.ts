@@ -43,8 +43,8 @@ function doubles(source: string): boolean {
   return [-5, -1, 0, 1, 5].every(n => exports.twice?.(n) === n * 2);
 }
 
-async function fixture(options: { baseline?: boolean; race?: boolean; a?: string; b?: string; neither?: boolean; malformed?: unknown; repair?: boolean; authorAdapter?: boolean; gateAdapter?: boolean; cancel?: boolean; inputCarriers?: boolean; separateReport?: boolean; unassignedReport?: boolean; lastCriterion?: boolean; direct?: boolean; broadScope?: boolean }) {
-  const taskBody = options.separateReport ? '# Double integers\n\nKeep the source input unchanged.\n\n## Acceptance criteria\n' + (options.lastCriterion
+async function fixture(options: { baseline?: boolean; race?: boolean; a?: string; b?: string; neither?: boolean; malformed?: unknown; repair?: boolean; authorAdapter?: boolean; gateAdapter?: boolean; cancel?: boolean; inputCarriers?: boolean; separateReport?: boolean; unassignedReport?: boolean; lastCriterion?: boolean; direct?: boolean; broadScope?: boolean; ancestorCriteria?: boolean; defaultGateRefs?: boolean; omitAncestorEvidence?: boolean; repairReportRefs?: boolean }) {
+  const taskBody = options.ancestorCriteria ? '# Double integers\n\n## Acceptance criteria\n1. input.md preserves the settled predecessor input.\n2. twice doubles integers, including negative values and zero.\n' : options.separateReport ? '# Double integers\n\nKeep the source input unchanged.\n\n## Acceptance criteria\n' + (options.lastCriterion
     ? '1. report.md names the implementation.\n2. report.md records the executable check.\n3. twice doubles integers, including negative values and zero.\n   - Preserve negative values in the implementation and literal $&.\n'
     : '1. report.md names the implementation.\n2. twice doubles integers, including negative values and zero.\n3. report.md records the executable check.\n') : brief;
   const task = options.direct ? `---\nworkflow: direct\noutputs: [report.md]\n---\n${taskBody}` : taskBody;
@@ -66,16 +66,20 @@ async function fixture(options: { baseline?: boolean; race?: boolean; a?: string
   const stagedBefore = git('diff', '--cached');
   const calls: Array<{ id: string; target: string; prompt: string; provider: string }> = [];
   let parentRunDir = '', cancelledAuthors = 0;
+  const reviewRefs = options.ancestorCriteria ? taskCriteria.map(criterion => criterion.id) : workRefs;
   const plan = [
+    ...(options.ancestorCriteria ? [{ id: 'prepare', role: 'coder', scope: [], criterion_refs: reportRefs }] : []),
     { id: 'implement', role: 'coder', scope: options.broadScope ? ['**', 'twice.js'] : ['twice.js'], ...(options.race === undefined ? {} : { race: options.race }),
-      criterion_refs: workRefs,
+      criterion_refs: workRefs, depends_on: options.ancestorCriteria ? ['prepare'] : [],
       ...(options.malformed === undefined ? {} : { race: options.malformed }),
       artifact_contract: { version: 1, produces: [{ id: 'build', root: 'run', path: 'stages/implement/build', kind: 'directory' }], reads: [
         { id: 'state', root: 'run', path: 'run.json', source: options.inputCarriers ? { kind: 'input' } : { kind: 'framework', artifact: 'run_state' } },
         { id: 'task', root: 'run', path: 'task_brief.md', source: options.inputCarriers ? { kind: 'input' } : { kind: 'framework', artifact: 'task_brief' } },
       ], replays: [] } },
-    { id: 'review', role: 'qa', depends_on: ['implement'], is_gate: true, scope: [], criterion_refs: workRefs },
-    { id: 'repair', role: 'coder', depends_on: ['review'], retry_to: ['review'], scope: ['twice.js'] },
+    { id: 'review', role: 'qa', depends_on: options.ancestorCriteria ? ['implement', 'prepare'] : ['implement'], is_gate: true, scope: [],
+      ...(options.defaultGateRefs ? {} : { criterion_refs: reviewRefs }) },
+    { id: 'repair', role: 'coder', depends_on: ['review'], retry_to: ['review'], scope: ['twice.js'],
+      criterion_refs: options.repairReportRefs ? reportRefs : [] },
     ...(options.separateReport && !options.unassignedReport ? [
       { id: 'report', role: 'coder', depends_on: ['review'], scope: ['report.md'], criterion_refs: reportRefs },
       { id: 'report_review', role: 'qa', depends_on: ['report'], is_gate: true, scope: [], criterion_refs: reportRefs },
@@ -91,6 +95,7 @@ async function fixture(options: { baseline?: boolean; race?: boolean; a?: string
       return { output: record('Authored the execution plan.'), exitCode: 0, duration_ms: 1,
         writes: ['run:dispatch.yaml'], writeAttribution: 'structured' };
     }
+    if (opts.stageId === 'prepare') return { output: record('Settled predecessor input.'), exitCode: 0, duration_ms: 1 };
     if (opts.stageId === 'implement') {
       expect(JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8')).projectDir).toBe(opts.workDir);
       expect(readFileSync(join(opts.workDir, 'input.md'), 'utf8')).toBe('current predecessor input\n');
@@ -131,10 +136,11 @@ async function fixture(options: { baseline?: boolean; race?: boolean; a?: string
     }
     const pass = doubles(readFileSync(join(opts.workDir, 'twice.js'), 'utf8'));
     const { criteria: admittedCriteria } = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8'));
-    const refs = opts.stageId === 'report_review' ? reportRefs : workRefs;
+    const refs = opts.stageId === 'report_review' ? reportRefs : options.omitAncestorEvidence ? workRefs : reviewRefs;
     const gatePass = pass && (opts.stageId !== 'report_review' || readFileSync(join(opts.workDir, 'report.md'), 'utf8').includes('checked negative values and zero'));
     const criteria = Object.fromEntries(admittedCriteria.filter(({ id }: { id: string }) => refs.includes(id)).map(({ id }: { id: string }) => [id,
-      { status: pass ? 'pass' : 'fail', evidence: 'Executed twice(-5, -1, 0, 1, 5) against n * 2.' }]));
+      { status: pass ? 'pass' : 'fail', evidence: workRefs.includes(id) ? 'Executed twice(-5, -1, 0, 1, 5) against n * 2.'
+        : `Read settled input: ${readFileSync(join(opts.workDir, 'input.md'), 'utf8').trim()}` }]));
     return { output: JSON.stringify({ pass: gatePass, reason: gatePass ? 'Independent oracle passed.' : 'Independent oracle rejected.',
       criteria, audit_findings: { version: 1, findings: [] },
       ...(pass ? {} : { repairability: { version: 1, disposition: options.repair ? 'repairable' : 'irreparable', evidence: 'The executable oracle requires doubling.' } }) }),
@@ -202,7 +208,7 @@ describe('planner-selected stage races', () => {
     expect(readFileSync(join(project, 'report.md'), 'utf8')).toContain('checked negative values and zero');
   });
   it('admits and gates the raced author criteria before a separate report stage', async () => {
-    const { state, calls, race, project, taskCriteria } = await fixture({ race: true, separateReport: true, repair: true, a: bad });
+    const { state, calls, race, project, taskCriteria } = await fixture({ race: true, separateReport: true, repair: true, a: bad, repairReportRefs: true });
     expect(state.status, state.failureReason).toBe('complete');
     expect(calls.filter(call => call.id === 'implement')).toHaveLength(1);
     expect(calls.filter(call => call.id === 'repair')).toHaveLength(1);
@@ -224,6 +230,33 @@ describe('planner-selected stage races', () => {
       expect(workflow.stages.flatMap((stage: { criterion_refs: string[] }) => stage.criterion_refs))
         .toEqual([taskCriteria[1].id, taskCriteria[1].id]);
     }
+  });
+  it.each([false, true])('settles all gate criteria when the raced author owns a subset (omitted gate refs: %s)', async defaultGateRefs => {
+    const { state, calls, race, project, taskCriteria } = await fixture({ race: true, ancestorCriteria: true, defaultGateRefs });
+    expect(state.status, state.failureReason).toBe('complete');
+    expect(calls.map(call => call.id)).toEqual(['plan', 'prepare', 'implement', 'review']);
+    expect(calls.filter(call => call.id === 'review' && call.target === project)).toEqual([]);
+    expect(state.stages.review.attempts ?? []).toEqual([]);
+    expect(state.stages.review.acceptedFrom!.verdict.pass).toBe(true);
+    const child = runDir(race.candidates[0].target, race.candidates[0].runId);
+    expect(JSON.parse(readFileSync(join(child, 'verdict_review.json'), 'utf8'))).toMatchObject({ pass: true,
+      criteria: Object.fromEntries(taskCriteria.map(criterion => [criterion.id, { status: 'pass', evidence: expect.any(String) }])) });
+    expect(extractBriefCriteria(readFileSync(join(child, 'task_brief.md'), 'utf8')).criteria.map(criterion => criterion.id))
+      .toEqual(taskCriteria.map(criterion => criterion.id));
+    const workflow = parse(readFileSync(join(child, 'workflow.yaml'), 'utf8'));
+    expect(workflow.stages.find((stage: { id: string }) => stage.id === 'review').criterion_refs)
+      .toEqual(taskCriteria.map(criterion => criterion.id));
+    const author = calls.find(call => call.id === 'implement')!;
+    expect(author.prompt).not.toContain('input.md preserves the settled predecessor input');
+    expect(calls.find(call => call.id === 'review')!.prompt).toContain('input.md preserves the settled predecessor input');
+  });
+  it('rejects both candidates when their gate omits evidence outside the author subset', async () => {
+    const { state, calls, race } = await fixture({ race: true, ancestorCriteria: true, defaultGateRefs: true, omitAncestorEvidence: true });
+    expect(state.status).not.toBe('complete');
+    expect(race.decision.basis).toBe('none-passed');
+    expect(race.candidates.map((candidate: { gatePassed: boolean }) => candidate.gatePassed)).toEqual([false, false]);
+    expect(new Set(calls.filter(call => call.id === 'review').map(call => call.target)).size).toBe(2);
+    expect(state.stages.review.acceptedFrom).toBeUndefined();
   });
   it('still refuses a parent plan that leaves report criteria without an author', async () => {
     const { state, calls } = await fixture({ race: true, separateReport: true, unassignedReport: true });
@@ -315,10 +348,10 @@ describe('planner-selected stage races', () => {
     expect(calls.map(call => call.id)).toEqual(['plan', 'implement', 'review']);
   }, 90_000);
 
-  it('refuses to reuse a partial candidate gate as acceptance for another author', () => {
+  it('admits a gate with review duties beyond the raced author', () => {
     const work = parseDispatchedStageConfig({ id: 'work', role: 'coder', scope: ['src/**'], race: true, criterion_refs: ['own'] });
     const review = parseDispatchedStageConfig({ id: 'review', role: 'qa', depends_on: ['work'], is_gate: true, scope: [], criterion_refs: ['own', 'ancestor'] });
-    expect(raceAdmissionErrors(work, [work, review])).toContain('work.race: candidate gates cannot own criteria outside the raced author');
+    expect(raceAdmissionErrors(work, [work, review])).toEqual([]);
     expect(raceAdmissionErrors({ ...work, race: false }, [work, review])).toEqual([]);
   });
 

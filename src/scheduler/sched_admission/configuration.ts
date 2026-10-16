@@ -102,9 +102,6 @@ export function raceAdmissionErrors(author: StageConfig, stages: StageConfig[]):
   if (!gates.length || author.criterion_refs.some(ref => !gates.some(gate => gate.criterion_refs.includes(ref)))) {
     errors.push(`${author.id}.race: requires independent gates covering its criterion_refs with candidate-local or settled ancestor inputs`);
   }
-  if (gates.some(gate => gate.criterion_refs.some(ref => !author.criterion_refs.includes(ref)))) {
-    errors.push(`${author.id}.race: candidate gates cannot own criteria outside the raced author`);
-  }
   const gateIds = new Set(gates.map(stage => stage.id));
   const byId = new Map(stages.map(stage => [stage.id, stage]));
   const available = (id: string) => id === author.id || gateIds.has(id) || transitivelyDependsOn(author.id, id, byId);

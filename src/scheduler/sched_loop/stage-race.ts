@@ -57,12 +57,15 @@ export function stageRaceAdapter(input: {
     const usage = () => sumInvocationUsage([...states.values()].flatMap(state => Object.values(state.stages)
       .flatMap(stage => stage.attempts ?? [])));
     const brief = readFileSync(join(input.runDirPath, 'task_brief.md'), 'utf8');
-    // Parent loop, terminal policy and other stages' criteria stay with the parent.
-    // Admission and authoring share the raced author's contract.
+    // Child gates retain every criterion they will settle in the parent, including
+    // review duties for settled ancestors. Authoring keeps its own narrower goal.
     const parsed = parseBriefFrontmatter(brief);
     const inputs = extractDeclaredBriefInputPaths(brief);
+    const candidateRefs = [...new Set(candidateStages.filter(stage => stage.id === input.stage.id || stage.is_gate)
+      .flatMap(stage => stage.criterion_refs))];
+    const childBody = scopeBriefCriteria(parsed.stripped, candidateRefs);
     const candidateBody = scopeBriefCriteria(parsed.stripped, input.stage.criterion_refs);
-    const candidateBrief = `---\n${stringify({ inputs })}---\n${candidateBody}`;
+    const candidateBrief = `---\n${stringify({ inputs })}---\n${childBody}`;
     // Let the child scheduler compile its own execution identity and obligations.
     const authoredTemplate = input.stage.prompt_template?.trim() ? input.stage.prompt_template : candidateBody;
     const candidatePrompt = authoredTemplate.replaceAll(brief.trim(), () => candidateBody.trim())
@@ -77,7 +80,7 @@ export function stageRaceAdapter(input: {
     // Guidance keeps its parent binding as evidence, rather than becoming an
     // instruction for an unrelated child execution with the same numeric index.
     const ledger = join(input.runDirPath, 'supervisor_guidance.md');
-    const rulings = readOperatorCriterionRulings(input.runDirPath, input.stage.criterion_refs);
+    const rulings = readOperatorCriterionRulings(input.runDirPath, candidateRefs);
     const rulingIds = new Set(rulings.map(entry => entry.id));
     const canonicalGuidance = existsSync(ledger) ? parseGuidanceLedger(readFileSync(ledger, 'utf8'))
       .filter(entry => entry.attemptIndex === undefined || rulingIds.has(entry.id)) : [];
@@ -211,7 +214,7 @@ export function stageRaceAdapter(input: {
             const context = buildDependencyContext({ dependsOn: stage.depends_on.filter(id => !candidateIds.has(id)),
               handoffVisibility: role.handoff_visibility, projectDir: target, runId: reservation.runId, runDir: reservation.runDirPath });
             return { ...stage, race: false,
-            criterion_refs: stage.criterion_refs.filter(ref => input.stage.criterion_refs.includes(ref)),
+            criterion_refs: stage.criterion_refs.filter(ref => candidateRefs.includes(ref)),
             depends_on: stage.depends_on.filter(id => candidateIds.has(id)),
             condition: stage.id === input.stage.id ? undefined : stage.condition,
             artifact_contract: stage.artifact_contract && { ...stage.artifact_contract,
@@ -220,7 +223,7 @@ export function stageRaceAdapter(input: {
                 ? { ...read, source: { kind: 'input' as const } } : read),
             },
             prompt_template: (stage.id === input.stage.id ? `${retryPreamble}\n\n${instruction}${context}\n\n${candidatePrompt}\n\n${guidance}`
-              : `${stage.prompt_template?.trim() || candidateBody}${context}\n\n${guidance}`)
+              : `${stage.prompt_template?.trim() || childBody}${context}\n\n${guidance}`)
               ?.replaceAll(input.projectDir, target).replaceAll(input.runDirPath, reservation.runDirPath),
             };
           });

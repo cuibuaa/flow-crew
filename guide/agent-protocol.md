@@ -48,7 +48,8 @@ Sources: [live schema/checker](../src/plan-interface.ts),
 
 Only an ordinary author can set `race: true`. Gates, planners and repairs cannot race.
 Eligible gates use a different role, depend on that author, have empty project scope
-and cover its criterion references without owning criteria outside that author. Gates and repairs may also depend on settled author
+and cover its criterion references. Child gates retain their full assigned criteria,
+including review duties beyond the author's subset. Gates and repairs may also depend on settled author
 ancestors whose facts and inputs are projected into both candidates. Candidate repairs
 return only to those gates and stay within the author's declared write capability.
 
