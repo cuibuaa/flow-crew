@@ -156,7 +156,7 @@ async function createHarness(): Promise<Harness> {
   const previousStore = fcGlobalDir();
   setFcGlobalDir(root);
   const daemon = spawn(process.execPath, [distCli, 'daemon', 'serve', '--socket', socket], {
-    cwd: repositoryRoot, env, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: repositoryRoot, env: { ...env, HOME: home, FC_HOME: root }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   const fixture: Harness = { root, project, socket, env, daemon, output: '', previousStore };
   harness = fixture;
@@ -171,7 +171,7 @@ async function createHarness(): Promise<Harness> {
 }
 
 function cli(fixture: Harness, args: string[]) {
-  return spawnSync(process.execPath, [distCli, ...args], { cwd: repositoryRoot, env: fixture.env,
+  return spawnSync(process.execPath, [distCli, ...args], { cwd: repositoryRoot, env: { ...fixture.env, HOME: join(fixture.root, 'home'), FC_HOME: fixture.root },
     encoding: 'utf8', timeout: 20_000, maxBuffer: 4 * 1024 * 1024 });
 }
 
