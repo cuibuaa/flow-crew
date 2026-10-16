@@ -10,7 +10,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { restoreProjectPath } from './restore.js';
 import { type RepairFileImage, compareRepairFileContents } from './file-images.js';
 import { type RepairRoundSnapshot, changedProjectPathsSinceSnapshotCooperatively } from './snapshots.js';
-import { baselineImage, readRollbackCurrentImage, settleRollbackBaselinePath, readRollbackCurrentImageCooperatively, trackedGitlinkAncestor } from './rollback-baseline.js';
+import { baselineImage, readRollbackCurrentImage, settleRollbackBaselinePath, resettleRollbackBaselinePath, readRollbackCurrentImageCooperatively, trackedGitlinkAncestor } from './rollback-baseline.js';
 import { scopeContainsPath, firstDeclaredInputScopeConflict, listProjectFiles, listProjectFilesAt, type DeclaredInputWriteBinding } from './path-capabilities.js';
 import { type ScopeBatchContext } from './scope-batch.js';
 
@@ -100,6 +100,8 @@ export function enforceStageScopeWrites(input: {
       if (changed) {
         durableWrites.push(normalized);
         settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+      } else {
+        resettleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized, current);
       }
       continue;
     }
@@ -108,6 +110,8 @@ export function enforceStageScopeWrites(input: {
         appliedWrites.push(normalized);
         durableWrites.push(normalized);
         settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+      } else {
+        resettleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized, current);
       }
       continue;
     }
@@ -286,7 +290,13 @@ export function createLiveGuardFactory() {
             );
             const comparison = compareRepairFileContents(before, current);
             const definitelyAttributed = definiteWrites.has(path);
-            if (comparison === 'equal') continue;
+            if (comparison === 'equal') {
+              // An admitted writer may have put this batch's preimage back after
+              // an earlier settle; the shared run baseline follows its current bytes.
+              resettleRollbackBaselinePath(baseline, input.projectDir, path, current,
+                () => scopeContainsPath(attemptContext.effectiveScope, path, input.projectDir, input.context.declaredInputs));
+              continue;
+            }
             if (comparison === 'unavailable' && !definitelyAttributed) {
               const entryKind = before.indexEntryKind ?? current.indexEntryKind;
               if (entryKind === 'gitlink' || entryKind === 'sparse_tree' || entryKind === 'unmerged' || entryKind === 'unknown') {

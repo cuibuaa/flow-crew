@@ -413,6 +413,19 @@ export function settleRollbackBaselinePath(baseline: RunRollbackBaseline, projec
   baseline.gitIndexEntries.delete(path);
 }
 
+/** Follow an admitted writer back to its batch preimage without touching lazy Git entries. */
+export function resettleRollbackBaselinePath(
+  baseline: RunRollbackBaseline,
+  projectDir: string,
+  path: string,
+  current: RepairFileImage,
+  admitted: () => boolean = () => true,
+): void {
+  const settled = baseline.images.get(path);
+  if (!settled || compareRepairFileContents(settled, current) !== 'different' || !admitted()) return;
+  settleRollbackBaselinePath(baseline, projectDir, path);
+}
+
 /** Commit a scheduler-owned project artifact into the run rollback baseline. */
 export function settleFrameworkRollbackPath(projectDir: string, runDirPath: string, path: string): void {
   const baseline = rollbackBaselines.get(rollbackBaselineKey(projectDir, runDirPath));
