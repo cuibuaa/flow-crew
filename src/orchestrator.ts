@@ -35,6 +35,7 @@ import {
   isSuccessfulRunStatus,
   isTerminalRunStatus,
   readRunReservation,
+  readOperationalRunState,
   readRunState,
   resolveRunStatus,
   reserveRun,
@@ -408,17 +409,22 @@ export class Orchestrator {
       errors.push('Registry is corrupt or has unknown statuses; deployment cannot be proved safe');
       controlErrors++;
     }
-    const observations = await Promise.all(this.registry.list({ status: TASK_LIST_STATUS.ALL }).map(async task => {
+    const registered = this.registry.list({ status: TASK_LIST_STATUS.ALL });
+    const units = this.systemd.isActiveMany
+      ? await this.systemd.isActiveMany(registered.map(task => task.systemd_unit)) : undefined;
+    const observations = await Promise.all(registered.map(async task => {
       const active = isActiveTaskStatus(task.status);
       let settled: boolean;
       let detail: string | undefined;
       try {
-        const unit = await this.systemd.isActive(task.systemd_unit);
+        const unit = units
+          ? units.get(task.systemd_unit) ?? { kind: 'unobservable' as const, reason: 'Unit omitted from supervisor observation' }
+          : await this.systemd.isActive(task.systemd_unit);
         const bound = this.readBoundRun(task);
         settled = unitIsStopped(unit) && !this.launchingTaskIds.has(task.id);
         if (bound) {
           const owner = inspectRunScheduler(bound.runId, bound.path);
-          const state = readRunState(task.projectDir, bound.runId);
+          const state = readOperationalRunState(task.projectDir, bound.runId);
           settled &&= ['dead', 'missing', 'reused'].includes(owner.kind)
             && (isPausedRunStatus(state.status) || isTerminalRunStatus(state.status))
             && checkpointCommandFateKnown(state) && checkpointConsumers(state.engineCheckpoint).length === 0;
@@ -1373,6 +1379,39 @@ export class NodeSystemd implements SupervisorBackend {
   private requireManagerAuthority(): void {
     const reason = this.managerRefusal();
     if (reason) throw new Error(`Refusing per-user systemd manager: ${reason}. Use a private runtime without an inherited session bus.`);
+  }
+
+  async isActiveMany(units: string[]): Promise<Map<string, UnitStatus>> {
+    if (!units.length) return new Map();
+    let loaded: Set<string> | undefined;
+    let failure: UnitStatus | undefined;
+    let unavailable = false;
+    const refusal = this.managerRefusal();
+    if (refusal) failure = { kind: 'unobservable', reason: `Refusing per-user systemd manager: ${refusal}` };
+    else {
+      try {
+        // Unlike is-active, a successful inventory proves that unloaded names
+        // have no manager owner. Historical tasks need no individual RPC.
+        const { stdout } = await execFileAsync('systemctl',
+          ['--user', 'list-units', '--all', '--output=json', '--no-pager'],
+          { encoding: 'utf-8', timeout: 1_000 });
+        const rows: unknown = JSON.parse(stdout);
+        if (!Array.isArray(rows) || rows.some(row => !row || typeof row.unit !== 'string' || !row.unit)) {
+          throw new Error('Invalid unit inventory');
+        }
+        loaded = new Set(rows.map(row => row.unit as string));
+      } catch (error) {
+        unavailable = (error as NodeJS.ErrnoException).code === 'ENOENT';
+        failure = { kind: 'unobservable', reason: 'systemctl inventory failed' };
+      }
+    }
+    return new Map(await Promise.all([...new Set(units)].map(async unit => {
+      if (loaded?.has(unit)) return [unit, await this.isActive(unit)] as const;
+      // Local supervision still owns a unit that the manager has retired.
+      const local = this.fallbackState(unit);
+      if (loaded || unavailable || local.kind === 'terminal') return [unit, local] as const;
+      return [unit, mergeSupervisorStatuses(local, failure!)] as const;
+    })));
   }
 
   async isActive(unit: string): Promise<UnitStatus> {

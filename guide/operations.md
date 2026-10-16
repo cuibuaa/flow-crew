@@ -244,6 +244,9 @@ distribution remains. Do not use `--force` or overwrite modules to bypass this c
 A hold's `ready: true` proves its registered units, schedulers and checkpoint-owned command
 groups have stopped; the daemon itself remains live until the separate stop. Unregistered
 old consumers are also covered by the build publication guard. A failed build is not a deploy.
+Historical terminal runs with no unit, scheduler or owned command group are already settled.
+Status uses one manager inventory, then probes only units still present; it does not query
+each retired unit separately. An unavailable manager or ambiguous owner still refuses readiness.
 
 A hold waits for the already admitted group to settle: ordinary disjoint peers finish
 together; a gate repair round includes its serialized repair waves, evidence settlement

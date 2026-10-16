@@ -30,6 +30,9 @@ docs/continue-legacy-cancel/*
 !docs/cancel-ledger-guard/
 docs/cancel-ledger-guard/*
 !docs/cancel-ledger-guard/report.md
+!docs/hold-real-store/
+docs/hold-real-store/*
+!docs/hold-real-store/report.md
 tests/
 ui/tests/
 design/*
