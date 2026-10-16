@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { StoreState } from './store.js';
+import { recordRunEvent } from './run-events.js';
 import { resolveResearchPaths } from './research-paths.js';
 
 export interface ResearchGateCandidate {
@@ -16,6 +17,9 @@ export interface ResearchGateCandidate {
   label?: string;
   result?: number;
   reason?: string;
+  /** Exact reviewed bytes, including brief-specific schema and integrity fields. */
+  evidenceJson?: string;
+  settlement?: { disposition: 'ingested' | 'rejected'; reason: string };
 }
 
 export const RESEARCH_GATE_CANDIDATE_FILE = 'research_gate_candidate.json';
@@ -27,13 +31,13 @@ function candidateFile(gateStageId?: string): string {
 }
 
 function classify(source: string, bytes: Buffer): ResearchGateCandidate {
-  const base = { version: 1 as const, capturedAt: new Date().toISOString(), source, sha256: createHash('sha256').update(bytes).digest('hex') };
+  const base = { version: 1 as const, capturedAt: new Date().toISOString(), source, evidenceJson: bytes.toString('utf8'), sha256: createHash('sha256').update(bytes).digest('hex') };
   let value: Record<string, unknown>;
   try { value = JSON.parse(bytes.toString('utf-8')) as Record<string, unknown>; }
   catch { return { ...base, kind: 'invalid', reason: 'candidate evidence is not valid JSON' }; }
   const label = typeof value.label === 'string' && value.label.trim() ? value.label.trim() : undefined;
   if (!label) return { ...base, kind: 'invalid', reason: 'candidate evidence has no non-empty label' };
-  if (value.outcome === 'no_candidate') {
+  if (value.outcome === 'no_candidate' || (value.outcome === undefined && value.status === 'no_candidate')) {
     return typeof value.reason === 'string' && value.reason.trim()
       ? { ...base, kind: 'no_candidate', label, reason: value.reason.trim() }
       : { ...base, kind: 'invalid', label, reason: 'no_candidate evidence has no non-empty reason' };
@@ -58,6 +62,10 @@ export function captureResearchGateCandidate(
   gateStageId?: string,
 ): ResearchGateCandidate {
   const destination = join(runDir, candidateFile(gateStageId));
+  const previous = readResearchGateCandidate(runDir, gateStageId);
+  if (previous && !previous.settlement) {
+    settleResearchGateCandidate(projectDir, runDir, previous, 'rejected', 'Gate was re-evaluated before this captured outcome was ingested');
+  }
   const consumed = immutableConsumed(runDir);
   let state: StoreState | undefined;
   try { state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8')) as StoreState; } catch { /* fallback below */ }
@@ -99,4 +107,37 @@ export function readResearchGateCandidate(runDir: string, gateStageId?: string):
     if (gateStageId && parsed.gateStageId !== gateStageId) return undefined;
     return parsed;
   } catch { return undefined; }
+}
+
+/** One settlement channel for reviewed evidence, including superseded captures. */
+export function settleResearchGateCandidate(
+  projectDir: string, runDir: string, candidate: ResearchGateCandidate,
+  disposition: 'ingested' | 'rejected', reason: string,
+): void {
+  if (candidate.settlement) return;
+  candidate.settlement = { disposition, reason };
+  writeFileSync(join(runDir, candidateFile(candidate.gateStageId)), `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
+  const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as StoreState;
+  recordRunEvent(projectDir, state.runId, {
+    type: 'research_gate_candidate_settled', runId: state.runId,
+    timestamp: new Date().toISOString(), iteration: state.currentIteration,
+    stageId: candidate.gateStageId, source: 'scheduler',
+    detail: `${disposition}: ${reason}; label=${JSON.stringify(candidate.label)}; sha256=${candidate.sha256 ?? 'absent'}`,
+  });
+}
+
+export function pendingResearchGateCandidates(runDir: string): ResearchGateCandidate[] {
+  return readdirSync(runDir)
+    .filter(name => /^research_gate_candidate(?:_[a-f0-9]{16})?\.json$/.test(name))
+    .flatMap(name => {
+      const candidate = JSON.parse(readFileSync(join(runDir, name), 'utf8')) as ResearchGateCandidate;
+      return candidate.version === 1 && !candidate.settlement ? [candidate] : [];
+    })
+    .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+}
+
+export function rejectPendingResearchGateCandidates(projectDir: string, runDir: string, reason: string): void {
+  for (const candidate of pendingResearchGateCandidates(runDir)) {
+    settleResearchGateCandidate(projectDir, runDir, candidate, 'rejected', reason);
+  }
 }

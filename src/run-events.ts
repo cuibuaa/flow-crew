@@ -59,6 +59,7 @@ export type RunEventType =
   | 'research_mode_degraded'
   | 'research_gate_exhausted'
   | 'research_round_contract_repaired'
+  | 'research_gate_candidate_settled'
   | 'stage_artifact_contract_violation'
   | 'reality_gate_advisory'
   | 'parallel_scope_serialized'

@@ -1,4 +1,5 @@
 // Boundary: Manage admitted run lifetime, verified checkpoint, heartbeat, deterministic watchdog and unconditional owned cleanup around the iteration driver.
+import { rejectPendingResearchGateCandidates } from '../../research-candidate.js';
 import { Adapter, AgentConfig, withRunProcessOwnership } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
 import { BriefAdmissionRecord } from '../../brief-preflight.js';
@@ -10,7 +11,7 @@ import { applyBasePrompt, buildRoleRegistry, listAvailableSkills, loadBasePrompt
 import { log } from '../sched_admission/shared.js';
 import { removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
 import { closeRollbackBaseline } from '../sched_scope/rollback-baseline.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, updateRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, isTerminalRunStatus, readRunState, runDir, updateRunState } from '../../store.js';
 import { StageWatchdog } from '../../stage-watchdog.js';
 import { configureWorkflowBrief } from './brief.js';
 import { prepareWorkflowLaunch } from './launch.js';
@@ -44,7 +45,12 @@ export async function runWorkflow(
     if (existingRunId && !policyRefusal) recordContinuationRefusal(projectDir, existingRunId, reason);
     throw error;
   }
-  if (launch.kind === 'settled') return launch.state;
+  if (launch.kind === 'settled') {
+    if (isTerminalRunStatus(launch.state.status)) {
+      rejectPendingResearchGateCandidates(projectDir, runDir(projectDir, launch.state.runId), `Run ended ${launch.state.status} before captured outcome ingestion: ${launch.state.failureReason ?? 'terminal outcome settled'}`);
+    }
+    return launch.state;
+  }
   const {runId, runDirPath, maxIterations, baseStages, resumingExistingRun, resumeAtIteration, schedulerPidPath, launchIntentOwned} = launch;
   workflowYaml = launch.workflowYaml;
   // Watchdog and pid cleanup cover every return after admission, including
@@ -114,6 +120,10 @@ export async function runWorkflow(
     if (launchIntentOwned) {
       releaseLaunchIntent(projectDir, runId);
       invalidateRunLockCache();
+    }
+    const settled = readRunState(projectDir, runId);
+    if (isTerminalRunStatus(settled.status)) {
+      rejectPendingResearchGateCandidates(projectDir, runDirPath, `Run ended ${settled.status} before captured outcome ingestion: ${settled.failureReason ?? 'terminal outcome settled'}`);
     }
   }
   });
