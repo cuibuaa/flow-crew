@@ -100,6 +100,26 @@ be fresh. No-candidate rounds consume stop budget without inventing a baseline o
 Duplicate journaled labels are refused. Accepted rounds enter `research_journal.json` and
 the report directory's exact `run_manifest.json` before confirmation.
 
+Before dispatch, the engine snapshots the content identities of both result slots and existing
+inferred `evidence.json` files in `run.json.researchInputGeneration`. Admission and inference
+share the same confined regular-file domain, with the existing 4 MiB evidence limit; aliases
+and special files are not read as evidence. Content identities use the existing nonblocking,
+no-follow regular-file reader. Explicit result slots retain confined internal aliases, using
+their canonical file identity; inferred evidence still requires a regular directory entry.
+A new publication changes content relative to that snapshot or is evidenced by a completed
+current-iteration producer attempt's settled write ledger. Equal measurement bytes remain valid
+when that ledger proves current production; touching an old file alone does not prove it.
+Backward clock steps therefore cannot discard a newly published round. The snapshot
+survives resume, while journal labels and immutable consumed copies prevent counting a round
+twice. A legacy run without a snapshot preserves pending publications recorded in the closed
+current-iteration producer attempt's write ledger, using the same publication rule. Independent review still decides whether
+that result is accepted, without repeating completed production. The existing confined project
+alias resolver and regular-file device/inode identity bind a result slot to that producer's
+recorded write, including project-local hardlinks. An independent file with identical bytes
+does not prove publication. Other pre-existing files are snapshotted as old; a completed stage
+name alone does not prove publication. Once established,
+the snapshot survives every resume.
+
 Variability and outlier bounds apply only when declared. Reported uncertainty still determines
 whether a gain counts; surprising gains and high variance need independent review or a declared
 confirmation check.

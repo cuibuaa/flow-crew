@@ -27,10 +27,6 @@ describe('engine boundaries from recorded runs', () => {
         const resultRel = 'research/round_result.json';
         mkdirSync(join(projectDir, 'research'), { recursive: true });
         mkdirSync(runDirPath, { recursive: true });
-        writeFileSync(join(projectDir, resultRel), JSON.stringify(caseName === 'confirmed'
-          ? { label: 'measured', result: 0.25 }
-          : { label: 'measured', result: 0.25, evidence: evidencePath }));
-        writeFileSync(join(projectDir, 'research/evidence.json'), JSON.stringify({ label: 'measured', result: evidenceScore, primary: true, confirmation: true }));
         writeFileSync(join(projectDir, 'confirm.cjs'), [
           "const fs = require('node:fs');",
           'const result = JSON.parse(fs.readFileSync(process.argv[2]));',
@@ -47,6 +43,12 @@ describe('engine boundaries from recorded runs', () => {
             stop: { beat: 0.1, maxRounds: 1, haltAfterNoImprovement: 1 },
             confirm: { command: `node confirm.cjs ${resultRel}`, requires: 'result and evidence match', timeoutSeconds: 10 } },
         } as StoreState;
+        const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
+        beginResearchInputGeneration(projectDir, state);
+        writeFileSync(join(projectDir, resultRel), JSON.stringify(caseName === 'confirmed'
+          ? { label: 'measured', result: 0.25 }
+          : { label: 'measured', result: 0.25, evidence: evidencePath }));
+        writeFileSync(join(projectDir, 'research/evidence.json'), JSON.stringify({ label: 'measured', result: evidenceScore, primary: true, confirmation: true }));
         const terminal = await tryAdvanceResearch(state, {
           projectDir, runId, runDirPath, iteration: 1, adapter: new ScriptedAdapter({}),
         });

@@ -94,6 +94,11 @@ and the audit outcome; scope admission and input protection share one intersecti
 Snapshot overlap is observation, not proof that two parallel stages wrote the same file;
 structured direct attribution is required for a parallel-write conflict claim.
 
+Settling an admitted write retains its bytes in the existing run rollback content store before
+a later writer can overwrite them. A later batch keeps that retained preimage when the path
+becomes a read-only input. Identity-only inspection still avoids copying uncaptured read-only
+data; unknown preimages still cannot authorize destructive restoration.
+
 Project validation owns dependency preparation. Each configured validation batch
 installs from the current project lockfiles with the discovered package manager's
 frozen install command before running checks; preparation failures stop the batch.

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { inspectDispatchAdmission, parseDispatchedStageConfig, runWorkflow, tryTerminateOnTerminalState, WorkflowConfigSchema } from '../src/scheduler.js';
@@ -103,6 +103,8 @@ describe('terminal outcome waits for required settlement', () => {
     state.stages.optional = { status: 'skipped', retries: 0 };
     state.stages.review = { status: 'pending', retries: 0 };
     writeFileSync(join(project, 'report.md'), 'fresh result');
+    const freshAt = (Date.parse(state.startedAt) + 100) / 1000;
+    utimesSync(join(project, 'report.md'), freshAt, freshAt);
     const result = await tryTerminateOnTerminalState(state, { projectDir: project, runId: created.runId, runDirPath: created.runDirPath, iteration: 1, adapter: new ScriptedAdapter({}) });
     expect(result.decision).toBe('matched');
     expect(state.status).toBe('complete');
@@ -121,6 +123,10 @@ describe('terminal outcome waits for required settlement', () => {
     if (disposition === 'retired') { state.planControl.stages = []; state.unresolvedStageObligations = [{ stageId: 'review', declaredIteration: 1 }]; }
     if (disposition === 'failed_work') { state.planControl.stages = [stage({ id: 'work', role: 'coder' })]; state.stages.work = { status: 'failed', retries: 0 }; }
     writeFileSync(join(project, 'report.md'), 'fresh terminal report');
+    // This tests review ordering with an explicitly fresh report, independently
+    // of the host's wall clock and filesystem timestamp rounding.
+    const freshAt = (Date.parse(state.startedAt) + 100) / 1000;
+    utimesSync(join(project, 'report.md'), freshAt, freshAt);
     if (disposition === 'rejected') writeFileSync(join(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'The required dedicated audit work artifact is absent.' }));
     const result = await tryTerminateOnTerminalState(state, { projectDir: project, runId: created.runId, runDirPath: runDir(project, created.runId), iteration: 1, adapter: new ScriptedAdapter({}) });
     expect(result.decision).toBe('deferred');

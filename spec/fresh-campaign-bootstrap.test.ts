@@ -125,12 +125,6 @@ async function emitNoCandidate(config: ResearchConfig): Promise<{ projectDir: st
   const resultFile = config.resultFile ?? 'docs/research_round_result.json';
   mkdirSync(dirname(join(projectDir, resultFile)), { recursive: true });
   mkdirSync(runDirPath, { recursive: true });
-  writeFileSync(`${join(projectDir, resultFile)}.no_candidate.json`, JSON.stringify({
-    label: 'no-safe-candidate',
-    outcome: 'no_candidate',
-    reason: 'every candidate violated a hard constraint',
-    evidence: { rejected: 4 },
-  }));
   const state = {
     runId: 'fresh-run',
     workflowName: 'fresh-campaign-bootstrap',
@@ -140,6 +134,14 @@ async function emitNoCandidate(config: ResearchConfig): Promise<{ projectDir: st
     startedAt: new Date(Date.now() - 1_000).toISOString(),
     research: config,
   } as StoreState;
+  const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
+  beginResearchInputGeneration(projectDir, state);
+  writeFileSync(`${join(projectDir, resultFile)}.no_candidate.json`, JSON.stringify({
+    label: 'no-safe-candidate',
+    outcome: 'no_candidate',
+    reason: 'every candidate violated a hard constraint',
+    evidence: { rejected: 4 },
+  }));
   await tryAdvanceResearch(state, {
     projectDir,
     runId: 'fresh-run',

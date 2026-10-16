@@ -33,7 +33,7 @@ interface ScopeWriteEnforcement {
 export function enforceStageScopeWrites(input: {
   projectDir: string;
   snapshot: RepairRoundSnapshot;
-  preimages?: ReadonlyMap<string, RepairFileImage>;
+  preimages?: Map<string, RepairFileImage>;
   effectiveScope: string[] | null;
   declaredInputs?: readonly DeclaredInputWriteBinding[];
   exemptPatterns?: readonly string[];
@@ -53,6 +53,12 @@ export function enforceStageScopeWrites(input: {
   const rollbackFailureReasons: Record<string, string> = {};
   const durableWrites: string[] = [];
   const ignored = ignoredGeneratedPaths(input.projectDir, rawWrites);
+  const settle = (path: string, before: RepairFileImage): void => {
+    // Audit can provisionally settle a peer's path before its structured
+    // writer closes, just as live observation can. Keep the same first image.
+    input.preimages?.set(path, input.preimages.get(path) ?? before);
+    settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, path);
+  };
   for (const rawPath of rawWrites) {
     const normalized = normalizedProjectPath(rawPath);
     const definitelyAttributed = input.definiteWrites.has(normalized ?? rawPath);
@@ -99,7 +105,7 @@ export function enforceStageScopeWrites(input: {
     if (ungoverned && !readOnly) {
       if (changed) {
         durableWrites.push(normalized);
-        settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+        settle(normalized, before);
       } else {
         resettleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized, current);
       }
@@ -109,7 +115,7 @@ export function enforceStageScopeWrites(input: {
       if (changed) {
         appliedWrites.push(normalized);
         durableWrites.push(normalized);
-        settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+        settle(normalized, before);
       } else {
         resettleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized, current);
       }
@@ -124,7 +130,7 @@ export function enforceStageScopeWrites(input: {
     const restoration = restoreProjectPath(input.projectDir, normalized, before);
     if (restoration.restored) {
       rolledBackWrites.push(normalized);
-      settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+      settle(normalized, before);
     } else {
       rollbackFailures.push(normalized);
       rollbackFailureReasons[normalized] = restoration.failure ?? `could not restore ${normalized}`;

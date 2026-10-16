@@ -1,11 +1,91 @@
 import { writeFileSync } from './engine-fs.js';
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import type { StoreState } from './store.js';
+import { lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { STAGE_STATUS, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
 import { resolveResearchPaths } from './research-paths.js';
+import { readLiveConstraintContentIdentity } from './live-constraint-guard.js';
+import { rollbackStatIdentity } from './rollback-content-store.js';
+import { resolveArtifactLocation } from './artifact-location.js';
+import { normalizedProjectContentPath } from './scheduler/sched_admission/scope-services.js';
+import { canonicalPotentialProjectPath, listProjectFilesAt } from './scheduler/sched_scope/path-capabilities.js';
+
+export interface ResearchInputGeneration {
+  startedAt: string;
+  resultFile: string;
+  baselines: Record<string, string | null>;
+}
+
+function fingerprint(projectDir: string, path: string): string | null {
+  try {
+    resolveArtifactLocation({ root: 'project', path }, projectDir, projectDir);
+    const identity = readLiveConstraintContentIdentity(canonicalPotentialProjectPath(projectDir, path));
+    return identity.state === 'present' && identity.type === 'file' ? identity.sha256 : null;
+  } catch { return null; }
+}
+
+function publicationIdentity(projectDir: string, path: string): string | undefined {
+  try {
+    resolveArtifactLocation({ root: 'project', path }, projectDir, projectDir);
+    const identity = rollbackStatIdentity(canonicalPotentialProjectPath(projectDir, path));
+    return identity?.type === 'file' ? `${identity.dev}:${identity.ino}` : undefined;
+  } catch { return undefined; }
+}
+
+/** Admission and inference share the consumer's bounded regular-file domain. */
+export function researchEvidenceFiles(projectDir: string, files: readonly string[]): string[] {
+  return files.filter(path => {
+    if (basename(path) !== 'evidence.json') return false;
+    try {
+      const absolute = resolveArtifactLocation({ root: 'project', path }, projectDir, projectDir);
+      const stat = lstatSync(absolute);
+      return stat.isFile() && stat.size <= 4 * 1024 * 1024;
+    } catch { return false; }
+  });
+}
+
+/** The settled current producer ledger proves publication, even for equal bytes.
+ * Match file identity so internal aliases work without promoting unrelated copies. */
+function hasCompletedPublication(projectDir: string, state: StoreState, path: string): boolean {
+  const identity = publicationIdentity(projectDir, path);
+  return identity !== undefined && Object.values(state.stages).some(stage => {
+    const attempt = stage.attempts?.at(-1);
+    return stage.status === STAGE_STATUS.COMPLETE && attempt?.status === STAGE_STATUS.COMPLETE
+      && (attempt.iteration ?? 1) === (state.currentIteration ?? 1)
+      && (attempt.writes ?? []).some(written => {
+        const normalized = normalizedProjectContentPath(written);
+        return normalized !== undefined && publicationIdentity(projectDir, normalized) === identity;
+      });
+  });
+}
+
+/** Snapshot mutable slots before dispatch, as attempt evidence generation does. */
+export function beginResearchInputGeneration(projectDir: string, state: StoreState): void {
+  if (!state.research) return;
+  const paths = resolveResearchPaths(state.research);
+  const previous = state.researchInputGeneration;
+  if (previous?.startedAt === state.startedAt && previous.resultFile === paths.resultFile) return;
+  const files = new Set([paths.resultFile, `${paths.resultFile}.no_candidate.json`,
+    ...researchEvidenceFiles(projectDir, listProjectFilesAt(projectDir, paths.reportDir))]);
+  state.researchInputGeneration = {
+    startedAt: state.startedAt,
+    resultFile: paths.resultFile,
+    baselines: Object.fromEntries([...files].map(path => [path, fingerprint(projectDir, path)])),
+  };
+}
+
+/** Changed content or completed current production establishes freshness without
+ * realtime ordering. The same ledger also preserves pending legacy production. */
+export function researchInputIsFresh(projectDir: string, state: StoreState, path: string): boolean {
+  const generation = state.researchInputGeneration;
+  if (!generation || generation.startedAt !== state.startedAt
+    || !state.research || generation.resultFile !== resolveResearchPaths(state.research).resultFile) return false;
+  const current = fingerprint(projectDir, path);
+  return current !== null && (current !== (generation.baselines[path] ?? null)
+    || hasCompletedPublication(projectDir, state, path));
+}
 
 export interface ResearchGateCandidate {
   version: 1;
@@ -74,12 +154,8 @@ export function captureResearchGateCandidate(
     const result = resolveResearchPaths(state.research).resultFile;
     const resultPath = join(projectDir, result);
     const sidecarPath = `${resultPath}.no_candidate.json`;
-    const started = Date.parse(state.startedAt);
-    const fresh = (path: string): boolean => {
-      try { return existsSync(path) && statSync(path).mtimeMs >= started; } catch { return false; }
-    };
-    const measured = fresh(resultPath);
-    const noCandidate = fresh(sidecarPath);
+    const measured = researchInputIsFresh(projectDir, state, result);
+    const noCandidate = researchInputIsFresh(projectDir, state, `${result}.no_candidate.json`);
     if (measured && noCandidate) {
       candidate = { version: 1, kind: 'invalid', capturedAt: new Date().toISOString(), source: result, reason: 'both measured and no_candidate evidence are fresh' };
     } else if (measured || noCandidate) {

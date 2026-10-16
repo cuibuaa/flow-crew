@@ -1,5 +1,4 @@
 import { mkdirSync } from './engine-fs.js';
-import { assertUnixSocketPath } from './daemon-identity.js';
 import { realpathSync } from 'node:fs';
 
 import { join } from 'node:path';
@@ -13,10 +12,10 @@ export function validationEnvironment(
   inherited: NodeJS.ProcessEnv,
   explicit?: NodeJS.ProcessEnv,
 ): { env: NodeJS.ProcessEnv; removed: string[] } {
-  // Invocation scratch may be a short alias for a longer run-local directory.
-  // Spend as little of the Unix socket path budget as possible on this fuse.
+  // Keep the fuse short for invocation scratch aliases. This private endpoint
+  // is never a bind target, so an overlong root must not refuse a command.
+  // Actual daemon clients still validate socket paths before I/O.
   const socket = join(root, 's');
-  assertUnixSocketPath(socket);
   const env = { ...(explicit ?? inherited) };
   const removed: string[] = [];
   for (const name of Object.keys(env)) {

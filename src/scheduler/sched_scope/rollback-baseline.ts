@@ -405,10 +405,10 @@ export function captureRollbackCurrentImage(
 
 export function settleRollbackBaselinePath(baseline: RunRollbackBaseline, projectDir: string, path: string): void {
   const before = baseline.images.get(path);
-  const image = repairFileIdentity(readRollbackCurrentImage(baseline, projectDir, path, before));
-  const unchanged = before && compareRepairFileContents(before, image) === 'equal';
-  if (!unchanged) delete image.gitObjectId; // hash-object comparison does not store a Git blob.
-  baseline.images.set(path, unchanged ? { ...before, ...image } : image);
+  // Settlement admits these bytes as the next preimage. Detection identities
+  // cannot restore them after a later trespass; use the existing owned store.
+  const image = captureRollbackCurrentImage(baseline, projectDir, path, before);
+  baseline.images.set(path, image);
   baseline.cleanTracked.delete(path);
   baseline.gitIndexEntries.delete(path);
 }

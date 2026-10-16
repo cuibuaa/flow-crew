@@ -650,6 +650,8 @@ export interface StoreState {
   program?: ProgramConfig;
   /** Research-mode config (set from brief `research:` block). */
   research?: ResearchConfig;
+  /** Content identities captured before this research run dispatches producers. */
+  researchInputGeneration?: import('./research-candidate.js').ResearchInputGeneration;
   /** Structurally declared brief outputs archived before terminal commit. */
   declaredOutputs?: Array<{
     path: string;

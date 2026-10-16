@@ -47,7 +47,7 @@ import type {
   ProjectValidationBaseline,
   ValidationCommandResult,
 } from '../src/project-validation.js';
-import { readResearchGateCandidate } from '../src/research-candidate.js';
+import { beginResearchInputGeneration, readResearchGateCandidate } from '../src/research-candidate.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
@@ -84,6 +84,7 @@ import {
   setFcGlobalDir,
   writeStageStatus,
   writeRunState,
+  type StoreState,
 } from '../src/store.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..');
@@ -630,11 +631,14 @@ describe('engine behaviour contracts', () => {
       label: 'prior', outcome: 'no_candidate', reason: 'prior round',
     }));
     const resultFile = join(projectDir, 'docs', 'result.json');
-    write(resultFile, JSON.stringify({ label: 'current', result: 42 }));
-    write(join(currentDirectory, 'run.json'), JSON.stringify({
+    const currentState = {
       runId: 'current-run', startedAt: new Date(Date.now() - 1_000).toISOString(),
+      stages: {},
       research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/result.json', stop: {} },
-    }));
+    } as StoreState;
+    beginResearchInputGeneration(projectDir, currentState);
+    write(join(currentDirectory, 'run.json'), JSON.stringify(currentState));
+    write(resultFile, JSON.stringify({ label: 'current', result: 42 }));
     const measuredPrompt = buildStagePrompt({
       dependsOn: [], promptTemplate: 'audit current result', projectDir, runId: 'current-run', runDir: currentDirectory,
       taskDescription: '# fixture', isGate: true, researchOutcomeGate: true,

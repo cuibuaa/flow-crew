@@ -81,6 +81,26 @@ Sources: [preflight](../src/cli-ship-preflight.ts), [setup](../src/cli-ship-setu
 [validation and deltas](../src/project-validation.ts),
 [gate validation](../src/scheduler/sched_settlement/gate-validation.ts).
 
+### Storage ownership
+
+Setup's independent input copies protect the source even when a subprocess writes its local
+input. A read-only declaration or a later hash check cannot provide that protection through a
+hardlink. An input-copy failure refuses setup without publishing READY; inspect available space
+and the reported target before retrying. Failed setup worktrees can contain partial copies.
+
+Use invocation `$TMPDIR` for disposable checkouts, compiler caches and test fixtures. Its owner
+retains scratch through retries and resumes, then retires it when the run commits a terminal
+status. Pytest's default temporary root follows that environment. An explicit `--basetemp` in a
+declared build directory instead chooses the artifact's longer lifetime.
+
+Declared build outputs survive retries, stage completion and terminal publication for their
+consumers. The engine cannot infer disposal authority from names such as `validation-1` or
+`pytest-temp`. Preserve required products, validation logs and useful failure fixtures in declared
+evidence before terminal scratch retirement; do not place their only copy in disposable temp.
+
+Sources: [input materialization](../src/cli-ship-setup.ts),
+[scratch owner](../src/invocation-scratch.ts), [terminal publisher](../src/store.ts).
+
 ## Inspect, guide and stop
 
 `status` selects the latest run for the current project; `--all` selects across projects.

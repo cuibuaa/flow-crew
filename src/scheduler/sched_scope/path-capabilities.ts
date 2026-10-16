@@ -126,7 +126,7 @@ function absolutePathContains(parent: string, candidate: string): boolean {
 
 /** Follow the longest existing prefix so aliases through a symlinked input tree
  * compare by identity even when the requested leaf does not exist yet. */
-function canonicalPotentialProjectPath(projectDir: string, rawPath: string): string {
+export function canonicalPotentialProjectPath(projectDir: string, rawPath: string): string {
   const normalized = normalizedProjectPath(rawPath) ?? '';
   const segments = normalized ? normalized.split('/') : [];
   for (let length = segments.length; length >= 0; length--) {

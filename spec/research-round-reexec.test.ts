@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { captureResearchGateCandidate, readResearchGateCandidate, settleResearchGateCandidate } from '../src/research-candidate.js';
+import { beginResearchInputGeneration, captureResearchGateCandidate, readResearchGateCandidate, settleResearchGateCandidate } from '../src/research-candidate.js';
 import { advanceSettledResearch } from '../src/scheduler/sched_loop/research-progress.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-setup.js';
@@ -45,7 +45,10 @@ function seed(research: boolean) {
     state.status = 'running';
     state.currentIteration = 2;
     state.startedAt = new Date(0).toISOString();
-    if (research) state.research = { baseline: 0, policy: 'greedy_stack', resultFile: resultPath, stop: { maxRounds: 5 } };
+    if (research) {
+      state.research = { baseline: 0, policy: 'greedy_stack', resultFile: resultPath, stop: { maxRounds: 5 } };
+      beginResearchInputGeneration(project, state);
+    }
     for (const stage of stages.slice(0, -1)) state.stages[stage.id] = { status: 'complete', retries: 0 };
     state.stages.round_gamma = { status: 'skipped', retries: 0 };
     state.stages.new_measurement = { status: 'complete', retries: 0 };

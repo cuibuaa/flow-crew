@@ -3,10 +3,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertDistFresh } from '../src/build-manifest.js';
+import { createInvocationScratch } from '../src/invocation-scratch.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-export default function verifyTestRuntimeGeneration(): void {
+export default function verifyTestRuntimeGeneration(): () => void {
   const gitOptions = {
     cwd: projectRoot, encoding: 'utf8',
     env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
@@ -30,4 +31,19 @@ export default function verifyTestRuntimeGeneration(): void {
   }
   if (violations.length) throw new Error(`Tracked text contains private paths or run identifiers:\n${violations.join('\n')}`);
   assertDistFresh(projectRoot);
+
+  // A suite is a command, not another author invocation. Inheriting an author's
+  // aliased .tmp-* tree makes no-follow homes and engine-carrier fixtures invalid.
+  // The existing owner supplies short physical storage until all workers close.
+  const scratch = createInvocationScratch();
+  const names = ['TMPDIR', 'TMP', 'TEMP'] as const;
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  for (const name of names) process.env[name] = scratch.path;
+  return () => {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+    scratch.cleanup();
+  };
 }

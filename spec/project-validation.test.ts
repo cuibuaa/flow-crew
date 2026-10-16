@@ -58,11 +58,13 @@ describe('project command environment and observer authority', () => {
   });
   it('ends configured validation inside the enclosing attempt budget', async () => {
     const project = mkdtempSync(join(tmpdir(), 'validation-deadline-'));
+    // Keep the requested budget deterministic while the real timeout runs.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
     try {
       const result = await runValidationCommand({ role: 'test', command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], display: 'deadline probe', cwd: project, timeoutMs: 30 });
       expect(result.exitCode).not.toBe(0);
       expect(result.error).toMatch(/30ms/);
-    } finally { rmSync(project, { recursive: true, force: true }); }
+    } finally { clock.mockRestore(); rmSync(project, { recursive: true, force: true }); }
   });
   it('keeps project inputs and explicit home reads while isolating control and credential settings', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'validation-env-'));
@@ -90,8 +92,9 @@ describe('project command environment and observer authority', () => {
       expect(explicit.env.PROJECT_INPUT).toBe('explicit');
       expect(explicit.removed).toEqual(['PROJECT_API_KEY']);
       if (process.platform !== 'win32') {
-        expect(() => validationEnvironment(join(scratch, 'x'.repeat(108)), {}))
-          .toThrow('Daemon socket path is too long');
+        const longRoot = join(scratch, 'x'.repeat(108));
+        expect(validationEnvironment(longRoot, {}).env.FLOWCREW_DAEMON_SOCKET)
+          .toBe(join(longRoot, 's'));
       }
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   });

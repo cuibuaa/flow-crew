@@ -4,9 +4,10 @@ import { type ResearchRound, evaluateResearch, evaluateResearchCeilingFloor } fr
 import { createHash } from 'node:crypto';
 import { type ResearchGateCandidate, settleResearchGateCandidate } from '../../research-candidate.js';
 import { updateFileHashSync } from '../../rollback-content-store.js';
-import { basename, join, dirname } from 'node:path';
+import { join, dirname } from 'node:path';
 import { copyFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
-import { lstatSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { researchEvidenceFiles, researchInputIsFresh } from '../../research-candidate.js';
 import { type Adapter } from '../../adapters/base.js';
 import { RUN_STATUS, type StoreState, enforceRealityGateBeforeTerminal, type PostTerminateHook } from '../../store.js';
 import { RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
@@ -115,18 +116,17 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     projectDir: string,
     reportDir: string,
     round: { label?: string; result?: number; evidence?: unknown },
-    startedMs: number,
+    state: StoreState,
   ): string | undefined {
     if (typeof round.evidence === 'string' && round.evidence.trim()) return round.evidence.trim();
     if (!round.label || typeof round.result !== 'number') return undefined;
     const expectedLabel = round.label;
     const expectedResult = round.result;
-    const candidates = listProjectFilesAt(projectDir, reportDir).filter((path) => basename(path) === 'evidence.json');
+    const candidates = researchEvidenceFiles(projectDir, listProjectFilesAt(projectDir, reportDir));
     const matches = candidates.filter((path) => {
       try {
         const absolute = join(projectDir, path);
-        const stat = lstatSync(absolute);
-        if (!stat.isFile() || stat.size > 4 * 1024 * 1024 || stat.mtimeMs < startedMs) return false;
+        if (!researchInputIsFresh(projectDir, state, path)) return false;
         const pending: unknown[] = [JSON.parse(readFileSync(absolute, 'utf-8'))];
         let sawLabel = false;
         let sawResult = false;
@@ -160,9 +160,6 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     const noCandidateAbs = `${resultAbs}.no_candidate.json`;
     
     const startedMs = state.startedAt ? new Date(state.startedAt).getTime() : Date.now();
-    const fresh = (path: string): boolean => {
-      try { return existsSync(path) && statSync(path).mtimeMs >= startedMs; } catch { return false; }
-    };
     const candidate = ctx.candidate;
     const settleCandidate = (disposition: 'ingested' | 'rejected', reason: string): void => {
       if (candidate) settleResearchGateCandidate(ctx.projectDir, ctx.runDirPath, candidate, disposition, reason);
@@ -171,8 +168,8 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       settleCandidate('rejected', candidate.reason ?? 'Captured outcome has no immutable evidence bytes');
       return null;
     }
-    const freshResult = candidate ? candidate.kind === 'measured' : fresh(resultAbs);
-    const freshNoCandidate = candidate ? candidate.kind === 'no_candidate' : fresh(noCandidateAbs);
+    const freshResult = candidate ? candidate.kind === 'measured' : researchInputIsFresh(ctx.projectDir, state, resultRel);
+    const freshNoCandidate = candidate ? candidate.kind === 'no_candidate' : researchInputIsFresh(ctx.projectDir, state, `${resultRel}.no_candidate.json`);
     if (!freshResult && !freshNoCandidate) return null;
     const digestSources = (paths: readonly string[]): string => {
       const hash = createHash('sha256');
@@ -280,7 +277,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     const sourceEvidenceDigest = candidate?.sha256 ?? digestSources([sourceAbs]);
     const roundEvidenceLink = noCandidate
       ? undefined
-      : researchRoundEvidenceLink(ctx.projectDir, researchPaths.reportDir, round, startedMs);
+      : researchRoundEvidenceLink(ctx.projectDir, researchPaths.reportDir, round, state);
 
     // Journal lives in the run dir (framework-owned, agent-unreachable).
     const journalPath = join(ctx.runDirPath, 'research_journal.json');

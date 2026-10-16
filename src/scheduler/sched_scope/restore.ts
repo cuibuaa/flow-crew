@@ -1,8 +1,10 @@
 // Boundary: Replace one project leaf from proven preimage bytes/Git identity and verify restoration; never recursively erase an unexpected directory or infer absence.
 import { basename, dirname, join, relative } from "node:path";
 import { chmodSync, closeSync, copyFileSync, mkdirSync, openSync, renameSync, rmSync, symlinkSync, writeFileSync } from '../../engine-fs.js';
-import { lstatSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { createHash } from "node:crypto";
+import { artifactRootContains } from '../../artifact-location.js';
+import { prospectivePhysicalPath } from '../../engine-owned-carriers.js';
 import { normalizedProjectPath } from "../sched_admission/scope-services.js";
 import { spawnSync } from "node:child_process";
 import { type RepairFileImage, compareRepairFileContents, describeRepairError, gitObjectIdForPath, readRepairFileImage, repairFileMaterializedBytes } from './file-images.js';
@@ -21,12 +23,19 @@ export function restoreProjectPath(
 ): ProjectPathRestoreResult {
   const normalized = normalizedProjectPath(rawPath);
   if (!normalized) return { restored: false, failure: `cannot restore non-project path ${rawPath}` };
-  const absolute = join(projectDir, normalized);
   if (before.inspectionFailure) {
     return { restored: false, failure: `preimage state is unavailable for ${normalized}: ${before.inspectionFailure}` };
   }
   let temporary: string | undefined;
   try {
+    // Resolve the parent, not the leaf: rollback may replace an outward leaf
+    // symlink, but must never restore through an outward directory alias.
+    const root = realpathSync(projectDir);
+    const parent = prospectivePhysicalPath(join(root, dirname(normalized)));
+    if (!artifactRootContains(root, parent)) {
+      return { restored: false, failure: `refused to restore through an ancestor outside the project at ${normalized}` };
+    }
+    const absolute = join(parent, basename(normalized));
     let currentIsDirectory = false;
     try { currentIsDirectory = lstatSync(absolute).isDirectory(); } catch { /* absent */ }
     // Never recursively erase an unexpected directory as part of rollback.
@@ -41,7 +50,7 @@ export function restoreProjectPath(
         };
       }
       rmSync(absolute, { force: true });
-      const after = readRepairFileImage(projectDir, normalized);
+      const after = readRepairFileImage(root, normalized);
       return !after.exists && !after.inspectionFailure
         ? { restored: true }
         : { restored: false, failure: `new path ${normalized} remained after removal` };
@@ -87,7 +96,7 @@ export function restoreProjectPath(
     }
     const stagedMatches = gitBlob
       ? gitObjectIdForPath(projectDir, temporary) === gitBlob
-      : compareRepairFileContents(before, readRepairFileImage(projectDir, relative(projectDir, temporary))) === 'equal';
+      : compareRepairFileContents(before, readRepairFileImage(root, relative(root, temporary))) === 'equal';
     if (!stagedMatches) {
       return { restored: false, failure: `staged preimage verification failed for ${normalized}` };
     }
@@ -95,7 +104,7 @@ export function restoreProjectPath(
     temporary = undefined;
     return (gitBlob
       ? gitObjectIdForPath(projectDir, absolute) === gitBlob
-      : compareRepairFileContents(before, readRepairFileImage(projectDir, normalized)) === 'equal')
+      : compareRepairFileContents(before, readRepairFileImage(root, normalized)) === 'equal')
       ? { restored: true }
       : { restored: false, failure: `restored content verification failed for ${normalized}` };
   } catch (error) {

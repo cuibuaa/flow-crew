@@ -157,9 +157,12 @@ describe('rollback capture follows admitted writes', () => {
     expect(enforceStageScopeWrites({ projectDir: project, snapshot: first, effectiveScope: writer.scope!,
       rawWrites: ['output.bin'], definiteWrites: new Set(['output.bin']), preserveUnverifiedPath: () => false })
       .appliedWrites).toEqual(['output.bin']);
-    expect(storedBytes(runDirPath)).toBe(0);
+    // Settlement retains the newly admitted bytes before a later unauthorized
+    // writer can destroy them, even if no next writer has been admitted yet.
+    expect(storedBytes(runDirPath)).toBe(2 * 1024 * 1024);
     const next = captureRepairRoundSnapshot(project, [writer], { runDirPath });
     expect(next.files.get('output.bin')!.backingPath).toBeTruthy();
+    expect(storedBytes(runDirPath)).toBe(2 * 1024 * 1024);
     writeFileSync(target, Buffer.alloc(2 * 1024 * 1024, 0x43));
     expect(enforceStageScopeWrites({ projectDir: project, snapshot: next, effectiveScope: [],
       rawWrites: ['output.bin'], definiteWrites: new Set(['output.bin']), preserveUnverifiedPath: () => false })

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { stringify } from 'yaml';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import { resetConfigCache } from '../src/config.js';
-import { captureResearchGateCandidate, readResearchGateCandidate } from '../src/research-candidate.js';
+import { beginResearchInputGeneration, captureResearchGateCandidate, readResearchGateCandidate } from '../src/research-candidate.js';
 import { readRunEvents } from '../src/run-events.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState } from '../src/store.js';
@@ -44,6 +44,7 @@ it('settles a real carrier refusal once without launching or retrying authored w
   const state = readRunState(project, created.runId);
   state.startedAt = new Date(0).toISOString();
   state.research = { baseline: 0, policy: 'best_of_n', resultFile: 'round.json' };
+  beginResearchInputGeneration(project, state);
   writeRunState(project, created.runId, state);
   writeFileSync(join(project, 'round.json'), JSON.stringify({ label: 'independent-measurement', result: 0.2 }));
   captureResearchGateCandidate(project, created.runDirPath, 'earlier_review');

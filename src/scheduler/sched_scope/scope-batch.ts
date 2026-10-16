@@ -64,8 +64,10 @@ export class ScopeBatchContext {
       const baseline = snapshot.rollbackBaseline;
       const before = baselineImage(baseline, path);
       const known = baseline.images.has(path) || baseline.cleanTracked.has(path);
-      const image = repairFileIdentity(known && before.provenance !== 'unknown'
-        ? before : readRollbackCurrentImage(baseline, projectDir, path, before));
+      // An already retained preimage remains restorable when a later batch
+      // treats this path as an input. Only uncaptured reads are identities.
+      const image = known && before.provenance !== 'unknown'
+        ? before : repairFileIdentity(readRollbackCurrentImage(baseline, projectDir, path, before));
       snapshot.rollbackBaseline.images.set(path, image);
       snapshot.files.set(path, image);
     }

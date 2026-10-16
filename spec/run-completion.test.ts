@@ -6,7 +6,7 @@ import { StageConfigSchema } from '../src/scheduler/sched_admission/configuratio
 import { runWorkflowIterations } from '../src/scheduler/sched_loop/workflow-loop.js';
 import { concludeWorkflowIteration } from '../src/scheduler/sched_loop/iteration-outcome.js';
 import { createResearchBudgetFinalizer } from '../src/scheduler/sched_loop/research-terminal.js';
-import { captureResearchGateCandidate, readResearchGateCandidate } from '../src/research-candidate.js';
+import { beginResearchInputGeneration, captureResearchGateCandidate, readResearchGateCandidate } from '../src/research-candidate.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
 import { log } from '../src/scheduler/sched_admission/shared.js';
 import { publishRunCompletion, settleTerminalResearchCandidates } from '../src/scheduler/sched_policy/run-completion.js';
@@ -26,6 +26,7 @@ beforeEach(() => {
   state.status = 'running';
   state.startedAt = new Date(0).toISOString();
   state.research = { baseline: 0, policy: 'best_of_n', resultFile: 'round.json' };
+  beginResearchInputGeneration(project, state);
   store.writeRunState(project, runId, state);
   writeFileSync(join(project, 'round.json'), JSON.stringify({ label: 'pending-measurement', result: 0.2 }));
   captureResearchGateCandidate(project, directory, 'review');

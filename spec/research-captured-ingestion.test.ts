@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
-import { captureResearchGateCandidate, readResearchGateCandidate } from '../src/research-candidate.js';
+import { beginResearchInputGeneration, captureResearchGateCandidate, readResearchGateCandidate } from '../src/research-candidate.js';
 import { readRunEvents } from '../src/run-events.js';
 import { runWorkflow } from '../src/scheduler.js';
 import { advanceSettledResearch } from '../src/scheduler/sched_loop/research-progress.js';
@@ -35,6 +35,7 @@ beforeEach(() => {
   };
   // A same-attempt correction is an accepted completed gate, including for ingestion.
   state.stages[gate.id] = { status: 'complete', retries: 0, attempts: [{ index: 1, status: 'complete', disposition: 'repaired', startedAt: new Date(0).toISOString(), completedAt: new Date(1).toISOString(), exitCode: 0 }] };
+  beginResearchInputGeneration(project, state);
   writeRunState(project, runId, state);
   writeFileSync(join(directory, `verdict_${gate.id}.json`), JSON.stringify({ pass: true, reason: 'Independent review agrees.' }));
 });
@@ -54,12 +55,17 @@ async function advance() {
 }
 
 describe('captured research evidence is the ingestion source', () => {
-  it('banks the exact repaired-gate candidate after an old producer overwrites the latest result', async () => {
+  it.each([false, true])('banks the exact repaired-gate candidate after an old producer overwrites the latest result (legacy snapshot=%s)', async legacy => {
     const old = { label: 'measurement-old', outcome: 'measured', result: 0.1 };
     writeFileSync(join(directory, 'research_journal.json'), JSON.stringify({ rounds: [old] }));
     writeFileSync(join(directory, 'research_round_1_consumed.json'), JSON.stringify(old));
     const measured = { label: 'measurement-new', result: 0.2, result_std: 0.01, admissible: true, evidence: 'artifacts/new-evidence.json' };
     capture(measured);
+    if (legacy) {
+      const state = readRunState(project, runId);
+      delete state.researchInputGeneration;
+      writeRunState(project, runId, state);
+    }
     writeFileSync(join(project, resultFile), JSON.stringify(old));
     await advance();
     expect(read('research_journal.json').rounds).toEqual([old, expect.objectContaining({ label: measured.label, result: measured.result, resultStd: 0.01, evidence: measured.evidence })]);
@@ -69,6 +75,15 @@ describe('captured research evidence is the ingestion source', () => {
     await advance();
     expect(read('research_journal.json').rounds).toHaveLength(2);
     expect(readRunEvents(project, runId).filter(event => event.type === 'research_gate_candidate_settled')).toHaveLength(1);
+  });
+
+  it('does not substitute fresh mutable output for an absent gate capture', async () => {
+    expect(captureResearchGateCandidate(project, directory, gate.id).kind).toBe('absent');
+    writeFileSync(join(project, resultFile), JSON.stringify({ label: 'unreviewed', result: 0.2, admissible: true }));
+    await advance();
+    expect(readResearchGateCandidate(directory, gate.id)?.settlement?.disposition).toBe('rejected');
+    expect(() => read('research_journal.json')).toThrow(/ENOENT/);
+    expect(JSON.parse(readFileSync(join(project, resultFile), 'utf8')).label).toBe('unreviewed');
   });
 
   it('settles every leftover capture before the policy terminal completion is published', async () => {

@@ -363,14 +363,16 @@ describe('gate settlement and research evidence', () => {
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
     mkdirSync(taskRunDir, { recursive: true });
     const sidecar = join(projectDir, 'docs', 'round.json.no_candidate.json');
-    writeFileSync(sidecar, JSON.stringify({
-      outcome: 'no_candidate', label: 'round_without_action', reason: 'every candidate violated a hard constraint', evidence: { rejected: 4 },
-    }));
     const state = {
       runId: 'run', workflowName: 'test', projectDir, status: 'running', stages: {},
       startedAt: new Date(Date.now() - 1000).toISOString(),
       research: { baseline: 10, policy: 'best_of_n', resultFile: 'docs/round.json', reportDir: 'docs', stop: { maxRounds: 2 } },
     } as StoreState;
+    const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
+    beginResearchInputGeneration(projectDir, state);
+    writeFileSync(sidecar, JSON.stringify({
+      outcome: 'no_candidate', label: 'round_without_action', reason: 'every candidate violated a hard constraint', evidence: { rejected: 4 },
+    }));
     await tryAdvanceResearch(state, { projectDir, runId: 'run', runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter });
     const journal = JSON.parse(readFileSync(join(taskRunDir, 'research_journal.json'), 'utf-8')) as { rounds: Array<Record<string, unknown>> };
     expect(journal.rounds[0]).toMatchObject({ outcome: 'no_candidate', label: 'round_without_action', evidence: { rejected: 4 } });
