@@ -1,3 +1,4 @@
+import { invocationUsageFields } from '../../invocation-usage.js';
 import { isRetryableAdapterFailure } from '../../adapters/failure.js';
 import { runStageWave } from '../stage-wave.js';
 // Boundary: Select and execute one scope-safe ready wave, coordinate live monitors and settle technical/failure/validation outcomes before terminal decisions.
@@ -236,6 +237,16 @@ export async function executeReadyBatch(
         continue;
       }
 
+      // The race has already gated the winner. Keep dependency IDs as acceptance
+      // projections, without launching another gate or recording parent attempts.
+      if (stage.race) for (const [id, acceptedFrom] of Object.entries(result.acceptedGates ?? {})) {
+        const previous = state.stages[id];
+        const accepted: StageStatus = { status: STAGE_STATUS.COMPLETE, retries: previous?.retries ?? 0,
+          attempts: previous?.attempts, duration_ms: previous?.duration_ms,
+          ...invocationUsageFields(previous ?? {}), acceptedFrom };
+        state.stages[id] = accepted;
+        writeStageStatus(projectDir, runId, id, accepted);
+      }
       technicalRetries.delete(stage.id);
       stageEvents.push({ stageId: stage.id, status: state.stages[stage.id] });
       log.info({ stage: stage.id }, 'Stage complete');

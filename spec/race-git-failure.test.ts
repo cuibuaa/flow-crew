@@ -6,14 +6,22 @@ import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stringify } from 'yaml';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
-import { parseDispatchedStageConfig, type WorkflowConfig } from '../src/scheduler/sched_admission/configuration.js';
+import { parseDispatchedStageConfig, type StageConfig, type WorkflowConfig } from '../src/scheduler/sched_admission/configuration.js';
 import { stageRaceAdapter } from '../src/scheduler/sched_loop/stage-race.js';
+import type { GateRuntimeFacts } from '../src/scheduler/sched_settlement/gate-recovery.js';
 import { initializeReservedRun, readRunState, reserveRun, updateRunState, writeStageOutput } from '../src/store.js';
 
 const workflowMock = vi.hoisted(() => vi.fn());
 vi.mock('../src/scheduler/sched_loop/run-workflow.js', () => ({ runWorkflow: workflowMock }));
 vi.mock('../src/scheduler/sched_settlement/gate-recovery.js', () => ({
-  collectGateRuntimeFacts: (_stages: unknown, state: { status: string }) => ({ allPass: state.status === 'complete' }),
+  collectGateRuntimeFacts: (stages: StageConfig[], state: { status: string }): GateRuntimeFacts => {
+    const verdict = { pass: state.status === 'complete', reason: 'Fixture independent gate result.' };
+    const gates = stages.filter(stage => stage.is_gate);
+    const rejectedGateIds = verdict.pass ? [] : gates.map(stage => stage.id);
+    return { allPass: verdict.pass, failedGateIds: rejectedGateIds, rejectedGateIds, contractRefusals: [],
+      evaluations: gates.map(stage => ({ id: stage.id, status: 'complete', attempts: 1,
+        authoredVerdict: verdict, effectiveVerdict: verdict })) };
+  },
 }));
 let directory: string;
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'flowcrew-race-git-failure-')); });

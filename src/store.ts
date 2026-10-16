@@ -142,6 +142,8 @@ export interface StageAttempt extends InvocationUsage {
 }
 
 export interface StageStatus {
+  /** Acceptance already settled in an isolated child; no local gate execution. */
+  acceptedFrom?: { runId: string; verdict: GateVerdict };
   status: StageState;
   exitCode?: number;
   processExitCode?: number | null;
@@ -2329,6 +2331,7 @@ export function rependStageStatus(
     status: STAGE_STATUS.PENDING,
     retries,
     error,
+    acceptedFrom: undefined,
   };
 }
 

@@ -128,7 +128,7 @@ describe('fresh race candidates after a parent stage retry', () => {
       expect(author.prompt).not.toContain('Obsolete first execution notice.');
       expect(author.prompt.match(/Current retry ruling: use the new answer\./g)).toHaveLength(1);
     }
-    expect(reviews).toHaveLength(2);
+    expect(reviews).toHaveLength(1);
     for (const prompt of reviews) {
       expect(prompt).toContain('Operator criterion rulings (binding reasoning context)');
       expect(prompt).toContain('Criterion 1 ruling: inspect the literal contents of answer.txt.');

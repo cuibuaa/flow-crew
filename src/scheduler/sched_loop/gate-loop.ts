@@ -69,7 +69,7 @@ export async function settleGateRetries(
       // Gate and retry_to topology owns verification for every admitted plan;
       // removing the dispatch-origin restriction also lets isolated stage candidates repair.
       if (readRunValidationBaseline(runDirPath)) {
-        for (const gate of sorted.filter((stage) => stage.is_gate && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE)) {
+        for (const gate of sorted.filter((stage) => stage.is_gate && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE && !state.stages[stage.id]?.acceptedFrom)) {
           const validation = await settleGateValidationEvidence(projectDir, runId, gate.id);
           state = readRunState(projectDir, runId);
           if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };

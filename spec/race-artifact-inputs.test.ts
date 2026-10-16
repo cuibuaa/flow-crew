@@ -93,7 +93,7 @@ describe('race stage input contracts', () => {
   it.each(['work', 'prepare'] as const)('projects settled ancestor inputs and evaluates a gate condition on %s', async gateFact => {
     const { state, reviewInputs } = await fixture(undefined, false, gateFact);
     expect(state.status, state.failureReason).toBe('complete');
-    expect(reviewInputs.length).toBeGreaterThanOrEqual(2);
+    expect(reviewInputs).toHaveLength(1);
     expect(reviewInputs.every(input => input === 'frozen predecessor input\n')).toBe(true);
   });
   it('refuses candidate completion when its conditional independent gate does not execute', async () => {

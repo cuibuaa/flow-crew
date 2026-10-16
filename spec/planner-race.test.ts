@@ -7,6 +7,7 @@ import { basename, join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadWorkflow, runWorkflow, parseDispatchedStageConfig, inspectDispatchAdmission, WorkflowConfigSchema } from '../src/scheduler.js';
+import { raceAdmissionErrors } from '../src/scheduler/sched_admission/configuration.js';
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
 import { renderPlanInterface } from '../src/plan-interface.js';
 import { atomicWrite, runDir, type StoreState } from '../src/store.js';
@@ -16,6 +17,13 @@ import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { parse, stringify } from 'yaml';
 
 const root = join(import.meta.dirname, '..');
+const baselineFixture = vi.hoisted(() => ({ enabled: false }));
+vi.mock('../src/ship-setup-record.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/ship-setup-record.js')>();
+  return { ...actual, readShipSetupReadyValidationBaseline: (...args: Parameters<typeof actual.readShipSetupReadyValidationBaseline>) => baselineFixture.enabled
+    ? { version: 1, projectDir: args[0], discovery: { state: 'configured', configPath: '', commands: [], missingRoles: [] }, results: [], gateCriteria: [] }
+    : actual.readShipSetupReadyValidationBaseline(...args) };
+});
 const roleAdapters = vi.hoisted(() => new Map<string, Adapter>());
 vi.mock('../src/adapters/loader.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/adapters/loader.js')>();
@@ -26,7 +34,7 @@ const good = 'exports.twice = n => n * 2;\n', bad = 'exports.twice = n => n;\n';
 const record = (summary: string, files: string[] = []) => JSON.stringify({ status: 'delivered', summary,
   files_modified: files, checks: [], caveats: [] });
 let directory: string;
-beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'flowcrew-planner-race-')); roleAdapters.clear(); });
+beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'flowcrew-planner-race-')); roleAdapters.clear(); baselineFixture.enabled = false; });
 afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
 function doubles(source: string): boolean {
@@ -35,7 +43,7 @@ function doubles(source: string): boolean {
   return [-5, -1, 0, 1, 5].every(n => exports.twice?.(n) === n * 2);
 }
 
-async function fixture(options: { race?: boolean; a?: string; b?: string; neither?: boolean; malformed?: unknown; repair?: boolean; authorAdapter?: boolean; gateAdapter?: boolean; cancel?: boolean; inputCarriers?: boolean; separateReport?: boolean; unassignedReport?: boolean; lastCriterion?: boolean; direct?: boolean; broadScope?: boolean }) {
+async function fixture(options: { baseline?: boolean; race?: boolean; a?: string; b?: string; neither?: boolean; malformed?: unknown; repair?: boolean; authorAdapter?: boolean; gateAdapter?: boolean; cancel?: boolean; inputCarriers?: boolean; separateReport?: boolean; unassignedReport?: boolean; lastCriterion?: boolean; direct?: boolean; broadScope?: boolean }) {
   const taskBody = options.separateReport ? '# Double integers\n\nKeep the source input unchanged.\n\n## Acceptance criteria\n' + (options.lastCriterion
     ? '1. report.md names the implementation.\n2. report.md records the executable check.\n3. twice doubles integers, including negative values and zero.\n   - Preserve negative values in the implementation and literal $&.\n'
     : '1. report.md names the implementation.\n2. twice doubles integers, including negative values and zero.\n3. report.md records the executable check.\n') : brief;
@@ -43,6 +51,7 @@ async function fixture(options: { race?: boolean; a?: string; b?: string; neithe
   const taskCriteria = extractBriefCriteria(task).criteria;
   const workRefs = taskCriteria.filter(criterion => criterion.text.startsWith('twice')).map(criterion => criterion.id);
   const reportRefs = taskCriteria.filter(criterion => !workRefs.includes(criterion.id)).map(criterion => criterion.id);
+  baselineFixture.enabled = options.baseline ?? false;
   const project = join(directory, 'project'); mkdirSync(project);
   setEngineDefaults({ gate_retry_loops: options.repair ? 1 : 0, stage_technical_retries: 0 });
   const git = (...args: string[]) => execFileSync(process.execPath, ['--input-type=module', '-e',
@@ -157,6 +166,18 @@ async function fixture(options: { race?: boolean; a?: string; b?: string; neithe
 }
 
 describe('planner-selected stage races', () => {
+  it.each([false, true])('accepts the winner without a parent gate stage execution (setup baseline: %s)', async baseline => {
+    const { state, calls, race, project } = await fixture({ race: true, baseline });
+    expect(state.status, state.failureReason).toBe('complete');
+    expect(calls.map(call => call.id)).toEqual(['plan', 'implement', 'review']);
+    expect(calls.filter(call => call.target === project).map(call => call.id)).toEqual(['plan']);
+    if (baseline) expect(JSON.parse(readFileSync(join(runDir(project, state.runId), 'validation_baseline.json'), 'utf8')))
+      .toMatchObject({ source: 'ship-setup-ready-record' });
+    expect(state.stages.review.attempts ?? []).toEqual([]);
+    expect(state.stages.review.acceptedFrom).toMatchObject({ runId: race.candidates[0].runId, verdict: { pass: true } });
+    expect(state.stages.repair.status).toBe('skipped');
+  }, 90_000);
+
   it.each([false, true])('settles a direct planner race before a later author produces the declared report (broad scope: %s)', async broadScope => {
     const { state, calls, project } = await fixture({ race: true, separateReport: true, direct: true, broadScope });
     expect(state.status, state.failureReason).toBe('complete');
@@ -164,6 +185,7 @@ describe('planner-selected stage races', () => {
     expect(calls.filter(call => call.id === 'plan')).toHaveLength(1);
     expect(calls.filter(call => call.id === 'implement')).toHaveLength(1);
     expect(state.stages.report.status).toBe('complete');
+    expect(calls.filter(call => call.id === 'report_review' && call.target === project)).toHaveLength(1);
     expect(readFileSync(join(project, 'report.md'), 'utf8')).toContain('checked negative values and zero');
   });
   it('completes one passing candidate with an unused repair and then the parent report', async () => {
@@ -223,7 +245,7 @@ describe('planner-selected stage races', () => {
   it('authors the alternative only after the first gate fails and integrates its outputs', async () => {
     const { state, calls, race, project } = await fixture({ race: true, a: bad });
     expect(state.status, state.failureReason).toBe('complete');
-    expect(calls.map(call => call.id)).toEqual(['plan', 'implement', 'review', 'implement', 'review', 'review']);
+    expect(calls.map(call => call.id)).toEqual(['plan', 'implement', 'review', 'implement', 'review']);
     const authors = calls.filter(call => call.id === 'implement');
     expect(new Set(authors.map(call => call.target)).size).toBe(2);
     expect(authors.every(call => call.target !== project)).toBe(true);
@@ -240,7 +262,7 @@ describe('planner-selected stage races', () => {
     expect(state.status, state.failureReason).toBe('complete');
     expect(race.decision).toMatchObject({ choice: 'B', basis: 'gated-fallback' });
     expect(race.gateAttempts.map((attempt: { pass: boolean }) => attempt.pass)).toEqual([false, true]);
-    expect(calls.filter(call => call.id === 'review')).toHaveLength(3);
+    expect(calls.filter(call => call.id === 'review')).toHaveLength(2);
   }, 90_000);
 
   it('leaves the parent unchanged when neither candidate passes', async () => {
@@ -259,15 +281,10 @@ describe('planner-selected stage races', () => {
     expect(calls.filter(call => call.id === 'implement')).toHaveLength(1);
     expect(race.candidates).toHaveLength(1);
     expect(doubles(readFileSync(join(project, 'twice.js'), 'utf8'))).toBe(true);
-    // The parent gate is pointed at the winner's own run, where its repaired
-    // output lives; candidate gates review their own run and get no pointer.
-    const winnerRun = runDir(project, race.candidates[0].runId);
-    const parentReviews = calls.filter(call => call.id === 'review' && call.target === project);
-    expect(parentReviews).toHaveLength(1);
-    expect(parentReviews[0].prompt).toContain(`# Race candidate evidence\nThese authors were integrated from the winning candidate of a race, which ran as a child run of this run:\n- implement: candidate A, run directory ${winnerRun}\n`);
-    expect(parentReviews[0].prompt).toContain('a report may cite them. Judge the integrated project tree independently.');
-    expect(readFileSync(join(winnerRun, 'stages/repair/output.md'), 'utf8')).toContain('Repaired doubling.');
-    expect(calls.filter(call => call.id === 'review' && call.target !== project).every(call => !call.prompt.includes('# Race candidate evidence'))).toBe(true);
+    expect(calls.filter(call => call.id === 'review')).toHaveLength(2);
+    expect(calls.filter(call => call.id === 'review' && call.target === project)).toEqual([]);
+    expect(state.stages.review.attempts ?? []).toEqual([]);
+    expect(state.stages.review.acceptedFrom).toMatchObject({ runId: race.candidates[0].runId, verdict: { pass: true } });
   }, 90_000);
 
   it.each([false, true])('preserves per-role adapters with gate override=%s', async gateAdapter => {
@@ -276,7 +293,7 @@ describe('planner-selected stage races', () => {
     expect(calls.filter(call => call.id === 'implement').map(call => call.provider))
       .toEqual(['author']);
     expect(calls.filter(call => call.id === 'review').map(call => call.provider))
-      .toEqual([gateAdapter ? 'gate' : 'default', gateAdapter ? 'gate' : 'default']);
+      .toEqual([gateAdapter ? 'gate' : 'default']);
   }, 90_000);
 
   it('closes the active role-selected candidate when the parent attempt is cancelled', async () => {
@@ -297,6 +314,13 @@ describe('planner-selected stage races', () => {
     expect(state.status, state.failureReason).toBe('complete');
     expect(calls.map(call => call.id)).toEqual(['plan', 'implement', 'review']);
   }, 90_000);
+
+  it('refuses to reuse a partial candidate gate as acceptance for another author', () => {
+    const work = parseDispatchedStageConfig({ id: 'work', role: 'coder', scope: ['src/**'], race: true, criterion_refs: ['own'] });
+    const review = parseDispatchedStageConfig({ id: 'review', role: 'qa', depends_on: ['work'], is_gate: true, scope: [], criterion_refs: ['own', 'ancestor'] });
+    expect(raceAdmissionErrors(work, [work, review])).toContain('work.race: candidate gates cannot own criteria outside the raced author');
+    expect(raceAdmissionErrors({ ...work, race: false }, [work, review])).toEqual([]);
+  });
 
   it('refuses malformed planner race dispatch before any author runs', async () => {
     const { state, calls } = await fixture({ malformed: { candidates: 2 } });

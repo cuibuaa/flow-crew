@@ -50,6 +50,9 @@ export function readGateVerdict(
   allowSharedFallback = true,
   requireValidationDelta = true,
 ): GateVerdict | null {
+  const accepted = runId && existsSync(join(runDir(projectDir, runId), 'run.json'))
+    ? readRunState(projectDir, runId).stages[stageId] : undefined;
+  if (accepted?.status === STAGE_STATUS.COMPLETE && accepted.acceptedFrom) return accepted.acceptedFrom.verdict;
   const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
   return evaluateGateVerdict(readGateVerdictDocument(base, stageId, allowSharedFallback), projectDir, stageId,
     runId, contract, allowSharedFallback, requireValidationDelta);
@@ -60,6 +63,10 @@ export function readGateVerdict(
 export function readGateEvaluation(projectDir: string, stage: StageConfig, state: StoreState, runId?: string, contract?: GateContract | null): {
   authoredVerdict: GateVerdict | null; effectiveVerdict: GateVerdict | null;
 } {
+  const accepted = state.stages[stage.id];
+  if (accepted?.status === STAGE_STATUS.COMPLETE && accepted.acceptedFrom) {
+    return { authoredVerdict: accepted.acceptedFrom.verdict, effectiveVerdict: accepted.acceptedFrom.verdict };
+  }
   const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
   const document = readGateVerdictDocument(base, stage.id);
   const authoredVerdict = document?.project() ?? null;

@@ -232,7 +232,7 @@ export function freshRunningStageProjection(
   };
   for (const field of [
     'exitCode', 'duration_ms', 'artifacts', 'completedAt', 'error', 'tokens_in', 'tokens_out',
-    'writes', 'writeAttribution', 'constraintAudit', 'timeout',
+    'writes', 'writeAttribution', 'constraintAudit', 'timeout', 'acceptedFrom',
   ] as const) delete next[field];
   return next;
 }

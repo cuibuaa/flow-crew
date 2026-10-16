@@ -48,7 +48,7 @@ Sources: [live schema/checker](../src/plan-interface.ts),
 
 Only an ordinary author can set `race: true`. Gates, planners and repairs cannot race.
 Eligible gates use a different role, depend on that author, have empty project scope
-and cover its criterion references. Gates and repairs may also depend on settled author
+and cover its criterion references without owning criteria outside that author. Gates and repairs may also depend on settled author
 ancestors whose facts and inputs are projected into both candidates. Candidate repairs
 return only to those gates and stay within the author's declared write capability.
 
@@ -59,7 +59,9 @@ inputs and must meet the same completion and gate requirements. An approval park
 completion claim cannot be delivered. A receives restatement guidance as a stage instruction;
 the admitted task and criteria stay unchanged.
 
-The selected scoped patch is checked/applied in the parent, whose downstream gates still run.
+The selected scoped patch is checked/applied in the parent. The winner's passing gates settle
+their admitted dependency IDs with child provenance and no parent gate attempts. Later work
+and its own gates still run normally.
 The stage retains version 3 `race_<attempt>.json` and patches for attempted candidates only,
 including A's failure before B starts; candidate run records retain verification evidence.
 Private project copies are reclaimed. There is no separate race CLI or public gate-hold switch.

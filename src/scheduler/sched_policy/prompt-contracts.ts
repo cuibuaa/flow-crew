@@ -1,7 +1,7 @@
 /** Scheduler-owned execution and admission prompt contracts; builds strings only and changes no contract bytes. */
 import { APPROVAL_REQUEST_FILE } from '../../approval-artifacts.js';
 import { readFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { type StageConfig } from '../sched_admission/configuration.js';
 import { scopeRevisionContract } from '../../live-constraint-guard.js';
 import { type ResearchConfig, type TerminalStatesConfig, type StoreState } from '../../store.js';
@@ -19,7 +19,7 @@ Independent reviewers must not durably modify the reviewed target or authoritati
 
 ## Run-directory safety
 Never write, move, delete, or otherwise modify any run directory other than this task's own run directory. This prohibition is absolute; read authorization never grants mutation authority.
-By default, do not read, browse, or list other \`.fc/runs/\` directories, except a race candidate run the engine names in your input as read-only evidence. Explicit brief authorization allows a bounded set as read-only evidence and governs default read restrictions for that evidence only; it grants no permission to modify those runs.`;
+By default, do not read, browse, or list other \`.fc/runs/\` directories. Explicit brief authorization allows a bounded set as read-only evidence and governs default read restrictions for that evidence only; it grants no permission to modify those runs.`;
 
 /** Raw roles and base-loaded roles share the same policy, including when _base.md is absent. */
 export function applySharedRoleContract(agent: AgentConfig): AgentConfig {
@@ -130,32 +130,4 @@ function dependencyClosure(stage: StageConfig, allStages: StageConfig[]): Set<st
     queue.push(...(byId.get(id)?.depends_on ?? []));
   }
   return closure;
-}
-
-/** A raced author's winner, including its repairs, ran as a child run beside
- * this one. Naming it lets the gate read the evidence a report cites. */
-export function appendRaceCandidateEvidenceContext(
-  prompt: string,
-  stage: StageConfig,
-  allStages: StageConfig[],
-  state: StoreState,
-  runDirPath: string,
-): string {
-  if (!stage.is_gate) return prompt;
-  const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
-  const rows = [...dependencyClosure(stage, allStages)].flatMap((id) => {
-    const attempt = state.stages[id]?.attempts?.at(-1)?.index;
-    if (!byId.get(id)?.race || attempt === undefined) return [];
-    try {
-      const record = JSON.parse(readFileSync(join(runDirPath, 'stages', id, `race_${attempt}.json`), 'utf8')) as {
-        decision?: { choice?: string }; candidates?: Array<{ label?: string; runId?: string }>;
-      };
-      const winner = record.candidates?.find((candidate) => candidate.label === record.decision?.choice);
-      if (!winner?.runId || basename(winner.runId) !== winner.runId) return [];
-      return [`- ${id}: candidate ${winner.label}, run directory ${join(dirname(runDirPath), winner.runId)}`];
-    } catch { return []; }
-  });
-  if (rows.length === 0) return prompt;
-  return `${prompt}\n\n# Race candidate evidence\nThese authors were integrated from the winning candidate of a race, which ran as a child run of this run:\n${rows.join('\n')}\n`
-    + 'Their builds, stage outputs, verdicts and repairs there are read-only evidence for this gate, and a report may cite them. Judge the integrated project tree independently.';
 }

@@ -1,5 +1,5 @@
 import { stageLiveLogPath } from '../../stage-live-log.js';
-// Boundary: adapt an admitted stage to the sequential race and existing workflow gates.
+// Boundary: adapt an admitted stage to a race whose candidate gates own acceptance.
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,7 +22,7 @@ import { stageScopeOwnsPath } from '../sched_admission/dispatch.js';
 import { parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
 import { extractDeclaredBriefInputPaths } from '../../ship-inputs.js';
 import { scopeBriefCriteria } from '../../brief-criteria.js';
-import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
+import { collectGateRuntimeFacts, type GateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { runWorkflow } from './run-workflow.js';
 
 /** Deleting the CLI cannot isolate stage writes or integrate a winner. This adapter
@@ -51,6 +51,7 @@ export function stageRaceAdapter(input: {
       return activation === 'inactive' ? [] : [{ ...artifact, when: undefined }];
     };
     const states = new Map<string, StoreState>();
+    const gateFacts = new Map<string, GateRuntimeFacts>();
     const workflows = new Map<string, ReturnType<typeof WorkflowConfigSchema.parse>>();
     const baselines = new Map<string, string>();
     const usage = () => sumInvocationUsage([...states.values()].flatMap(state => Object.values(state.stages)
@@ -237,8 +238,10 @@ export function stageRaceAdapter(input: {
         readRun: target => {
           const state = states.get(target); if (!state) return undefined;
           const stages = workflows.get(target)!.stages;
+          const facts = collectGateRuntimeFacts(stages, state, target, state.runId);
+          gateFacts.set(target, facts);
           return { runId: state.runId, status: state.status,
-            gatePassed: collectGateRuntimeFacts(stages, state, target, state.runId).allPass,
+            gatePassed: facts.allPass,
             repairs: stages.filter(stage => stage.retry_to?.length).reduce((count, stage) => count + (state.stages[stage.id]?.attempts?.length ?? 0), 0),
             failureReason: state.failureReason };
         },
@@ -266,7 +269,15 @@ export function stageRaceAdapter(input: {
         git(input.projectDir, ['apply', '--check', '--binary', '-'], patch);
         git(input.projectDir, ['apply', '--binary', '-'], patch);
       }
-      for (const artifact of input.stage.artifact_contract?.produces ?? []) {
+      const acceptedGates = Object.fromEntries(gateFacts.get(winner)!.evaluations.map(gate =>
+        [gate.id, { runId: winnerState.runId, verdict: gate.effectiveVerdict! }]));
+      // Promote the accepted gates' products for ordinary dependency readers;
+      // their acceptance belongs to the child, not a fabricated parent attempt.
+      const products = candidateStages.flatMap(stage => [
+        ...(stage.artifact_contract?.produces ?? []),
+        ...['output.md', 'metric.json'].map(name => ({ root: 'run', path: `stages/${stage.id}/${name}` })),
+      ]);
+      for (const artifact of products) {
         if (artifact.root !== 'run') continue;
         const source = join(runDir(winner, winnerState.runId), artifact.path);
         if (!existsSync(source)) continue;
@@ -275,7 +286,7 @@ export function stageRaceAdapter(input: {
         copyProject(source, destination);
       }
       return { output: readStageOutput(winner, winnerState.runId, input.stage.id), exitCode: 0, duration_ms: 0,
-        writes: paths, writeAttribution: 'structured', ...usage() };
+        acceptedGates, writes: paths, writeAttribution: 'structured', ...usage() };
     } catch (error) {
       return { output: error instanceof Error ? error.message : String(error), exitCode: 1, duration_ms: 0, ...usage() };
     } finally {

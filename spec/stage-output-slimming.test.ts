@@ -1,16 +1,14 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { HANDOFF_SCHEMA, parseStageRecord } from '../src/handoff.js';
 import { renderPlanInterface } from '../src/plan-interface.js';
 import { generationCompatibleSchema } from '../src/reality-gate/checks/json-schema-match.js';
-import { parseDispatchedStageConfig } from '../src/scheduler.js';
 import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
 import { applyBasePrompt } from '../src/scheduler/sched_admission/dispatch.js';
-import { appendRaceCandidateEvidenceContext } from '../src/scheduler/sched_policy/prompt-contracts.js';
-import { createRun, fcGlobalDir, setFcGlobalDir, type StoreState } from '../src/store.js';
+import { createRun, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 
 const agents = resolve(import.meta.dirname, '..', 'config', 'agents');
@@ -73,9 +71,9 @@ describe('engine-held facts and boundaries', () => {
     expect(qa).toContain('Target repairs belong to an author');
   });
 
-  it('opens only engine-named race candidate runs for reading and keeps every other run closed and unwritable', () => {
+  it('keeps other run directories closed and unwritable', () => {
     const coder = loaded('coder');
-    expect(coder).toContain('By default, do not read, browse, or list other `.fc/runs/` directories, except a race candidate run the engine names in your input as read-only evidence.');
+    expect(coder).toContain('By default, do not read, browse, or list other `.fc/runs/` directories.');
     expect(coder).toContain('Never write, move, delete, or otherwise modify any run directory other than this task\'s own run directory. This prohibition is absolute');
   });
 });
@@ -103,43 +101,5 @@ describe('stage result contract', () => {
     });
     expect(seen).toContain('Write declared human deliverables within admitted capabilities. Evidence references name reproducible files or commands.');
     expect(seen).not.toContain('necessary evidence');
-  });
-});
-
-describe('race candidate evidence for a parent gate', () => {
-  let runs: string;
-  beforeEach(() => { runs = mkdtempSync(join(tmpdir(), 'race-candidate-evidence-')); });
-  afterEach(() => rmSync(runs, { recursive: true, force: true }));
-
-  const stages = (race: boolean) => [
-    parseDispatchedStageConfig({ id: 'implement', role: 'coder', scope: ['src/**'], race }),
-    parseDispatchedStageConfig({ id: 'review', role: 'qa', is_gate: true, scope: [], depends_on: ['implement'] }),
-    parseDispatchedStageConfig({ id: 'repair', role: 'coder', scope: ['src/**'], depends_on: ['review'], retry_to: ['review'] }),
-  ];
-  const state = { stages: { implement: { status: 'complete', retries: 0, attempts: [{ index: 2, startedAt: '2026-01-01T00:00:00.000Z', status: 'complete' }] } } } as unknown as StoreState;
-  const parent = (record?: unknown) => {
-    const runDirPath = join(runs, 'parent');
-    mkdirSync(join(runDirPath, 'stages', 'implement'), { recursive: true });
-    if (record) writeFileSync(join(runDirPath, 'stages', 'implement', 'race_2.json'), JSON.stringify(record));
-    return runDirPath;
-  };
-  const record = (runId: string) => ({ version: 3, decision: { choice: 'B', basis: 'gated-fallback' },
-    candidates: [{ label: 'A', runId: 'candidate-a' }, { label: 'B', runId }] });
-
-  it('names the winning candidate run of the latest raced attempt beside the parent run', () => {
-    const runDirPath = parent(record('candidate-b'));
-    const [gate] = stages(true).filter(stage => stage.is_gate);
-    const prompt = appendRaceCandidateEvidenceContext('Review.', gate, stages(true), state, runDirPath);
-    expect(prompt).toContain(`- implement: candidate B, run directory ${join(dirname(runDirPath), 'candidate-b')}`);
-    expect(prompt).not.toContain('candidate-a');
-  });
-
-  it('adds nothing for authors, unraced stages, races without a winner or a run id that is not a sibling name', () => {
-    const all = stages(true);
-    const [gate] = all.filter(stage => stage.is_gate);
-    expect(appendRaceCandidateEvidenceContext('Author.', all[0], all, state, parent(record('candidate-b')))).toBe('Author.');
-    expect(appendRaceCandidateEvidenceContext('Review.', stages(false)[1], stages(false), state, parent(record('candidate-b')))).toBe('Review.');
-    expect(appendRaceCandidateEvidenceContext('Review.', gate, all, state, parent({ version: 3, decision: { basis: 'none-passed' }, candidates: [{ label: 'A', runId: 'candidate-a' }] }))).toBe('Review.');
-    expect(appendRaceCandidateEvidenceContext('Review.', gate, all, state, parent(record('../escape')))).toBe('Review.');
   });
 });
