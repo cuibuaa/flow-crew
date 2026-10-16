@@ -37,7 +37,7 @@ Initial focused runs exposed two assertion issues: the daemon assertion required
 
 ## Mutation and focused validation
 
-Thirty-five independent mutations ran against the corrected runtime/spec baseline. Each received its own ordinary build and focused Vitest command with the normal configuration and build-freshness check. Every build exited 0; every test command exited 1 with at least one executed failing test. Thirty-four mutations produce assertion failures; omitting projection inspection instead makes the valid split-settlement test fail with a continuation refusal. Setup failures and skipped tests are not counted as detections.
+Thirty-seven independent mutations ran against the final constants-based runtime/spec baseline. Each received its own ordinary build and focused Vitest command with the normal configuration and build-freshness check. Every build exited 0; every test command exited 1 with at least one executed failing test. Thirty-four mutations produce assertion failures; omitting projection inspection instead makes the valid split-settlement test fail with a continuation refusal, and the two restored-literal probes fail the source-policy guard. Setup failures and skipped tests are not counted as detections.
 
 | Conditions mutated independently | Count |
 | --- | ---: |
@@ -47,17 +47,24 @@ Thirty-five independent mutations ran against the corrected runtime/spec baselin
 | Projection/ledger publication races and owner recheck under the lock | 3 |
 | Reintroduced retry, attempt-metadata and scheduling-status agreement | 3 |
 | Cancellation unchanged-stage, missing/malformed ledger, equality and pending-preservation guards | 5 |
+| Reintroduced literal statuses in each corrected predicate | 2 |
 
-`systemic/verified-mutations/mutations.json` records each exact source mutation, selected test, direct exit, executed failures, timing and restoration hashes. The runner exited 0. Its baseline and restored hashes match, and all restored files match the staged files. The restored ordinary build exited 0. Earlier interrupted mutation runs are separate and are not included in these results.
+`systemic/constants-mutations/mutations.json` records each exact source mutation, selected test, direct exit, executed failures, timing and restoration hashes. The runner exited 0. Its baseline and restored hashes match, and all restored files match the staged files. The restored ordinary build exited 0. Earlier interrupted and pre-constant mutation runs are separate and are not included in these final-source results.
 
-After restoration, the ordinary focused suite passed all 157 tests across nine files in 66.16 seconds, direct exit 0 (`systemic/restored-focused.log`). It includes both private-daemon cancel/resume lifecycles, all five real scheduler repend paths, cancellation safety/recovery, legacy continuation, deployment continuation and public-spec purity.
+Before the status-constant correction, the restored focused suite passed all 157 tests across nine files in 66.16 seconds, direct exit 0 (`systemic/restored-focused.log`). That selection omitted the source-policy guard later caught by full validation. The corrected final focused suite includes that guard as well as both private-daemon cancel/resume lifecycles, all five real scheduler repend paths, cancellation safety/recovery, legacy continuation, deployment continuation and public-spec purity. After repeating the mutations on the constants-based source, the final focused suite passed all 161 tests across ten files in 69.99 seconds, direct exit 0 (`systemic/constants-restored-focused.log`).
 
 Precommit receipts live under the gitignored `docs/cancel-ledger-guard/systemic/` directory, with additional focused legacy receipts under gitignored `docs/`. They are not stored in another task's artifact directory.
 
-## Final-commit acceptance
+## Full validation and status-constant correction
 
-The supplied VERIFY command is run once after committing this report, the runtime and the specs. It invokes the complete unmodified validator from a clean tree on that final commit. The validator's generated `summary.txt` and individual outputs in the worktree's sibling `.validate` directory are the authoritative post-commit result, including commit identity, direct exits and timings. Success requires all checks to exit 0, `DONE`, and a clean Git tree. No earlier check is copied into that summary, and the summary is never hand-written or edited.
+The supplied VERIFY command ran the unmodified full validator once on clean commit `ca188bc`. Nine of ten checks passed. The root suite passed 3754 tests and failed one source-policy check: two continuation predicates used literal stage statuses instead of the existing store constants. Both private-daemon lifecycle tests and all other runtime tests passed. The validator finished with `DONE`, but VERIFY correctly exited 1 because the root command had `rc=1`.
 
-This committed report records precommit evidence; post-commit validation results belong to the validator's receipts, so recording them does not create another unvalidated commit. The validator covers dependency installation, engine/UI builds, lint, TypeScript, root/UI tests, public-spec isolation and operation without service-manager commands. Its public-isolation construction does not reproduce Docker or disabled networking.
+The original receipts are retained unchanged under `systemic/first-full-validation/`; the generated `.validate` summary identifies that commit and failure. No successful check is reused as evidence of validation on a different commit.
+
+The correction replaces the two literal arrays with `STAGE_STATUS` constants. It changes no status values or runtime conditions. Its ordinary build and all four source-status guard tests passed. The final mutation and focused receipts are repeated on this corrected source, rather than treating the earlier hashes as final-source evidence.
+
+An additional full validation needs approval because the task explicitly limits full validation to one invocation. If authorized, the complete supplied VERIFY command must run again from a clean tree after committing the correction and this report. The generated summary and individual outputs in the worktree's sibling `.validate` directory are the authoritative post-commit result, including commit identity, direct exits and timings. They are never hand-written, edited or assembled from earlier runs. Success requires all checks to exit 0, `DONE`, and a clean Git tree.
+
+This report records precommit evidence and the failed full run; any authorized post-commit rerun belongs to the validator's direct receipts, so recording it does not create another unvalidated commit. The validator covers dependency installation, engine/UI builds, lint, TypeScript, root/UI tests, public-spec isolation and operation without service-manager commands. Its public-isolation construction does not reproduce Docker or disabled networking.
 
 All builds, focused tests, mutation commands and validation run with niceness 19 on cores 6–11; focused Vitest commands use `--maxWorkers=2`. No real daemon, deployed checkout, real task or service manager is used. Nothing is merged or pushed. Evidence is written only in this worktree or its `.validate` directory.

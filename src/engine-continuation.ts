@@ -82,7 +82,7 @@ export function assertContinuationCompatible(projectDir: string, runId: string):
       const ledger = ledgerExists ? readStageStatus(projectDir, runId, id) : undefined;
       if (ledger) ledgers.set(id, digest(ledger));
       const attempts = stage.attempts ?? [];
-      const settled = (status: string) => ['complete', 'failed', 'suspended'].includes(status);
+      const settled = (status: string) => [STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED, 'suspended'].includes(status);
       const unsettled = (record: typeof stage) => record.status === STAGE_STATUS.RUNNING
         || (record.attempts ?? []).some(attempt => !settled(attempt.status));
       // Either carrier can retain interrupted work. Only positive owner death
@@ -108,7 +108,7 @@ export function assertContinuationCompatible(projectDir: string, runId: string):
           continue;
         }
         if ((record.attempts ?? []).some((attempt, index) => attempt.index !== index + 1
-            || !['running', 'closed', 'complete', 'failed', 'suspended'].includes(attempt.status)
+            || ![STAGE_STATUS.RUNNING, 'closed', STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED, 'suspended'].includes(attempt.status)
             || !Number.isFinite(Date.parse(attempt.startedAt)))) errors.push(`invalid attempt history in ${id}`);
       }
       if (attempts.length && !ledger) errors.push(`missing attempt ledger for ${id}`);
