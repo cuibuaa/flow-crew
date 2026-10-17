@@ -36,18 +36,21 @@ interface HandoffOpts {
 
 const text: Schema = { type: 'string', minLength: 1, pattern: '\\S' };
 const strings: Schema = { type: 'array', items: text };
-const object = (properties: Record<string, Schema>): Schema => ({
-  type: 'object', properties, required: Object.keys(properties), additionalProperties: false,
+const object = (properties: Record<string, Schema>, optional: Record<string, Schema> = {}): Schema => ({
+  type: 'object', properties: { ...properties, ...optional }, required: Object.keys(properties), additionalProperties: false,
 });
+// An explicit empty list certifies no work remains at wrap-up.
+const completion = { remaining_work: strings };
 export const HANDOFF_SCHEMA = object({
   status: { type: 'string', enum: ['delivered', 'blocked'] }, summary: text,
   checks: { type: 'array', items: object({ command: text, exit_code: { type: 'integer' }, evidence: text }) },
-  caveats: strings,
+  caveats: strings, ...completion,
 });
 
 // Old results carry an author-reported file list. Deleting the read field would
 // hide those records; new generation uses the engine's existing write ledger.
-export const RECORDED_HANDOFF_SCHEMA: Schema = { ...HANDOFF_SCHEMA, properties: {
+export const RECORDED_HANDOFF_SCHEMA: Schema = { ...HANDOFF_SCHEMA,
+  required: HANDOFF_SCHEMA.required!.filter(key => key !== 'remaining_work'), properties: {
   ...HANDOFF_SCHEMA.properties, files_modified: strings,
 } };
 
@@ -71,10 +74,10 @@ export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionR
   }) } });
   const pass = object({ reason: text, criteria: criteria(true), audit_findings: { ...audit_findings,
     properties: { ...audit_findings.properties, findings: { ...audit_findings.properties!.findings, maxItems: 0 } },
-  }, pass: { type: 'boolean', enum: [true] } });
+  }, pass: { type: 'boolean', enum: [true] } }, completion);
   const fail = object({ reason: text, criteria: criteria(false), audit_findings, pass: { type: 'boolean', enum: [false] }, repairability: object({
     version: { type: 'integer', enum: [1] }, disposition: { type: 'string', enum: ['repairable', 'irreparable'] }, evidence: text,
-  }) });
+  }) }, completion);
   if (opts.extendedVerdict) pass.additionalProperties = fail.additionalProperties = true;
   return { type: 'object', anyOf: [pass, fail] };
 }

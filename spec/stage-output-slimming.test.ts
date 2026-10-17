@@ -35,8 +35,8 @@ describe('author results and reports carry only what the brief and readers need'
     // Empty arrays already validate, so the schema keeps every key required and
     // closed: removing them from `required` would end constrained generation.
     expect(generationCompatibleSchema(HANDOFF_SCHEMA)).toBe(true);
-    expect(parseStageRecord(JSON.stringify({ status: 'delivered', summary: 'Done.', checks: [], caveats: [] }), HANDOFF_SCHEMA))
-      .toEqual({ status: 'delivered', summary: 'Done.', checks: [], caveats: [] });
+    expect(parseStageRecord(JSON.stringify({ status: 'delivered', summary: 'Done.', checks: [], caveats: [], remaining_work: [] }), HANDOFF_SCHEMA))
+      .toEqual({ status: 'delivered', summary: 'Done.', checks: [], caveats: [], remaining_work: [] });
   });
 
   it('asks authors for one citable final test log instead of raw evidence sets', () => {
@@ -92,7 +92,7 @@ describe('stage result contract', () => {
     let seen = '';
     await runStage({ async run(prompt) {
       seen = prompt;
-      return { output: JSON.stringify({ status: 'delivered', summary: 'Done.', checks: [], caveats: [] }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return { output: JSON.stringify({ status: 'delivered', summary: 'Done.', checks: [], caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
     } }, {
       stageId: 'work', projectDir: project, runDir: directory, runId,
       role: { name: 'coder', description: '', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Deliver.' },

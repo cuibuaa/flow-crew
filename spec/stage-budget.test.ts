@@ -9,7 +9,7 @@ import { withRunProcessOwnership } from '../src/adapters/base.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
 import { ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS, stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
-import { HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
+import { HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
 import { atomicWrite, beginStageAttempt, completeStageAttempt, attachStageConstraintAudit, isContinuingStage, createRun, readRunState, readStageStatus, updateRunState, writeStageStatus } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
 import { WorkflowConfigSchema, normalizeStageContracts, findAllReady, readGateVerdict, tryTerminateOnTerminalState, runWorkflow } from '../src/scheduler.js';
@@ -151,7 +151,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(calls[1].argv).not.toContain('resume');
     expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('unit 1\n');
     expect(readFileSync(join(project, 'handoff.txt'), 'utf8')).toContain('Remaining: unit 2');
-    expect(parseStageRecord(result.output, HANDOFF_SCHEMA).summary).toContain('Done: unit 1');
+    expect(parseStageRecord(result.output, RECORDED_HANDOFF_SCHEMA).summary).toContain('Done: unit 1');
     expect(readFileSync(join(created.runDirPath, result.continuation!.handoff), 'utf8')).toBe(result.output);
     expect(result.continuation?.summary).toContain('Remaining:');
     expect(readRunEvents(project, created.runId).map(event => event.type)).toEqual(expect.arrayContaining(['stage_wrap_up_requested', 'stage_wrap_up_delivered', 'stage_wrap_up_completed']));
@@ -200,7 +200,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(status.attempts).toHaveLength(1);
     expect(fixture.calls()).toHaveLength(2);
     expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('unit 1\n');
-    expect(parseStageRecord(result.output, HANDOFF_SCHEMA).summary).toContain('Remaining:');
+    expect(parseStageRecord(result.output, RECORDED_HANDOFF_SCHEMA).summary).toContain('Remaining:');
     expect(readFileSync(join(created.runDirPath, result.continuation!.handoff), 'utf8')).toBe(result.output);
     expect(result.continuation?.summary).toContain('work.txt');
     expect(readRunEvents(project, created.runId).some(event => event.type === 'stage_wrap_up_forced')).toBe(true);
@@ -388,17 +388,21 @@ describe('stage budget delivery through the shared guidance boundary', () => {
         time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
       });
       time.advanceTo(stageWrapUpTiming(budget).hardLimitMs);
-      return { exitCode: 124, timedOut: true, output: 'retained finishing unit', duration_ms: 11 };
+      return { ...withRemaining(completed(opts, 'Complete.'), []), exitCode: 124, timedOut: true, duration_ms: 11 };
     } };
     const result = await runStage(adapter, options(created, time));
     expect(result).toMatchObject({ exitCode: 0, duration_ms: 18, continuation: { forced: true } });
     const status = readStageStatus(project, created.runId, 'work');
     expect(status.duration_ms).toBe(18); expect(status.timeout?.elapsedMs).toBe(budget); expect(calls).toBe(2);
   });
-  it('B17 a wrapping gate cannot publish acceptance or release its consumers', async () => {
+  it.each([undefined, ['Finish the independent review.']])('B17 a wrapping gate cannot publish acceptance with unknown or remaining work (%j)', async remaining => {
     const time = manualClock();
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
-    const adapter: Adapter = { async run(_prompt, _role, opts) { time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); return completed(opts, 'Review still needs another unit.'); } };
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
+      const partial = completed(opts, 'Review still needs another unit.');
+      return remaining ? withRemaining(partial, remaining) : partial;
+    } };
     const result = await runStage(adapter, { ...options(created, time), isGate: true, outputSchema: stageRecordSchema({ isGate: true }), artifactContract: fixtureArtifactContract('work', true) });
     expect(result.continuation).toBeTruthy();
     expect(parseStageRecord(result.output, stageRecordSchema({ isGate: true })).pass).toBe(true);
@@ -420,6 +424,140 @@ function workflowFixture(maxIterations = 2) {
   normalizeStageContracts(workflow.stages);
   return { roles, workflow };
 }
+/** Explicit authored completion; prose alone cannot settle a warned stage. */
+function withRemaining(result: RunResult, remaining_work: string[]): RunResult {
+  return { ...result, output: JSON.stringify({ ...JSON.parse(result.output), remaining_work }) };
+}
+async function finishWorkflowAtWrap(stageId: 'work' | 'review', duringWrap: boolean, maxIterations = 2) {
+  const { roles, workflow } = workflowFixture(maxIterations);
+  workflow.stages.find(stage => stage.id === 'work')!.artifact_contract = {
+    ...fixtureArtifactContract('work'), produces: [{ id: 'units', root: 'project', path: 'work.txt' }],
+  };
+  let time = manualClock();
+  const calls: string[] = [];
+  const adapter: Adapter = { async run(prompt, _role, opts) {
+    calls.push(`${opts.stageId}:${opts.attemptIndex}`);
+    if (opts.stageId === stageId && !prompt.includes('# Stage budget wrap-up')) {
+      time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
+      if (duringWrap) return { exitCode: 137, duration_ms: 1, output: 'Closed at warning.' };
+    }
+    if (opts.stageId === 'work') writeFileSync(join(project, 'work.txt'), 'unit 1\nunit 2\n');
+    if (opts.stageId === 'review') {
+      expect(prompt).toContain('Both units and all assigned checks are complete.');
+      expect(readFileSync(join(project, 'work.txt'), 'utf8')).toContain('unit 2');
+    }
+    return withRemaining(completed(opts, 'Both units and all assigned checks are complete.'), []);
+  } };
+  const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+    undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+  return { result, calls };
+}
+describe('authored completion at the budget boundary', () => {
+  it.each([false, true])('B40 an author finishing at wrap-up reaches its gate in the same iteration (finishing turn: %s)', async duringWrap => {
+    const { result, calls } = await finishWorkflowAtWrap('work', duringWrap);
+    expect(result.status, result.failureReason).toBe('complete');
+    expect(result.currentIteration).toBe(1);
+    expect(calls).toEqual(['done:1', 'work:1', ...(duringWrap ? ['work:1'] : []), 'review:1']);
+    expect(result.stages.work.attempts).toHaveLength(1);
+    expect(result.stages.work.attempts?.[0].continuation).toBeUndefined();
+    expect(result.stages.work.continuation).toBeUndefined();
+    expect(result.stages.work.timeout).toMatchObject({ terminationCause: 'complete', wrapUpRequestedAt: expect.any(String) });
+  });
+  it.each([false, true])('B41 a gate passing at wrap-up publishes its verdict in the same iteration (finishing turn: %s)', async duringWrap => {
+    const { result, calls } = await finishWorkflowAtWrap('review', duringWrap);
+    expect(result.status, result.failureReason).toBe('complete');
+    expect(result.currentIteration).toBe(1);
+    expect(calls).toEqual(['done:1', 'work:1', 'review:1', ...(duringWrap ? ['review:1'] : [])]);
+    expect(result.stages.review.attempts).toHaveLength(1);
+    expect(result.stages.review.attempts?.[0].continuation).toBeUndefined();
+    expect(readGateVerdict(project, 'review', result.runId)).toMatchObject({ pass: true });
+    expect(result.stages.review.timeout).toMatchObject({ terminationCause: 'complete', wrapUpRequestedAt: expect.any(String) });
+  });
+  it('B42 an author reporting remaining work retains its authored handoff and spends the next iteration', async () => {
+    const { roles, workflow } = workflowFixture();
+    let time = manualClock();
+    const calls: string[] = [];
+    let handoff = '';
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      calls.push(`${opts.stageId}:${opts.attemptIndex}`);
+      if (opts.stageId === 'work') {
+        if (opts.attemptIndex === 1) {
+          if (!prompt.includes('# Stage budget wrap-up')) {
+            writeFileSync(join(project, 'work.txt'), 'unit 1\n');
+            time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
+            return { exitCode: 137, duration_ms: 1, output: 'Closed at warning.' };
+          }
+          const partial = withRemaining(completed(opts), ['Complete unit 2 and its checks.']);
+          handoff = partial.output;
+          return partial;
+        }
+        expect(prompt).toContain('Own-stage continuation evidence');
+        expect(readFileSync(join(opts.runDir, 'stages/work/output_attempt_1.md'), 'utf8')).toBe(handoff);
+        expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('unit 1\n');
+        writeFileSync(join(project, 'work.txt'), 'unit 1\nunit 2\n');
+      }
+      return withRemaining(completed(opts, 'Complete.'), []);
+    } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+      undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    expect(result.status, result.failureReason).toBe('complete');
+    expect(result.currentIteration).toBe(2);
+    expect(calls).toEqual(['done:1', 'work:1', 'work:1', 'work:2', 'review:1']);
+    expect(result.stages.work.attempts?.[0].continuation).toMatchObject({ reason: 'stage_budget', forced: false });
+    expect(result.stages.work.continuation).toBeUndefined();
+  });
+  it('B44 explicit completion at wrap-up still enforces the author artifact contract', async () => {
+    const time = manualClock();
+    const created = createRun(project, 'fixture', 'name: fixture', ['work']);
+    let calls = 0;
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      calls++;
+      time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
+      return withRemaining(completed(opts, 'All work complete.'), []);
+    } };
+    const result = await runStage(adapter, { ...options(created, time), artifactContract: {
+      ...fixtureArtifactContract('work'), produces: [{ id: 'units', root: 'project', path: 'work.txt' }],
+    } });
+    expect(result.exitCode).toBe(1);
+    expect(result.friendlyError).toContain('Stage settlement refused:');
+    expect(result.continuation).toBeUndefined();
+    expect(calls).toBe(1);
+  });
+  it('B45 completion lists are optional for compatibility but malformed lists cannot certify completion', () => {
+    for (const schema of [RECORDED_HANDOFF_SCHEMA, stageRecordSchema({ isGate: true })]) {
+      const base = schema === RECORDED_HANDOFF_SCHEMA
+        ? { status: 'delivered', summary: 'Complete.', checks: [], caveats: [] }
+        : { pass: true, reason: 'Complete.', criteria: {}, audit_findings: { version: 1, findings: [] } };
+      expect(() => parseStageRecord(JSON.stringify(base), schema)).not.toThrow();
+      expect(() => parseStageRecord(JSON.stringify({ ...base, remaining_work: [] }), schema)).not.toThrow();
+      for (const remaining_work of [null, false, 'none', [''], ['   '], [1]]) {
+        expect(() => parseStageRecord(JSON.stringify({ ...base, remaining_work }), schema)).toThrow('remaining_work');
+      }
+    }
+  });
+  it('B46 a blocked author with an empty completion list still retains its handoff', async () => {
+    const time = manualClock();
+    const created = createRun(project, 'fixture', 'name: fixture', ['work']);
+    const adapter: Adapter = { async run() {
+      time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
+      return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ status: 'blocked', summary: 'Blocked on a declared duty.',
+        checks: [], caveats: [], remaining_work: [] }) };
+    } };
+    const result = await runStage(adapter, { ...options(created, time), gateReviewed: true });
+    expect(result.exitCode, result.friendlyError).toBe(0);
+    expect(result.continuation).toMatchObject({ reason: 'stage_budget', forced: false });
+  });
+  it.each([
+    ['work', false], ['work', true], ['review', false], ['review', true],
+  ] as const)('B43 max_iterations 1 completes when %s finishes at wrap-up (finishing turn: %s)', async (stageId, duringWrap) => {
+    const { result, calls } = await finishWorkflowAtWrap(stageId, duringWrap, 1);
+    expect(result.status, result.failureReason).toBe('complete');
+    expect(result.currentIteration).toBe(1);
+    expect(calls.filter(call => call.startsWith(`${stageId}:`))).toHaveLength(duringWrap ? 2 : 1);
+    expect(result.stages[stageId].attempts).toHaveLength(1);
+    expect(result.stages[stageId].continuation).toBeUndefined();
+  });
+});
 describe('durable bounded continuation', () => {
   it('B36 child closure persists the budget handoff in both history and projection before final settlement', () => {
     const created = createRun(project, 'fixture', 'name: fixture', ['work']); beginStageAttempt(project, created.runId, 'work', 0);

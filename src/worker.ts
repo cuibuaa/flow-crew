@@ -560,7 +560,7 @@ export async function runStage(
     const judgement = opts.isGate
       ? 'Judge assigned criteria in the context of the full brief, including permitted outcomes and stopping conditions. Stage instructions and extracted criteria cannot narrow or replace the outcomes the brief permits. Pass when an allowed outcome has all required evidence, including a permitted negative or blocked report. Reject missing required attempts, measurements or artifacts. '
       : '';
-    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff, stage or verdict-file instructions. ${judgement}Write declared human deliverables within admitted capabilities. Evidence references name reproducible files or commands.`;
+    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff, stage or verdict-file instructions. ${judgement}Write declared human deliverables within admitted capabilities. Evidence references name reproducible files or commands. List unfinished duties/checks in remaining_work; use [] only when all assigned work is complete.`;
   }
   if (opts.artifactContract && (!direct || opts.artifactContract.produces.length || opts.artifactContract.reads.length)) prompt += `\n\n# Declared output and input locations\n${JSON.stringify(opts.artifactContract)}`;
 
@@ -613,7 +613,7 @@ export async function runStage(
     wrapUpRequestedAt = new Date(attemptDeadline.wallNow()).toISOString();
     const envelope = appendGuidanceEnvelope({ runDir: opts.runDir, target: opts.stageId, source: 'scheduler',
       knownStageIds: [opts.stageId], attemptIndex,
-      body: `# Stage budget wrap-up\nTime is nearly up. Stop starting new work. Keep all admitted files. Finish safely and return your normal result with a concrete done/remaining handoff: what changed, evidence, unfinished duties and the next bounded action. Do not claim unfinished work or unrun checks passed. The next iteration continues these files. Hard stop: ${attemptDeadline.deadlineAt}; finishing interval: at least ${attemptDeadline.finishingMs} ms after the current child retires within its bounded closure window.` });
+      body: `# Stage budget wrap-up\nTime is nearly up. Stop starting new work. Keep all admitted files. Finish safely and return your normal result with a concrete done/remaining handoff: what changed, evidence, unfinished duties and the next bounded action. Return remaining_work as a list of unfinished duties/checks, or [] only when all assigned work is complete. Do not claim unfinished work or unrun checks passed. If work remains, the next iteration continues these files. Hard stop: ${attemptDeadline.deadlineAt}; finishing interval: at least ${attemptDeadline.finishingMs} ms after the current child retires within its bounded closure window.` });
     const guidance = consumeNewGuidance('adapter_invocation', activeInvocationIndex);
     if (activeInvocationAbortController && !activeInvocationAbortController.signal.aborted) {
       commandBoundaryControl = { kind: 'budget_wrap_up', command: { id: 'stage_budget', phase: 'completed', timestamp: wrapUpRequestedAt }, guidance };
@@ -1191,6 +1191,14 @@ export async function runStage(
     }
     return record;
   };
+  const finishedStageRecord = (record: Record<string, unknown>): boolean => {
+    // A completed rejection keeps its existing authority. Otherwise require an
+    // explicit empty list: delivered/pass alone can also describe partial work.
+    return opts.isGate && record.pass === false
+      || Array.isArray(record.remaining_work) && record.remaining_work.length === 0
+        && (opts.isGate ? record.pass === true : record.status === 'delivered');
+  };
+  let stageWorkFinished = false;
   let correctionReinvocations = 0;
   const invokeAdapterWithCorrection = async (
     selectedAdapter: Adapter,
@@ -1209,10 +1217,10 @@ export async function runStage(
       if (commandControl && !aggregateAbortSignal.aborted
           && !latestLiveConstraintResult?.monitorFailure && !latestLiveConstraintResult?.incidents.length) {
         activeCommands.delete(commandControl.command.id);
-        // A completed independent rejection remains authoritative when its
-        // child closes at the warning boundary; a finishing turn cannot erase it.
-        if (commandControl.kind === 'budget_wrap_up' && opts.isGate && current.exitCode === 0) {
-          try { if (stageRecord(current.output).pass === false) return combined; }
+        // A valid completed result needs no replacement finishing turn, even
+        // when the warning arrived before the child's result was observed.
+        if (commandControl.kind === 'budget_wrap_up' && current.exitCode === 0 && opts.outputSchema) {
+          try { if (finishedStageRecord(stageRecord(current.output))) return combined; }
           catch { /* malformed results still need the bounded finishing turn */ }
         }
         // A durable current-execution grant stops at the closed child boundary.
@@ -1417,10 +1425,9 @@ export async function runStage(
     try {
       const record = stageRecord(result.output);
       blockedStageResult = record.status === 'blocked';
-      // A real rejection remains a rejection, even when warning and verdict overlap.
-      if (opts.isGate && record.pass === false) wrapUpRequestedAt = undefined;
+      stageWorkFinished = finishedStageRecord(record);
       if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
-      const carriers = opts.isGate && !wrapUpRequestedAt ? [`verdict_${opts.stageId}.json`] : [];
+      const carriers = opts.isGate && (!wrapUpRequestedAt || stageWorkFinished) ? [`verdict_${opts.stageId}.json`] : [];
       const handoff = `handoff_${opts.stageId}.md`;
       if (opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === handoff)) carriers.push(handoff);
       for (const carrier of carriers) {
@@ -1445,12 +1452,12 @@ export async function runStage(
         artifactContract: opts.artifactContract,
         statuses: opts.artifactStatuses,
       };
-      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || Boolean(wrapUpRequestedAt) || scopeRevisionBoundaryReached || result.exitCode !== 0);
+      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || Boolean(wrapUpRequestedAt && !stageWorkFinished) || scopeRevisionBoundaryReached || result.exitCode !== 0);
       const productFacts = existsSync(join(opts.runDir, 'run.json')) ? declaredOutputFacts(opts.projectDir, opts.runId) : [];
       // A single direct author owns the whole brief. Split plans settle each
       // stage's artifact contract; completion still requires every run product.
       const authors = runState?.planControl?.stages.filter(stage => !stage.is_gate && !stage.dynamic_dispatch && !stage.retry_to?.length);
-      const dueProducts = direct && (authors?.length ?? 1) <= 1 && !opts.isGate && !opts.dynamicDispatch && !blockedStageResult && !wrapUpRequestedAt && result.exitCode === 0 ? productFacts : [];
+      const dueProducts = direct && (authors?.length ?? 1) <= 1 && !opts.isGate && !opts.dynamicDispatch && !blockedStageResult && (!wrapUpRequestedAt || stageWorkFinished) && result.exitCode === 0 ? productFacts : [];
       const requiredProducts = new Map([...dueProducts, ...availableProductsAtStart].map(product => [product.path, product]));
       for (const product of requiredProducts.values()) {
         const current = productFacts.find(output => output.path === product.path);
@@ -1534,7 +1541,7 @@ export async function runStage(
   }
   let retainedArtifacts: string[] | undefined;
   if (!stageAborted && !approvalSuspended
-    && (result.exitCode === 0 && wrapUpRequestedAt || timedOut)) {
+    && (result.exitCode === 0 && wrapUpRequestedAt && !stageWorkFinished || timedOut)) {
     const forced = timedOut;
     const retainedPaths = retainedArtifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope);
     const summary = `Engine budget handoff. Done/evidence: retained changed files ${JSON.stringify(retainedPaths)} and the execution log at ${liveLogPath}. Their bytes are kept; unfinished duties are not certified complete. Remaining: complete the stage's declared duties and run unfinished checks; verify retained work before continuing. Disposition: ${forced ? 'bounded grace expired; child stopped with work kept' : 'cooperative wrap-up completed normally'}.`;
