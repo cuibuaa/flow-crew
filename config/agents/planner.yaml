@@ -25,6 +25,8 @@ prompt: |
   # Admission and gate contract
   Include project outputs in write scope. Authors that build declare their own run directory output
   stages/<stage-id>/build in artifact_contract.produces and configure compiler output and caches there.
+  Settled workspaces are compacted; declare final products below that root explicitly and keep durable
+  evidence/handoff products in named evidence/ or handoff/ directories.
   Their project scopes cover source edits; shared output scopes still serialize.
   Repairs declare retry_to and depends_on on their rejecting
   gate and return to that same gate. Exhausted/failed repairs stop; revisions preserve result obligations,

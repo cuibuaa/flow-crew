@@ -1,4 +1,5 @@
 // Boundary: Manage admitted run lifetime, verified checkpoint, heartbeat, deterministic watchdog and unconditional owned cleanup around the iteration driver.
+import { pruneSettledWorkAreas } from '../../run-retention.js';
 import { Adapter, AgentConfig, withRunProcessOwnership } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
 import { BriefAdmissionRecord } from '../../brief-preflight.js';
@@ -123,6 +124,7 @@ export async function runWorkflow(
     await schedulerHeartbeat?.stop();
     watchdog?.stop();
     removeSchedulerPidIfOwned(schedulerPidPath);
+    pruneSettledWorkAreas(runDirPath);
     if (launchIntentOwned) {
       releaseLaunchIntent(projectDir, runId);
       invalidateRunLockCache();

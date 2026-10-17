@@ -183,8 +183,9 @@ describe('cancellation entry convergence', () => {
       failureReason: 'Cancelled by user',
       completedAt: expect.any(String),
     });
-    expect(() => lstatSync(scratchAlias)).toThrow(/ENOENT/);
-    expect(existsSync(join(created.runDirPath, 'scratch'))).toBe(false);
+    expect(lstatSync(scratchAlias).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(scratch.path, 'evidence.txt'), 'utf8')).toBe('cancelled invocation payload');
+    expect(existsSync(join(created.runDirPath, 'scratch'))).toBe(true);
     expect(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf8')).toContain('name: default');
   });
 

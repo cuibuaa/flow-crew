@@ -1,10 +1,10 @@
+export { readHostBootId, checkpointCommandFateKnown, checkpointConsumers } from './checkpoint-liveness.js';
 import { join, resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
 import { sha256Canonical as digest } from './runtime-negotiation.js';
 import { z } from 'zod';
 import { readBuildManifest } from './build-manifest.js';
+import { readHostBootId, checkpointCommandFateKnown, checkpointConsumers } from './checkpoint-liveness.js';
 import { inspectRunScheduler, processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './run-lock.js';
-import { processGroupIsAlive } from './process-liveness.js';
 
 import { RUN_STATUS, STAGE_STATUS, interruptedStageStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
@@ -73,11 +73,6 @@ function matchesStage(current: StageStatus | undefined, stage: RecoveryIntent['s
   return ([STAGE_STATUS.FAILED, STAGE_STATUS.PENDING] as readonly string[]).includes(current.status)
     && digest(attempt) === digest(closedAttempt(stage, previous));
 }
-export function readHostBootId(): string | undefined {
-  if (process.platform !== 'linux') return undefined;
-  try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined; } catch { return undefined; }
-}
-
 
 // Capture at module load, as daemon identity does. A later disk replacement is
 // never evidence of which modules this process loaded.
@@ -86,38 +81,6 @@ export function engineGeneration(): string | undefined { return loadedGeneration
 export function captureEngineCheckpoint(projectDir: string, runId: string): EngineCheckpoint {
   runId = canonicalRunId(runsRoot(projectDir), runId);
   return { version: 2, runId, projectDir: resolve(projectDir), bootId: readHostBootId(), generation: engineGeneration(), pid: process.pid, processStart: processStartToken(process.pid), at: new Date().toISOString(), ...(process.platform !== 'win32' ? { processes: [] } : {}) };
-}
-
-/** Version 1 race parents omitted nested consumers. An empty historical list
- * cannot prove their death; a different known host boot can. */
-export function checkpointCommandFateKnown(state: Pick<StoreState, 'engineCheckpoint' | 'planControl'> | undefined,
-  options: { currentBootId?: string } = {}): boolean {
-  const boot = Object.hasOwn(options, 'currentBootId') ? options.currentBootId : readHostBootId();
-  const checkpoint = state?.engineCheckpoint;
-  if (checkpoint?.bootId && boot && checkpoint.bootId !== boot) return true;
-  return checkpoint?.version === 2 || !state?.planControl?.stages.some(stage => stage.race);
-}
-
-/** Query the existing ownership ledger. A proven current boot also retires
- * identity-bound command groups; callers wait for a later empty observation. */
-export function checkpointConsumers(checkpoint?: EngineCheckpoint, options: { currentBootId?: string; retire?: boolean } = {}): number[] {
-  const boot = Object.hasOwn(options, 'currentBootId') ? options.currentBootId : readHostBootId();
-  if (checkpoint?.bootId && boot && checkpoint.bootId !== boot) return [];
-  const active: number[] = [];
-  for (const group of checkpoint?.processes ?? []) {
-    if (!Number.isSafeInteger(group.pid) || group.pid <= 0) throw new Error('RECOVERY_FATE_UNKNOWN: invalid owned command group');
-    if (!processGroupIsAlive(group.pid)) continue;
-    const currentStart = processStartToken(group.pid);
-    if (group.processStart && currentStart && !processStartTokensMatch(group.processStart, currentStart)) continue;
-    active.push(group.pid);
-    // A missing/reused leader cannot authorize signalling surviving writers.
-    if (options.retire && boot && checkpoint!.bootId === boot && group.processStart
-        && processStartTokensMatch(group.processStart, currentStart)) {
-      try { process.kill(-group.pid, 'SIGKILL'); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
-    }
-  }
-  return active;
 }
 
 /** Shared by interrupted recovery and every settled continuation entrance. */

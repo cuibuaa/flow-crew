@@ -165,6 +165,7 @@ Sources: [inbox parser](../src/cli-inbox.ts), [campaign/brief dispatch](../src/c
 | `audit-reality` | `--task <numeric-id>`, `--range last-21-days`, `--output <path>`; executes recorded deterministic checks and prints Markdown. Exit 0 for completed audit, including failed/unverifiable rows. |
 | `land` | Required `--run`; `--json`; `--remove`, `--acknowledge-regenerable=<count>`; optional closure pair `--complete-fc-task`, `--fc-task-session`, `--fc-tasks-root`. Value options also accept separate syntax. Audit/removal outcomes can refuse nonzero; read reasons. |
 | `export [run-id]` | Writes a JSON bundle to the current directory, default latest global run |
+| `prune [--run <run-id>] [--dry-run \| --apply] [--json]` | Compacts terminal run workspaces while preserving history, products and cited evidence. Defaults to dry-run; reports bytes/kept paths. Refuses live, nonterminal or unverifiable owners. See [retention](operations.md#storage-ownership). |
 | `clean` | `--keep N`, default 5; removes selected old readable runs and expired reservations, skipping verified live schedulers; zero keeps no recent readable runs |
 
 These are execution or deletion authority, not passive status commands. Detailed preservation

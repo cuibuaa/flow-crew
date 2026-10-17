@@ -53,3 +53,8 @@ without accepting unrelated equal-content copies. See [research candidate source
 [research publication specs](../spec/research-generation.test.ts) and the
 [brief contract](brief-contract.md). Independent review and duplicate-consumption
 protections still apply.
+
+
+Subsequent run retention implements workspace compaction with declared product/input,
+citation and ownership guards. The E17/E18 dispositions above record the original review;
+current behavior is documented under [storage ownership](operations.md#storage-ownership).

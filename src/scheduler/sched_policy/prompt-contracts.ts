@@ -86,7 +86,7 @@ export function appendPlannerAdmissionContract(
     ? terminalPaths.map(({ status, path }) => `- ${status}: ${path} — one final ordinary producer; ordered writers and repairs may share its scope`).join('\n')
     : '- none declared';
   return `${prompt}\n\n# Engine admission contract for this proposal (pre-submit)\n${rows}\n`
-    + `Give each author that builds a private run directory output at stages/<stage-id>/build in artifact_contract.produces. Configure compiler output and caches there; project scope covers its source edits. Shared build destinations still conflict and serialize. `
+    + `Give each author that builds a private run directory output at stages/<stage-id>/build in artifact_contract.produces. Configure compiler output and caches there; project scope covers its source edits. Settled workspaces are compacted: put durable handoffs/logs/evidence in named directories, explicitly declare final products below the workspace root, and cite evidence paths in the result. Shared build destinations still conflict and serialize. `
     + `Paths under an external run store (for example .fc/runs/) are not project outputs and cannot be made reachable by declaring project scope.`;
 }
 

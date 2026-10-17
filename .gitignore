@@ -33,6 +33,7 @@ docs/cancel-ledger-guard/*
 !docs/no-race-soft-deadline/
 docs/no-race-soft-deadline/*
 !docs/no-race-soft-deadline/review.md
+!docs/no-race-soft-deadline/report.md
 !docs/hold-real-store/
 docs/hold-real-store/*
 !docs/hold-real-store/report.md

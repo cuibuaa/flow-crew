@@ -1,3 +1,4 @@
+import { pruneSettledWorkAreas } from '../../run-retention.js';
 import { publishRunCompletion } from '../sched_policy/run-completion.js';
 import { isRetryableAdapterFailure } from '../../adapters/failure.js';
 import { runStageWave } from '../stage-wave.js';
@@ -261,6 +262,7 @@ export async function executeReadyBatch(
     for (const event of stageEvents) {
       recordStageOutcome(projectDir, runId, event.stageId, state.currentIteration, event.status);
     }
+    pruneSettledWorkAreas(runDirPath);
     if (exhaustedAdapterFailure) {
       const detail = `Upstream adapter failure exhausted technical recovery for ${exhaustedAdapterFailure.stageId}: ${exhaustedAdapterFailure.kind}`;
       state.status = RUN_STATUS.FAILED;

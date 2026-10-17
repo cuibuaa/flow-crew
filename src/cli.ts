@@ -44,6 +44,7 @@ function earlyCommandHelp(input: string[]): string | undefined {
     status: 'Usage: flowcrew status [--all] [--project <path>]',
     list: 'Usage: flowcrew list [--limit N]',
     clean: 'Usage: flowcrew clean [--keep N]',
+    prune: 'Usage: flowcrew prune [--run <run-id>] [--dry-run | --apply] [--json]\nCompacts settled workspaces; defaults to a read-only dry-run. Keeps run history and evidence.',
     export: 'Usage: flowcrew export [run-id]',
     'audit-reality': 'Usage: flowcrew audit-reality [options]',
     'ship-preflight': 'Usage: flowcrew ship-preflight [--brief <path>] [options]',
@@ -75,6 +76,9 @@ if (bootstrapHelp !== undefined) {
     process.stdout.write(`fc_tasks: degraded[internal_error] · command failed to load: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   }
+} else if (bootstrapArgs[0] === 'prune') {
+  const { cmdPrune } = await import('./run-retention.js');
+  process.exitCode = cmdPrune(bootstrapArgs);
 } else if (bootstrapArgs[0] === 'plan-check') {
   const { cmdPlanCheck } = await import('./plan-interface.js');
   process.exitCode = await cmdPlanCheck(bootstrapArgs);
@@ -2063,6 +2067,7 @@ Commands:
   guide     Queue original guidance for a running stage or every stage
   interrupt Stop the active command in a named stage and deliver a reason
   clean     Delete old runs (keeps 5 most recent by default)
+  prune     Compact terminal run workspaces, preserving history/evidence (dry-run by default)
   export    Export a run as JSON bundle
   campaign  Inspect recorded campaign state and review pending brief patches
   daemon    Operate the background orchestrator (hold/continue, restart/status; serve is internal)
@@ -2104,6 +2109,8 @@ Examples:
   flowcrew guide --run <run-id> "try a different approach"
   flowcrew interrupt --run <run-id> --stage <stage-id> "stop the oversized job"
   flowcrew clean --keep 3
+  flowcrew prune --dry-run
+  flowcrew prune --run <run-id> --apply
   flowcrew ship-preflight --brief docs/task_brief.md
   flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work
   flowcrew land --run <run-id>

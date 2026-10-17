@@ -12,9 +12,10 @@ import { createInvocationScratch, retireRunScratch, sweepRunScratch } from '../s
 import { createRun, fcGlobalDir, setFcGlobalDir, updateRunState, readRunState } from '../src/store.js';
 import { RUN_STATUS, TERMINAL_STATUSES } from '../src/lifecycle-status.js';
 import { processStartToken } from '../src/run-lock.js';
+import { readHostBootId } from '../src/restart-recovery.js';
 
 const role: AgentConfig = { name: 'fixture', description: '', model: 'fixture', reasoning_effort: 'low', tools: ['Bash'], prompt: 'Write test evidence in private scratch.' };
-let root: string, runDir: string, project: string, previousStore: string;
+let root: string, runDir: string, project: string, previousStore: string, retiredController: number;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'fc-scratch-spec-'));
@@ -24,6 +25,15 @@ beforeEach(() => {
   setFcGlobalDir(join(root, 'control'));
   const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []);
   runDir = join(root, 'control', 'runs', created.runId);
+  retiredController = Number(spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], {
+    cwd: project, encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, HOME: join(root, 'home'), FC_HOME: join(root, 'control') },
+  }).stdout.trim());
+  expect(retiredController).toBeGreaterThan(0);
+  updateRunState(project, created.runId, state => {
+    state.engineCheckpoint = { version: 2, runId: created.runId, projectDir: project,
+      pid: retiredController, bootId: readHostBootId(), at: new Date().toISOString(), processes: [] };
+  });
   vi.stubEnv('HOME', join(root, 'home'));
   vi.stubEnv('USERPROFILE', join(root, 'home'));
   vi.stubEnv('CODEX_HOME', join(root, 'source'));
@@ -50,7 +60,7 @@ process.stdin.on('end', () => {
     return;
   }
   if (process.env.TMPDIR !== process.env.TMP || process.env.TMPDIR !== process.env.TEMP) throw Error('temporary environment differs');
-  const citation = path.join(process.env.TMPDIR, 'test.log');
+  const citation = path.join(process.env.TMPDIR, 'test-result.bin');
   const finish = () => {
     fs.writeFileSync(citation, 'tests passed\n');
     if (request.ready) fs.writeFileSync(request.ready, citation);
@@ -74,10 +84,11 @@ function invoke(adapter: Adapter, stageId: string, request: object, options: Par
   return adapter.run(JSON.stringify(request), role, { workDir: project, runDir, stageId, timeout_ms: 10_000, ...options });
 }
 
-function retire(citation: string): void {
+function publishCitedCompletion(citation: string): void {
+  writeFileSync(join(runDir, 'report.md'), `Final validation evidence: \`${citation}\`.\n`);
   updateRunState(project, basename(runDir), state => { state.status = RUN_STATUS.COMPLETE; });
-  expect(existsSync(citation)).toBe(false);
-  expect(existsSync(join(runDir, 'scratch'))).toBe(false);
+  expect(readFileSync(citation, 'utf8')).toBe('tests passed\n');
+  expect(existsSync(join(runDir, 'scratch'))).toBe(true);
   expect(readRunState(project, basename(runDir)).status).toBe(RUN_STATUS.COMPLETE);
   for (const name of ['run.json', 'summary.md', 'progress.md']) expect(existsSync(join(runDir, name))).toBe(true);
 }
@@ -111,8 +122,12 @@ describe('invocation scratch lifetime without provider calls', () => {
       expect(readFileSync(citation, 'utf8')).toBe('tests passed\n');
     }
     const payloads = citations.map(citation => realpathSync(citation));
-    retire(citations[0]);
-    for (const path of [...citations, ...payloads]) expect(existsSync(path)).toBe(false);
+    const disposable = join(dirname(citations[0]), 'discard.bin');
+    writeFileSync(disposable, 'discarded work');
+    writeFileSync(join(runDir, 'report.md'), citations.map(citation => `Validation evidence: \`${citation}\`.`).join('\n'));
+    updateRunState(project, basename(runDir), state => { state.status = RUN_STATUS.COMPLETE; });
+    for (const path of [...citations, ...payloads]) expect(readFileSync(path, 'utf8')).toBe('tests passed\n');
+    expect(existsSync(disposable)).toBe(false);
   });
 
   it.each([
@@ -129,7 +144,7 @@ describe('invocation scratch lifetime without provider calls', () => {
   it.each([
     ['Claude', () => new ClaudeAdapter()],
     ['Codex', () => new CodexAdapter()],
-  ] as const)('%s retains cancellation evidence until run retirement', async (_name, createAdapter) => {
+  ] as const)('%s retains cancellation evidence through the final cited report', async (_name, createAdapter) => {
     const controller = new AbortController();
     const ready = join(root, 'ready');
     const running = invoke(createAdapter(), 'author', { action: 'hang', ready }, { abortSignal: controller.signal });
@@ -140,8 +155,8 @@ describe('invocation scratch lifetime without provider calls', () => {
       expect((await running).exitCode).toBe(137);
       expect(readFileSync(citation, 'utf8')).toBe('tests passed\n');
       const payload = realpathSync(citation);
-      retire(citation);
-      expect(existsSync(payload)).toBe(false);
+      publishCitedCompletion(citation);
+      expect(readFileSync(payload, 'utf8')).toBe('tests passed\n');
     } finally { controller.abort(); await running; }
   });
 
@@ -190,8 +205,8 @@ describe('invocation scratch lifetime without provider calls', () => {
       rmSync(parentRunDir, { recursive: true, force: true });
       expect(readFileSync(citation, 'utf8')).toBe('tests passed\n');
       const payload = realpathSync(citation);
-      retire(citation);
-      expect(existsSync(payload)).toBe(false);
+      publishCitedCompletion(citation);
+      expect(readFileSync(payload, 'utf8')).toBe('tests passed\n');
     } finally {
       retireRunScratch(parentRunDir);
       rmSync(parentRunDir, { recursive: true, force: true });
@@ -223,14 +238,16 @@ describe('invocation scratch lifetime without provider calls', () => {
     } finally { child.kill('SIGKILL'); await exited; }
   });
 
-  it.each(TERMINAL_STATUSES)('retires physical scratch on terminal publication: %s', status => {
+  it.each(TERMINAL_STATUSES)('retires only disposable scratch with a proven dead owner, keeping resumable status %s', status => {
     const scratch = createInvocationScratch(runDir);
     const payload = realpathSync(scratch.path);
     const alias = dirname(scratch.path);
-    writeFileSync(join(payload, 'large.log'), 'fixture');
+    writeFileSync(join(payload, 'disposable.bin'), 'fixture');
     updateRunState(project, basename(runDir), state => { state.status = status; });
-    for (const path of [scratch.path, payload, alias, join(runDir, 'scratch')]) expect(existsSync(path)).toBe(false);
-    expect(() => lstatSync(alias)).toThrow(/ENOENT/);
+    const resumable = ([RUN_STATUS.STOPPED, RUN_STATUS.INCOMPLETE, RUN_STATUS.FAILED] as readonly string[]).includes(status);
+    for (const path of [scratch.path, payload, alias, join(runDir, 'scratch')]) expect(existsSync(path)).toBe(resumable);
+    if (resumable) expect(readFileSync(join(payload, 'disposable.bin'), 'utf8')).toBe('fixture');
+    else expect(() => lstatSync(alias)).toThrow(/ENOENT/);
     expect(readRunState(project, basename(runDir)).status).toBe(status);
     expect(existsSync(join(runDir, 'summary.md'))).toBe(true);
   });
@@ -243,32 +260,41 @@ describe('invocation scratch lifetime without provider calls', () => {
     expect(readFileSync(citation, 'utf8')).toBe('tests passed\n');
     updateRunState(project, basename(runDir), state => { state.status = RUN_STATUS.RUNNING; });
     expect(readFileSync(citation, 'utf8')).toBe('tests passed\n');
-    retire(citation);
+    publishCitedCompletion(citation);
   });
 
-  it('startup sweeps terminal and missing owners, preserving resumable and uncertain owners', () => {
+  it('startup sweeps only settled terminal disposable scratch with known dead owners', () => {
     const runRoot = dirname(runDir);
     const warn = vi.fn();
-    const fixtures = [...TERMINAL_STATUSES, RUN_STATUS.PARKED, RUN_STATUS.AWAITING_APPROVAL, 'future-status', 'malformed', 'missing-status', 'missing-record', 'missing-owner'].map((status, index) => {
+    const fixtures = [...TERMINAL_STATUSES, RUN_STATUS.PARKED, RUN_STATUS.AWAITING_APPROVAL, 'future-status', 'malformed', 'missing-status', 'missing-record', 'missing-owner', 'missing-checkpoint'].map((status, index) => {
       const owner = join(runRoot, `sweep-${index}`);
       const scratch = createInvocationScratch(owner);
       const payload = realpathSync(scratch.path);
       const alias = dirname(scratch.path);
-      writeFileSync(join(payload, 'test.log'), 'tests passed\n');
+      writeFileSync(join(payload, 'disposable.bin'), 'tests passed\n');
+      writeFileSync(join(owner, 'workflow.yaml'), 'name: fixture\nstages: []\n');
       if (status === 'missing-owner') rmSync(owner, { recursive: true });
-      else if (status !== 'missing-record') writeFileSync(join(owner, 'run.json'), status === 'malformed' ? '{' : JSON.stringify(status === 'missing-status' ? {} : { status }));
+      else if (status !== 'missing-record') writeFileSync(join(owner, 'run.json'), status === 'malformed' ? '{' : JSON.stringify({
+        runId: basename(owner), projectDir: project, workflowName: 'fixture', startedAt: new Date().toISOString(), stages: {},
+        ...(status === 'missing-status' ? {} : { status: status === 'missing-checkpoint' ? RUN_STATUS.COMPLETE : status }),
+        ...(status === 'missing-checkpoint' ? {} : { engineCheckpoint: {
+          version: 2, runId: basename(owner), projectDir: project, pid: retiredController,
+          bootId: readHostBootId(), at: new Date().toISOString(), processes: [],
+        } }),
+      }));
       return { status, owner, payload, alias };
     });
     try {
       sweepRunScratch(runRoot, warn);
       for (const { status, owner, payload, alias } of fixtures) {
-        const retained = [RUN_STATUS.PARKED, RUN_STATUS.AWAITING_APPROVAL, 'future-status', 'malformed', 'missing-status'].includes(status);
-        expect(existsSync(alias), status).toBe(retained);
-        if (!retained) expect(() => lstatSync(alias)).toThrow(/ENOENT/);
-        expect(existsSync(payload), status).toBe(retained);
+        const retained = [RUN_STATUS.STOPPED, RUN_STATUS.INCOMPLETE, RUN_STATUS.FAILED, RUN_STATUS.PARKED,
+          RUN_STATUS.AWAITING_APPROVAL, 'future-status', 'malformed', 'missing-status', 'missing-record', 'missing-owner', 'missing-checkpoint'].includes(status);
+        if (retained) expect(lstatSync(alias).isSymbolicLink(), status).toBe(true);
+        else expect(() => lstatSync(alias)).toThrow(/ENOENT/);
+        expect(existsSync(payload), status).toBe(retained && status !== 'missing-owner');
         if (status !== 'missing-owner') expect(existsSync(owner), status).toBe(true);
       }
-      expect(warn).toHaveBeenCalledTimes(1); // malformed run is reported, never treated as missing
+      expect(warn).toHaveBeenCalledTimes(2); // Malformed and missing-checkpoint owners are reported, never treated as dead.
       sweepRunScratch(runRoot, vi.fn()); // retirement is idempotent
     } finally { for (const { owner } of fixtures) retireRunScratch(owner); }
   });

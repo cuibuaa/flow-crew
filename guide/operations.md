@@ -88,17 +88,60 @@ input. A read-only declaration or a later hash check cannot provide that protect
 hardlink. An input-copy failure refuses setup without publishing READY; inspect available space
 and the reported target before retrying. Failed setup worktrees can contain partial copies.
 
-Use invocation `$TMPDIR` for disposable checkouts, compiler caches and test fixtures. Its owner
-retains scratch through retries and resumes, then retires it when the run commits a terminal
-status. Pytest's default temporary root follows that environment. An explicit `--basetemp` in a
-declared build directory instead chooses the artifact's longer lifetime.
+Use invocation `$TMPDIR` for disposable checkouts, compiler caches and test fixtures.
+Scratch survives retries, gates and continuations. A settled stage's `stages/<stage>/build/`
+and `stages/<stage>/scratch/` are workspaces: after children, monitors, audits and retry
+settlement finish, the engine compacts their disposable members. The workspace directory
+itself remains so an existing directory declaration can still be queried. Declare final
+products below that root explicitly, and name evidence in the stage result or a retained
+report. Use `evidence/` and `handoff/` for durable material, including portable tarballs.
 
-Declared build outputs survive retries, stage completion and terminal publication for their
-consumers. The engine cannot infer disposal authority from names such as `validation-1` or
-`pytest-temp`. Preserve required products, validation logs and useful failure fixtures in declared
-evidence before terminal scratch retirement; do not place their only copy in disposable temp.
+Retention keeps every path outside those workspaces and invocation scratch. Within a workspace
+it keeps declared products below the workspace root, all declared run inputs (including
+completed consumers that might retry), evidence/handoff/patch/output/log directories,
+patches, bundles, archives and log files. Exact report/evidence path citations survive at
+any size and keep their original pathname. Small scripts, configurations and results at
+the workspace root, or whose filename appears in retained reports/evidence, also stay
+when at most **1 MiB per file**. That cutoff preserves reproducibility inputs and small
+measurements without a filename-only mention pinning a multi-gigabyte corpus. Larger
+required files must have an exact path citation or an explicit product/input declaration.
+Citations can use run-relative, stage-relative or workspace-relative paths, quoted paths
+with spaces, or the recorded absolute workspace/invocation-scratch path. Logs and native
+prompts remain durable but do not turn every command's working directory into a citation.
+Private credential files are never opened by retention. Removal keeps symlinks and never traverses them. Declared locations and report aliases are
+resolved for preservation and citation discovery; workspace targets are protected too.
+
+Unfinished, unknown and budget-continuing stages retain their entire workspaces. Failed,
+stopped and incomplete runs retain invocation scratch for resume. Parked/deployment-held
+runs retain all their work. Status/attempt ledgers, checkpoint and process ownership,
+workflow/dispatch/admitted plans, scope/approval/guidance decisions, verdicts, validation
+and audit records, append-only history, outputs and every attempt log stay available to
+continuation, cancellation, audits and dashboard readers. Project files and patches are
+never reverted by retention. A terminal status alone cannot authorize removal while a
+controller or owned command may still be alive; malformed or missing ownership evidence
+also preserves work. The policy sends no signals. A failed cleanup keeps remaining work
+and does not change the authored verdict.
+
+For existing runs, inspect the same policy before applying it:
+
+```bash
+flowcrew prune --dry-run
+flowcrew prune --run <run-id> --dry-run --json
+flowcrew prune --run <run-id> --apply
+```
+
+The default is a read-only dry-run: no lock, index, manifest, alias or store file is written.
+It reports per-run bytes and kept paths/reasons; JSON includes the candidate file list,
+refusals and total bytes. Counts are logical file lengths, not filesystem free-space
+promises (hardlinks, compression and metadata can differ). Bulk operation skips refused
+runs and uninitialized store entries; an explicitly selected refused run exits nonzero.
+Apply replans under the run-state lock shared with launch, resume and cancellation.
+Repeated application is safe. `clean` separately deletes old run history; `prune` keeps it.
+Retained artifacts intentionally continue to consume space; this is workspace compaction,
+not a quota or an age-based history expiration policy.
 
 Sources: [input materialization](../src/cli-ship-setup.ts),
+[retention policy and CLI](../src/run-retention.ts),
 [scratch owner](../src/invocation-scratch.ts), [terminal publisher](../src/store.ts).
 
 ## Inspect, guide and stop

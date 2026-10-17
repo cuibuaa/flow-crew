@@ -216,7 +216,10 @@ describe('safe scope batching', () => {
     for (const id of ['left', 'right']) writeFileSync(join(projectDir, `src/${id}.ts`), `export const ${id} = 0;`);
     const destinations: string[] = [];
     const contracts = Object.fromEntries(['left', 'right'].map(id => [id, {
-      version: 1 as const, produces: [{ id: 'build', root: 'run' as const, path: `stages/${id}/build`, kind: 'directory' as const }],
+      version: 1 as const, produces: [
+        { id: 'build', root: 'run' as const, path: `stages/${id}/build`, kind: 'directory' as const },
+        { id: 'published', root: 'run' as const, path: `stages/${id}/build/dist`, kind: 'directory' as const },
+      ],
       reads: [], replays: [],
     }]));
     const measured = await runStatic([['src/left.ts'], ['src/right.ts']], id => [`src/${id}.ts`], (id, opts) => {
