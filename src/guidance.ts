@@ -374,7 +374,7 @@ export function routePendingOperatorGuidanceToStage(
 export function guidanceForExecution(entries: readonly GuidanceEnvelope[], attemptIndex: number): GuidanceEnvelope[] {
   return entries.filter((entry) => !(entry.source === 'scheduler'
     && entry.attemptIndex !== undefined && entry.attemptIndex < attemptIndex
-    && /^(?:Scope revision [^\s]+ was accepted\b|# Accepted scope revision\b)/.test(entry.body)));
+    && /^(?:Scope revision [^\s]+ was accepted\b|# Accepted scope revision\b|# Stage budget wrap-up\b)/.test(entry.body)));
 }
 
 export function renderGuidanceDelivery(entries: readonly GuidanceEnvelope[]): string {

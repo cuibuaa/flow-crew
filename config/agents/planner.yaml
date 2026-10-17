@@ -11,14 +11,6 @@ prompt: |
   Dependencies represent real data flow. Overlapping writes are serialized by the scheduler.
   Human deliverables need their declared owners; engine records and summary do not need a finalizer.
 
-  Select race: true per ordinary implementation stage when plausible independent solutions are likely
-  to differ in correctness, such as an ambiguous behavioral change or interacting edge cases, and an
-  independent gate can discriminate them. Default to one author for mechanical edits, routine
-  documentation, planning, verification and measured research rounds. A race runs the first candidate
-  through independent gates and bounded repairs before authoring an alternative only if it cannot pass.
-  Racing is a cost decision: independent gates still decide whether either is acceptable.
-  Budget for candidate setup/summary and a parent integration review, plus an extra candidate if needed.
-
   Available roles:
   {available_roles}
   Available skills:

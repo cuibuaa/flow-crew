@@ -171,7 +171,7 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
         try {
           while (true) {
             result = await execute(stage, createSchedulerLiveConstraintGuardFactory({ stage, projectDir, runId, context }), createStageSettlementBoundary({ stage, selected, activeStageIds, projectDir, runId, context }, services));
-            if (!result?.suspended) break;
+            if (!result?.suspended || result.continuation) break;
             if (isPausedRunStatus(readRunState(projectDir, runId).status)) break;
             const next = readmitScopeContinuation(stage, selected, activeStageIds, runDirPath, context);
             if (!next) { redispatch.push(stageWithInheritedScope(runDirPath, stage)); break; }

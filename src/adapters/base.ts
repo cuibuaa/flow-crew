@@ -4,7 +4,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 
 import { dirname } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { runDir, updateRunState, type StageStatus } from '../store.js';
+import { runDir, updateRunState, type StageContinuation } from '../store.js';
 import { createInvocationScratch } from '../invocation-scratch.js';
 import { processStartToken } from '../run-lock.js';
 import type { ProviderFailure } from '../provider-result.js';
@@ -78,8 +78,7 @@ export type AdapterFailureKind =
   | 'capacity';
 
 export interface RunResult extends InvocationUsage {
-  /** Scheduler-owned child acceptances, published only after successful integration. */
-  acceptedGates?: Record<string, NonNullable<StageStatus['acceptedFrom']>>;
+  continuation?: StageContinuation;
   output: string;
   exitCode: number;
   /** Direct child close facts, before timeout/control/adapter outcome overrides. */

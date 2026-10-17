@@ -11,7 +11,7 @@ export const PLAN_STAGE_SCHEMA: Schema = {
     role: { type: 'string', minLength: 1 }, scope: strings, depends_on: strings,
     prompt_template: { type: 'string' }, task: { type: 'string' }, condition: { type: 'string' },
     is_gate: { type: 'boolean' }, retry_to: strings, criterion_refs: strings,
-    skills: strings, dynamic_dispatch: { type: 'boolean' }, race: { type: 'boolean' },
+    skills: strings, dynamic_dispatch: { type: 'boolean' },
     // Optional output/input locations supply write capabilities and ownership metadata.
     artifact_contract: { type: 'object' },
   },
@@ -24,6 +24,7 @@ export const PLAN_SCHEMA: Schema = { type: 'object', required: ['stages'], addit
 // Recorded readers retain historical metadata; generation describes consumed fields.
 export const RECORDED_PLAN_STAGE_SCHEMA: Schema = { ...PLAN_STAGE_SCHEMA, properties: {
   ...PLAN_STAGE_SCHEMA.properties,
+  race: { type: 'boolean' }, // Historical records only.
   dependency_reasons: { type: 'object', additionalProperties: { type: 'string' } },
   max_retries: { type: 'number' }, timeout_ms: {}, timeout_total_ms: {}, resources: {},
 } };
@@ -40,7 +41,6 @@ export function renderPlanInterface(): string {
     + 'Empty/omitted criterion_refs conservatively assign all brief criteria; nonempty subsets use exact brief_criteria.json IDs. '
     + 'Ordinary authored work needs a downstream independent gate. Every gate needs a separate ordinary repair stage with retry_to and depends_on naming that gate, and scope for the permitted repairs; default_gate_retry_loops bounds repair rounds without re-planning. Existing-work audits may consist of gates with empty project scope, plus separate retry_to repairs. Scope amendments must preserve admission. '
     + 'The engine settles configured validation before each gate review, gives the gate its receipt and sends measured regressions to repair. Gates judge the work independently. '
-    + 'Optional race: true on an ordinary author runs one isolated candidate through its independent gates and bounded repairs, authoring an alternative only if the first cannot pass. Omit race for a single author. Racing needs gates of another role covering its assigned criteria; child gates retain all their assigned criteria and may also use settled inputs from the author\'s ancestors. Candidate repairs cannot widen its scope. Gates, planners and repairs cannot race. '
     + 'The engine supplies empty artifact duties and each gate verdict when artifact_contract is omitted. '
     + 'Artifact contracts describe output/input locations for capabilities and ownership. A delivered result must supply its active declared outputs with the declared kind, nonempty policy and exactly-one groups; no proof, replay or intermediate freshness duties are inferred. '
     + 'Put downstream analysis in stage instructions; create declared terminal documents within admitted write capabilities. The engine publishes run records and summary.md. Write reality_checks.md only for useful independent hard properties; baseline validation is already enforced. '
@@ -93,7 +93,7 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
       runDirPath = resolve(options.get('--run')!);
       const { readArchivedRunStateFromDirectory } = await import('./store.js');
       state = readArchivedRunStateFromDirectory(runDirPath).state as import('./store.js').StoreState;
-      baseStages = loadWorkflow(join(runDirPath, 'workflow.yaml')).config.stages;
+      baseStages = loadWorkflow(join(runDirPath, 'workflow.yaml'), true).config.stages;
     } else {
       const brief = readFileSync(resolve(options.get('--brief')!), 'utf8');
       const parsedBrief = parseBriefFrontmatter(brief);

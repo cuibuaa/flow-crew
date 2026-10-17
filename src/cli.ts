@@ -1189,7 +1189,7 @@ async function cmdQuick() {
   }
 
   const { assessResearchIterationBudget, loadWorkflow, runWorkflow } = await import('./scheduler.js');
-  const { config, raw } = loadWorkflow(workflowPath);
+  const { config, raw } = loadWorkflow(workflowPath, initializedContinuation);
   if (maxIterations && !initializedContinuation) config.defaults.max_iterations = maxIterations;
   if (!initializedContinuation) {
     const budgetDefaults = loadEngineDefaults();

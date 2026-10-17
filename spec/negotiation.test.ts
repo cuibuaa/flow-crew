@@ -57,7 +57,7 @@ const role: AgentConfig = {
   name: 'coder', description: 'fixture', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'fixture',
 };
 
-// Pin the engine input so these contracts measure the retry doubling rule.
+// Pin the engine input; historical retries keep their old clocks, new slices do not grow.
 const OWNED_STAGE_TIMEOUT_MS = 3_600_000;
 function seedEngineDefaults(): void {
   setEngineDefaults({ timeout_ms: OWNED_STAGE_TIMEOUT_MS });
@@ -229,16 +229,16 @@ describe('shared immutable negotiation protocol', () => {
 });
 
 describe('ordinary-stage scope negotiation and reconciliation', () => {
-  function scopeWorkflow(maxRetries = 0): { yaml: string; config: WorkflowConfig } {
+  function scopeWorkflow(maxRetries = 0, maxIterations = 1): { yaml: string; config: WorkflowConfig } {
     const yaml = [
-      'name: e9-scope', 'defaults:', '  max_iterations: 1', `  max_retries: ${maxRetries}`,
+      'name: e9-scope', 'defaults:', `  max_iterations: ${maxIterations}`, `  max_retries: ${maxRetries}`,
       'stages:', '  - id: ordinary', '    role: coder', '    scope: [src/declared.ts]',
       `    max_retries: ${maxRetries}`, '    prompt_template: scope fixture',
     ].join('\n');
     return {
       yaml,
       config: {description: '', 
-        name: 'e9-scope', defaults: { max_iterations: 1, max_retries: maxRetries }, stages: [{ artifact_contract: fixtureArtifactContract('ordinary', false),criterion_refs: [], 
+        name: 'e9-scope', defaults: { max_iterations: maxIterations, max_retries: maxRetries }, stages: [{ artifact_contract: fixtureArtifactContract('ordinary', false),criterion_refs: [],
           id: 'ordinary', role: 'coder', depends_on: [], scope: ['src/declared.ts'], prompt_template: 'scope fixture',
           max_retries: maxRetries, skills: [], dynamic_dispatch: false, is_gate: false,
         }],
@@ -344,7 +344,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
   it('does not carry an accepted scope revision into a timeout retry attempt', { timeout: 10_000 }, async () => {
     mkdirSync(join(projectDir, 'src'), { recursive: true });
     writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
-    const { config, yaml } = scopeWorkflow(1);
+    const { config, yaml } = scopeWorkflow(1, 2);
     const created = prepareRun(config, yaml);
     let calls = 0;
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
@@ -378,10 +378,10 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     mkdirSync(join(projectDir, 'src'), { recursive: true });
     writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
     const yaml = [
-      'name: repair-scope-attempts', 'defaults:', '  max_iterations: 1', '  max_retries: 0',
+      'name: repair-scope-attempts', 'defaults:', '  max_iterations: 2', '  max_retries: 0',
       'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true',
     ].join('\n');
-    const config: WorkflowConfig = {description: '',  name: 'repair-scope-attempts', defaults: { max_iterations: 1, max_retries: 0 }, stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
+    const config: WorkflowConfig = {description: '',  name: 'repair-scope-attempts', defaults: { max_iterations: 2, max_retries: 0 }, stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],
       id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false,
     }] };
     const created = prepareRun(config, yaml);
@@ -442,14 +442,14 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
 describe('approval attempt suspension', () => {
   it('[C1] parks on approval detection, suspends the requester, and resumes by re-running that same stage', { timeout: 15_000 }, async () => {
     const yaml = [
-      'name: approval-suspension', 'defaults:', '  max_iterations: 1', '  max_retries: 0', 'stages:',
+      'name: approval-suspension', 'defaults:', '  max_iterations: 2', '  max_retries: 0', 'stages:',
       '  - id: action', '    role: coder', '    scope: []', '    prompt_template: request approval',
       '  - id: downstream', '    role: coder', '    scope: []', '    depends_on: [action]',
       '    dependency_reasons: {action: "consume the approved action"}', '    prompt_template: finish',
     ].join('\n');
     const config: WorkflowConfig = {description: '', 
       name: 'approval-suspension',
-      defaults: { max_iterations: 1, max_retries: 0 },
+      defaults: { max_iterations: 2, max_retries: 0 },
       stages: [
         { artifact_contract: fixtureArtifactContract('action', false),criterion_refs: [],  id: 'action', role: 'coder', depends_on: [], scope: [], prompt_template: 'request approval', skills: [], dynamic_dispatch: false, is_gate: false },
         { artifact_contract: fixtureArtifactContract('downstream', false),criterion_refs: [],  id: 'downstream', role: 'coder', depends_on: ['action'], dependency_reasons: { action: 'consume the approved action' }, scope: [], prompt_template: 'finish', skills: [], dynamic_dispatch: false, is_gate: false },
@@ -587,10 +587,10 @@ describe('gate verdict facts and repair eligibility', () => {
 
   it('never dispatches a pending release repair/gate and resumes the DAG after review repair passes', { timeout: 15_000 }, async () => {
     const yaml = [
-      'name: e9-gates', 'defaults:', '  max_iterations: 1', '  max_retries: 0',
+      'name: e9-gates', 'defaults:', '  max_iterations: 2', '  max_retries: 0',
       'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true',
     ].join('\n');
-    const config: WorkflowConfig = {description: '',  name: 'e9-gates', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
+    const config: WorkflowConfig = {description: '',  name: 'e9-gates', defaults: { max_iterations: 2, max_retries: 0 }, stages: [
       { artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false },
     ] };
     const created = prepareRun(config, yaml);
@@ -747,7 +747,8 @@ describe('bounded timeout negotiation', () => {
       const adapter: Adapter = { async run(_prompt, _agent, opts) {
         const summary = summaryResult(opts);
         if (summary) return fixtureResult(summary, opts);
-        budgets.push(opts.timeout_ms);
+        const nominal = readStageStatus(projectDir, opts.runDir.split('/').at(-1)!, opts.stageId).timeout!.budgetMs;
+        expect(opts.timeout_ms).toBeGreaterThan(0); expect(opts.timeout_ms).toBeLessThanOrEqual(nominal); budgets.push(nominal);
         return fixtureResult({ output: 'resumed', exitCode: 0, duration_ms: 1 }, opts);
       } };
       await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'resume timeout', true);
@@ -796,11 +797,11 @@ describe('bounded timeout negotiation', () => {
     process.stdout.write(`SINGLE_TIMEOUT_RETRY_SEMANTICS=${JSON.stringify(semantic)}\n`);
   });
 
-  it('makes the lost first-timeout shape recover with a larger second attempt', { timeout: 10_000 }, async () => {
+  it('continues first-budget work without enlarging the next execution', { timeout: 10_000 }, async () => {
     const yaml = [
       'name: retry-after-timeout',
       'defaults:',
-      '  max_iterations: 1',
+      '  max_iterations: 2',
       '  max_retries: 1',
       'stages:',
       '  - id: work',
@@ -810,7 +811,7 @@ describe('bounded timeout negotiation', () => {
     ].join('\n');
     const config = WorkflowConfigSchema.parse({description: '', 
       name: 'retry-after-timeout',
-      defaults: { max_iterations: 1, max_retries: 1 },
+      defaults: { max_iterations: 2, max_retries: 1 },
       stages: [{ artifact_contract: fixtureArtifactContract('work', false), id: 'work', role: 'coder', max_retries: 1, prompt_template: 'finish the work' }],
     });
     const created = prepareRun(config, yaml);
@@ -818,11 +819,12 @@ describe('bounded timeout negotiation', () => {
     const adapter: Adapter = { async run(prompt, _agent, opts) {
       const summary = summaryResult(opts);
       if (summary) return fixtureResult(summary, opts);
-      budgets.push(opts.timeout_ms);
+      const nominal = readStageStatus(projectDir, opts.runDir.split('/').at(-1)!, opts.stageId).timeout!.budgetMs;
+        expect(opts.timeout_ms).toBeGreaterThan(0); expect(opts.timeout_ms).toBeLessThanOrEqual(nominal); budgets.push(nominal);
       if (budgets.length === 1) {
         return fixtureResult({ output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true }, opts);
       }
-      expect(prompt).toContain(`strictly larger immutable budget of ${opts.timeout_ms}ms`);
+      expect(prompt).toContain('Own-stage continuation evidence');
       return fixtureResult({ output: 'finished', exitCode: 0, duration_ms: 1 }, opts);
     } };
 
@@ -831,18 +833,19 @@ describe('bounded timeout negotiation', () => {
       writeRoles('coder'), created.runId, 'timeout retry', true,
     );
     expect(final.status).toBe('complete');
-    expect(budgets).toEqual([3_600_000, 7_200_000]);
+    expect(final.currentIteration).toBe(2);
+    expect(budgets).toEqual([3_600_000, 3_600_000]);
     const attempts = readStageStatus(projectDir, created.runId, 'work').attempts ?? [];
     expect(attempts.map((attempt) => attempt.timeout?.budgetMs)).toEqual(budgets);
-    expect(attempts.map((attempt) => attempt.timeout?.terminationCause)).toEqual(['attempt_timeout', 'complete']);
+    expect(attempts.map((attempt) => attempt.timeout?.terminationCause)).toEqual(['budget_forced_stop', 'complete']);
   });
 
-  it('does not let planner-authored max_retries suppress the configured timeout retry', { timeout: 10_000 }, async () => {
+  it('does not let planner-authored max_retries suppress bounded budget continuation', { timeout: 10_000 }, async () => {
     setEngineDefaults({ timeout_ms: OWNED_STAGE_TIMEOUT_MS, stage_technical_retries: 1 });
     const yaml = [
       'name: planner-retry-suppression',
       'defaults:',
-      '  max_iterations: 1',
+      '  max_iterations: 2',
       '  max_retries: 0',
       'stages:',
       '  - id: plan',
@@ -869,7 +872,8 @@ describe('bounded timeout negotiation', () => {
         return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       workCalls++;
-      budgets.push(opts.timeout_ms);
+      const nominal = readStageStatus(projectDir, opts.runDir.split('/').at(-1)!, opts.stageId).timeout!.budgetMs;
+        expect(opts.timeout_ms).toBeGreaterThan(0); expect(opts.timeout_ms).toBeLessThanOrEqual(nominal); budgets.push(nominal);
       if (workCalls === 1) {
         return fixtureResult({ output: 'partial', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true }, opts);
       }
@@ -885,7 +889,7 @@ describe('bounded timeout negotiation', () => {
     };
     const observed = { workCalls, budgets, finalStatus: final.status };
     process.stdout.write(`PLAN_RETRY_SUPPRESSION=${JSON.stringify(observed)}\n`);
-    expect(observed).toEqual({ workCalls: 2, budgets: [OWNED_STAGE_TIMEOUT_MS, OWNED_STAGE_TIMEOUT_MS * 2], finalStatus: 'complete' });
+    expect(observed).toEqual({ workCalls: 2, budgets: [OWNED_STAGE_TIMEOUT_MS, OWNED_STAGE_TIMEOUT_MS], finalStatus: 'complete' });
     expect((final.dispatchedStages as Array<{ id: string; max_retries?: number }> | undefined)
       ?.find((stage) => stage.id === 'work')).not.toHaveProperty('max_retries');
     expect(recorded.stages.find((stage) => stage.id === 'work')).not.toHaveProperty('max_retries');
@@ -903,14 +907,14 @@ describe('bounded timeout negotiation', () => {
     let workerSettled = false;
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       opts.abortSignal?.addEventListener('abort', cancelled, { once: true });
-      clock.advance(40);
+      clock.advance(20000);
       await childClose;
       adapterSettled = true;
       return fixtureResult({ output: 'closed after cancellation', exitCode: 137, duration_ms: 160 }, opts);
     } };
     const execution = runStage(adapter, {
       artifactContract: fixtureArtifactContract(stageId), deadlineClock: clock,
-      stageId, role, dependsOn: [], promptTemplate: 'child close', timeout_ms: 40,
+      stageId, role, dependsOn: [], promptTemplate: 'child close', timeout_ms: 20000,
       projectDir, runId, runDir: runDirPath, retries: 0,
     }).then(() => { workerSettled = true; });
     try {
@@ -933,9 +937,9 @@ describe('bounded timeout negotiation', () => {
   it('kills an infinite local Node child at its immutable attempt deadline despite repeated extension requests', { timeout: 15_000 }, async () => {
     const stageId = 'infinite';
     const { runId, runDirPath } = directRunDir(stageId);
-    const initialBudgetMs = 500;
+    const initialBudgetMs = 20000;
     const requestedExtensionMs = 500;
-    const requestCadenceMs = 100;
+    const requestCadenceMs = 1000;
     const clock = new ManualAttemptDeadlineClock();
     let childStarted = false;
     let requestNumber = 0;
@@ -984,8 +988,8 @@ describe('bounded timeout negotiation', () => {
     expect(result).toMatchObject({ processExitCode: null, processSignal: 'SIGTERM' });
     const status = readStageStatus(projectDir, runId, stageId);
     const decisions = status.timeout?.decisionPaths?.map((path) => readJson(join(runDirPath, path))) ?? [];
-    expect(result.exitCode).not.toBe(0);
-    expect(status.timeout?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('attempt_timeout');
+    expect(result).toMatchObject({ exitCode: 0, continuation: { reason: 'stage_budget', forced: true } });
+    expect(status.timeout?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('budget_forced_stop');
     expect(status.timeout?.deadlineReachedAt).toBeTruthy();
     expect(status.timeout?.budgetMs).toBe(initialBudgetMs);
     expect(Date.parse(status.timeout!.deadlineAt) - Date.parse(status.timeout!.attemptStartedAt)).toBe(initialBudgetMs);

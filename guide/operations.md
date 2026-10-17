@@ -254,8 +254,9 @@ and gate re-evaluation. Scope continuations and technical retries already inside
 use their ordinary bounds. The scheduler then parks before admitting another group or
 iteration. Completed stages and their artifacts, attempt ledgers, admitted plan, rollback
 audits, gate rejection evidence and budgets are retained. This does not checkpoint a live
-process. No attempt is killed to obtain a deployment hold; an ordinary attempt timeout
-still applies its existing TERM/5-second grace/KILL policy and records failure honestly.
+process. No attempt is killed to obtain a deployment hold. A stage budget first requests
+wrap-up; its hard stop uses TERM/5-second grace/KILL and retains a continuation with work
+kept. Idle aborts, unsafe writes and unverified child closure keep their refusal semantics.
 
 There is no finite universal successful-hold bound: stage deadlines differ, groups may have
 several bounded attempts, and audit/validation cleanup may itself fail to settle. For a

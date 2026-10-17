@@ -68,7 +68,9 @@ export function validationExecutionId(
 
 function gateValidationExecution(projectDir: string, runId: string, stageId: string, status: 'running' | 'complete' | 'failed'): GateValidationExecutionIdentity | undefined {
   try {
-    const attempt = readStageStatus(projectDir, runId, stageId).attempts?.at(-1);
+    const stage = readStageStatus(projectDir, runId, stageId);
+    if (stage.continuation) return undefined;
+    const attempt = stage.attempts?.at(-1);
     if (attempt?.status !== status || (status !== STAGE_STATUS.RUNNING && !attempt.completedAt)) return undefined;
     const completedAt = status === STAGE_STATUS.RUNNING ? '' : attempt.completedAt!;
     return { attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, attemptCompletedAt: completedAt,
@@ -197,6 +199,10 @@ export async function recordGateValidationDelta(
   const base = runDir(projectDir, runId);
   const snapshot = readRunValidationBaseline(base);
   if (!snapshot) return undefined;
+  // A retained slice has not finished its review. Keep the pre-review receipt
+  // without spending more command time or binding it as completed acceptance.
+  if (existsSync(join(base, 'stages', stageId, 'status.json'))
+      && readStageStatus(projectDir, runId, stageId).continuation) return undefined;
   const validationStartedAt = new Date().toISOString();
   const runningExecution = gateValidationExecution(projectDir, runId, stageId, STAGE_STATUS.RUNNING);
   const executionOwner = runningExecution ? { stageId, attemptIndex: runningExecution.attemptIndex,

@@ -1,6 +1,7 @@
-# Sole operator control for a scheduled stage attempt. The deadline is immutable
-# once an attempt starts; a timeout retry gets a larger derived attempt budget.
-# Longer values reduce premature timeouts but also delay terminal failure.
+# Normal authoring budget per execution. A live wrap-up warning arrives before
+# the finishing interval (10% of the budget, capped at 5 minutes), reserving a
+# further 5.5 seconds for child retirement. Hard stop = max(budget, 5.5s + interval).
+# Wrapped work continues in the next finite workflow iteration, without growth.
 default_timeout_ms: 10800000
 # Minimum observed silence before deterministic idle abort, including local commands.
 # Changed output, artifact, CPU/I/O or provider socket receive counters advance progress.

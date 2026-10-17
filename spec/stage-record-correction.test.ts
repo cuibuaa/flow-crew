@@ -186,8 +186,9 @@ describe('record correction uses the existing attempt', () => {
       return { output: calls === 1 ? malformed[0][1]() : JSON.stringify(rejected()), exitCode: 0, duration_ms: 1 };
     } };
     const result = await runStage(adapter, { ...options(), deadlineClock: clock });
-    expect(result).toMatchObject({ exitCode: 124, timedOut: true }); expect(calls).toBe(expirationInvocation);
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false, continuation: { reason: 'stage_budget', forced: true } }); expect(calls).toBe(expirationInvocation);
     expect(existsSync(join(runDir, 'verdict_review.json'))).toBe(false);
     expect(readStageStatus(projectDir, runId, 'review').attempts).toHaveLength(1);
+    expect(readStageStatus(projectDir, runId, 'review').timeout?.deadlineAt).toBe(new Date(started + 10000).toISOString());
   });
 });

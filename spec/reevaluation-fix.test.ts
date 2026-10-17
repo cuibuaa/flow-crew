@@ -46,7 +46,7 @@ function dynamicWorkflow(): { config: WorkflowConfig; yaml: string } {
   const yaml = [
     'name: reevaluation-retry-ledger',
     'defaults:',
-    '  max_iterations: 1',
+    '  max_iterations: 2',
     '  max_retries: 0',
     'stages:',
     '  - id: plan',
@@ -58,7 +58,7 @@ function dynamicWorkflow(): { config: WorkflowConfig; yaml: string } {
     yaml,
     config: {description: '', 
       name: 'reevaluation-retry-ledger',
-      defaults: { max_iterations: 1, max_retries: 0 },
+      defaults: { max_iterations: 2, max_retries: 0 },
       stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], scope: [],
         prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [],
@@ -69,7 +69,7 @@ function dynamicWorkflow(): { config: WorkflowConfig; yaml: string } {
 }
 
 describe('repair-stage retry ledger reevaluation', () => {
-  it('retains a timed-out fix attempt before its successful retry', async () => {
+  it('retains a budget-limited fix before its next bounded iteration', async () => {
     const { config, yaml } = dynamicWorkflow();
     const created = createRun(projectDir, config.name, yaml, ['plan']);
     writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
@@ -130,10 +130,12 @@ describe('repair-stage retry ledger reevaluation', () => {
     const repair = final.stages.fix_release;
 
     expect(final.status).toBe('complete');
-    expect(repair.attempts?.map((attempt) => attempt.status)).toEqual(['failed', 'complete']);
-    expect(repair.attempts?.map((attempt) => attempt.exitCode)).toEqual([124, 0]);
+    expect(repair.attempts?.map((attempt) => attempt.status)).toEqual(['complete', 'complete']);
+    expect(repair.attempts?.[0].continuation).toMatchObject({ reason: 'stage_budget', forced: true });
+    expect(final.currentIteration).toBe(2);
+    expect(repair.attempts?.map((attempt) => attempt.exitCode)).toEqual([0, 0]);
     expect(repair).toMatchObject({
-      status: 'complete', retries: 1, reruns: 1,
+      status: 'complete', retries: 0, reruns: 1,
       duration_ms: 500, tokens_in: 50, tokens_out: 5,
     });
   });

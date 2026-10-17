@@ -61,10 +61,10 @@ See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
 
 <img src="assets/architecture.png" width="900" alt="FlowCrew architecture: the ship procedure and quick or daemon launch lead to scheduler planning, scoped authors, engine validation, independent gates and bounded repair; declared reality checks guard successful outcomes, with adapters, roles, dashboard, campaigns and persistent evidence alongside." />
 
-This summarizes the review path; research also has measured rounds and a stopping policy.
-An optional race tries one private candidate through gates and bounded repairs before trying a second.
-The selected patch still faces the parent run's gates. Declared reality checks govern terminal success,
-with advisory exceptions. See [races](guide/agent-protocol.md#planner-selected-races) and
+Each authoring stage has one author. Independent gates receive their own stage budgets,
+including configured validation. Declared reality checks govern terminal success, with advisory
+exceptions. Research also has measured rounds and a stopping policy. See
+[stage budgets](guide/agent-protocol.md#stage-budgets-and-retained-continuation) and
 [deterministic checks](guide/brief-contract.md#deterministic-checks).
 
 ## Get started
@@ -179,7 +179,8 @@ they do not guarantee novel proposals.
   output/input locations make results inspectable. Location checks establish required paths
   and producer bindings; content quality still needs criteria and review.
 - **Stopping is a rule.** Research policy owns numeric keep/stop decisions. Repair limits,
-  attempt deadlines and a deterministic idle watchdog bound execution.
+  live wrap-up guidance retains over-budget work for the next bounded iteration;
+  independent gate budgets and a deterministic idle watchdog bound execution.
 
 The [architecture](guide/architecture.md) and [artifact protocol](guide/agent-protocol.md) explain these boundaries.
 

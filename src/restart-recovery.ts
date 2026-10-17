@@ -11,7 +11,7 @@ import { recordRunEvent } from './run-events.js';
 import { planDigest } from './plan-revisions.js';
 import { canonicalRunId } from './cancellation-policy.js';
 import { runsRoot } from './store.js';
-import { StageConfigSchema } from './scheduler/sched_admission/configuration.js';
+import { RecordedStageConfigSchema } from './scheduler/sched_admission/configuration.js';
 import { artifactDeclarationErrors } from './artifact-declarations.js';
 
 export interface EngineCheckpoint {
@@ -127,7 +127,7 @@ export function persistedPlanErrors(state: StoreState): string[] {
       || (state.queryState?.version !== undefined && state.queryState.version !== 1)) errors.push('RECOVERY_PLAN_INCOMPATIBLE: unsupported persisted plan/query format');
   if (Boolean(state.planControl) !== Boolean(state.queryState?.planRevision) || (state.planControl && planDigest(state.planControl.stages) !== state.queryState?.planRevision?.digest)) errors.push('RECOVERY_PLAN_UNBOUND: admitted plan revision is unavailable or does not match the persisted plan');
   for (const stage of state.planControl?.stages ?? []) {
-    const parsed = StageConfigSchema.safeParse(stage);
+    const parsed = RecordedStageConfigSchema.safeParse(stage);
     if (!parsed.success || artifactDeclarationErrors(stage.artifact_contract, stage.id).length) errors.push(`RECOVERY_PLAN_INCOMPATIBLE: ${stage.id} does not satisfy the current execution contract`);
   }
   return errors;

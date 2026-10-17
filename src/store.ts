@@ -72,13 +72,18 @@ export interface StageAttemptTimeoutSummary {
   budgetMs: number;
   attemptStartedAt: string;
   deadlineAt: string;
+  budgetDeadlineAt?: string;
+  wrapUpAt?: string;
+  finishingMs?: number;
+  wrapUpRequestedAt?: string;
+  wrapUpDeliveredAt?: string;
   elapsedMs: number;
   remainingMs: number;
   /** Historical extension receipts; new immutable deadlines never write these. */
   rejectedExtensionCount?: number;
   decisionPaths?: string[];
   mismatchPaths?: string[];
-  terminationCause?: 'complete' | 'stage_abort' | 'supervisor_abort' | 'approval_suspension' | 'scope_revision_suspension' | 'attempt_timeout' | 'adapter_error' | 'failed';
+  terminationCause?: 'complete' | 'stage_abort' | 'supervisor_abort' | 'approval_suspension' | 'scope_revision_suspension' | 'budget_wrap_up' | 'budget_forced_stop' | 'attempt_timeout' | 'adapter_error' | 'failed';
   deadlineReachedAt?: string;
   childClosedAt?: string;
   deadlineOverrunMs?: number;
@@ -111,6 +116,16 @@ export interface AttemptAttribution {
 }
 export type AttemptDisposition = 'pending' | 'accepted' | 'discarded' | 'superseded' | 'repaired';
 
+/** A settled slice of work, not evidence that its duties or gates passed. */
+export interface StageContinuation {
+  reason: 'stage_budget';
+  forced: boolean;
+  /** Run-relative retained done/remaining handoff. */
+  handoff: string;
+  /** Engine retention facts, distinct from an author's schema-validated result. */
+  summary?: string;
+}
+
 export interface StageAttempt extends InvocationUsage {
   role?: string;
   iteration?: number;
@@ -140,6 +155,7 @@ export interface StageAttempt extends InvocationUsage {
   constraintAudit?: StageConstraintAuditSummary;
   /** Attempt-local immutable deadline evidence. */
   timeout?: StageAttemptTimeoutSummary;
+  continuation?: StageContinuation;
 }
 
 export interface StageStatus {
@@ -172,6 +188,13 @@ export interface StageStatus {
   validationGeneratedWrites?: string[];
   constraintAudit?: StageConstraintAuditSummary;
   timeout?: StageAttemptTimeoutSummary;
+  continuation?: StageContinuation;
+}
+
+/** Control-boundary work may be complete or pending re-admission; neither is
+ * permission to reset the workflow's spent iteration budget. */
+export function isContinuingStage(stage: StageStatus): boolean {
+  return Boolean(stage.continuation) && (stage.status === STAGE_STATUS.COMPLETE || stage.status === STAGE_STATUS.PENDING);
 }
 
 /**
@@ -2112,6 +2135,7 @@ export interface CompleteStageAttemptInput extends InvocationUsage {
   validationGeneratedWrites?: string[];
   constraintAudit?: StageConstraintAuditSummary;
   timeout?: StageAttemptTimeoutSummary;
+  continuation?: StageContinuation;
 }
 
 /** Complete only the current attempt, then rebuild compatibility aggregates. */
@@ -2172,6 +2196,7 @@ export function completedStageAttemptStatus(
     validationGeneratedWrites: completion.validationGeneratedWrites,
     constraintAudit: completion.constraintAudit,
     timeout: completion.timeout,
+    continuation: completion.continuation,
   };
   const writes = uniqueStrings(previous?.writes, completion.writes);
   const usage = sumInvocationUsage(attempts);
@@ -2203,6 +2228,7 @@ export function completedStageAttemptStatus(
     ),
     constraintAudit: completion.constraintAudit ?? previous?.constraintAudit,
     timeout: completion.timeout ?? previous?.timeout,
+    continuation: completion.continuation,
   };
   return final;
 }
@@ -2243,11 +2269,13 @@ export function settledStageAttemptStatus(
     throw new Error(`Cannot settle attempt ${attemptIndex}: current execution is not the matching closed child`);
   }
   if (failure) Object.assign(attempt, failure);
+  if (attempt.exitCode !== 0) delete attempt.continuation;
   // Reconciliation can already have refused or suspended this exact execution.
   attempt.status = attempt.exitCode !== 0 ? 'failed'
     : suspended || attempt.status === 'suspended' ? 'suspended' : 'complete';
   return {
     ...previous, attempts,
+    continuation: attempt.continuation,
     status: attempt.status === 'suspended' ? STAGE_STATUS.PENDING : attempt.status,
     exitCode: attempt.status === 'suspended' ? undefined : attempt.exitCode,
     completedAt: attempt.status === 'suspended' ? undefined : attempt.completedAt,
@@ -2280,7 +2308,7 @@ export function attachStageConstraintAudit(
   attempts[index] = {
     ...attempts[index],
     constraintAudit: audit,
-    ...(violationError ? { status: 'failed', exitCode: 1, error: violationError } : {}),
+    ...(violationError ? { status: 'failed', exitCode: 1, error: violationError, continuation: undefined } : {}),
   };
   const updated: StageStatus = {
     ...status,
@@ -2290,6 +2318,7 @@ export function attachStageConstraintAudit(
       status: STAGE_STATUS.FAILED,
       exitCode: 1,
       error: violationError,
+      continuation: undefined,
     } : {}),
   };
   writeStageStatus(projectDir, runId, stageId, updated);
@@ -2408,6 +2437,7 @@ export function rependStageStatus(
     retries,
     error,
     acceptedFrom: undefined,
+    continuation: undefined,
   };
 }
 

@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { inspectArtifactDeclarations } from '../../artifact-declarations.js';
 import { resolveResearchPaths } from '../../research-paths.js';
 import { discoverProjectValidation } from '../../project-validation.js';
-import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, EMITTED_RESEARCH_DECISIONS, raceAdmissionErrors } from './configuration.js';
+import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, EMITTED_RESEARCH_DECISIONS, RecordedWorkflowConfigSchema } from './configuration.js';
 import { finiteStatusConditionDomainError, researchTerminalConditionExcludesContinue, assessTerminalConditionCoverage } from './condition-coverage.js';
 import { normalizedProjectPath, scopeMatchesProjectPath } from './scope-services.js';
 import { inspectStageGraph, parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn, findScopeConflict } from './frontier.js';
@@ -21,10 +21,10 @@ import type { DeclaredInputScopeServices } from './scope-services.js';
 import type { DeclaredInputWriteBinding } from '../../scheduler.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
 
-export function loadWorkflow(yamlPath: string): { config: WorkflowConfig; raw: string } {
+export function loadWorkflow(yamlPath: string, recorded = false): { config: WorkflowConfig; raw: string } {
   const raw = readFileSync(yamlPath, 'utf-8');
   const parsed = parseYaml(raw);
-  const config = WorkflowConfigSchema.parse(parsed);
+  const config = (recorded ? RecordedWorkflowConfigSchema : WorkflowConfigSchema).parse(parsed);
   for (const stage of config.stages) {
     if (!stage.condition?.trim()) continue;
     const condition = parseCondition(stage.condition);
@@ -459,7 +459,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
     for (const stage of input.dispatched) {
       if (!stage.dynamic_dispatch && !stage.retry_to?.length && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
     }
-    errors.push(...input.dispatched.flatMap(stage => raceAdmissionErrors(stage, all)));
     for (const stage of input.dispatched) {
       for (const ref of stage.criterion_refs ?? []) {
         if (!criterionIds.has(ref)) errors.push(`${stage.id}.criterion_refs: unknown criterion ${JSON.stringify(ref)}`);

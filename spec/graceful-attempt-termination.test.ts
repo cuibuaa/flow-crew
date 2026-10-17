@@ -1,3 +1,4 @@
+import { stageWrapUpTiming } from '../src/attempt-deadline.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { retireRunScratch } from '../src/invocation-scratch.js';
 import {
@@ -422,7 +423,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('records post-deadline cleanup as real overrun without moving the immutable deadline', { timeout: 30_000 }, async () => {
+  it('records forced wrap-up and child cleanup without moving the immutable hard stop', { timeout: 30_000 }, async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-deadline-project-'));
     const stateRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-deadline-state-'));
     const previousStateRoot = fcGlobalDir();
@@ -492,8 +493,9 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
             childClosed: Boolean(timeout.childClosedAt),
             cleanupWritten: existsSync(cleanupPath),
           });
-          expect(status.error).toContain('timed out after');
-          expect(timeout.terminationCause).toBe('attempt_timeout');
+          expect(status.error).toBeUndefined();
+          expect(status.continuation).toMatchObject({ forced: true });
+          expect(timeout.terminationCause).toBe('budget_forced_stop');
           expect(timeout.remainingMs).toBe(0);
         } finally {
           hardStopFixture(fixturePid(pidPath));
@@ -502,9 +504,9 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       }
       process.stdout.write(`DEADLINE_SETTLEMENT_SAMPLES=${JSON.stringify(observations)}\n`);
 
-      expect(observations.every(({ exitCode }) => exitCode === 124)).toBe(true);
+      expect(observations.every(({ exitCode }) => exitCode === 0)).toBe(true);
       expect(observations.every(({ budgetMs, deadlineSpanMs }) => (
-        budgetMs === 2_000 && deadlineSpanMs === budgetMs
+        budgetMs === 2_000 && deadlineSpanMs === stageWrapUpTiming(budgetMs).hardLimitMs
       ))).toBe(true);
       expect(observations.every(({ elapsedMs, budgetMs }) => elapsedMs >= budgetMs)).toBe(true);
       expect(observations.every(({ deadlineOverrunMs }) => (

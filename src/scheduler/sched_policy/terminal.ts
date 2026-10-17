@@ -2,7 +2,7 @@ import { publishRunCompletion } from './run-completion.js';
 /** Terminal selection, floor/owner/freshness/reality enforcement and quiescent conclusion; receives validation, campaign and escalation services. */
 import { type Adapter } from '../../adapters/base.js';
 import { type ProjectValidationDependencies } from '../../project-validation.js';
-import { type StoreState, type PostTerminateHook, RUN_STATUS, STAGE_STATUS, enforceRealityGateBeforeTerminal, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName, isSuccessfulRunStatus } from '../../store.js';
+import { type StoreState, isContinuingStage, type PostTerminateHook, RUN_STATUS, STAGE_STATUS, enforceRealityGateBeforeTerminal, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName, isSuccessfulRunStatus } from '../../store.js';
 import { createHash } from 'node:crypto';
 import { hashRollbackFileSync, updateFileHashSync } from '../../rollback-content-store.js';
 import { renameSync, copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
@@ -230,6 +230,9 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
   ): Promise<TerminalEvaluation> {
     if (!state.terminalStates) {
       return { decision: 'not_matched', reasons: ['the brief declares no terminal states'] };
+    }
+    if (Object.values(state.stages).some(isContinuingStage)) {
+      return { decision: 'deferred', reasons: ['retained stage budget work must continue before terminal settlement'] };
     }
     const notMatchedReasons: string[] = [];
     const deferredReasons: string[] = [];

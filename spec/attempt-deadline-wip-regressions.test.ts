@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
-import type { AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import {
   createRun,
   fcGlobalDir,
@@ -65,8 +65,8 @@ afterEach(() => {
   rmSync(stateRoot, { recursive: true, force: true });
 });
 
-describe('immutable attempt deadline regressions', () => {
-  it('F03 classifies an exit-zero adapter settlement after timer starvation as attempt_timeout', { timeout: 10_000 }, async () => {
+describe('bounded stage wrap-up and cancellation regressions', () => {
+  it('F03 retains an exit-zero settlement after starved hard-stop expiry as forced continuation', { timeout: 10_000 }, async () => {
     const stageId = 'starved_deadline';
     const created = createRun(projectRoot, 'starved-deadline', 'name: starved-deadline', [stageId]);
     const budgetMs = 40;
@@ -79,7 +79,7 @@ describe('immutable attempt deadline regressions', () => {
         mkdirSync(home, { recursive: true });
         writeFileSync(join(home, 'fixture-thread.json'), '{"messages":["needed thread context"]}');
         // Advance past the deadline while leaving its callback pending.
-        advance(120);
+        advance(stageWrapUpTiming(budgetMs).hardLimitMs + 80);
         return { output: 'late success', exitCode: 0, duration_ms: 120, sessionId: '123e4567-e89b-42d3-a456-426614174000' };
       },
     };
@@ -99,16 +99,15 @@ describe('immutable attempt deadline regressions', () => {
     });
     const status = readStageStatus(projectRoot, created.runId, stageId);
 
-    expect(result).toMatchObject({ exitCode: 124, timedOut: true });
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false, continuation: { forced: true } });
     expect(adapterStarted).toBe(true);
     expect(existsSync(home)).toBe(true);
     expect(status).toMatchObject({
-      status: 'failed',
-      error: expect.stringMatching(/timed out/iu),
+      status: 'complete',
       timeout: {
         budgetMs,
         remainingMs: 0,
-        terminationCause: 'attempt_timeout',
+        terminationCause: 'budget_forced_stop',
         deadlineReachedAt: expect.any(String),
         deadlineOverrunMs: expect.any(Number),
       },
@@ -116,14 +115,14 @@ describe('immutable attempt deadline regressions', () => {
     expect(status.timeout?.deadlineOverrunMs).toBeGreaterThan(0);
   });
 
-  it('QA16 classifies a rejected adapter settlement after timer starvation as attempt_timeout', { timeout: 10_000 }, async () => {
+  it('QA16 retains a rejected settlement after starved hard-stop expiry as forced continuation', { timeout: 10_000 }, async () => {
     const stageId = 'starved_rejection';
     const created = createRun(projectRoot, 'starved-rejection', 'name: starved-rejection', [stageId]);
     const budgetMs = 40;
     const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        advance(120);
+        advance(stageWrapUpTiming(budgetMs).hardLimitMs + 80);
         throw new Error('late adapter rejection');
       },
     };
@@ -143,12 +142,12 @@ describe('immutable attempt deadline regressions', () => {
     });
     const status = readStageStatus(projectRoot, created.runId, stageId);
 
-    expect(result).toMatchObject({ exitCode: 124, timedOut: true });
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false, continuation: { forced: true } });
     expect(status).toMatchObject({
-      status: 'failed',
+      status: 'complete',
       timeout: {
         budgetMs,
-        terminationCause: 'attempt_timeout',
+        terminationCause: 'budget_forced_stop',
         deadlineReachedAt: expect.any(String),
       },
     });
@@ -163,7 +162,7 @@ describe('immutable attempt deadline regressions', () => {
     const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        advance(120);
+        advance(stageWrapUpTiming(40).hardLimitMs + 80);
         atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId,
@@ -211,7 +210,7 @@ describe('immutable attempt deadline regressions', () => {
     const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
       async run() {
-        advance(80, true);
+        advance(stageWrapUpTiming(40).hardLimitMs + 80, true);
         atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId,

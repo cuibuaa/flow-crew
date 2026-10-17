@@ -11,7 +11,7 @@ import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { captureEngineCheckpoint, reconcileHostInterruptedRun } from '../src/restart-recovery.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import { processStartToken } from '../src/run-lock.js';
-import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
+import { RecordedStageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { beginStageAttempt, createRun, fcGlobalDir, readRunState, setFcGlobalDir, updateRunState } from '../src/store.js';
 import type { SupervisorBackend } from '../src/supervision.js';
 import { TaskRegistry } from '../src/task-registry.js';
@@ -41,8 +41,8 @@ async function interruptedLegacy(race: boolean, previousBoot = false) {
   for (let count = 0; count < 500 && !existsSync(marker); count++) await delay(10);
   expect(existsSync(marker)).toBe(true);
   const contract = { version: 1, produces: [], reads: [], replays: [] };
-  const stages = [StageConfigSchema.parse({ id: 'work', role: 'coder', race, scope: [], artifact_contract: contract }),
-    StageConfigSchema.parse({ id: 'review', role: 'qa', is_gate: true, depends_on: ['work'], scope: [], artifact_contract: contract })];
+  const stages = [RecordedStageConfigSchema.parse({ id: 'work', role: 'coder', race, scope: [], artifact_contract: contract }),
+    RecordedStageConfigSchema.parse({ id: 'review', role: 'qa', is_gate: true, depends_on: ['work'], scope: [], artifact_contract: contract })];
   const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work', 'review']);
   beginStageAttempt(project, created.runId, 'work', 0);
   updateRunState(project, created.runId, state => {

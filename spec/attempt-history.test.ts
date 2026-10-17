@@ -30,11 +30,11 @@ function writeRoles(): string {
   return agentsDir;
 }
 
-function workflow(): { config: WorkflowConfig; yaml: string } {
+function workflow(maxIterations = 1): { config: WorkflowConfig; yaml: string } {
   const yaml = [
     'name: attempts',
     'defaults:',
-    '  max_iterations: 1',
+    `  max_iterations: ${maxIterations}`,
     '  max_retries: 0',
     'stages:',
     '  - id: plan',
@@ -45,7 +45,7 @@ function workflow(): { config: WorkflowConfig; yaml: string } {
     yaml,
     config: {description: '', 
       name: 'attempts',
-      defaults: { max_iterations: 1, max_retries: 0 },
+      defaults: { max_iterations: maxIterations, max_retries: 0 },
       stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } }],
     },
   };
@@ -143,8 +143,8 @@ describe('append-only stage attempts', () => {
     expect(summary).toContain('release_gate: complete — ran 2 times, 24s cumulative');
   });
 
-  it('retains a failed technical retry between gate rejection and final pass', async () => {
-    const { config, yaml } = workflow();
+  it('retains a budget handoff between gate rejection and the next bounded iteration pass', async () => {
+    const { config, yaml } = workflow(2);
     const created = createRun(projectDir, config.name, yaml, ['plan']);
     writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
     const initial = readRunState(projectDir, created.runId);
@@ -198,9 +198,11 @@ describe('append-only stage attempts', () => {
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles(), created.runId, 'release task', true);
     const gate = final.stages.release_gate;
     expect(final.status).toBe('complete');
-    expect(gate.attempts?.map((attempt) => attempt.status)).toEqual(['complete', 'failed', 'complete']);
+    expect(final.currentIteration).toBe(2);
+    expect(gate.attempts?.[1].continuation).toMatchObject({ forced: true });
+    expect(gate.attempts?.map((attempt) => attempt.status)).toEqual(['complete', 'complete', 'complete']);
     expect(gate.attempts?.map((attempt) => attempt.duration_ms)).toEqual([100, 200, 300]);
-    expect(gate).toMatchObject({ duration_ms: 600, tokens_out: 6, retries: 1, reruns: 2 });
+    expect(gate).toMatchObject({ duration_ms: 600, tokens_out: 6, retries: 0, reruns: 2 });
   });
 
   it('keeps top-level compatibility values equal to a single successful attempt', () => {

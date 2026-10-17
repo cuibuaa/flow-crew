@@ -53,8 +53,9 @@ export function readGateVerdict(
   try {
     const accepted = runId && existsSync(join(runDir(projectDir, runId), 'run.json'))
       ? readRunState(projectDir, runId).stages[stageId] : undefined;
+    if (accepted?.continuation) return null;
     if (accepted?.status === STAGE_STATUS.COMPLETE && accepted.acceptedFrom) return accepted.acceptedFrom.verdict;
-  } catch { /* Optional race acceptance must not prevent reading an authored verdict. */ }
+  } catch { /* Historical child acceptance must not prevent reading an authored verdict. */ }
   const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
   return evaluateGateVerdict(readGateVerdictDocument(base, stageId, allowSharedFallback), projectDir, stageId,
     runId, contract, allowSharedFallback, requireValidationDelta);
@@ -66,6 +67,7 @@ export function readGateEvaluation(projectDir: string, stage: StageConfig, state
   authoredVerdict: GateVerdict | null; effectiveVerdict: GateVerdict | null;
 } {
   const accepted = state.stages[stage.id];
+  if (accepted?.continuation) return { authoredVerdict: null, effectiveVerdict: null };
   if (accepted?.status === STAGE_STATUS.COMPLETE && accepted.acceptedFrom) {
     return { authoredVerdict: accepted.acceptedFrom.verdict, effectiveVerdict: accepted.acceptedFrom.verdict };
   }

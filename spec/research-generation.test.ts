@@ -158,7 +158,7 @@ it.each([
     projectFiles: { [written]: bytes } } }), {
     stageId: 'measure', projectDir: project, runId, runDir: run,
     role: { name: 'coder', description: 'fixture', model: 'default', reasoning_effort: 'low', tools: [], prompt: '' },
-    dependsOn: [], promptTemplate: 'Publish measurement.', timeout_ms: 5000, retries: 0,
+    dependsOn: [], promptTemplate: 'Publish measurement.', timeout_ms: 20000, retries: 0,
     artifactContract: workflow.stages[0].artifact_contract!, gateReviewed: true,
   });
   expect(produced.exitCode, produced.output).toBe(0);

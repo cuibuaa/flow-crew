@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { sha256Canonical as digest } from './runtime-negotiation.js';
-import { WorkflowConfigSchema } from './scheduler/sched_admission/configuration.js';
+import { RecordedWorkflowConfigSchema } from './scheduler/sched_admission/configuration.js';
 import { persistedPlanErrors, checkpointCommandFateKnown, checkpointConsumers, engineGeneration, readHostBootId } from './restart-recovery.js';
 import { inspectRunScheduler, processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './run-lock.js';
 import { interruptedStageStatus, settleInterruptedRunStagesAtPath, readRunState, readStageStatus, requireKnownRunStatus, runDir, RUN_STATUS, STAGE_STATUS, updateOperationalRunStateAtPath, type StoreState } from './store.js';
@@ -54,7 +54,7 @@ export function assertContinuationCompatible(projectDir: string, runId: string):
     requireKnownRunStatus(state.status, `continue run ${runId}`);
     if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new Error('run/project binding mismatch');
     if (state.recovery?.kind === 'blocked') throw new Error(state.recovery.reason);
-    const workflow = WorkflowConfigSchema.parse(parse(readFileSync(join(runDir(projectDir, runId), 'workflow.yaml'), 'utf8')));
+    const workflow = RecordedWorkflowConfigSchema.parse(parse(readFileSync(join(runDir(projectDir, runId), 'workflow.yaml'), 'utf8')));
     const errors = persistedPlanErrors(state);
     const checkpoint = state.engineCheckpoint;
     if (checkpoint && (![1, 2].includes(checkpoint.version) || checkpoint.runId !== runId

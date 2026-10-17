@@ -6,8 +6,6 @@ import { RecordedArtifactContractSchema, artifactActivation } from '../../artifa
 import { type StoreState, RUN_STATUS } from '../../store.js';
 import { parseCondition } from '../../condition.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
-import { parseDeclaredScope, transitivelyDependsOn } from './frontier.js';
-import { scopeRequestAlreadyAuthorized } from '../sched_scope/path-capabilities.js';
 
 export { loadDefaults };
 
@@ -39,7 +37,7 @@ export function parseAgent(raw: unknown): AgentConfig {
   return applySharedRoleContract(agent);
 }
 
-export const StageConfigSchema = z.object({
+const StageFields = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
   role: z.string().min(1),
   depends_on: z.array(z.string()).optional().default([]),
@@ -52,8 +50,6 @@ export const StageConfigSchema = z.object({
   max_retries: z.number().optional(),
   skills: z.array(z.string()).optional().default([]),
   dynamic_dispatch: z.boolean().optional().default(false),
-  /** The planner selects competition; ordinary omission retains one author. */
-  race: z.boolean().optional(),
   is_gate: z.boolean().optional().default(false),
   retry_to: z.array(z.string()).optional(),
   /** Canonical IDs from the run-local brief_criteria.json artifact. */
@@ -62,65 +58,44 @@ export const StageConfigSchema = z.object({
   artifact_contract: RecordedArtifactContractSchema.optional(),
 });
 
-export const WorkflowConfigSchema = z.object({
+/** Reject retired execution requests before Zod strips unknown metadata. */
+export function refuseCompetition(value: unknown): void {
+  if (!value || typeof value !== 'object') return;
+  if (Object.hasOwn(value, 'race')) throw new Error('race is no longer supported: every authoring stage runs one author; remove the competition request');
+  for (const child of Object.values(value)) refuseCompetition(child);
+}
+
+export const StageConfigSchema = z.preprocess((value, context) => {
+  try { refuseCompetition(value); }
+  catch (error) { context.addIssue({ code: 'custom', path: ['race'], message: (error as Error).message }); }
+  return value;
+}, StageFields);
+
+/** Read-only history retains the ownership marker; it never enables execution. */
+export const RecordedStageConfigSchema = StageFields.extend({ race: z.boolean().optional() });
+export type StageConfig = z.infer<typeof StageFields>;
+export type RecordedStageConfig = z.infer<typeof RecordedStageConfigSchema>;
+
+const WorkflowFields = z.object({
   name: z.string(),
   description: z.string().optional().default(''),
   defaults: z.object({
     max_retries: z.number().optional(),
-    max_iterations: z.number().optional(),
+    max_iterations: z.number().int().positive().optional(),
   }).optional().default({}),
-  stages: z.array(StageConfigSchema).min(1),
-  /** A fixed plan. The dynamic_dispatch stage answers with it instead of calling its role, and the
-   * answer is admitted, executed, repaired and re-planned exactly like a planner's. */
+  stages: z.array(StageFields).min(1),
+  /** A fixed answer to a dynamic_dispatch stage, admitted like a planner answer. */
   dispatch: z.array(z.unknown()).min(1).optional(),
 }).refine((workflow) => !workflow.dispatch || workflow.stages.some((stage) => stage.dynamic_dispatch), {
   path: ['dispatch'], message: 'a fixed dispatch is the answer of a dynamic_dispatch stage; declare that stage',
 });
-
-export type StageConfig = z.infer<typeof StageConfigSchema>;
-
-export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
-
-/** Reuse the admitted gate/repair graph instead of creating a second verification policy.
- * A stage race needs gates that can settle before any later author runs. */
-export function raceCandidateStages(author: StageConfig, stages: StageConfig[]): StageConfig[] {
-  const byId = new Map(stages.map(stage => [stage.id, stage]));
-  const available = (id: string) => id === author.id || transitivelyDependsOn(author.id, id, byId);
-  const gates = stages.filter(stage => stage.is_gate && stage.role !== author.role
-    && stage.depends_on.includes(author.id) && stage.depends_on.every(available) && (stage.scope?.length ?? 0) === 0);
-  const gateIds = new Set(gates.map(stage => stage.id));
-  const repairs = stages.filter(stage => !stage.is_gate && stage.retry_to?.length
-    && stage.retry_to.some(id => gateIds.has(id)));
-  return [author, ...gates, ...repairs];
-}
-
-export function raceAdmissionErrors(author: StageConfig, stages: StageConfig[]): string[] {
-  if (!author.race) return [];
-  if (author.is_gate || author.dynamic_dispatch || author.retry_to?.length) return [`${author.id}.race: only ordinary author stages can race`];
-  const candidates = raceCandidateStages(author, stages), gates = candidates.filter(stage => stage.is_gate);
-  const errors: string[] = [];
-  if (!gates.length || author.criterion_refs.some(ref => !gates.some(gate => gate.criterion_refs.includes(ref)))) {
-    errors.push(`${author.id}.race: requires independent gates covering its criterion_refs with candidate-local or settled ancestor inputs`);
-  }
-  const gateIds = new Set(gates.map(stage => stage.id));
-  const byId = new Map(stages.map(stage => [stage.id, stage]));
-  const available = (id: string) => id === author.id || gateIds.has(id) || transitivelyDependsOn(author.id, id, byId);
-  for (const candidate of candidates.filter(stage => stage.id !== author.id)) {
-    let localCondition = true;
-    try {
-      const id = candidate.condition && parseCondition(candidate.condition).stageId;
-      if (id && !available(id)) localCondition = false;
-    } catch { localCondition = false; }
-    if (!localCondition || !candidate.depends_on.every(available) || (!candidate.is_gate && !candidate.retry_to?.every(id => gateIds.has(id)))) {
-      errors.push(`${author.id}.race: candidate ${candidate.id} requires candidate-local or settled ancestor facts and repairs must return to its gates`);
-    }
-    if (candidate.is_gate) continue;
-    if (candidate.race || (candidate.scope ?? []).some(scope => !scopeRequestAlreadyAuthorized(parseDeclaredScope(scope), (author.scope ?? []).map(parseDeclaredScope)))) {
-      errors.push(`${author.id}.race: candidate repair ${candidate.id} must stay within the author's declared scope and cannot race`);
-    }
-  }
-  return errors;
-}
+export const WorkflowConfigSchema = z.preprocess((value, context) => {
+  try { refuseCompetition(value); }
+  catch (error) { context.addIssue({ code: 'custom', path: ['race'], message: (error as Error).message }); }
+  return value;
+}, WorkflowFields);
+export const RecordedWorkflowConfigSchema = WorkflowFields.safeExtend({ stages: z.array(RecordedStageConfigSchema).min(1) });
+export type WorkflowConfig = z.infer<typeof WorkflowFields>;
 
 /** The scheduler resolves conditions; every consumer reads the same admitted facts. */
 export function refreshRunQueryState(state: StoreState, stages: StageConfig[]): void {

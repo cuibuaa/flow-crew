@@ -9,7 +9,7 @@ import { syncStageStatuses } from '../sched_scope/stage-group.js';
 import { archiveGateRoundEvidence, archiveRejectedGateRuntimeFacts, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
 import { classifyGateRecoveryFact, collectGateRuntimeFacts, findGateRecoveryStages, gateIdsForRecoveryStages, gateRetryDiagnosticSnapshot } from '../sched_settlement/gate-recovery.js';
 import { executeSingleStage } from '../sched_settlement/stage-execution.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isPendingStageStatus, isTerminalRunStatus, readRunState, rependStageStatus, writeRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, isContinuingStage, isPausedRunStatus, isPendingStageStatus, isTerminalRunStatus, readRunState, rependStageStatus, writeRunState } from '../../store.js';
 import { readRunValidationBaseline, settleGateValidationEvidence } from '../sched_settlement/gate-validation.js';
 import { executeIteration } from './iteration.js';
 import { runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
@@ -66,11 +66,12 @@ export async function settleGateRetries(
       if (resumedRepairRound === innerRetriesUsed) innerRetriesUsed--;
     }
     let revisitRuntimeFacts = true;
+    const budgetPending = () => Object.values(state.stages).some(isContinuingStage);
     while (revisitRuntimeFacts) {
     revisitRuntimeFacts = false;
     state = readRunState(projectDir, runId);
-      // Gate and retry_to topology owns verification for every admitted plan;
-      // removing the dispatch-origin restriction also lets isolated stage candidates repair.
+    if (budgetPending()) return { kind: 'continue', state, maxInnerRetries, innerRetriesUsed };
+      // Gate and retry_to topology owns verification for every admitted plan.
       if (readRunValidationBaseline(runDirPath)) {
         for (const gate of sorted.filter((stage) => stage.is_gate && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE && !state.stages[stage.id]?.acceptedFrom)) {
           const validation = await settleGateValidationEvidence(projectDir, runId, gate.id);
@@ -282,6 +283,8 @@ export async function settleGateRetries(
               statuses: state.stages,
             });
 
+            if (budgetPending()) return { kind: 'continue', state, maxInnerRetries, innerRetriesUsed };
+
             // Check for cancellation after fix stages complete
             if (isTerminalRunStatus(state.status)) break;
 
@@ -326,6 +329,7 @@ export async function settleGateRetries(
             }
             state = readRunState(projectDir, runId);
             if (isPausedRunStatus(state.status)) return { kind: 'settled', state };
+            if (budgetPending()) return { kind: 'continue', state, maxInnerRetries, innerRetriesUsed };
 
             // Check gates again
             const recheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);

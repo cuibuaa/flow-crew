@@ -7,6 +7,8 @@ import { type ResearchConfig, type TerminalStatesConfig, type StoreState } from 
 import { resolveResearchPaths } from '../../research-paths.js';
 import type { AgentConfig } from '../../adapters/base.js';
 
+export const SINGLE_AUTHOR_NOTICE = 'Execution model: every authoring stage runs one author. Requests in brief text or frontmatter for competing candidates run as single-author work under this notice. Independent gates have their own stage budgets.';
+
 const SHARED_ROLE_CONTRACT = `## Review contract
 An independent review decides whether the change achieves the brief's outcome and what it breaks.
 Reviewers give every assigned criterion and every score required by the brief or role/gate contract its own result
@@ -92,8 +94,8 @@ export function appendAttemptDeadlineContract(
   prompt: string,
   attemptBudgetMs: number,
 ): string {
-  return `${prompt}\n\nRuntime timeout contract: this execution has an immutable ${attemptBudgetMs}ms deadline. `
-    + `Retries, backoff and fallback consume that same budget; the scheduler allocates any later execution's budget.`;
+  return `${prompt}\n\nStage budget: ${attemptBudgetMs}ms. The engine delivers a live wrap-up instruction before it expires, then allows a bounded finishing interval. Keep admitted files and report done/remaining work. `
+    + `Retries, backoff and fallback share this execution's hard stop; budget handoffs spend the next finite workflow iteration. Independent gates have separate stage budgets.`;
 }
 
 export function appendGateConstraintAuditContext(

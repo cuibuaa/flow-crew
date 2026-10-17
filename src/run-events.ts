@@ -8,6 +8,11 @@ import type { ProviderFailure } from './provider-result.js';
 import { atomicWrite, isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
+  | 'execution_notice'
+  | 'stage_wrap_up_requested'
+  | 'stage_wrap_up_delivered'
+  | 'stage_wrap_up_completed'
+  | 'stage_wrap_up_forced'
   | 'stage_environment_wait_started'
   | 'stage_environment_wait_finished'
   | 'resource_lease_decided'
@@ -116,6 +121,10 @@ export interface RunEvent {
   commandFingerprint?: string;
   commandTimeoutMs?: number;
   remainingBudgetMs?: number;
+  remainingMs?: number;
+  finishingMs?: number;
+  deadlineAt?: string;
+  handoff?: string;
   shortfallMs?: number;
   originalRequestId?: string;
   criterionId?: string;

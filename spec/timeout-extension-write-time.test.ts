@@ -8,7 +8,7 @@ import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
 import {
   runStage,
 } from '../src/worker.js';
-import type { AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { createRun, fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 
 const ATTEMPT_STARTED_WALL_MS = Date.parse('2030-01-01T00:00:00.000Z');
@@ -59,7 +59,7 @@ class ManualAttemptDeadlineClock implements AttemptDeadlineClock {
   }
 }
 
-describe('immutable attempt deadline settlement', () => {
+describe('bounded wrap-up settlement accounting', () => {
   async function persistedTerminationCause(settleAfterDeadline: boolean) {
     const stageId = settleAfterDeadline ? 'late_settlement' : 'prompt_settlement';
     const created = createRun(projectDir, 'deadline-accounting', 'name: deadline-accounting', [stageId]);
@@ -69,9 +69,9 @@ describe('immutable attempt deadline settlement', () => {
       return new Promise<RunResult>((resolve) => {
         opts.abortSignal?.addEventListener('abort', () => {
           if (settleAfterDeadline) clock.advance(50);
-          resolve({ output: 'cancelled', exitCode: 137, duration_ms: clock.monotonicNow() });
+          resolve({ output: 'retained progress', exitCode: 137, duration_ms: clock.monotonicNow() });
         }, { once: true });
-        setImmediate(() => clock.advance(50));
+        setImmediate(() => clock.advance(stageWrapUpTiming(50).hardLimitMs));
       });
     } };
 
@@ -91,8 +91,8 @@ describe('immutable attempt deadline settlement', () => {
     return readStageStatus(projectDir, created.runId, stageId).timeout?.terminationCause;
   }
 
-  it('keeps the same attempt-timeout cause while child settlement is observed', async () => {
-    await expect(persistedTerminationCause(true)).resolves.toBe('attempt_timeout');
-    await expect(persistedTerminationCause(false)).resolves.toBe('attempt_timeout');
+  it('keeps the same forced-wrap cause while child settlement is observed', async () => {
+    await expect(persistedTerminationCause(true)).resolves.toBe('budget_forced_stop');
+    await expect(persistedTerminationCause(false)).resolves.toBe('budget_forced_stop');
   });
 });

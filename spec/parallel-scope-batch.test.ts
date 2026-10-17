@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import {
@@ -277,7 +278,7 @@ describe('scheduler scope waves', () => {
         if (opts.stageId === '_summary') {
           return fixtureResult({ output: '## What was done\n- summarized', exitCode: 0, duration_ms: 1 }, opts);
         }
-        const interval = { start: Date.now(), end: 0 };
+        const interval = { start: performance.now(), end: 0 };
         invocationIntervals[opts.stageId].push(interval);
         active++;
         maxActive = Math.max(maxActive, active);
@@ -292,8 +293,8 @@ describe('scheduler scope waves', () => {
             if (opts.stageId === 'readonly_left') {
               physicalWrites++;
               writeFileSync(protectedPath, 'unauthorized adapter write\n');
-              const deadline = Date.now() + 2_000;
-              while (Date.now() < deadline && readFileSync(protectedPath, 'utf-8') !== preimage) {
+              const deadline = performance.now() + 2_000;
+              while (performance.now() < deadline && readFileSync(protectedPath, 'utf-8') !== preimage) {
                 await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
               }
             } else {
@@ -303,13 +304,13 @@ describe('scheduler scope waves', () => {
           return fixtureResult({
             output: `${opts.stageId} invocation finished`,
             exitCode: 0,
-            duration_ms: Date.now() - interval.start,
+            duration_ms: performance.now() - interval.start,
             ...(opts.stageId === 'readonly_left' && physicalWrites === 1
               ? { writes: ['protected.txt'], writeAttribution: 'structured' as const }
               : { writeAttribution: 'unknown' as const }),
           }, opts);
         } finally {
-          interval.end = Date.now();
+          interval.end = performance.now();
           active--;
         }
       },
@@ -334,8 +335,12 @@ describe('scheduler scope waves', () => {
     const rightAttempt = final.stages.readonly_right.attempts?.at(-1);
     expect(leftAttempt).toBeDefined();
     expect(rightAttempt).toBeDefined();
-    expect(Date.parse(leftAttempt!.startedAt)).toBeLessThan(Date.parse(rightAttempt!.completedAt!));
-    expect(Date.parse(rightAttempt!.startedAt)).toBeLessThan(Date.parse(leftAttempt!.completedAt!));
+    // Wall time can move backwards during a run. Establish actual overlap from
+    // the same monotonic clock that measured these invocations.
+    const leftInterval = invocationIntervals.readonly_left[0];
+    const rightInterval = invocationIntervals.readonly_right[0];
+    expect(leftInterval.start).toBeLessThan(rightInterval.end);
+    expect(rightInterval.start).toBeLessThan(leftInterval.end);
     for (const stageId of ['readonly_left', 'readonly_right']) {
       const status = final.stages[stageId];
       expect(status.constraintAudit).toMatchObject({ violationCount: 1, liveRestoredCount: 1 });

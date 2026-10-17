@@ -4,14 +4,14 @@ import { BriefAdmissionRecord, verifyBriefAdmission } from '../../brief-prefligh
 import { resolveRunIdentity } from '../../cancellation-policy.js';
 import { reconcileHostInterruptedRun } from '../../restart-recovery.js';
 import { claimLaunchIntent, describeLiveRunOwner, findLiveRunOwnerForProject, inspectRunScheduler, invalidateRunLockCache, releaseLaunchIntent } from '../../run-lock.js';
-import { StageConfig, WorkflowConfig, WorkflowConfigSchema, loadDefaults, normalizeStageContracts, raceAdmissionErrors } from '../sched_admission/configuration.js';
+import { StageConfig, WorkflowConfig, loadDefaults, normalizeStageContracts, RecordedWorkflowConfigSchema, refuseCompetition } from '../sched_admission/configuration.js';
 import { topoSort } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
 import { claimSchedulerPid, removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
 import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { snapshotShipSetupValidationBaseline } from '../sched_settlement/gate-validation.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, atomicWrite, initializeReservedRun, isPausedRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, isContinuingStage, atomicWrite, initializeReservedRun, isPausedRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
 import { mkdirSync, rmSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,12 +27,13 @@ function isContinuationStatus(status: string): boolean {
 export function workflowContinuation(state: StoreState, projectDir: string, runId: string, workflow?: WorkflowConfig): { iteration: number; gateIds: string[] } {
   const currentIteration = state.parked?.atIteration ?? state.currentIteration ?? 1;
   const workflowPath = join(runDir(projectDir, runId), 'workflow.yaml');
-  const admitted = workflow ?? (existsSync(workflowPath) ? WorkflowConfigSchema.parse(parseYaml(readFileSync(workflowPath, 'utf8'))) : undefined);
+  const admitted = workflow ?? (existsSync(workflowPath) ? RecordedWorkflowConfigSchema.parse(parseYaml(readFileSync(workflowPath, 'utf8'))) : undefined);
   const gateIds = state.status === RUN_STATUS.INCOMPLETE
     ? collectGateRuntimeFacts(state.planControl?.stages ?? admitted?.stages ?? [], state, projectDir, runId)
       .failedGateIds.filter(id => state.stages[id]?.status === STAGE_STATUS.COMPLETE)
     : [];
-  const iteration = currentIteration + Number(gateIds.length > 0);
+  const budgetContinuation = Object.values(state.stages).some(isContinuingStage);
+  const iteration = currentIteration + Number(gateIds.length > 0 || budgetContinuation);
   const maxIterations = state.maxIterations ?? admitted?.defaults.max_iterations ?? loadDefaults().max_iterations;
   if (iteration > maxIterations) throw new Error(`Cannot resume: iteration budget exhausted (${currentIteration}/${maxIterations}); no admitted iteration remains.`);
   return { iteration, gateIds };
@@ -56,11 +57,12 @@ export function prepareWorkflowLaunch(
       || archived.deploymentHold || archived.recovery?.kind === 'resumable' || (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint)) {
       // Resume the admitted contract, validated by this engine's ordinary
       // parser, even if engine configuration changed during the redeploy.
-      const admitted = WorkflowConfigSchema.parse(parseYaml(readFileSync(join(runDir(projectDir, existingRunId), 'workflow.yaml'), 'utf8')));
+      const admitted = RecordedWorkflowConfigSchema.parse(parseYaml(readFileSync(join(runDir(projectDir, existingRunId), 'workflow.yaml'), 'utf8')));
       for (const key of Object.keys(workflow)) Reflect.deleteProperty(workflow, key);
       Object.assign(workflow, admitted);
     }
   }
+  if (!launchState) refuseCompetition(workflow);
   normalizeStageContracts(workflow.stages);
   if (briefAdmission) {
     if (taskDescription === undefined) {
@@ -74,14 +76,13 @@ export function prepareWorkflowLaunch(
       );
     }
   }
-  const raceErrors = workflow.stages.flatMap(stage => raceAdmissionErrors(stage, workflow.stages));
-  if (raceErrors.length) throw new Error(raceErrors.join('; '));
   // The run-local workflow is the normalized executable contract, including
   // inferred gate/dependency facts, not the stale input text.
   workflowYaml = stringifyYaml(workflow);
   const baseStages = topoSort(workflow.stages);
   const stageIds = baseStages.map((s) => s.id);
   let maxIterations = workflow.defaults.max_iterations ?? loadDefaults().max_iterations;
+  if (!Number.isSafeInteger(maxIterations) || maxIterations < 1) throw new Error('max_iterations must be a finite positive integer');
 
   let runId: string;
   let runDirPath: string;

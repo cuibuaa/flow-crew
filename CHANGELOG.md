@@ -8,6 +8,14 @@ retained as reported release history, not current guarantees or benchmark eviden
 
 # Changelog
 
+## Unreleased
+
+- Every authoring stage runs one author. New structured competition requests are refused;
+  historical plans, ownership markers, candidate artifacts and accepted gate provenance remain readable.
+- Stage budgets deliver wrap-up guidance through the shared invocation control path on both
+  adapters. Cooperative and bounded forced stops keep admitted work and a done/remaining handoff
+  for the next finite iteration; independent gates receive their own budgets.
+
 ## [0.10.1] - 2026-10-14
 
 The Claude adapter now does what the Codex adapter does, and a few engine records that
@@ -50,9 +58,6 @@ work. Several interfaces changed; read the migration notes before upgrading.
 - **Model stage supervision is removed**, together with its launch flags. `quick --supervise`
   is now an unknown option. The deterministic idle watchdog and immutable attempt deadlines
   remain; portable process supervision is separate.
-- **Stage races are a planner choice.** A plan stage may set `race: true`, and the race is
-  admitted under independent gates. The separate race command and the gate-hold launch
-  control are removed.
 - **Engine configuration comes only from the package.** Defaults, roles and workflows are
   read from the installed package's `config/` directory; a target project's `config/` no
   longer overrides them. Choose a campaign with `--campaign` (default: the repository

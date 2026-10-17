@@ -1,7 +1,7 @@
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
@@ -10,7 +10,7 @@ import { readExecutionDefaults } from '../src/dashboard.js';
 import { applyBasePrompt, loadBasePrompt, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
 import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
 import { cmdPlanCheck } from '../src/plan-interface.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 
 let fixtureRoot: string;
 let projectDir: string;
@@ -43,7 +43,8 @@ async function launch(): Promise<{ timeoutMs: number; maxIterations: number; rol
   const observed: { timeoutMs: number; maxIterations: number; role?: AgentConfig } = { timeoutMs: -1, maxIterations: -1 };
   const adapter: Adapter = {
     async run(_prompt: string, role: AgentConfig, opts: RunOpts) {
-      if (opts.stageId === 'work') { observed.timeoutMs = opts.timeout_ms; observed.role = role; }
+      if (opts.stageId === 'work') { observed.timeoutMs = readStageStatus(projectDir, basename(opts.runDir), opts.stageId).timeout!.budgetMs;
+        expect(opts.timeout_ms).toBeGreaterThan(0); expect(opts.timeout_ms).toBeLessThanOrEqual(observed.timeoutMs); observed.role = role; }
       return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
     },
   };

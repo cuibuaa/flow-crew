@@ -9,7 +9,7 @@ import { readCampaignEntries, resolveCampaignStorageKey } from '../../campaigns.
 import { isSessionReuseEnabled } from '../../config.js';
 import { summarizeContext } from '../../context-inventory.js';
 import { listCheckTypes } from '../../reality-gate/index.js';
-import { StageConfig, WorkflowConfig, parseAgent } from '../sched_admission/configuration.js';
+import { StageConfig, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { sessionResumeForStage, shouldPreserveSession } from '../sched_admission/sessions.js';
@@ -26,7 +26,6 @@ import { createSchedulerLiveConstraintGuardFactory } from './services.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { stageRaceAdapter } from './stage-race.js';
 
 export async function executeOrdinaryStage(
   stage: StageConfig, sorted: StageConfig[], state: StoreState,
@@ -38,7 +37,6 @@ export async function executeOrdinaryStage(
   skills?: string, taskDescription?: string, availableSkills?: string,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
   settlementBoundary?: (phase: 'child_closed' | 'attempt_closed') => Promise<boolean>,
-  workflowDefaults?: WorkflowConfig['defaults'],
 ): Promise<{stage: StageConfig; result: RunResult; currentRetries: number}> {
       if (!agents.has(stage.role)) {
         const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
@@ -135,8 +133,7 @@ export async function executeOrdinaryStage(
         resolvedPrompt = appendGateEvidenceInstruction(resolvedPrompt, runDirPath, stage.id, state.currentIteration ?? 1);
       }
 
-      const stageAdapter = stage.race ? stageRaceAdapter({ stage, stages: sorted, adapter,
-        agentsDir: resolvedAgentsDir, projectDir, runDirPath, state, skills, defaults: workflowDefaults, attemptDeadlineClockFactory }) : agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
+      const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
       const sessionReuseEnabled = isSessionReuseEnabled();
       const resumeSession = sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled, stageAdapter.sessionKind);
       if (!technicalRetry) {

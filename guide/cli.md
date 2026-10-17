@@ -29,7 +29,7 @@ rehearsal's actual options); the tables below follow parsers, not just help text
 | `audit-reality`, `land`, `export`, `clean` | Recheck, preserve, export or reclaim records |
 | `version` | Which package version is this? |
 
-`race` is removed. `quick --supervise`, `--no-supervise`, `--foreground`, `--hold-gates`
+`quick --supervise`, `--no-supervise`, `--foreground`, `--hold-gates`
 and unknown long options refuse with exit 1. `--timeout`/`--timeout=...` refuses with a
 engine-default migration hint. Foreground is the absence of `--background`.
 Standing approval rules are retired. Historic usage records remain readable.

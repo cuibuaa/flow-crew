@@ -7,7 +7,7 @@ import { loadAdapterByName } from '../../adapters/loader.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, nextTechnicalRetryBudget, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
 import { isSessionReuseEnabled } from '../../config.js';
 import { LiveConstraintGuardFactory } from '../../live-constraint-guard.js';
-import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, writeRunState, writeStageStatus } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StageAttemptSettlementError, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { appendTraceEvent } from '../../trace.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
 import { stageRecordSchema } from '../../handoff.js';
@@ -217,6 +217,10 @@ export async function executeSingleStage(
       liveConstraintGuardFactory,
       settlementBoundary,
     });
+
+    if (result.exitCode === 125 && /^ENGINE_STATE_(?:TAMPERED|REFUSED):/.test(result.friendlyError ?? '')) {
+      throw new StageAttemptSettlementError(stage.id, readStageStatus(projectDir, runId, stage.id).attempts!.at(-1)!.index, new Error(result.friendlyError));
+    }
 
     const retryableTechnicalFailure = recordSchedulerTechnicalAttemptResult(
       technicalRetry,

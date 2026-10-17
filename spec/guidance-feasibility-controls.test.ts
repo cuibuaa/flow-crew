@@ -1,3 +1,4 @@
+import { stageWrapUpTiming } from '../src/attempt-deadline.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { spawnSync } from 'node:child_process';
 import {
@@ -274,8 +275,8 @@ describe('live guidance and feasibility controls', () => {
       commandTimeoutMs: 60_000,
       shortfallMs: expect.any(Number),
     });
-    expect(Number(projection?.remainingBudgetMs)).toBeLessThanOrEqual(5_000);
-    expect(Number(projection?.shortfallMs)).toBeGreaterThanOrEqual(55_000);
+    expect(Number(projection?.remainingBudgetMs)).toBeLessThanOrEqual(stageWrapUpTiming(5_000).hardLimitMs);
+    expect(Number(projection?.shortfallMs)).toBeGreaterThanOrEqual(60_000 - stageWrapUpTiming(5_000).hardLimitMs);
   });
 
   async function interruptScenario(repeatAfterInterrupt: boolean, reason = 'The 10000-block job is infeasible; stop it and use the measured rate.') {
@@ -694,7 +695,7 @@ describe('continuation at closed tool boundaries', () => {
     expect(calls[2].fresh).toContain('Keep correction 2.');
     expect(calls[2].prompt).toContain('# Live guidance delivered at tool completion');
     expect(calls[2].fresh).toContain('# Live guidance delivered at tool completion');
-    expect(calls[2].prompt).toContain('absolute deadline');
+    expect(calls[2].prompt).toContain('hard stop');
   });
 
   it('omits unchanged empty tool checks while retaining invocation checks and command lifecycle', async () => {

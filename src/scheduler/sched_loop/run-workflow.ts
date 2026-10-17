@@ -19,6 +19,8 @@ import { publishRunCompletion } from './iteration-outcome.js';
 import { settleTerminalResearchCandidates } from '../sched_policy/run-completion.js';
 import { join } from 'node:path';
 import { engineConfigDir } from '../../config.js';
+import { recordRunEvent } from '../../run-events.js';
+import { SINGLE_AUTHOR_NOTICE } from '../sched_policy/prompt-contracts.js';
 import { recordContinuationRefusal } from '../../engine-continuation.js';
 
 export async function runWorkflow(
@@ -78,6 +80,8 @@ export async function runWorkflow(
   });
   await schedulerHeartbeat.ready.catch((err) => log.warn({ err }, 'Scheduler observer unavailable'));
   log.info({ runId, workflow: workflow.name }, 'Run started');
+  log.info({ runId }, SINGLE_AUTHOR_NOTICE);
+  recordRunEvent(projectDir, runId, { type: 'execution_notice', runId, timestamp: new Date().toISOString(), detail: SINGLE_AUTHOR_NOTICE, source: 'scheduler' });
   const configured = configureWorkflowBrief(workflow, projectDir, runId, runDirPath, maxIterations, resumingExistingRun, taskDescription, autoApprove, campaignId, inheritCampaignContext, briefAdmission);
   if (configured.kind === 'settled') return settled = configured.state;
   taskDescription = configured.taskDescription;

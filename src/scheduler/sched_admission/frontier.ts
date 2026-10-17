@@ -82,7 +82,7 @@ export function createReadyFinder({ loadGateContract, readGateVerdict }: GateRea
       if (!ss || !isPendingStageStatus(ss.status)) continue;
       const depsReady = (s.depends_on ?? []).every((d) => {
         const ds = state.stages[d];
-        if (!ds || !isSatisfiedStageDependencyStatus(ds.status)) return false;
+        if (!ds || ds.continuation || !isSatisfiedStageDependencyStatus(ds.status)) return false;
         const dependency = stagesById.get(d);
         const hasRunLocation = typeof state.projectDir === 'string' && typeof state.runId === 'string';
         if (hasRunLocation && contract === undefined) {

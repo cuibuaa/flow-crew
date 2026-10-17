@@ -14,7 +14,7 @@ import { log } from '../sched_admission/shared.js';
 import { checkCampaignHealth } from '../sched_policy/campaign.js';
 import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { deriveCriterionDischarges } from '../sched_settlement/gate-verdict.js';
-import { STAGE_STATUS, StoreState, captureStageEvidence, isTerminalRunStatus, readRunState, rependStageStatus, requireKnownRunStatus, runDir, writeRunState } from '../../store.js';
+import { STAGE_STATUS, StoreState, isContinuingStage, captureStageEvidence, isTerminalRunStatus, readRunState, rependStageStatus, requireKnownRunStatus, runDir, writeRunState, writeStageStatus } from '../../store.js';
 import { concludeRepeatedBlockage, tryParkOnApprovalRequest, tryTerminateOnTerminalState } from './services.js';
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -30,6 +30,7 @@ export async function prepareWorkflowIteration(
 }> {
     const isResumedIteration = resumingExistingRun && iteration === resumeAtIteration;
     let state = readRunState(projectDir, runId);
+    const continuingBudget = Object.values(state.stages).some(isContinuingStage);
     requireKnownRunStatus(state.status, `execute scheduler iteration for run ${runId}`);
 
     // Exit if run was cancelled externally or already terminated
@@ -88,23 +89,45 @@ export async function prepareWorkflowIteration(
     writeRunState(projectDir, runId, state);
 
     // Build sorted stages for this iteration: start from base stages
-    const sorted: StageConfig[] = (isResumedIteration && state.planControl ? state.planControl.stages : baseStages).map(s => ({ ...s }));
+    // A retired dynamic plan remains immutable history while its next planner
+    // works. Only an active dispatch (or a complete static plan) is executable.
+    const retainedPlan = state.planControl && (!state.planControl.stages.some(stage => stage.dynamic_dispatch)
+      || Array.isArray(state.dispatchedStages)) ? state.planControl.stages : baseStages;
+    const sorted: StageConfig[] = (isResumedIteration || continuingBudget ? retainedPlan : baseStages).map(s => ({ ...s }));
     const injectedDispatchStages = new Set<string>();
-    if (isResumedIteration && state.planControl) for (const stage of sorted) if (stage.dynamic_dispatch && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE) injectedDispatchStages.add(stage.id);
+    if ((isResumedIteration || continuingBudget) && state.planControl) for (const stage of sorted) if (stage.dynamic_dispatch && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE) injectedDispatchStages.add(stage.id);
     // Planner retry counters are bounded within this iteration.
     const planStageRetries = new Map<string, number>();
 
     // Delete dispatch.yaml before plan stage runs only on re-plan (iteration > 1)
     const dispatchPathPre = join(runDirPath, 'dispatch.yaml');
-    if (iteration > 1 && !isResumedIteration && existsSync(dispatchPathPre)) unlinkSync(dispatchPathPre);
-    if (iteration > 1 && !isResumedIteration && state.admittedRealityChecks) {
+    if (iteration > 1 && !isResumedIteration && !continuingBudget && existsSync(dispatchPathPre)) unlinkSync(dispatchPathPre);
+    if (iteration > 1 && !isResumedIteration && !continuingBudget && state.admittedRealityChecks) {
       restoreAdmittedRealityChecks(runDirPath, state);
     }
 
     // Reset all base stages to pending for this iteration
     state = readRunState(projectDir, runId);
-    // On iteration 2+, reset base stage statuses and clear old dispatched stages
-    if (iteration > 1 && !isResumedIteration) {
+    if (continuingBudget) {
+      // Preserve the admitted DAG and completed predecessors. Only unfinished
+      // slices and their consumers need execution; no optional session is needed.
+      const reset = new Set(Object.entries(state.stages).filter(([, stage]) => isContinuingStage(stage)).map(([id]) => id));
+      let added = true;
+      while (added) {
+        added = false;
+        for (const stage of sorted) if (!reset.has(stage.id) && stage.depends_on.some(id => reset.has(id))) {
+          reset.add(stage.id); added = true;
+        }
+      }
+      for (const id of reset) {
+        state.stages[id] = rependStageStatus(state.stages[id], 0);
+        writeStageStatus(projectDir, runId, id, state.stages[id]);
+        injectedDispatchStages.delete(id);
+      }
+      writeRunState(projectDir, runId, state);
+    }
+    // An ordinary re-plan retires the old DAG; a budget boundary retains it.
+    if (iteration > 1 && !isResumedIteration && !continuingBudget) {
       // Persist required work before retiring the old dynamic DAG. The retired
       // usage ledger preserves cost/history; this separate ledger preserves the
       // fact that a pending/running required stage was never fulfilled.

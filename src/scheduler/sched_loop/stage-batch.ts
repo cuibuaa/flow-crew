@@ -1,4 +1,3 @@
-import { invocationUsageFields } from '../../invocation-usage.js';
 import { publishRunCompletion } from '../sched_policy/run-completion.js';
 import { isRetryableAdapterFailure } from '../../adapters/failure.js';
 import { runStageWave } from '../stage-wave.js';
@@ -101,8 +100,8 @@ export async function executeReadyBatch(
         const boundary = createStageSettlementBoundary({ stage, selected: toRun, activeStageIds: activeScopeStageIds,
           projectDir, runId, context: ordinaryScopeContext,
         }, { monitorScopeRevisionRequests, reconcileCompletedStageAttempts });
-        const item = await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, ordinaryScopeContext, skills, taskDescription, availableSkills, attemptDeadlineClockFactory, boundary, workflow.defaults);
-        if (!item.result.suspended) return item;
+        const item = await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, ordinaryScopeContext, skills, taskDescription, availableSkills, attemptDeadlineClockFactory, boundary);
+        if (!item.result.suspended || item.result.continuation) return item;
         item.result.suspensionReason ??= 'scope_revision';
         state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
         if (isPausedRunStatus(readRunState(projectDir, runId).status)) return item;
@@ -238,16 +237,6 @@ export async function executeReadyBatch(
         continue;
       }
 
-      // The race has already gated the winner. Keep dependency IDs as acceptance
-      // projections, without launching another gate or recording parent attempts.
-      if (stage.race) for (const [id, acceptedFrom] of Object.entries(result.acceptedGates ?? {})) {
-        const previous = state.stages[id];
-        const accepted: StageStatus = { status: STAGE_STATUS.COMPLETE, retries: previous?.retries ?? 0,
-          attempts: previous?.attempts, duration_ms: previous?.duration_ms,
-          ...invocationUsageFields(previous ?? {}), acceptedFrom };
-        state.stages[id] = accepted;
-        writeStageStatus(projectDir, runId, id, accepted);
-      }
       technicalRetries.delete(stage.id);
       stageEvents.push({ stageId: stage.id, status: state.stages[stage.id] });
       log.info({ stage: stage.id }, 'Stage complete');

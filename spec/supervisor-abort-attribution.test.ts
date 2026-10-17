@@ -98,7 +98,7 @@ describe('worker.ts abort attribution (Layer 2 fix)', () => {
     expect(status.error).not.toMatch(/timed out after/);
   });
 
-  it('still attributes true wall-clock timeout as "timed out"', async () => {
+  it('attributes an exhausted budget as retained work rather than an idle abort', async () => {
     const adapter = makeAdapter('timeout');
     await runStage(adapter, {
       stageId,
@@ -113,8 +113,10 @@ describe('worker.ts abort attribution (Layer 2 fix)', () => {
       retries: 0,
     });
     const status = JSON.parse(readFileSync(join(runDir, 'stages', stageId, 'status.json'), 'utf-8'));
-    expect(status.error).toMatch(/^timed out after/);
-    expect(status.error).not.toMatch(/aborted by engine/);
+    expect(status.error).toBeUndefined();
+    expect(status.status).toBe('complete');
+    expect(status.timeout.terminationCause).toBe('budget_forced_stop');
+    expect(status.continuation).toMatchObject({ reason: 'stage_budget', forced: true });
   });
 });
 
