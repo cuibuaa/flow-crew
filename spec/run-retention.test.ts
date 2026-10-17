@@ -7,7 +7,7 @@ import { stringify } from 'yaml';
 import * as ownership from '../src/run-lock.js';
 import * as liveness from '../src/process-liveness.js';
 import * as recovery from '../src/restart-recovery.js';
-import { cmdPrune, pruneRunWorkAreas, RETENTION_SMALL_FILE_BYTES } from '../src/run-retention.js';
+import { cmdPrune, pruneRunWorkAreas, RETENTION_SMALL_FILE_BYTES, RETENTION_FILE_BYTES, RETENTION_STAGE_BYTES } from '../src/run-retention.js';
 import { fcGlobalDir, setFcGlobalDir, type StoreState } from '../src/store.js';
 
 let root: string, run: string, state: StoreState, previousStore: string;
@@ -101,9 +101,11 @@ describe('run retention authority guards', () => {
       }
       rejectWithoutWrites(/RETENTION_PROCESS/);
     });
-  it.each(['running', 'closed'] as const)('R07 refuses unsettled %s attempt ledgers', status => {
+  it.each(['running', 'closed'] as const)('R07 refuses unsettled %s attempt ledgers for a joined live owner', status => {
+    state.engineCheckpoint!.pid = process.pid;
     state.stages.done.attempts = [{ index: 1, startedAt: state.startedAt, status }];
-    rejectWithoutWrites(/RETENTION_UNSETTLED/);
+    persist();
+    expect(() => pruneRunWorkAreas(run, { dryRun: true, ownerSettled: true })).toThrow(/RETENTION_UNSETTLED/);
   });
   it('R08 permits only the joined self owner while the run is running', () => {
     state.status = 'running'; state.engineCheckpoint!.pid = process.pid; persist();
@@ -175,10 +177,12 @@ describe('retention preserves consumers and evidence', () => {
       pruneRunWorkAreas(run);
       expect(existsSync(join(run, 'stages/done/build/attempt_1/corpus.bin'))).toBe(true);
     });
-  it.each(['incomplete', 'stopped', 'failed'] as const)('R10 keeps invocation scratch for %s continuation', status => {
+  it.each(['incomplete', 'stopped', 'failed'] as const)('R10 deletes invocation scratch at terminal %s even with unfinished work', status => {
     state.status = status; persist(); put('scratch/work.bin');
-    expect(removed()).not.toContain('scratch/work.bin');
+    expect(removed()).toContain('scratch/work.bin');
     expect(removed()).toContain('stages/done/build/attempt_1/corpus.bin');
+    pruneRunWorkAreas(run);
+    expect(existsSync(join(run, 'scratch'))).toBe(false);
   });
   it.each(['parked', 'deploymentHold'] as const)('R11 keeps all work for retained %s control records', field => {
     (state as unknown as Record<string, unknown>)[field] = { reason: 'pending continuation' };
@@ -202,7 +206,7 @@ describe('retention preserves consumers and evidence', () => {
       reads: [{ id: 'input', root: 'run', path: 'stages/done/build/attempt_1/corpus.bin', kind: 'file', source: { kind: 'input' } }] } }] } as StoreState['planControl'];
     persist(); expect(removed()).toEqual(['stages/done/scratch/attempt_2/work.bin']);
   });
-  it('R14 keeps exact cited paths at any size and basename evidence only through the 1 MiB bound', () => {
+  it('R14 keeps bounded exact cited paths and removes ambiguous basename mentions', () => {
     expect(RETENTION_SMALL_FILE_BYTES).toBe(1024 * 1024);
     put('stages/done/build/experiment/exact.bin', Buffer.alloc(RETENTION_SMALL_FILE_BYTES + 1));
     put('stages/done/build/experiment/driver.py', Buffer.alloc(RETENTION_SMALL_FILE_BYTES));
@@ -214,10 +218,10 @@ describe('retention preserves consumers and evidence', () => {
     expect(removal).toContain('stages/done/build/experiment/big.csv');
     expect(removal).toContain('stages/done/build/experiment/unmentioned.cfg');
     expect(removal).not.toContain('stages/done/build/experiment/exact.bin');
-    expect(removal).not.toContain('stages/done/build/experiment/driver.py');
-    expect(removal).not.toContain('stages/done/build/config.yaml');
+    expect(removal).toContain('stages/done/build/experiment/driver.py');
+    expect(removal).toContain('stages/done/build/config.yaml');
     pruneRunWorkAreas(run);
-    expect(readFileSync(join(run, 'stages/done/build/experiment/driver.py')).length).toBe(RETENTION_SMALL_FILE_BYTES);
+    expect(existsSync(join(run, 'stages/done/build/experiment/driver.py'))).toBe(false);
     expect(existsSync(join(run, 'stages/done/build/experiment/exact.bin'))).toBe(true);
   });
   it('R15 preserves nested portable handoffs, patches, logs, evidence, outputs and root records', () => {
@@ -226,6 +230,7 @@ describe('retention preserves consumers and evidence', () => {
       'stages/done/build/old/replay.patch', 'stages/done/build/old/session.log', 'stages/done/handoff/source.tgz',
       'patches/change.patch', 'outputs/report.md', 'events.jsonl', 'stages/done/status.json', 'stages/done/verdict.json', 'stages/done/output_attempt_1.md'];
     for (const path of durable) put(path, path === 'stages/done/status.json' ? JSON.stringify(state.stages.done) : 'durable bytes');
+    put('stages/done/output.md', durable.map(path => `\`${path}\``).join(' '));
     const before = new Map(durable.map(path => [path, readFileSync(join(run, path))]));
     pruneRunWorkAreas(run);
     for (const [path, bytes] of before) expect(readFileSync(join(run, path)), path).toEqual(bytes);
@@ -236,6 +241,7 @@ describe('retention preserves consumers and evidence', () => {
   });
   it.each(['outputs/findings.md', 'stages/done/analysis.md', 'stages/done/build/old/outputs/findings.md'])(
     'R29 preserves evidence cited by a durable report named %s', report => {
+      if (report.includes('/build/')) put('stages/done/output.md', `Recorded report: \`${report}\`.`);
       put(report, 'Raw evidence: `stages/done/build/attempt_1/corpus.bin`.');
       expect(removed()).not.toContain('stages/done/build/attempt_1/corpus.bin');
     });
@@ -252,11 +258,11 @@ describe('retention preserves consumers and evidence', () => {
         const outside = join(root, 'ledger.json'); writeFileSync(outside, JSON.stringify(state.stages.done));
         rmSync(ledgerPath); symlinkSync(outside, ledgerPath);
       }
-      expect(removed()).toEqual(['stages/later/build/unused.bin']);
+      expect(removed()).toEqual(['scratch/continuation.bin', 'stages/later/build/unused.bin']);
       pruneRunWorkAreas(run);
       expect(existsSync(join(run, 'stages/done/build/attempt_1/corpus.bin'))).toBe(true);
       expect(existsSync(join(run, 'stages/done/scratch/attempt_2/work.bin'))).toBe(true);
-      expect(existsSync(join(run, 'scratch/continuation.bin'))).toBe(true);
+      expect(existsSync(join(run, 'scratch/continuation.bin'))).toBe(false);
     });
   it.each([
     { path: 'attempt_1/corpus.bin', citation: '`../build/attempt_1/corpus.bin`' },
@@ -512,4 +518,143 @@ it('R49 resolves report-relative citations at a declared report symlink location
   mkdirSync(join(run, 'stages/done/handoff'));
   symlinkSync(actual, join(run, 'stages/done/handoff/report.md'));
   expect(removed()).not.toContain('stages/done/build/attempt_1/corpus.bin');
+});
+
+
+it.each(['running', 'closed'] as const)('R50 proven-dead stale %s attempt preserves its own work without blocking settled stages', status => {
+  state.status = 'stopped';
+  state.stages.later = { status: 'running', retries: 0, attempts: [{ index: 1, startedAt: state.startedAt, status }] };
+  persist(); put('stages/later/build/unfinished.bin');
+  expect(plan().removeBytes).toBe(3072);
+  expect(removed()).not.toContain('stages/later/build/unfinished.bin');
+  vi.mocked(ownership.processIsAlive).mockReturnValue(true);
+  vi.spyOn(ownership, 'processStartToken').mockReturnValue(state.engineCheckpoint!.processStart);
+  expect(() => plan()).toThrow(/controller may still be alive/);
+});
+
+it('R51 bounds all discretionary citations and durable categories per file and per stage across build and scratch', () => {
+  const paths = ['evidence/large.bin', 'logs/large.log', 'outputs/large.md', 'archive.tar.gz', 'cited.bin'];
+  for (const path of paths) put(`stages/done/build/${path}`, Buffer.alloc(RETENTION_FILE_BYTES + 1));
+  put('stages/done/output.md', 'Evidence: `build/cited.bin`; `build/many`; `scratch/many`.');
+  for (let index = 0; index < 6; index++) {
+    put(`stages/done/${index % 2 ? 'scratch' : 'build'}/many/${index}.log`, Buffer.alloc(RETENTION_FILE_BYTES));
+  }
+  const result = plan();
+  for (const path of paths) expect(result.remove.map(item => item.path)).toContain(`stages/done/build/${path}`);
+  const keptLogs = result.kept.filter(item => /many\/\d.log$/.test(item.path));
+  expect(keptLogs.length * RETENTION_FILE_BYTES).toBe(RETENTION_STAGE_BYTES);
+  const before = result.removeBytes;
+  pruneRunWorkAreas(run);
+  expect(before).toBeGreaterThan(RETENTION_STAGE_BYTES);
+  expect(plan().removeBytes).toBe(0);
+});
+
+it('R52 workspace Markdown becomes a citation source only through recorded evidence, including transitive reports', () => {
+  put('stages/done/build/corpus/README.md', '`../attempt_1/corpus.bin`');
+  expect(removed()).toContain('stages/done/build/attempt_1/corpus.bin');
+  put('stages/done/output.md', '[analysis](build/corpus/README.md)');
+  expect(removed()).not.toContain('stages/done/build/attempt_1/corpus.bin');
+});
+
+it('R53 oversized reports are not scanned as citation sources', () => {
+  put('stages/done/output.md', 'x'.repeat(RETENTION_SMALL_FILE_BYTES) + ' `build/attempt_1/corpus.bin`');
+  expect(removed()).toContain('stages/done/build/attempt_1/corpus.bin');
+});
+
+
+it('R54 bounds citation-source bytes per stage without reading arbitrary workspace Markdown', () => {
+  for (let index = 0; index < RETENTION_STAGE_BYTES / RETENTION_SMALL_FILE_BYTES; index++) {
+    put(`stages/done/evidence/${String(index).padStart(2, '0')}.md`, Buffer.alloc(RETENTION_SMALL_FILE_BYTES, 32));
+  }
+  put('stages/done/evidence/last.md', '`../build/attempt_1/corpus.bin`');
+  expect(removed()).toContain('stages/done/build/attempt_1/corpus.bin');
+  rmSync(join(run, 'stages/done/evidence/00.md'));
+  expect(removed()).not.toContain('stages/done/build/attempt_1/corpus.bin');
+});
+
+
+it.each(['running', 'closed'] as const)('R55 protects complete stage with stale %s attempt while cleaning other stages', status => {
+  state.stages.done.attempts = [{ index: 1, startedAt: state.startedAt, status }];
+  persist(); put('stages/later/build/disposable.bin');
+  expect(removed()).toEqual(['stages/later/build/disposable.bin']);
+});
+
+it('R56 invocation scratch Markdown cannot pin settled stage work', () => {
+  put('scratch/report.md', '`stages/done/build/attempt_1/corpus.bin`');
+  expect(removed()).toContain('stages/done/build/attempt_1/corpus.bin');
+  expect(removed()).toContain('scratch/report.md');
+});
+
+it('R57 unfinished work area Markdown also needs a recorded incoming citation', () => {
+  state.stages.later.status = 'failed'; persist();
+  put('stages/later/build/README.md', '`stages/done/build/attempt_1/corpus.bin`');
+  expect(removed()).toContain('stages/done/build/attempt_1/corpus.bin');
+});
+
+it('R58 incidental links and private filenames cannot bypass workspace size bounds', () => {
+  put('stages/done/build/big.bin', Buffer.alloc(RETENTION_FILE_BYTES + 1));
+  put('stages/done/build/tokens.fixture', Buffer.alloc(RETENTION_FILE_BYTES + 1));
+  symlinkSync('big.bin', join(run, 'stages/done/build/link'));
+  expect(removed()).toContain('stages/done/build/big.bin');
+  expect(removed()).toContain('stages/done/build/tokens.fixture');
+  expect(removed()).not.toContain('stages/done/build/link');
+});
+
+
+it('R59 workspace-root citations, incidental archives/logs/Markdown and root scripts do not pin work', () => {
+  put('stages/done/build/report.md', 'incidental');
+  put('stages/done/build/replay.log', 'incidental');
+  put('stages/done/build/source.tar.gz', 'incidental');
+  put('stages/done/build/driver.py', 'incidental');
+  put('stages/done/output.md', '`build/`; driver.py helped produce the results.');
+  const removal = removed();
+  for (const path of ['report.md', 'replay.log', 'source.tar.gz', 'driver.py', 'attempt_1/corpus.bin']) {
+    expect(removal).toContain(`stages/done/build/${path}`);
+  }
+});
+
+
+it('R60 incidental workspace symlinks preserve targets without admitting Markdown as citation sources', () => {
+  put('stages/done/build/corpus/README.md', '`../attempt_1/corpus.bin`');
+  symlinkSync('corpus/README.md', join(run, 'stages/done/build/readme'));
+  expect(removed()).toContain('stages/done/build/attempt_1/corpus.bin');
+  expect(removed()).not.toContain('stages/done/build/corpus/README.md');
+  put('stages/done/output.md', '[recorded evidence](build/corpus/README.md)');
+  expect(removed()).not.toContain('stages/done/build/attempt_1/corpus.bin');
+});
+
+
+it('R61 retains admitted citation sources before their payloads so bounded apply is idempotent', () => {
+  for (let index = 0; index < 4; index++) {
+    put(`stages/done/build/evidence/${index}.bin`, Buffer.alloc(index === 3 ? RETENTION_FILE_BYTES - 512 * 1024 : RETENTION_FILE_BYTES));
+  }
+  put('stages/done/build/z.md', '`zz.bin`' + ' '.repeat(RETENTION_SMALL_FILE_BYTES - 8));
+  put('stages/done/build/zz.bin', Buffer.alloc(1024));
+  put('stages/done/output.md', '[source](build/z.md)');
+  const result = pruneRunWorkAreas(run);
+  expect(result.remove.map(item => item.path)).not.toContain('stages/done/build/z.md');
+  expect(existsSync(join(run, 'stages/done/build/zz.bin'))).toBe(true);
+  expect(plan().removeBytes).toBe(0);
+});
+
+
+it('R62 retains link references before bounded targets so later apply does not lose their reason', () => {
+  for (let index = 0; index < 4; index++) {
+    put(`stages/done/build/evidence/${index}.bin`, Buffer.alloc(index === 3 ? RETENTION_FILE_BYTES - 2 : RETENTION_FILE_BYTES));
+  }
+  put('stages/done/build/a.bin', 'x');
+  symlinkSync('a.bin', join(run, 'stages/done/build/z-link'));
+  pruneRunWorkAreas(run);
+  expect(existsSync(join(run, 'stages/done/build/z-link'))).toBe(true);
+  expect(readFileSync(join(run, 'stages/done/build/a.bin'), 'utf8')).toBe('x');
+  expect(plan().removeBytes).toBe(0);
+});
+
+
+it('R63 durable outside-work links preserve targets without making workspace Markdown a citation source', () => {
+  put('stages/done/build/corpus/README.md', '`../attempt_1/corpus.bin`');
+  mkdirSync(join(run, 'handoff'));
+  symlinkSync('../stages/done/build/corpus/README.md', join(run, 'handoff/readme'));
+  expect(removed()).not.toContain('stages/done/build/corpus/README.md');
+  expect(removed()).toContain('stages/done/build/attempt_1/corpus.bin');
 });

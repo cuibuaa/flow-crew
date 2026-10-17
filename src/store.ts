@@ -1,4 +1,5 @@
 import { writeFileSync, appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, renameSync, rmdirSync, unlinkSync, writeSync } from './engine-fs.js';
+import { retireRunScratch } from './invocation-scratch.js';
 import { pruneTerminalWorkAreasUnderLock } from './run-retention.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
@@ -766,10 +767,10 @@ export interface ArchivedRunStateRead {
 }
 
 export const FC_DIR = '.fc';
-// FC_HOME (env) or setFcGlobalDir() override the global state root (~/.fc).
+// FC_HOME (env) or setFcGlobalDir() override the configured store root.
 // Consumers: engine-scenario tests and `flowcrew rehearse` run real workflows
 // against a temp dir so they can never write runs/campaign ledgers into the
-// developer's real ~/.fc (openworker lesson: tests once read real machine
+// developer's real store (openworker lesson: tests once read real machine
 // state and emitted real telemetry; isolation must be structural, not
 // disciplinary). The env var works when set before module load; the setter
 // covers callers inside an already-loaded process (the CLI's rehearse path).
@@ -1814,7 +1815,10 @@ function publishRunProjection(projectDir: string, runPath: string, projection: S
     assertProjectionUnchanged();
   }
   atomicWrite(join(runPath, 'run.json'), JSON.stringify(projection) + '\n');
-  if (isTerminalRunStatus(projection.status)) pruneTerminalWorkAreasUnderLock(runPath);
+  if (isTerminalRunStatus(projection.status)) {
+    retireRunScratch(runPath);
+    pruneTerminalWorkAreasUnderLock(runPath);
+  }
   if (canonicalRunDirectory(runPath) === canonicalRunDirectory(runDir(projectDir, projection.runId))) {
     try { upsertRunIndex(projectDir, projection); } catch { /* index is best-effort */ }
     emitCampaignEnvelopeEvents(projectDir, projection.runId, summaryState);

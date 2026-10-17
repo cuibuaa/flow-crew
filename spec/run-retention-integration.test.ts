@@ -113,7 +113,7 @@ describe('run retention at scheduler and continuation boundaries', () => {
     } finally { await app.close(); }
   });
 
-  it.each(['incomplete', 'stopped', 'failed'] as const)('R31 a pruned %s run resumes using retained unfinished work and history', async status => {
+  it.each(['incomplete', 'stopped', 'failed'] as const)('R31 a pruned %s run resumes from stage work after invocation scratch retirement', async status => {
     const workflow = workflowFixture();
     const bytes = stringify(workflow);
     const created = createRun(project, workflow.name, bytes, workflow.stages.map(stage => stage.id));
@@ -153,7 +153,8 @@ describe('run retention at scheduler and continuation boundaries', () => {
     expect(plan.removeBytes).toBeGreaterThan(1024 * 1024);
     expect(existsSync(predecessor.bulky)).toBe(false);
     expect(existsSync(unfinished.bulky)).toBe(true);
-    expect(existsSync(temporaryFile)).toBe(true);
+    expect(existsSync(temporaryFile), 'terminal publication retires invocation scratch').toBe(false);
+    expect(existsSync(join(created.runDirPath, 'scratch'))).toBe(false);
     const archived = readRunStateView(project, created.runId);
     expect(archived.run.status).toBe(status);
     expect(archived.stages.done).toEqual(before);
@@ -164,7 +165,12 @@ describe('run retention at scheduler and continuation boundaries', () => {
         calls.push(opts.stageId);
         expect(opts.stageId).toBe('work');
         expect(readFileSync(join(unfinished.directory, 'resume.txt'), 'utf8')).toContain('unfinished experiment');
-        expect(readFileSync(temporaryFile).length).toBe(1024 * 1024 + 1);
+        expect(existsSync(temporaryFile)).toBe(false);
+        const freshScratch = createInvocationScratch(opts.runDir);
+        expect(freshScratch.path).not.toBe(scratch.path);
+        const freshPayload = join(freshScratch.path, 'resumed.txt');
+        writeFileSync(freshPayload, readFileSync(join(unfinished.directory, 'resume.txt')));
+        expect(readFileSync(freshPayload, 'utf8')).toContain('unfinished experiment');
         return completed(opts, 'Resumed retained experiment.');
       },
     }, new Map(), undefined, roles, created.runId);

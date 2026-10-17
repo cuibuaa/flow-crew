@@ -89,38 +89,44 @@ hardlink. An input-copy failure refuses setup without publishing READY; inspect 
 and the reported target before retrying. Failed setup worktrees can contain partial copies.
 
 Use invocation `$TMPDIR` for disposable checkouts, compiler caches and test fixtures.
-Scratch survives retries, gates and continuations. A settled stage's `stages/<stage>/build/`
-and `stages/<stage>/scratch/` are workspaces: after children, monitors, audits and retry
-settlement finish, the engine compacts their disposable members. The workspace directory
-itself remains so an existing directory declaration can still be queried. Declare final
-products below that root explicitly, and name evidence in the stage result or a retained
-report. Use `evidence/` and `handoff/` for durable material, including portable tarballs.
+Invocation scratch survives within an active run, then is retired at terminal publication,
+including failed, incomplete and stopped outcomes. Resume uses retained unfinished stage
+work and allocates fresh invocation scratch. Daemon startup also repairs interrupted scratch
+retirement, including temporary aliases for missing run records or deleted run folders.
 
-Retention keeps every path outside those workspaces and invocation scratch. Within a workspace
-it keeps declared products below the workspace root, all declared run inputs (including
-completed consumers that might retry), evidence/handoff/patch/output/log directories,
-patches, bundles, archives and log files. Exact report/evidence path citations survive at
-any size and keep their original pathname. Small scripts, configurations and results at
-the workspace root, or whose filename appears in retained reports/evidence, also stay
-when at most **1 MiB per file**. That cutoff preserves reproducibility inputs and small
-measurements without a filename-only mention pinning a multi-gigabyte corpus. Larger
-required files must have an exact path citation or an explicit product/input declaration.
-Citations can use run-relative, stage-relative or workspace-relative paths, quoted paths
-with spaces, or the recorded absolute workspace/invocation-scratch path. Logs and native
-prompts remain durable but do not turn every command's working directory into a citation.
-Private credential files are never opened by retention. Removal keeps symlinks and never traverses them. Declared locations and report aliases are
-resolved for preservation and citation discovery; workspace targets are protected too.
+A settled stage's `stages/<stage>/build/` and `stages/<stage>/scratch/` are workspaces.
+After children, monitors, audits and retry settlement finish, the engine compacts their
+disposable members. The workspace root remains queryable. Declare final products below
+that root explicitly; a declaration or citation naming the workspace root does not make
+its entire contents permanent.
 
-Unfinished, unknown and budget-continuing stages retain their entire workspaces. Failed,
-stopped and incomplete runs retain invocation scratch for resume. Parked/deployment-held
-runs retain all their work. Status/attempt ledgers, checkpoint and process ownership,
-workflow/dispatch/admitted plans, scope/approval/guidance decisions, verdicts, validation
-and audit records, append-only history, outputs and every attempt log stay available to
-continuation, cancellation, audits and dashboard readers. Project files and patches are
-never reverted by retention. A terminal status alone cannot authorize removal while a
-controller or owned command may still be alive; malformed or missing ownership evidence
-also preserves work. The policy sends no signals. A failed cleanup keeps remaining work
-and does not change the authored verdict.
+Every path outside these workspaces remains durable. Inside, declared products below the
+workspace root and declared inputs (including consumers that might retry) are protected.
+Other preservation is bounded to **8 MiB per file and 32 MiB per stage**, shared across
+build and stage scratch: exact report/evidence citations, cited directories below the
+workspace root, evidence/handoff/patches directories, patch/diff files, incidental symlinks
+and their targets, and private filenames. Incidental logs, archives, Markdown and scripts
+do not qualify by filename or a bare basename mention alone.
+Larger required artifacts need an explicit input/product declaration.
+
+Recorded reports and evidence supply citations, bounded to **1 MiB per source file and
+32 MiB of source text per stage**; physical aliases are read once. Workspace Markdown
+supplies citations only when declared as a report or cited by recorded evidence, including
+transitive citations. Admitted report/link sources take priority over their payloads to
+keep repeated compaction stable. Citation paths can be run-relative, stage-relative, report-relative
+or absolute, including quoted paths with spaces. Private credential files are never opened,
+and workspace walks never follow symlinks. Explicit declarations and report aliases resolve
+their physical locations for protection and citation discovery.
+
+Unfinished, unknown and budget-continuing stages retain their entire workspaces. A stale
+running/closed attempt preserves its stage's work, but once controller and command absence
+is proven using the existing process/start-token/boot identity evidence it does not block
+other settled stages. A possibly live owner still blocks workspace compaction. Park and
+deployment holds preserve stage work. Missing or malformed ownership evidence also preserves
+stage work. Status/attempt ledgers, workflow/dispatch/admitted plans, decisions, verdicts,
+validation, audit, append-only history, official outputs and attempt logs stay outside the
+compacted areas. Retention sends no signals and never reverts project changes. A failed
+compaction keeps remaining work and does not change the authored verdict.
 
 For existing runs, inspect the same policy before applying it:
 

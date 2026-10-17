@@ -87,7 +87,7 @@ The first applicable earlier limit wins. Idle is earlier in the hung trials; the
 
 All evidence names below are relative to `stages/prove_and_report/`. `evidence/*.json` preserves exact private argv, direct exits, source identity, timing and original receipt roots. The public excerpts use run aliases and relative time from the work attempt. Original records remain under `build/trials/`.
 
-The installed `~/bin/fc-trial` was read and preserved as `build/fc-trial.original.cjs`; its digest is in `evidence/harness-original.json`. Its defaults conflict with this task: cores 6–15, shared receipt storage, Claude-only fixture with an explicit Codex refusal, no progress/hang/budget controls, and same-source redeploy. `build/fc-trial.cjs` is a task-local CommonJS adaptation; `evidence/fc-trial.patch` includes the exact changes and native child fixture. It retains lifecycle/RPC, command receipts, restoration and marker/start-token ownership machinery; process-environment inspection is restricted to descendants and previously attested owned identities. Storage is canonicalized beneath the stage build root; a short admitted scratch alias is used for socket spelling. Configuration fixtures are applied only to private engine copies and restored. Root/UI dependencies and caches are private.
+The installed private-daemon trial helper was read and preserved as `build/fc-trial.original.cjs`; its digest is in `evidence/harness-original.json`. Its defaults conflict with this task: cores 6–15, shared receipt storage, Claude-only fixture with an explicit Codex refusal, no progress/hang/budget controls, and same-source redeploy. `build/fc-trial.cjs` is a task-local CommonJS adaptation; `evidence/fc-trial.patch` includes the exact changes and native child fixture. It retains lifecycle/RPC, command receipts, restoration and marker/start-token ownership machinery; process-environment inspection is restricted to descendants and previously attested owned identities. Storage is canonicalized beneath the stage build root; a short admitted scratch alias is used for socket spelling. Configuration fixtures are applied only to private engine copies and restored. Root/UI dependencies and caches are private.
 
 Builds, tests, lint, mutations and daemon trials run at `taskset -c 6-11 nice -n 19` with command deadlines. The first validation snapshot copy omitted that prefix; it only copied files. Suite scratch is allocated/retired by the existing configured global setup; manually forcing its physical storage under a long trial root caused socket failures, retained in the exploratory receipt. Docker validation uses the existing isolation recipe and a locally present image without network. The harness does not operate the operator daemon or any pre-existing run.
 
@@ -263,120 +263,207 @@ CI's additional Linux isolation and no-service-manager checks are considered sep
 
 ## Run retention
 
-Per-stage workspaces previously accumulated extracted corpora, experiment directories and
-superseded attempts for the lifetime of the store. One compaction policy now serves settled
-scheduler waves, terminal publication/finally, daemon startup and `flowcrew prune`. It replaces
-unconditional terminal scratch removal: `failed`, `incomplete` and `stopped` are terminal in
-the lifecycle table but can continue, so their invocation scratch must survive. No new run
-status, retention timer, daemon service or artifact protocol was added. Existing process-fate
-helpers share a small module using the existing ownership probes, rather than pulling
-recovery's configuration graph into the store. The original recovery exports remain available. The additional policy is necessary to distinguish disposable workspace members
-from evidence and continuation inputs; deleting a whole directory could not provide that
-guarantee.
+The review fixes restore the original invocation-scratch lifetime: terminal publication
+retires it immediately for every terminal outcome, including failed/incomplete/stopped.
+Daemon startup again scans temporary `fc-*` aliases and retires scratch for terminal,
+missing-record and deleted runs. The original `scratch-lifetime`, daemon-reconciliation
+and cancellation test expectations are restored byte-for-byte from the parent of `2c335d2`; no original expectation
+was relaxed. R31 actually resumes each failed/incomplete/stopped run, reads retained unfinished
+stage work, verifies the old invocation payload is gone and allocates fresh invocation scratch.
 
-Only `stages/<stage>/build/`, `stages/<stage>/scratch/` and final invocation `scratch/` are
-candidates. A stage must be complete, without continuation, and its execution ledger must
-match the run projection. Cleanup follows joined children, monitors, audits and retry
-settlement. Unfinished stages, deployment/approval holds and uncertain ownership preserve
-work. Offline apply requires a terminal run, proven controller/command absence and the same
-run-state lock used by launch, resume and cancellation. Missing/malformed checkpoints,
-unknown historical consumers, inconsistent ledgers and unreadable contracts never authorize
-removal. Retention sends no process signals.
+Stage compaction still runs after joined scheduler waves, terminal/finally boundaries,
+daemon startup and explicit `flowcrew prune`. The existing process, start-token and host-boot
+probes prove controller and command absence; retention sends no signals. Proven-dead stale
+running/closed attempt records keep their own stage work without blocking other settled
+stages (R50/R55). Possibly live or unverifiable ownership still blocks compaction. A joined
+live controller also refuses unsettled attempts (R07/R08). Continuations, holds, unknown
+contracts and divergent ledgers remain protective.
 
-| Retained material | Consumer that still needs it |
-| --- | --- |
-| Workflow, dispatch, admitted plans, run/history records, ownership and attempt ledgers | Resume, cancellation, scheduler admission and audit attribution |
-| Every attempt output/log, structured result, verdict, gate archives and validation/constraint records | Continuation prompts, retries, independent review and audit |
-| Project changes, patches, declared products below the workspace root, all declared reads | Delivery, downstream stages and later gate retries |
-| Reports, evidence, handoffs and portable tarballs/bundles, including nested workspace copies | Report readers, portable review and dashboard links |
-| Unfinished stage work and invocation scratch for resumable outcomes | Actual continuation of stopped/incomplete/failed work |
-| Summary, progress, events, invocation inputs and artifact directory roots | Dashboard detail, output, summary and query projections |
+The policy now removes broad retention rules instead of adding a second cleanup mechanism.
+Inside settled stage build/scratch, incidental Markdown, logs, archives and workspace-root
+scripts no longer qualify merely by name. A workspace-root citation no longer pins the whole
+workspace. Exact citations, evidence/handoff/patch directories, patches, incidental
+links/targets and private filenames share **8 MiB per file and 32 MiB per stage**, across
+both stage work areas. Bare basename mentions do not qualify reproduction inputs. Declared
+inputs/products below the workspace root remain required artifacts and bypass discretionary limits. Everything outside stage work
+areas remains durable, including official attempt logs, outputs, history and run records.
+Invocation scratch follows its original separate retirement rule.
 
-Exact evidence paths remain at their original location at any size. Small scripts,
-configurations and results are also kept when named in retained reports/evidence, or at the
-workspace root, up to **1 MiB per file**. This preserves reproducibility inputs and small
-measurements while preventing an ambiguous prose filename mention from pinning a multi-gigabyte
-corpus. Reports and structured evidence supply path references; execution logs/native inputs
-remain durable without treating every old command's working directory as an evidence
-citation. Symlinks and their workspace targets are protected. No auth or credential contents
-are opened by retention. The policy intentionally preserves required artifacts rather than
-promising an absolute store quota.
+Citation discovery reads recorded reports/evidence, at most **1 MiB per source file and
+32 MiB per stage**, deduplicating physical aliases. Workspace Markdown becomes a source only
+through a declared report or an incoming recorded citation, including transitive citations;
+this applies to unfinished work areas too (R52/R57). Invocation scratch is never a citation
+source (R56). No private credential contents are opened. Large required evidence must be
+declared as an input/product rather than relying on an unlimited prose citation. Within
+these limits, original paths and relative Markdown link forms remain supported.
 
-The CLI defaults to dry-run. `flowcrew prune --dry-run --json` reports each eligible run's
-candidate bytes, file list and kept paths/reasons. `--run <run-id>` selects one; `--apply`
-recomputes under the run lock. Bulk mode preserves refused/uninitialized entries; targeted
-refusal exits nonzero. Dry-run takes no store lock and writes no index, manifest, alias or
-store file. Byte counts are logical lengths; hardlinks, filesystem compression and metadata
-can change the free-space result. Operations and CLI guides document the command and policy.
+The fixed R19/R20 workload still reclaims **3,072 of 3,072 disposable bytes**, preserves
+run/workflow bytes and reclaims zero on a second apply. R51 also verifies idempotence after
+bounded evidence retention. R61/R62 prioritize admitted report and link sources before
+their payloads so another apply does not lose a payload after deleting its only reference.
+R30 exercises automatic predecessor compaction and actual dashboard detail/output/summary routes. Focused validation passes **5 files / 192 tests**, including the original scratch cleanup and real scheduler resume cases.
 
-The unchanged synthetic R19/R20 workload has **3,072 disposable bytes before compaction,
-zero afterward**, with byte-identical run/workflow records and a second apply reclaiming zero.
-R30 observes automatic cleanup before a successor executes, retains nested evidence and
-patches, and reads actual dashboard detail/output/summary routes successfully afterward.
-R31 actually resumes each of failed/incomplete/stopped after predecessor cleanup, consumes
-the retained unfinished workspace and invocation scratch, and preserves prior attempt ledgers.
-The native scratch-lifetime and parallel-isolation fixtures also retain their independent
-provider/concurrency assertions under the new evidence policy.
+### Read-only effectiveness on the same largest run
 
-Named guards in `spec/run-retention.test.ts` cover status/ownership (R01–R08, R25–R28,
-R41/R45), unfinished work and holds (R09–R11/R33), declared consumers/products (R12/R13,
-R16/R37/R40/R46/R47), references and symlinks (R14/R15/R17/R18/R29/R34–R36/R38/R39/R42–R44/R48/R49),
-and dry-run/apply/CLI behavior (R19–R24). Each unsafe condition has a named behavioral
-assertion. Additional review reproductions first demonstrated the citation/ownership defects
-before their fixes; source changes were made after recording those failing controls.
+The final read-only policy simulation ran **2026-10-17 02:46:59–02:47:35 UTC** on the largest
+of **58 initialized run folders** in the configured operator store. It remained running;
+normal prune would refuse it. The test harness overrides only the archived state in memory
+to terminal with proven prior-boot process absence and a missing scheduler. Actual stage
+projections, stage ledgers and payload locations remain unchanged. It invokes only dry-run,
+rejects mutation APIs and private-file reads, and never copies operator payloads. The
+`2c335d2` baseline uses the same metadata inventory and settled stages; its unfinished active
+stage/attempt is marked incomplete only in memory to bypass the old whole-run stale-attempt
+refusal. That unfinished stage remains ineligible in both policies.
 
-### Read-only operator-store observation
+The same settled work areas contain **28,854,863,040 logical bytes**. The baseline retained
+all of them and reclaimed **zero**; the final policy retains **302,019,811** and reclaims
+**28,552,843,229 (98.95%)**. Every settled stage reclaims a majority, including the small
+report stage. Invocation scratch adds **259,716,907** disposable bytes, for a simulated total
+of **28,812,560,136**. These are logical lengths, not promised filesystem free space.
 
-On October 16 local time (metadata observation **2026-10-17 02:09:39 UTC**), the worktree's
-built CLI ran with `FC_HOME` selecting `~/.fc`, CPU affinity **6–11**, nice **19**, and exactly
-`prune --dry-run --json`. No apply, history deletion, daemon mutation or process signal was
-used there. Private receipts remain in ignored worktree files
-`.tmp_retention-store-dry-run.json` and `.tmp_retention-store-sizes.json`; the latter only
-counts directory-entry metadata and does not open payload files.
+| Stage | Work area bytes | Kept bytes | Reclaimed bytes | Reclaimed |
+| --- | ---: | ---: | ---: | ---: |
+| audit_refactor | 3,791,447,461 | 33,554,432 | 3,757,893,029 | 99.11% |
+| final_gate | 3,688,322,535 | 33,554,432 | 3,654,768,103 | 99.09% |
+| final_report | 96,552 | 29,934 | 66,618 | 69.00% |
+| port_gate | 1,564,246,644 | 33,554,432 | 1,530,692,212 | 97.85% |
+| port_oracle | 3,632,014,585 | 33,554,431 | 3,598,460,154 | 99.08% |
+| refactor_gate | 2,083,710,915 | 33,554,432 | 2,050,156,483 | 98.39% |
+| refactor_integrate | 1,309,945,026 | 33,554,423 | 1,276,390,603 | 97.44% |
+| release_finalize | 5,577,725,003 | 33,554,432 | 5,544,170,571 | 99.40% |
+| row3_change | 4,910,107,366 | 33,554,432 | 4,876,552,934 | 99.32% |
+| row3_gate | 2,297,246,953 | 33,554,431 | 2,263,692,522 | 98.54% |
+| **Total settled** | **28,854,863,040** | **302,019,811** | **28,552,843,229** | **98.95%** |
 
-The dry-run would reclaim **0 bytes**: **43** runs were eligible, **15** refused (7 nonterminal,
-5 unsettled and 3 with possibly live process ownership), and **4,449** uninitialized entries
-were preserved. All remaining stage build areas occurred in running runs. The incident's
-131 GB historical observation therefore is not the current reclaimable amount. The current
-initialized-run inventory held **49,041,651,997 logical bytes**. The largest ten runs below
-are ordered by observed stored bytes; every eligible run also ties at zero reclaimable bytes.
-Aliases replace private run identifiers. Live runs can change during this read-only inventory.
+Citation discovery falls from **688,632,481 bytes / 15,964 unique files / 18,211 opens** to
+**27,518,504 bytes / 2,404 files / 2,404 opens**. Maximum bytes read per source falls from
+**20,455,716** to **927,732**, within the 1 MiB source bound. No workspace Markdown file in
+this run was admitted automatically as a citation source. Metadata inventories before and
+after verify **290,503 settled files** with no additions, removals, size changes or mtime
+changes. The active unfinished work continued growing; the final **02:47:48 UTC** inventory
+still ranks this same run largest at **38,121,854,438 logical bytes**, without treating its
+growth as a cleanup effect.
 
-| Size rank alias | Status | Observed logical bytes | Dry-run reclaim bytes | Disposition |
-| --- | --- | ---: | ---: | --- |
-| largest-01 | running | 34,449,075,993 | 0 | Refused: nonterminal |
-| largest-02 | running | 3,734,185,100 | 0 | Refused: nonterminal |
-| largest-03 | complete | 2,310,278,064 | 0 | Refused: process ownership |
-| largest-04 | complete | 2,193,183,346 | 0 | Refused: process ownership |
-| largest-05 | stopped | 1,642,042,351 | 0 | Refused: unsettled attempts |
-| largest-06 | running | 396,266,691 | 0 | Refused: nonterminal |
-| largest-07 | ceiling_hit | 249,609,972 | 0 | Eligible; durable material retained |
-| largest-08 | escalated | 233,325,699 | 0 | Eligible; durable material retained |
-| largest-09 | complete | 204,090,885 | 0 | Eligible; durable material retained |
-| largest-10 | stopped | 196,169,158 | 0 | Refused: unsettled attempts |
+Ignored worktree receipts are `.tmp_retention_measure_before.json`,
+`.tmp_retention_measure_after.json` and `.tmp_retention_metadata_audit.json`; the local
+`.tmp_retention_format.py` renders this table. The measured final policy SHA256 is
+`989dfaf0b410626a65ef606680cd6b87ede0e08561635138d897c680a5f7e67b`.
+The previous aggregate store observation's “three possibly live owners” wording was wrong:
+it comprised two potentially live controllers and one non-run folder without an ownership
+checkpoint. That old zero-benefit inventory is superseded by this controlled measurement.
+
+### Mutation checks of the final implementation
+
+An isolated snapshot of the **final implementation** killed **82/82 compiled independent
+faults**, each through the named behavioral test below. The final retention policy hash
+matches the measured hash above; the final tracked source/test manifest SHA256 is
+`909b24c118ed33cdd072bf54cdefecf17c447395d91f7a9882fb5c9daed3e324`.
+The snapshot and root source/test hashes match after restoration. Controls pass **5 files /
+192 tests** before and after, including the restored cancellation fixture.
+
+Every row has compiler exit **0** and test exit **1** with an actual named behavioral
+failure. Expected-success cases that raise the targeted retention refusal also count as
+behavioral failures. Compilation errors, setup/freshness failures and superseded harmless
+probes are excluded. Independent file/stage limits, source limits, live commands, park/hold,
+boot checks, stale attempts, original scratch cleanup and all later citation/source fixes
+are included. Directory/dedup rows explicitly marked inversion reverse the guard rather
+than removing a redundant check. Mutants use incremental TypeScript emission and the
+existing build manifest/freshness setup in an isolated backend snapshot; normal backend
+builds and unchanged test setup supply restored controls. The required root build below
+also builds the unchanged UI.
+
+| Guard deliberately broken | Named test that fails (first actual failure) | Compile / test exits |
+| --- | --- | ---: |
+| terminal-status | R01 refuses nonterminal or unknown status "pending" without writes | 0 / 1 |
+| scheduler-liveness | R02 refuses live scheduler identity without writes | 0 / 1 |
+| live-controller | R03 refuses a live checkpoint controller even when its scheduler marker is absent | 0 / 1 |
+| live-command | R05 refuses an alive command group with known identity=true without sending signals | 0 / 1 |
+| historical-command-fate | R06 refuses unknown ownership: legacy consumers | 0 / 1 |
+| checkpoint-binding | R06 refuses unknown ownership: bad version | 0 / 1 |
+| checkpoint-process-array | R06 refuses unknown ownership: missing groups | 0 / 1 |
+| controller-pid | R06 refuses unknown ownership: bad controller | 0 / 1 |
+| missing-checkpoint | R06 refuses unknown ownership: missing checkpoint | 0 / 1 |
+| joined-unsettled | R07 refuses unsettled running attempt ledgers for a joined live owner | 0 / 1 |
+| joined-self | R08 permits only the joined self owner while the run is running | 0 / 1 |
+| stage-complete | R09 keeps stage work needed by pending stage or continuation | 0 / 1 |
+| stage-continuation | R09 keeps stage work needed by continuation stage or continuation | 0 / 1 |
+| terminal-invocation-plan | R10 deletes invocation scratch at terminal incomplete even with unfinished work | 0 / 1 |
+| terminal-invocation-retire | R10 deletes invocation scratch at terminal incomplete even with unfinished work | 0 / 1 |
+| park-hold | R11 keeps all work for retained parked control records | 0 / 1 |
+| declared-paths | R12 preserves declared readers, produced descendants and empty declared directories | 0 / 1 |
+| dynamic-declarations | R13 preserves admitted dynamic-plan readers as well as base workflow declarations | 0 / 1 |
+| exact-citations | R14 keeps bounded exact cited paths and removes ambiguous basename mentions | 0 / 1 |
+| durable-categories | R20 apply reclaims the same measured bytes, preserves durable state and is idempotent | 0 / 1 |
+| workflow-stages | R16 refuses absent or malformed workflow artifact declarations without mutation | 0 / 1 |
+| internal-link-target | R17 retains symlinks and their internal targets without traversing external targets | 0 / 1 |
+| symlink-preservation | R17 retains symlinks and their internal targets without traversing external targets | 0 / 1 |
+| plain-directory | R18 never traverses a linked run ancestor | 0 / 1 |
+| stage-directory-inversion | R20 apply reclaims the same measured bytes, preserves durable state and is idempotent | 0 / 1 |
+| workspace-directory-inversion | R20 apply reclaims the same measured bytes, preserves durable state and is idempotent | 0 / 1 |
+| dry-run | R19 dry-run preserves every file, directory, timestamp and byte while reporting the exact benefit | 0 / 1 |
+| apply-removal | R20 apply reclaims the same measured bytes, preserves durable state and is idempotent | 0 / 1 |
+| cli-default | R21 CLI defaults to read-only and prints per-run bytes plus kept paths ([]) | 0 / 1 |
+| cli-selection | R22 CLI requires explicit apply and limits mutation to the selected run | 0 / 1 |
+| cli-unsafe-run | R23 CLI reports unsafe bulk runs without changing them and refuses targeted pruning | 0 / 1 |
+| cli-flags | R24 CLI rejects ambiguous or unsafe flags [ '--apply', '--dry-run' ] without store writes | 0 / 1 |
+| run-directory-identity | R25 refuses mismatched run-directory identity | 0 / 1 |
+| prior-boot | R26 accepts proven prior-boot death without requiring current-host process observations | 0 / 1 |
+| reused-controller | R27 accepts reused controller and command identities only with different verified start tokens | 0 / 1 |
+| invalid-command-pid | R28 refuses invalid command-group ownership without sending any signal | 0 / 1 |
+| durable-report-reading | R29 preserves evidence cited by a durable report named outputs/findings.md | 0 / 1 |
+| settled-stage-hook | R30 prunes a settled predecessor before its successor runs and preserves readable dashboard records | 0 / 1 |
+| ledger-agreement | R33 preserves stage and invocation work when the execution ledger is running | 0 / 1 |
+| ledger-nofollow | R33 preserves stage and invocation work when the execution ledger is linked | 0 / 1 |
+| relative-citations | R34 preserves large evidence resolved relative to its report: '[measurements](../build/experiment/fi…' | 0 / 1 |
+| outer-link-target | R35 preserves scratch targets referenced by a durable handoff file symlink | 0 / 1 |
+| workspace-report-declaration | R36 preserves evidence cited by a declared report inside its own workspace | 0 / 1 |
+| artifact-contract | R37 refuses absent artifact contracts instead of guessing that no continuation reads exist | 0 / 1 |
+| workspace-root-citation | R59 workspace-root citations, incidental archives/logs/Markdown and root scripts do not pin work | 0 / 1 |
+| external-report | R39 preserves evidence cited by an explicit project report before terminal archiving | 0 / 1 |
+| declared-physical-path | R40 preserves a scratch target exposed through a declared project output alias | 0 / 1 |
+| saved-controller-token | R41 refuses malformed or incompatible 'controller' identity { kind: 'linux', value: 'malformed' } without writes | 0 / 1 |
+| saved-group-token | R41 refuses malformed or incompatible 'group' identity { kind: 'linux', value: 'malformed' } without writes | 0 / 1 |
+| explicit-sibling | R48 preserves explicit local Markdown evidence '[raw](<raw data.bin>)' | 0 / 1 |
+| project-report-target | R43 preserves evidence cited through a declared project report symlink | 0 / 1 |
+| external-link-physical-target | R44 protects a durable link target reached through an external alias without deleting outside the run | 0 / 1 |
+| malformed-boot | R45 refuses malformed boot identity "invalid-boot" instead of inferring owner death | 0 / 1 |
+| contract-schema | R46 refuses malformed declared root before disposing work | 0 / 1 |
+| unknown-report-target | R47 refuses an explicit report with an unknown linked target format without mutation | 0 / 1 |
+| explicit-raw-citation | R48 preserves explicit local Markdown evidence '`raw!`' | 0 / 1 |
+| directory-citation | R48 preserves explicit local Markdown evidence '[complete measurements](results)' | 0 / 1 |
+| report-symlink-origins | R49 resolves report-relative citations at a declared report symlink location as well as its target | 0 / 1 |
+| stale-attempt-global-block | R50 proven-dead stale running attempt preserves its own work without blocking settled stages | 0 / 1 |
+| kept-file-limit | R51 bounds all discretionary citations and durable categories per file and per stage across build and scratch | 0 / 1 |
+| kept-stage-limit | R51 bounds all discretionary citations and durable categories per file and per stage across build and scratch | 0 / 1 |
+| workspace-md-authority | R52 workspace Markdown becomes a citation source only through recorded evidence, including transitive reports | 0 / 1 |
+| source-file-limit | R53 oversized reports are not scanned as citation sources | 0 / 1 |
+| source-stage-limit | R54 bounds citation-source bytes per stage without reading arbitrary workspace Markdown | 0 / 1 |
+| stale-stage-attempt | R55 protects complete stage with stale running attempt while cleaning other stages | 0 / 1 |
+| invocation-source-exclusion | R56 invocation scratch Markdown cannot pin settled stage work | 0 / 1 |
+| terminal-store-scratch | retires physical scratch on terminal publication: complete | 0 / 1 |
+| startup-terminal-scratch | startup sweeps terminal and missing owners, preserving resumable and uncertain owners | 0 / 1 |
+| startup-missing-record | startup sweeps terminal and missing owners, preserving resumable and uncertain owners | 0 / 1 |
+| startup-missing-owner-link | startup sweeps terminal and missing owners, preserving resumable and uncertain owners | 0 / 1 |
+| startup-terminal-hook | retires scratch when orphan reconciliation reaches a terminal refusal and preserves run history | 0 / 1 |
+| unfinished-workspace-source | R57 unfinished work area Markdown also needs a recorded incoming citation | 0 / 1 |
+| link-size-bypass | R58 incidental links and private filenames cannot bypass workspace size bounds | 0 / 1 |
+| private-size-bypass | R58 incidental links and private filenames cannot bypass workspace size bounds | 0 / 1 |
+| source-dedup-inversion | R14 keeps bounded exact cited paths and removes ambiguous basename mentions | 0 / 1 |
+| unverifiable-controller-token | R04 refuses unverifiable live controller identity | 0 / 1 |
+| basename-is-not-exact-citation | R59 workspace-root citations, incidental archives/logs/Markdown and root scripts do not pin work | 0 / 1 |
+| symlink-source-admission | R63 durable outside-work links preserve targets without making workspace Markdown a citation source | 0 / 1 |
+| citation-source-priority | R61 retains admitted citation sources before their payloads so bounded apply is idempotent | 0 / 1 |
+| citation-source-optional-inversion | R61 retains admitted citation sources before their payloads so bounded apply is idempotent | 0 / 1 |
+| link-retention-priority | R62 retains link references before bounded targets so later apply does not lose their reason | 0 / 1 |
+| workspace-link-discovery-exclusion | R35 preserves scratch targets referenced by a durable handoff file symlink | 0 / 1 |
+
+Complete per-mutant edits, compiler/test receipts, all failing parameter cases and restored
+control results remain in ignored `.tmp_retention_mutations/final-v3/summary.json` and
+`table.md`. No mutation changes the shared tracked implementation or the operator store.
 
 
-Final focused validation passed **9 files / 165 tests**, including **101 guard/CLI cases**
-and **4 scheduler/resume/dashboard cases**. Build passed; lint passed with **0 errors and
-17 existing warnings**. The later review regressions were recorded against the preceding
-source (10 failures and one already-safe case), then passed with the fixes. Common Markdown
-angle destinations, extensionless sibling links, link titles, literal punctuation and relative
-links through declared report aliases now have separate named cases.
-
-An isolated frozen pre-final-review variant killed **17/17 successfully compiled independent
-faults** through named behavioral failures: terminal status, scheduler/controller liveness,
-stage continuation, resumable scratch, declared paths, exact citations/size cutoff, durable
-categories, no-follow/ledger agreement, read-only planning, CLI default, settled-stage hook,
-relative references, durable symlink targets and saved-token validity. Two compile-invalid
-probes were excluded, not counted as kills. Both restored controls built and passed all
-**87** retention tests present in that snapshot. Receipts are in ignored
-`.tmp_retention_mutations/summary.json`; these mutation results do not claim coverage of the
-later citation fixes, which have their own reproductions and final passing tests.
-
-The required clean-tree/build/lint/full-test pipeline is run after committing this report;
-its direct output and exit are retained in `.retention-verify.log`. No live-provider or
-private-daemon trial is needed for this filesystem lifecycle change. Native adapter fixtures,
-real scheduler continuation and actual dashboard routes exercise its affected boundaries.
-Normal build/test scratch uses the permitted system temporary directory, never a worktree
-`TMPDIR`. All owned mutation processes finished before final verification. No deployed
-checkout, distribution or daemon was modified, and the operator store was never pruned.
+The required clean-tree/build/lint/full-test pipeline runs after the commit. Its output is
+kept in the ignored worktree verification log. All commands use CPU affinity **6–11** and
+nice **19**; normal build/test temporary storage stays in the system temporary directory.
+No deployed checkout, deployed distribution or daemon is changed. No process outside the
+owned test/mutation children is signalled. The configured operator store is strictly read-only.

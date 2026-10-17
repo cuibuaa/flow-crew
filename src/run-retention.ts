@@ -12,14 +12,14 @@ import { prospectivePhysicalPath } from './engine-owned-carriers.js';
 import { retireRunScratch } from './invocation-scratch.js';
 import { RecordedArtifactContractSchema, type ArtifactPlanStage } from './artifact-declarations.js';
 
-/** A bare filename is weaker evidence than a path. Retain small reproducibility
- * inputs/results by name; never retain a multi-GB corpus just because its basename occurs. */
+/** Discretionary workspace evidence and its citation sources are bounded separately
+ * from required declared artifacts. */
 export const RETENTION_SMALL_FILE_BYTES = 1024 * 1024;
+export const RETENTION_FILE_BYTES = 8 * 1024 * 1024;
+export const RETENTION_STAGE_BYTES = 32 * 1024 * 1024;
 const secret = /^(?:auth\.json|credentials\.json|installation_id|tokens?(?:\..*)?)$/i;
 const textFile = /\.(?:md|txt|json|ya?ml|csv|tsv|py|sh|[cm]?js|ts)$/i;
-const smallEvidence = /\.(?:py|sh|[cm]?js|ts|json|ya?ml|toml|ini|cfg|csv|tsv|txt)$/i;
 const durable = /(?:^|\/)(?:evidence|handoff|patches|outputs|logs)(?:\/|$)|\.(?:patch|diff|bundle|tar(?:\.[a-z0-9]+)?|tgz|zip|log|stdout|stderr|md)$/i;
-const resumable = (state: StoreState): boolean => ([RUN_STATUS.STOPPED, RUN_STATUS.INCOMPLETE, RUN_STATUS.FAILED] as string[]).includes(state.status);
 interface Member { path: string; bytes: number; directory: boolean; link: boolean }
 export interface RetentionPlan {
   runId: string;
@@ -82,7 +82,7 @@ function assertQuiescent(runPath: string, state: StoreState, ownerSettled = fals
   } else {
     throw new Error('RETENTION_PROCESS: executed run has no ownership checkpoint');
   }
-  if (Object.values(state.stages).some(stage => stage.status === STAGE_STATUS.RUNNING
+  if (own && Object.values(state.stages).some(stage => stage.status === STAGE_STATUS.RUNNING
     || stage.attempts?.some(attempt => attempt.status === STAGE_STATUS.RUNNING || attempt.status === 'closed'))) throw new Error('RETENTION_UNSETTLED: attempt is not settled');
 }
 
@@ -98,12 +98,17 @@ function declarations(runPath: string, state: StoreState): ArtifactPlanStage[] {
   return stages;
 }
 
-/** Stream durable text instead of loading whole reports; neither logs/native prompts nor
- * private credential files are opened to discover report references. */
-function referenceNames(runPath: string, workspaces: string[], reports: string[]): Set<string> {
+/** Read bounded recorded reports; logs/native prompts and private files are never
+ * citation sources. Workspace reports require an incoming recorded citation. */
+function referenceNames(runPath: string, reports: string[]): { names: Set<string>; sources: Set<string> } {
   const names = new Set<string>();
+  const linkedNames = new Set<string>();
+  const sources = new Set<string>();
   const aliases = reports.map(source => ({ source, physical: prospectivePhysicalPath(source) }));
   const contexts = new Map<string, string[]>();
+  const deferred: (() => boolean)[] = [];
+  const scannedBytes = new Map<string, number>();
+  const scannedFiles = new Set<string>();
   const record = (value: string, source: string, explicit = false): void => {
     const pathLike = value.includes('/');
     let origins = contexts.get(source);
@@ -130,34 +135,50 @@ function referenceNames(runPath: string, workspaces: string[], reports: string[]
       const path = join(directory, name);
       if (onlyFile && path !== onlyFile) continue;
       const local = relative(runPath, path).split('\\').join('/');
-      if (secret.test(name)) continue;
-      const workspace = workspaces.find(root => local === root || local.startsWith(`${root}/`));
+      if (secret.test(name) || local === 'scratch') continue;
+      const workspace = local.match(/^stages\/[^/]+\/(?:build|scratch)(?=\/|$)/)?.[0];
       const stat = lstatSync(path);
       if (stat.isSymbolicLink()) {
         const target = resolve(directory, readlinkSync(path));
         const physical = prospectivePhysicalPath(target);
-        names.add(target); names.add(physical);
-        names.add(relative(runPath, physical).split('\\').join('/'));
+        if (!workspace) {
+          linkedNames.add(target); linkedNames.add(physical);
+          linkedNames.add(relative(runPath, physical).split('\\').join('/'));
+        }
         continue;
       }
       if (stat.isDirectory()) { scan(path, readText && !/^(?:invocations?|native|node_modules|\.git|\.venv|__pycache__)$/.test(name)); continue; }
       const declaredReport = reports.some(report => path === report || path.startsWith(`${report}/`));
       if ((!readText && !declaredReport) || !stat.isFile() || !textFile.test(name)) continue;
-      if (workspace && !declaredReport && !/\.md$/i.test(name) && !/(?:^|\/)(?:evidence|handoff|outputs)(?:\/|$)/.test(local)) continue;
+      if (workspace && !declaredReport && !/\.md$/i.test(name)) continue;
       const reportDirectory = /(?:^|\/)(?:evidence|handoff|outputs|declared_outputs|terminal_snapshots)(?:\/|$)/.test(local);
       if (!reportDirectory && (/^(?:summary|progress)\.md$/.test(local) || /(?:^|\/)input(?:_attempt_\d+)?\.md$/.test(local))) continue;
       if (!declaredReport && !reportDirectory && !/\.md$/i.test(name) && !/^(?:stage_record|verdict).*\.json$/.test(name)) continue;
-      const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      try {
-        const buffer = Buffer.alloc(64 * 1024);
-        let tail = '', count: number;
-        while ((count = readSync(fd, buffer, 0, buffer.length, null)) > 0) {
-          const text = tail + buffer.toString('utf8', 0, count);
-          for (const match of text.matchAll(/`([^`]+)`|\]\(([^)]+)\)/g)) record(match[1] ?? match[2], path, true);
-          for (const token of text.split(/[\s"'`<>|=(){}[\],;]+/)) record(token, path);
-          tail = text.slice(-4096);
-        }
-      } finally { closeSync(fd); }
+      const readReport = (): boolean => {
+        // Workspace Markdown is untrusted corpus content until a recorded report cites it.
+        if (workspace && !declaredReport && !names.has(local) && !names.has(path)) return false;
+        const physical = prospectivePhysicalPath(path);
+        if (scannedFiles.has(physical)) return true;
+        const stage = workspace?.split('/').slice(0, 2).join('/') ?? local.split('/').slice(0, 2).join('/');
+        const used = scannedBytes.get(stage) ?? 0;
+        if (stat.size > RETENTION_SMALL_FILE_BYTES || used + stat.size > RETENTION_STAGE_BYTES) return true;
+        if (workspace) sources.add(local);
+        scannedFiles.add(physical);
+        scannedBytes.set(stage, used + stat.size);
+        const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        try {
+          const buffer = Buffer.alloc(64 * 1024);
+          let tail = '', count: number;
+          while ((count = readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+            const text = tail + buffer.toString('utf8', 0, count);
+            for (const match of text.matchAll(/`([^`]+)`|\]\(([^)]+)\)/g)) record(match[1] ?? match[2], path, true);
+            for (const token of text.split(/[\s"'`<>|=(){}[\],;]+/)) record(token, path);
+            tail = text.slice(-4096);
+          }
+        } finally { closeSync(fd); }
+        return true;
+      };
+      if (workspace) deferred.push(readReport); else readReport();
     }
   };
   scan(runPath);
@@ -172,7 +193,15 @@ function referenceNames(runPath: string, workspaces: string[], reports: string[]
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
-  return names;
+  // Follow only recorded citations, including citations from an admitted workspace report.
+  let remaining = deferred;
+  while (remaining.length) {
+    const next = remaining.filter(read => !read());
+    if (next.length === remaining.length) break;
+    remaining = next;
+  }
+  for (const name of linkedNames) names.add(name);
+  return { names, sources };
 }
 
 function planRetention(runPath: string, options: RetentionOptions): RetentionPlan {
@@ -207,14 +236,21 @@ function planRetention(runPath: string, options: RetentionOptions): RetentionPla
       if (!children(path).includes(name)) continue;
       const local = `stages/${id}/${name}`;
       if (!lstatSync(join(path, name)).isDirectory()) { keep(local, 'non-directory workspace or symlink (never followed)'); continue; }
-      if (!status || status.status !== STAGE_STATUS.COMPLETE || status.continuation || !settledLedgers.has(id)) { keep(local, 'unfinished or unknown stage; continuation work'); continue; }
+      if (!status || status.status !== STAGE_STATUS.COMPLETE || status.continuation
+        || status.attempts?.some(attempt => attempt.status === STAGE_STATUS.RUNNING || attempt.status === 'closed') || !settledLedgers.has(id)) { keep(local, 'unfinished or unknown stage; continuation work'); continue; }
       workspaces.push(local);
     }
   }
-  if (children(runPath).includes('scratch')) {
-    if (!lstatSync(join(runPath, 'scratch')).isDirectory()) keep('scratch', 'non-directory workspace or symlink (never followed)');
-    else if (resumable(state) || Object.entries(state.stages).some(([id, stage]) => !settledLedgers.has(id) || stage.status !== STAGE_STATUS.COMPLETE && stage.status !== STAGE_STATUS.SKIPPED)) keep('scratch', 'run continuation work');
-    else if (isTerminalRunStatus(state.status)) workspaces.push('scratch');
+  // Invocation scratch has always been disposable at terminal publication, even on failure.
+  // Do not let report citations or unfinished stages extend that lifetime.
+  if (isTerminalRunStatus(state.status) && children(runPath).includes('scratch')) {
+    if (!lstatSync(join(runPath, 'scratch')).isDirectory()) keep('scratch', 'non-directory invocation scratch');
+    else walk(join(runPath, 'scratch'), member => {
+      if (!member.directory && member.path !== '.tmpdir') {
+        result.remove.push({ path: `scratch/${member.path}`, bytes: member.bytes });
+        result.removeBytes += member.bytes;
+      }
+    });
   }
   if (!workspaces.length) return result;
   const stages = declarations(runPath, state);
@@ -235,21 +271,21 @@ function planRetention(runPath: string, options: RetentionOptions): RetentionPla
       }
     }
   }
-  const names = referenceNames(runPath, workspaces, reports);
+  const { names, sources } = referenceNames(runPath, reports);
   // Preserve symlink targets as well as the links, without traversing either.
   const members = new Map<string, Member>();
+  const symlinkTargets = new Map<string, string>();
+  const workspaceLinks = new Map<string, string>();
   for (const root of workspaces) walk(join(runPath, root), member => {
     const local = member.path ? `${root}/${member.path}` : root;
     members.set(local, member);
     if (member.link) {
       const target = relative(runPath, resolve(dirname(join(runPath, local)), readlinkSync(join(runPath, local)))).split('\\').join('/');
-      if (target && !target.startsWith('../')) protectedPaths.set(target, 'retained symlink target');
+      if (target && !target.startsWith('../')) workspaceLinks.set(local, target);
     }
   });
-  let scratchAlias: string | undefined;
-  const marker = members.get('scratch/.tmpdir');
-  if (marker && !marker.link && !marker.directory) scratchAlias = readFileSync(join(runPath, 'scratch/.tmpdir'), 'utf8');
-  const retainedDirectories = new Set<string>();
+  const retainedBytes = new Map<string, number>();
+  const citedDirectories = new Map<string, string>();
   const ancestorReason = (paths: ReadonlyMap<string, string>, local: string): string | undefined => {
     for (let path = local; path !== '.'; path = dirname(path)) {
       const reason = paths.get(path);
@@ -257,20 +293,31 @@ function planRetention(runPath: string, options: RetentionOptions): RetentionPla
     }
     return undefined;
   };
-  for (const [local, member] of members) {
-    if (local.split('/').some((_, index, parts) => retainedDirectories.has(parts.slice(0, index).join('/')))) continue;
+  // Citation sources must survive before their payloads: otherwise a second
+  // compaction could erase evidence whose only retained reference just disappeared.
+  const priority = ([local, member]: [string, Member]): number => sources.has(local) ? 2 : member.link ? 1 : 0;
+  const ordered = [...members].sort((a, b) => priority(b) - priority(a));
+  for (const [local, member] of ordered) {
     const root = workspaces.find(root => local === root || local.startsWith(`${root}/`))!;
     const stageRelative = local.startsWith('stages/') ? local.split('/').slice(2).join('/') : local;
     const workspaceRelative = local.slice(root.length + 1);
-    const exact = [local, ...(local === root ? [] : [stageRelative]), ...(workspaceRelative.includes('/') ? [workspaceRelative] : []), join(runPath, local), ...(scratchAlias && root === 'scratch' ? [join(scratchAlias, workspaceRelative)] : [])].some(path => names.has(path));
+    const exact = [local, ...(local === root ? [] : [stageRelative]), ...(workspaceRelative.includes('/') ? [workspaceRelative] : []), join(runPath, local)].some(path => names.has(path));
+    const stage = local.split('/').slice(0, 2).join('/');
     let reason = ancestorReason(protectedPaths, local);
-    reason ??= member.link ? 'symlink (never followed)' : secret.test(basename(local)) ? 'private file (never opened)' : durable.test(local) ? 'durable evidence, log or handoff' : exact ? 'exact report/evidence citation' : undefined;
-    if (!reason && !member.directory && member.bytes <= RETENTION_SMALL_FILE_BYTES && smallEvidence.test(local)
-      && (names.has(basename(local)) || dirname(local) === root)) reason = 'small reproducibility script, configuration or result (at most 1 MiB)';
+    if (exact && member.directory && local !== root) citedDirectories.set(local, 'exact report/evidence citation');
+    const optional = sources.has(local) ? 'recorded citation source' : member.link ? 'symlink (never followed)' : secret.test(basename(local)) ? 'private file (never opened)'
+      : ancestorReason(symlinkTargets, local) ?? (/(?:^|\/)(?:evidence|handoff|patches)(?:\/|$)|\.(?:patch|diff)$/i.test(local) ? 'bounded evidence, handoff or patch' : exact || ancestorReason(citedDirectories, local) ? 'exact report/evidence citation' : undefined);
+    if (!reason && !member.directory && optional && member.bytes <= RETENTION_FILE_BYTES
+      && (retainedBytes.get(stage) ?? 0) + member.bytes <= RETENTION_STAGE_BYTES) {
+      reason = optional;
+      retainedBytes.set(stage, (retainedBytes.get(stage) ?? 0) + member.bytes);
+    }
     if (reason) {
       keep(local, reason);
-      if (member.directory) retainedDirectories.add(local);
-    } else if (!member.directory && local !== 'scratch/.tmpdir') {
+      const target = workspaceLinks.get(local);
+      if (target) symlinkTargets.set(target, 'bounded symlink target');
+    }
+    else if (!member.directory) {
       result.remove.push({ path: local, bytes: member.bytes });
       result.removeBytes += member.bytes;
     }
@@ -308,11 +355,7 @@ function compactWorkAreas(runPath: string, options: RetentionOptions): Retention
       // Only touch ancestors of files admitted to this plan.
       if (plan.remove.some(member => member.path.startsWith(`stages/${stage}/${name}/`))) pruneEmpty(path);
     }
-    if (plan.remove.some(member => member.path.startsWith('scratch/'))) {
-      const scratch = join(runPath, 'scratch');
-      pruneEmpty(scratch);
-      if (children(scratch).every(name => name === '.tmpdir')) retireRunScratch(runPath);
-    }
+    if (isTerminalRunStatus(plan.status) && !plan.kept.some(entry => entry.path === 'stages/, scratch/')) retireRunScratch(runPath);
     return plan;
 }
 

@@ -60,7 +60,7 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('retains scratch when orphan reconciliation refuses continuation and preserves run history', () => {
+  it('retires scratch when orphan reconciliation reaches a terminal refusal and preserves run history', () => {
     const id = orphan();
     const runDir = join(runsRoot(), id);
     const scratch = createInvocationScratch(runDir);
@@ -73,9 +73,8 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     createDaemonReconciler(registry, vi.fn())();
 
     expect(readRunState(project, id)).toMatchObject({ status: 'failed', recovery: { kind: 'blocked' } });
-    expect(lstatSync(alias).isSymbolicLink()).toBe(true);
-    expect(readFileSync(join(scratch.path, 'evidence.txt'), 'utf8')).toBe('interrupted invocation payload');
-    expect(existsSync(join(runDir, 'scratch'))).toBe(true);
+    expect(() => lstatSync(alias)).toThrow(/ENOENT/);
+    expect(existsSync(join(runDir, 'scratch'))).toBe(false);
     expect(readFileSync(join(runDir, 'stages/work/status.json'), 'utf8')).toBe(ledger);
   });
 
