@@ -8,13 +8,43 @@ retained as reported release history, not current guarantees or benchmark eviden
 
 # Changelog
 
-## Unreleased
+## [0.10.2] - 2026-10-18
 
-- Every authoring stage runs one author. New structured competition requests are refused;
-  historical plans, ownership markers, candidate artifacts and accepted gate provenance remain readable.
-- Stage budgets deliver wrap-up guidance through the shared invocation control path on both
-  adapters. Cooperative and bounded forced stops keep admitted work and a done/remaining handoff
-  for the next finite iteration; independent gates receive their own budgets.
+Ordinary tasks run a fixed review workflow, stage races are gone, and in-flight runs survive an
+engine deploy.
+
+### Migration
+
+- **Stage races are removed.** Every authoring stage runs one author. New structured competition
+  requests are refused; historical plans, ownership markers, candidate artifacts and accepted gate
+  provenance remain readable.
+
+### Changed
+
+- **Fixed review workflow by default.** Ordinary tasks run author → review → repair → re-review
+  instead of planner decomposition, and fixed workflows receive the full execution and review
+  contracts. Repair waves respect their dependencies, keep pending slices and the existing round
+  budget, and refresh scope-guard preimages each wave.
+- **Deploy while tasks are in flight.** `daemon hold` waits for the current stage group, the engine
+  can be rebuilt and restarted, and held runs continue.
+- **Stage budgets** deliver wrap-up guidance through the shared invocation control path on both
+  adapters. Cooperative and bounded forced stops keep admitted work and a done/remaining handoff for
+  the next finite iteration; independent gates receive their own budgets.
+- **Claude adapter model selection.** A machine-local `~/.config/flowcrew/claude.json` sets the
+  default model; shipped roles inherit the backend's model and effort settings at invocation time.
+- **Smaller stage outputs.** Gates read the winner's evidence and receipts instead of re-running
+  checks; FlowCrew no longer adds its own report sections.
+
+### Fixed
+
+- Research rounds keep completed static work across iteration resets, ingest reviewed snapshots and
+  record every candidate settlement before completion.
+- Cancelled and re-pended stages stay continuable; disagreeing ledgers are preserved on cancellation;
+  legacy stopped runs can continue.
+- Settled run workspaces are compacted while evidence is preserved, and scratch cleanup is bounded.
+- Rollback baselines follow an admitted writer back to its batch preimage.
+- Verification duties are admitted and required work is settled before terminal outcomes; terminal
+  product review settles from executed evidence.
 
 ## [0.10.1] - 2026-10-14
 
