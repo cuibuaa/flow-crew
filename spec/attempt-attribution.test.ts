@@ -67,11 +67,13 @@ describe('durable attempt attribution on every publisher', () => {
   it.each([0, 1, 124, 137])('attributes worker start and exit %s independently of stage names', async exitCode => {
     const created = fixture();
     await runStage({ run: async () => result(exitCode) }, workerOpts(created));
+    const retained = exitCode === 124;
     expect(events(created)).toEqual([
       expect.objectContaining({ type: 'attempt_started', ...attribution, disposition: 'pending', attemptIndex: 1 }),
-      expect.objectContaining({ type: exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
-        ...attribution, disposition: exitCode === 0 ? 'accepted' : 'discarded', attemptIndex: 1 }),
+      expect.objectContaining({ type: exitCode === 0 || retained ? 'attempt_finished' : 'attempt_failed',
+        ...attribution, disposition: exitCode === 0 || retained ? 'accepted' : 'discarded', attemptIndex: 1 }),
     ]);
+    if (retained) expect(readStageStatus(project, created.runId, 'opaque').continuation).toMatchObject({ reason: 'stage_budget', forced: true });
     expect(events(created)[0].attemptStartedAt).toBe(events(created)[1].attemptStartedAt);
     expect(readStageStatus(project, created.runId, 'opaque').attempts?.[0]).toMatchObject(attribution);
   });

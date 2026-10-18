@@ -1,11 +1,15 @@
+import { publishRunCompletion, settleTerminalResearchCandidates } from './run-completion.js';
 /** Research artifact identity, round ingestion/advancement, confirmation and best-effort terminal hooks; file inventory, rollback settlement and campaign writer are supplied. */
 import { type ResearchRound, evaluateResearch, evaluateResearchCeilingFloor } from '../../research-policy.js';
 import { createHash } from 'node:crypto';
-import { basename, join, dirname } from 'node:path';
+import { type ResearchGateCandidate, settleResearchGateCandidate } from '../../research-candidate.js';
+import { updateFileHashSync } from '../../rollback-content-store.js';
+import { join, dirname } from 'node:path';
 import { copyFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
-import { lstatSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { researchEvidenceFiles, researchInputIsFresh } from '../../research-candidate.js';
 import { type Adapter } from '../../adapters/base.js';
-import { RUN_STATUS, type StoreState, enforceRealityGateBeforeTerminal, writeRunState, type PostTerminateHook } from '../../store.js';
+import { RUN_STATUS, type StoreState, enforceRealityGateBeforeTerminal, type PostTerminateHook } from '../../store.js';
 import { RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
 import { log } from '../sched_admission/shared.js';
 import { markLeftoverStagesSkipped, recordConfirmNotRun } from '../sched_admission/brief-contract.js';
@@ -112,18 +116,17 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     projectDir: string,
     reportDir: string,
     round: { label?: string; result?: number; evidence?: unknown },
-    startedMs: number,
+    state: StoreState,
   ): string | undefined {
     if (typeof round.evidence === 'string' && round.evidence.trim()) return round.evidence.trim();
     if (!round.label || typeof round.result !== 'number') return undefined;
     const expectedLabel = round.label;
     const expectedResult = round.result;
-    const candidates = listProjectFilesAt(projectDir, reportDir).filter((path) => basename(path) === 'evidence.json');
+    const candidates = researchEvidenceFiles(projectDir, listProjectFilesAt(projectDir, reportDir));
     const matches = candidates.filter((path) => {
       try {
         const absolute = join(projectDir, path);
-        const stat = lstatSync(absolute);
-        if (!stat.isFile() || stat.size > 4 * 1024 * 1024 || stat.mtimeMs < startedMs) return false;
+        if (!researchInputIsFresh(projectDir, state, path)) return false;
         const pending: unknown[] = [JSON.parse(readFileSync(absolute, 'utf-8'))];
         let sawLabel = false;
         let sawResult = false;
@@ -147,7 +150,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
 
   async function tryAdvanceResearch(
     state: StoreState,
-    ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number; adapter: Adapter },
+    ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number; adapter: Adapter; candidate?: ResearchGateCandidate },
   ): Promise<StoreState | null> {
     const rc = state.research;
     if (!rc) return null;
@@ -157,22 +160,28 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     const noCandidateAbs = `${resultAbs}.no_candidate.json`;
     
     const startedMs = state.startedAt ? new Date(state.startedAt).getTime() : Date.now();
-    const fresh = (path: string): boolean => {
-      try { return existsSync(path) && statSync(path).mtimeMs >= startedMs; } catch { return false; }
+    const candidate = ctx.candidate;
+    const settleCandidate = (disposition: 'ingested' | 'rejected', reason: string): void => {
+      if (candidate) settleResearchGateCandidate(ctx.projectDir, ctx.runDirPath, candidate, disposition, reason);
     };
-    const freshResult = fresh(resultAbs);
-    const freshNoCandidate = fresh(noCandidateAbs);
+    if (candidate && (!candidate.evidenceJson || (candidate.kind !== 'measured' && candidate.kind !== 'no_candidate'))) {
+      settleCandidate('rejected', candidate.reason ?? 'Captured outcome has no immutable evidence bytes');
+      return null;
+    }
+    const freshResult = candidate ? candidate.kind === 'measured' : researchInputIsFresh(ctx.projectDir, state, resultRel);
+    const freshNoCandidate = candidate ? candidate.kind === 'no_candidate' : researchInputIsFresh(ctx.projectDir, state, `${resultRel}.no_candidate.json`);
     if (!freshResult && !freshNoCandidate) return null;
     const digestSources = (paths: readonly string[]): string => {
       const hash = createHash('sha256');
       for (const path of [...paths].sort()) {
         hash.update(path === resultAbs ? resultRel : `${resultRel}.no_candidate.json`, 'utf8');
-        try { hash.update(readFileSync(path)); } catch { hash.update('<unreadable>', 'utf8'); }
+        try { updateFileHashSync(path, hash); } catch { hash.update('<unreadable>', 'utf8'); }
       }
       return hash.digest('hex');
     };
     const rejectRoundInput = (kind: string, detail: string, sources: readonly string[]): null => {
-      const evidenceDigest = digestSources(sources);
+      const evidenceDigest = candidate?.sha256 ?? digestSources(sources);
+      settleCandidate('rejected', detail);
       try {
         writeFileSync(join(ctx.runDirPath, 'research_round_input_error.json'), `${JSON.stringify({
           error: detail,
@@ -204,10 +213,18 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         [resultAbs, noCandidateAbs],
       );
     }
-    const sourceAbs = freshNoCandidate ? noCandidateAbs : resultAbs;
+    const sourceRel = freshNoCandidate ? `${resultRel}.no_candidate.json` : resultRel;
+    const sourceAbs = join(ctx.projectDir, sourceRel);
+    const sourceBytes = candidate ? Buffer.from(candidate.evidenceJson!, 'utf8') : undefined;
+    const removeReviewedSource = (): void => {
+      // A later writer owns the slot now; consuming a snapshot must not delete it.
+      if (sourceBytes && (!existsSync(sourceAbs) || !readFileSync(sourceAbs).equals(sourceBytes))) return;
+      unlinkSync(sourceAbs);
+      settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, sourceRel);
+    };
     let round: { label?: string; result?: number; outcome?: string; status?: string; reason?: string; evidence?: unknown };
     try {
-      round = JSON.parse(readFileSync(sourceAbs, 'utf-8'));
+      round = JSON.parse(sourceBytes?.toString('utf8') ?? readFileSync(sourceAbs, 'utf-8'));
     } catch {
       return rejectRoundInput('malformed_json', `Research round artifact ${sourceAbs} is not valid JSON.`, [sourceAbs]);
     }
@@ -257,10 +274,10 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       return rejectRoundInput('invalid_measured_result', 'A measured research result requires a finite numeric result.', [sourceAbs]);
     }
     const measuredResult = noCandidate ? undefined : round.result;
-    const sourceEvidenceDigest = digestSources([sourceAbs]);
+    const sourceEvidenceDigest = candidate?.sha256 ?? digestSources([sourceAbs]);
     const roundEvidenceLink = noCandidate
       ? undefined
-      : researchRoundEvidenceLink(ctx.projectDir, researchPaths.reportDir, round, startedMs);
+      : researchRoundEvidenceLink(ctx.projectDir, researchPaths.reportDir, round, state);
 
     // Journal lives in the run dir (framework-owned, agent-unreachable).
     const journalPath = join(ctx.runDirPath, 'research_journal.json');
@@ -277,6 +294,10 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     // blockage, not another budget-consuming round.
     const duplicate = journal.rounds.some((r) => r.label === label);
     if (duplicate) {
+      if (candidate) {
+        settleCandidate('rejected', 'Captured outcome uses an already-journaled immutable identity');
+        return null;
+      }
       observeStableBlockage({
         runDirPath: ctx.runDirPath,
         kind: 'research_round_duplicate',
@@ -294,6 +315,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     }
 
     const rejectGate = async (reason: string, message: string): Promise<StoreState | null> => {
+      settleCandidate('rejected', `${reason}: ${message}`);
       const rejPath = join(ctx.runDirPath, 'research_integrity_rejections.json');
       let rejData: Record<string, number> = {};
       if (existsSync(rejPath)) { try { rejData = JSON.parse(readFileSync(rejPath, 'utf-8')); } catch { /* reset */ } }
@@ -307,7 +329,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         evidenceDigest: sourceEvidenceDigest,
         threshold: state.campaignTriggers?.repeatedFailureAfter,
       });
-      try { unlinkSync(sourceAbs); } catch { /* non-critical */ }
+      try { removeReviewedSource(); } catch { /* non-critical */ }
       appendSchedulerGuidanceOnce(
         ctx.runDirPath,
         RUN_WIDE_GUIDANCE_TARGET,
@@ -358,10 +380,12 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         state.completedAt = new Date().toISOString();
         const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
         
-        if (!gate.allowed) { writeCampaignEntry(ctx.projectDir, gate.state); return gate.state; }
-        writeRunState(ctx.projectDir, ctx.runId, state);
-        writeCampaignEntry(ctx.projectDir, state);
-        recordRunEvent(ctx.projectDir, ctx.runId, { type: 'run_completed', runId: ctx.runId, timestamp: state.completedAt, iteration: ctx.iteration, detail: `Research ceiling: ${totalRej} integrity-gate rejections (reasons: ${Object.keys(rejData).join(',')})` });
+        if (!gate.allowed) {
+          settleTerminalResearchCandidates(ctx.projectDir, gate.state);
+          writeCampaignEntry(ctx.projectDir, gate.state);
+          return gate.state;
+        }
+        publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({ iteration: ctx.iteration, detail: `Research ceiling: ${totalRej} integrity-gate rejections (reasons: ${Object.keys(rejData).join(',')})` }), writeCampaignEntry);
         return state;
       }
       try {
@@ -435,6 +459,12 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       if (r) return r; else return null;
     }
 
+    if (candidate && rc.confirm && !noCandidate
+        && evaluateResearch(rc, [...journal.rounds, { label, result: measuredResult!, resultStd: stdField }]).decision === 'ship'
+        && (!existsSync(sourceAbs) || !readFileSync(sourceAbs).equals(sourceBytes!))) {
+      return rejectGate('confirm_source_changed', 'The reviewed result was replaced before confirmation; confirmation requires the exact captured result.');
+    }
+
     journal.rounds.push({
       label,
       outcome: noCandidate ? 'no_candidate' : 'measured',
@@ -444,7 +474,8 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       resultStd: (round as { result_std?: number }).result_std,
       wallHoursCumulative: (Date.now() - startedMs) / 3600000,
     });
-    try { writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+    writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8');
+    settleCandidate('ingested', 'Reviewed outcome appended to the research journal');
     
     try {
       const manifestPath = join(ctx.projectDir, researchPaths.manifestFile);
@@ -462,8 +493,12 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     const consumedPath = join(ctx.runDirPath, `research_round_${journal.rounds.length}_${noCandidate ? 'no_candidate_' : ''}consumed.json`);
     const confirmNeedsResult = evalResult.decision === 'ship' && Boolean(rc.confirm) && !noCandidate;
     try {
-      if (confirmNeedsResult) copyFileSync(sourceAbs, consumedPath);
+      if (sourceBytes) {
+        writeFileSync(consumedPath, sourceBytes);
+        if (!confirmNeedsResult) removeReviewedSource();
+      } else if (confirmNeedsResult) copyFileSync(sourceAbs, consumedPath);
       else renameSync(sourceAbs, consumedPath);
+      settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, sourceRel);
     } catch { /* non-critical */ }
 
     log.info({ runId: ctx.runId, iteration: ctx.iteration, label, result: measuredResult, outcome: noCandidate ? 'no_candidate' : 'measured', runningBest: evalResult.runningBest, decision: evalResult.decision }, 'Research round evaluated');
@@ -507,7 +542,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       }
       // The confirm command has settled. Consume the mutable slot even on a
       // refusal, so the next iteration cannot observe the same round as new.
-      try { unlinkSync(sourceAbs); } catch { /* duplicate journal identity still prevents a replay */ }
+      try { removeReviewedSource(); } catch { /* duplicate journal identity still prevents a replay */ }
       try { writeFileSync(join(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: rc.confirm.command, requires: rc.confirm.requires }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
       if (!confirmReport.pass) {
         const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
@@ -607,6 +642,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         const lastConsumed = join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
         if (lastRound?.outcome !== 'no_candidate' && !existsSync(resultAbs) && existsSync(lastConsumed)) {
           copyFileSync(lastConsumed, resultAbs);
+          settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, resultRel);
         }
       } catch { /* terminal owner will expose missing decision evidence */ }
       appendSchedulerGuidanceOnce(
@@ -636,7 +672,10 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     
     try {
       const lastConsumed = join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
-      if (!existsSync(resultAbs) && existsSync(lastConsumed)) copyFileSync(lastConsumed, resultAbs);
+      if (!existsSync(resultAbs) && existsSync(lastConsumed)) {
+        copyFileSync(lastConsumed, resultAbs);
+        settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, resultRel);
+      }
     } catch { /* non-critical */ }
 
     const reportBody = `# Research ${terminalDecision === 'ship' ? 'Ship' : 'Ceiling'} Report\n\n`
@@ -670,18 +709,14 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         try { renameSync(source, join(ctx.runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
       };
       if (wroteDeclaredCandidate && declaredPath) quarantine(join(ctx.projectDir, declaredPath), declaredPath.split('/').pop() ?? 'terminal_candidate');
+      settleTerminalResearchCandidates(ctx.projectDir, gate.state);
       writeCampaignEntry(ctx.projectDir, gate.state);
       return gate.state;
     }
-    writeRunState(ctx.projectDir, ctx.runId, state);
-    writeCampaignEntry(ctx.projectDir, state);
-    recordRunEvent(ctx.projectDir, ctx.runId, {
-      type: 'run_completed',
-      runId: ctx.runId,
-      timestamp: state.completedAt,
+    publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
       iteration: ctx.iteration,
       detail: `Research ${terminalDecision}: ${finalEval.reason}`,
-    });
+    }), writeCampaignEntry);
     log.info({ runId: ctx.runId, decision: terminalDecision, runningBest: finalEval.runningBest }, 'Research loop terminated');
     return state;
   }

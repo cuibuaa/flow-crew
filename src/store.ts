@@ -1,4 +1,6 @@
 import { writeFileSync, appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, renameSync, rmdirSync, unlinkSync, writeSync } from './engine-fs.js';
+import { retireRunScratch } from './invocation-scratch.js';
+import { pruneTerminalWorkAreasUnderLock } from './run-retention.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -19,6 +21,7 @@ import type { ProviderFailure } from './provider-result.js';
 import { invocationUsageFields, sumInvocationUsage, usageComplete, type InvocationUsage, type NativeInvocationUsage, type TokenUsage } from './invocation-usage.js';
 
 import {
+  RUN_STATUS,
   UnknownRunStatusError,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
@@ -70,13 +73,18 @@ export interface StageAttemptTimeoutSummary {
   budgetMs: number;
   attemptStartedAt: string;
   deadlineAt: string;
+  budgetDeadlineAt?: string;
+  wrapUpAt?: string;
+  finishingMs?: number;
+  wrapUpRequestedAt?: string;
+  wrapUpDeliveredAt?: string;
   elapsedMs: number;
   remainingMs: number;
   /** Historical extension receipts; new immutable deadlines never write these. */
   rejectedExtensionCount?: number;
   decisionPaths?: string[];
   mismatchPaths?: string[];
-  terminationCause?: 'complete' | 'stage_abort' | 'supervisor_abort' | 'approval_suspension' | 'scope_revision_suspension' | 'attempt_timeout' | 'adapter_error' | 'failed';
+  terminationCause?: 'complete' | 'stage_abort' | 'supervisor_abort' | 'approval_suspension' | 'scope_revision_suspension' | 'budget_wrap_up' | 'budget_forced_stop' | 'attempt_timeout' | 'adapter_error' | 'failed';
   deadlineReachedAt?: string;
   childClosedAt?: string;
   deadlineOverrunMs?: number;
@@ -109,6 +117,16 @@ export interface AttemptAttribution {
 }
 export type AttemptDisposition = 'pending' | 'accepted' | 'discarded' | 'superseded' | 'repaired';
 
+/** A settled slice of work, not evidence that its duties or gates passed. */
+export interface StageContinuation {
+  reason: 'stage_budget';
+  forced: boolean;
+  /** Run-relative retained done/remaining handoff. */
+  handoff: string;
+  /** Engine retention facts, distinct from an author's schema-validated result. */
+  summary?: string;
+}
+
 export interface StageAttempt extends InvocationUsage {
   role?: string;
   iteration?: number;
@@ -138,9 +156,12 @@ export interface StageAttempt extends InvocationUsage {
   constraintAudit?: StageConstraintAuditSummary;
   /** Attempt-local immutable deadline evidence. */
   timeout?: StageAttemptTimeoutSummary;
+  continuation?: StageContinuation;
 }
 
 export interface StageStatus {
+  /** Acceptance already settled in an isolated child; no local gate execution. */
+  acceptedFrom?: { runId: string; verdict: GateVerdict };
   status: StageState;
   exitCode?: number;
   processExitCode?: number | null;
@@ -168,6 +189,13 @@ export interface StageStatus {
   validationGeneratedWrites?: string[];
   constraintAudit?: StageConstraintAuditSummary;
   timeout?: StageAttemptTimeoutSummary;
+  continuation?: StageContinuation;
+}
+
+/** Control-boundary work may be complete or pending re-admission; neither is
+ * permission to reset the workflow's spent iteration budget. */
+export function isContinuingStage(stage: StageStatus): boolean {
+  return Boolean(stage.continuation) && (stage.status === STAGE_STATUS.COMPLETE || stage.status === STAGE_STATUS.PENDING);
 }
 
 /**
@@ -605,6 +633,10 @@ export interface RunStateFormat {
 }
 
 export interface StoreState {
+  deploymentHold?: import('./deployment-hold.js').RunDeploymentHold;
+  continuationFailure?: { at: string; reason: string; generation?: string };
+  /** Observed scheduler admissions only; legacy starts are never fabricated. */
+  engineHistory?: Array<{ kind: 'start' | 'resume'; at: string; generation?: string; pid: number; processStart?: import('./run-lock.js').ProcessStartToken }>;
   engineCheckpoint?: import('./restart-recovery.js').EngineCheckpoint;
   recovery?: import('./restart-recovery.js').RestartRecovery;
   /** Durable authority for reconciling a partially published interruption. */
@@ -643,6 +675,8 @@ export interface StoreState {
   program?: ProgramConfig;
   /** Research-mode config (set from brief `research:` block). */
   research?: ResearchConfig;
+  /** Content identities captured before this research run dispatches producers. */
+  researchInputGeneration?: import('./research-candidate.js').ResearchInputGeneration;
   /** Structurally declared brief outputs archived before terminal commit. */
   declaredOutputs?: Array<{
     path: string;
@@ -733,10 +767,10 @@ export interface ArchivedRunStateRead {
 }
 
 export const FC_DIR = '.fc';
-// FC_HOME (env) or setFcGlobalDir() override the global state root (~/.fc).
+// FC_HOME (env) or setFcGlobalDir() override the configured store root.
 // Consumers: engine-scenario tests and `flowcrew rehearse` run real workflows
 // against a temp dir so they can never write runs/campaign ledgers into the
-// developer's real ~/.fc (openworker lesson: tests once read real machine
+// developer's real store (openworker lesson: tests once read real machine
 // state and emitted real telemetry; isolation must be structural, not
 // disciplinary). The env var works when set before module load; the setter
 // covers callers inside an already-loaded process (the CLI's rehearse path).
@@ -1702,6 +1736,7 @@ function persistRunStateUnlocked(
     }
     // A fresh locked transition can continue admitted work. Compatibility
     // snapshots and stage publishers cannot resurrect acknowledged cancellation.
+    // Explicit continuation uses the fresh locked stopped -> running transition.
     if (!expectation || state.status !== 'running') throw cancelledRunPublicationError(runId);
   }
 
@@ -1711,6 +1746,10 @@ function persistRunStateUnlocked(
   normalizeHistoryTail(join(runPath, historyPath), committedBytes);
   const committedHistories = readRunHistories(runPath, currentRef);
   const merged = mergeStateHistories(currentState, state);
+  // Compatibility snapshot writers cannot drop admissions published by the
+  // scheduler. Admission appends itself under this same run-local lock.
+  merged.engineHistory = [...new Map([...(currentState?.engineHistory ?? []), ...(merged.engineHistory ?? [])]
+    .map(entry => [JSON.stringify(entry), entry])).values()];
   // Command ownership is append-only within one checkpoint. Compatibility
   // writers may carry an older snapshot while another stage starts a child.
   if (currentState?.engineCheckpoint?.at === merged.engineCheckpoint?.at && currentState?.engineCheckpoint?.pid === merged.engineCheckpoint?.pid && merged.engineCheckpoint?.processes) {
@@ -1776,6 +1815,10 @@ function publishRunProjection(projectDir: string, runPath: string, projection: S
     assertProjectionUnchanged();
   }
   atomicWrite(join(runPath, 'run.json'), JSON.stringify(projection) + '\n');
+  if (isTerminalRunStatus(projection.status)) {
+    retireRunScratch(runPath);
+    pruneTerminalWorkAreasUnderLock(runPath);
+  }
   if (canonicalRunDirectory(runPath) === canonicalRunDirectory(runDir(projectDir, projection.runId))) {
     try { upsertRunIndex(projectDir, projection); } catch { /* index is best-effort */ }
     emitCampaignEnvelopeEvents(projectDir, projection.runId, summaryState);
@@ -1842,6 +1885,14 @@ export function updateRunStateAtPath(directory: string, mutator: (state: StoreSt
 /** Mutate control state without requiring historical evidence. History bytes,
  * references and inline records remain untouched, even when evidence is lost. */
 export function updateOperationalRunStateAtPath(directory: string, mutator: (state: StoreState) => void): StoreState {
+  return updateOperationalRunState(directory, mutator);
+}
+
+/** The two interruption entrances publish their changed stage ledgers under
+ * the same cancellation lock. Cancellation preserves pre-existing disagreements;
+ * continuation supplies its own exact ledger and ownership proof under this lock.
+ * Ordinary operational writers retain the stopped fence. */
+function updateOperationalRunState(directory: string, mutator: (state: StoreState) => void, interruption?: 'cancellation' | 'continuation'): StoreState {
   const identity = resolveRunIdentity(directory);
   if (!identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: run has no project directory');
   return withRunStateLock(identity.directory, () => {
@@ -1857,13 +1908,69 @@ export function updateOperationalRunStateAtPath(directory: string, mutator: (sta
     }
     if (isJsonPersistedEqual(previous, state)) return state;
     requireKnownRunStatus(state.status, `write operational run state ${identity.runId}`);
-    if (previous.status === 'stopped') throw cancelledRunPublicationError(identity.runId);
+    if (previous.status === 'stopped' && !interruption) throw cancelledRunPublicationError(identity.runId);
+    if (interruption) for (const [id, status] of Object.entries(state.stages)) {
+      if (isJsonPersistedEqual(previous.stages[id], status)) continue;
+      const stagePath = join(identity.directory, 'stages', id);
+      if (interruption === 'cancellation') {
+        let ledger: unknown;
+        try { ledger = JSON.parse(readFileSync(join(stagePath, 'status.json'), 'utf8')); }
+        catch { continue; } // Missing or unreadable evidence cannot authorize a ledger write.
+        if (!isJsonPersistedEqual(previous.stages[id], ledger)) continue;
+      }
+      mkdirSync(stagePath, { recursive: true });
+      atomicWrite(join(stagePath, 'status.json'), JSON.stringify(status, null, 2));
+    }
     if (state.stateFormat) state.stateFormat.revision += 1;
     publishRunProjection(identity.projectDir, identity.directory, state, state, () => {
       if (readFileSync(path, 'utf8') !== raw) throw new RunStateProjectionConflictError(`Run state changed during operational mutation for ${identity.runId}`);
     });
     return state;
   });
+}
+
+/** Close exactly the current interrupted execution without inventing another attempt. */
+export function interruptedStageStatus(previous: StageStatus, completedAt: string, error: string): StageStatus {
+  const attempt = previous.attempts?.at(-1);
+  if (attempt?.status === 'closed') return settledStageAttemptStatus(previous, attempt.index, false, { exitCode: 143, error });
+  if (attempt?.status === 'running') return completedStageAttemptStatus(previous, previous.retries, {
+    exitCode: 143, completedAt, duration_ms: Math.max(0, Date.parse(completedAt) - Date.parse(attempt.startedAt)), error,
+  });
+  return previous.status === STAGE_STATUS.RUNNING ? { ...previous, status: STAGE_STATUS.FAILED } : previous;
+}
+
+/** Native cancellation fences the run and closes its interrupted stage ledgers together. */
+export function cancelRunStateAtPath(directory: string, completedAt: string): { state: StoreState; preservedRunStatus?: string } {
+  let preservedRunStatus: string | undefined;
+  const state = updateOperationalRunState(directory, state => {
+    if (resolveRunStatus(state.status).kind === 'unknown' || isTerminalRunStatus(state.status) && !(state.status === RUN_STATUS.FAILED && state.recovery?.kind === 'blocked')) {
+      preservedRunStatus = state.status;
+      return;
+    }
+    state.status = RUN_STATUS.STOPPED;
+    state.failureReason = 'Cancelled by user';
+    state.completedAt = completedAt;
+    for (const [id, stage] of Object.entries(state.stages)) {
+      state.stages[id] = interruptedStageStatus(stage, completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
+      // Pending stages have no current execution to settle. Keep them runnable
+      // for explicit continuation; the stopped run fences ordinary publication.
+    }
+  }, 'cancellation');
+  return { state, preservedRunStatus };
+}
+
+/** An explicit continuation may settle only its proven stopped interruption.
+ * Admission supplies fresh ownership and exact ledger/projection evidence while
+ * the run lock prevents a concurrent cancellation or scheduler publication. */
+export function settleInterruptedRunStagesAtPath(directory: string, stageIds: string[], completedAt: string, error: string, assertAuthority: (state: StoreState) => void): StoreState {
+  return updateOperationalRunState(directory, state => {
+    if (state.status !== RUN_STATUS.STOPPED) throw new Error('INTERRUPTION_STATE_CHANGED: run is no longer stopped');
+    assertAuthority(state);
+    for (const id of stageIds) {
+      if (!state.stages[id]) throw new Error(`INTERRUPTION_STATE_CHANGED: missing stage ${id}`);
+      state.stages[id] = interruptedStageStatus(state.stages[id], completedAt, error);
+    }
+  }, 'continuation');
 }
 
 function updateRunStateInDirectory(projectDir: string, runId: string, runPath: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState) => void): StoreState {
@@ -2032,6 +2139,7 @@ export interface CompleteStageAttemptInput extends InvocationUsage {
   validationGeneratedWrites?: string[];
   constraintAudit?: StageConstraintAuditSummary;
   timeout?: StageAttemptTimeoutSummary;
+  continuation?: StageContinuation;
 }
 
 /** Complete only the current attempt, then rebuild compatibility aggregates. */
@@ -2092,6 +2200,7 @@ export function completedStageAttemptStatus(
     validationGeneratedWrites: completion.validationGeneratedWrites,
     constraintAudit: completion.constraintAudit,
     timeout: completion.timeout,
+    continuation: completion.continuation,
   };
   const writes = uniqueStrings(previous?.writes, completion.writes);
   const usage = sumInvocationUsage(attempts);
@@ -2123,6 +2232,7 @@ export function completedStageAttemptStatus(
     ),
     constraintAudit: completion.constraintAudit ?? previous?.constraintAudit,
     timeout: completion.timeout ?? previous?.timeout,
+    continuation: completion.continuation,
   };
   return final;
 }
@@ -2163,11 +2273,13 @@ export function settledStageAttemptStatus(
     throw new Error(`Cannot settle attempt ${attemptIndex}: current execution is not the matching closed child`);
   }
   if (failure) Object.assign(attempt, failure);
+  if (attempt.exitCode !== 0) delete attempt.continuation;
   // Reconciliation can already have refused or suspended this exact execution.
   attempt.status = attempt.exitCode !== 0 ? 'failed'
     : suspended || attempt.status === 'suspended' ? 'suspended' : 'complete';
   return {
     ...previous, attempts,
+    continuation: attempt.continuation,
     status: attempt.status === 'suspended' ? STAGE_STATUS.PENDING : attempt.status,
     exitCode: attempt.status === 'suspended' ? undefined : attempt.exitCode,
     completedAt: attempt.status === 'suspended' ? undefined : attempt.completedAt,
@@ -2200,7 +2312,7 @@ export function attachStageConstraintAudit(
   attempts[index] = {
     ...attempts[index],
     constraintAudit: audit,
-    ...(violationError ? { status: 'failed', exitCode: 1, error: violationError } : {}),
+    ...(violationError ? { status: 'failed', exitCode: 1, error: violationError, continuation: undefined } : {}),
   };
   const updated: StageStatus = {
     ...status,
@@ -2210,6 +2322,7 @@ export function attachStageConstraintAudit(
       status: STAGE_STATUS.FAILED,
       exitCode: 1,
       error: violationError,
+      continuation: undefined,
     } : {}),
   };
   writeStageStatus(projectDir, runId, stageId, updated);
@@ -2327,6 +2440,8 @@ export function rependStageStatus(
     status: STAGE_STATUS.PENDING,
     retries,
     error,
+    acceptedFrom: undefined,
+    continuation: undefined,
   };
 }
 

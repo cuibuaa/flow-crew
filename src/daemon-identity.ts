@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { updateFileHashSync } from './rollback-content-store.js';
 import { mkdirSync, renameSync, rmSync, writeFileSync } from './engine-fs.js';
 import { existsSync, readFileSync, readdirSync, realpathSync, readlinkSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -140,13 +141,14 @@ export function computeBuildFingerprint(distDir: string): DaemonBuildFingerprint
   for (const record of inventory.backend) {
     const path = join(root, record.path);
     const relativePath = relative(root, path).split(sep).join('/');
-    const content = readFileSync(path);
     const stat = statSync(path);
     newestMtimeMs = Math.max(newestMtimeMs, stat.mtimeMs);
     hash.update(`${Buffer.byteLength(relativePath)}:`);
     hash.update(relativePath);
-    hash.update(`:${content.byteLength}:`);
-    hash.update(content);
+    hash.update(`:${stat.size}:`);
+    if (updateFileHashSync(path, hash).byteLength !== stat.size) {
+      throw new Error(`${path} changed while its build identity was hashed`);
+    }
   }
 
   // File count remains the runtime JS/UI diagnostic; the hash covers the full
@@ -161,10 +163,12 @@ export function computeBuildFingerprint(distDir: string): DaemonBuildFingerprint
   if (manifest?.uiPresence) hash.update(`ui-presence:${manifest.uiPresence}:`);
   for (const path of uiFiles.sort((a, b) => a.localeCompare(b))) {
     const name = `ui/dist/${relative(uiRoot, path).split(sep).join('/')}`;
-    const bytes = readFileSync(path);
-    newestMtimeMs = Math.max(newestMtimeMs, statSync(path).mtimeMs);
-    hash.update(`${Buffer.byteLength(name)}:${name}:${bytes.byteLength}:`);
-    hash.update(bytes);
+    const stat = statSync(path);
+    newestMtimeMs = Math.max(newestMtimeMs, stat.mtimeMs);
+    hash.update(`${Buffer.byteLength(name)}:${name}:${stat.size}:`);
+    if (updateFileHashSync(path, hash).byteLength !== stat.size) {
+      throw new Error(`${path} changed while its build identity was hashed`);
+    }
   }
 
   return {

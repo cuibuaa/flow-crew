@@ -337,7 +337,7 @@ const TASK_OWNER_ARTIFACT_COMMITMENT = /^(?:(?:before|prior\s+to)\b[^,;]{0,100},
 const ASSIGNED_PREREGISTRATION_ARTIFACT = /^(?:`[^`]*\bpre[- _]?registr(?:ation|ations|er|ers|ered|ering)\b[^`]*`|(?:the\s+|this\s+|your\s+|our\s+)?pre[- ]?registration(?:\s+(?:artifact|file|protocol))?)\s*,?\s+(?:to\s+be\s+)?(?:written|created|recorded|produced|fixed|locked)\b/i;
 const QUOTED_SOURCE_ATTRIBUTION = /\b(?:legacy|prior|earlier|historical)\b.{0,60}\b(?:instruction|directive|requirement|passage|text|documentation)\b|\b(?:instruction|directive|requirement|passage|text|documentation)\b.{0,60}\b(?:legacy|prior|earlier|historical)\b|\b(?:quoted?|excerpt(?:ed)?)\b.{0,60}\b(?:from|according\s+to)\b|\b(?:from|according\s+to)\b.{0,60}\b(?:guide|brief|run|round|stage|source|document(?:ation)?)\b/i;
 const NUMERIC_LITERAL = /(?:^|[^A-Za-z0-9_])[-+−]?\d[\d,.]*(?:\s*(?:%|bps?|basis\s+points?))?(?=$|[^A-Za-z0-9_])/i;
-const OPERATOR_EXPECTATION = /\b(?:operator|author|user)(?:'s)?\b.{0,60}\b(?:expect(?:s|ed|ation)?|prior|provid(?:e|es|ed)|suppl(?:y|ies|ied)|gave|given|hand(?:s|ed)?|figure|number|value|estimate)\b|\b(?:our|my)\s+(?:expected|prior|reference)\s+(?:figure|number|value|estimate|result)\b|\bexpected\s+(?:result|value|figure|estimate|number)\b/i;
+const OPERATOR_EXPECTATION = /\b(?:operator|author|user)(?:'s)?\b.{0,60}\b(?:expect(?:s|ed|ation)?|prior|provid(?:e|es|ed)|suppl(?:y|ies|ied)|gave|given|handed|hands\s+(?:us|me|you)|figure|number|value|estimate)\b|\b(?:our|my)\s+(?:expected|prior|reference)\s+(?:figure|number|value|estimate|result)\b|\bexpected\s+(?:result|value|figure|estimate|number)\b/i;
 const DECISION_ILLUSTRATIVE = /\b(?:for example|illustrative(?:ly)?|e\.g\.)\b|(?:例如|比如|举例|只是例子|并非判据|不是判据)/i;
 
 function decisionLintLines(brief: string): string[] {
@@ -861,6 +861,8 @@ export function inspectBrief(
     for (const mention of extractBriefPathMentions(brief)) {
       if (!ignoredPrefixes.some((prefix) => pathCovers(prefix, mention.path))) continue;
       if (declared.some((path) => pathCovers(path, mention.path))) continue;
+      if (parsed.outputs?.some(output => output.expectedType === 'directory'
+        ? pathCovers(output.path, mention.path) : output.path === mention.path)) continue;
       add({
         code: 'gitignored_input_undeclared',
         level: 'warn',

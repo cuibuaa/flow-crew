@@ -1,8 +1,9 @@
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 // Boundary: Reconcile exact-ID outstanding obligations, guard plain completion, archive declared outputs and read existing study completion; receives only campaign publication.
 import { archiveDeclaredOutputs } from '../../declared-output-archive.js';
-import { recordRunEvent } from '../../run-events.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, runDir, writeRunState } from '../../store.js';
 import { StageConfig } from '../sched_admission/configuration.js';
+import { isStageInSkippedBranch } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
 import { orderedGateIdsForState } from '../sched_policy/campaign.js';
 import { scopePlanningDigestsBlockingStage, scopePlanningDispositionDigests } from '../sched_scope/scope-planning.js';
@@ -16,15 +17,17 @@ export function reconcileUnresolvedStageObligations(
 ): { changed: boolean; stageIds: string[] } {
   const before = state.unresolvedStageObligations ?? [];
   const obligations = new Map(before.map((entry) => [entry.stageId, entry]));
+  const stagesById = new Map(dispatchedStages.map(stage => [stage.id, stage]));
   const disposedScopeDigests = scopePlanningDispositionDigests(runDirPath);
 
-  // An obligation is discharged only by an engine-observed success or explicit
-  // skip of the same stage ID. A planner may also use the existing, durable
+  // Engine-observed success or a skip of the stage or its dependency branch
+  // discharges its obligation. A planner may also use the existing, durable
   // scope-negotiation resolve/defer contract when that exact digest is what
   // blocked the old downstream stage. Missing and failed stages otherwise stay.
   for (const [stageId, obligation] of obligations) {
     const status = state.stages[stageId]?.status;
-    if (status === STAGE_STATUS.COMPLETE || status === STAGE_STATUS.SKIPPED) {
+    if (status === STAGE_STATUS.COMPLETE || status === STAGE_STATUS.SKIPPED
+        || isStageInSkippedBranch(stageId, stagesById, state)) {
       obligations.delete(stageId);
       continue;
     }
@@ -40,7 +43,8 @@ export function reconcileUnresolvedStageObligations(
     // Conditional stages and retry_to repair stages are optional by contract.
     // A repair is eligible only after its gate rejects; a passing gate must not
     // turn its intentionally pending repair into required downstream work.
-    if (stage.condition?.trim() || (!stage.is_gate && stage.retry_to?.length)) continue;
+    if (stage.condition?.trim() || (!stage.is_gate && stage.retry_to?.length)
+        || isStageInSkippedBranch(stage.id, stagesById, state)) continue;
     const status = state.stages[stage.id]?.status;
     if (status === STAGE_STATUS.PENDING || status === STAGE_STATUS.RUNNING) {
       const scopePlanningDigests = scopePlanningDigestsBlockingStage(runDirPath, stage.id, dispatchedStages);
@@ -115,8 +119,8 @@ export function appendUnresolvedStageObligationContext(prompt: string, state: St
 }
 
 export function recoverTerminalStudyCompletion(projectDir: string, runId: string, state: StoreState): StoreState | null {
-  // This is an authored gate terminal contract, not a plain-complete exit. Like
-  // brief terminal_states, it intentionally outranks unresolved DAG work.
+  // Recover an already authored gate terminal contract from its settled
+  // evidence; terminal-file selection has its own required-settlement barrier.
   const gateIds = orderedGateIdsForState(projectDir, state);
   for (const gateId of gateIds) {
     const evidence = readTerminalStudyCompletionEvidence(projectDir, runId, gateId);
@@ -160,17 +164,12 @@ export function createPlainCompletionArchiver(writeCampaignEntry: (projectDir: s
       state.status = RUN_STATUS.FAILED;
       state.failureReason = `Declared output archival refused plain completion (${completionPath}): ${detail}`;
       state.completedAt = new Date().toISOString();
-      writeRunState(context.projectDir, context.runId, state);
-      writeCampaignEntry(context.projectDir, state);
-      recordRunEvent(context.projectDir, context.runId, {
-        type: 'run_completed',
-        runId: context.runId,
-        timestamp: state.completedAt,
+      publishRunCompletion(state, context.projectDir, context.runId, () => ({
         iteration: context.iteration,
         detail: state.failureReason,
         level: 'warning',
         source: 'scheduler',
-      });
+      }), writeCampaignEntry);
       log.error({ runId: context.runId, completionPath, detail }, 'Plain completion refused because declared outputs could not be archived');
       return false;
     }

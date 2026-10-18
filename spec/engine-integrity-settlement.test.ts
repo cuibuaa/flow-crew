@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import { stringify } from 'yaml';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import { resetConfigCache } from '../src/config.js';
+import { beginResearchInputGeneration, captureResearchGateCandidate, readResearchGateCandidate } from '../src/research-candidate.js';
 import { readRunEvents } from '../src/run-events.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
-import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir } from '../src/store.js';
+import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState } from '../src/store.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 
@@ -40,6 +41,13 @@ it('settles a real carrier refusal once without launching or retrying authored w
   };
   const yaml = stringify(workflow);
   const created = prepareFixtureRun(project, workflow, yaml);
+  const state = readRunState(project, created.runId);
+  state.startedAt = new Date(0).toISOString();
+  state.research = { baseline: 0, policy: 'best_of_n', resultFile: 'round.json' };
+  beginResearchInputGeneration(project, state);
+  writeRunState(project, created.runId, state);
+  writeFileSync(join(project, 'round.json'), JSON.stringify({ label: 'independent-measurement', result: 0.2 }));
+  captureResearchGateCandidate(project, created.runDirPath, 'earlier_review');
   const authored = join(project, 'state.json');
   writeFileSync(authored, '{"pass":true}');
   symlinkSync(authored, join(created.runDirPath, 'verdict_previous.json'));
@@ -49,6 +57,9 @@ it('settles a real carrier refusal once without launching or retrying authored w
   const settled = await runWorkflow(workflow, yaml, project, adapter, new Map([['fixture', role]]),
     undefined, join(project, 'config', 'agents'), created.runId);
 
+  expect(readResearchGateCandidate(created.runDirPath, 'earlier_review')?.settlement).toMatchObject({
+    disposition: 'rejected', reason: expect.stringContaining('Run ended failed'),
+  });
   expect(adapterCalls).toBe(0);
   expect(settled.status).toBe('failed');
   expect(settled.failureReason).toContain('ENGINE_STATE_REFUSED');

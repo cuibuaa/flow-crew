@@ -75,6 +75,157 @@ async function scan(context: ScopeBatchContext, writer: ReturnType<typeof stage>
 }
 
 describe('observed existence owns dependency comparison', () => {
+  it.each([
+    { boundary: 'live', attributed: true }, { boundary: 'live', attributed: false },
+    { boundary: 'settlement', attributed: true }, { boundary: 'settlement', attributed: false },
+  ])('uses the shared cache rule during $boundary (attributed=$attributed)', async ({ boundary, attributed }) => {
+    const source = 'tools/parity/module.py';
+    const trackedCache = 'tools/parity/__pycache__/tracked.pyc';
+    const cache = 'tools/parity/__pycache__/module.pyc';
+    const ignoredData = 'tools/parity/data/frozen.csv';
+    const omittedData = 'tools/parity/.venv/evidence.csv';
+    const newData = 'tools/parity/.venv/added.csv';
+    write('.gitignore', '**/__pycache__/\n**/data/\n**/.venv/\n');
+    write(source, 'VALUE = 1\n');
+    write(trackedCache, 'authored cache fixture\n');
+    commitFixture(true);
+    write(ignoredData, 'id\n1\n');
+    write(omittedData, 'id\n2\n');
+    const writer = stage('writer', ['**']);
+    const created = createRun(project, 'input-preservation', '', [writer.id]);
+    runPath = created.runDirPath;
+    writeFileSync(join(runPath, 'task_brief.md'), '---\ninputs: [tools/parity]\n---\n# Goal\nRead the Python source.\n');
+    const context = createScopeBatchContext(project, [writer], undefined, created.runId);
+    beginStageAttempt(project, created.runId, writer.id, 0);
+    const originals = new Map([
+      [source, 'VALUE = 1\n'], [trackedCache, 'authored cache fixture\n'],
+      [ignoredData, 'id\n1\n'], [omittedData, 'id\n2\n'],
+    ]);
+    write(cache, 'interpreter output\n');
+    for (const path of originals.keys()) write(path, 'real edit\n');
+    write(newData, 'new data member\n');
+    const protectedPaths = [...originals.keys(), newData];
+    const restorablePaths = [source, trackedCache, newData];
+    const unrestorablePaths = [ignoredData, omittedData];
+    const writes = [cache, ...protectedPaths];
+    if (boundary === 'live') {
+      const { result, aborts } = await scan(context, writer, created.runId, writes, attributed);
+      if (attributed) expect(result.exemptedPaths).toContain(cache);
+      expect(result.incidents.map(incident => incident.path).sort()).toEqual(protectedPaths.sort());
+      expect(result.incidents.every(incident => incident.changeObserved)).toBe(true);
+      expect(result.incidents.filter(incident => incident.restored).map(incident => incident.path).sort())
+        .toEqual(restorablePaths.sort());
+      expect(result.incidents.filter(incident => !incident.restored).map(incident => incident.path).sort())
+        .toEqual(unrestorablePaths.sort());
+      for (const incident of result.incidents.filter(incident => !incident.restored)) {
+        expect(incident.rollbackFailure).toContain('preimage content is unavailable');
+      }
+      expect(aborts).toContain('live_constraint_rollback_failure');
+    } else {
+      completeStageAttempt(project, created.runId, writer.id, 0, {
+        exitCode: 0, duration_ms: 1, writes: attributed ? writes : [],
+        writeAttribution: attributed ? 'structured' : 'unknown',
+      });
+      const reconciled = createScopeReconciler().reconcileStageScope({
+        stage: writer, projectDir: project, runId: created.runId, context, attemptIndex: 1,
+      });
+      expect(reconciled.violation).toBe(attributed);
+      const audit = JSON.parse(readFileSync(join(runPath, reconciled.status.attempts![0].constraintAudit!.path), 'utf8'));
+      if (attributed) expect(audit.exemptedWrites).toContain(cache);
+      expect(audit.violations.map((violation: { path: string }) => violation.path).sort()).toEqual(protectedPaths.sort());
+      expect(audit.rolledBackWrites.sort()).toEqual(restorablePaths.sort());
+      expect(audit.rollbackFailures.sort()).toEqual(unrestorablePaths.sort());
+    }
+    expect(readFileSync(join(project, cache), 'utf8')).toBe('interpreter output\n');
+    for (const [path, contents] of originals) {
+      expect(readFileSync(join(project, path), 'utf8')).toBe(unrestorablePaths.includes(path) ? 'real edit\n' : contents);
+    }
+    expect(() => readFileSync(join(project, newData), 'utf8')).toThrow();
+  });
+
+  it.each([
+    { path: 'fixtures/input.csv', scope: ['**'], declared: true },
+    { path: 'src/shared.ts', scope: ['src/owned.ts'], declared: false },
+  ])('refuses and restores an attributed write to $path after setup admission', async ({ path, scope, declared }) => {
+    write(path, 'authoritative input\n');
+    commitFixture();
+    const writer = stage('writer', scope);
+    const created = createRun(project, 'protected-write', '', [writer.id]);
+    runPath = created.runDirPath;
+    if (declared) writeFileSync(join(runPath, 'task_brief.md'),
+      `---\ninputs: [${path}]\n---\n# Goal\nRead the input.\n`);
+    const context = createScopeBatchContext(project, [writer], undefined, created.runId);
+    beginStageAttempt(project, created.runId, writer.id, 0);
+    write(path, 'attributed overwrite\n');
+    const { result, aborts } = await scan(context, writer, created.runId, [path]);
+    expect(result.incidents).toContainEqual(expect.objectContaining({ path, restored: true }));
+    expect(aborts).toContain('live_constraint_violation');
+    expect(readFileSync(join(project, path), 'utf8')).toBe('authoritative input\n');
+  });
+
+  it('preserves tracked cache content reached through a declared directory alias', async () => {
+    const path = 'tools/parity/__pycache__/nested/evidence.pyc';
+    write(path, 'authored bytes\n');
+    commitFixture();
+    symlinkSync('tools/parity', join(project, 'input-alias'), 'dir');
+    const writer = stage('writer', ['**']);
+    const created = createRun(project, 'input-alias-preservation', '', [writer.id]);
+    runPath = created.runDirPath;
+    writeFileSync(join(runPath, 'task_brief.md'), '---\ninputs: [input-alias]\n---\n# Goal\nPreserve the source.\n');
+    const context = createScopeBatchContext(project, [writer], undefined, created.runId);
+    beginStageAttempt(project, created.runId, writer.id, 0);
+    write('input-alias/__pycache__/nested/evidence.pyc', 'real edit\n');
+    const { result } = await scan(context, writer, created.runId, ['input-alias/__pycache__/nested/evidence.pyc'], false);
+    expect(result.incidents).toContainEqual(expect.objectContaining({ path, restored: true }));
+    expect(readFileSync(join(project, path), 'utf8')).toBe('authored bytes\n');
+  });
+
+  it.each([false, true])('keeps a declared output inside a preserved input writable at live and settlement boundaries (existing=%s)', async existing => {
+    const output = 'fixtures/source/report.md';
+    const evidence = 'fixtures/source/evidence.txt';
+    const undeclared = 'fixtures/source/undeclared.txt';
+    write(evidence, 'preserved evidence\n');
+    if (existing) write(output, 'previous report\n');
+    commitFixture();
+    const writer = stage('writer', ['**']);
+    const created = createRun(project, 'nested-output', '', [writer.id]);
+    runPath = created.runDirPath;
+    writeFileSync(join(runPath, 'task_brief.md'), [
+      '---', 'inputs: [fixtures/source]', 'outputs:',
+      `  - path: ${output}`, ...(existing ? ['    on_existing: replace'] : []),
+      '---', '# Goal', 'Write the declared report from preserved evidence.',
+    ].join('\n'));
+    const context = createScopeBatchContext(project, [writer], undefined, created.runId);
+    beginStageAttempt(project, created.runId, writer.id, 0);
+    write(output, 'authorized report\n');
+    const allowed = await scan(context, writer, created.runId, [output]);
+    expect(allowed.result.incidents).toEqual([]);
+    expect(allowed.aborts).toEqual([]);
+    completeStageAttempt(project, created.runId, writer.id, 0, {
+      exitCode: 0, duration_ms: 1, writes: [output], writeAttribution: 'structured',
+    });
+    const reconciled = createScopeReconciler().reconcileStageScope({
+      stage: writer, projectDir: project, runId: created.runId, context, attemptIndex: 1,
+    });
+    expect(reconciled.violation).toBe(false);
+    expect(readFileSync(join(project, output), 'utf8')).toBe('authorized report\n');
+    const audit = JSON.parse(readFileSync(join(runPath, reconciled.status.attempts![0].constraintAudit!.path), 'utf8'));
+    expect(audit.durableWrites).toContain(output);
+    expect(audit.rollbackFailures).toEqual([]);
+
+    // A sibling remains a preserved input even under the same unrestricted scope.
+    write(evidence, 'unauthorized evidence replacement\n');
+    write(undeclared, 'unauthorized new sibling\n');
+    const protectedWrites = await scan(context, writer, created.runId, [evidence, undeclared]);
+    expect(protectedWrites.result.incidents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: evidence, restored: true }),
+      expect.objectContaining({ path: undeclared, restored: true }),
+    ]));
+    expect(readFileSync(join(project, evidence), 'utf8')).toBe('preserved evidence\n');
+    expect(() => readFileSync(join(project, undeclared), 'utf8')).toThrow();
+    expect(readFileSync(join(project, output), 'utf8')).toBe('authorized report\n');
+  });
+
   it('does not accuse an omitted dependency merely because a scan nominates it', async () => {
     const dependency = join('.venv', 'library', 'index.js');
     write(dependency, 'pre-existing dependency\n');
@@ -176,7 +327,7 @@ describe('observed existence owns dependency comparison', () => {
     { protection: 'tracked files', alias: false, attributed: false },
     { protection: 'declared inputs', alias: true, attributed: false },
     { protection: 'declared inputs', alias: true, attributed: true },
-  ])('restores dependency content and link-target changes protected by $protection (aliases=$alias, attributed=$attributed)', async ({ alias, attributed }) => {
+  ])('detects dependency content and link-target changes protected by $protection and restores available preimages (aliases=$alias, attributed=$attributed)', async ({ alias, attributed }) => {
     const prefixes = ['', 'ui/'];
     const dependencyDirectory = 'node_modules';
     const paths = prefixes.flatMap(prefix => [
@@ -208,12 +359,16 @@ describe('observed existence owns dependency comparison', () => {
       } else write(path, 'changed dependency content');
     }
     const { result, aborts } = await scan(context, writer, created.runId, paths, attributed);
-    expect(result.incidents).toHaveLength(6);
-    expect(result.incidents.every(incident => incident.changeObserved && incident.restored)).toBe(true);
-    expect(aborts).toContain('live_constraint_violation');
+    expect(result.incidents.map(incident => incident.path).sort()).toEqual([...paths].sort());
+    expect(result.incidents.every(incident => incident.changeObserved)).toBe(true);
+    expect(result.incidents.every(incident => incident.restored === !alias)).toBe(true);
+    if (alias) {
+      expect(result.incidents.every(incident => !!incident.rollbackFailure)).toBe(true);
+    }
+    expect(aborts).toContain(alias ? 'live_constraint_rollback_failure' : 'live_constraint_violation');
     for (const path of paths) {
-      if (path.endsWith('/.bin/tool')) expect(readlinkSync(join(project, path))).toBe('../tool/bin/tool.js');
-      else expect(readFileSync(join(project, path), 'utf8')).toBe(`original ${path}\n`);
+      if (path.endsWith('/.bin/tool')) expect(readlinkSync(join(project, path))).toBe(alias ? '../wrong/bin.js' : '../tool/bin/tool.js');
+      else expect(readFileSync(join(project, path), 'utf8')).toBe(alias ? 'changed dependency content' : `original ${path}\n`);
     }
   });
 
@@ -296,8 +451,12 @@ describe('enforcement owns batch audit outcomes', () => {
       stage: observer, projectDir: project, runId: created.runId, context, attemptIndex: 1,
     });
     expect(reconciled.status.attempts![0].constraintAudit).toMatchObject({
-      unverifiedCount: 1, violationCount: 0, rolledBackWriteCount: 1,
+      unverifiedCount: 1, violationCount: 0, rolledBackWriteCount: 0,
     });
-    expect(readFileSync(join(project, 'src/unowned.ts'), 'utf8')).toBe('unowned preimage\n');
+    const audit = JSON.parse(readFileSync(join(runPath, reconciled.status.attempts![0].constraintAudit!.path), 'utf8'));
+    expect(audit.violations).toContainEqual(expect.objectContaining({ path: 'src/unowned.ts', certainty: 'unverified' }));
+    expect(audit.rollbackFailures).toEqual(['src/unowned.ts']);
+    expect(audit.rollbackFailureReasons['src/unowned.ts']).toContain('preimage content is unavailable');
+    expect(readFileSync(join(project, 'src/unowned.ts'), 'utf8')).toBe('unverified trespass\n');
   });
 });

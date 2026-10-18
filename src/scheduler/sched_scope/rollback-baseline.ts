@@ -1,12 +1,12 @@
 // Boundary: Own one run-scoped lazy Git/disk preimage cache, watcher journal, current-image nomination, committed writes and lifecycle cleanup.
 import { type LiveConstraintGitIndexEntry, parseLiveConstraintGitIndexEntries } from "../../live-constraint-guard.js";
-import { RollbackContentStore, type RollbackStatIdentity, rollbackStatIdentity, rollbackStatIdentitiesEqual, hashRollbackFileCooperatively, hashRollbackFileSync } from "../../rollback-content-store.js";
+import { RollbackContentStore, type RollbackStatIdentity, rollbackStatIdentity, rollbackStatIdentitiesEqual, hashRollbackFileCooperatively } from "../../rollback-content-store.js";
 import { normalizedProjectPath, normalizedProjectContentPath } from "../sched_admission/scope-services.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { resolve, join } from "node:path";
 import { lstatSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
-import { type RepairFileImage, stageZeroIndexEntry, readRepairFileImage, repairFileImageBytes, describeRepairError, gitObjectIdForPath } from './file-images.js';
+import { type RepairFileImage, stageZeroIndexEntry, readRepairFileImage, repairFileIdentity, compareRepairFileContents, repairFileImageBytes, describeRepairError, gitObjectIdForPath } from './file-images.js';
 import { REPAIR_DIFF_SKIP_DIRS, listProjectFiles, listProjectFilesAt } from './path-capabilities.js';
 
 export interface RunRollbackBaseline {
@@ -102,7 +102,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
   let strategy: RunRollbackBaseline['initialization']['strategy'] = 'filesystem-images';
   let gitRoot: string | undefined;
   const captureBaselineImage = (path: string, entries?: readonly LiveConstraintGitIndexEntry[]): void => {
-    const image = readRepairFileImage(projectDir, path, entries, { contentStore });
+    const image = repairFileIdentity(readRepairFileImage(projectDir, path, entries));
     images.set(path, image);
     filesRead++;
     bytesRead += repairFileImageBytes(image);
@@ -123,9 +123,9 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     }
     const dirty = new Set([
       // Every tracked path remains guardable even when it lives below a cache
-      // directory. Preserve a dirty run-start preimage instead of restoring
-      // such a path to the index blob.
-      ...nulPaths(gitOutput(projectDir, ['diff', '--name-only', '-z', 'HEAD', '--', '.'])),
+      // directory. Preserve its live identity; an admitted writer captures
+      // operator bytes before writing instead of restoring the index blob.
+      ...nulPaths(gitOutput(projectDir, ['diff', '--name-only', '-z', '--', '.'])),
       // Git deliberately hides assume-unchanged and skip-worktree paths from
       // ordinary diff. Snapshot their live bytes even if the index object is
       // unchanged, since the worktree can still contain an operator preimage.
@@ -175,8 +175,10 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
       captureBaselineImage(path, entries);
     }
     strategy = 'git-index-plus-dirty-images';
-  } catch {
-    gitRoot = undefined;
+  } catch (error) {
+    // A non-Git project needs a filesystem identity inventory. Once Git was
+    // found, an inventory/capture failure must not silently expand the scan.
+    if (gitRoot) throw error;
     for (const path of listProjectFiles(projectDir)) {
       filesEnumerated++;
       captureBaselineImage(path);
@@ -389,32 +391,39 @@ export function captureRollbackCurrentImage(
   before?: RepairFileImage,
 ): RepairFileImage {
   const identity = rollbackStatIdentity(join(projectDir, path));
-  if (before && rollbackStatIdentitiesEqual(before.statIdentity, identity)) return before;
-  if (before?.type === 'file' && before.backingPath && identity?.type === 'file') {
-    // Metadata churn nominates a check, not another immutable copy. Reuse the
-    // owned preimage only after hashing proves the live content is identical;
-    // retain the old image for rollback and give this snapshot its current mode.
-    try {
-      const hashed = hashRollbackFileSync(join(projectDir, path));
-      if (hashed.sha256 === before.sha256 && hashed.byteLength === before.byteLength) {
-        return { ...before, statIdentity: hashed.statIdentity, verifiedStatIdentity: undefined,
-          mode: Number(BigInt(hashed.statIdentity.mode) & 0o7777n) };
-      }
-    } catch { /* the normal capture below retains its fail-closed diagnostics */ }
+  if (before && (before.backingPath || before.gitObjectId || before.bytes || before.text !== undefined)
+      && rollbackStatIdentitiesEqual(before.statIdentity, identity)) return before;
+  const image = readRepairFileImage(projectDir, path, baseline.gitIndexEntries.get(path),
+    { contentStore: baseline.contentStore });
+  // Promote only an unchanged baseline to restorable backing. Earlier rounds
+  // retain their own image when a newly admitted writer sees different bytes.
+  if (before && before.sha256 === image.sha256 && before.exists === image.exists) {
+    baseline.images.set(path, image);
   }
-  return readRepairFileImage(
-    projectDir,
-    path,
-    baseline.gitIndexEntries.get(path),
-    { contentStore: baseline.contentStore },
-  );
+  return image;
 }
 
 export function settleRollbackBaselinePath(baseline: RunRollbackBaseline, projectDir: string, path: string): void {
-  const image = captureRollbackCurrentImage(baseline, projectDir, path, baseline.images.get(path));
+  const before = baseline.images.get(path);
+  // Settlement admits these bytes as the next preimage. Detection identities
+  // cannot restore them after a later trespass; use the existing owned store.
+  const image = captureRollbackCurrentImage(baseline, projectDir, path, before);
   baseline.images.set(path, image);
   baseline.cleanTracked.delete(path);
   baseline.gitIndexEntries.delete(path);
+}
+
+/** Follow an admitted writer back to its batch preimage without touching lazy Git entries. */
+export function resettleRollbackBaselinePath(
+  baseline: RunRollbackBaseline,
+  projectDir: string,
+  path: string,
+  current: RepairFileImage,
+  admitted: () => boolean = () => true,
+): void {
+  const settled = baseline.images.get(path);
+  if (!settled || compareRepairFileContents(settled, current) !== 'different' || !admitted()) return;
+  settleRollbackBaselinePath(baseline, projectDir, path);
 }
 
 /** Commit a scheduler-owned project artifact into the run rollback baseline. */

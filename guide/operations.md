@@ -81,6 +81,75 @@ Sources: [preflight](../src/cli-ship-preflight.ts), [setup](../src/cli-ship-setu
 [validation and deltas](../src/project-validation.ts),
 [gate validation](../src/scheduler/sched_settlement/gate-validation.ts).
 
+### Storage ownership
+
+Setup's independent input copies protect the source even when a subprocess writes its local
+input. A read-only declaration or a later hash check cannot provide that protection through a
+hardlink. An input-copy failure refuses setup without publishing READY; inspect available space
+and the reported target before retrying. Failed setup worktrees can contain partial copies.
+
+Use invocation `$TMPDIR` for disposable checkouts, compiler caches and test fixtures.
+Invocation scratch survives within an active run, then is retired at terminal publication,
+including failed, incomplete and stopped outcomes. Resume uses retained unfinished stage
+work and allocates fresh invocation scratch. Daemon startup also repairs interrupted scratch
+retirement, including temporary aliases for missing run records or deleted run folders.
+
+A settled stage's `stages/<stage>/build/` and `stages/<stage>/scratch/` are workspaces.
+After children, monitors, audits and retry settlement finish, the engine compacts their
+disposable members. The workspace root remains queryable. Declare final products below
+that root explicitly; a declaration or citation naming the workspace root does not make
+its entire contents permanent.
+
+Every path outside these workspaces remains durable. Inside, declared products below the
+workspace root and declared inputs (including consumers that might retry) are protected.
+Other preservation is bounded to **8 MiB per file and 32 MiB per stage**, shared across
+build and stage scratch: exact report/evidence citations, cited directories below the
+workspace root, evidence/handoff/patches directories, patch/diff files, incidental symlinks
+and their targets, and private filenames. Incidental logs, archives, Markdown and scripts
+do not qualify by filename or a bare basename mention alone.
+Larger required artifacts need an explicit input/product declaration.
+
+Recorded reports and evidence supply citations, bounded to **1 MiB per source file and
+32 MiB of source text per stage**; physical aliases are read once. Workspace Markdown
+supplies citations only when declared as a report or cited by recorded evidence, including
+transitive citations. Admitted report/link sources take priority over their payloads to
+keep repeated compaction stable. Citation paths can be run-relative, stage-relative, report-relative
+or absolute, including quoted paths with spaces. Private credential files are never opened,
+and workspace walks never follow symlinks. Explicit declarations and report aliases resolve
+their physical locations for protection and citation discovery.
+
+Unfinished, unknown and budget-continuing stages retain their entire workspaces. A stale
+running/closed attempt preserves its stage's work, but once controller and command absence
+is proven using the existing process/start-token/boot identity evidence it does not block
+other settled stages. A possibly live owner still blocks workspace compaction. Park and
+deployment holds preserve stage work. Missing or malformed ownership evidence also preserves
+stage work. Status/attempt ledgers, workflow/dispatch/admitted plans, decisions, verdicts,
+validation, audit, append-only history, official outputs and attempt logs stay outside the
+compacted areas. Retention sends no signals and never reverts project changes. A failed
+compaction keeps remaining work and does not change the authored verdict.
+
+For existing runs, inspect the same policy before applying it:
+
+```bash
+flowcrew prune --dry-run
+flowcrew prune --run <run-id> --dry-run --json
+flowcrew prune --run <run-id> --apply
+```
+
+The default is a read-only dry-run: no lock, index, manifest, alias or store file is written.
+It reports per-run bytes and kept paths/reasons; JSON includes the candidate file list,
+refusals and total bytes. Counts are logical file lengths, not filesystem free-space
+promises (hardlinks, compression and metadata can differ). Bulk operation skips refused
+runs and uninitialized store entries; an explicitly selected refused run exits nonzero.
+Apply replans under the run-state lock shared with launch, resume and cancellation.
+Repeated application is safe. `clean` separately deletes old run history; `prune` keeps it.
+Retained artifacts intentionally continue to consume space; this is workspace compaction,
+not a quota or an age-based history expiration policy.
+
+Sources: [input materialization](../src/cli-ship-setup.ts),
+[retention policy and CLI](../src/run-retention.ts),
+[scratch owner](../src/invocation-scratch.ts), [terminal publisher](../src/store.ts).
+
 ## Inspect, guide and stop
 
 `status` selects the latest run for the current project; `--all` selects across projects.
@@ -106,7 +175,8 @@ records the operator decision and closes active control state before bounded wor
 Unknown process evidence is retained in the cancellation result and task notes; it neither
 vetoes cancellation nor authorizes a signal. A retained running marker alone proves neither
 life nor death. Use `task resume` or the adjacent dashboard Resume control to continue a
-stopped, failed or incomplete registered run. A task retry requests another launch attempt;
+compatible stopped (including cancelled), failed or incomplete registered run after settlement.
+Cancellation alone grants no automatic continuation. A task retry requests another launch attempt;
 after terminal settlement it starts a fresh run. Foreground operation stays attached to the
 caller; process supervision and hard-kill limits are in
 [architecture](architecture.md#process-supervision-and-recovery).
@@ -156,10 +226,11 @@ the run finishes incomplete with the failing criteria and missing-owner evidence
 not ask a person to repeat the gate decision. Proven resumable host interruptions retain their
 orchestration checkpoints without requesting human approval.
 
-To hold registered work, use `flowcrew task cancel <task-id>`. Cancellation closes
-active control state as `stopped` and attempts to stop its owned workers. Cancellation
-acknowledges the decision; task notes report any unresolved process evidence. Hold preserves
-completed work; daemon restart, recovery and automatic retry leave a stopped run stopped.
+Cancellation closes active control state as `stopped` and attempts to stop its owned
+workers. It acknowledges a terminal decision; task notes report any unresolved process
+evidence. Daemon restart, recovery and deployment release leave that cancellation stopped.
+Explicit resume can continue safely settled work after ownership and compatibility checks.
+Use the deployment hold below to let current stage work settle normally before deployment.
 
 Explicitly continue a registered task's stopped, failed or incomplete run by task ID:
 
@@ -180,8 +251,10 @@ An unfinished repair continues its admitted gate round; the related gates review
 the new repair without restarting earlier authoring or planning work.
 The task registry supplies the run ID and project directory; the dashboard Resume
 control beside Cancel requests the same continuation. Resume still checks brief
-admission, scheduler ownership and unresolved approvals. Only explicit continuation
-resumes stopped work. `flowcrew task retry <task-id>` requests another launch attempt:
+admission, scheduler ownership, persisted execution compatibility and unresolved approvals.
+Only explicit continuation resumes stopped work, including acknowledged cancellation.
+Cancellation settles interrupted attempts and their stage ledgers. Explicit resume also settles the matching unfinished attempt left by an older cancellation when the existing ownership evidence proves its scheduler, controller and commands are no longer alive. Other unsettled attempts, unknown or live owners, and unrelated ledger disagreements still refuse continuation.
+`flowcrew task retry <task-id>` requests another launch attempt:
 before terminal settlement it retains any existing run binding, and after settlement
 it starts a fresh run with a new plan, stage history and iteration budget. Retry does
 not resume stopped work. Parked approval requests use the Inbox decision controls.
@@ -193,6 +266,84 @@ Omit `--background` to continue that run in the foreground.
 Sources: [inbox](../src/inbox.ts), [request paths](../src/approval-artifacts.ts),
 [active monitoring](../src/scheduler/sched_policy/approvals.ts), [decision CLI](../src/cli-inbox.ts),
 [continuation admission](../src/scheduler/sched_loop/launch.ts), [daemon queue](../src/orchestrator.ts).
+
+## Deploy while tasks are in flight
+
+Use an engine with deployment-hold support for this procedure. Upgrading an older engine
+that lacks the command still requires retiring its consumers first. Select the same
+`FC_HOME` and daemon socket for every command. The hold is durable in that state root,
+survives daemon restart, and fences both registered launches and foreground schedulers.
+
+```bash
+flowcrew daemon hold --timeout-ms 60000
+flowcrew daemon hold-status
+flowcrew daemon stop
+# Wait for the owned daemon process to exit; stop's RPC acknowledgement alone is insufficient.
+# Stop any other old-build dashboard/CLI consumers you own, then publish the combined build:
+npm run build
+flowcrew daemon start
+flowcrew daemon status
+flowcrew daemon continue
+flowcrew task show <task-id>
+```
+
+Run the build from the intended deployment checkout only after retiring its consumers.
+The builder refuses publication if any live daemon, scheduler or other importer of that
+distribution remains. Do not use `--force` or overwrite modules to bypass this check.
+A hold's `ready: true` proves its registered units, schedulers and checkpoint-owned command
+groups have stopped; the daemon itself remains live until the separate stop. Unregistered
+old consumers are also covered by the build publication guard. A failed build is not a deploy.
+Historical terminal runs with no unit, scheduler or owned command group are already settled.
+Status uses one manager inventory, then probes only units still present; it does not query
+each retired unit separately. An unavailable manager or ambiguous owner still refuses readiness.
+
+A hold waits for the already admitted group to settle: ordinary disjoint peers finish
+together; a gate repair round includes its serialized repair waves, evidence settlement
+and gate re-evaluation. Scope continuations and technical retries already inside that group
+use their ordinary bounds. The scheduler then parks before admitting another group or
+iteration. Completed stages and their artifacts, attempt ledgers, admitted plan, rollback
+audits, gate rejection evidence and budgets are retained. This does not checkpoint a live
+process. No attempt is killed to obtain a deployment hold. A stage budget first requests
+wrap-up; its hard stop uses TERM/5-second grace/KILL and retains a continuation with work
+kept. Idle aborts, unsafe writes and unverified child closure keep their refusal semantics.
+
+There is no finite universal successful-hold bound: stage deadlines differ, groups may have
+several bounded attempts, and audit/validation cleanup may itself fail to settle. For a
+single running attempt, the wait includes its remaining immutable deadline, up to 5 seconds
+of termination grace, then owned command closure and settlement. `hold --timeout-ms N`
+bounds the operator's polling window (default 60 seconds), plus at most the initial 2-second
+RPC timeout. A missing response can report unknown delivery. Exit 1/2 or `ready: false`
+means **do not deploy**: the fence remains active, current work continues to its normal
+boundary, and no timeout fallback cancels it. Recheck `hold-status` later. If abandoning
+the deployment, wait for settlement and use `continue` on the existing build.
+
+After restart, the latch still blocks queued tasks. `continue` validates every held run
+before granting launch authority, releases compatible runs into the existing queue, and
+returns per-run refusals with a failing exit if any cannot continue. Those tasks become
+`stuck`; their run retains `continuationFailure`, original attempts and parked state for
+inspection. One refused run does not block the compatible runs from continuing. Repeated
+continue does not grant attempts twice. Approval parks still require their own decisions;
+cancellation takes precedence. Task launch retry budgets are not charged for the hold.
+If a scheduler is lost while the hold is pending, existing restart recovery must first
+prove owner/command fate and reconcile its ledger. A proven resumable interruption joins
+the same hold without spending a task retry; its interrupted attempt remains in history
+and can restart after release. Unprovable recovery is reported and cannot launch work.
+Foreground runs without registered tasks also observe the fence. After `daemon continue`,
+continue those explicitly with `flowcrew quick --project <project-dir> --existing-run-id <run-id>`;
+the same compatibility and ownership checks apply before execution.
+
+`task show` displays the scheduler generation at actual start and each actual resume,
+with timestamp and PID. `run.json` retains the same `engineHistory`. Legacy runs may lack
+their initial identity; the engine does not invent one. Daemon `status` separately proves
+the listener's loaded build. Different generations are allowed when their workflow,
+checkpoint, plan binding, stage ledgers and persisted formats are supported. Unsupported or
+inconsistent state fails closed before a new attempt or successful resume admission.
+A missing admitted-stage projection in a checkpointed run, or one with a retained ledger,
+is inconsistent: continuation reports it instead of recreating pending work. Attemptless
+legacy preparations without checkpoints or ledgers remain supported.
+
+Sources: [hold](../src/deployment-hold.ts), [continuation validation](../src/engine-continuation.ts),
+[deployment control](../src/orchestrator.ts), [publication guard](../src/build-manifest.ts).
 
 ## Campaigns
 

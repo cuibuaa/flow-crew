@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -12,6 +12,7 @@ import {
   type ValidationFileSystem,
 } from '../src/project-validation.js';
 import { validationEnvironment } from '../src/validation-environment.js';
+import { sendRpc, startRpcServer } from '../src/orchestrator-rpc.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 import { createRun, writeStageStatus } from '../src/store.js';
 import { bindReviewedGateValidation, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
@@ -57,11 +58,13 @@ describe('project command environment and observer authority', () => {
   });
   it('ends configured validation inside the enclosing attempt budget', async () => {
     const project = mkdtempSync(join(tmpdir(), 'validation-deadline-'));
+    // Keep the requested budget deterministic while the real timeout runs.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
     try {
       const result = await runValidationCommand({ role: 'test', command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], display: 'deadline probe', cwd: project, timeoutMs: 30 });
       expect(result.exitCode).not.toBe(0);
       expect(result.error).toMatch(/30ms/);
-    } finally { rmSync(project, { recursive: true, force: true }); }
+    } finally { clock.mockRestore(); rmSync(project, { recursive: true, force: true }); }
   });
   it('keeps project inputs and explicit home reads while isolating control and credential settings', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'validation-env-'));
@@ -76,7 +79,7 @@ describe('project command environment and observer authority', () => {
       expect(ambient.env.HOME).toBe(join(scratch, 'home'));
       expect(ambient.env.CODEX_HOME).toBe(join(scratch, 'codex'));
       expect(ambient.env.FC_HOME).toBe(join(scratch, 'home', '.fc'));
-      expect(ambient.env.FLOWCREW_DAEMON_SOCKET).toBe(join(scratch, 'unavailable.sock'));
+      expect(ambient.env.FLOWCREW_DAEMON_SOCKET).toBe(join(scratch, 's'));
       expect(ambient.removed).toEqual(['CODEX_HOME', 'DBUS_SESSION_BUS_ADDRESS', 'FC_SESSION_REUSE',
         'FLOWCREW_LAUNCH_RESULT_PATH', 'NODE_OPTIONS', 'OPENAI_API_KEY', 'XDG_RUNTIME_DIR']);
       for (const name of ['FLOWCREW_LAUNCH_RESULT_PATH', 'FC_SESSION_REUSE', 'OPENAI_API_KEY', 'NODE_OPTIONS', 'DBUS_SESSION_BUS_ADDRESS']) {
@@ -89,9 +92,36 @@ describe('project command environment and observer authority', () => {
       expect(explicit.env.PROJECT_INPUT).toBe('explicit');
       expect(explicit.removed).toEqual(['PROJECT_API_KEY']);
       if (process.platform !== 'win32') {
-        expect(() => validationEnvironment(join(scratch, 'x'.repeat(108)), {}))
-          .toThrow('Daemon socket path is too long');
+        const longRoot = join(scratch, 'x'.repeat(108));
+        expect(validationEnvironment(longRoot, {}).env.FLOWCREW_DAEMON_SOCKET)
+          .toBe(join(longRoot, 's'));
       }
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  });
+
+  it.skipIf(process.platform === 'win32')('keeps validation control private and usable beneath a long scratch alias', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'validation-path-'));
+    try {
+      const limit = process.platform === 'linux' ? 107 : 103;
+      const target = join(scratch, 'x'.repeat(limit - Buffer.byteLength(realpathSync(scratch)) - 5));
+      mkdirSync(target);
+      const alias = join(scratch, 'alias');
+      symlinkSync(target, alias, 'dir');
+      const environment = validationEnvironment(alias, {
+        FC_HOME: '/ambient-store', FLOWCREW_DAEMON_SOCKET: '/ambient.sock',
+        CODEX_HOME: '/ambient-agent', OPENAI_API_KEY: 'fake',
+        TMPDIR: alias, TMP: alias, TEMP: alias,
+      });
+      const socket = environment.env.FLOWCREW_DAEMON_SOCKET!;
+      expect(realpathSync(environment.env.FC_HOME!)).toBe(join(realpathSync(target), 'home', '.fc'));
+      expect(socket.startsWith(alias + '/')).toBe(true);
+      expect(existsSync(socket)).toBe(false);
+      expect(environment.env.OPENAI_API_KEY).toBeUndefined();
+      for (const name of ['TMPDIR', 'TMP', 'TEMP']) expect(environment.env[name]).toBe(realpathSync(target));
+      expect(environment.removed).toEqual(['CODEX_HOME', 'FC_HOME', 'FLOWCREW_DAEMON_SOCKET', 'OPENAI_API_KEY']);
+      const server = await startRpcServer(socket, () => ({ ok: true }));
+      try { expect(await sendRpc(socket, { cmd: 'status' })).toMatchObject({ ok: true }); }
+      finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   });
 

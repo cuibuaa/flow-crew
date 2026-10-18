@@ -10,6 +10,7 @@ import { writeCampaignEntry } from './services.js';
 import { writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { beginResearchInputGeneration } from '../../research-candidate.js';
 
 export function configureWorkflowBrief(
   workflow: WorkflowConfig, projectDir: string, runId: string, runDirPath: string,
@@ -73,6 +74,7 @@ export function configureWorkflowBrief(
         if (program) s.program = program;
         if (research) s.research = research;
         if (outputs) s.declaredOutputs = outputs;
+        beginResearchInputGeneration(projectDir, s);
         writeRunState(projectDir, runId, s);
         if (terminalStates) log.info({ runId, statuses: Object.keys(terminalStates) }, 'Terminal-state config loaded from brief frontmatter');
         if (program) log.info({ runId, program: program.name, phase: program.phase }, 'Program config loaded from brief frontmatter');

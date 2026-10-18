@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { createRun, readRunState, type ResearchIntegrityConfig } from '../src/store.js';
 import { assessResearchShipTarget } from '../src/research-policy.js';
 import { createResearchAdvancer } from '../src/scheduler/sched_policy/research.js';
+import { beginResearchInputGeneration } from '../src/research-candidate.js';
 import type { Adapter } from '../src/adapters/base.js';
 
 let project: string;
@@ -15,6 +16,7 @@ async function measure(baseline: number, result: number, resultStd?: number, int
   const created = createRun(project, 'research', 'name: research\nstages: []\n', []);
   const state = readRunState(project, created.runId);
   state.research = { baseline, policy: 'best_of_n', integrity, stop: { maxRounds: 8 } };
+  beginResearchInputGeneration(project, state);
   mkdirSync(join(project, 'docs'), { recursive: true });
   writeFileSync(join(project, 'docs', 'research_round_result.json'), JSON.stringify({
     label: 'independent-measurement', result, ...(resultStd === undefined ? {} : { result_std: resultStd }),

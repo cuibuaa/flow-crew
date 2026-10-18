@@ -3,8 +3,13 @@ import { type ParsedScope, parseDeclaredScope } from "../sched_admission/frontie
 import { type StageConfig } from "../sched_admission/configuration.js";
 import { scopeMatchesProjectPath } from "../sched_admission/scope-services.js";
 import { type RunRollbackBaseline, baselineImage, readRollbackCurrentImage, trackedGitlinkAncestor, readRollbackCurrentImageCooperatively, captureRollbackCurrentImage, ensureRollbackBaseline } from './rollback-baseline.js';
-import { type RepairFileImage, compareRepairFileContents, repairFileImageBytes, stageZeroIndexEntry } from './file-images.js';
-import { listProjectFiles, listProjectFilesAt } from './path-capabilities.js';
+import { type RepairFileImage, compareRepairFileContents, repairFileImageBytes } from './file-images.js';
+import { firstDeclaredInputScopeConflict, resolveDeclaredInputWriteBindings, listProjectFiles, listProjectFilesAt } from './path-capabilities.js';
+import { ignoredGeneratedPaths } from '../../generated-path-policy.js';
+import { isLiveConstraintExemptPath } from '../../live-constraint-guard.js';
+import { loadEngineDefaults } from '../../config.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 export interface RepairSnapshotMeasurement {
   baselineInitialized: boolean;
@@ -32,7 +37,7 @@ export interface RepairSnapshotMeasurement {
 export interface RepairRoundSnapshot {
   startedAt: string;
   declaredScopes: Record<string, string[] | null>;
-  /** Full preimages make definite unauthorized writes atomically reversible. */
+  /** Identities detect forbidden writes; admitted writable paths have preimages. */
   allFileImages: Map<string, RepairFileImage>;
   files: Map<string, RepairFileImage>;
   /** Run-scoped baseline + change-journal cursor avoid repeated project walks. */
@@ -44,9 +49,10 @@ export interface RepairRoundSnapshot {
 export function changedProjectPathsSinceSnapshot(
   snapshot: RepairRoundSnapshot,
   projectDir: string,
+  additionalPaths: readonly string[] = [],
 ): string[] {
   const baseline = snapshot.rollbackBaseline;
-  return snapshotCandidatePaths(snapshot, projectDir).filter((path) => {
+  return [...new Set([...snapshotCandidatePaths(snapshot, projectDir), ...additionalPaths])].filter((path) => {
     const before = snapshot.files.get(path) ?? baselineImage(baseline, path);
     const after = readRollbackCurrentImage(baseline, projectDir, path, before);
     return compareRepairFileContents(before, after) === 'different';
@@ -103,9 +109,6 @@ export function captureRepairRoundSnapshot(
     for (const path of listProjectFiles(projectDir, {
       skipDirectory: (directory) => trackedGitlinkAncestor(baseline, directory) !== undefined,
     })) scopedPaths.add(path);
-    for (const [path, entries] of baseline.gitIndexEntries) {
-      if (stageZeroIndexEntry(entries)?.kind === 'gitlink') scopedPaths.add(path);
-    }
   } else {
     for (const scope of parsedScopes) {
       if (scope.kind === 'exact' || scope.kind === 'tree') {
@@ -121,11 +124,21 @@ export function captureRepairRoundSnapshot(
         }
       }
     }
-    for (const [path, entries] of baseline.gitIndexEntries) {
-      if (stageZeroIndexEntry(entries)?.kind === 'gitlink'
-          && parsedScopes.some((scope) => scopeMatchesProjectPath(scope, path))) {
-        scopedPaths.add(path);
-      }
+  }
+  // Tracked content remains writable/protected inside otherwise skipped caches.
+  for (const path of baseline.trackedPaths) {
+    if (captureAll || parsedScopes.some(scope => scopeMatchesProjectPath(scope, path))) scopedPaths.add(path);
+  }
+  const briefPath = options?.runDirPath && join(options.runDirPath, 'task_brief.md');
+  const inputs = briefPath && existsSync(briefPath)
+    ? resolveDeclaredInputWriteBindings(projectDir, readFileSync(briefPath, 'utf8')) : [];
+  const ignored = ignoredGeneratedPaths(projectDir, [...scopedPaths]);
+  const exemptPatterns = loadEngineDefaults().live_constraint_exempt_patterns;
+  for (const path of scopedPaths) {
+    if (isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths)
+        || ignored.has(path) || firstDeclaredInputScopeConflict([path], inputs, projectDir)
+        || (!captureAll && !parsedScopes.some(scope => scopeMatchesProjectPath(scope, path)))) {
+      scopedPaths.delete(path);
     }
   }
   const files = new Map<string, RepairFileImage>();
@@ -136,6 +149,9 @@ export function captureRepairRoundSnapshot(
   for (const path of scopedPaths) {
     const before = baselineImage(baseline, path);
     const image = captureRollbackCurrentImage(baseline, projectDir, path, before);
+    if (image.inspectionFailure || (image.materializationFailure && !image.gitObjectId)) {
+      throw new Error(image.inspectionFailure ?? image.materializationFailure);
+    }
     if (image !== before) {
       scopedFilesRead++;
       scopedBytesRead += repairFileImageBytes(image);
@@ -145,13 +161,6 @@ export function captureRepairRoundSnapshot(
       }
     }
     files.set(path, image);
-  }
-  // Exact paths need an explicit absent preimage so a newly-created file is
-  // distinguishable from an out-of-scope write whose preimage was unavailable.
-  for (const scope of parsedScopes) {
-    if (scope.kind === 'exact' && !files.has(scope.value)) {
-      files.set(scope.value, captureRollbackCurrentImage(baseline, projectDir, scope.value));
-    }
   }
   const scopedBytes = [...files.values()].reduce((total, image) => total + repairFileImageBytes(image), 0);
   return {

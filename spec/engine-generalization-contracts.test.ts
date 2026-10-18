@@ -448,4 +448,73 @@ describe('engine generalization binding contracts', () => {
     expect(revisedManifest.rejectionReason).toContain('framework-owned research manifest');
     expect(revisedOutput).toMatchObject({ accepted: true, decision: 'accepted' });
   });
+
+  it('authorizes only declared output leaves and trees inside a preserved input, including aliases', () => {
+    const projectDir = join(temporaryRoot(), 'project');
+    mkdirSync(join(projectDir, 'fixtures', 'source'), { recursive: true });
+    writeFileSync(join(projectDir, 'fixtures', 'source', 'evidence.txt'), 'preserved evidence\n');
+    symlinkSync('fixtures/source', join(projectDir, 'alias'));
+    const declaredInputs = resolveDeclaredInputWriteBindings(projectDir, [
+      '---', 'inputs: [fixtures/source]', 'outputs:',
+      '  - path: fixtures/source/report.md',
+      '  - path: fixtures/source/generated', '    type: directory',
+      '---', '# Goal', 'Produce the declared report and generated tree.',
+    ].join('\n'));
+    for (const scope of ['fixtures/source/report.md', 'fixtures/source/', 'fixtures/source/**', '**']) {
+      expect(scopeContainsPath([scope], 'fixtures/source/report.md', projectDir, declaredInputs), scope).toBe(true);
+    }
+    for (const path of ['fixtures/source/generated/round/result.json', 'alias/generated/index.json']) {
+      expect(scopeContainsPath(['**'], path, projectDir, declaredInputs), path).toBe(true);
+    }
+    expect(scopeContainsPath(['alias/**'], 'alias/report.md', projectDir, declaredInputs)).toBe(true);
+    for (const path of ['fixtures/source/evidence.txt', 'fixtures/source/undeclared.md',
+      'alias/evidence.txt', 'alias/report.md/child.txt', 'fixtures/source/generated-peer/new.json']) {
+      expect(scopeContainsPath(['**'], path, projectDir, declaredInputs), path).toBe(false);
+    }
+    expect(scopeContainsPath([], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(false);
+    expect(scopeContainsPath(['fixtures/other/**'], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(false);
+  });
+
+  it('keeps an output directory alias from authorizing preserved siblings outside its canonical tree', () => {
+    const projectDir = join(temporaryRoot(), 'project');
+    mkdirSync(join(projectDir, 'fixtures', 'source', 'generated'), { recursive: true });
+    mkdirSync(join(projectDir, 'fixtures', 'source', 'evidence'), { recursive: true });
+    writeFileSync(join(projectDir, 'fixtures', 'source', 'evidence', 'keep.txt'), 'preserved evidence\n');
+    symlinkSync('../evidence', join(projectDir, 'fixtures', 'source', 'generated', 'alias'));
+    const declaredInputs = resolveDeclaredInputWriteBindings(projectDir, [
+      '---', 'inputs: [fixtures/source]', 'outputs:',
+      '  - path: fixtures/source/generated', '    type: directory',
+      '---', '# Goal', 'Produce the declared generated tree.',
+    ].join('\n'));
+
+    expect(scopeContainsPath(['**'], 'fixtures/source/generated/result.json', projectDir, declaredInputs)).toBe(true);
+    for (const path of ['fixtures/source/evidence/keep.txt', 'fixtures/source/generated/alias/keep.txt']) {
+      expect(scopeContainsPath(['**'], path, projectDir, declaredInputs), path).toBe(false);
+    }
+  });
+
+  it('allows replacing a declared output alias while refusing a retargeted preserved input', () => {
+    const projectDir = join(temporaryRoot(), 'project');
+    const source = join(projectDir, 'fixtures', 'source');
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, 'prior.md'), 'previous output\n');
+    writeFileSync(join(source, 'evidence.md'), 'preserved evidence\n');
+    symlinkSync('prior.md', join(source, 'report.md'));
+    const declaredInputs = resolveDeclaredInputWriteBindings(projectDir, [
+      '---', 'inputs: [fixtures/source]', 'outputs:',
+      '  - path: fixtures/source/report.md', '    on_existing: replace',
+      '---', '# Goal', 'Replace the declared report.',
+    ].join('\n'));
+    expect(scopeContainsPath(['**'], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(true);
+
+    rmSync(join(source, 'report.md'));
+    symlinkSync('evidence.md', join(source, 'report.md'));
+    expect(scopeContainsPath(['**'], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(false);
+    expect(scopeContainsPath(['**'], 'fixtures/source/evidence.md', projectDir, declaredInputs)).toBe(false);
+
+    rmSync(join(source, 'report.md'));
+    writeFileSync(join(source, 'report.md'), 'replacement output\n');
+    expect(scopeContainsPath(['**'], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(true);
+    expect(scopeContainsPath(['**'], 'fixtures/source/evidence.md', projectDir, declaredInputs)).toBe(false);
+  });
 });

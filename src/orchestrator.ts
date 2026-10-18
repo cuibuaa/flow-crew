@@ -10,6 +10,7 @@ import {
   TaskRegistry,
   TASK_LIST_STATUS,
   TASK_STATUS,
+  isActiveTaskStatus,
   type TaskCreateInput,
   type TaskEntry,
   type TaskRegistryMetrics,
@@ -34,12 +35,18 @@ import {
   isSuccessfulRunStatus,
   isTerminalRunStatus,
   readRunReservation,
+  readOperationalRunState,
   readRunState,
   resolveRunStatus,
   reserveRun,
   RUN_STATUS,
   runsRoot,
+  updateRunState,
 } from './store.js';
+import { deploymentHeld, parkAtDeploymentBoundary, readDeploymentHold, requestDeploymentHold, releaseDeploymentHold, type DeploymentHold } from './deployment-hold.js';
+import { assertContinuationCompatible, recordContinuationRefusal } from './engine-continuation.js';
+import { checkpointCommandFateKnown, checkpointConsumers } from './restart-recovery.js';
+import { unitIsStopped } from './run-control.js';
 import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
 import { reconcileHostInterruptedRun } from './restart-recovery.js';
 import { resolveRunIdentity } from './cancellation-policy.js';
@@ -85,6 +92,15 @@ interface BoundRun {
   failureReason?: string;
   pendingApprovalId?: string;
   resumeAuthorized?: boolean;
+  deploymentContinuation?: boolean;
+}
+
+export interface DeploymentStatus {
+  hold?: DeploymentHold;
+  ready: boolean;
+  released?: boolean;
+  tasks: Array<{ id: number; runId?: string; status: string; settled: boolean; detail?: string }>;
+  errors: string[];
 }
 
 export interface GitAdapter {
@@ -270,6 +286,7 @@ export class Orchestrator {
 
   async register(input: TaskCreateInput): Promise<TaskEntry> {
     let task = this.createAdmittedTask(input);
+    if (deploymentHeld()) return this.registry.update(task.id, { status: TASK_STATUS.PENDING, notes: 'Deployment hold: launch fenced' });
     // Admission control (skip-on-overlap): single-in-flight per project used to
     // be enforced only INSIDE the launched run — the daemon spawned a second
     // unit anyway, the child killed itself on the conflict, systemd reported
@@ -344,27 +361,138 @@ export class Orchestrator {
 
   async resume(id: number): Promise<TaskEntry> {
     const task = this.mustGet(id);
+    if (deploymentHeld()) throw new Error('Deployment hold is active; use flowcrew daemon continue');
     const bound = this.readBoundRun(task);
     if (!bound) throw new Error('Task has no readable bound run to resume');
-    if (![RUN_STATUS.STOPPED, RUN_STATUS.FAILED, RUN_STATUS.INCOMPLETE].some(status => status === bound.status)) {
+    // A cancelled/stopped run can retain historical hold metadata. Only a
+    // currently parked run needs that hold's release before explicit launch.
+    const heldContinuation = bound.status === RUN_STATUS.PARKED
+      ? readRunState(task.projectDir, bound.runId).deploymentHold : undefined;
+    if (![RUN_STATUS.STOPPED, RUN_STATUS.FAILED, RUN_STATUS.INCOMPLETE].some(status => status === bound.status) && !(bound.status === RUN_STATUS.PARKED && heldContinuation)) {
       throw new Error(`Cannot resume a ${bound.status} run; resume requires stopped, failed or incomplete work`);
     }
     if (task.status === TASK_STATUS.CANCELLING || this.launchingTaskIds.has(id)
-        || inspectRunScheduler(bound.runId, bound.path).kind === 'live') {
+        || !['dead', 'missing', 'reused'].includes(inspectRunScheduler(bound.runId, bound.path).kind)) {
       throw new Error('Task is still stopping or launching; wait for settlement before resuming');
     }
     buildCommand(task, this.cliPath); // Verify the original admission before queuing any work.
+    assertContinuationCompatible(task.projectDir, bound.runId);
     workflowContinuation(readRunState(task.projectDir, bound.runId), task.projectDir, bound.runId);
+    if (heldContinuation) updateRunState(task.projectDir, bound.runId, state => {
+      if (state.status !== RUN_STATUS.PARKED || state.deploymentHold?.id !== heldContinuation.id) throw new Error('Held run changed before explicit resume');
+      state.deploymentHold.releasedAt ??= new Date().toISOString();
+    });
     // An explicit continuation is a launch that has not happened yet, exactly
     // like enqueue(existing run). Clearing started_at keeps the queue from
     // reconciling the previous terminal outcome before this launch occurs.
     return this.registry.update(id, {
       status: TASK_STATUS.PENDING, started_at: undefined, completed_at: undefined,
-      not_before: undefined, defer_reason: undefined, defer_kind: 'retry',
+      not_before: undefined, defer_reason: undefined, defer_kind: heldContinuation ? 'wait' : 'retry',
       notes: undefined, completing_commit: undefined,
       summary_verdict: undefined, summary_one_liner: undefined, summary_full: undefined,
       summary_source: undefined, summary_parsed_at: undefined,
     });
+  }
+
+  /** Request is synchronous and durable before observing any asynchronous unit.
+   * Queue admission and schedulers read the same latch after daemon restart. */
+  async holdDeployment(): Promise<DeploymentStatus> {
+    requestDeploymentHold();
+    return this.deploymentStatus();
+  }
+
+  async deploymentStatus(): Promise<DeploymentStatus> {
+    const hold = readDeploymentHold();
+    const errors: string[] = [];
+    let controlErrors = 0;
+    if (this.registry.health().unreadableRecords || this.registry.hasUnknownTaskStatuses()) {
+      errors.push('Registry is corrupt or has unknown statuses; deployment cannot be proved safe');
+      controlErrors++;
+    }
+    const registered = this.registry.list({ status: TASK_LIST_STATUS.ALL });
+    const units = this.systemd.isActiveMany
+      ? await this.systemd.isActiveMany(registered.map(task => task.systemd_unit)) : undefined;
+    const observations = await Promise.all(registered.map(async task => {
+      const active = isActiveTaskStatus(task.status);
+      let settled: boolean;
+      let detail: string | undefined;
+      try {
+        const unit = units
+          ? units.get(task.systemd_unit) ?? { kind: 'unobservable' as const, reason: 'Unit omitted from supervisor observation' }
+          : await this.systemd.isActive(task.systemd_unit);
+        const bound = this.readBoundRun(task);
+        settled = unitIsStopped(unit) && !this.launchingTaskIds.has(task.id);
+        if (bound) {
+          const owner = inspectRunScheduler(bound.runId, bound.path);
+          const state = readOperationalRunState(task.projectDir, bound.runId);
+          settled &&= ['dead', 'missing', 'reused'].includes(owner.kind)
+            && (isPausedRunStatus(state.status) || isTerminalRunStatus(state.status))
+            && checkpointCommandFateKnown(state) && checkpointConsumers(state.engineCheckpoint).length === 0;
+          detail = `run=${state.status}, scheduler=${owner.kind}, unit=${unit.kind}`;
+          if (state.deploymentHold?.id === hold?.id && state.continuationFailure) {
+            errors.push(`Task ${task.id}: ${state.continuationFailure.reason}`);
+            detail += `; ${state.continuationFailure.reason}`;
+          }
+        } else if (active && task.run_id && !readRunReservation(task.projectDir, task.run_id)) {
+          settled = false;
+          detail = 'Bound run is unreadable';
+        } else if (task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.CANCELLING) settled = false;
+        if (!detail) detail = `unit=${unit.kind}${settled ? '; queued launch fenced' : ''}`;
+        // Settled historical tasks need no deployment action. A terminal
+        // cancellation with unresolved owners still vetoes readiness.
+        return !active && settled && !errors.some(error => error.startsWith(`Task ${task.id}:`)) ? undefined
+          : { id: task.id, runId: bound?.runId, status: bound?.status ?? task.status, settled, detail };
+      } catch (error) {
+        controlErrors++;
+        detail = error instanceof Error ? error.message : String(error);
+        errors.push(`Task ${task.id}: ${detail}`);
+        return { id: task.id, status: task.status, settled: false, detail };
+      }
+    }));
+    const tasks = observations.filter((task): task is NonNullable<typeof task> => task !== undefined);
+    return { hold, ready: Boolean(hold && !hold.releasedAt) && controlErrors === 0 && tasks.every(task => task.settled), tasks, errors };
+  }
+
+  async continueDeployment(): Promise<DeploymentStatus> {
+    const snapshot = await this.deploymentStatus();
+    const hold = snapshot.hold;
+    if (!hold) throw new Error('No deployment hold exists');
+    if (hold.releasedAt || readDeploymentHold()?.releasedAt) return { ...snapshot, released: true };
+    if (!snapshot.ready) return { ...snapshot, errors: [...snapshot.errors, 'Deployment hold is not settled; old owners may still be active. Hold remains in effect.'] };
+    const errors: string[] = [...snapshot.errors];
+    // Validate each run before any launch authority is published. Failure of one
+    // run is durable and does not conceal the disposition of its peers.
+    for (const task of this.registry.list({ status: TASK_LIST_STATUS.ACTIVE })) {
+      const bound = this.readBoundRun(task);
+      if (!bound) continue;
+      const state = readRunState(task.projectDir, bound.runId);
+      if (state.deploymentHold?.id !== hold.id || state.deploymentHold.releasedAt || state.status !== RUN_STATUS.PARKED) continue;
+      try {
+        buildCommand(task, this.cliPath);
+        assertContinuationCompatible(task.projectDir, bound.runId);
+        workflowContinuation(state, task.projectDir, bound.runId);
+        let authorized = false;
+        updateRunState(task.projectDir, bound.runId, current => {
+          if (current.status !== RUN_STATUS.PARKED || current.deploymentHold?.id !== hold.id || current.deploymentHold.releasedAt) return;
+          current.deploymentHold.releasedAt = new Date().toISOString();
+          authorized = true;
+        });
+        const latest = this.registry.get(task.id);
+        if (authorized && latest && latest.status !== TASK_STATUS.CANCELLED && latest.status !== TASK_STATUS.CANCELLING) {
+          this.registry.update(task.id, { status: TASK_STATUS.PENDING, started_at: undefined, completed_at: undefined,
+            not_before: undefined, defer_reason: undefined, defer_kind: 'wait', notes: `Continuing deployment-held run ${bound.runId}` });
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const detail = `Task ${task.id} run ${bound.runId}: ${reason}`;
+        recordContinuationRefusal(task.projectDir, bound.runId, reason);
+        errors.push(detail);
+        const latest = this.registry.get(task.id);
+        if (latest && latest.status !== TASK_STATUS.CANCELLED && latest.status !== TASK_STATUS.CANCELLING) this.failClosed(latest, detail);
+      }
+    }
+    releaseDeploymentHold(hold);
+    return { ...snapshot, ready: errors.length === 0, released: true, errors };
   }
 
   async tail(id: number, lines = 100, _follow = false): Promise<string> {
@@ -488,6 +616,7 @@ export class Orchestrator {
    * elapsed and its project is free; otherwise leave it queued.
    */
   private async tryLaunchQueued(task: TaskEntry): Promise<void> {
+    if (deploymentHeld()) return;
     // The sweep's task snapshot may predate a concurrent register() status
     // write. Re-read before doing any asynchronous admission work.
     const current = this.registry.get(task.id);
@@ -523,7 +652,7 @@ export class Orchestrator {
       if (this.waitForBoundApproval(task, bound)) return;
       const recovery = this.boundRunRecoveryDecision(task, bound);
       if (recovery.kind === 'stop') return;
-      if (task.defer_kind !== 'retry') {
+      if (task.defer_kind !== 'retry' && !bound.deploymentContinuation) {
         task = this.registry.update(task.id, {
           defer_kind: 'retry',
           defer_reason: recovery.reason,
@@ -553,6 +682,7 @@ export class Orchestrator {
       || (afterUnitProbe.status !== TASK_STATUS.DEFERRED && afterUnitProbe.status !== TASK_STATUS.PENDING)
     ) return;
     task = afterUnitProbe;
+    if (deploymentHeld()) return;
     switch (observedUnitState.kind) {
       case 'active':
         this.registry.update(task.id, {
@@ -611,7 +741,7 @@ export class Orchestrator {
     // reuse a transient unit name, and that refusal degrades to an untracked
     // detached child.
     const consumesAttempt = task.defer_kind === 'retry';
-    const usedBefore = consumesAttempt || Boolean(task.started_at) || (task.launch_seq ?? 0) > 0;
+    const usedBefore = consumesAttempt || Boolean(task.started_at) || (task.launch_seq ?? 0) > 0 || bound?.deploymentContinuation === true;
     const attempt = consumesAttempt ? task.attempt + 1 : task.attempt;
     const launchSeq = usedBefore ? (task.launch_seq ?? 0) + 1 : (task.launch_seq ?? 0);
     const unit = !usedBefore
@@ -642,6 +772,8 @@ export class Orchestrator {
 
   private async tickTask(task: TaskEntry): Promise<void> {
     if (this.launchingTaskIds.has(task.id)) return;
+    const held = this.readBoundRun(task);
+    if (held && this.waitForBoundApproval(task, held)) return;
     // A parked run EXITS its process on purpose (freeing the project and the
     // queue) while a human decides. To systemd that is indistinguishable from a
     // clean exit or a crash, so ask the run itself first — otherwise the
@@ -759,6 +891,7 @@ export class Orchestrator {
         projectDir?: string;
         parked?: { requestId?: string; pausedAt?: string };
         recovery?: { kind?: string };
+        deploymentHold?: { releasedAt?: string };
       };
       if (typeof parsed.status !== 'string' || parsed.runId !== identity.runId || typeof parsed.projectDir !== 'string' || resolve(parsed.projectDir) !== resolve(task.projectDir)) return undefined;
       const requestId = parsed.parked?.requestId;
@@ -770,7 +903,8 @@ export class Orchestrator {
         status: parsed.status,
         ...(typeof parsed.failureReason === 'string' ? { failureReason: parsed.failureReason } : {}),
         ...(boundApproval && isPendingInboxItemState(boundApproval.state) ? { pendingApprovalId: requestId } : {}),
-        resumeAuthorized: parsed.recovery?.kind === 'resumable' || Boolean(boundApproval && !isPendingInboxItemState(boundApproval.state)),
+        resumeAuthorized: parsed.recovery?.kind === 'resumable' || Boolean(parsed.deploymentHold?.releasedAt) || Boolean(boundApproval && !isPendingInboxItemState(boundApproval.state)),
+        deploymentContinuation: Boolean(parsed.deploymentHold?.releasedAt),
       };
     } catch {
       return undefined;
@@ -779,6 +913,10 @@ export class Orchestrator {
 
   private waitForBoundApproval(task: TaskEntry, bound: BoundRun, prefix = ''): boolean {
     if (!isPausedRunStatus(bound.status)) return false;
+    if (readRunState(task.projectDir, bound.runId).deploymentHold && deploymentHeld()) {
+      this.defer(task, `${prefix}deployment hold: run ${bound.runId} parked at settled stage boundary`, 'wait', task.run_id);
+      return true;
+    }
     if (bound.pendingApprovalId) {
       this.defer(task, `${prefix}bound run ${bound.runId} is awaiting approval resume (request ${bound.pendingApprovalId})`, 'wait', task.run_id);
     } else if (bound.resumeAuthorized) return false;
@@ -833,7 +971,14 @@ export class Orchestrator {
       }
       if (this.waitForBoundApproval(task, bound, `${reason}; `)) return true;
       const recovery = this.boundRunRecoveryDecision(task, bound, reason);
-      if (recovery.kind === 'resume') await this.retryOrStuck(task, recovery.reason);
+      if (recovery.kind === 'resume') {
+        if (deploymentHeld()) {
+          // Recovery already excluded and retired the interrupted owners. Join
+          // the same hold instead of spending a crash retry behind its fence.
+          parkAtDeploymentBoundary(task.projectDir, bound.runId);
+          this.defer(task, `deployment hold; ${recovery.reason}`, 'wait', task.run_id);
+        } else await this.retryOrStuck(task, recovery.reason);
+      }
       return true;
     }
     if (!task.run_id) return false; // legacy early crash
@@ -883,7 +1028,14 @@ export class Orchestrator {
     }
     let recovered = bound.resumeAuthorized === true;
     if (readRunState(task.projectDir, bound.runId).status === RUN_STATUS.RUNNING) {
-      const reconciled = reconcileHostInterruptedRun(task.projectDir, bound.runId);
+      let reconciled;
+      try { reconciled = reconcileHostInterruptedRun(task.projectDir, bound.runId); }
+      catch (error) {
+        const reason = `${leading}CONTINUATION_INCOMPATIBLE: ${error instanceof Error ? error.message : String(error)}`;
+        recordContinuationRefusal(task.projectDir, bound.runId, reason);
+        this.failClosed(task, reason);
+        return { kind: 'stop' };
+      }
       if (isTerminalRunStatus(reconciled.status)) {
         this.failClosed(task, `${leading}bound run ${bound.runId} ended ${reconciled.status}: ${reconciled.failureReason ?? 'unknown outcome'}; inspect its recovery record before starting new work`);
         return { kind: 'stop' };
@@ -1066,6 +1218,9 @@ export class Orchestrator {
 
   private prepareLaunchCommand(task: TaskEntry): string | undefined {
     try {
+      if (deploymentHeld()) return undefined;
+      const bound = this.readBoundRun(task);
+      if (bound && bound.status !== RUN_STATUS.RUNNING) assertContinuationCompatible(task.projectDir, bound.runId);
       return buildCommand(task, this.cliPath);
     } catch (error) {
       if (task.run_id) releaseLaunchIntent(task.projectDir, task.run_id);
@@ -1226,7 +1381,40 @@ export class NodeSystemd implements SupervisorBackend {
     if (reason) throw new Error(`Refusing per-user systemd manager: ${reason}. Use a private runtime without an inherited session bus.`);
   }
 
-  async isActive(unit: string): Promise<UnitStatus> {
+  async isActiveMany(units: string[]): Promise<Map<string, UnitStatus>> {
+    if (!units.length) return new Map();
+    let loaded: Set<string> | undefined;
+    let failure: UnitStatus | undefined;
+    let unavailable = false;
+    const refusal = this.managerRefusal();
+    if (refusal) failure = { kind: 'unobservable', reason: `Refusing per-user systemd manager: ${refusal}` };
+    else {
+      try {
+        // Unlike is-active, a successful inventory proves that unloaded names
+        // have no manager owner. Historical tasks need no individual RPC.
+        const { stdout } = await execFileAsync('systemctl',
+          ['--user', 'list-units', '--all', '--output=json', '--no-pager'],
+          { encoding: 'utf-8', timeout: 1_000 });
+        const rows: unknown = JSON.parse(stdout);
+        if (!Array.isArray(rows) || rows.some(row => !row || typeof row.unit !== 'string' || !row.unit)) {
+          throw new Error('Invalid unit inventory');
+        }
+        loaded = new Set(rows.map(row => row.unit as string));
+      } catch (error) {
+        unavailable = (error as NodeJS.ErrnoException).code === 'ENOENT';
+        failure = { kind: 'unobservable', reason: 'systemctl inventory failed' };
+      }
+    }
+    return new Map(await Promise.all([...new Set(units)].map(async unit => {
+      if (loaded?.has(unit)) return [unit, await this.isActive(unit, false)] as const;
+      // Readiness observes local owners without repairing legacy records.
+      const local = this.fallbackState(unit, false);
+      if (loaded || unavailable || local.kind === 'terminal') return [unit, local] as const;
+      return [unit, mergeSupervisorStatuses(local, failure!)] as const;
+    })));
+  }
+
+  async isActive(unit: string, repairLegacyRecords = true): Promise<UnitStatus> {
     const portable = this.portableState(unit);
     // An atomically-written exit status is the only backend-independent result
     // and therefore outranks even a systemd unit that has not been reaped yet.
@@ -1249,12 +1437,12 @@ export class NodeSystemd implements SupervisorBackend {
       if (failure.killed || failure.signal === 'SIGTERM' || failure.code === 'ETIMEDOUT') {
         return { kind: 'unobservable', reason: 'systemctl probe timed out' };
       }
-      if (failure.code === 'ENOENT') return this.fallbackState(unit);
+      if (failure.code === 'ENOENT') return this.fallbackState(unit, repairLegacyRecords);
       // A bound live shim is conservative positive evidence. Terminal-unknown
       // and absent cannot prove that a real unit stopped while systemctl itself
       // is unobservable, so those cases preserve the Phase 1 fail-closed rule.
       if (portable.kind === 'active' || portable.kind === 'deactivating') return portable;
-      const legacy = this.legacyFallbackState(unit);
+      const legacy = this.legacyFallbackState(unit, repairLegacyRecords);
       if (legacy.kind === 'active' || legacy.kind === 'deactivating') return legacy;
       return { kind: 'unobservable', reason: 'systemctl probe failed' };
     }
@@ -1515,9 +1703,9 @@ export class NodeSystemd implements SupervisorBackend {
     return { kind: 'journal', unit };
   }
 
-  private fallbackState(unit: string): UnitStatus {
+  private fallbackState(unit: string, repairLegacyRecords = true): UnitStatus {
     if (hasSupervisionEvidence(this.baseDir, unit)) return this.portableState(unit);
-    return this.legacyFallbackState(unit);
+    return this.legacyFallbackState(unit, repairLegacyRecords);
   }
 
   private portableState(unit: string): UnitStatus {
@@ -1527,7 +1715,7 @@ export class NodeSystemd implements SupervisorBackend {
     }).status;
   }
 
-  private legacyFallbackState(unit: string): UnitStatus {
+  private legacyFallbackState(unit: string, repairLegacyRecords: boolean): UnitStatus {
     const path = this.fallbackPath(unit);
     if (!existsSync(path)) return { kind: 'absent' };
     try {
@@ -1542,14 +1730,14 @@ export class NodeSystemd implements SupervisorBackend {
       if (parsed.pid && processIsAlive(parsed.pid)) {
         return parsed.state === 'deactivating' ? { kind: 'deactivating' } : { kind: 'active' };
       }
-      this.writeFallbackRecord(unit, {
+      if (repairLegacyRecords) this.writeFallbackRecord(unit, {
         ...parsed,
         state: 'inactive',
         completedAt: parsed.completedAt ?? new Date().toISOString(),
       });
       return { kind: 'terminal-unknown', reason: 'fallback process ended without an exit status' };
     } catch {
-      this.writeFallbackRecord(unit, {
+      if (repairLegacyRecords) this.writeFallbackRecord(unit, {
         state: 'failed',
         reason: 'fallback state record is malformed',
         completedAt: new Date().toISOString(),

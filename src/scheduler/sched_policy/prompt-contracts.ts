@@ -7,14 +7,16 @@ import { type ResearchConfig, type TerminalStatesConfig, type StoreState } from 
 import { resolveResearchPaths } from '../../research-paths.js';
 import type { AgentConfig } from '../../adapters/base.js';
 
+export const SINGLE_AUTHOR_NOTICE = 'Execution model: every authoring stage runs one author. Requests in brief text or frontmatter for competing candidates run as single-author work under this notice. Independent gates have their own stage budgets.';
+
 const SHARED_ROLE_CONTRACT = `## Review contract
 An independent review decides whether the change achieves the brief's outcome and what it breaks.
-Give every assigned criterion and every score required by the brief or role/gate contract its own result
+Reviewers give every assigned criterion and every score required by the brief or role/gate contract its own result
 and evidence. Pass only when all meet their acceptance lines. Disclose missing or ambiguous lines;
 never invent a threshold or waive a supplied one. Examples do not exclude equivalent property evidence
 unless the criterion explicitly requires that means. A wording/property conflict identifies its originating
-sentence; a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it. Say briefly what you did not examine and why.
-Independent reviewers must not durably modify the reviewed target or authoritative inputs; isolated temporary probes and declared evidence generation are allowed within admitted capabilities. Target repairs belong to an author.
+sentence; a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it. Reviewers say briefly in their reason what they did not examine and why.
+Independent reviewers must not durably modify the reviewed target or authoritative inputs (the engine guards reviewer writes, so this needs no reviewer proof); isolated temporary probes and declared evidence generation are allowed within admitted capabilities. Target repairs belong to an author.
 
 ## Run-directory safety
 Never write, move, delete, or otherwise modify any run directory other than this task's own run directory. This prohibition is absolute; read authorization never grants mutation authority.
@@ -84,7 +86,7 @@ export function appendPlannerAdmissionContract(
     ? terminalPaths.map(({ status, path }) => `- ${status}: ${path} — one final ordinary producer; ordered writers and repairs may share its scope`).join('\n')
     : '- none declared';
   return `${prompt}\n\n# Engine admission contract for this proposal (pre-submit)\n${rows}\n`
-    + `Give each author that builds a private run directory output at stages/<stage-id>/build in artifact_contract.produces. Configure compiler output and caches there; project scope covers its source edits. Shared build destinations still conflict and serialize. `
+    + `Give each author that builds a private run directory output at stages/<stage-id>/build in artifact_contract.produces. Configure compiler output and caches there; project scope covers its source edits. Settled workspaces are compacted: put durable handoffs/logs/evidence in named directories, explicitly declare final products below the workspace root, and cite evidence paths in the result. Shared build destinations still conflict and serialize. `
     + `Paths under an external run store (for example .fc/runs/) are not project outputs and cannot be made reachable by declaring project scope.`;
 }
 
@@ -92,8 +94,8 @@ export function appendAttemptDeadlineContract(
   prompt: string,
   attemptBudgetMs: number,
 ): string {
-  return `${prompt}\n\nRuntime timeout contract: this execution has an immutable ${attemptBudgetMs}ms deadline. `
-    + `Retries, backoff and fallback consume that same budget; the scheduler allocates any later execution's budget.`;
+  return `${prompt}\n\nStage budget: ${attemptBudgetMs}ms. The engine delivers a live wrap-up instruction before it expires, then allows a bounded finishing interval. Keep admitted files and report done/remaining work. `
+    + `Retries, backoff and fallback share this execution's hard stop; budget handoffs spend the next finite workflow iteration. Independent gates have separate stage budgets.`;
 }
 
 export function appendGateConstraintAuditContext(
@@ -104,16 +106,7 @@ export function appendGateConstraintAuditContext(
   runDirPath: string,
 ): string {
   if (!stage.is_gate) return prompt;
-  const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
-  const closure = new Set<string>();
-  const queue = [...(stage.depends_on ?? [])];
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    if (closure.has(id)) continue;
-    closure.add(id);
-    queue.push(...(byId.get(id)?.depends_on ?? []));
-  }
-  const rows = [...closure].flatMap((id) => {
+  const rows = [...dependencyClosure(stage, allStages)].flatMap((id) => {
     const status = state.stages[id];
     return (status?.attempts ?? []).flatMap((attempt) => {
       if (!attempt.constraintAudit) return [];
@@ -127,3 +120,15 @@ export function appendGateConstraintAuditContext(
   return `${prompt}\n\n# Runtime Constraint Audits\nRead these dependency-closure audits as gate evidence:\n${rows.join('\n')}`;
 }
 
+function dependencyClosure(stage: StageConfig, allStages: StageConfig[]): Set<string> {
+  const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
+  const closure = new Set<string>();
+  const queue = [...(stage.depends_on ?? [])];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (closure.has(id)) continue;
+    closure.add(id);
+    queue.push(...(byId.get(id)?.depends_on ?? []));
+  }
+  return closure;
+}

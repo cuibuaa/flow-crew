@@ -9,7 +9,7 @@ import { clearAttemptSummaryRefreshDebounce } from '../src/run-events.js';
 import { runStage } from '../src/worker.js';
 
 const record = () => ({ status: 'delivered', summary: 'Delivered the requested report.',
-  checks: [{ command: 'node check.mjs', exit_code: 0, evidence: 'checks/stdout.txt' }], caveats: [] });
+  checks: [{ command: 'node check.mjs', exit_code: 0, evidence: 'checks/stdout.txt' }], caveats: [], remaining_work: [] });
 let root: string, project: string, directory: string, runId: string, previousStore: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'author-output-cost-'));

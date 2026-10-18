@@ -123,15 +123,17 @@ export function assessResearchIterationBudget(
   return assessment;
 }
 
-/** The brief author understands the task. Resolve that choice, or the planner
- * default, to an engine workflow; declarations are contracts, not complexity. */
+/** Resolve an authored choice or use the fixed author/review/repair plan.
+ * Research and program loops still require their planner workflows. */
 export function autoSelectedWorkflow(
   parsed: ParsedBriefFrontmatter,
   override?: string,
 ): { workflow: string; reason: string; error?: string } {
-  const workflow = override ?? (parsed.workflow === 'direct' ? 'direct' : parsed.research ? 'research' : 'default');
+  const workflow = override ?? (parsed.workflow === 'direct' ? 'direct'
+    : parsed.research ? 'research'
+      : parsed.workflow === 'planner' || parsed.program || parsed.frontmatterError ? 'default' : 'direct');
   const reason = override ? `explicit --workflow ${override}`
-    : `${parsed.workflow ? `brief declares workflow: ${parsed.workflow}` : 'no workflow choice; planner default'}${parsed.research ? '; research requires the research loop' : ''}`;
+    : `${parsed.workflow ? `brief declares workflow: ${parsed.workflow}` : `no workflow choice; ${workflow === 'direct' ? 'fixed author/review/repair' : 'planner'} default`}${parsed.research ? '; research requires the research loop' : parsed.program ? '; program requires the program loop' : ''}`;
   const loop = parsed.research ? 'research' : parsed.program ? 'program' : undefined;
   const error = parsed.workflowError ?? (workflow === 'direct' && loop
     ? `direct cannot run the ${loop} loop; choose workflow: planner` : undefined);

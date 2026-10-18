@@ -26,6 +26,7 @@ import {
 import { recordRequest, resolveRequest } from '../src/inbox.js';
 import { supervisionPaths } from '../src/supervision.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
+import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import {
   fcGlobalDir,
   initializeReservedRun,
@@ -34,6 +35,7 @@ import {
   runsRoot,
   setFcGlobalDir,
   writeRunState,
+  updateRunState,
 } from '../src/store.js';
 
 let tempDir: string;
@@ -106,9 +108,12 @@ function writeRun(
     runId,
     projectDir: tempDir,
     status,
+    workflowName: 'fixture', startedAt: new Date(clock).toISOString(), stages: {},
     ...(parked ? { parked } : {}),
     ...(failureReason ? { failureReason } : {}),
   }, null, 2), 'utf-8');
+  writeFileSync(join(dir, 'workflow.yaml'), JSON.stringify({ name: 'fixture', defaults: {},
+    stages: [{ id: 'work', role: 'coder', scope: [], artifact_contract: { version: 1, produces: [], reads: [] } }] }));
   return dir;
 }
 
@@ -687,12 +692,21 @@ describe('Orchestrator', () => {
     const runJson = join(runPath, 'run.json');
     writeFileSync(runJson, JSON.stringify({
       ...JSON.parse(readFileSync(runJson, 'utf8')),
+      status: status === 'stopped' ? 'failed' : status,
       taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission,
       currentIteration: 2, maxIterations: 3, maxRetries: 1,
-      stages: { done: { status: 'complete', retries: 0, attempts: [{ status: 'complete' }] },
-        work: { status: 'failed', retries: 1, attempts: [{ status: 'failed' }] } },
-      planControl: { version: 1, revision: 1, stages: [] },
+      stages: { done: { status: 'complete', retries: 0, attempts: [{ index: 1, status: 'complete', startedAt: new Date(clock).toISOString() }] },
+        work: { status: 'failed', retries: 1, attempts: [{ index: 1, status: 'failed', startedAt: new Date(clock).toISOString() }] } },
     }));
+    updateRunState(tempDir, runId, state => recordAdmittedPlan(state, [
+      { id: 'done', role: 'coder', depends_on: [], scope: [], artifact_contract: { version: 1, produces: [], reads: [] } },
+      { id: 'work', role: 'coder', depends_on: ['done'], scope: [], artifact_contract: { version: 1, produces: [], reads: [] } },
+    ], runPath, 'Fixture admitted before continuation.'));
+    for (const [id, stage] of Object.entries(readRunState(tempDir, runId).stages)) {
+      mkdirSync(join(runPath, 'stages', id), { recursive: true });
+      writeFileSync(join(runPath, 'stages', id, 'status.json'), JSON.stringify(stage));
+    }
+    if (status === 'stopped') writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')), status, failureReason: 'Cancelled by user' }));
     const before = readFileSync(runJson, 'utf8');
     const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId,
       status: status === 'stopped' ? 'cancelled' : 'failed', attempt: 3, max_retries: 3 });
@@ -739,7 +753,7 @@ describe('Orchestrator', () => {
       taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission }));
     const archived = readFileSync(runJson, 'utf8');
     const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId,
-      status: 'cancelled', attempt: 2 });
+      status: status === 'stopped' ? 'cancelled' : 'failed', attempt: 2 });
     systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
     await orchestrator.resume(task.id);
     if (queued === 'deferred') {

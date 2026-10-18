@@ -6,7 +6,7 @@ import { writeFileSync, appendFileSync, mkdirSync, unlinkSync } from './engine-f
 // Module: worker
 import { withEngineIntegrity } from './engine-integrity.js';
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { hashRollbackFileSync } from './rollback-content-store.js';
 import { recordInvocationInput } from './run-state-view.js';
 import { finalizeStageSessions, isSessionUuid, readSession } from './adapter-session.js';
 import { declaredOutputFacts, runStateContext } from './run-state-access.js';
@@ -79,6 +79,7 @@ import {
   stageArtifactProduction,
 } from './stage-artifact-contract.js';
 import { readAcceptedScopeRevisionDecisions } from './runtime-negotiation.js';
+import { SINGLE_AUTHOR_NOTICE } from './scheduler/sched_policy/prompt-contracts.js';
 import { buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 
 /** Put the canonical IDs beside the planner's first proposal instructions. */
@@ -232,7 +233,7 @@ export function freshRunningStageProjection(
   };
   for (const field of [
     'exitCode', 'duration_ms', 'artifacts', 'completedAt', 'error', 'tokens_in', 'tokens_out',
-    'writes', 'writeAttribution', 'constraintAudit', 'timeout',
+    'writes', 'writeAttribution', 'constraintAudit', 'timeout', 'acceptedFrom', 'continuation',
   ] as const) delete next[field];
   return next;
 }
@@ -267,7 +268,7 @@ export interface AttemptEvidenceGeneration {
 }
 
 function attemptArtifactFingerprint(path: string): string | null {
-  try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return null; }
+  try { return hashRollbackFileSync(path).sha256; } catch { return null; }
 }
 
 /** Mark the attempt stream so the watchdog excludes its bookkeeping bytes. */
@@ -317,18 +318,13 @@ export async function runStage(
   adapter: Adapter,
   opts: StageOpts,
 ): Promise<RunResult> {
-  // Direct already supplies the whole admitted task. Its guarantees are the
-  // same worker/scheduler checks, rather than a second process brief.
   const runState = existsSync(join(opts.runDir, 'run.json'))
     ? readRunState(opts.projectDir, opts.runId) : undefined;
   const direct = runState?.workflowName === 'direct';
-  const promptTemplate = direct && opts.taskDescription && runState.taskDescription
-    ? opts.promptTemplate.replace(opts.taskDescription.trim(), () => runState.taskDescription!)
-    : opts.promptTemplate;
   const skillNames = opts.stageSkills ?? [];
   let prompt = buildStagePrompt({
     dependsOn: opts.dependsOn,
-    promptTemplate,
+    promptTemplate: opts.promptTemplate,
     projectDir: opts.projectDir,
     runId: opts.runId,
     runDir: opts.runDir,
@@ -337,12 +333,12 @@ export async function runStage(
     availableRoles: opts.availableRoles,
     availableSkills: opts.availableSkills,
     taskDescription: opts.taskDescription,
-    isGate: direct ? false : opts.isGate,
+    isGate: opts.isGate,
     researchOutcomeGate: opts.researchOutcomeGate,
-    criterionRefs: direct && !opts.isGate ? undefined : opts.criterionRefs,
+    criterionRefs: opts.criterionRefs,
     stageId: opts.stageId,
     role: opts.role.name,
-    handoffVisibility: direct && opts.isGate ? 'none' : opts.role.handoff_visibility,
+    handoffVisibility: opts.role.handoff_visibility,
   });
 
   const attribution = opts.attribution ?? {
@@ -368,6 +364,7 @@ export async function runStage(
   // resumed sessions. Arm and publish one clock before preparing its work.
   const attemptDeadline = new AttemptDeadlineController({
     budgetMs: opts.timeout_ms,
+    wrapUp: true,
     ledgerDir: join(opts.runDir, 'stages', opts.stageId),
     executionIndex: attemptIndex,
     ...(opts.deadlineClock ? { clock: opts.deadlineClock } : {}),
@@ -403,8 +400,8 @@ export async function runStage(
     .replace(/<current execution index>/g, String(attemptIndex))
     .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
   const priorAttempt = runningStatus.attempts?.at(-2);
-  if (priorAttempt && (priorAttempt.status === RUN_STATUS.FAILED || priorAttempt.status === 'suspended')) {
-    prompt += `\n\n# Own-stage continuation evidence\nRead ${opts.runDir}/stages/${opts.stageId}/output_attempt_${priorAttempt.index}.md and ${readStageLiveLogPath(opts.runDir, opts.stageId, priorAttempt.index)} for the previous execution's progress. Its attributed writes were ${JSON.stringify(priorAttempt.writes ?? [])}. Verify these existing artifacts and continue the declared duties; do not infer success from the prior attempt. An unavailable thread uses the full current duties and these same evidence references.`;
+  if (priorAttempt && (priorAttempt.status === RUN_STATUS.FAILED || priorAttempt.status === 'suspended' || priorAttempt.continuation)) {
+    prompt += `\n\n# Own-stage continuation evidence\nRead ${opts.runDir}/stages/${opts.stageId}/output_attempt_${priorAttempt.index}.md and ${readStageLiveLogPath(opts.runDir, opts.stageId, priorAttempt.index)} for the previous execution's progress. Its attributed writes were ${JSON.stringify(priorAttempt.writes ?? [])}.${priorAttempt.continuation?.summary ? `\nEngine continuation handoff: ${priorAttempt.continuation.summary}\n` : ' '} Verify these existing artifacts and continue the declared duties; do not infer success from the prior attempt. An unavailable thread uses the full current duties and these same evidence references.`;
   }
   // buildStagePrompt ran before the execution index existed and intentionally
   // included only run-wide guidance. Add notices bound to this execution now.
@@ -491,12 +488,7 @@ export async function runStage(
   // (cli.ts cmdQuick or the dashboard). If absent, we skip prepending.
   const projectContract = opts.role.prompt.includes('{project_contract}')
     ? loadProjectContract(opts.projectDir) : 'none';
-  let resolvedSystemPrompt = (direct
-    ? (opts.isGate
-      ? "Decide independently whether the change achieves the brief's outcome and what it breaks. Return a short verdict and concrete defects with evidence."
-      : "Implement the brief's outcome. You decide how. Return a short result; the engine runs configured validation and checks declared outputs.")
-      + '\nRun unattended. Do not access credentials or signal processes you did not start. Use private scratch at $TMPDIR.'
-    : opts.role.prompt)
+  let resolvedSystemPrompt = opts.role.prompt
     .replace(/\{available_roles\}/g, opts.availableRoles ?? '')
     .replace(/\{available_checks\}/g, opts.availableChecks ?? 'none')
     .replace(/\{available_skills\}/g, opts.availableSkills ?? 'none')
@@ -513,7 +505,7 @@ export async function runStage(
     .replace(/\{default_timeout_ms\}/g, getDefaultTimeout());
   try {
     const taskBriefPath = join(opts.runDir, 'task_brief.md');
-    if (!direct && existsSync(taskBriefPath)) {
+    if (existsSync(taskBriefPath)) {
       const brief = readFileSync(taskBriefPath, 'utf-8').trim();
       if (brief) {
         resolvedSystemPrompt = `# Task Brief\n\n${brief}\n\n---\n\n${resolvedSystemPrompt}`;
@@ -558,10 +550,13 @@ export async function runStage(
     const judgement = opts.isGate
       ? 'Judge assigned criteria in the context of the full brief, including permitted outcomes and stopping conditions. Stage instructions and extracted criteria cannot narrow or replace the outcomes the brief permits. Pass when an allowed outcome has all required evidence, including a permitted negative or blocked report. Reject missing required attempts, measurements or artifacts. '
       : '';
-    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff, stage or verdict-file instructions. ${judgement}Write declared human deliverables and necessary evidence within admitted capabilities. Evidence references name reproducible files or commands.`;
+    prompt += `\n\n# Stage result\nReturn your final answer as one JSON document matching this schema:\n${JSON.stringify(opts.outputSchema)}\nThe engine validates and publishes that answer as the stage record${opts.isGate ? ` and verdict_${opts.stageId}.json` : ''}. This result contract supersedes older prose handoff, stage or verdict-file instructions. ${judgement}Write declared human deliverables within admitted capabilities. Evidence references name reproducible files or commands. List unfinished duties/checks in remaining_work; use [] only when all assigned work is complete.`;
   }
-  if (opts.artifactContract && (!direct || opts.artifactContract.produces.length || opts.artifactContract.reads.length)) prompt += `\n\n# Declared output and input locations\n${JSON.stringify(opts.artifactContract)}`;
+  if (opts.artifactContract) prompt += `\n\n# Declared output and input locations\n${JSON.stringify(opts.artifactContract)}`;
 
+  prompt += `\n\n${SINGLE_AUTHOR_NOTICE}`;
+  const historicalCandidates = readdirSync(join(opts.runDir, 'stages', opts.stageId)).filter(name => /^(?:race_.*\.json|candidate_.*\.patch)$/.test(name));
+  if (historicalCandidates.length) prompt += `\n\nHistorical candidate evidence (retained without selection or execution): ${historicalCandidates.map(name => join(opts.runDir, 'stages', opts.stageId, name)).join(', ')}. Inspect unfinished candidate work and patches before continuing in this project; preserve accepted gate provenance.`;
   const projectWriteScope = opts.projectWriteScope ?? [];
   const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope);
   // A declared run product may belong to later work, but an available product
@@ -579,6 +574,7 @@ export async function runStage(
   // crash can leave a file behind, so ownership is validated on every launch;
   // stale/malformed envelopes are warned about and removed without firing.
   const attemptAbortController = new AbortController();
+  const parentAbortSignal = runProcessAbortSignal();
   const abortSignalPath = join(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
   const commandInterruptSignalPath = join(opts.runDir, 'signals', `interrupt_${opts.stageId}.json`);
   const liveLogPath = stageLiveLogPath(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
@@ -587,7 +583,7 @@ export async function runStage(
   let activeInvocationAbortController: AbortController | undefined;
   let activeInvocationIndex: number | undefined;
   type CommandBoundaryControl = {
-    kind: 'guidance' | 'timeout_projection' | 'operator_interrupt' | 'scope_revision';
+    kind: 'guidance' | 'budget_wrap_up' | 'timeout_projection' | 'operator_interrupt' | 'scope_revision';
     command: CommandLifecycleEvent;
     guidance: ReturnType<typeof readGuidanceForStage>;
     interrupt?: StageCommandInterruptSignal;
@@ -600,6 +596,26 @@ export async function runStage(
   let approvalRequestingStageId: string | undefined;
   let abortReason = '';
   let terminationCause: StageAttemptTimeoutSummary['terminationCause'];
+  let wrapUpRequestedAt: string | undefined;
+  let wrapUpDeliveredAt: string | undefined;
+  const requestWrapUp = (): void => {
+    if (wrapUpRequestedAt || attemptAbortController.signal.aborted) return;
+    wrapUpRequestedAt = new Date(attemptDeadline.wallNow()).toISOString();
+    const envelope = appendGuidanceEnvelope({ runDir: opts.runDir, target: opts.stageId, source: 'scheduler',
+      knownStageIds: [opts.stageId], attemptIndex,
+      body: `# Stage budget wrap-up\nTime is nearly up. Stop starting new work. Keep all admitted files. Finish safely and return your normal result with a concrete done/remaining handoff: what changed, evidence, unfinished duties and the next bounded action. Return remaining_work as a list of unfinished duties/checks, or [] only when all assigned work is complete. Do not claim unfinished work or unrun checks passed. If work remains, the next iteration continues these files. Hard stop: ${attemptDeadline.deadlineAt}; finishing interval: at least ${attemptDeadline.finishingMs} ms after the current child retires within its bounded closure window.` });
+    const guidance = consumeNewGuidance('adapter_invocation', activeInvocationIndex);
+    if (activeInvocationAbortController && !activeInvocationAbortController.signal.aborted) {
+      commandBoundaryControl = { kind: 'budget_wrap_up', command: { id: 'stage_budget', phase: 'completed', timestamp: wrapUpRequestedAt }, guidance };
+      activeInvocationAbortController.abort('guidance_delivery_for_budget_wrap_up');
+    }
+    attemptDeadline.append('stage_wrap_up_requested', { guidanceId: envelope.id, finishingMs: attemptDeadline.finishingMs });
+    recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_wrap_up_requested', runId: opts.runId,
+      timestamp: wrapUpRequestedAt, stageId: opts.stageId, attemptIndex, attemptStartedAt,
+      guidanceId: envelope.id, finishingMs: attemptDeadline.finishingMs, deadlineAt: attemptDeadline.deadlineAt, source: 'worker' });
+  };
+  attemptDeadline.wrapUpSignal.addEventListener('abort', requestWrapUp, { once: true });
+  if (attemptDeadline.wrapUpSignal.aborted) requestWrapUp();
   const attemptElapsedMs = (): number => attemptDeadline.elapsedMs();
 
   const removeAbortSignal = (): void => {
@@ -616,6 +632,12 @@ export async function runStage(
     try { appendFileSync(liveLogPath, `\nWarning: ${detail}\n`); } catch { /* non-critical */ }
   };
   const pollAbortSignal = (): void => {
+    if (parentAbortSignal?.aborted) {
+      stageAborted = true;
+      terminationCause = 'stage_abort';
+      abortReason ||= 'enclosing run cancelled';
+      if (!attemptAbortController.signal.aborted) attemptAbortController.abort('stage_abort');
+    }
     try {
       if (!existsSync(abortSignalPath) || attemptAbortController.signal.aborted) return;
       const parsed = parseStageAbortSignal(readFileSync(abortSignalPath, 'utf-8'));
@@ -770,7 +792,6 @@ export async function runStage(
       }));
     }
   } catch { /* one-second reconciliation remains the portable fallback */ }
-  const parentAbortSignal = runProcessAbortSignal();
   const aggregateAbortSignal = AbortSignal.any([attemptAbortController.signal, attemptDeadline.signal,
     ...(parentAbortSignal ? [parentAbortSignal] : [])]);
   const cancelledResult = (telemetry?: RunResult): RunResult => {
@@ -780,13 +801,15 @@ export async function runStage(
     const tokensOut = typeof telemetry?.tokens_out === 'number' && Number.isFinite(telemetry.tokens_out)
       ? telemetry.tokens_out
       : undefined;
-    const timedOut = !approvalSuspended && (terminationCause === 'attempt_timeout' || attemptDeadline.signal.aborted);
+    const timedOut = !stageAborted && !approvalSuspended && (terminationCause === 'attempt_timeout' || attemptDeadline.signal.aborted);
     return {
       output: '',
       exitCode: approvalSuspended ? 0 : timedOut ? 124 : 137,
       ...(telemetry?.processExitCode !== undefined ? { processExitCode: telemetry.processExitCode } : {}),
       ...(telemetry?.processSignal !== undefined ? { processSignal: telemetry.processSignal } : {}),
-      duration_ms: Math.round(attemptElapsedMs()),
+      // Telemetry belongs to this invocation; adding the whole attempt here
+      // would count earlier turns twice when the warning retired a child.
+      duration_ms: telemetry?.duration_ms ?? Math.round(attemptElapsedMs()),
       timedOut,
       ...(approvalSuspended ? {
         suspended: true,
@@ -814,9 +837,7 @@ export async function runStage(
   if (opts.resumeSessionId && isSessionUuid(opts.resumeSessionId)) {
     continuations.set(adapter, { sessionId: opts.resumeSessionId, ownerStageId: opts.sessionOwnerStageId ?? opts.stageId });
   }
-  const deadlineContext = (): string => direct
-    ? `Execution deadline: ${attemptDeadline.deadlineAt}.`
-    : `# Execution clock\nExecution ${attemptIndex}: started ${attemptDeadline.attemptStartedAt}; absolute deadline ${attemptDeadline.deadlineAt}; remaining ${Math.floor(attemptDeadline.remainingMs())} ms at ${new Date(attemptDeadline.wallNow()).toISOString()}. This deadline is immutable. Query UTC time with node -e "console.log(new Date().toISOString())".`;
+  const deadlineContext = (): string => `# Execution clock\nExecution ${attemptIndex}: started ${attemptDeadline.attemptStartedAt}; stage budget ends ${attemptDeadline.budgetDeadlineAt}; wrap-up warning ${attemptDeadline.wrapUpAt}; absolute deadline (hard stop) ${attemptDeadline.deadlineAt}; remaining ${Math.floor(attemptDeadline.remainingMs())} ms at ${new Date(attemptDeadline.wallNow()).toISOString()}. This deadline is immutable. Retries, backoff and fallback consume that same budget; corrections share this hard stop. Query UTC time with node -e "console.log(new Date().toISOString())".`;
   const invokeAdapter = async (
     selectedAdapter: Adapter,
     selectedRole: AgentConfig,
@@ -842,7 +863,7 @@ export async function runStage(
     // A fresh child (including a failed-resume fallback) needs both its duties
     // and the current local correction; the thread only carries the former.
     const additionalGuidance = deliveredGuidance.filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
-    const stateContext = direct ? '' : runStateContext(opts.projectDir, opts.runId, opts.planRevision);
+    const stateContext = runStateContext(opts.projectDir, opts.runId, opts.planRevision);
     const fullPrompt = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`;
     const effectiveInvocationPrompt = continuation && invocationPrompt !== prompt
       ? `${invocationPrompt}\n\n${guidanceBlock(deliveredGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`
@@ -861,6 +882,15 @@ export async function runStage(
         model: input.model ?? invocationRole.model ?? 'provider-default-unresolved', systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
         resumeSessionId: input.resumeSessionId, transport: input.transport, guidanceIds: guidanceForExecution(deliveredGuidance, attemptIndex).map((entry) => entry.id),
       });
+      // Record submitted input at the adapter's existing input boundary. Merely
+      // preparing a prompt does not establish that a native call received it.
+      if (wrapUpRequestedAt && !wrapUpDeliveredAt && input.userPrompt.includes('# Stage budget wrap-up')) {
+        wrapUpDeliveredAt = new Date(attemptDeadline.wallNow()).toISOString();
+        attemptDeadline.append('stage_wrap_up_delivered', { invocationIndex, finishingMs: attemptDeadline.finishingMs });
+        recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_wrap_up_delivered', runId: opts.runId,
+          timestamp: wrapUpDeliveredAt, stageId: opts.stageId, attemptIndex, attemptStartedAt, invocationIndex,
+          remainingMs: attemptDeadline.remainingMs(), source: 'worker' });
+      }
     };
     // input.md remains a compatible latest alias; immutable records carry exact inputs.
     writeStageInput(opts.projectDir, opts.runId, opts.stageId, effectiveInvocationPrompt);
@@ -920,7 +950,8 @@ export async function runStage(
             });
           }
           const explicitTimeout = parseExplicitCommandTimeout(event.command);
-          const remainingBudgetMs = Math.max(0, Math.floor(attemptDeadline.remainingMs()));
+          const remainingBudgetMs = Math.max(0, Math.floor(wrapUpRequestedAt ? attemptDeadline.remainingMs()
+            : Math.min(attemptDeadline.remainingMs(), effectiveBudgetMs - attemptDeadline.elapsedMs())));
           if (explicitTimeout && explicitTimeout.timeoutMs > remainingBudgetMs) {
             const shortfallMs = explicitTimeout.timeoutMs - remainingBudgetMs;
             recordRunEvent(opts.projectDir, opts.runId, {
@@ -1040,7 +1071,8 @@ export async function runStage(
         if (!closeObservationTimer) {
           closeObservationTimer = setTimeout(() => {
             childCloseUnverified = true;
-            finish(cancelledResult());
+            finish({ ...cancelledResult(), exitCode: 125, timedOut: false,
+              friendlyError: 'ENGINE_STATE_REFUSED: adapter child closure is unverified; preserve its ownership evidence and exclude live consumers before continuing' });
           }, ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
         }
       };
@@ -1053,7 +1085,7 @@ export async function runStage(
             resumeSessionId: continuation?.sessionId }, 'adapter');
         }
         return selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
-          timeout_ms: effectiveBudgetMs,
+          timeout_ms: Math.max(1, Math.floor(attemptDeadline.remainingMs())),
           workDir: opts.projectDir,
           runDir: opts.runDir,
           stageId: opts.stageId,
@@ -1084,7 +1116,8 @@ export async function runStage(
           observeAdapterSettlement();
           // Cancellation changes the attempt outcome, not telemetry already
           // parsed while the adapter was closing its child process.
-          finish(aggregateAbortSignal.aborted ? cancelledResult(value) : value);
+          finish(value.exitCode === 125 && /^ENGINE_STATE_(?:TAMPERED|REFUSED):/.test(value.friendlyError ?? '')
+            ? value : aggregateAbortSignal.aborted ? cancelledResult(value) : value);
         },
         (error) => {
           lastChildClosedAt = new Date().toISOString();
@@ -1146,6 +1179,14 @@ export async function runStage(
     }
     return record;
   };
+  const finishedStageRecord = (record: Record<string, unknown>): boolean => {
+    // A completed rejection keeps its existing authority. Otherwise require an
+    // explicit empty list: delivered/pass alone can also describe partial work.
+    return opts.isGate && record.pass === false
+      || Array.isArray(record.remaining_work) && record.remaining_work.length === 0
+        && (opts.isGate ? record.pass === true : record.status === 'delivered');
+  };
+  let stageWorkFinished = false;
   let correctionReinvocations = 0;
   const invokeAdapterWithCorrection = async (
     selectedAdapter: Adapter,
@@ -1161,8 +1202,15 @@ export async function runStage(
       // closed; a scope grant cannot turn missing closure into clean suspension.
       if (childCloseUnverified) return combined;
       if (!isRetryableAdapterFailure(current.adapterFailureKind)) return combined;
-      if (commandControl && !aggregateAbortSignal.aborted) {
+      if (commandControl && !aggregateAbortSignal.aborted
+          && !latestLiveConstraintResult?.monitorFailure && !latestLiveConstraintResult?.incidents.length) {
         activeCommands.delete(commandControl.command.id);
+        // A valid completed result needs no replacement finishing turn, even
+        // when the warning arrived before the child's result was observed.
+        if (commandControl.kind === 'budget_wrap_up' && current.exitCode === 0 && opts.outputSchema) {
+          try { if (finishedStageRecord(stageRecord(current.output))) return combined; }
+          catch { /* malformed results still need the bounded finishing turn */ }
+        }
         // A durable current-execution grant stops at the closed child boundary.
         // The scheduler alone re-admits inherited capability for the next child.
         if (commandControl.kind === 'scope_revision'
@@ -1200,7 +1248,7 @@ export async function runStage(
             source: 'worker',
           });
         }
-        const label = commandControl.kind === 'operator_interrupt'
+        const label = commandControl.kind === 'budget_wrap_up' ? 'Stage budget wrap-up' : commandControl.kind === 'operator_interrupt'
           ? 'Operator command interrupt'
           : commandControl.kind === 'timeout_projection'
             ? 'Command timeout projection'
@@ -1274,11 +1322,15 @@ export async function runStage(
     }
   };
   const adapterRetryDelays = opts.technicalRetry?.delaysMs ?? ADAPTER_RETRY_DELAYS;
-  const waitForRetry = (delayMs: number): Promise<boolean> => {
-    if (delayMs <= 0) {
-      return Promise.resolve(!aggregateAbortSignal.aborted && attemptDeadline.remainingMs() > 0);
-    }
-    return attemptDeadline.boundedSleep(delayMs, attemptAbortController.signal);
+  const waitForRetry = async (delayMs: number): Promise<boolean> => {
+    const canInvoke = () => !aggregateAbortSignal.aborted && attemptDeadline.remainingMs() > 0;
+    if (!canInvoke()) return false;
+    // Backoff cannot spend the finishing interval before its instruction gets
+    // a native turn. The warning wakes the existing finite retry loop.
+    if (delayMs <= 0 || attemptDeadline.wrapUpSignal.aborted) return true;
+    const completed = await attemptDeadline.boundedSleep(delayMs,
+      AbortSignal.any([aggregateAbortSignal, attemptDeadline.wrapUpSignal]));
+    return (completed || attemptDeadline.wrapUpSignal.aborted) && canInvoke();
   };
 
   let result: RunResult;
@@ -1301,7 +1353,11 @@ export async function runStage(
         // Settlement owns the replay and its receipt; do not run commands again.
         validation = JSON.parse(readFileSync(join(opts.runDir, `validation_delta_${opts.stageId}.json`), 'utf8'));
       }
-      if (validation?.pass) prompt += `\n\nEngine validation: pass=true; ${validation.current.map(command => `${command.display ?? command.role}: exit=${command.exitCode ?? 'unavailable'}, state=${command.state}`).join('; ')}. Receipt: ${join(opts.runDir, validation.immutablePath ?? `validation_delta_${opts.stageId}.json`)}. The engine enforces this comparison. Review every assigned criterion lacking a prior independent conclusion; validation receipts contain no semantic conclusions. Do not rerun configured commands without a concrete evidence gap. Project writes require post-write validation.`;
+      // A no-regression pass can still carry failed or unlaunchable commands;
+      // only commands that themselves passed make a rerun redundant.
+      const configured = validation?.current.filter(command => command.state !== 'not_configured') ?? [];
+      const commandsPassed = configured.length > 0 && configured.every(command => command.state === 'passed');
+      if (validation?.pass) prompt += `\n\nEngine validation: pass=true; ${validation.current.map(command => `${command.display ?? command.role}: exit=${command.exitCode ?? 'unavailable'}, state=${command.state}`).join('; ')}. Receipt: ${join(opts.runDir, validation.immutablePath ?? `validation_delta_${opts.stageId}.json`)} (each command's result and output tail). The engine enforces this comparison. Review every assigned criterion lacking a prior independent conclusion; validation receipts contain no semantic conclusions.${commandsPassed ? ' Do not rerun configured commands without a concrete evidence gap.' : ''} Project writes require post-write validation.`;
       const regressions = validation?.delta.filter(entry => entry.state === 'regression') ?? [];
       if (validation && regressions.length) {
         // Use the existing verdict carrier and repair path without a model decision.
@@ -1357,8 +1413,9 @@ export async function runStage(
     try {
       const record = stageRecord(result.output);
       blockedStageResult = record.status === 'blocked';
+      stageWorkFinished = finishedStageRecord(record);
       if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
-      const carriers = opts.isGate ? [`verdict_${opts.stageId}.json`] : [];
+      const carriers = opts.isGate && (!wrapUpRequestedAt || stageWorkFinished) ? [`verdict_${opts.stageId}.json`] : [];
       const handoff = `handoff_${opts.stageId}.md`;
       if (opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === handoff)) carriers.push(handoff);
       for (const carrier of carriers) {
@@ -1383,12 +1440,12 @@ export async function runStage(
         artifactContract: opts.artifactContract,
         statuses: opts.artifactStatuses,
       };
-      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || scopeRevisionBoundaryReached || result.exitCode !== 0);
+      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || Boolean(wrapUpRequestedAt && !stageWorkFinished) || scopeRevisionBoundaryReached || result.exitCode !== 0);
       const productFacts = existsSync(join(opts.runDir, 'run.json')) ? declaredOutputFacts(opts.projectDir, opts.runId) : [];
       // A single direct author owns the whole brief. Split plans settle each
       // stage's artifact contract; completion still requires every run product.
       const authors = runState?.planControl?.stages.filter(stage => !stage.is_gate && !stage.dynamic_dispatch && !stage.retry_to?.length);
-      const dueProducts = direct && (authors?.length ?? 1) <= 1 && !opts.isGate && !opts.dynamicDispatch && !blockedStageResult && result.exitCode === 0 ? productFacts : [];
+      const dueProducts = direct && (authors?.length ?? 1) <= 1 && !opts.isGate && !opts.dynamicDispatch && !blockedStageResult && (!wrapUpRequestedAt || stageWorkFinished) && result.exitCode === 0 ? productFacts : [];
       const requiredProducts = new Map([...dueProducts, ...availableProductsAtStart].map(product => [product.path, product]));
       for (const product of requiredProducts.values()) {
         const current = productFacts.find(output => output.path === product.path);
@@ -1419,6 +1476,7 @@ export async function runStage(
     clearInterval(abortPollTimer);
     clearInterval(commandInterruptPollTimer);
     for (const watcher of requestWatchers) watcher.close();
+    attemptDeadline.wrapUpSignal.removeEventListener('abort', requestWrapUp);
     cleanupAbortSignalAtExit();
     cleanupCommandInterruptSignalAtExit();
     // The execution attempt ends after adapter settlement.
@@ -1430,8 +1488,9 @@ export async function runStage(
     attemptDeadline.dispose();
   }
 
+  const settlementRefused = result.exitCode === 125 || Boolean(result.exitCode !== 0 && result.friendlyError && !result.timedOut);
   if (attemptDeadline.signal.aborted && !stageAborted && !approvalSuspended) terminationCause = 'attempt_timeout';
-  const timedOut = !stageAborted && !approvalSuspended && (
+  const timedOut = !settlementRefused && !stageAborted && !approvalSuspended && (
     terminationCause === 'attempt_timeout'
     || result.exitCode === 124
     || result.timedOut === true
@@ -1459,12 +1518,36 @@ export async function runStage(
     terminationCause = 'stage_abort';
   } else if (result.suspensionReason === 'scope_revision') {
     terminationCause = 'scope_revision_suspension';
+  } else if (settlementRefused) {
+    terminationCause = 'failed';
   } else if (result.exitCode === 0) {
     terminationCause = 'complete';
   } else if (result.adapterError) {
     terminationCause = 'adapter_error';
   } else {
     terminationCause ??= 'failed';
+  }
+  let retainedArtifacts: string[] | undefined;
+  if (!stageAborted && !approvalSuspended
+    && (result.exitCode === 0 && wrapUpRequestedAt && !stageWorkFinished || timedOut)) {
+    const forced = timedOut;
+    const retainedPaths = retainedArtifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope);
+    const summary = `Engine budget handoff. Done/evidence: retained changed files ${JSON.stringify(retainedPaths)} and the execution log at ${liveLogPath}. Their bytes are kept; unfinished duties are not certified complete. Remaining: complete the stage's declared duties and run unfinished checks; verify retained work before continuing. Disposition: ${forced ? 'bounded grace expired; child stopped with work kept' : 'cooperative wrap-up completed normally'}.`;
+    result.continuation = { reason: 'stage_budget', forced, summary,
+      handoff: `stages/${opts.stageId}/output_attempt_${attemptIndex}.md` };
+    result.exitCode = 0;
+    result.timedOut = false;
+    result.adapterError = false;
+    result.adapterFailureKind = undefined;
+    result.friendlyError = undefined;
+    terminationCause = forced ? 'budget_forced_stop' : 'budget_wrap_up';
+    // Keep authored JSON intact. A forced stop has no authored result; publish
+    // a typed control handoff rather than inventing a gate verdict or checks.
+    if (forced) result.output = JSON.stringify({ status: 'delivered', summary, checks: [],
+      caveats: ['Engine-retained partial work; no authored completion or gate acceptance is inferred.'] });
+    recordRunEvent(opts.projectDir, opts.runId, { type: forced ? 'stage_wrap_up_forced' : 'stage_wrap_up_completed',
+      runId: opts.runId, timestamp: new Date().toISOString(), stageId: opts.stageId, attemptIndex, attemptStartedAt,
+      handoff: result.continuation.handoff, source: 'worker' });
   }
   if (stageAborted) result.output = renderStageAbortOutput(result.output, opts.stageId, attemptIndex, abortReason);
   if (approvalSuspended || timedOut || stageAborted || result.exitCode === 0) result.providerFailure = undefined;
@@ -1473,7 +1556,7 @@ export async function runStage(
 
   writeStageOutput(opts.projectDir, opts.runId, opts.stageId, result.output, attemptIndex);
 
-  const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope);
+  const artifacts = retainedArtifacts ?? diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope);
   const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
   const writes = structuredWrites ?? artifacts;
   const writeAttribution = structuredWrites ? 'structured' as const : 'snapshot' as const;
@@ -1486,6 +1569,10 @@ export async function runStage(
     budgetMs: effectiveBudgetMs,
     attemptStartedAt: attemptDeadline.attemptStartedAt,
     deadlineAt: attemptDeadline.deadlineAt,
+    budgetDeadlineAt: attemptDeadline.budgetDeadlineAt,
+    wrapUpAt: attemptDeadline.wrapUpAt,
+    finishingMs: attemptDeadline.finishingMs,
+    wrapUpRequestedAt, wrapUpDeliveredAt,
     elapsedMs: deadlineSnapshot.elapsedMs,
     remainingMs: deadlineSnapshot.remainingMs,
     terminationCause,
@@ -1529,6 +1616,7 @@ export async function runStage(
     writeAttribution,
     validationGeneratedWrites: result.validationGeneratedWrites,
     timeout: timeoutSummary,
+    continuation: result.continuation,
   });
 
   let boundaryError: unknown;
@@ -1545,6 +1633,7 @@ export async function runStage(
     const suspended = settled?.status === 'suspended';
     if (settled?.exitCode !== undefined) result.exitCode = settled.exitCode;
     result.suspended = suspended;
+    if (result.exitCode !== 0) result.continuation = undefined;
     if (result.exitCode !== 0 && !suspended) result.timeoutTerminationCause = settled?.timeout?.terminationCause ?? 'failed';
     recordRunEvent(opts.projectDir, opts.runId, {
       type: approvalSuspended ? 'approval_attempt_suspended' : suspended ? 'attempt_suspended' : result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
@@ -1573,7 +1662,7 @@ export async function runStage(
 
     // Final classification and durable settlement, rather than a raw child zero,
     // determine whether the successful-home cleanup policy applies.
-    if (final.status === RUN_STATUS.COMPLETE && !opts.preserveSession && !suspended) {
+    if (final.status === RUN_STATUS.COMPLETE && !result.continuation && !opts.preserveSession && !suspended) {
       for (const stageId of new Set([opts.stageId, ...[...continuations.values()].map(session => session.ownerStageId)])) {
         finalizeStageSessions(opts.runDir, stageId);
       }

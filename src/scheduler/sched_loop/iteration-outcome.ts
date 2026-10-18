@@ -1,6 +1,6 @@
 // Boundary: Choose next iteration or truthful completion/failure from settled gates, required obligations and finite budgets; no stage execution.
 import { Adapter } from '../../adapters/base.js';
-import { recordRunEvent } from '../../run-events.js';
+import { publishRunCompletion as publishCompletion } from '../sched_policy/run-completion.js';
 import { StageConfig } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
 import { observeStableBlockage } from '../sched_policy/guidance.js';
@@ -11,7 +11,7 @@ import { archiveRejectedGateRuntimeFacts, canonicalGateRoundArtifactDir, gateArc
 import { loadGateContract } from '../sched_settlement/gate-contract.js';
 import { collectGateRuntimeFacts, lastGatePassed } from '../sched_settlement/gate-recovery.js';
 import { readGateVerdict } from '../sched_settlement/gate-verdict.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, enforceRealityGateBeforeTerminal, isPausedRunStatus, isPendingStageStatus, runDir, writeRunState, writeStageStatus } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, enforceRealityGateBeforeTerminal, isPausedRunStatus, isPendingStageStatus, runDir, writeStageStatus } from '../../store.js';
 import { createResearchBudgetFinalizer } from './research-terminal.js';
 import { archiveDeclaredOutputsBeforePlainCompletion, concludeDeclaredTerminalAtQuiescence, concludeRepeatedBlockage, terminateForGateContractRefusal, writeCampaignEntry } from './services.js';
 import { createHash } from 'node:crypto';
@@ -105,7 +105,7 @@ export async function concludeWorkflowIteration(
 
     // Completed execution is not gate acceptance: static gates use the same
     // effective authored/validation facts as dispatched gates.
-    if (iterationDispatchedIds.length === 0 && !anyFailed(state) && allDone(state)
+    if (iterationDispatchedIds.length === 0 && !anyFailed(state) && allDone(state, sorted)
         && collectGateRuntimeFacts(sorted, state, projectDir, runId).allPass) {
       if (state.status === RUN_STATUS.FAILED) {
         writeCampaignEntry(projectDir, state);
@@ -272,9 +272,5 @@ export function publishRunCompletion(
   state: StoreState, projectDir: string, runId: string,
   eventFields: () => {iteration: number | undefined; detail: string | undefined},
 ): void {
-  writeRunState(projectDir, runId, state);
-  writeCampaignEntry(projectDir, state);
-  recordRunEvent(projectDir, runId, {
-    type: 'run_completed', runId, timestamp: state.completedAt!, ...eventFields(),
-  });
+  publishCompletion(state, projectDir, runId, eventFields, writeCampaignEntry);
 }

@@ -11,7 +11,7 @@ import { LiveConstraintGuard, readLiveConstraintIncidents } from '../src/live-co
 import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { executeReadyBatch } from '../src/scheduler/sched_loop/stage-batch.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
-import { createRun, readRunState, readStageStatus } from '../src/store.js';
+import { createRun, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -22,9 +22,11 @@ const role: AgentConfig = {
 };
 const providers = ['claude', 'codex'] as const;
 let root: string, project: string, runDir: string, callsPath: string;
+let previousStore: string;
 
 beforeEach(() => {
   root = mkdtempSync(join(process.cwd(), '.authentication-spec-'));
+  previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'state'));
   writeFileSync(join(root, 'package.json'), '{"type":"commonjs"}\n');
   project = join(root, 'project'); runDir = join(root, 'run'); callsPath = join(root, 'calls.jsonl');
   const bin = join(root, 'bin');
@@ -63,7 +65,7 @@ process.stdin.on('end', () => {
 `, { mode: 0o700 });
 });
 
-afterEach(() => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { setFcGlobalDir(previousStore); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
 function adapter(provider: typeof providers[number]) {
   return provider === 'claude' ? new ClaudeAdapter() : new CodexAdapter();

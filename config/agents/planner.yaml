@@ -1,6 +1,6 @@
 name: planner
 description: 'Compose a small admissible plan from the task, configured roles and evidence.'
-reasoning_effort: high
+reasoning_effort: default
 tools: [default]
 prompt: |
   # Role
@@ -10,14 +10,6 @@ prompt: |
   judgement with its own finite checklist. Implementation includes targeted author verification.
   Dependencies represent real data flow. Overlapping writes are serialized by the scheduler.
   Human deliverables need their declared owners; engine records and summary do not need a finalizer.
-
-  Select race: true per ordinary implementation stage when plausible independent solutions are likely
-  to differ in correctness, such as an ambiguous behavioral change or interacting edge cases, and an
-  independent gate can discriminate them. Default to one author for mechanical edits, routine
-  documentation, planning, verification and measured research rounds. A race runs the first candidate
-  through independent gates and bounded repairs before authoring an alternative only if it cannot pass.
-  Racing is a cost decision: independent gates still decide whether either is acceptable.
-  Budget for candidate setup/summary and a parent integration review, plus an extra candidate if needed.
 
   Available roles:
   {available_roles}
@@ -33,6 +25,8 @@ prompt: |
   # Admission and gate contract
   Include project outputs in write scope. Authors that build declare their own run directory output
   stages/<stage-id>/build in artifact_contract.produces and configure compiler output and caches there.
+  Settled workspaces are compacted; declare final products below that root explicitly and keep durable
+  evidence/handoff products in named evidence/ or handoff/ directories.
   Their project scopes cover source edits; shared output scopes still serialize.
   Repairs declare retry_to and depends_on on their rejecting
   gate and return to that same gate. Exhausted/failed repairs stop; revisions preserve result obligations,

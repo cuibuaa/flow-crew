@@ -55,6 +55,8 @@ export interface StageExecutionFacts {
   handoffObserved: boolean;
   commitObserved: boolean;
   liveProgressThisTick: boolean;
+  /** Byte offset in this execution's stream, persisted with the observation. */
+  liveLogBytes?: number;
   artifactProgressThisTick: boolean;
   activeCommandCount: number;
   commandActivityValid: boolean;
@@ -110,6 +112,7 @@ export function inspectStageExecutionFacts(input: {
   commitObserved?: boolean;
   commitProgressThisTick?: boolean;
   previousProcessWork?: string;
+  previousLiveLogBytes?: number;
 }): StageExecutionFacts {
   const attempt = runningStageAttempt(input.status);
   const attemptStartedMs = attempt ? Date.parse(attempt.startedAt) : Number.NaN;
@@ -155,8 +158,7 @@ export function inspectStageExecutionFacts(input: {
         && activity.attemptStartedAt === attempt.startedAt
         && typeof activity.streamClosed === 'boolean'
         && active !== undefined
-        && Number.isFinite(updatedAtMs)
-        && updatedAtMs >= attemptStartedMs;
+        && Number.isFinite(updatedAtMs);
       if (commandActivityValid) {
         if (activity.streamClosed) processDescription = 'command stream closed; awaiting engine settlement';
         activeCommandCount = activity.streamClosed ? 0 : active!.filter((record) => {
@@ -164,7 +166,7 @@ export function inspectStageExecutionFacts(input: {
           const value = record as Record<string, unknown>;
           const startedAtMs = typeof value.startedAt === 'string' ? Date.parse(value.startedAt) : Number.NaN;
           return typeof value.id === 'string' && value.id.length > 0
-            && Number.isFinite(startedAtMs) && startedAtMs >= attemptStartedMs;
+            && Number.isFinite(startedAtMs);
         }).length;
         const process = activity.process as { pid?: number; startTimeTicks?: string; kind?: string } | undefined;
         if (Number.isSafeInteger(process?.pid) && typeof process?.startTimeTicks === 'string') {
@@ -205,8 +207,15 @@ export function inspectStageExecutionFacts(input: {
   walk(stageRoot, 0);
   const generation = readAttemptGeneration(input.runDir, input.stageId);
   const generationMatches = generation?.attemptIndex === attempt?.index && generation?.attemptStartedAt === attempt?.startedAt;
-  const liveProgressThisTick = changedThisTick(liveLogPath)
-    && (!generationMatches || statSync(liveLogPath).size > generation!.segmentStart);
+  // The native stream already has an execution-specific name. Neither its
+  // membership nor newly appended bytes depend on a wall-clock timestamp.
+  const currentStream = attempt && stageLiveLogPath(input.runDir, input.stageId, attempt.index, attempt.startedAt);
+  let liveLogBytes: number | undefined;
+  try {
+    if (attempt && (liveLogPath === currentStream || generationMatches)) liveLogBytes = statSync(liveLogPath).size;
+  } catch { /* absent stream provides no progress */ }
+  const liveProgressThisTick = liveLogBytes !== undefined
+    && liveLogBytes > Math.max(input.previousLiveLogBytes ?? 0, generationMatches ? generation!.segmentStart : 0);
   const artifactProgressThisTick = stageArtifactChanged
     || changedThisTick(verdictPath)
     || changedThisTick(handoffPath)
@@ -222,6 +231,7 @@ export function inspectStageExecutionFacts(input: {
     handoffObserved,
     commitObserved,
     liveProgressThisTick,
+    liveLogBytes,
     artifactProgressThisTick,
     activeCommandCount,
     commandActivityValid,
@@ -361,10 +371,13 @@ export class StageWatchdog {
     const attemptStartedMs = attempt ? Date.parse(attempt.startedAt) : Number.NaN;
     const commitObserved = Boolean(attempt && projectCommit && projectCommit.hash !== baseCommit
       && Number.isFinite(attemptStartedMs) && projectCommit.committedAtMs + 999 >= attemptStartedMs);
+    const previous = this.stageObservations.facts(stageId);
+    const sameAttempt = previous?.attemptIndex === attempt?.index && previous?.attemptStartedAt === attempt?.startedAt;
     return inspectStageExecutionFacts({
       runDir: this.runDir(), stageId, status, sinceMs, commitObserved,
       commitProgressThisTick: Boolean(projectCommit && projectCommit.committedAtMs + 999 >= sinceMs),
       previousProcessWork: this.stageObservations.facts(stageId)?.processWork,
+      previousLiveLogBytes: sameAttempt ? previous?.liveLogBytes : undefined,
     });
   }
 

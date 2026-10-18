@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import type { Server } from 'node:net';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startRpcServer } from '../src/orchestrator-rpc.js';
 
@@ -16,7 +17,7 @@ afterEach(async () => {
 });
 
 function fixture() {
-  const root = mkdtempSync(join(repositoryRoot, '.tmp_cli-pipe-'));
+  const root = mkdtempSync(join(tmpdir(), 'fc-cli-pipe-'));
   fixtures.push(root);
   const home = join(root, 'home');
   const fcHome = join(root, 'state');

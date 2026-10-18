@@ -36,11 +36,11 @@ function writeRoles(): string {
 }
 
 describe('append-only gate history under a technical retry', () => {
-  it('retains initial rejection, timed-out re-evaluation, and final pass', async () => {
+  it('retains initial rejection, bounded budget handoff, and final pass', async () => {
     const yaml = [
       'name: gate-technical-retry-history',
       'defaults:',
-      '  max_iterations: 1',
+      '  max_iterations: 2',
       '  max_retries: 1',
       'stages:',
       '  - id: plan',
@@ -50,7 +50,7 @@ describe('append-only gate history under a technical retry', () => {
     ].join('\n');
     const workflow: WorkflowConfig = {description: '', 
       name: 'gate-technical-retry-history',
-      defaults: { max_iterations: 1, max_retries: 1 },
+      defaults: { max_iterations: 2, max_retries: 1 },
       stages: [{criterion_refs: [], 
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
@@ -124,7 +124,9 @@ describe('append-only gate history under a technical retry', () => {
 
     const gate = final.stages.release_gate;
     expect(final.status).toBe('complete');
-    expect(gate.attempts?.map((attempt) => attempt.status)).toEqual(['complete', 'failed', 'complete']);
+    expect(gate.attempts?.map((attempt) => attempt.status)).toEqual(['complete', 'complete', 'complete']);
+    expect(gate.attempts?.[1].continuation).toMatchObject({ reason: 'stage_budget', forced: true });
+    expect(final.currentIteration).toBe(2);
     expect(gate.attempts?.map((attempt) => attempt.duration_ms)).toEqual([100, 200, 300]);
     expect(gate).toMatchObject({ duration_ms: 600, tokens_out: 6, reruns: 2 });
   });

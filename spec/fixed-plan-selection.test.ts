@@ -17,12 +17,27 @@ describe('automatic choice of the workflow', () => {
   it('runs a research block on the research loop', () => {
     expect(select(`---\nresearch:\n  baseline: 0.5\n  policy: greedy_stack\n  higher_is_better: true\n  result_file: r/result.json\n  stop:\n    max_rounds: 2\n---\n${body}`)).toBe('research');
   });
-  it('uses one planner default when the author leaves the choice out', () => {
-    expect(select(`# TASK\n\nNo frontmatter at all.\n`)).toBe('default');
-    expect(select(`---\noutputs: [docs/report.md]\n---\n${body}`)).toBe('default');
-    expect(select(`---\ninputs:\n  - docs/notes.md\noutputs:\n  - docs/report.md\n---\n${body}`)).toBe('default');
-    expect(select(`---\noutputs:\n  - docs/a.md\n  - docs/b.md\n---\n${body}`)).toBe('default');
+  it('uses the fixed plan by default independently of input and output count', () => {
+    expect(select(`# TASK\n\nNo frontmatter at all.\n`)).toBe('direct');
+    expect(select(`---\noutputs: [docs/report.md]\n---\n${body}`)).toBe('direct');
+    expect(select(`---\ninputs:\n  - docs/notes.md\noutputs:\n  - docs/report.md\n---\n${body}`)).toBe('direct');
+    expect(select(`---\noutputs:\n  - docs/a.md\n  - docs/b.md\n---\n${body}`)).toBe('direct');
+    // Invalid frontmatter still reaches the existing refusal, not a fixed-plan admission.
     expect(select(`---\noutputs: [docs/report.md\n---\n${body}`)).toBe('default');
+    expect(inspectBrief(`---\noutputs: [docs/report.md]\n---\n${body}`).findings).toContainEqual(expect.objectContaining({
+      message: expect.stringContaining('Workflow without --workflow: direct'),
+    }));
+  });
+
+  it('keeps program planning and explicit CLI choices ahead of the default', () => {
+    const program = parseBriefFrontmatter(`---\nprogram:\n  name: study\n  phase: first\n---\n${body}`);
+    expect(autoSelectedWorkflow(program).workflow).toBe('default');
+    expect(autoSelectedWorkflow(program, 'direct').error).toContain('direct cannot run the program loop');
+    expect(autoSelectedWorkflow(parseBriefFrontmatter(body), 'default').workflow).toBe('default');
+    expect(autoSelectedWorkflow(parseBriefFrontmatter('---\nworkflow: direct\n---\n'), 'custom').workflow).toBe('custom');
+    const research = parseBriefFrontmatter('---\nresearch:\n  baseline: 0.5\n---\n');
+    expect(autoSelectedWorkflow(research, 'default').workflow).toBe('default');
+    expect(autoSelectedWorkflow(research, 'direct').error).toContain('direct cannot run the research loop');
   });
 
   it('refuses direct loops with the structural reason and rejects unknown choices', () => {

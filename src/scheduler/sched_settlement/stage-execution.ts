@@ -1,3 +1,4 @@
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 import { isRetryableAdapterFailure } from '../../adapters/failure.js';
 import { appendGateEvidenceInstruction } from './gate-archives.js';
 // Boundary: Technical attempt budgets and one repair/re-evaluation stage execution; uses existing worker and typed prompt/session/validation boundaries.
@@ -6,8 +7,7 @@ import { loadAdapterByName } from '../../adapters/loader.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, nextTechnicalRetryBudget, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
 import { isSessionReuseEnabled } from '../../config.js';
 import { LiveConstraintGuardFactory } from '../../live-constraint-guard.js';
-import { recordRunEvent } from '../../run-events.js';
-import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, writeRunState, writeStageStatus } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StageAttemptSettlementError, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { appendTraceEvent } from '../../trace.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
 import { stageRecordSchema } from '../../handoff.js';
@@ -25,7 +25,6 @@ import { parse as parseYaml } from 'yaml';
 import { appendUnresolvedStageObligationContext } from './completion.js';
 import { gateArchiveArtifactPath, buildGateFixCorrectionContract, gateArchiveCoordinate } from './gate-archives.js';
 import { isGateReviewed, isResearchOutcomeGate } from './gate-recovery.js';
-import { recordGateValidationDelta, bindReviewedGateValidation } from './gate-validation.js';
 
 export function stageInitialTimeout(): number {
   return loadDefaults().timeout_ms;
@@ -185,13 +184,13 @@ export async function executeSingleStage(
       role: agent,
       attribution: { role: stage.role, iteration: state.currentIteration ?? 1 },
       dependsOn: stage.depends_on ?? [],
-      promptTemplate: (workflow.name === 'direct' ? (prompt: string) => prompt : appendAttemptDeadlineContract)(retryPreamble
+      promptTemplate: appendAttemptDeadlineContract(retryPreamble
         ? `${retryPreamble}\n\n${resolvedPrompt}`
         : resolvedPrompt, prepared.budgetMs),
       artifactObligationTemplate: stage.prompt_template,
       artifactContract: stage.artifact_contract,
       outputSchema: stageRecordSchema({ isGate: stage.is_gate,
-        criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(workflow.name !== 'direct' && (stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.campaignStorageKey) || state.research || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
+        criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
       planRevision: state.queryState?.planRevision,
       artifactStatuses: state.stages,
       timeout_ms: prepared.budgetMs,
@@ -219,6 +218,10 @@ export async function executeSingleStage(
       settlementBoundary,
     });
 
+    if (result.exitCode === 125 && /^ENGINE_STATE_(?:TAMPERED|REFUSED):/.test(result.friendlyError ?? '')) {
+      throw new StageAttemptSettlementError(stage.id, readStageStatus(projectDir, runId, stage.id).attempts!.at(-1)!.index, new Error(result.friendlyError));
+    }
+
     const retryableTechnicalFailure = recordSchedulerTechnicalAttemptResult(
       technicalRetry,
       result,
@@ -243,17 +246,13 @@ export async function executeSingleStage(
         state.failureReason = detail;
         state.completedAt = new Date().toISOString();
         markLeftoverStagesSkipped(state, detail);
-        writeRunState(projectDir, runId, state);
-        recordRunEvent(projectDir, runId, {
-          type: 'run_completed',
-          runId,
-          timestamp: state.completedAt,
+        publishRunCompletion(state, projectDir, runId, () => ({
           iteration: state.currentIteration ?? 1,
           stageId: stage.id,
           detail,
           source: 'scheduler',
           level: 'warning',
-        });
+        }));
         return;
       }
       transitionTechnicalRetryBudget(technicalRetry, { type: 'retry_exhausted' });
@@ -275,9 +274,6 @@ export async function executeSingleStage(
   // Record the outcome event using the authoritative per-stage file.
   try {
     const stageStatus = readStageStatus(projectDir, runId, stage.id);
-    if (stage.is_gate && (stageStatus.status === STAGE_STATUS.COMPLETE || stageStatus.status === STAGE_STATUS.FAILED)) {
-      if (!bindReviewedGateValidation(projectDir, runId, stage.id)) await recordGateValidationDelta(projectDir, runId, stage.id);
-    }
     // Batch reconciliation owns stage_complete/stage_failed emission because a
     // just-accepted scope request or approval may convert this settlement into
     // a suspension before downstream dependencies are released.
@@ -306,12 +302,6 @@ export function appendStageExecutionContracts(
   state: Pick<StoreState, 'research' | 'terminalStates' | 'workflowName'>,
   projectDir: string, runId: string, runDirPath: string,
 ): string {
-  if (state.workflowName === 'direct') {
-    return appendApprovalRequestContract(
-      `${resolvedPrompt}\n\nProject write scope: ${JSON.stringify(stage.scope ?? [])}. Private scratch: $TMPDIR.`,
-      runDirPath, stage.id,
-    );
-  }
   resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id);
   resolvedPrompt = appendScopeRevisionContract(resolvedPrompt, runDirPath, runId, stage);
   resolvedPrompt = appendResearchPathContract(resolvedPrompt, state.research, state.terminalStates);
@@ -321,7 +311,8 @@ export function appendStageExecutionContracts(
     resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));
   }
 
-  resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, allStages, readRunState(projectDir, runId), runDirPath);
+  const current = readRunState(projectDir, runId);
+  resolvedPrompt = appendGateConstraintAuditContext(resolvedPrompt, stage, allStages, current, runDirPath);
 
   return resolvedPrompt;
 }

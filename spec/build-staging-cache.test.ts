@@ -26,7 +26,7 @@ function createBuildFixture(): { projectDir: string; stagingRoot: string } {
   const projectDir = join(fixtureRoot, 'project');
   for (const directory of ['scripts', 'src']) mkdirSync(join(projectDir, directory), { recursive: true });
   // A small backend preserves real compiler and publication cache transitions.
-  for (const file of ['build-manifest.ts', 'engine-fs.ts', 'engine-owned-carriers.ts', 'daemon-identity.ts', 'process-liveness.ts']) {
+  for (const file of ['build-manifest.ts', 'engine-fs.ts', 'engine-owned-carriers.ts', 'rollback-content-store.ts', 'daemon-identity.ts', 'process-liveness.ts']) {
     copyFileSync(join(repositoryRoot, 'src', file), join(projectDir, 'src', file));
   }
   writeFileSync(join(projectDir, 'src', 'cli.ts'), 'export const cli = true;\n');

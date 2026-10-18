@@ -1,3 +1,4 @@
+import { hashRollbackFileSync } from './rollback-content-store.js';
 import { createHash } from 'node:crypto';
 import { copyFileSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from './engine-fs.js';
 import { lstatSync, readFileSync, readlinkSync, readdirSync, statSync } from 'node:fs';
@@ -88,11 +89,16 @@ function archiveOne(projectDir: string, archiveBase: string, declaration: BriefO
       return;
     }
     const symlink = type === 'symlink';
-    const bytes = symlink ? readlinkSync(sourcePath, { encoding: 'buffer' }) : readFileSync(sourcePath);
     mkdirSync(dirname(destinationPath), { recursive: true });
-    if (symlink) symlinkSync(bytes, destinationPath);
-    else copyFileSync(sourcePath, destinationPath);
-    members.push(memberRecord(memberPath, bytes, symlink));
+    if (symlink) {
+      const bytes = readlinkSync(sourcePath, { encoding: 'buffer' });
+      symlinkSync(bytes, destinationPath);
+      members.push(memberRecord(memberPath, bytes, true));
+    } else {
+      copyFileSync(sourcePath, destinationPath);
+      const identity = hashRollbackFileSync(destinationPath);
+      members.push({ path: memberPath, bytes: identity.byteLength, sha256: identity.sha256 });
+    }
   });
   members.sort((left, right) => left.path.localeCompare(right.path));
   return { path, expectedType: declaration.expectedType, archiveRoot, members, digest: digestMembers(members) };
@@ -132,7 +138,7 @@ export function archiveDeclaredOutputs(
 }
 
 interface ArchiveReadFileSystem {
-  readBytes?(path: string): Uint8Array;
+  hashFile?(path: string): { sha256: string; byteLength: number };
 }
 
 /** True only while both the worktree bytes and archived bytes still match the
@@ -143,7 +149,7 @@ export function isPathSafelyArchived(
   rawPath: string,
   fs: ArchiveReadFileSystem,
 ): boolean {
-  if (!fs.readBytes) return false;
+  if (!fs.hashFile) return false;
   let manifest: DeclaredOutputArchiveManifest;
   try { manifest = JSON.parse(readFileSync(join(runDir, DECLARED_OUTPUT_MANIFEST), 'utf-8')) as DeclaredOutputArchiveManifest; }
   catch { return false; }
@@ -165,12 +171,15 @@ export function isPathSafelyArchived(
     try {
       const symlink = member.type === 'symlink';
       if (lstatSync(projectPath).isSymbolicLink() !== symlink || lstatSync(archivedPath).isSymbolicLink() !== symlink) return false;
-      const current = symlink ? readlinkSync(projectPath, { encoding: 'buffer' }) : Buffer.from(fs.readBytes(projectPath));
-      const archived = symlink ? readlinkSync(archivedPath, { encoding: 'buffer' }) : Buffer.from(fs.readBytes(archivedPath));
-      const currentHash = createHash('sha256').update(current).digest('hex');
-      const archivedHash = createHash('sha256').update(archived).digest('hex');
+      const identity = (path: string) => symlink
+        ? (() => {
+            const bytes = readlinkSync(path, { encoding: 'buffer' });
+            return { byteLength: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') };
+          })()
+        : fs.hashFile!(path);
+      const current = identity(projectPath), archived = identity(archivedPath);
       return current.byteLength === member.bytes && archived.byteLength === member.bytes
-        && currentHash === member.sha256 && archivedHash === member.sha256;
+        && current.sha256 === member.sha256 && archived.sha256 === member.sha256;
     } catch { return false; }
   }
   return false;

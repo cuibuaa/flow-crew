@@ -80,7 +80,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-p11-entry-'));
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'fc-eg-'));
   projectDir = join(fixtureRoot, 'project');
   setFcGlobalDir(join(fixtureRoot, 'fc'));
   mkdirSync(join(projectDir, 'config', 'workflows'), { recursive: true });
@@ -726,7 +726,7 @@ interface CliFixture {
 }
 
 function cliFixture(): CliFixture {
-  const root = join(fixtureRoot, `cli-${Math.random().toString(16).slice(2)}`);
+  const root = mkdtempSync(join(fixtureRoot, 'c-'));
   const home = join(root, 'home');
   const fcHome = join(root, 'fc');
   const project = join(root, 'project');

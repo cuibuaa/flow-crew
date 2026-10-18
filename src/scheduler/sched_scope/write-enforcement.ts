@@ -10,7 +10,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { restoreProjectPath } from './restore.js';
 import { type RepairFileImage, compareRepairFileContents } from './file-images.js';
 import { type RepairRoundSnapshot, changedProjectPathsSinceSnapshotCooperatively } from './snapshots.js';
-import { baselineImage, readRollbackCurrentImage, settleRollbackBaselinePath, readRollbackCurrentImageCooperatively, trackedGitlinkAncestor } from './rollback-baseline.js';
+import { baselineImage, readRollbackCurrentImage, settleRollbackBaselinePath, resettleRollbackBaselinePath, readRollbackCurrentImageCooperatively, trackedGitlinkAncestor } from './rollback-baseline.js';
 import { scopeContainsPath, firstDeclaredInputScopeConflict, listProjectFiles, listProjectFilesAt, type DeclaredInputWriteBinding } from './path-capabilities.js';
 import { type ScopeBatchContext } from './scope-batch.js';
 
@@ -33,7 +33,7 @@ interface ScopeWriteEnforcement {
 export function enforceStageScopeWrites(input: {
   projectDir: string;
   snapshot: RepairRoundSnapshot;
-  preimages?: ReadonlyMap<string, RepairFileImage>;
+  preimages?: Map<string, RepairFileImage>;
   effectiveScope: string[] | null;
   declaredInputs?: readonly DeclaredInputWriteBinding[];
   exemptPatterns?: readonly string[];
@@ -53,6 +53,12 @@ export function enforceStageScopeWrites(input: {
   const rollbackFailureReasons: Record<string, string> = {};
   const durableWrites: string[] = [];
   const ignored = ignoredGeneratedPaths(input.projectDir, rawWrites);
+  const settle = (path: string, before: RepairFileImage): void => {
+    // Audit can provisionally settle a peer's path before its structured
+    // writer closes, just as live observation can. Keep the same first image.
+    input.preimages?.set(path, input.preimages.get(path) ?? before);
+    settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, path);
+  };
   for (const rawPath of rawWrites) {
     const normalized = normalizedProjectPath(rawPath);
     const definitelyAttributed = input.definiteWrites.has(normalized ?? rawPath);
@@ -89,9 +95,9 @@ export function enforceStageScopeWrites(input: {
       && current.mode !== undefined
       && before.mode !== current.mode;
     const changed = contentChanged || attributedModeChange || attributedUncomparableWrite;
-    const generated = !readOnly && (ignored.has(normalized) || isLiveConstraintExemptPath(
+    const generated = (!readOnly && ignored.has(normalized)) || isLiveConstraintExemptPath(
       normalized, input.exemptPatterns ?? [], input.snapshot.rollbackBaseline.trackedPaths,
-    ));
+    );
     if (generated) {
       exemptedWrites.push(normalized);
       continue;
@@ -99,7 +105,9 @@ export function enforceStageScopeWrites(input: {
     if (ungoverned && !readOnly) {
       if (changed) {
         durableWrites.push(normalized);
-        settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+        settle(normalized, before);
+      } else {
+        resettleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized, current);
       }
       continue;
     }
@@ -107,7 +115,9 @@ export function enforceStageScopeWrites(input: {
       if (changed) {
         appliedWrites.push(normalized);
         durableWrites.push(normalized);
-        settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+        settle(normalized, before);
+      } else {
+        resettleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized, current);
       }
       continue;
     }
@@ -120,7 +130,7 @@ export function enforceStageScopeWrites(input: {
     const restoration = restoreProjectPath(input.projectDir, normalized, before);
     if (restoration.restored) {
       rolledBackWrites.push(normalized);
-      settleRollbackBaselinePath(input.snapshot.rollbackBaseline, input.projectDir, normalized);
+      settle(normalized, before);
     } else {
       rollbackFailures.push(normalized);
       rollbackFailureReasons[normalized] = restoration.failure ?? `could not restore ${normalized}`;
@@ -229,6 +239,7 @@ export function createLiveGuardFactory() {
             candidates.add(path);
           };
           for (const path of definiteWrites) addCandidate(path);
+          for (const path of input.context.inputContentPaths()) addCandidate(path);
           const fullReconciliation = trigger === 'fallback' || trigger === 'phase_boundary';
           if (fullReconciliation) {
             for (const path of listProjectFiles(input.projectDir, {
@@ -267,8 +278,9 @@ export function createLiveGuardFactory() {
           const ignored = ignoredGeneratedPaths(input.projectDir, [...candidates]);
           const nominated = new Set([...candidatePaths, ...definiteWrites]);
           for (const path of [...candidates].sort()) {
-            if (!firstDeclaredInputScopeConflict([path], input.context.declaredInputs, input.projectDir)
-                && (ignored.has(path) || isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths))) {
+            if (isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths)
+                || (!firstDeclaredInputScopeConflict([path], input.context.declaredInputs, input.projectDir)
+                  && ignored.has(path))) {
               exemptedPaths.add(path);
               if (nominated.has(path)) validationGeneratedPaths.add(path);
               continue;
@@ -284,7 +296,13 @@ export function createLiveGuardFactory() {
             );
             const comparison = compareRepairFileContents(before, current);
             const definitelyAttributed = definiteWrites.has(path);
-            if (comparison === 'equal') continue;
+            if (comparison === 'equal') {
+              // An admitted writer may have put this batch's preimage back after
+              // an earlier settle; the shared run baseline follows its current bytes.
+              resettleRollbackBaselinePath(baseline, input.projectDir, path, current,
+                () => scopeContainsPath(attemptContext.effectiveScope, path, input.projectDir, input.context.declaredInputs));
+              continue;
+            }
             if (comparison === 'unavailable' && !definitelyAttributed) {
               const entryKind = before.indexEntryKind ?? current.indexEntryKind;
               if (entryKind === 'gitlink' || entryKind === 'sparse_tree' || entryKind === 'unmerged' || entryKind === 'unknown') {

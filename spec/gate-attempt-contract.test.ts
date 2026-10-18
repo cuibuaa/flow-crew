@@ -332,6 +332,18 @@ describe('gate verdict and score contracts', () => {
 });
 
 describe('verdict authority and binding score consistency', () => {
+  it.each(['malformed', 'unreadable'])('reads a rejected authored verdict with %s run state', (kind) => {
+    const verdict = { pass: false, reason: 'The authored rejection remains readable.' };
+    writeGateVerdict(verdict);
+    const statePath = join(runDir(projectDir, UNIT_RUN_ID), 'run.json');
+    if (kind === 'malformed') writeFileSync(statePath, '{');
+    else mkdirSync(statePath);
+
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual(verdict);
+    rmSync(join(runDir(projectDir, UNIT_RUN_ID), `verdict_${GATE_ID}.json`));
+    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toBeNull();
+  });
+
   it('accepts a qualitative verdict when no metric file exists', () => {
     writeGateVerdict({ pass: true, reason: 'qualitative evidence is sufficient' });
 

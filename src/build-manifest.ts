@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { hashRollbackFileSync, updateFileHashSync } from './rollback-content-store.js';
 import { chmodSync, closeSync, copyFileSync, mkdirSync, openSync, renameSync, rmSync, unlinkSync, writeFileSync } from './engine-fs.js';
 import { existsSync, fsyncSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -69,12 +70,8 @@ function collectRegularFiles(root: string, accept: (path: string) => boolean): s
 }
 
 function hashFile(path: string, root: string): BuildFileRecord {
-  const bytes = readFileSync(path);
-  return {
-    path: portableRelative(root, path),
-    bytes: bytes.byteLength,
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-  };
+  const { byteLength, sha256 } = hashRollbackFileSync(path);
+  return { path: portableRelative(root, path), bytes: byteLength, sha256 };
 }
 
 function digestRecords(records: BuildFileRecord[]): string {
@@ -421,9 +418,11 @@ function legacyGeneration(distDir: string, touchedPaths: string[]): string {
   for (const path of touchedPaths.sort((left, right) => left.localeCompare(right))) {
     const absolute = join(distDir, path);
     if (!existsSync(absolute)) continue;
-    const bytes = readFileSync(absolute);
-    hash.update(`${path}:${bytes.byteLength}:`);
-    hash.update(bytes);
+    const size = statSync(absolute).size;
+    hash.update(`${path}:${size}:`);
+    if (updateFileHashSync(absolute, hash).byteLength !== size) {
+      throw new Error(`${absolute} changed while its build identity was hashed`);
+    }
   }
   return `legacy-${hash.digest('hex')}`;
 }
@@ -489,8 +488,8 @@ export function publishBuildGeneration(options: PublishBuildOptions): BuildManif
   ];
   const changedOutputs = files.filter(({ target, record }) => {
     if (!existsSync(target)) return true;
-    const bytes = readFileSync(target);
-    return bytes.byteLength !== record.bytes || createHash('sha256').update(bytes).digest('hex') !== record.sha256;
+    const content = hashRollbackFileSync(target);
+    return content.byteLength !== record.bytes || content.sha256 !== record.sha256;
   });
   const touched = [...changedOutputs.map(({ key, target }) => ({ key, target })), ...removedOutputs,
     { key: BUILD_MANIFEST_FILENAME, target: manifestPath }];

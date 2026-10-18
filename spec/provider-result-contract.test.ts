@@ -192,7 +192,7 @@ describe('provider-owned refusal contract', () => {
     expect(status.attempts?.[1].providerFailure).toBeUndefined();
   });
 
-  it('keeps transport retries and clears stale provider cause on a timeout', async () => {
+  it('keeps transport retries and clears stale provider cause on forced budget continuation', async () => {
     let calls = 0;
     await stage({ run: async () => ++calls === 1
       ? { output: 'capacity', exitCode: 1, duration_ms: 1, adapterError: true, adapterFailureKind: 'capacity' }
@@ -200,7 +200,9 @@ describe('provider-owned refusal contract', () => {
     expect(calls).toBe(2);
     await stage({ run: async () => ({ output: message, exitCode: 124, processExitCode: 1, duration_ms: 1, timedOut: true, providerFailure: failure }) }, 1);
     const status = readStageStatus(projectDir, runId, 'work');
-    expect(status.error).toMatch(/^timed out after/);
+    expect(status.error).toBeUndefined();
+    expect(status.continuation).toMatchObject({ forced: true });
+    expect(status.status).toBe('complete');
     expect(status.providerFailure).toBeUndefined();
     expect(status.processExitCode).toBe(1);
   });

@@ -13,7 +13,7 @@ import { runStage } from '../src/worker.js';
 
 const UUID = '11111111-1111-4111-8111-111111111111';
 const freshUUID = '22222222-2222-4222-8222-222222222222';
-const keys = ['PATH', 'CODEX_HOME', 'CODEX_PLUGINS_CACHE', 'CODEX_SKILLS_CACHE', 'FC_INPUT_MODE'] as const;
+const keys = ['PATH', 'CODEX_HOME', 'CODEX_PLUGINS_CACHE', 'CODEX_SKILLS_CACHE', 'CLAUDE_CONFIG_DIR', 'FC_INPUT_MODE'] as const;
 let root: string, project: string, directory: string, runId: string, previousStore: string;
 let previousEnvironment: Record<string, string | undefined>;
 const role: AgentConfig = { name: 'coder', description: 'fixture', model: 'destination-model', reasoning_effort: 'high', tools: [], prompt: 'Exact system\r\n界🧪' };
@@ -25,6 +25,7 @@ beforeEach(() => {
   const bin = join(root, 'bin');
   for (const path of [project, bin, join(root, 'source'), join(root, 'plugins'), join(root, 'skills')]) mkdirSync(path);
   process.env.CODEX_HOME = join(root, 'source');
+  process.env.CLAUDE_CONFIG_DIR = join(root, 'source');
   process.env.CODEX_PLUGINS_CACHE = join(root, 'plugins');
   process.env.CODEX_SKILLS_CACHE = join(root, 'skills');
   process.env.PATH = `${bin}:${process.env.PATH ?? ''}`;
@@ -155,6 +156,20 @@ describe('one recoverable record per native invocation', () => {
     expect(record.boundary).toBe('model');
     expect(transport.stdin).toBe(record.userPrompt);
     expect(transport.appendedSystemPrompt).toBe(record.systemPrompt);
+  });
+
+  it('persists inherited Claude selections and their sources with the invocation', async () => {
+    writeFileSync(join(root, 'source', 'settings.json'), JSON.stringify({ model: 'opus', effortLevel: 'xhigh' }));
+    const result = await runStage(new ClaudeAdapter(), { ...options(), role: { ...role, model: 'default', reasoning_effort: 'default' } });
+    expect(result.exitCode, result.output).toBe(0);
+    const input = view().prompts.invocations[0];
+    expect(input.integrity).toBe('verified');
+    expect(input.record!.model).toBe('opus');
+    const transport = JSON.parse(input.record!.transport!.payload!);
+    expect(transport.model).toEqual({ value: 'opus', source: 'user-settings' });
+    expect(transport.effort).toEqual({ value: 'xhigh', source: 'user-settings' });
+    expect(transport.argv[transport.argv.indexOf('--model') + 1]).toBe('opus');
+    expect(transport.argv[transport.argv.indexOf('--effort') + 1]).toBe('xhigh');
   });
 });
 

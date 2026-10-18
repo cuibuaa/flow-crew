@@ -2,10 +2,11 @@
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState } from '../../attempt-deadline.js';
 import { StageConfig, WorkflowConfig } from '../sched_admission/configuration.js';
-import { RUN_STATUS, StoreState, isAwaitingApprovalRunStatus, isPausedRunStatus, isTerminalRunStatus, readRunState } from '../../store.js';
+import { RUN_STATUS, StoreState, isContinuingStage, isAwaitingApprovalRunStatus, isPausedRunStatus, isTerminalRunStatus, readRunState } from '../../store.js';
 import { admitPlannerDispatches } from './planner-dispatch.js';
 import { consumePlanRevisions } from './services.js';
 import { executeReadyBatch } from './stage-batch.js';
+import { parkAtDeploymentBoundary } from '../../deployment-hold.js';
 
 export async function executeIteration(
   sorted: StageConfig[],
@@ -26,6 +27,8 @@ export async function executeIteration(
 ): Promise<StoreState> {
   const technicalRetries = new Map<string, TechnicalRetryBudgetState>();
   while (true) {
+    const held = parkAtDeploymentBoundary(projectDir, runId);
+    if (held) return held;
     let state = readRunState(projectDir, runId);
     if (state.status === RUN_STATUS.RUNNING) state = consumePlanRevisions(sorted, state, projectDir, runId, runDirPath, workflow, roleRegistry);
 
@@ -39,6 +42,10 @@ export async function executeIteration(
     if (isPausedRunStatus(state.status) || isAwaitingApprovalRunStatus(state.status)) {
       return state;
     }
+
+    // A completed slice cannot release dependencies or spend another slice in
+    // this iteration. The outer loop owns the finite continuation budget.
+    if (Object.values(state.stages).some(isContinuingStage)) return state;
 
     const admitted = admitPlannerDispatches(sorted, state, projectDir, runId, runDirPath, roleRegistry, injectedDispatchStages, planStageRetries, taskDescription);
     if (admitted.kind === 'settled') return admitted.state;

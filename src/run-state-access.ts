@@ -48,7 +48,7 @@ export function runStateContext(projectDir: string, runId: string, revision?: { 
     + (outputs.length ? `\n\n# Required declared outputs (current engine facts)\n${JSON.stringify(outputs)}\n`
       + 'These products must remain available with the declared type. Guidance cannot remove these obligations. '
       + 'Report conflicts with other brief constraints instead of deleting a required product. '
-      + 'A gate must check its required products before PASS; unavailable products need repair, except products assigned to later ordinary work.' : '');
+      + 'The engine refuses gate PASS while one is unavailable, except products assigned to later ordinary work; unavailable products need repair.' : '');
 }
 
 export function cmdState(args: string[], output: Pick<NodeJS.WriteStream, 'write'> = process.stdout, errors: Pick<NodeJS.WriteStream, 'write'> = process.stderr): number {

@@ -1,0 +1,107 @@
+# Scrubbed planner-authored research workflow: a round gate and a conditional
+# terminal branch, each with its own repair edge. Stage names are planner choices.
+name: research
+description: Settle independently reviewed measurements and select the next round.
+defaults:
+  max_iterations: 5
+  max_retries: 0
+stages:
+  - id: plan
+    role: planner
+    depends_on: []
+    dynamic_dispatch: true
+    artifact_contract:
+      version: 1
+      produces: [{id: dispatch, root: run, path: dispatch.yaml, kind: file, nonempty: true}]
+      reads: []
+  - id: baseline_round
+    role: coder
+    depends_on: []
+    scope:
+      - artifacts/research/rounds/round_01/**
+      - artifacts/research/stage_01_verdict.md
+      - artifacts/research/round_result.json
+      - artifacts/research/round_result.json.no_candidate.json
+    prompt_template: Measure this round and write its result and evidence.
+    artifact_contract:
+      version: 1
+      produces:
+        - {id: build, root: run, path: stages/baseline_round/build, kind: directory, nonempty: false}
+        - {id: round_evidence, root: project, path: artifacts/research/rounds/round_01, kind: directory, nonempty: true}
+        - {id: attempt_index, root: project, path: artifacts/research/stage_01_verdict.md, kind: file, nonempty: true}
+      reads: []
+  - id: baseline_review
+    role: qa
+    depends_on: [baseline_round]
+    scope: []
+    is_gate: true
+    prompt_template: Independently verify the measured round and its evidence.
+    artifact_contract:
+      version: 1
+      produces:
+        - {id: review, root: run, path: stages/baseline_review/review, kind: directory, nonempty: true}
+        - {id: verdict, root: run, path: verdict_baseline_review.json, kind: file, nonempty: false}
+      reads:
+        - id: round_evidence
+          root: project
+          path: artifacts/research/rounds/round_01
+          kind: directory
+          source: {kind: stage, stage: baseline_round, artifact: round_evidence}
+  - id: baseline_repair
+    role: coder
+    depends_on: [baseline_review]
+    retry_to: [baseline_review]
+    scope:
+      - artifacts/research/rounds/round_01/**
+      - artifacts/research/stage_01_verdict.md
+      - artifacts/research/round_result.json
+      - artifacts/research/round_result.json.no_candidate.json
+    prompt_template: Repair only rejected round evidence.
+    artifact_contract:
+      version: 1
+      produces: [{id: build, root: run, path: stages/baseline_repair/build, kind: directory, nonempty: false}]
+      reads: []
+  - id: ceiling_report
+    role: doc_writer
+    depends_on: [baseline_review]
+    scope: [artifacts/research/ceiling_report.md]
+    condition: research.terminalPath == "artifacts/research/ceiling_report.md"
+    prompt_template: Write the framework-selected ceiling report from settled evidence.
+    artifact_contract:
+      version: 1
+      produces: [{id: ceiling_report, root: project, path: artifacts/research/ceiling_report.md, kind: file, nonempty: true}]
+      reads:
+        - id: round_evidence
+          root: project
+          path: artifacts/research/rounds/round_01
+          kind: directory
+          source: {kind: stage, stage: baseline_round, artifact: round_evidence}
+  - id: ceiling_review
+    role: doc_reviewer
+    depends_on: [ceiling_report]
+    scope: []
+    is_gate: true
+    condition: research.terminalPath == "artifacts/research/ceiling_report.md"
+    prompt_template: Verify the ceiling report against the settled measurements.
+    artifact_contract:
+      version: 1
+      produces:
+        - {id: review, root: run, path: stages/ceiling_review/review, kind: directory, nonempty: true}
+        - {id: verdict, root: run, path: verdict_ceiling_review.json, kind: file, nonempty: false}
+      reads:
+        - id: ceiling_report
+          root: project
+          path: artifacts/research/ceiling_report.md
+          kind: file
+          source: {kind: stage, stage: ceiling_report, artifact: ceiling_report}
+  - id: ceiling_repair
+    role: doc_writer
+    depends_on: [ceiling_review]
+    retry_to: [ceiling_review]
+    scope: [artifacts/research/ceiling_report.md]
+    condition: research.terminalPath == "artifacts/research/ceiling_report.md"
+    prompt_template: Repair only rejected ceiling evidence.
+    artifact_contract:
+      version: 1
+      produces: []
+      reads: []

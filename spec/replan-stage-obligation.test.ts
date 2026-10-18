@@ -244,7 +244,7 @@ describe('engine-owned unresolved stage obligations', () => {
     expect(final.failureReason).toContain('phase5_ci_docs');
   });
 
-  it('keeps an authored terminal_states artifact as explicit terminal authority', async () => {
+  it('withholds an authored terminal_states outcome until carried obligations settle', async () => {
     const brief = [
       '---',
       'terminal_states:',
@@ -301,8 +301,9 @@ describe('engine-owned unresolved stage obligations', () => {
       true,
     );
 
-    expect(final.status).toBe('complete');
-    expect(final.terminalArtifact).toBe('docs/explicit-terminal.md');
+    expect(final.status).toBe('incomplete');
+    expect(final.terminalArtifact).toBeUndefined();
+    expect(final.failureReason).toContain('phase5_ci_docs');
     expect(adapterCalls).toBe(2);
     expect(final.unresolvedStageObligations?.map((entry) => entry.stageId)).toEqual(['phase5_ci_docs']);
   });

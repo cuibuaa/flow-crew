@@ -1,8 +1,10 @@
+import { publishRunCompletion } from './run-completion.js';
 /** Terminal selection, floor/owner/freshness/reality enforcement and quiescent conclusion; receives validation, campaign and escalation services. */
 import { type Adapter } from '../../adapters/base.js';
 import { type ProjectValidationDependencies } from '../../project-validation.js';
-import { type StoreState, type PostTerminateHook, RUN_STATUS, STAGE_STATUS, enforceRealityGateBeforeTerminal, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName } from '../../store.js';
+import { type StoreState, isContinuingStage, type PostTerminateHook, RUN_STATUS, STAGE_STATUS, enforceRealityGateBeforeTerminal, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName, isSuccessfulRunStatus } from '../../store.js';
 import { createHash } from 'node:crypto';
+import { hashRollbackFileSync, updateFileHashSync } from '../../rollback-content-store.js';
 import { renameSync, copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -13,9 +15,12 @@ import { evaluateResearchCeilingFloor } from '../../research-policy.js';
 import { log } from '../sched_admission/shared.js';
 import { recordRunEvent } from '../../run-events.js';
 import { runAllChecks } from '../../reality-gate/index.js';
+import { isStageInSkippedBranch, transitivelyDependsOn } from '../sched_admission/frontier.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
-import { lastAttributedStageWriteMs, admittedTerminalOwner, stageAttemptWroteProjectPath } from './terminal-ownership.js';
+import { lastAttributedStageWriteMs, admittedTerminalOwner, stageAttemptWroteProjectPath, terminalProductWrites } from './terminal-ownership.js';
 import { appendSchedulerGuidanceOnce, observeStableBlockage } from './guidance.js';
+import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
+import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { runPostTerminateHook } from './research.js';
 
 type GateValidationDeltaArtifact = NonNullable<Awaited<ReturnType<typeof import('../../scheduler.js').recordGateValidationDelta>>>;
@@ -98,6 +103,7 @@ function terminalDagHasNoRemainingTransition(
       stageState.status === STAGE_STATUS.COMPLETE
       || stageState.status === STAGE_STATUS.FAILED
       || stageState.status === STAGE_STATUS.SKIPPED
+      || isStageInSkippedBranch(stageId, byId, state)
     ) {
       return true;
     }
@@ -137,7 +143,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     }
 
     const validationStageId = `terminal_${input.ownerStageId.replace(/[^A-Za-z0-9_-]+/g, '_')}`;
-    const baselineSha256 = createHash('sha256').update(readFileSync(baselinePath)).digest('hex');
+    const baselineSha256 = hashRollbackFileSync(baselinePath).sha256;
     const laterDeltas: GateValidationDeltaArtifact[] = [];
     for (const file of readdirSync(input.runDirPath)) {
       if (!/^validation_delta_.+\.json$/.test(file)) continue;
@@ -225,6 +231,9 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     if (!state.terminalStates) {
       return { decision: 'not_matched', reasons: ['the brief declares no terminal states'] };
     }
+    if (Object.values(state.stages).some(isContinuingStage)) {
+      return { decision: 'deferred', reasons: ['retained stage budget work must continue before terminal settlement'] };
+    }
     const notMatchedReasons: string[] = [];
     const deferredReasons: string[] = [];
     const researchSelection = state.research
@@ -256,7 +265,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
         const evidence = createHash('sha256');
         for (const candidate of freshLogicalCandidates.sort((left, right) => left.path.localeCompare(right.path))) {
           evidence.update(`${candidate.terminalStatus}:${candidate.path}\n`, 'utf8');
-          try { evidence.update(readFileSync(candidate.sources[0])); } catch { evidence.update('<unreadable>', 'utf8'); }
+          try { updateFileHashSync(candidate.sources[0], evidence); } catch { evidence.update('<unreadable>', 'utf8'); }
         }
         const ownerIds = [...new Set(freshLogicalCandidates
           .map((candidate) => admittedTerminalOwner(ctx.runDirPath, candidate.path))
@@ -300,6 +309,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
       }
     }
     for (const [terminalStatus, entry] of Object.entries(state.terminalStates)) {
+      const accepting = isSuccessfulRunStatus(terminalStatus) || terminalStatus === RUN_STATUS.PHASE_COMPLETE;
       for (const path of entry.paths) {
         
         const projPath = join(ctx.projectDir, path);
@@ -341,9 +351,13 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           continue;
         }
         const sourcePath = source.path;
-        if (admittedOwner && !stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path)) {
+        const ownerWrote = admittedOwner && (
+          stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path)
+          || (!accepting && stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path, STAGE_STATUS.FAILED))
+        );
+        if (admittedOwner && !ownerWrote) {
           const marker = `[scheduler-hint:${terminalStatus}:${path}:owner]`;
-          const reason = `${path} is owned by terminal stage '${admittedOwner}', but that stage has no completed-attempt write attribution for the path`;
+          const reason = `${path} is owned by terminal stage '${admittedOwner}', but that stage has no eligible settled-attempt write attribution for the path`;
           appendSchedulerGuidanceOnce(
             ctx.runDirPath,
             admittedOwner,
@@ -430,6 +444,44 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           continue;
         }
         
+        // A terminal artifact selects the outcome; required settlement owns
+        // permission to finish, regardless of where the producer sits in the DAG.
+        const stages = state.planControl?.stages ?? (state.dispatchedStages as StageConfig[] | undefined) ?? [];
+        const obligations = reconcileUnresolvedStageObligations(
+          state, stages, state.currentIteration ?? ctx.iteration, ctx.runDirPath,
+        );
+        if (obligations.changed) writeRunState(ctx.projectDir, ctx.runId, state);
+        const unresolved = obligations.stageIds.filter((id) => accepting || state.stages[id]?.status !== STAGE_STATUS.FAILED);
+        const gates = collectGateRuntimeFacts(stages, state, ctx.projectDir, ctx.runId);
+        const unsettledGates = gates.evaluations.filter((gate) => (
+          gate.status !== STAGE_STATUS.COMPLETE && gate.status !== STAGE_STATUS.FAILED
+        ));
+        const failedWork = accepting ? Object.entries(state.stages)
+          .filter(([, stage]) => stage.status === STAGE_STATUS.FAILED).map(([id]) => id) : [];
+        // Settled research policy can conclude rejected rounds honestly. An
+        // ordinary report, including a blocker report, must pass its own review.
+        const rejectedGates = accepting || !researchSelection ? gates.failedGateIds : [];
+        if (unresolved.length > 0 || unsettledGates.length > 0 || failedWork.length > 0 || rejectedGates.length > 0) {
+          deferredReasons.push(`${terminalStatus}: required settlement is pending or rejected (${[...new Set([
+            ...unresolved, ...unsettledGates.map((gate) => gate.id), ...failedWork, ...rejectedGates,
+          ])].join(', ')})`);
+          continue;
+        }
+
+        // Authorized product changes still need an executed independent review.
+        // Settlement, not a prediction about optional DAG branches, proves it.
+        const productWrites = admittedOwner ? terminalProductWrites(ctx.runDirPath, state, admittedOwner) : [];
+        const byId = new Map(stages.map(stage => [stage.id, stage]));
+        const unreviewed = productWrites.filter(write => !gates.evaluations.some(gate => (
+          gate.status === STAGE_STATUS.COMPLETE && gate.effectiveVerdict?.pass === true
+          && transitivelyDependsOn(gate.id, admittedOwner!, byId)
+          && Date.parse(state.stages[gate.id]?.attempts?.at(-1)?.startedAt ?? state.stages[gate.id]?.startedAt ?? '') >= write.completedAt
+        )));
+        if (unreviewed.length > 0) {
+          deferredReasons.push(`${terminalStatus}: terminal producer ${admittedOwner} has unreviewed product writes (${[...new Set(unreviewed.map(write => write.path))].join(', ')})`);
+          continue;
+        }
+
         if (terminalStatus === RUN_STATUS.SHIPPED && state.research?.confirm) {
           let confirmReport: { pass: boolean; results: Array<{ details: string }> };
           try {
@@ -524,15 +576,10 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           }
           return { decision: 'matched', state: gate.state, reasons: [] };
         }
-        writeRunState(ctx.projectDir, ctx.runId, state);
-        writeCampaignEntry(ctx.projectDir, state);
-        recordRunEvent(ctx.projectDir, ctx.runId, {
-          type: 'run_completed',
-          runId: ctx.runId,
-          timestamp: state.completedAt,
+        publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
           iteration: ctx.iteration,
           detail: `Terminal state '${terminalStatus}' reached via ${path}`,
-        });
+        }), writeCampaignEntry);
         log.info({ runId: ctx.runId, iteration: ctx.iteration, terminalStatus, path }, 'Terminal-state file detected; ending iteration loop');
         // Auto-append ledger row only on phase_complete (other terminal states
         // are program-level, not phase-level).
@@ -602,15 +649,10 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     state.failureReason = conclusion;
     state.completedAt = new Date().toISOString();
     markLeftoverStagesSkipped(state, conclusion);
-    writeRunState(ctx.projectDir, ctx.runId, state);
-    writeCampaignEntry(ctx.projectDir, state);
-    recordRunEvent(ctx.projectDir, ctx.runId, {
-      type: 'run_completed',
-      runId: ctx.runId,
-      timestamp: state.completedAt,
+    publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
       iteration: ctx.iteration,
       detail: `terminal evaluation ${evaluation.decision}: ${conclusion}`,
-    });
+    }), writeCampaignEntry);
     log.warn({
       runId: ctx.runId,
       iteration: ctx.iteration,

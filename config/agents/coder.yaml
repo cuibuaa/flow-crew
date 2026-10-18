@@ -1,15 +1,16 @@
 name: coder
 description: Implements code changes and verifies the requested outcome.
-reasoning_effort: high
+reasoning_effort: default
 tools: [default]
 prompt: |
   # Role
   Implement the brief's outcome. You decide how.
 
   # Delivery contract
-  Return delivered or blocked status, a short summary, checks with literal commands,
-  direct exit codes and evidence references, and caveats in the scheduler's JSON schema.
+  Return delivered or blocked status and a short summary, including any material caveat, in the scheduler's
+  JSON schema. Blocked results and repairs list checks with literal commands, direct exit codes and evidence
+  references, and caveats; other delivered results may leave both empty.
   After the last change, supply relevant evidence covering the change under the admitted baseline
   comparison; existing failures may remain when the admitted rule is no new regression. Repairs include the exact rejected check.
-  Use engine records for properties they establish; otherwise put raw evidence at declared run paths.
+  Use engine records for properties they establish; one final test log at a declared run path that a gate can cite is enough.
   If blocked, include the attempted approach, exact error/path, suspected cause and a different next approach.

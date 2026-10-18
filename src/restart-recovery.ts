@@ -1,17 +1,17 @@
+export { readHostBootId, checkpointCommandFateKnown, checkpointConsumers } from './checkpoint-liveness.js';
 import { join, resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
 import { sha256Canonical as digest } from './runtime-negotiation.js';
 import { z } from 'zod';
 import { readBuildManifest } from './build-manifest.js';
+import { readHostBootId, checkpointCommandFateKnown, checkpointConsumers } from './checkpoint-liveness.js';
 import { inspectRunScheduler, processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './run-lock.js';
-import { processGroupIsAlive } from './process-liveness.js';
 
-import { RUN_STATUS, STAGE_STATUS, completedStageAttemptStatus, settledStageAttemptStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
+import { RUN_STATUS, STAGE_STATUS, interruptedStageStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
 import { planDigest } from './plan-revisions.js';
 import { canonicalRunId } from './cancellation-policy.js';
 import { runsRoot } from './store.js';
-import { StageConfigSchema } from './scheduler/sched_admission/configuration.js';
+import { RecordedStageConfigSchema } from './scheduler/sched_admission/configuration.js';
 import { artifactDeclarationErrors } from './artifact-declarations.js';
 
 export interface EngineCheckpoint {
@@ -73,50 +73,27 @@ function matchesStage(current: StageStatus | undefined, stage: RecoveryIntent['s
   return ([STAGE_STATUS.FAILED, STAGE_STATUS.PENDING] as readonly string[]).includes(current.status)
     && digest(attempt) === digest(closedAttempt(stage, previous));
 }
-export function readHostBootId(): string | undefined {
-  if (process.platform !== 'linux') return undefined;
-  try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined; } catch { return undefined; }
-}
 
-
-export function engineGeneration(): string | undefined {
-  return (readBuildManifest(import.meta.dirname) ?? readBuildManifest(join(import.meta.dirname, '..', 'dist')))?.generation;
-}
+// Capture at module load, as daemon identity does. A later disk replacement is
+// never evidence of which modules this process loaded.
+const loadedGeneration = (readBuildManifest(import.meta.dirname) ?? readBuildManifest(join(import.meta.dirname, '..', 'dist')))?.generation;
+export function engineGeneration(): string | undefined { return loadedGeneration; }
 export function captureEngineCheckpoint(projectDir: string, runId: string): EngineCheckpoint {
   runId = canonicalRunId(runsRoot(projectDir), runId);
   return { version: 2, runId, projectDir: resolve(projectDir), bootId: readHostBootId(), generation: engineGeneration(), pid: process.pid, processStart: processStartToken(process.pid), at: new Date().toISOString(), ...(process.platform !== 'win32' ? { processes: [] } : {}) };
 }
 
-/** Version 1 race parents omitted nested consumers. An empty historical list
- * cannot prove their death; a different known host boot can. */
-export function checkpointCommandFateKnown(state: Pick<StoreState, 'engineCheckpoint' | 'planControl'> | undefined,
-  options: { currentBootId?: string } = {}): boolean {
-  const boot = Object.hasOwn(options, 'currentBootId') ? options.currentBootId : readHostBootId();
-  const checkpoint = state?.engineCheckpoint;
-  if (checkpoint?.bootId && boot && checkpoint.bootId !== boot) return true;
-  return checkpoint?.version === 2 || !state?.planControl?.stages.some(stage => stage.race);
-}
-
-/** Query the existing ownership ledger. A proven current boot also retires
- * identity-bound command groups; callers wait for a later empty observation. */
-export function checkpointConsumers(checkpoint?: EngineCheckpoint, options: { currentBootId?: string; retire?: boolean } = {}): number[] {
-  const boot = Object.hasOwn(options, 'currentBootId') ? options.currentBootId : readHostBootId();
-  if (checkpoint?.bootId && boot && checkpoint.bootId !== boot) return [];
-  const active: number[] = [];
-  for (const group of checkpoint?.processes ?? []) {
-    if (!Number.isSafeInteger(group.pid) || group.pid <= 0) throw new Error('RECOVERY_FATE_UNKNOWN: invalid owned command group');
-    if (!processGroupIsAlive(group.pid)) continue;
-    const currentStart = processStartToken(group.pid);
-    if (group.processStart && currentStart && !processStartTokensMatch(group.processStart, currentStart)) continue;
-    active.push(group.pid);
-    // A missing/reused leader cannot authorize signalling surviving writers.
-    if (options.retire && boot && checkpoint!.bootId === boot && group.processStart
-        && processStartTokensMatch(group.processStart, currentStart)) {
-      try { process.kill(-group.pid, 'SIGKILL'); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
-    }
+/** Shared by interrupted recovery and every settled continuation entrance. */
+export function persistedPlanErrors(state: StoreState): string[] {
+  const errors: string[] = [];
+  if ((state.planControl?.version !== undefined && state.planControl.version !== 1)
+      || (state.queryState?.version !== undefined && state.queryState.version !== 1)) errors.push('RECOVERY_PLAN_INCOMPATIBLE: unsupported persisted plan/query format');
+  if (Boolean(state.planControl) !== Boolean(state.queryState?.planRevision) || (state.planControl && planDigest(state.planControl.stages) !== state.queryState?.planRevision?.digest)) errors.push('RECOVERY_PLAN_UNBOUND: admitted plan revision is unavailable or does not match the persisted plan');
+  for (const stage of state.planControl?.stages ?? []) {
+    const parsed = RecordedStageConfigSchema.safeParse(stage);
+    if (!parsed.success || artifactDeclarationErrors(stage.artifact_contract, stage.id).length) errors.push(`RECOVERY_PLAN_INCOMPATIBLE: ${stage.id} does not satisfy the current execution contract`);
   }
-  return active;
+  return errors;
 }
 
 /** The caller has already excluded a live scheduler/direct runner. PID absence alone is insufficient. */
@@ -156,11 +133,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       }
     }
   }
-  if (Boolean(state.planControl) !== Boolean(state.queryState?.planRevision) || (state.planControl && planDigest(state.planControl.stages) !== state.queryState?.planRevision?.digest)) errors.push('RECOVERY_PLAN_UNBOUND: admitted plan revision is unavailable or does not match the persisted plan');
-  for (const stage of state.planControl?.stages ?? []) {
-    const parsed = StageConfigSchema.safeParse(stage);
-    if (!parsed.success || artifactDeclarationErrors(stage.artifact_contract, stage.id).length) errors.push(`RECOVERY_PLAN_INCOMPATIBLE: ${stage.id} does not satisfy the current execution contract`);
-  }
+  errors.push(...persistedPlanErrors(state));
   let intent: RecoveryIntent | undefined;
   if (state.recoveryIntent) {
     const parsed = RecoveryIntentSchema.safeParse(state.recoveryIntent);
@@ -222,12 +195,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       evidence.assertSchedulerAbsent?.();
       assertIntentAuthority(current, authority);
       // A closed failed143 attempt is retained, never completed a second time.
-      return ledger.attempts!.at(-1)!.status === 'closed'
-        ? settledStageAttemptStatus(ledger, stage.attempt.index, false, { exitCode: 143, error: interruptionError(previous) })
-        : ledger.attempts!.at(-1)!.status === STAGE_STATUS.RUNNING
-        ? completedStageAttemptStatus(ledger, stage.retries, {
-          exitCode: 143, duration_ms: stage.durationMs, completedAt: stage.completedAt, error: interruptionError(previous),
-        }) : ledger;
+      return interruptedStageStatus(ledger, stage.completedAt, interruptionError(previous));
     });
     if (state.status !== RUN_STATUS.RUNNING) return state;
     state = updateStageStatusUnderRunLock(projectDir, runId, stage.stageId, (current, ledger) => {

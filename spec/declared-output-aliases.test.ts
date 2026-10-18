@@ -1,3 +1,4 @@
+import { hashRollbackFileSync } from '../src/rollback-content-store.js';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,7 @@ const declaration = (path: string, expectedType: 'file' | 'directory' = 'file'):
   path, expectedType, disposition: 'create', source: 'outputs', line: 2,
 });
 const inventory = (disposition?: string) => inspectBriefOutputs(`---\noutputs:\n  - path: report.md\n${disposition ? `    on_existing: ${disposition}\n` : ''}---\n`, project);
-const archiveFs = { readBytes: (path: string) => readFileSync(path) };
+const archiveFs = { hashFile: hashRollbackFileSync };
 
 it.each(['update', 'append', 'replace'])('admits an output alias with explicit %s authority', disposition => {
   symlinkSync('source.md', join(project, 'report.md'));

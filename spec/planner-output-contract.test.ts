@@ -16,7 +16,6 @@ describe('planner results contain consumed dispatch fields', () => {
   it.each([
     { id: '../escape' }, { id: 'bad/name' }, { id: `a${'b'.repeat(64)}` }, { role: '' },
     { scope: 'src/**' }, { depends_on: 'work' }, { depends_on: null }, { is_gate: 1 },
-    ...['yes', 2, null, [], { candidates: 2 }].map(race => ({ race })),
   ])('refuses malformed consumed stage fields through the shared runtime owner (%j)', invalid => {
     for (const parse of [StageConfigSchema.parse.bind(StageConfigSchema), parseDispatchedStageConfig]) {
       expect(() => parse({ id: 'work', role: 'coder', ...invalid })).toThrow(Object.keys(invalid)[0]);

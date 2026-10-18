@@ -1,12 +1,12 @@
+import { publishRunCompletion } from './run-completion.js';
 /** Deduplicated scheduler guidance and stable blockage escalation; terminal owner lookup is shared, campaign persistence is supplied. */
 import { appendGuidanceEnvelope, RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
 import { mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordBlockageOccurrence } from '../../blockage-ledger.js';
-import { RUN_STATUS, type StoreState, writeRunState } from '../../store.js';
+import { RUN_STATUS, type StoreState } from '../../store.js';
 import { markLeftoverStagesSkipped } from '../sched_admission/brief-contract.js';
-import { recordRunEvent } from '../../run-events.js';
 import { admittedTerminalOwner } from './terminal-ownership.js';
 
 export function appendSchedulerGuidanceOnce(
@@ -101,16 +101,11 @@ export function createBlockageConcluder(writeCampaignEntry: (projectDir: string,
         Object.keys(state.stages),
       );
     }
-    writeRunState(ctx.projectDir, ctx.runId, state);
-    writeCampaignEntry(ctx.projectDir, state);
-    recordRunEvent(ctx.projectDir, ctx.runId, {
-      type: 'run_completed',
-      runId: ctx.runId,
-      timestamp: state.completedAt,
+    publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
       iteration: ctx.iteration,
       ...(stageId ? { stageId } : {}),
       detail: reason,
-    });
+    }), writeCampaignEntry);
     return state;
   }
 

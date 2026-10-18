@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ClaudeAdapter } from '../src/adapters/claude.js';
+import { buildClaudeInvocation, ClaudeAdapter } from '../src/adapters/claude.js';
 import type { AgentConfig, RunOpts } from '../src/adapters/base.js';
 import { prepareAdapterHome } from '../src/adapter-home.js';
 import { readSession, stageSessionHome, writeSession } from '../src/adapter-session.js';
@@ -53,8 +53,8 @@ process.stdin.on('end', () => {
     ? {input_tokens:2,output_tokens:1,cache_read_input_tokens:3,cache_creation_input_tokens:4}
     : {input_tokens:5,output_tokens:6,cache_read_input_tokens:7,cache_creation_input_tokens:8},total_cost_usd:resumed ? 0.001 : 0.002,
     ...(fixture.sessionCumulative ? {modelUsage:{'claude-fixture-resolved':{inputTokens:23,outputTokens:45,cacheReadInputTokens:67,cacheCreationInputTokens:89}}} : {})} : {};
-  if (fixture.rejectPins) {
-    const parameter = argv.includes('--effort') ? 'effort' : argv.includes('--model') ? 'model' : undefined;
+  if (fixture.rejectPins || fixture.rejectEffort) {
+    const parameter = argv.includes('--effort') ? 'effort' : fixture.rejectPins && argv.includes('--model') ? 'model' : undefined;
     if (parameter) {
       emit({type:'system',subtype:'init',session_id:resumed ? argv[argv.indexOf('--resume') + 1] : '11111111-1111-4111-8111-111111111111'});
       emit({type:'result',is_error:true,error:{param:parameter,message:'synthetic rejected parameter'},...counters}); process.exit(1);
@@ -323,6 +323,215 @@ describe('G14: resolved model and exact invocation input', () => {
     expect(transport.argv).toEqual(calls()[0].argv);
     expect(transport.argv).not.toContain(prompt);
     expect(readFileSync(transport.argv[transport.argv.indexOf('--append-system-prompt-file') + 1], 'utf8')).toBe(role.prompt);
+  });
+});
+
+describe('Claude user settings inheritance', () => {
+  const settings = (value: unknown) => writeFileSync(join(root, 'ambient', 'settings.json'), JSON.stringify(value));
+  const flags = (agent: AgentConfig = role) => buildClaudeInvocation(agent, {}, 'system.md').args;
+
+  it('inherits alias model and effort with settings isolation intact', async () => {
+    settings({ model: 'opus', effortLevel: 'xhigh', hooks: { unused: 'must stay isolated' }, permissions: { defaultMode: 'bypassPermissions' } });
+    const inputs: Input[] = [];
+    const result = await new ClaudeAdapter().run(DUTIES, role, options({ onInvocationInput: input => inputs.push(input) }));
+    expect(result.exitCode).toBe(0);
+    const argv = calls()[0].argv;
+    expect(argv.slice(argv.indexOf('--model'), argv.indexOf('--model') + 2)).toEqual(['--model', 'opus']);
+    expect(argv.slice(argv.indexOf('--effort'), argv.indexOf('--effort') + 2)).toEqual(['--effort', 'xhigh']);
+    expect(argv[argv.indexOf('--setting-sources') + 1]).toBe('');
+    expect(argv).toContain('--strict-mcp-config');
+    const transport = JSON.parse(inputs[0].transport!.payload);
+    expect(transport).toMatchObject({
+      argv,
+      model: { value: 'opus', source: 'user-settings' },
+      effort: { value: 'xhigh', source: 'user-settings' },
+    });
+    expect(inputs[0].model).toBe('claude-fixture-resolved');
+    expect(inputs[0].transport!.payload).not.toContain('must stay isolated');
+    expect(inputs[0].transport!.payload).not.toContain('bypassPermissions');
+  });
+
+  it.each([
+    { model: 'haiku', reasoning_effort: 'low', expectedModel: 'haiku', expectedEffort: 'low' },
+    { model: 'haiku', reasoning_effort: 'default', expectedModel: 'haiku', expectedEffort: 'high' },
+    { model: 'default', reasoning_effort: 'low', expectedModel: 'opus', expectedEffort: 'low' },
+    { model: 'default', reasoning_effort: 'default', expectedModel: 'opus', expectedEffort: 'xhigh' },
+  ])('resolves model=$model and effort=$reasoning_effort independently', async ({ model, reasoning_effort, expectedModel, expectedEffort }) => {
+    settings({ model: 'opus', effortLevel: 'medium', modelSettings: { opus: { effortLevel: 'xhigh' }, haiku: { effortLevel: 'high' } } });
+    scenario({ model: null });
+    const inputs: Input[] = [];
+    await new ClaudeAdapter().run(DUTIES, { ...role, model, reasoning_effort }, options({ onInvocationInput: input => inputs.push(input) }));
+    const transport = JSON.parse(inputs[0].transport!.payload);
+    expect(transport.model).toEqual({ value: expectedModel, source: model === 'default' ? 'user-settings' : 'role' });
+    expect(transport.effort).toEqual({ value: expectedEffort, source: reasoning_effort === 'default' ? 'user-settings' : 'role' });
+    expect(transport.argv[transport.argv.indexOf('--model') + 1]).toBe(expectedModel);
+    expect(transport.argv[transport.argv.indexOf('--effort') + 1]).toBe(expectedEffort);
+    expect(inputs[0].model).toBe(expectedModel);
+  });
+
+  it('uses a canonical per-model effort ahead of top-level effort for the selected model', () => {
+    settings({ model: 'claude-fixture-model', effortLevel: 'medium', modelSettings: {
+      'claude-fixture-model': { effortLevel: 'xhigh' }, 'unrelated-model': { effortLevel: 'low' },
+    } });
+    expect(flags()).toContain('xhigh');
+    expect(flags({ ...role, model: 'unrelated-model' })).toContain('low');
+    expect(flags({ ...role, model: 'other-model' })).toContain('medium');
+  });
+
+  it('applies the machine-local default model below role pins and above settings.json, inheriting that model\'s effort', () => {
+    const home = join(root, 'local-home');
+    mkdirSync(join(home, '.config', 'flowcrew'), { recursive: true });
+    vi.stubEnv('HOME', home);
+    const local = (value: string) => writeFileSync(join(home, '.config', 'flowcrew', 'claude.json'), value);
+    const pick = (agent: AgentConfig, flag: string) => { const a = flags(agent); return a.includes(flag) ? a[a.indexOf(flag) + 1] : null; };
+    settings({ model: 'opus', effortLevel: 'medium', modelSettings: { 'claude-local-model': { effortLevel: 'xhigh' } } });
+    local(JSON.stringify({ model: 'claude-local-model' }));
+    expect(pick({ ...role, model: 'default', reasoning_effort: 'default' }, '--model')).toBe('claude-local-model');
+    expect(pick({ ...role, model: 'default', reasoning_effort: 'default' }, '--effort')).toBe('xhigh');
+    expect(pick({ ...role, model: 'default', reasoning_effort: 'low' }, '--effort')).toBe('low');
+    expect(pick({ ...role, model: 'haiku', reasoning_effort: 'default' }, '--model')).toBe('haiku');
+    settings({ model: 'opus', effortLevel: 'medium' });
+    expect(pick({ ...role, model: 'default', reasoning_effort: 'default' }, '--effort')).toBe('medium');
+    for (const bad of ['', '{', JSON.stringify({ model: 'default' }), JSON.stringify({ model: 7 })]) {
+      local(bad);
+      expect(pick({ ...role, model: 'default', reasoning_effort: 'default' }, '--model')).toBe('opus');
+    }
+    rmSync(join(home, '.config', 'flowcrew', 'claude.json'));
+    expect(pick({ ...role, model: 'default', reasoning_effort: 'default' }, '--model')).toBe('opus');
+  });
+
+  it('inherits per-model effort without a top-level effort', () => {
+    settings({ model: 'opus', modelSettings: { opus: { effortLevel: 'high' } } });
+    expect(flags()).toContain('high');
+  });
+
+  it.each([undefined, 'default'])('inherits absent or default role values (%s)', value => {
+    settings({ model: 'opus', effortLevel: 'high' });
+    const argv = flags({ ...role, model: value, reasoning_effort: value });
+    expect(argv[argv.indexOf('--model') + 1]).toBe('opus');
+    expect(argv[argv.indexOf('--effort') + 1]).toBe('high');
+  });
+
+  it.each(['missing-file', 'missing-keys', 'invalid-json', 'null', 'array', 'invalid-values', 'unreadable-file'])('falls back to CLI defaults for %s', async fixture => {
+    const path = join(root, 'ambient', 'settings.json');
+    if (fixture === 'missing-keys') settings({ modelSettings: { opus: { effortLevel: 'high' } } });
+    if (fixture === 'invalid-json') writeFileSync(path, '{');
+    if (fixture === 'null') settings(null);
+    if (fixture === 'array') settings([]);
+    if (fixture === 'invalid-values') settings({ model: 7, effortLevel: false, modelSettings: null });
+    if (fixture === 'unreadable-file') mkdirSync(path);
+    scenario({ model: null });
+    const inputs: Input[] = [];
+    const result = await new ClaudeAdapter().run(DUTIES, role, options({ onInvocationInput: input => inputs.push(input) }));
+    expect(result.exitCode).toBe(0);
+    const transport = JSON.parse(inputs[0].transport!.payload);
+    expect(transport.argv).not.toContain('--model');
+    expect(transport.argv).not.toContain('--effort');
+    expect(transport.model).toEqual({ value: null, source: 'cli-default' });
+    expect(transport.effort).toEqual({ value: null, source: 'cli-default' });
+    expect(inputs[0].model).toBe('provider-default-unresolved');
+  });
+
+  it.each([
+    { config: { model: 'opus' }, model: 'opus', effort: undefined },
+    { config: { effortLevel: 'high' }, model: undefined, effort: 'high' },
+    { config: { model: 'opus', effortLevel: 'high', modelSettings: { opus: null } }, model: 'opus', effort: 'high' },
+    { config: { model: 'opus', effortLevel: 'high', modelSettings: { opus: { effortLevel: 3 } } }, model: 'opus', effort: 'high' },
+    { config: { model: '', effortLevel: ' ' }, model: undefined, effort: undefined },
+  ])('handles partial and invalid settings independently: $config', ({ config, model, effort }) => {
+    settings(config);
+    const argv = flags();
+    expect(argv.includes('--model')).toBe(model !== undefined);
+    expect(argv.includes('--effort')).toBe(effort !== undefined);
+    if (model) expect(argv[argv.indexOf('--model') + 1]).toBe(model);
+    if (effort) expect(argv[argv.indexOf('--effort') + 1]).toBe(effort);
+  });
+
+  it('uses the isolated home settings only when CLAUDE_CONFIG_DIR is unset', () => {
+    const home = join(root, 'operator-home');
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ model: 'haiku', effortLevel: 'low' }));
+    vi.stubEnv('HOME', home);
+    settings({ model: 'opus', effortLevel: 'high' });
+    expect(flags()).toContain('opus');
+    vi.stubEnv('CLAUDE_CONFIG_DIR', join(root, 'missing-config'));
+    expect(flags()).not.toContain('--model');
+    vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
+    expect(flags()).toContain('haiku');
+    expect(flags()).toContain('low');
+  });
+
+  it('reads changed settings on every call of the same adapter', async () => {
+    const adapter = new ClaudeAdapter();
+    const inputs: Input[] = [];
+    for (const [model, effortLevel] of [['opus', 'high'], ['haiku', 'low']]) {
+      settings({ model, effortLevel });
+      expect((await adapter.run(DUTIES, role, options({ onInvocationInput: input => inputs.push(input) }))).exitCode).toBe(0);
+    }
+    expect(inputs.map(input => JSON.parse(input.transport!.payload).model.value)).toEqual(['opus', 'haiku']);
+    expect(inputs.map(input => JSON.parse(input.transport!.payload).effort.value)).toEqual(['high', 'low']);
+  });
+
+  it('reads changed user settings again for a fresh-session retry', async () => {
+    settings({ model: 'opus', effortLevel: 'high' });
+    scenario({ failResume: true });
+    const inputs: Input[] = [];
+    const result = await new ClaudeAdapter().run(DUTIES, role, options({ resumeSessionId: UUID, onInvocationInput: input => {
+      inputs.push(input);
+      settings({ model: 'haiku', effortLevel: 'low' });
+    } }));
+    expect(result.exitCode).toBe(0);
+    expect(inputs.map(input => JSON.parse(input.transport!.payload).model.value)).toEqual(['opus', 'haiku']);
+    expect(inputs.map(input => JSON.parse(input.transport!.payload).effort.value)).toEqual(['high', 'low']);
+  });
+
+  it('drops rejected inherited flags and records the source for each repair', async () => {
+    settings({ model: 'opus', effortLevel: 'xhigh' });
+    scenario({ rejectPins: true });
+    const inputs: Input[] = [];
+    const result = await new ClaudeAdapter().run(DUTIES, role, options({ onInvocationInput: input => inputs.push(input) }));
+    expect(result.exitCode).toBe(0);
+    expect(inputs.map(input => JSON.parse(input.transport!.payload).model)).toEqual([
+      { value: 'opus', source: 'user-settings' }, { value: 'opus', source: 'user-settings' }, { value: null, source: 'cli-default' },
+    ]);
+    expect(inputs.map(input => JSON.parse(input.transport!.payload).effort)).toEqual([
+      { value: 'xhigh', source: 'user-settings' }, { value: null, source: 'cli-default' }, { value: null, source: 'cli-default' },
+    ]);
+  });
+
+  it('remembers rejection against the settings used by a fresh-session retry', async () => {
+    settings({ model: 'opus', effortLevel: 'high' });
+    scenario({ failResume: true });
+    const adapter = new ClaudeAdapter();
+    let count = 0;
+    const result = await adapter.run(DUTIES, role, options({ resumeSessionId: UUID, onInvocationInput: () => {
+      if (++count === 1) {
+        settings({ model: 'haiku', effortLevel: 'low' });
+        scenario({ rejectEffort: true });
+      }
+    } }));
+    expect(result.exitCode).toBe(0);
+    expect(calls()).toHaveLength(3);
+    scenario({});
+    settings({ model: 'opus', effortLevel: 'high' });
+    expect((await adapter.run(DUTIES, role, options())).exitCode).toBe(0);
+    expect(calls()[3].argv).toContain('--effort');
+    settings({ model: 'haiku', effortLevel: 'low' });
+    expect((await adapter.run(DUTIES, role, options())).exitCode).toBe(0);
+    expect(calls()[4].argv).not.toContain('--effort');
+  });
+
+  it.each(['model', 'effort'])('scopes remembered effort rejection to the inherited %s', async changed => {
+    settings({ model: 'opus', effortLevel: 'high' });
+    scenario({ rejectPins: true });
+    const adapter = new ClaudeAdapter();
+    expect((await adapter.run(DUTIES, role, options())).exitCode).toBe(0);
+    scenario({});
+    expect((await adapter.run(DUTIES, role, options())).exitCode).toBe(0);
+    expect(calls()[3].argv).not.toContain('--effort');
+    settings({ model: changed === 'model' ? 'haiku' : 'opus', effortLevel: changed === 'effort' ? 'low' : 'high' });
+    expect((await adapter.run(DUTIES, role, options())).exitCode).toBe(0);
+    expect(calls()[4].argv).toContain('--effort');
   });
 });
 

@@ -48,6 +48,8 @@ export interface SupervisorTailSnapshot {
 
 export interface SupervisorBackend {
   isActive(unit: string): Promise<UnitStatus>;
+  /** One manager inventory for a store-wide observation; omitted by older backends. */
+  isActiveMany?(units: string[]): Promise<Map<string, UnitStatus>>;
   runUnit(opts: { unit: string; workingDirectory: string; command: string }): Promise<void>;
   stopUnit(unit: string): Promise<void>;
   journalTail(unit: string, lines: number, follow?: boolean): Promise<string>;

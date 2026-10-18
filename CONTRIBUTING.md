@@ -33,6 +33,12 @@ Build publication refuses replacement of a live distribution. Tests use the chec
 `dist` and its manifest: a private build alone does not redirect them. Validate an isolated
 copy with identical source/configuration and its freshly built distribution.
 
+The full suite's global setup allocates command-owned temporary storage through the
+existing invocation scratch owner and retires it after workers close. It does not inherit
+an author invocation's aliased `.tmp-*` namespace: fixtures need physical paths for
+no-follow adapter homes, Unix sockets and engine-carrier integrity checks. Per-file private
+homes and stores remain separate, and the author's scratch evidence keeps its run lifetime.
+
 The root Vitest configuration includes `spec/**/*.test.ts`, `.test.tsx` and the recorded
 UX performance replays. `test:baseline-identities` excludes those replay files for an explicit
 population comparison; it is not the full suite. `test:ux-perf` selects a focused replay

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { hashRollbackFileSync } from './rollback-content-store.js';
 import { isSessionHomeName } from './adapter-session.js';
 import { observeEnginePublications, publishEngineFiles } from './engine-fs.js';
 export { publishEngineFiles } from './engine-fs.js';
@@ -12,7 +13,7 @@ import { externalOutputDirectory, extractBriefOutputDeclarations, extractDeclare
 
 type Entry = { identity: string; bytes?: Buffer; link?: string; mode?: number };
 type Snapshot = Map<string, Entry>;
-interface Guard { scan: () => Snapshot; owns: (path: string) => boolean; expected: Snapshot; error?: string }
+interface Guard { scan: () => Snapshot; retain: (path: string, destination?: string) => Entry | undefined; owns: (path: string) => boolean; expected: Snapshot; error?: string }
 const guards = new Set<Guard>();
 const activeOutputs = new Set<string>();
 const inside = (root: string, path: string): boolean => {
@@ -23,7 +24,7 @@ const privateNames = new Set(['auth.json', 'credentials.json', 'installation_id'
 const privateName = (name: string): boolean => privateNames.has(name) || isSessionHomeName(name);
 const same = (a?: Entry, b?: Entry): boolean => a?.identity === b?.identity;
 
-function entry(path: string): Entry | undefined {
+function entry(path: string, retain = false): Entry | undefined {
   try {
     const stat = lstatSync(path), inode = `${stat.dev}:${stat.ino}:${stat.mode}`;
     if (stat.isSymbolicLink()) {
@@ -32,8 +33,9 @@ function entry(path: string): Entry | undefined {
     }
     if (stat.isDirectory()) return { identity: `directory:${inode}`, mode: stat.mode };
     if (!stat.isFile()) throw new Error(`ENGINE_STATE_REFUSED: unsupported engine carrier ${path}`);
-    const bytes = readFileSync(path);
-    return { identity: `file:${inode}:${createHash('sha256').update(bytes).digest('hex')}`, bytes, mode: stat.mode };
+    const bytes = retain ? readFileSync(path) : undefined;
+    const digest = bytes ? createHash('sha256').update(bytes).digest('hex') : hashRollbackFileSync(path).sha256;
+    return { identity: `file:${inode}:${digest}`, bytes, mode: stat.mode };
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
 }
 
@@ -78,7 +80,7 @@ observeEnginePublications((paths, tree, transfer) => {
       const snapshot: Snapshot = new Map();
       const capture = (source: string, destination: string): void => {
         if (!guard.owns(destination) && !guard.expected.has(destination)) return;
-        const value = entry(source);
+        const value = guard.retain(source, destination);
         if (!value) return;
         snapshot.set(destination, value);
         if (value.identity.startsWith('directory:')) {
@@ -101,13 +103,14 @@ observeEnginePublications((paths, tree, transfer) => {
       if (!relevant(guard)) continue;
       const snapshot = postimages.get(guard);
       const published = (path: string, actual?: Entry): Entry | undefined => {
-        if (!moved || !snapshot) return actual;
-        if (inside(moved[0], path) || inside(moved[1], path)) {
+        if (moved && snapshot && (inside(moved[0], path) || inside(moved[1], path))) {
           const value = snapshot.get(path);
           notice(guard, same(value, actual) ? [] : [path]);
           return value;
         }
-        return actual;
+        const retained = actual ? guard.retain(path) : undefined;
+        notice(guard, same(actual, retained) ? [] : [path]);
+        return same(actual, retained) ? retained : guard.expected.get(path);
       };
       if (descendants) {
         const current = guard.scan();
@@ -182,9 +185,21 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
   for (const guard of guards) for (const path of guard.expected.keys()) {
     if (exclusions.some(root => inside(root, path))) guard.expected.delete(path);
   }
+  // Rollback payloads have a retained digest checked by restoreProjectPath.
+  // Admission still reserves their namespace; they are not engine decisions.
+  const rollbackBlobs = run && join(run, '.rollback-preimages');
+  const isRollbackBlob = (path: string): boolean => Boolean(rollbackBlobs && inside(rollbackBlobs, path));
+  const excluded = (path: string): boolean => {
+    const root = run && inside(run, path) ? run : inside(distribution, path) ? distribution : undefined;
+    // A temporary ancestor does not make an entire nested engine disposable.
+    // Only temporary entries inside the protected carrier tree are exempt.
+    const local = root === undefined ? '' : relative(root, path).split('\\').join('/');
+    return path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|(?:^|\/)\.run-state\.lock$/.test(local)
+      || [...activeOutputs].some(root => inside(root, path));
+  };
   const owns = (path: string): boolean => {
-    if (path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path)
-      || [...activeOutputs].some(root => inside(root, path))) return false;
+    if (isRollbackBlob(path)) return false;
+    if (excluded(path)) return false;
     if (run && inside(run, path)) {
       const local = relative(run, path).split('\\').join('/');
       if (/^gate_reevaluation\/verdict_correction_[^/]+\.json$/.test(local)) return false;
@@ -199,16 +214,21 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     }
     return inside(distribution, path);
   };
+  const retain = (path: string, destination = path): Entry | undefined => entry(path, Boolean(run && inside(run, destination)));
   const scan = (): Snapshot => {
     const result: Snapshot = new Map(), visited = new Set<string>(), ancestors = new Set<string>();
     const separate = (path: string): void => {
       if ([project, ...activeOutputs].some(root => inside(root, path))) throw new Error(`ENGINE_STATE_REFUSED: engine carrier consults authored work ${path}`);
     };
     const walk = (path: string, owned = true): void => {
+      if (isRollbackBlob(path)) {
+        if (owned) throw new Error(`ENGINE_STATE_REFUSED: engine record aliases rollback payload ${path}`);
+        return;
+      }
       if (owned) separate(path);
-      if (path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|\/\.run-state\.lock$/.test(path) || [...activeOutputs].some(root => inside(root, path))) return;
+      if (excluded(path)) return;
       if (!owned && !lstatSync(path).isDirectory()) return;
-      const value = entry(path);
+      const value = retain(path);
       if (!value) return;
       if (owned) result.set(path, run && inside(run, path) ? value : { identity: value.identity, link: value.link });
       if (value.link !== undefined) {
@@ -253,7 +273,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     for (const path of exclusions) activeOutputs.delete(path);
     throw new Error(`ENGINE_STATE_REFUSED: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
-  const guard: Guard = { scan, owns, expected };
+  const guard: Guard = { scan, retain, owns, expected };
   guards.add(guard);
   let result: T | undefined, failure: unknown;
   try { result = await action(); } catch (error) { failure = error; } finally {
@@ -262,7 +282,12 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     for (const path of exclusions) activeOutputs.delete(path);
     for (const other of guards) {
       const current = other.scan();
-      for (const [path, value] of current) if (exclusions.some(root => inside(root, path))) other.expected.set(path, value);
+      for (const [path, value] of current) {
+        if (!exclusions.some(root => inside(root, path))) continue;
+        const retained = other.retain(path);
+        notice(other, same(value, retained) ? [] : [path]);
+        if (same(value, retained)) other.expected.set(path, retained!);
+      }
     }
   }
   if (guard.error) {
@@ -306,7 +331,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
       try {
         for (const path of new Set([...guard.expected.keys(), ...other.expected.keys()])) {
           if (!run || !inside(run, path) || !other.owns(path)) continue;
-          const value = entry(path);
+          const value = other.retain(path);
           if (value) other.expected.set(path, value); else other.expected.delete(path);
         }
       } catch { /* the surviving guard will fail closed */ }

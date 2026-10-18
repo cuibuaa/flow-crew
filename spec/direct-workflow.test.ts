@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
@@ -60,7 +61,7 @@ async function runDirect(task: string, calls: string[], rejectFirstReview = fals
 }
 
 describe('direct workflow', () => {
-  it('sends the admitted task once with generic roles on author, reviewer and repair calls', async () => {
+  it('keeps the full role and execution contracts on author, independent review and repair calls', async () => {
     const task = brief('outputs:\n  - docs/report.md').replace('---\n#', '---\n\n#');
     const captured: Array<{ id: string; system: string; user: string }> = [];
     const result = await runDirect(task, [], true, (user, role, opts) => {
@@ -70,8 +71,7 @@ describe('direct workflow', () => {
         expect(opts.resumeSessionId).not.toBe(authorSession);
         if (captured.filter(call => call.id === 'review').length === 1) {
           expect(opts.resumeSessionId).not.toBeDefined();
-          expect(user).not.toContain('Previous stage: implement');
-          expect(user).not.toContain('Context from stage: implement');
+          expect(user).toContain('Previous stage: implement');
         } else if (opts.resumeSessionId) {
           expect(opts.resumeSessionId).toBe(reviewerSession);
           expect(opts.sessionOwnerStageId).toBe('review');
@@ -81,13 +81,29 @@ describe('direct workflow', () => {
     expect(result.status).toBe('complete');
     expect(captured.map(call => call.id)).toEqual(['implement', 'review', 'repair', 'review']);
     for (const call of captured) {
-      expect(call.user).toContain(task.trim());
-      expect((call.system + call.user).split(task.trim())).toHaveLength(2);
-      expect(Buffer.byteLength(call.system)).toBeLessThan(400);
-      expect(call.user).not.toContain('Runtime timeout contract');
-      expect(call.user).not.toContain('scope_revision_request');
-      expect(call.user).not.toContain('optional trustworthy numeric campaign');
-      expect(call.user).not.toContain('Engine state query');
+      expect(call.system).toContain(task.trim());
+      expect(call.system).toContain('## Review contract');
+      expect(call.system).toContain('Never read or expose secrets');
+      if (call.id === 'repair') {
+        expect(call.user).toContain('archived rejected verdict:');
+        expect(call.user).toContain('Gate repair round 1');
+      } else {
+        expect(call.user).toContain('Canonical brief criteria assigned to this stage');
+      }
+      expect(call.user).toContain('scope_revision_request');
+      expect(call.user).toContain('Stage budget:');
+      expect(call.user).toContain('# Execution clock');
+      expect(call.user).toContain('Engine state query');
+      if (call.id === 'review') {
+        expect(call.system).toContain('including the limits of the inputs the brief allows');
+        expect(call.system).toContain("The author's summary, tests and evidence alone");
+        expect(call.system).toContain('independent evidence across the allowed input families and complete observable');
+        expect(call.system).toContain('unchanged baseline is the oracle wherever preservation is required');
+        expect(call.system).toContain('supplied references and constraints');
+        expect(call.user).toContain('Quantified-remedy feasibility contract');
+      } else {
+        expect(call.system).toContain('After the last change, supply relevant evidence');
+      }
     }
   });
 
@@ -114,6 +130,32 @@ describe('direct workflow', () => {
     expect(final.status, final.failureReason).toBe('complete');
     expect(calls).toEqual(['implement', 'repair', 'review']);
     expect(receipts).toHaveLength(1);
+  });
+
+  // A no-regression receipt can still carry commands that failed or never ran
+  // (a red baseline that stays red); only passing commands make a rerun redundant.
+  it.each([
+    { state: 'passed', probe: 'process.exit(0);\n', rerunAdvised: false },
+    { state: 'failed', probe: 'process.exit(1);\n', rerunAdvised: true },
+  ])('advises against rerunning configured commands only when they $state', async ({ state, probe, rerunAdvised }) => {
+    const task = brief('outputs:\n  - docs/report.md');
+    const readyPath = writeReadySetupRecord(projectDir, task, fcGlobalDir());
+    const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
+    ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
+    if (state === 'failed') {
+      ready.validationBaseline.results[0] = { ...ready.validationBaseline.results[0], state: 'failed', exitCode: 1, failureIdentity: 'unknown' };
+      ready.validationBaseline.gateCriteria[0] = { role: 'build', rule: 'no_regression_from_baseline', baselineFailureIdentifiers: [], description: 'Fixture build failed at baseline' };
+    }
+    writeFileSync(readyPath, JSON.stringify(ready));
+    writeFileSync(join(projectDir, 'validation-probe.mjs'), probe);
+    const prompts: string[] = [];
+    const final = await runDirect(task, [], false, (prompt, _role, opts) => { if (opts.stageId === 'review') prompts.push(prompt); });
+    expect(final.status, final.failureReason).toBe('complete');
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Engine validation: pass=true');
+    expect(prompts[0]).toContain(`exit=${state === 'passed' ? 0 : 1}, state=${state}`);
+    expect(prompts[0]).toContain("(each command's result and output tail)");
+    expect(prompts[0].includes('Do not rerun configured commands')).toBe(!rerunAdvised);
   });
 
   it('cannot accept a missing declared output even when the reviewer accepts', async () => {
@@ -154,7 +196,6 @@ describe('direct workflow', () => {
     const refusals: Array<[string, string]> = [
       ['workflow: direct\nresearch:\n  baseline: 0.5', 'direct cannot run the research loop'],
       ['workflow: direct\nprogram:\n  name: study\n  phase: first', 'direct cannot run the program loop'],
-      ['terminal_states:\n  complete:\n    paths: [docs/report.md]', 'terminal owner implement.depends_on: mandatory stage review is not an ancestor'],
     ];
     for (const [frontmatter, reason] of refusals) {
       const calls: string[] = [];
@@ -179,11 +220,35 @@ describe('direct workflow', () => {
     expect(readFileSync(join(projectDir, 'evidence', 'source.md'), 'utf8')).toBe('frozen evidence\n');
   });
 
+  it('keeps an unrestored input violation blocking completion across repairs', async () => {
+    writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
+    const final = await runDirect(brief('workflow: direct\ninputs: [notes.md]\noutputs: [docs/report.md]'), [], false, (_prompt, _role, opts) => {
+      if (opts.stageId === 'implement' || opts.stageId === 'repair') {
+        writeFileSync(join(projectDir, 'notes.md'), 'unauthorized\n');
+      }
+    });
+    expect(final.status).not.toBe('complete');
+    expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('unauthorized\n');
+    const audits = Object.values(final.stages).flatMap(stage => stage.attempts ?? [])
+      .flatMap(attempt => attempt.constraintAudit
+        ? [JSON.parse(readFileSync(join(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
+    expect(audits.flatMap(audit => audit.rollbackFailures)).toContain('notes.md');
+    expect(audits.flatMap(audit => audit.rolledBackWrites)).not.toContain('notes.md');
+  });
+
   it.each(['notes.md', 'evidence/source.md', 'evidence/new.md', 'alias/source.md'])('restores an input write to %s despite broad scope', async (path) => {
     mkdirSync(join(projectDir, 'evidence'));
     writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
     writeFileSync(join(projectDir, 'evidence', 'source.md'), 'frozen evidence\n');
     symlinkSync('evidence', join(projectDir, 'alias'));
+    // Existing Git objects provide rollback without copying read-only inputs.
+    execFileSync(process.execPath, ['--input-type=module', '-e', `
+      import { execFileSync } from 'node:child_process';
+      for (const args of [
+        ['init', '-q'], ['add', '.'],
+        ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline'],
+      ]) execFileSync('git', args);
+    `], { cwd: projectDir, env: { ...process.env, HOME: fixtureRoot, FC_HOME: join(fixtureRoot, 'private-store') } });
     const final = await runDirect(brief('workflow: direct\ninputs: [notes.md, evidence]\noutputs: [docs/report.md]'), [], false, (_prompt, _role, opts) => {
       if (opts.stageId === 'implement' || opts.stageId === 'repair') writeFileSync(join(projectDir, path), 'unauthorized\n');
     });
@@ -192,5 +257,10 @@ describe('direct workflow', () => {
     expect(readFileSync(join(projectDir, 'evidence', 'source.md'), 'utf8')).toBe('frozen evidence\n');
     expect(existsSync(join(projectDir, 'evidence', 'new.md'))).toBe(false);
     expect(final.stages.implement.attempts?.length).toBeGreaterThan(0);
+    const audits = final.stages.implement.attempts!.flatMap(attempt => attempt.constraintAudit
+      ? [JSON.parse(readFileSync(join(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
+    const canonicalPath = path.replace(/^alias\//, 'evidence/');
+    expect(audits.flatMap(audit => audit.rolledBackWrites)).toContain(canonicalPath);
+    expect(audits.flatMap(audit => audit.rollbackFailures)).toEqual([]);
   });
 });

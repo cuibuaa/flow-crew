@@ -14,18 +14,22 @@ import { artifacts } from '../spec_contracts/declared-fixtures.js';
  *           as not_run in research_confirm.json (never silently invisible).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { runWorkflow, type WorkflowConfig } from '../../src/scheduler.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
-import { createRun, readRunState, runDir, runsRoot, writeRunState } from '../../src/store.js';
+import { createRun, fcGlobalDir, readRunState, runDir, runsRoot, setFcGlobalDir, writeRunState } from '../../src/store.js';
 import { generateRunSummary } from '../../src/run-summary.js';
 
-let projectDir: string;
-beforeEach(() => { projectDir = join(tmpdir(), 'fc-r3-' + randomBytes(6).toString('hex')); mkdirSync(projectDir, { recursive: true }); });
-afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
+let fixtureRoot: string, projectDir: string, previousStore: string;
+beforeEach(() => {
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'fc-r3-'));
+  projectDir = join(fixtureRoot, 'project'); mkdirSync(projectDir);
+  previousStore = fcGlobalDir(); setFcGlobalDir(join(fixtureRoot, 'state'));
+});
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(fixtureRoot, { recursive: true, force: true }); });
 
 const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: research', 'defaults:', '  max_iterations: 6', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),

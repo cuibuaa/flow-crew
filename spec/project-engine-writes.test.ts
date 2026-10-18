@@ -7,6 +7,7 @@ import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir } from '..
 import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { createResearchBudgetFinalizer } from '../src/scheduler/sched_loop/research-terminal.js';
 import { createResearchAdvancer } from '../src/scheduler/sched_policy/research.js';
+import { beginResearchInputGeneration } from '../src/research-candidate.js';
 
 let root: string, project: string, previousStore: string;
 const workflow = { name: 'fixture', description: '', defaults: {}, stages: [] };
@@ -40,6 +41,7 @@ describe('engine bookkeeping stays outside the project', () => {
     // No real agent, process, or confirmation command is needed to settle a no-candidate round.
     state.startedAt = '2026-01-01T00:00:00.000Z';
     state.research = { baseline: 0, policy: 'greedy_stack', resultFile: 'round.json', reportDir: 'reports', stop: { maxRounds: 1 } };
+    beginResearchInputGeneration(project, state);
     state.terminalStates = { ceiling_hit: { paths: ['declared.md'] } };
     const base = runDir(project, state.runId);
     const adapter = new ScriptedAdapter({});

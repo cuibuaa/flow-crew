@@ -180,7 +180,7 @@ function writeRun(id: string, status: 'running' | 'complete', mtimeMs: number): 
 }
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'flowcrew-operator-surface-'));
+  root = mkdtempSync(join(tmpdir(), 'fc-os-'));
   fcHome = join(root, 'state');
   project = join(root, 'project');
   for (const path of [fcHome, project, join(root, 'home')]) mkdirSync(path, { recursive: true });

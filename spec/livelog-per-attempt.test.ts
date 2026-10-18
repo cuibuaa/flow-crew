@@ -175,18 +175,24 @@ describe('native logs belong to scheduler attempts', () => {
     beginAttemptEvidenceGeneration(created.runDirPath, 'work', attempt.index, attempt.startedAt);
     const current = stageLiveLogPath(created.runDirPath, 'work', attempt.index);
     expect(stageLiveLogPath(created.runDirPath, 'work')).toBe(current);
+    let previousLiveLogBytes: number | undefined;
     const facts = () => inspectStageExecutionFacts({ runDir: created.runDirPath, stageId: 'work',
-      status, sinceMs: 0 });
+      status, sinceMs: 0, previousLiveLogBytes });
     expect(facts().liveProgressThisTick).toBe(false);
     appendFileSync(legacy, 'late historical bytes\n');
     appendFileSync(stageLiveLogPath(created.runDirPath, 'work', 1), 'late prior-attempt bytes\n');
     expect(facts()).toMatchObject({ liveProgressThisTick: false, artifactProgressThisTick: false,
       protectedFromIdleAbort: false });
     appendFileSync(current, 'current native bytes\n');
-    expect(facts().liveProgressThisTick).toBe(true);
+    const progress = facts();
+    expect(progress.liveProgressThisTick).toBe(true);
+    previousLiveLogBytes = progress.liveLogBytes;
     expect(readFileSync(legacy, 'utf8')).toContain('legacy native result');
     utimesSync(current, 1, 1);
     expect(facts().liveProgressThisTick).toBe(false);
+    appendFileSync(current, 'more current native bytes\n');
+    utimesSync(current, 1, 1);
+    expect(facts().liveProgressThisTick).toBe(true);
   });
 
   it('retains native evidence when a later DAG reuses attempt index one', () => {

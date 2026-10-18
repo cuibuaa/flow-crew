@@ -1,6 +1,7 @@
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 /** Planner artifact retry decisions; run/campaign/guidance effects enter through typed callbacks. */
 import { renderPlanInterface } from '../../plan-interface.js';
-import { type StoreState, runDir, RUN_STATUS, writeRunState } from '../../store.js';
+import { type StoreState, runDir, RUN_STATUS } from '../../store.js';
 import { join, posix } from 'node:path';
 import { writeFileSync, unlinkSync, mkdirSync, copyFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -8,7 +9,6 @@ import { createHash } from 'node:crypto';
 import { buildMonotonePlanRetryContext, type PlanRetryRequirement, planRetryRequirement, readMonotonePlanRetryState } from '../../plan-retry-monotone.js';
 import { readDispatchDocument } from '../../dispatch-document.js';
 import { type RealityCheckPreflightReport } from '../../reality-check-preflight.js';
-import { recordRunEvent } from '../../run-events.js';
 import { publishJsonCreateOnly } from '../../runtime-negotiation.js';
 import { type DispatchAdmissionReport } from './dispatch.js';
 
@@ -176,15 +176,11 @@ export function concludePlanRetryFailure(input: {
   input.state.status = RUN_STATUS.FAILED;
   input.state.failureReason = reason;
   input.state.completedAt = new Date().toISOString();
-  writeRunState(input.projectDir, input.runId, input.state);
-  recordRunEvent(input.projectDir, input.runId, {
-    type: 'run_completed',
-    runId: input.runId,
-    timestamp: input.state.completedAt,
+  publishRunCompletion(input.state, input.projectDir, input.runId, () => ({
     iteration: input.state.currentIteration ?? 1,
     stageId: input.stageId,
     detail: `failed: ${reason}`,
-  });
+  }));
   return input.state;
 }
 

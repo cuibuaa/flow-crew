@@ -5,11 +5,14 @@ import { runDir } from '../../store.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { publishConstraintDecision } from '../../runtime-negotiation.js';
-import type { RepairFileImage } from './file-images.js';
+import { type RepairFileImage, repairFileIdentity } from './file-images.js';
+import { baselineImage, readRollbackCurrentImage } from './rollback-baseline.js';
 import { type RepairRoundSnapshot, captureRepairRoundSnapshot } from './snapshots.js';
 import { acceptedInheritedScope } from './scope-revisions.js';
 import { scopeContainsPath, resolveDeclaredInputWriteBindings, listProjectFilesAt, type DeclaredInputWriteBinding } from './path-capabilities.js';
-import { captureRollbackCurrentImage } from './rollback-baseline.js';
+import { isLiveConstraintExemptDirectory, isLiveConstraintExemptPath } from '../../live-constraint-guard.js';
+import { loadEngineDefaults } from '../../config.js';
+import { normalizedProjectContentPath } from '../sched_admission/scope-services.js';
 
 interface ScopeAttempt {
   readonly effectiveScope: string[];
@@ -46,20 +49,27 @@ export class ScopeBatchContext {
   readonly liveWritePreimages = new Map<string, RepairFileImage>();
   private readonly partitions = new Map<string, ScopePartition>();
   private readonly violations: BatchViolation[] = [];
+  private readonly initialInputPaths?: ReadonlySet<string>;
 
   constructor(readonly projectDir: string, stages: StageConfig[], readonly snapshot: RepairRoundSnapshot, runId?: string) {
     this.activeStageIds = new Set(stages.map(stage => stage.id));
     const briefPath = runId && join(runDir(projectDir, runId), 'task_brief.md');
     this.declaredInputs = briefPath && existsSync(briefPath)
       ? resolveDeclaredInputWriteBindings(projectDir, readFileSync(briefPath, 'utf8')) : [];
-    // Read-only inputs need content evidence even inside an omitted cache tree.
-    // Freeze their admitted names before any member of this batch can execute.
-    for (const input of this.declaredInputs) {
-      const paths = input.kind === 'tree' ? listProjectFilesAt(projectDir, input.path, true) : [input.path];
-      for (const path of paths) {
-        if (!snapshot.files.has(path)) snapshot.files.set(path,
-          captureRollbackCurrentImage(snapshot.rollbackBaseline, projectDir, path));
-      }
+    // Input membership follows the same tracked-first cache rule as setup and
+    // enforcement, including declared data omitted by the project inventory.
+    this.initialInputPaths = new Set(this.inputContentPaths());
+    for (const path of this.initialInputPaths) {
+      if (snapshot.files.has(path)) continue;
+      const baseline = snapshot.rollbackBaseline;
+      const before = baselineImage(baseline, path);
+      const known = baseline.images.has(path) || baseline.cleanTracked.has(path);
+      // An already retained preimage remains restorable when a later batch
+      // treats this path as an input. Only uncaptured reads are identities.
+      const image = known && before.provenance !== 'unknown'
+        ? before : repairFileIdentity(readRollbackCurrentImage(baseline, projectDir, path, before));
+      snapshot.rollbackBaseline.images.set(path, image);
+      snapshot.files.set(path, image);
     }
     for (const stage of stages) {
       const declared = snapshot.declaredScopes[stage.id] ?? stage.scope ?? null;
@@ -67,6 +77,34 @@ export class ScopeBatchContext {
         : { scope: [...(declared ?? [])], decisionPaths: [] };
       this.partitions.set(stage.id, { declared: declared === null ? null : [...declared], inherited, attempts: new Map() });
     }
+  }
+
+  /** Enumerate the same input members before execution and at each comparison
+   * boundary, so newly created data is visible even outside the project journal. */
+  inputContentPaths(): string[] {
+    const patterns = loadEngineDefaults().live_constraint_exempt_patterns;
+    const tracked = this.snapshot.rollbackBaseline.trackedPaths;
+    const members = [...new Set(this.declaredInputs.flatMap(input => {
+      // Classify in-project aliases by Git's spelling, while preserving the
+      // alias entry itself. External roots retain their project-relative alias.
+      const root = normalizedProjectContentPath(relative(this.projectDir, input.resolvedPath)) ?? input.path;
+      const paths = input.kind === 'tree' ? listProjectFilesAt(this.projectDir, root, true, {
+        complete: true,
+        skipDirectory: path => isLiveConstraintExemptDirectory(`${root}/${path}`, patterns, tracked),
+      }) : [root];
+      if (root !== input.path) paths.push(input.path);
+      return paths.filter(path => !isLiveConstraintExemptPath(path, patterns, tracked));
+    }))];
+    for (const path of members) {
+      if (this.initialInputPaths && !this.initialInputPaths.has(path) && !this.snapshot.files.has(path)) {
+        // The complete admitted input inventory proves this member was absent,
+        // even when the generic project baseline omitted its directory.
+        const absent: RepairFileImage = { exists: false, provenance: 'observed' };
+        this.snapshot.files.set(path, absent);
+        this.snapshot.rollbackBaseline.images.set(path, absent);
+      }
+    }
+    return members;
   }
 
   declaredScope(stageId: string): string[] | null { return this.partitions.get(stageId)?.declared ?? null; }

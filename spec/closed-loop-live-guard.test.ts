@@ -69,6 +69,16 @@ function seedProject(): string {
   const path = join(projectDir, 'spec', 'existing.test.ts');
   writeFileSync(path, 'export const invariant = "original";\n');
   writeFileSync(join(projectDir, 'operator-note.txt'), 'pre-existing dirt stays intact\n');
+  // These restoration scenarios use Git's existing immutable source preimage;
+  // unrelated untracked operator content remains outside writable admission.
+  execFileSync(process.execPath, ['--input-type=module', '-e', String.raw`
+    import { execFileSync } from 'node:child_process';
+    const git = args => execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    git(['init', '-q']);
+    git(['add', 'spec/existing.test.ts']);
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '-qm', 'Record protected source']);
+  `], { cwd: projectDir, env: { ...process.env, HOME: stateDir, FC_HOME: stateDir }, stdio: ['ignore', 'pipe', 'pipe'] });
   return path;
 }
 

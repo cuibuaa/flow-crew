@@ -1,3 +1,5 @@
+import { RollbackContentStore } from '../src/rollback-content-store.js';
+import { renameSync as publishRename } from '../src/engine-fs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -52,6 +54,20 @@ const command = (code: string) => execWithStdin(process.execPath, ['-e', code], 
 const voided = (action: () => Promise<unknown>) => expect(withEngineIntegrity(input(), action)).rejects.toThrow('ENGINE_STATE_TAMPERED');
 
 describe('structural engine state protection', () => {
+  it('protects a nested run beneath an invocation temporary ancestor', async () => {
+    const parent = join(root, '.tmp-owner');
+    project = join(parent, 'project'); mkdirSync(project, { recursive: true });
+    store = join(parent, 'store'); setFcGlobalDir(store);
+    run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runDirPath;
+    const path = join(run, 'run.json');
+    const before = readFileSync(path, 'utf8');
+    await voided(async () => {
+      const result = await command(`require('node:fs').writeFileSync(${JSON.stringify(path)}, 'counterfeit')`);
+      expect(result.exitCode).toBe(0);
+    });
+    expect(readFileSync(path, 'utf8')).toBe(before);
+  });
+
   it.each(['run', 'store', 'project-link', 'future-database', 'live-distribution', 'project-inside-run', 'project-inside-distribution'])('refuses engine storage inside authored work: %s', async mode => {
     let args = input();
     if (mode === 'project-inside-distribution') args = { ...args, projectDir: join(import.meta.dirname, '../dist/future-project') };
@@ -66,9 +82,38 @@ describe('structural engine state protection', () => {
     expect(called).toBe(false);
   });
 
+  it('restores a parent-published carrier moved from the project', async () => {
+    const source = join(project, 'result.json'), carrier = join(run, 'goal_met.json');
+    write(source, 'trusted result');
+    await voided(async () => {
+      publishRename(source, carrier);
+      writeFileSync(carrier, 'child edit');
+    });
+    expect(readFileSync(carrier, 'utf8')).toBe('trusted result');
+  });
+
+  it('restores engine decisions from memory without creating rollback backing', async () => {
+    const carrier = join(run, 'stage_watchdog.json');
+    write(carrier, 'trusted state');
+    const capture = vi.spyOn(RollbackContentStore.prototype, 'capture');
+    await voided(async () => { writeFileSync(carrier, 'child edit'); });
+    expect(readFileSync(carrier, 'utf8')).toBe('trusted state');
+    expect(capture).not.toHaveBeenCalled();
+    expect(existsSync(join(run, '.rollback-preimages'))).toBe(false);
+  });
+
+  it('refuses a decision record carried by an unscanned rollback payload', async () => {
+    const payload = join(run, '.rollback-preimages', 'blob');
+    write(payload, 'counterfeit decision');
+    symlinkSync(payload, join(run, 'verdict_previous.json'));
+    let called = false;
+    await expect(withEngineIntegrity(input(), async () => { called = true; })).rejects.toThrow('engine record aliases rollback payload');
+    expect(called).toBe(false);
+  });
+
   it.each(['run.json', 'events.jsonl', 'run-history.jsonl', 'run-history.v1.jsonl', 'workflow.yaml', 'validation_baseline.json',
     'validation_delta_review.json', 'verdict_review.json', 'summary.md', 'goal_met.json',
-    'approvals/decision.json', 'stages/work/status.json', 'stages/work/invocations/attempt/input.json.gz',
+    'rollback_change_journal.jsonl', 'approvals/decision.json', 'stages/work/status.json', 'stages/work/invocations/attempt/input.json.gz',
     'stage_evidence/review/verdict.json', 'dispatch.yaml', 'handoff_previous.md', 'scheduler.identity.json', 'scheduler.pid'])('voids a successful child overwriting %s', async local => {
     const path = join(run, local); write(path);
     await voided(() => command(`require('node:fs').writeFileSync(${JSON.stringify(path)},'counterfeit pass')`));

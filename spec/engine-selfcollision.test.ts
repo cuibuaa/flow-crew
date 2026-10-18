@@ -324,7 +324,7 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it('3 — accepts churn beneath exact stable generated parents and still rejects ordinary or literal late requests', () => {
+  it('3 — admits future scope independently of past generated or ordinary churn', () => {
     const fixtures = new Map<string, string>([
       [`${dependencyDirectory}/.vite/vitest/**`, `${dependencyDirectory}/.vite/vitest/${'a'.repeat(40)}/results.json`],
       ['.cache/build-generations/**', `.cache/build-generations/${'b'.repeat(64)}/.flowcrew-build-manifest.json`],
@@ -374,12 +374,10 @@ describe('engine self-collision after-state replays and controls', () => {
       });
     expect(generated.every(({ decision }) => decision.accepted)).toBe(true);
     const ordinary = decide('src/generated/**', 'src/generated/ordinary.ts', 'ordinary');
-    expect(ordinary).toMatchObject({ accepted: false, decision: 'rejected' });
-    expect(ordinary.rejectionReason).toContain('requested content changed before scope approval');
+    expect(ordinary).toMatchObject({ accepted: true, decision: 'accepted' });
     const generatedMember = fixtures.get('.cache/build-generations/**')!;
     const literal = decide(generatedMember, generatedMember, 'literal');
-    expect(literal).toMatchObject({ accepted: false, decision: 'rejected' });
-    expect(literal.rejectionReason).toContain('Request the stable generated parent');
+    expect(literal).toMatchObject({ accepted: true, decision: 'accepted' });
 
     recordAfter(3, 'rewrite each recognized content-addressed member, request its stable parent, then exercise ordinary and literal controls', {
       generated,

@@ -114,13 +114,15 @@ describe('research ingestion and planner refusal evidence', () => {
     const root = temporaryRoot('round-ingestion'), projectDir = join(root, 'project'), runDirectory = join(root, 'run');
     mkdirSync(runDirectory, { recursive: true });
     const path = join(projectDir, `artifacts/round.json${sidecar ? '.no_candidate.json' : ''}`);
-    write(path, JSON.stringify(record));
     const completedAt = new Date(Date.now() - 100).toISOString();
     const producer = { status: 'complete', retries: 0, completedAt };
     const state = { runId: 'fixture', workflowName: 'research', projectDir, status: 'running',
       startedAt: new Date(Date.now() - 1_000).toISOString(), stages: { measure: producer },
       research: { baseline: 0.1, policy: 'best_of_n', resultFile: 'artifacts/round.json', reportDir: 'artifacts', stop: { maxRounds: 2 } },
     } as StoreState;
+    const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
+    beginResearchInputGeneration(projectDir, state);
+    write(path, JSON.stringify(record));
     const result = await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath: runDirectory, iteration: 1, adapter: inertAdapter });
     expect(state.stages.measure).toEqual({ status: 'complete', retries: 0, completedAt });
     if (!outcome) {

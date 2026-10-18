@@ -12,13 +12,18 @@ import { assertUnixSocketPath, findUnixSocketOwnerPid, writeDaemonIdentity } fro
 import { dashboardListenHosts, startDashboard } from '../src/dashboard.js';
 import { cmdTask } from '../src/cli-task.js';
 import { cmdDaemon } from '../src/cli-daemon.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 let root: string;
+let previousStore: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'fc-control-'));
+  previousStore = fcGlobalDir();
+  setFcGlobalDir(join(root, 'fc'));
 });
 afterEach(() => {
   vi.unstubAllEnvs();
+  setFcGlobalDir(previousStore);
   rmSync(root, { recursive: true, force: true });
 });
 

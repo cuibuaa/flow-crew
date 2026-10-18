@@ -743,6 +743,8 @@ describe('engine generalization runtime bindings', () => {
       control: { mean: 0.01, lower: 0.009, upper: 0.011 }, evidence: { sample: 'control-pair-a', seed: 11 } };
     const independent = { ...first, label: 'round-c', evidence: { sample: 'control-pair-c', seed: 29 } };
     const adapter = { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) };
+    const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
+    beginResearchInputGeneration(projectDir, state);
     for (const [index, round] of [first, independent].entries()) {
       writeFileSync(resultPath, JSON.stringify(round));
       await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: index + 1, adapter });
@@ -947,6 +949,8 @@ describe('engine generalization runtime bindings', () => {
     } as StoreState;
     const measured = join(refusalProject, 'artifacts', 'round.json');
     const sidecar = `${measured}.no_candidate.json`;
+    const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
+    beginResearchInputGeneration(refusalProject, state);
     writeFileSync(measured, JSON.stringify({ label: 'measured', result: 1 }));
     writeFileSync(sidecar, JSON.stringify({ label: 'none', outcome: 'no_candidate', reason: 'unsafe' }));
     await tryAdvanceResearch(state, { projectDir: refusalProject, runId: state.runId, runDirPath: refusalRun, iteration: 1, adapter });

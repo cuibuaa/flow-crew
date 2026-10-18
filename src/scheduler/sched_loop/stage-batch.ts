@@ -1,3 +1,5 @@
+import { pruneSettledWorkAreas } from '../../run-retention.js';
+import { publishRunCompletion } from '../sched_policy/run-completion.js';
 import { isRetryableAdapterFailure } from '../../adapters/failure.js';
 import { runStageWave } from '../stage-wave.js';
 // Boundary: Select and execute one scope-safe ready wave, coordinate live monitors and settle technical/failure/validation outcomes before terminal decisions.
@@ -8,7 +10,6 @@ import { recordRunEvent, recordStageOutcome } from '../../run-events.js';
 import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit } from '../sched_admission/configuration.js';
 import { detectParallelWriteConflicts, selectRunnableBatch } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
-import { admittedTerminalDurableScope } from '../sched_policy/terminal-ownership.js';
 import { createScopeBatchContext } from '../sched_scope/scope-batch.js';
 import { stageWithInheritedScope } from '../sched_scope/scope-revisions.js';
 import { readmitScopeContinuation, recordThrownStageAttempt, createStageSettlementBoundary } from '../sched_scope/stage-group.js';
@@ -99,10 +100,9 @@ export async function executeReadyBatch(
       while (true) {
         const boundary = createStageSettlementBoundary({ stage, selected: toRun, activeStageIds: activeScopeStageIds,
           projectDir, runId, context: ordinaryScopeContext,
-          terminalDurableScope: admittedTerminalDurableScope(runDirPath, stage.id, state.terminalStates),
         }, { monitorScopeRevisionRequests, reconcileCompletedStageAttempts });
-        const item = await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, ordinaryScopeContext, skills, taskDescription, availableSkills, attemptDeadlineClockFactory, boundary, workflow.defaults);
-        if (!item.result.suspended) return item;
+        const item = await executeOrdinaryStage(stage, sorted, state, projectDir, runId, runDirPath, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, ordinaryScopeContext, skills, taskDescription, availableSkills, attemptDeadlineClockFactory, boundary);
+        if (!item.result.suspended || item.result.continuation) return item;
         item.result.suspensionReason ??= 'scope_revision';
         state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
         if (isPausedRunStatus(readRunState(projectDir, runId).status)) return item;
@@ -262,22 +262,19 @@ export async function executeReadyBatch(
     for (const event of stageEvents) {
       recordStageOutcome(projectDir, runId, event.stageId, state.currentIteration, event.status);
     }
+    pruneSettledWorkAreas(runDirPath);
     if (exhaustedAdapterFailure) {
       const detail = `Upstream adapter failure exhausted technical recovery for ${exhaustedAdapterFailure.stageId}: ${exhaustedAdapterFailure.kind}`;
       state.status = RUN_STATUS.FAILED;
       state.failureReason = detail;
       state.completedAt = new Date().toISOString();
-      writeRunState(projectDir, runId, state);
-      recordRunEvent(projectDir, runId, {
-        type: 'run_completed',
-        runId,
-        timestamp: state.completedAt,
+      publishRunCompletion(state, projectDir, runId, () => ({
         iteration: state.currentIteration ?? 1,
         stageId: exhaustedAdapterFailure.stageId,
         detail,
         source: 'scheduler',
         level: 'warning',
-      });
+      }));
       return { kind: 'settled', state };
     }
     if (parkedDuringExecution || isPausedRunStatus(state.status)) return { kind: 'settled', state };

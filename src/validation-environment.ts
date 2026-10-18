@@ -1,5 +1,5 @@
 import { mkdirSync } from './engine-fs.js';
-import { assertUnixSocketPath } from './daemon-identity.js';
+import { realpathSync } from 'node:fs';
 
 import { join } from 'node:path';
 
@@ -12,8 +12,10 @@ export function validationEnvironment(
   inherited: NodeJS.ProcessEnv,
   explicit?: NodeJS.ProcessEnv,
 ): { env: NodeJS.ProcessEnv; removed: string[] } {
-  const socket = join(root, 'unavailable.sock');
-  assertUnixSocketPath(socket);
+  // Keep the fuse short for invocation scratch aliases. This private endpoint
+  // is never a bind target, so an overlong root must not refuse a command.
+  // Actual daemon clients still validate socket paths before I/O.
+  const socket = join(root, 's');
   const env = { ...(explicit ?? inherited) };
   const removed: string[] = [];
   for (const name of Object.keys(env)) {
@@ -23,6 +25,11 @@ export function validationEnvironment(
       if (env[name] !== undefined) removed.push(name);
       delete env[name];
     }
+  }
+  // Keep the admitted temporary directory, using its physical spelling so
+  // child write guards never have to traverse a caller's scratch symlink.
+  for (const name of ['TMPDIR', 'TMP', 'TEMP']) {
+    if (env[name]) try { env[name] = realpathSync(env[name]!); } catch { /* retain an unavailable project input */ }
   }
   const home = join(root, 'home');
   const fcHome = join(home, '.fc');

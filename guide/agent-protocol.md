@@ -25,7 +25,6 @@ rejects unknown fields, and offers these optional stage keys:
 | `criterion_refs` | Canonical IDs; empty/omitted conservatively covers the whole brief |
 | `skills` | Stage skill names |
 | `dynamic_dispatch` | Runtime plan expansion |
-| `race` | Ordinary author competition; see below |
 | `artifact_contract` | Versioned rooted output/read locations |
 
 Whole-plan admission checks roles, graph, scope conflicts, criterion coverage, terminal
@@ -44,28 +43,55 @@ Sources: [live schema/checker](../src/plan-interface.ts),
 [normalization](../src/scheduler/sched_admission/configuration.ts),
 [dispatch admission](../src/scheduler/sched_admission/dispatch.ts).
 
-### Planner-selected races
+### Single-author execution and history
 
-Only an ordinary author can set `race: true`. Gates, planners and repairs cannot race.
-Eligible gates use a different role, depend on that author, have empty project scope
-and cover its criterion references. Gates and repairs may also depend on settled author
-ancestors whose facts and inputs are projected into both candidates. Candidate repairs
-return only to those gates and stay within the author's declared write capability.
+Every authoring stage runs one author. New workflow and dispatch competition fields are refused before unknown metadata is
+stripped. Brief text and frontmatter run under the visible single-author notice in
+each stage input; this also keeps old brief bytes usable on continuation.
 
-Race freezes the current project inputs, then authors one private candidate through its
-independent gates and ordinary bounded repairs. If A completes with effective passing gate
-facts, it is delivered without setting up or authoring B. Otherwise B receives the same frozen
-inputs and must meet the same completion and gate requirements. An approval park or an ungated
-completion claim cannot be delivered. A receives restatement guidance as a stage instruction;
-the admitted task and criteria stay unchanged.
+Historical workflows and plans use separate tolerant readers. Their competition markers,
+candidate patches and records remain evidence; no candidate is launched or selected.
+Accepted child gate verdicts retain their original provenance. An unfinished author
+continues in the original project with its retained artifacts and an explicit reference
+to old candidate records. Unknown historical consumer ownership still blocks recovery.
 
-The selected scoped patch is checked/applied in the parent, whose downstream gates still run.
-The stage retains version 3 `race_<attempt>.json` and patches for attempted candidates only,
-including A's failure before B starts; candidate run records retain verification evidence.
-Private project copies are reclaimed. There is no separate race CLI or public gate-hold switch.
+## Stage budgets and retained continuation
 
-Sources: [race admission](../src/scheduler/sched_admission/configuration.ts),
-[selector](../src/race.ts), [stage integration](../src/scheduler/sched_loop/stage-race.ts).
+Each execution has one monotonic clock, shared by provider retries, parameter repairs,
+guidance continuations and backoff. For a normal budget `B`, the finishing interval is
+`W = min(300000, max(1, floor(B / 10)))` milliseconds. The warning is due at
+`max(0, B - W - 5500)`. The immutable hard stop is `max(B, W + 5500)`; very short
+budgets therefore start in finishing mode and still reserve child retirement.
+No numeric default changed: the three-hour default now includes the finishing turn.
+
+The worker persists an attempt-bound guidance envelope, retires the current invocation
+through its existing control path and invokes the same adapter with the actionable
+wrap-up instruction. Both Codex and Claude use this path. A captured same-attempt UUID
+may resume; otherwise the full duties and guidance are supplied to a fresh child.
+No cross-stage session reuse is required. The 5.5-second closure window reserves the
+existing five-second process-group escalation plus observation. Once that child retires
+within the window, at least `W` remains for the finishing turn under a responsive scheduler.
+An unresponsive scheduler cannot deliver a timely warning; monotonic settlement still
+recognizes expiry, retains the files and records missing delivery rather than inventing it.
+
+A cooperative wrap settles normally. At the hard stop an uncooperative child receives
+SIGTERM, followed by SIGKILL after five seconds if needed. Child closure must be verified;
+unknown closure refuses further execution. Both outcomes keep admitted files, the output
+and live log, with an immutable done/remaining handoff in continuation metadata. Cooperative
+authored JSON stays intact; a forced stop publishes a typed partial-work control handoff
+instead of inventing an authored result or gate verdict. Unsafe writes and genuine gate
+rejections remain refusals. The idle watchdog independently stops lack of verified progress;
+a wrap-up does not reset its progress clock.
+
+A completed budget slice is not completed duty or gate acceptance. It cannot release
+consumers or publish a passing gate verdict. The next workflow iteration preserves the
+admitted DAG, files and completed predecessors, and reopens the unfinished slice and its
+consumers. The next author receives its own previous output, live log and attributed
+writes. Each slice spends one of the existing finite `max_iterations`; exhaustion is
+`incomplete` with retained work, without timeout retry growth. A configured research wall
+ceiling also prevents another slice at a budget boundary. Cancel/resume preserves spent
+iterations. Gates and configured validation run in independent stage boundaries with
+their own budgets, so an author cannot consume their execution time.
 
 ## Artifact locations
 
@@ -179,6 +205,14 @@ proposed `stages` list. Revisions require all stages idle. Preserve admitted res
 and executed history; unstarted declared tactics may be replaced. New scopes fit the initial capability union. Whole-plan admission
 runs again. A decision projection without matching journaled history cannot authorize a revision.
 Removing an obligation requires a new initial plan rather than an amendment.
+
+Repair batches use this same idle-boundary admission. Newly appended repair stages
+for the active rejected gates finish in dependency order before those gates run
+again, within the existing repair round and budget. Every round resets its repair
+dependencies before selecting ready work. Each disjoint execution wave captures
+fresh guard preimages, including scopes serialized after earlier writes; the gate
+receives the combined repair diff from the start of the round. Failed work does not
+release its successors or clear the rejection.
 
 Sources: [scope protocol](../src/runtime-negotiation.ts),
 [live guard](../src/live-constraint-guard.ts), [plan revisions](../src/plan-revisions.ts).

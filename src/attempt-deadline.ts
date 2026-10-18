@@ -12,6 +12,15 @@ export const ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS = 500;
 export const ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS =
   ATTEMPT_TERMINATION_GRACE_MS + ATTEMPT_CLOSE_OBSERVATION_CUSHION_MS;
 
+/** Reserve a finishing turn, not another authoring budget. Short stages scale
+ * the interval; long stages get five minutes, measured after child retirement. */
+export function stageWrapUpTiming(budgetMs: number): { warningAfterMs: number; finishingMs: number; hardLimitMs: number } {
+  positiveSafeInteger(budgetMs, 'stage budget');
+  const finishingMs = Math.min(300_000, Math.max(1, Math.floor(budgetMs / 10)));
+  return { warningAfterMs: Math.max(0, budgetMs - finishingMs - ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS), finishingMs,
+    hardLimitMs: Math.max(budgetMs, ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS + finishingMs) };
+}
+
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 export interface AttemptDeadlineEvent {
@@ -28,6 +37,9 @@ export interface AttemptDeadlineSnapshot {
   budgetMs: number;
   attemptStartedAt: string;
   deadlineAt: string;
+  budgetDeadlineAt?: string;
+  wrapUpAt?: string;
+  finishingMs?: number;
   elapsedMs: number;
   remainingMs: number;
   deadlineReachedAt?: string;
@@ -63,17 +75,23 @@ export class AttemptDeadlineController {
   readonly attemptStartedAt: string;
   readonly deadlineAt: string;
   readonly signal: AbortSignal;
+  readonly wrapUpSignal: AbortSignal;
+  readonly budgetDeadlineAt: string;
+  readonly wrapUpAt?: string;
+  readonly finishingMs?: number;
   readonly ledgerPath?: string;
 
   private readonly clock: AttemptDeadlineClock;
   private readonly startedMono: number;
   private readonly deadlineMono: number;
   private readonly controller = new AbortController();
+  private readonly wrapUpController = new AbortController();
   private timer?: ReturnType<typeof setTimeout>;
   private deadlineReachedWall?: number;
 
   constructor(input: {
     budgetMs: number;
+    wrapUp?: boolean;
     ledgerDir?: string;
     /** Human-facing one-based execution number used only for the journal name. */
     executionIndex?: number;
@@ -85,9 +103,15 @@ export class AttemptDeadlineController {
     this.attemptId = input.attemptId ?? randomBytes(16).toString('hex');
     this.startedMono = this.clock.monotonicNow();
     const wallStarted = this.clock.wallNow();
-    this.deadlineMono = this.startedMono + this.budgetMs;
+    const timing = input.wrapUp ? stageWrapUpTiming(this.budgetMs) : undefined;
+    const hardLimitMs = timing?.hardLimitMs ?? this.budgetMs;
+    this.deadlineMono = this.startedMono + hardLimitMs;
+    this.budgetDeadlineAt = new Date(wallStarted + this.budgetMs).toISOString();
+    this.finishingMs = timing?.finishingMs;
+    this.wrapUpAt = timing ? new Date(wallStarted + timing.warningAfterMs).toISOString() : undefined;
+    this.wrapUpSignal = this.wrapUpController.signal;
     this.attemptStartedAt = new Date(wallStarted).toISOString();
-    this.deadlineAt = new Date(wallStarted + this.budgetMs).toISOString();
+    this.deadlineAt = new Date(wallStarted + hardLimitMs).toISOString();
     this.signal = this.controller.signal;
     if (input.ledgerDir) {
       mkdirSync(input.ledgerDir, { recursive: true });
@@ -100,6 +124,7 @@ export class AttemptDeadlineController {
       budgetMs: this.budgetMs,
       attemptStartedAt: this.attemptStartedAt,
       deadlineAt: this.deadlineAt,
+      ...(this.finishingMs ? { budgetDeadlineAt: this.budgetDeadlineAt, wrapUpAt: this.wrapUpAt, finishingMs: this.finishingMs } : {}),
     });
     this.scheduleDeadlineCheck();
   }
@@ -151,6 +176,7 @@ export class AttemptDeadlineController {
       budgetMs: this.budgetMs,
       attemptStartedAt: this.attemptStartedAt,
       deadlineAt: this.deadlineAt,
+      ...(this.finishingMs ? { budgetDeadlineAt: this.budgetDeadlineAt, wrapUpAt: this.wrapUpAt, finishingMs: this.finishingMs } : {}),
       elapsedMs: Math.round(this.elapsedMs()),
       remainingMs: Math.max(0, Math.floor(this.remainingMs())),
       deadlineReachedAt: this.deadlineReachedAt(),
@@ -193,6 +219,7 @@ export class AttemptDeadlineController {
 
   /** Observe monotonic expiry even when the timer callback was starved. */
   observeSettlement(): boolean {
+    this.observeWrapUp();
     if (!this.signal.aborted && this.remainingMs() <= 0) this.abortAtDeadline();
     return this.signal.aborted;
   }
@@ -201,16 +228,28 @@ export class AttemptDeadlineController {
     if (this.timer) this.clock.clearTimer(this.timer);
   }
 
+  private observeWrapUp(): void {
+    if (this.wrapUpAt && !this.wrapUpSignal.aborted
+      && this.clock.monotonicNow() - this.startedMono >= stageWrapUpTiming(this.budgetMs).warningAfterMs) {
+      this.append('stage_wrap_up_due', { finishingMs: this.finishingMs });
+      this.wrapUpController.abort('stage_budget_wrap_up');
+    }
+  }
+
   private scheduleDeadlineCheck(): void {
+    this.observeWrapUp();
     const remaining = this.remainingMs();
     if (remaining <= 0) {
       this.abortAtDeadline();
       return;
     }
+    const untilWarning = this.wrapUpAt && !this.wrapUpSignal.aborted
+      ? stageWrapUpTiming(this.budgetMs).warningAfterMs - this.elapsedMs() : remaining;
     this.timer = this.clock.setTimer(() => {
+      this.observeWrapUp();
       if (this.remainingMs() > 0) this.scheduleDeadlineCheck();
       else this.abortAtDeadline();
-    }, Math.max(1, Math.min(MAX_TIMER_DELAY_MS, Math.ceil(remaining))));
+    }, Math.max(1, Math.min(MAX_TIMER_DELAY_MS, Math.ceil(remaining), Math.ceil(untilWarning))));
   }
 
   private abortAtDeadline(): void {

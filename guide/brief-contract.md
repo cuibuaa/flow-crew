@@ -29,9 +29,13 @@ validation:
 ```
 
 Follow it with the goal, constraints and extractable acceptance criteria. `workflow: direct`
-selects a fixed author/gate/repair plan; `workflow: planner` or omission uses the planner.
+selects a fixed author/gate/repair plan, also used when the choice is omitted for an
+ordinary task. `workflow: planner` requests dynamic planning; `--workflow <name>`
+preserves an explicit CLI choice, including `--workflow default` for the planner.
 Numeric research selects the research workflow unless an explicit CLI workflow overrides it.
-Direct research and program loops are refused. Input/output count does not choose the workflow.
+Program briefs retain the planner default. Direct research and program loops are refused.
+Input/output count does not choose the workflow. The fixed plan uses the same admission,
+isolated author writes, independent review, repair and re-review, and brief/report duties.
 
 `objective:` is an exact alias for `research:`, with `research` winning when both exist.
 A numeric `baseline` activates the metric loop. An engineering `objective` containing only
@@ -58,6 +62,9 @@ Absolute external outputs require an explicit directory declaration: protected/r
 overlaps and aliases are refused.
 Their contents are not recursively inventoried by preflight. Rehearsal substitutes temporary
 locations. A declaration is authority for its named location, not permission for siblings.
+Project outputs may lie inside declared input directories: input preservation excludes the
+declared output file or directory tree, while other input paths stay protected. Stage write
+scope and existing-content rules still apply.
 
 `validation.commands` is a nonempty mapping of `build`, `test` and/or `lint` to
 `{command: string, args: string[]}`. These declarations supply shell-free argv; unknown roles,
@@ -96,6 +103,26 @@ sidecar with `label`, `outcome: no_candidate` and a nonblank `reason`. Exactly o
 be fresh. No-candidate rounds consume stop budget without inventing a baseline observation.
 Duplicate journaled labels are refused. Accepted rounds enter `research_journal.json` and
 the report directory's exact `run_manifest.json` before confirmation.
+
+Before dispatch, the engine snapshots the content identities of both result slots and existing
+inferred `evidence.json` files in `run.json.researchInputGeneration`. Admission and inference
+share the same confined regular-file domain, with the existing 4 MiB evidence limit; aliases
+and special files are not read as evidence. Content identities use the existing nonblocking,
+no-follow regular-file reader. Explicit result slots retain confined internal aliases, using
+their canonical file identity; inferred evidence still requires a regular directory entry.
+A new publication changes content relative to that snapshot or is evidenced by a completed
+current-iteration producer attempt's settled write ledger. Equal measurement bytes remain valid
+when that ledger proves current production; touching an old file alone does not prove it.
+Backward clock steps therefore cannot discard a newly published round. The snapshot
+survives resume, while journal labels and immutable consumed copies prevent counting a round
+twice. A legacy run without a snapshot preserves pending publications recorded in the closed
+current-iteration producer attempt's write ledger, using the same publication rule. Independent review still decides whether
+that result is accepted, without repeating completed production. The existing confined project
+alias resolver and regular-file device/inode identity bind a result slot to that producer's
+recorded write, including project-local hardlinks. An independent file with identical bytes
+does not prove publication. Other pre-existing files are snapshotted as old; a completed stage
+name alone does not prove publication. Once established,
+the snapshot survives every resume.
 
 Variability and outlier bounds apply only when declared. Reported uncertainty still determines
 whether a gain counts; surprising gains and high variance need independent review or a declared

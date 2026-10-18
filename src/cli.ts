@@ -27,7 +27,7 @@ function earlyCommandHelp(input: string[]): string | undefined {
     if (subcommand === 'show') return 'Usage: flowcrew task show <id> [--summary-only | --raw]\nShows bounded run/stage detail; raw tick JSON is opt-in.';
     return 'Usage: flowcrew task list|show|cancel|resume|retry|tail ...';
   }
-  if (command === 'daemon') return 'Usage: flowcrew daemon start|serve|stop|restart|status|logs [options]';
+  if (command === 'daemon') return 'Usage: flowcrew daemon start|serve|stop|restart|status|hold|hold-status|continue|logs [options]\n  hold [--timeout-ms N] fences launches and waits for settled groups (default 60000ms).\n  hold-status reports settlement; continue releases compatible held runs.';
   if (command === 'quick') return 'Usage: flowcrew quick <task|brief path|-> [--project <path>] [--max-iterations N]';
   if (command === 'rehearse') return 'Usage: flowcrew rehearse <brief> [--project <path>] [--json]';
   if (command === 'interrupt') return 'Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"';
@@ -44,6 +44,7 @@ function earlyCommandHelp(input: string[]): string | undefined {
     status: 'Usage: flowcrew status [--all] [--project <path>]',
     list: 'Usage: flowcrew list [--limit N]',
     clean: 'Usage: flowcrew clean [--keep N]',
+    prune: 'Usage: flowcrew prune [--run <run-id>] [--dry-run | --apply] [--json]\nCompacts settled workspaces; defaults to a read-only dry-run. Keeps run history and evidence.',
     export: 'Usage: flowcrew export [run-id]',
     'audit-reality': 'Usage: flowcrew audit-reality [options]',
     'ship-preflight': 'Usage: flowcrew ship-preflight [--brief <path>] [options]',
@@ -75,6 +76,9 @@ if (bootstrapHelp !== undefined) {
     process.stdout.write(`fc_tasks: degraded[internal_error] · command failed to load: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   }
+} else if (bootstrapArgs[0] === 'prune') {
+  const { cmdPrune } = await import('./run-retention.js');
+  process.exitCode = cmdPrune(bootstrapArgs);
 } else if (bootstrapArgs[0] === 'plan-check') {
   const { cmdPlanCheck } = await import('./plan-interface.js');
   process.exitCode = await cmdPlanCheck(bootstrapArgs);
@@ -953,7 +957,7 @@ async function cmdQuick() {
     console.error('');
     console.error('Options:');
     console.error('  --adapter auto|codex|claude|mock  Agent backend (defaults to engine config/defaults.yaml)');
-    console.error('  --workflow <name>       Workflow to use (default: default)');
+    console.error('  --workflow <name>       Workflow to use (default: direct; research/program use planner loops)');
     console.error('  --max-iterations <n>    Override engine config/defaults.yaml for this run');
     console.error('  --campaign <name>       Attach run to campaign (default: slug of the main worktree)');
     console.error('  --no-campaign           Run un-attached to any campaign (opt-out)');
@@ -1189,7 +1193,7 @@ async function cmdQuick() {
   }
 
   const { assessResearchIterationBudget, loadWorkflow, runWorkflow } = await import('./scheduler.js');
-  const { config, raw } = loadWorkflow(workflowPath);
+  const { config, raw } = loadWorkflow(workflowPath, initializedContinuation);
   if (maxIterations && !initializedContinuation) config.defaults.max_iterations = maxIterations;
   if (!initializedContinuation) {
     const budgetDefaults = loadEngineDefaults();
@@ -1771,7 +1775,7 @@ function cmdInterrupt() {
   }
 }
 
-function cmdClean() {
+async function cmdClean() {
   if (args.includes('--help') || args.includes('-h')) {
     console.log('Usage: flowcrew clean [--keep N]');
     console.log('');
@@ -1814,6 +1818,15 @@ function cmdClean() {
       }
     } catch { /* no validated live scheduler; historical run is cleanable */ }
     try {
+      // A crashed scheduler can leave owned commands alive. Keep their run
+      // records until every consumer has retired.
+      const { checkpointConsumers } = await import('./restart-recovery.js');
+      if (readableRuns.includes(runId) && checkpointConsumers(readRunState('', runId).engineCheckpoint).length > 0) {
+        skippedLive += 1;
+        continue;
+      }
+      const { retireRunScratch } = await import('./invocation-scratch.js');
+      retireRunScratch(join(root, runId));
       rmSync(join(root, runId), { recursive: true, force: true });
       cleaned += 1;
     } catch { /* non-critical */ }
@@ -2054,9 +2067,10 @@ Commands:
   guide     Queue original guidance for a running stage or every stage
   interrupt Stop the active command in a named stage and deliver a reason
   clean     Delete old runs (keeps 5 most recent by default)
+  prune     Compact terminal run workspaces, preserving history/evidence (dry-run by default)
   export    Export a run as JSON bundle
   campaign  Inspect recorded campaign state and review pending brief patches
-  daemon    Operate the background orchestrator (restart/status; serve is foreground/internal)
+  daemon    Operate the background orchestrator (hold/continue, restart/status; serve is internal)
   dashboard Query the running web dashboard (status)
   task      List and manage background tasks
   fc_tasks  Render and safely update a conversational task ledger
@@ -2095,6 +2109,8 @@ Examples:
   flowcrew guide --run <run-id> "try a different approach"
   flowcrew interrupt --run <run-id> --stage <stage-id> "stop the oversized job"
   flowcrew clean --keep 3
+  flowcrew prune --dry-run
+  flowcrew prune --run <run-id> --apply
   flowcrew ship-preflight --brief docs/task_brief.md
   flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work
   flowcrew land --run <run-id>
@@ -2136,7 +2152,7 @@ switch (command) {
     cmdInterrupt();
     break;
   case 'clean':
-    cmdClean();
+    await cmdClean();
     break;
   case 'export':
     cmdExport();

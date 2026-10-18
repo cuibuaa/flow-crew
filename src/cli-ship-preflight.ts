@@ -1,4 +1,5 @@
 import { errorMessage } from './source_services/cli-inputs.js';
+import { hashRollbackFileSync } from './rollback-content-store.js';
 import {
   accessSync,
   constants,
@@ -87,6 +88,7 @@ export interface ShipPreflightDependencies {
   readDirectory?: (path: string) => string[];
   readText?: (path: string) => string;
   readBytes?: (path: string) => Uint8Array;
+  hashFile?: (path: string) => { sha256: string; byteLength: number };
   stat?: (path: string) => FileStat;
   exists?: (path: string) => boolean;
   readable?: (path: string) => boolean;
@@ -110,6 +112,7 @@ interface ResolvedDependencies {
   readDirectory: (path: string) => string[];
   readText: (path: string) => string;
   readBytes: (path: string) => Uint8Array;
+  hashFile: (path: string) => { sha256: string; byteLength: number };
   stat: (path: string) => FileStat;
   exists: (path: string) => boolean;
   readable: (path: string) => boolean;
@@ -258,6 +261,7 @@ function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDepe
     readDirectory: overrides.readDirectory ?? ((path) => readdirSync(path)),
     readText: overrides.readText ?? ((path) => readFileSync(path, 'utf-8')),
     readBytes: overrides.readBytes ?? ((path) => readFileSync(path)),
+    hashFile: overrides.hashFile ?? hashRollbackFileSync,
     stat: overrides.stat ?? ((path) => statSync(path) as Stats),
     exists: overrides.exists ?? existsSync,
     readable: overrides.readable ?? ((path) => {
@@ -706,6 +710,7 @@ function inspectBriefInputs(
     readable: deps.readable,
     readText: deps.readText,
     readBytes: deps.readBytes,
+    hashFile: deps.hashFile,
     readDirectory: deps.readDirectory,
     stat: deps.stat,
     lstat: deps.lstat,
@@ -738,6 +743,7 @@ function inspectOutputInventory(
       readable: deps.readable,
       readText: deps.readText,
       readBytes: deps.readBytes,
+      hashFile: deps.hashFile,
       readDirectory: deps.readDirectory,
       stat: deps.stat,
       lstat: deps.lstat,

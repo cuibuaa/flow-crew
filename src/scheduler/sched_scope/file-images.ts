@@ -221,6 +221,12 @@ export function readRepairFileImage(
   }
 }
 
+/** Detection retains no payload for content that has not been admitted writable. */
+export function repairFileIdentity(image: RepairFileImage): RepairFileImage {
+  const { bytes: _bytes, text: _text, backingPath: _backingPath, ...identity } = image;
+  return identity;
+}
+
 export function repairFileImageBytes(image: RepairFileImage): number {
   if (!image.exists) return 0;
   if (image.byteLength !== undefined) return image.byteLength;

@@ -37,8 +37,10 @@ independent reviews and retained evidence. **You probably don't need FlowCrew** 
   `ceiling_hit` ends research without a metric win; `incomplete` means insufficient completion. `failed` and
   `reality_gate_failed` record execution/check failures; `escalated` is unresolved or irreparable;
   `phase_complete` ends a phase; `stopped` records a stop.
-- **Interruptible work.** `task cancel` stops registered work; `task resume` continues stopped, failed or incomplete
-  runs with completed stages, plan, history and remaining budget. `task retry` requests another launch attempt,
+- **Interruptible work.** `daemon hold` parks in-flight work at settled stage groups for deployment;
+  `daemon continue` resumes compatible runs with completed stages, plan, history and remaining budget.
+  `task cancel` stops work. Explicit `task resume` continues compatible stopped, failed or incomplete work after settlement.
+  `task retry` requests another launch attempt,
   starting a fresh run after terminal settlement.
 
 See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
@@ -59,10 +61,10 @@ See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
 
 <img src="assets/architecture.png" width="900" alt="FlowCrew architecture: the ship procedure and quick or daemon launch lead to scheduler planning, scoped authors, engine validation, independent gates and bounded repair; declared reality checks guard successful outcomes, with adapters, roles, dashboard, campaigns and persistent evidence alongside." />
 
-This summarizes the review path; research also has measured rounds and a stopping policy.
-An optional race tries one private candidate through gates and bounded repairs before trying a second.
-The selected patch still faces the parent run's gates. Declared reality checks govern terminal success,
-with advisory exceptions. See [races](guide/agent-protocol.md#planner-selected-races) and
+Each authoring stage has one author. Independent gates receive their own stage budgets,
+including configured validation. Declared reality checks govern terminal success, with advisory
+exceptions. Research also has measured rounds and a stopping policy. See
+[stage budgets](guide/agent-protocol.md#stage-budgets-and-retained-continuation) and
 [deterministic checks](guide/brief-contract.md#deterministic-checks).
 
 ## Get started
@@ -92,6 +94,8 @@ check which checkout it selects. [Getting started](guide/getting-started.md) cov
 ```
 
 The installer skips absent agent executables. Live runs need an installed, authenticated Codex CLI or Claude Code.
+Both adapters run complete live tasks end to end; the Claude adapter takes its default model from
+`~/.config/flowcrew/claude.json` when present, otherwise the Claude Code user settings.
 **Recommendation: plan in Claude Code, execute in Codex.** The default `auto` backend selects Codex when both
 CLIs are installed, or the only installed CLI. [Adapter configuration](guide/configuration.md#precedence-and-adapters).
 
@@ -112,19 +116,19 @@ The [ship procedure](skills/ship.md) calls for exact-byte rehearsal and digest c
 and launch into an isolated worktree with a measured validation baseline. Skills are instructions to
 the coding agent; the engine does not guarantee that it follows them.
 
-### 5. Watch, cancel and resume
+### 5. Watch and control tasks
 
 ```bash
 flowcrew start
 flowcrew watch
 flowcrew status
-flowcrew task cancel <numeric-id>
-flowcrew task resume <numeric-id>
+flowcrew task show <numeric-id>
 ```
 
 `start` runs the dashboard at `http://localhost:3000/` by default; use another terminal for `watch` and `status`.
-Use task controls as needed with the registered task's numeric ID. Dashboard Resume sits beside Cancel;
-it preserves completed work and remaining budget. Retry starts fresh after terminal settlement.
+Use `daemon hold` and `daemon continue` for the [deployment procedure](guide/operations.md#deploy-while-tasks-are-in-flight).
+`task resume` (and Dashboard Resume) explicitly continues compatible stopped, failed or incomplete work,
+preserving completed work and remaining budget. Cancellation stays stopped until explicit continuation; retry starts fresh after settlement.
 Parked approvals use Inbox decisions. [CLI](guide/cli.md#services-and-tasks) · [Operations](guide/operations.md#inspect-guide-and-stop).
 
 ## What you can run
@@ -177,7 +181,8 @@ they do not guarantee novel proposals.
   output/input locations make results inspectable. Location checks establish required paths
   and producer bindings; content quality still needs criteria and review.
 - **Stopping is a rule.** Research policy owns numeric keep/stop decisions. Repair limits,
-  attempt deadlines and a deterministic idle watchdog bound execution.
+  live wrap-up guidance retains over-budget work for the next bounded iteration;
+  independent gate budgets and a deterministic idle watchdog bound execution.
 
 The [architecture](guide/architecture.md) and [artifact protocol](guide/agent-protocol.md) explain these boundaries.
 

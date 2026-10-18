@@ -491,7 +491,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     expect(parsed.files.map((file) => file.path)).toContain('outside/guarded.txt');
   });
 
-  it('item 11: run-start rollback preserves clean, dirty, untracked, deleted, and mode preimages', async () => {
+  it('item 11: admitted writable content preserves clean, dirty, untracked, deleted, and mode preimages', async () => {
     const projectDir = temporaryRoot();
     const stateRoot = temporaryRoot('flowcrew-rollback-shapes-state-');
     priorStateRoot = fcGlobalDir();
@@ -530,6 +530,15 @@ describe('UX/performance engine-loop evidence replays', () => {
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
+    // A previous writer admission owns rollback for these mutable source files;
+    // the later empty-scope stage must still be caught and restored independently.
+    const admittedWriter = stage({ id: 'prior_writer', role: 'coder', scope: ['src/**'],
+      depends_on: [], dependency_reasons: {} });
+    const admitted = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
+    expect(admitted.files.get('src/dirty.txt')?.backingPath).toBeTruthy();
+    expect(admitted.files.get('src/untracked.txt')?.backingPath).toBeTruthy();
+    const warm = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
+    expect(warm.measurement).toMatchObject({ baselineInitialized: false, scopedFilesRead: 0, scopedFilesHashed: 0 });
     const paths = ['src/clean.txt', 'src/dirty.txt', 'src/untracked.txt', 'src/deleted.txt', 'src/mode.txt', 'src/new.txt'];
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
@@ -550,7 +559,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     expect(() => statSync(join(projectDir, 'src', 'new.txt'))).toThrow();
   }, 20_000);
 
-  it('item 11: a non-Git run images once and still restores an out-of-scope overwrite', async () => {
+  it('item 11: a non-Git run captures admitted content once and restores a later out-of-scope overwrite', async () => {
     const projectDir = temporaryRoot();
     const stateRoot = temporaryRoot('flowcrew-nongit-rollback-state-');
     priorStateRoot = fcGlobalDir();
@@ -574,6 +583,15 @@ describe('UX/performance engine-loop evidence replays', () => {
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
+    const admittedWriter = stage({ id: 'prior_writer', role: 'coder', scope: ['src/protected.txt'],
+      depends_on: [], dependency_reasons: {} });
+    const admitted = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
+    expect(admitted.measurement.baselineStrategy).toBe('filesystem-images');
+    expect(admitted.files.get('src/protected.txt')?.backingPath).toBeTruthy();
+    const warm = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
+    expect(warm.measurement).toMatchObject({ baselineInitialized: false, scopedFilesRead: 0, scopedFilesHashed: 0,
+      scopedBytesRead: 0, scopedBytesHashed: 0 });
+    expect(readdirSync(join(created.runDirPath, '.rollback-preimages'))).toHaveLength(1);
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       writeFileSync(join(projectDir, 'src', 'protected.txt'), 'unauthorized\n');

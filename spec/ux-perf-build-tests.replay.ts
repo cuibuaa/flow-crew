@@ -90,7 +90,7 @@ describe('transactional build and truthful fast-test contracts', () => {
       findDeployedDistConsumers,
       writeDaemonIdentity,
     } = await import('../src/daemon-identity.js');
-    const root = temporaryRoot('flowcrew-deployed-dist-warning-');
+    const root = temporaryRoot('fc-bld-');
     const dist = join(root, 'dist');
     const procRoot = join(root, 'empty-proc');
     const socketPath = join(root, 'daemon.sock');

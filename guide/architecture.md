@@ -20,7 +20,7 @@ checks, deadlines, process identity and publication integrity are code boundarie
 
 A planner's typed result supplies the graph. Roles and check descriptors are supplied from
 registries; unknown roles and invalid whole-plan topology refuse admission.
-[Agent protocol](agent-protocol.md) owns dispatch/verdict/artifact schemas and races.
+[Agent protocol](agent-protocol.md) owns dispatch/verdict/artifact schemas and retained continuation.
 [Brief contract](brief-contract.md) owns research policy and deterministic checks.
 Ordinary failed work follows admitted bounded repairs, then stops; it does not force an
 unbounded outer re-plan. Deliberate next-phase/research advancement can plan more work.
@@ -31,12 +31,19 @@ Sources: [workflow loop](../src/scheduler/sched_loop/workflow-loop.ts),
 
 ## Deadlines and idle progress
 
-Each scheduled execution receives the configured base deadline. It is immutable and covers
-adapter retries, backoff, correction, fallback loading and fallback execution. Extension
-requests cannot move it. A configured technical timeout retry starts a later execution with
-a strictly larger derived budget; there is no aggregate technical-chain deadline above it.
-Settlement synchronously checks the monotonic deadline even if event-loop delay starved timers.
-A current-execution watchdog abort remains authoritative at that boundary.
+Each scheduled execution receives one budget and an immutable hard stop, shared by
+adapter retries, backoff, correction and guidance continuations. Before the budget ends,
+the worker delivers actionable wrap-up guidance through the existing invocation control
+path on both adapters. A finishing interval and child-retirement reserve keep orderly
+handoff separate from forced termination; [the protocol](agent-protocol.md#stage-budgets-and-retained-continuation)
+states the exact timing formula and very-short-budget behavior.
+
+Cooperative and bounded forced wrap-ups retain admitted files and a done/remaining
+handoff, and continue the same DAG in the next finite iteration. They are not technical
+failures and do not grow the budget. Each later gate has its own clock. Legacy timeout
+retry history remains readable; an older interrupted technical chain retains its recorded
+budget on continuation. Settlement synchronously checks monotonic expiry when timers were
+starved. Current-execution abort authority still wins.
 
 The always-used deterministic watchdog polls at a default 30 seconds and binds observations
 to the active execution index/start. Changed output, artifact or command CPU/I/O evidence
@@ -93,6 +100,11 @@ tracked files and declared inputs remain protected. Batch ownership decides both
 and the audit outcome; scope admission and input protection share one intersection model.
 Snapshot overlap is observation, not proof that two parallel stages wrote the same file;
 structured direct attribution is required for a parallel-write conflict claim.
+
+Settling an admitted write retains its bytes in the existing run rollback content store before
+a later writer can overwrite them. A later batch keeps that retained preimage when the path
+becomes a read-only input. Identity-only inspection still avoids copying uncaptured read-only
+data; unknown preimages still cannot authorize destructive restoration.
 
 Project validation owns dependency preparation. Each configured validation batch
 installs from the current project lockfiles with the discovered package manager's

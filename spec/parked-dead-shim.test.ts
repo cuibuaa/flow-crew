@@ -26,7 +26,7 @@ beforeEach(() => {
   project = join(root, 'project'); mkdirSync(project);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   registry = new TaskRegistry({ baseDir: join(root, 'registry') });
-  runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []).runId;
+  runId = createRun(project, 'fixture', 'name: fixture\nstages: [{id: work, role: coder, scope: [], artifact_contract: {version: 1, produces: [], reads: []}}]\n', ['work']).runId;
   directory = runDir(project, runId);
   writeFileSync(join(directory, 'scheduler.pid'), String(DEAD_PID));
   atomicWriteJson(supervisionPaths(registry.baseDir, unit).running, {

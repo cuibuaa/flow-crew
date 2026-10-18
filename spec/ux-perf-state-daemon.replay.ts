@@ -60,7 +60,7 @@ let previousFcDir: string;
 let clock: number;
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'flowcrew-state-daemon-'));
+  root = mkdtempSync(join(tmpdir(), 'fc-sd-'));
   projectDir = join(root, 'project');
   registryDir = join(root, 'registry');
   mkdirSync(projectDir);

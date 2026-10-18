@@ -1,8 +1,7 @@
-import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Adapter } from '../src/adapters/base.js';
@@ -12,6 +11,7 @@ import {
 } from '../src/cancellation-client.js';
 import { cmdTask } from '../src/cli-task.js';
 import { cancelRunWithControlPlane } from '../src/dashboard.js';
+import { createInvocationScratch } from '../src/invocation-scratch.js';
 import { Orchestrator, type SupervisorBackend, type UnitStatus } from '../src/orchestrator.js';
 import {
   RpcOutcomeUnknownError,
@@ -39,13 +39,14 @@ let registry: TaskRegistry;
 let socketPath: string;
 let server: Server | undefined;
 let originalFcHome: string;
+const scratchAliases: string[] = [];
 
 beforeAll(() => {
   originalFcHome = fcGlobalDir();
 });
 
 beforeEach(() => {
-  fixtureRoot = mkdtempSync(join(tmpdir(), `flowcrew-e13b-${randomBytes(4).toString('hex')}-`));
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'fc-cp-'));
   projectDir = join(fixtureRoot, 'project');
   mkdirSync(projectDir, { recursive: true });
   setFcGlobalDir(fixtureRoot);
@@ -59,6 +60,7 @@ afterEach(async () => {
   server = undefined;
   invalidateRunLockCache();
   setFcGlobalDir(originalFcHome);
+  for (const alias of scratchAliases.splice(0)) rmSync(alias, { force: true });
   rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
@@ -137,6 +139,10 @@ describe('cancellation entry convergence', () => {
     state.status = RUN_STATUS.RUNNING;
     state.stages.work.status = STAGE_STATUS.RUNNING;
     writeRunState(projectDir, created.runId, state);
+    const scratch = createInvocationScratch(created.runDirPath);
+    const scratchAlias = dirname(scratch.path);
+    scratchAliases.push(scratchAlias);
+    writeFileSync(join(scratch.path, 'evidence.txt'), 'cancelled invocation payload');
     // Legacy registries may bind the same run by absolute path. The wire must
     // still use its safe run id while local convergence retains that binding.
     const task = boundTask(created.runDirPath);
@@ -177,6 +183,9 @@ describe('cancellation entry convergence', () => {
       failureReason: 'Cancelled by user',
       completedAt: expect.any(String),
     });
+    expect(() => lstatSync(scratchAlias)).toThrow(/ENOENT/);
+    expect(existsSync(join(created.runDirPath, 'scratch'))).toBe(false);
+    expect(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf8')).toContain('name: default');
   });
 
   it('accepts only complete confirmed RPC results and never retries an outcome-unknown mutation', async () => {

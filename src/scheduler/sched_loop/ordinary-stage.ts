@@ -9,7 +9,7 @@ import { readCampaignEntries, resolveCampaignStorageKey } from '../../campaigns.
 import { isSessionReuseEnabled } from '../../config.js';
 import { summarizeContext } from '../../context-inventory.js';
 import { listCheckTypes } from '../../reality-gate/index.js';
-import { StageConfig, WorkflowConfig, parseAgent } from '../sched_admission/configuration.js';
+import { StageConfig, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { sessionResumeForStage, shouldPreserveSession } from '../sched_admission/sessions.js';
@@ -26,7 +26,6 @@ import { createSchedulerLiveConstraintGuardFactory } from './services.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { stageRaceAdapter } from './stage-race.js';
 
 export async function executeOrdinaryStage(
   stage: StageConfig, sorted: StageConfig[], state: StoreState,
@@ -38,7 +37,6 @@ export async function executeOrdinaryStage(
   skills?: string, taskDescription?: string, availableSkills?: string,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
   settlementBoundary?: (phase: 'child_closed' | 'attempt_closed') => Promise<boolean>,
-  workflowDefaults?: WorkflowConfig['defaults'],
 ): Promise<{stage: StageConfig; result: RunResult; currentRetries: number}> {
       if (!agents.has(stage.role)) {
         const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
@@ -135,8 +133,7 @@ export async function executeOrdinaryStage(
         resolvedPrompt = appendGateEvidenceInstruction(resolvedPrompt, runDirPath, stage.id, state.currentIteration ?? 1);
       }
 
-      const stageAdapter = stage.race ? stageRaceAdapter({ stage, stages: sorted, adapter,
-        agentsDir: resolvedAgentsDir, projectDir, runDirPath, state, skills, defaults: workflowDefaults, attemptDeadlineClockFactory }) : agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
+      const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
       const sessionReuseEnabled = isSessionReuseEnabled();
       const resumeSession = sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled, stageAdapter.sessionKind);
       if (!technicalRetry) {
@@ -151,7 +148,7 @@ export async function executeOrdinaryStage(
       if (currentRetries > 0) {
         resolvedPrompt = `${buildRetryPreamble(currentRetries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`;
       }
-      if (state.workflowName !== 'direct') resolvedPrompt = appendAttemptDeadlineContract(resolvedPrompt, prepared.budgetMs);
+      resolvedPrompt = appendAttemptDeadlineContract(resolvedPrompt, prepared.budgetMs);
       const result = await runStage(stageAdapter, {
         stageId: stage.id,
         role: agent,
@@ -160,7 +157,7 @@ export async function executeOrdinaryStage(
         artifactObligationTemplate: stage.prompt_template,
         artifactContract: stage.artifact_contract,
         outputSchema: stageRecordSchema({ isGate: stage.is_gate,
-          criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(state.workflowName !== 'direct' && (stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.campaignStorageKey) || state.research || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
+          criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
         planRevision: state.queryState?.planRevision,
         artifactStatuses: state.stages,
         timeout_ms: prepared.budgetMs,

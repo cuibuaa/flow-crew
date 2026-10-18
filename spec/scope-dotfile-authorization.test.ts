@@ -3,10 +3,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRun, fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
+import { createRun, fcGlobalDir, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { publishConstraintDecision, readAcceptedScopeRevisionDecisions, scopePathDigest, type ScopeRevisionRequestV1 } from '../src/runtime-negotiation.js';
 import type { StageConfig } from '../src/scheduler.js';
 import * as scheduler from '../src/scheduler.js';
+import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { readLiveConstraintContentIdentity } from '../src/live-constraint-guard.js';
 
 describe('scope dotfile authorization', () => {
@@ -58,8 +59,16 @@ describe('path-wise scope admission', () => {
       unrestoredContent: readLiveConstraintContentIdentity(join(project, path)),
     })).join('\n') + '\n');
   }
-  it('grants two safe paths and reports every conflicting capability and owner', () => {
+  it.each(['static', 'dispatched'])('grants two safe paths and reports every conflicting capability and owner (%s)', mode => {
     const { created, request, input } = setup(['safe/a.txt', 'shared/one.txt', 'shared/two.txt', 'safe/b.txt']);
+    if (mode === 'dispatched') {
+      input.stage = scheduler.parseDispatchedStageConfig({ id: 'writer', role: 'coder', scope: [] });
+      const planner = scheduler.parseDispatchedStageConfig({ id: 'plan', role: 'planner', dynamic_dispatch: true });
+      updateRunState(project, created.runId, state => {
+        recordAdmittedPlan(state, [planner, input.stage], created.runDirPath, 'scope fixture', true);
+        state.dispatchedStages = [input.stage];
+      });
+    }
     input.activePeers = [stage('first', ['shared/one.txt', 'shared/two.txt']), stage('second', ['shared/two.txt'])];
     const decision = scheduler.decideScopeRevision(input);
     expect(decision).toMatchObject({ accepted: true, requestedPaths: request.requestedPaths,
@@ -94,7 +103,7 @@ describe('path-wise scope admission', () => {
       });
     } finally { closeRepairRoundSnapshot(snapshot); }
   });
-  it('withholds input and prewritten paths while capturing only the safe preimage', () => {
+  it('withholds frozen inputs while capturing the current preimage for future grants', () => {
     writeFileSync(join(project, 'input.txt'), 'read-only evidence');
     writeFileSync(join(project, 'changed.txt'), 'before');
     const { created, input } = setup(['input.txt', 'changed.txt', 'safe.txt']);
@@ -103,19 +112,41 @@ describe('path-wise scope admission', () => {
     try {
       writeFileSync(join(project, 'changed.txt'), 'after');
       const decision = scheduler.decideScopeRevision({ ...input, snapshot });
-      expect(decision).toMatchObject({ accepted: true, authorizedPaths: ['safe.txt'], effectiveScope: ['safe.txt'],
-        rejectedPaths: ['input.txt', 'changed.txt'] });
+      expect(decision).toMatchObject({ accepted: true, authorizedPaths: ['changed.txt', 'safe.txt'], effectiveScope: ['changed.txt', 'safe.txt'],
+        rejectedPaths: ['input.txt'] });
       expect(decision.conflicts).toEqual([
         expect.objectContaining({ path: 'input.txt', reason: expect.stringContaining('declared read-only input') }),
-        expect.objectContaining({ path: 'changed.txt', reason: expect.stringContaining('requested content changed before scope approval') }),
       ]);
       expect(snapshot.files.has('safe.txt')).toBe(true);
-      expect(snapshot.files.has('changed.txt')).toBe(false);
+      expect(snapshot.files.get('changed.txt')).toMatchObject({ exists: true, text: 'after' });
       expect(readFileSync(join(project, 'input.txt'), 'utf8')).toBe('read-only evidence');
     } finally { closeRepairRoundSnapshot(snapshot); }
   });
-  it('admits exact failed-rollback recovery without ratifying unrecorded or subsequently changed writes', () => {
-    const parent = ['docs', '.comparison', 'node_modules'].join('/');
+  it('grants a declared output inside an input tree while withholding its preserved sibling', () => {
+    mkdirSync(join(project, 'fixtures', 'source'), { recursive: true });
+    writeFileSync(join(project, 'fixtures', 'source', 'evidence.txt'), 'read-only evidence');
+    const output = 'fixtures/source/report.md';
+    const sibling = 'fixtures/source/evidence.txt';
+    const { created, input } = setup([output, sibling]);
+    writeFileSync(join(created.runDirPath, 'task_brief.md'), [
+      '---', 'inputs: [fixtures/source]', `outputs: [${output}]`, '---', 'Write the declared report.',
+    ].join('\n'));
+    const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage], { runDirPath: created.runDirPath });
+    try {
+      const decision = scheduler.decideScopeRevision({ ...input, snapshot });
+      expect(decision).toMatchObject({ accepted: true, authorizedPaths: [output], effectiveScope: [output],
+        rejectedPaths: [sibling], conflicts: [expect.objectContaining({
+          path: sibling, reason: expect.stringContaining('declared read-only input'),
+        })] });
+      const bindings = scheduler.resolveDeclaredInputWriteBindings(project,
+        readFileSync(join(created.runDirPath, 'task_brief.md'), 'utf8'));
+      expect(scheduler.scopeContainsPath(decision.effectiveScope, output, project, bindings)).toBe(true);
+      expect(scheduler.scopeContainsPath(['**'], sibling, project, bindings)).toBe(false);
+      expect(snapshot.files.has(output)).toBe(true);
+    } finally { closeRepairRoundSnapshot(snapshot); }
+  });
+  it('admits future recovery independently of earlier failed-rollback identities', () => {
+    const parent = ['artifacts', '.comparison', 'node_modules'].join('/');
     const paths = ['recorded.txt', 'tampered.txt', 'unrecorded.txt'].map(name => `${parent}/${name}`);
     const { input } = setup(paths);
     mkdirSync(join(project, parent), { recursive: true });
@@ -126,13 +157,31 @@ describe('path-wise scope admission', () => {
       recordFailedRollbacks(input.runId, paths.slice(0, 2));
       writeFileSync(join(project, paths[1]), 'changed after the engine observation');
       const decision = scheduler.decideScopeRevision({ ...input, snapshot });
-      expect(decision).toMatchObject({ accepted: true, authorizedPaths: [paths[0]],
-        rejectedPaths: paths.slice(1), effectiveScope: [paths[0]] });
+      expect(decision).toMatchObject({ accepted: true, authorizedPaths: paths, effectiveScope: paths });
       expect(snapshot.files.get(paths[0])).toMatchObject({ exists: true, text: 'unauthorized content' });
-      expect(snapshot.files.has(paths[1])).toBe(false);
-      const tree = ['docs/.comparison/'];
+      expect(snapshot.files.get(paths[1])).toMatchObject({ exists: true, text: 'changed after the engine observation' });
+      const tree = ['artifacts/.comparison/'];
       expect(scheduler.decideScopeRevision({ ...input, request: { ...input.request,
-        requestedPaths: tree, pathDigest: scopePathDigest(tree) }, snapshot })).toMatchObject({ accepted: false });
+        requestedPaths: tree, pathDigest: scopePathDigest(tree) }, snapshot })).toMatchObject({ accepted: true });
+    } finally { closeRepairRoundSnapshot(snapshot); }
+  });
+  it.each(['dist/', 'dist/**', '**'])('grants a changed output subtree prospectively and preserves prior violation evidence (%s)', requested => {
+    const path = 'dist/adapters/base.d.ts';
+    const { created, input } = setup([requested]);
+    mkdirSync(join(project, 'dist', 'adapters'), { recursive: true });
+    writeFileSync(join(project, path), 'before build');
+    const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage], { runDirPath: created.runDirPath });
+    try {
+      writeFileSync(join(project, path), 'generated before admission');
+      recordFailedRollbacks(input.runId, [path]);
+      const incidentPath = join(created.runDirPath, 'stages/writer/live_constraint_incidents_attempt_1.jsonl');
+      const history = readFileSync(incidentPath, 'utf8');
+      const decision = scheduler.decideScopeRevision({ ...input, snapshot });
+      expect(decision).toMatchObject({ accepted: true, authorizedPaths: [requested], effectiveScope: [requested] });
+      expect(readFileSync(incidentPath, 'utf8')).toBe(history);
+      expect(snapshot.files.get(path)).toMatchObject({ exists: true, text: 'generated before admission' });
+      writeFileSync(join(project, path), 'later authorized write');
+      expect(snapshot.files.get(path)).toMatchObject({ text: 'generated before admission' });
     } finally { closeRepairRoundSnapshot(snapshot); }
   });
   it('keeps read-only inputs and peers binding even for recorded failed rollbacks', () => {
@@ -150,6 +199,29 @@ describe('path-wise scope admission', () => {
         conflicts: [expect.objectContaining({ reason: expect.stringContaining('declared read-only input') }),
           expect.objectContaining({ conflictingStageId: 'peer' })],
       });
+    } finally { closeRepairRoundSnapshot(snapshot); }
+  });
+  it('withholds the scheduler manifest and an active peer from a broad changed-tree request', () => {
+    const paths = ['artifacts/', 'spec/shared.test.ts', 'safe.txt'];
+    const { created, input } = setup(paths);
+    const research = scheduler.parseBriefFrontmatter([
+      '---', 'research:', '  baseline: 0', '  policy: greedy_stack',
+      '  result_file: artifacts/round.json', '  report_dir: artifacts',
+      '  stop:', '    max_rounds: 2', '---',
+    ].join('\n')).research!;
+    updateRunState(project, created.runId, state => { state.research = research; });
+    input.activePeers = [stage('peer', ['spec/shared.test.ts'])];
+    mkdirSync(join(project, 'artifacts'), { recursive: true });
+    writeFileSync(join(project, 'artifacts/run_manifest.json'), 'scheduler state');
+    const snapshot = scheduler.captureRepairRoundSnapshot(project, [input.stage], { runDirPath: created.runDirPath });
+    try {
+      writeFileSync(join(project, 'artifacts/run_manifest.json'), 'updated scheduler state');
+      const decision = scheduler.decideScopeRevision({ ...input, snapshot });
+      expect(decision).toMatchObject({ accepted: true, authorizedPaths: ['safe.txt'], rejectedPaths: paths.slice(0, 2),
+        conflicts: [expect.objectContaining({ path: 'artifacts/', reason: expect.stringContaining('framework-owned research manifest') }),
+          expect.objectContaining({ path: 'spec/shared.test.ts', conflictingStageId: 'peer' })] });
+      expect(snapshot.files.has('artifacts/run_manifest.json')).toBe(false);
+      expect(snapshot.files.has('safe.txt')).toBe(true);
     } finally { closeRepairRoundSnapshot(snapshot); }
   });
   it.each(['run', 'stage', 'attempt', 'malformed'] as const)('never partially accepts an invalid %s binding', (kind) => {

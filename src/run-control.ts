@@ -8,14 +8,11 @@ import {
   type TaskRegistry,
 } from './task-registry.js';
 import {
-  isPendingStageStatus,
-  isRunningStageStatus,
   isTerminalRunStatus,
   resolveRunStatus,
   RUN_STATUS,
   runsRoot,
-  STAGE_STATUS,
-  updateOperationalRunStateAtPath,
+  cancelRunStateAtPath,
   type StoreState,
 } from './store.js';
 import { requireSafeRunId, resolveRunIdentity } from './cancellation-policy.js';
@@ -147,16 +144,6 @@ function describeUnitStatus(status: UnitStatus): string {
 
 function defaultDelay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
-}
-
-function mutateCancelledRun(state: StoreState, completedAt: string): void {
-  state.status = RUN_STATUS.STOPPED;
-  state.failureReason = 'Cancelled by user';
-  state.completedAt = completedAt;
-  for (const stage of Object.values(state.stages)) {
-    if (isRunningStageStatus(stage.status)) stage.status = STAGE_STATUS.FAILED;
-    if (isPendingStageStatus(stage.status)) stage.status = STAGE_STATUS.SKIPPED;
-  }
 }
 
 /**
@@ -569,16 +556,6 @@ export class RunCancellationCoordinator {
   }
 
   private updateRun(run: RunTarget, completedAt: string): string | undefined {
-    let preservedRunStatus: string | undefined;
-    updateOperationalRunStateAtPath(run.runPath, state => {
-      // Archived verdicts remain evidence. The cancellation decision closes
-      // active control state regardless of unknown historical execution fate.
-      if (resolveRunStatus(state.status).kind === 'unknown' || preservesTerminalRun(state)) {
-        preservedRunStatus = state.status;
-      } else {
-        mutateCancelledRun(state, completedAt);
-      }
-    });
-    return preservedRunStatus;
+    return cancelRunStateAtPath(run.runPath, completedAt).preservedRunStatus;
   }
 }

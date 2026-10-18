@@ -1,5 +1,6 @@
 import { errorMessage, optionValue, within } from './source_services/cli-inputs.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { hashRollbackFileSync } from './rollback-content-store.js';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { copyFileSync, mkdirSync, rmSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from './engine-fs.js';
@@ -34,6 +35,7 @@ import { loadEngineDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
 import { shipSetupReadyRecordPath } from './ship-setup-record.js';
 import { withEngineIntegrity } from './engine-integrity.js';
+import { isLiveConstraintExemptDirectory, isLiveConstraintExemptPath } from './live-constraint-guard.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -47,6 +49,7 @@ export interface ShipSetupFileSystem extends ShipInputFileSystem {
   createDirectoryExclusive(path: string): void;
   createLink(source: string, target: string, type: 'file' | 'dir'): void;
   copyFile(source: string, target: string): void;
+  filesEqual(source: string, target: string): boolean;
   removeEntry(path: string): void;
   writeAtomic(path: string, contents: string): void;
 }
@@ -90,6 +93,7 @@ export const nodeShipSetupFileSystem: ShipSetupFileSystem = {
   readable: nodeReadable,
   readText: (path) => readFileSync(path, 'utf-8'),
   readBytes: (path) => readFileSync(path),
+  hashFile: hashRollbackFileSync,
   readDirectory: (path) => readdirSync(path),
   stat: (path) => statSync(path),
   lstat: (path) => lstatSync(path),
@@ -103,6 +107,11 @@ export const nodeShipSetupFileSystem: ShipSetupFileSystem = {
   },
   createLink: (source, target, type) => symlinkSync(source, target, type),
   copyFile: (source, target) => copyFileSync(source, target, constants.COPYFILE_EXCL),
+  filesEqual: (source, target) => {
+    const sourceHash = hashRollbackFileSync(source);
+    const targetHash = hashRollbackFileSync(target);
+    return sourceHash.byteLength === targetHash.byteLength && sourceHash.sha256 === targetHash.sha256;
+  },
   removeEntry: (path) => rmSync(path, { recursive: true, force: true }),
   writeAtomic: nodeAtomicWrite,
 };
@@ -305,30 +314,6 @@ export interface TestPopulationParity {
   reason?: string;
 }
 
-export interface DeclaredInputSnapshotSummary {
-  location: 'source' | 'target';
-  path: string;
-  lexicalPath: string;
-  state: 'captured' | 'unavailable';
-  resolvedPath?: string;
-  digest?: string;
-  entryCount?: number;
-  reason?: string;
-}
-
-export interface DeclaredInputStabilityCheck {
-  phase: 'input_materialization' | 'test_collection' | 'source_validation_fallback' | 'target_validation_baseline';
-  state: 'stable' | 'changed' | 'unverified';
-  before: DeclaredInputSnapshotSummary[];
-  after?: DeclaredInputSnapshotSummary[];
-  changedInputs: Array<{
-    path: string;
-    before: DeclaredInputSnapshotSummary;
-    after: DeclaredInputSnapshotSummary;
-  }>;
-  reason?: string;
-}
-
 export interface ShipSetupBlocker {
   phase: 'source' | 'worktree' | 'target' | 'validation' | 'record';
   reason: string;
@@ -358,7 +343,6 @@ interface ShipSetupFacts {
   targetVerification?: BriefInputVerification;
   targetOutputInventory?: BriefOutputInventory;
   testPopulation?: TestPopulationParity;
-  declaredInputStability: DeclaredInputStabilityCheck[];
   validationBaseline?: ProjectValidationBaseline;
   blockers: ShipSetupBlocker[];
 }
@@ -736,203 +720,17 @@ function setupFacts(
     worktreeReused: false,
     links: [],
     copies: [],
-    declaredInputStability: [],
     sourceVerification,
     sourceOutputInventory,
     proseInputWarnings,
   };
 }
 
-interface InputTreeRecord {
-  path: string;
-  kind: 'directory' | 'file' | 'symlink' | 'cycle' | 'other';
-  value?: string;
-}
-
-interface DeclaredInputSnapshotRoot {
-  location: DeclaredInputSnapshotSummary['location'];
-  verification: BriefInputVerification;
-  rootDir: string;
-}
-
-function fingerprintDeclaredInputTree(
-  rootPath: string,
-  fs: ShipSetupFileSystem,
-): { digest: string; entryCount: number } {
-  const records: InputTreeRecord[] = [];
-  const activeDirectories = new Set<string>();
-  const rootCanonical = fs.realpath(rootPath);
-  const visit = (entryPath: string, displayPath: string): void => {
-    if (!within(rootCanonical, fs.realpath(entryPath))) {
-      throw new Error('Input member resolves outside the declared root');
-    }
-    const lexicalStat = fs.lstat ? fs.lstat(entryPath) : fs.stat(entryPath);
-    const symbolicLink = lexicalStat.isSymbolicLink?.() === true;
-    if (symbolicLink) {
-      records.push({
-        path: displayPath,
-        kind: 'symlink',
-        value: fs.readlink ? fs.readlink(entryPath) : '(target unavailable)',
-      });
-    }
-    const followedStat = symbolicLink ? fs.stat(entryPath) : lexicalStat;
-    if (followedStat.isDirectory()) {
-      const canonicalDirectory = fs.realpath(entryPath);
-      records.push({ path: displayPath, kind: 'directory' });
-      if (activeDirectories.has(canonicalDirectory)) {
-        records.push({ path: displayPath, kind: 'cycle', value: canonicalDirectory });
-        return;
-      }
-      activeDirectories.add(canonicalDirectory);
-      try {
-        for (const name of [...fs.readDirectory(entryPath)].sort()) {
-          visit(join(entryPath, name), displayPath === '.' ? name : join(displayPath, name));
-        }
-      } finally {
-        activeDirectories.delete(canonicalDirectory);
-      }
-      return;
-    }
-    if (followedStat.isFile ? followedStat.isFile() : !followedStat.isDirectory()) {
-      const contentDigest = createHash('sha256').update(fs.readBytes(entryPath)).digest('hex');
-      records.push({ path: displayPath, kind: 'file', value: contentDigest });
-      return;
-    }
-    records.push({ path: displayPath, kind: 'other' });
-  };
-  visit(rootPath, '.');
-  return {
-    digest: createHash('sha256').update(JSON.stringify(records)).digest('hex'),
-    entryCount: records.length,
-  };
-}
-
-function captureDeclaredInputSnapshot(
-  roots: DeclaredInputSnapshotRoot[],
-  fs: ShipSetupFileSystem,
-): DeclaredInputSnapshotSummary[] {
-  const fingerprints = new Map<string, { digest: string; entryCount: number }>();
-  return roots.flatMap((root) => root.verification.inputs
-    .filter((input) => root.location !== 'source' || input.sourceExists !== false)
-    .map((input): DeclaredInputSnapshotSummary => {
-      const lexicalPath = resolve(root.rootDir, input.path);
-      try {
-        const resolvedPath = fs.realpath(lexicalPath);
-        let fingerprint = fingerprints.get(resolvedPath);
-        if (!fingerprint) {
-          fingerprint = fingerprintDeclaredInputTree(resolvedPath, fs);
-          fingerprints.set(resolvedPath, fingerprint);
-        }
-        return {
-          location: root.location,
-          path: input.path,
-          lexicalPath,
-          state: 'captured',
-          resolvedPath,
-          ...fingerprint,
-        };
-      } catch (error) {
-        return {
-          location: root.location,
-          path: input.path,
-          lexicalPath,
-          state: 'unavailable',
-          reason: errorMessage(error),
-        };
-      }
-    }));
-}
-
-function compareDeclaredInputSnapshots(
-  phase: DeclaredInputStabilityCheck['phase'],
-  before: DeclaredInputSnapshotSummary[],
-  after: DeclaredInputSnapshotSummary[],
-): DeclaredInputStabilityCheck {
-  const key = (snapshot: DeclaredInputSnapshotSummary): string => `${snapshot.location}\0${snapshot.path}`;
-  const afterByPath = new Map(after.map((snapshot) => [key(snapshot), snapshot]));
-  const changedInputs: DeclaredInputStabilityCheck['changedInputs'] = [];
-  for (const previous of before) {
-    const current = afterByPath.get(key(previous)) ?? {
-      location: previous.location,
-      path: previous.path,
-      lexicalPath: previous.lexicalPath,
-      state: 'unavailable' as const,
-      reason: 'declared input disappeared from the snapshot set',
-    };
-    if (previous.state !== current.state
-      || previous.resolvedPath !== current.resolvedPath
-      || previous.digest !== current.digest
-      || previous.entryCount !== current.entryCount) {
-      changedInputs.push({ path: previous.path, before: previous, after: current });
-    }
-  }
-  return {
-    phase,
-    state: changedInputs.length > 0 ? 'changed' : 'stable',
-    before,
-    after,
-    changedInputs,
-  };
-}
-
-function initialDeclaredInputSnapshotCheck(
-  phase: DeclaredInputStabilityCheck['phase'],
-  before: DeclaredInputSnapshotSummary[],
-): DeclaredInputStabilityCheck | undefined {
-  const unavailable = before.filter((snapshot) => snapshot.state === 'unavailable');
-  if (unavailable.length === 0) return undefined;
-  return {
-    phase,
-    state: 'unverified',
-    before,
-    changedInputs: [],
-    reason: unavailable
-      .map((snapshot) => `${snapshot.location}:${snapshot.path}: ${snapshot.reason ?? 'snapshot unavailable'}`)
-      .join('; '),
-  };
-}
-
-function declaredInputStabilityBlocker(
-  check: DeclaredInputStabilityCheck,
-): ShipSetupBlockerInput {
-  const phase = check.phase.replaceAll('_', ' ');
-  if (check.state === 'unverified') {
-    return {
-      phase: 'validation',
-      reason: `Cannot prove declared read-only inputs are stable before ${phase}: ${check.reason ?? 'snapshot unavailable'}. No test collection or validation baseline command was launched.`,
-      repair: 'Make every declared input tree readable and stable, then rerun ship-setup.',
-    };
-  }
-  const paths = [...new Set(check.changedInputs.map((input) => `${input.before.location}:${input.path}`))];
-  return {
-    phase: 'validation',
-    ...(paths.length > 0 ? { input: paths.join(', ') } : {}),
-    reason: `Declared read-only input changed during ${phase}: ${paths.join(', ') || '(unknown input)'}. The target is not ready.`,
-    repair: 'Restore the named input from its authoritative source and make collection/validation write only declared generated or output paths, then rerun ship-setup.',
-  };
-}
-
-type StableOperation<T> = {
-  outcome: { ok: true; value: T } | { ok: false; error: unknown };
-  after: DeclaredInputSnapshotSummary[];
-  check: DeclaredInputStabilityCheck;
-};
-
-async function observeDeclaredInputStability<T>(
-  phase: DeclaredInputStabilityCheck['phase'],
-  before: DeclaredInputSnapshotSummary[],
-  roots: DeclaredInputSnapshotRoot[],
-  fs: ShipSetupFileSystem,
-  operation: () => Promise<T>,
-): Promise<StableOperation<T>> {
-  let outcome: StableOperation<T>['outcome'];
-  try {
-    outcome = { ok: true, value: await operation() };
-  } catch (error) {
-    outcome = { ok: false, error };
-  }
-  const after = captureDeclaredInputSnapshot(roots, fs);
-  return { outcome, after, check: compareDeclaredInputSnapshots(phase, before, after) };
+async function declaredInputTrackedPaths(rootDir: string, git: GitCommandRunner): Promise<ReadonlySet<string> | undefined> {
+  const result = await git({ command: 'git', args: ['ls-files', '-z', '--cached'], cwd: rootDir });
+  // Without an index inventory, retain every member rather than exempting a
+  // potentially tracked file. Freeze the inventory before validation can run.
+  return result.exitCode === 0 ? new Set((result.stdout ?? '').split('\0').filter(Boolean)) : undefined;
 }
 
 function worktreeFailureReason(response: GitWorktreeResponse): string {
@@ -1197,6 +995,7 @@ function reconcileInputs(
   projectDir: string,
   targetDir: string,
   fs: ShipSetupFileSystem,
+  trackedPaths?: ReadonlySet<string>,
 ): { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] } {
   const links: ShipSetupLink[] = [];
   const copies: ShipSetupCopy[] = [];
@@ -1205,6 +1004,17 @@ function reconcileInputs(
   const normalizedInputPath = (sourcePath: string): string => relative(projectDir, sourcePath)
     .split(sep)
     .join('/');
+  const patterns = loadEngineDefaults().live_constraint_exempt_patterns;
+  const exempt = (sourcePath: string, directory: boolean): boolean => {
+    if (!trackedPaths) return false;
+    const path = normalizedInputPath(sourcePath);
+    if (directory) {
+      return isLiveConstraintExemptDirectory(path, patterns, trackedPaths)
+        && isLiveConstraintExemptDirectory(normalizedInputPath(fs.realpath(sourcePath)), patterns, trackedPaths);
+    }
+    return isLiveConstraintExemptPath(path, patterns, trackedPaths)
+      && !trackedPaths.has(normalizedInputPath(fs.realpath(sourcePath)));
+  };
   const addBlocker = (sourcePath: string, reason: string): void => {
     blockers.push({ phase: 'target', input: normalizedInputPath(sourcePath), reason });
   };
@@ -1235,11 +1045,11 @@ function reconcileInputs(
       return;
     }
     fs.copyFile(source, target);
-    const sourceBytes = Buffer.from(fs.readBytes(source));
-    const targetBytes = Buffer.from(fs.readBytes(target));
-    if (!sourceBytes.equals(targetBytes)) {
-      addBlocker(source, 'Copied target descendant does not match the declared source bytes');
-      return;
+    if (!exempt(source, false)) {
+      if (!fs.filesEqual(source, target)) {
+        addBlocker(source, 'Copied target descendant does not match the declared source bytes');
+        return;
+      }
     }
     copies.push({ path: normalizedInputPath(source), source, target });
   };
@@ -1262,6 +1072,7 @@ function reconcileInputs(
       const source = join(sourceDirectory, name);
       const target = join(targetDirectory, name);
       try {
+        if (exempt(source, (fs.lstat ? fs.lstat(source) : fs.stat(source)).isDirectory())) continue;
         if (!fs.exists(source) || !fs.readable(source)) {
           addBlocker(source, 'Source descendant is missing or unreadable');
           continue;
@@ -1344,9 +1155,7 @@ function reconcileInputs(
           );
           continue;
         }
-        const sourceBytes = Buffer.from(fs.readBytes(source));
-        const targetBytes = Buffer.from(fs.readBytes(target));
-        if (!sourceBytes.equals(targetBytes)) {
+        if (!fs.filesEqual(source, target)) {
           addBlocker(source, 'Target descendant has a content collision and will not be overwritten');
         }
       } catch (error) {
@@ -1407,10 +1216,8 @@ function reconcileInputs(
       }
       if (sourceDirectory) {
         reconcileExistingDirectory(source, target, sourceCanonical, target, new Set([sourceCanonical]));
-      } else {
-        const sourceBytes = Buffer.from(fs.readBytes(source));
-        const targetBytes = Buffer.from(fs.readBytes(target));
-        if (!sourceBytes.equals(targetBytes)) {
+      } else if (!exempt(source, false)) {
+        if (!fs.filesEqual(source, target)) {
           blockers.push({ phase: 'target', input: input.path, reason: 'Existing declared target input has a content collision and will not be overwritten' });
         }
       }
@@ -2086,33 +1893,23 @@ export async function runShipSetup(
     }]);
   }
 
-  // A copy must bind one stable source tree, not assemble leaves observed
-  // across a source mutation. Reuse the existing content/member snapshot rule.
-  const sourceInputRoots: DeclaredInputSnapshotRoot[] = [
-    { location: 'source', verification: sourceVerification, rootDir: projectDir },
-  ];
-  const materializationBefore = captureDeclaredInputSnapshot(sourceInputRoots, deps.fs);
-  const unavailableSource = initialDeclaredInputSnapshotCheck('input_materialization', materializationBefore);
-  if (unavailableSource) {
-    facts = { ...facts, declaredInputStability: [...facts.declaredInputStability, unavailableSource] };
-    return refuse([declaredInputStabilityBlocker(unavailableSource)]);
-  }
+  // Input materialization owns target collisions and path confinement. A live
+  // source may advance independently; setup cannot attribute that change to a
+  // command, and does not promise an immutable experiment snapshot.
+  const sourceTrackedPaths = sourceVerification.inputs.length
+    ? await declaredInputTrackedPaths(projectDir, deps.runGitCommand) : undefined;
+  const targetTrackedPaths = sourceVerification.inputs.length
+    ? await declaredInputTrackedPaths(targetDir, deps.runGitCommand) : undefined;
+  const materializationTrackedPaths = sourceTrackedPaths && targetTrackedPaths
+    ? new Set([...sourceTrackedPaths, ...targetTrackedPaths]) : undefined;
   let reconciled: { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] };
   try {
-    reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs);
+    reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs, materializationTrackedPaths);
   } catch (error) {
     return refuse([{ phase: 'target', reason: `Cannot inspect target worktree: ${errorMessage(error)}` }]);
   }
   facts = { ...facts, links: reconciled.links, copies: reconciled.copies };
   if (reconciled.blockers.length > 0) return refuse(reconciled.blockers);
-
-  const materializationCheck = compareDeclaredInputSnapshots(
-    'input_materialization', materializationBefore, captureDeclaredInputSnapshot(sourceInputRoots, deps.fs),
-  );
-  if (materializationCheck.state !== 'stable') {
-    facts = { ...facts, declaredInputStability: [...facts.declaredInputStability, materializationCheck] };
-    return refuse([declaredInputStabilityBlocker(materializationCheck)]);
-  }
 
   const targetVerification = verifyDeclaredBriefInputs(brief, targetDir, deps.fs);
   const targetOutputInventory = inspectBriefOutputs(brief, targetDir, deps.fs, { stateRoot: deps.globalDir() });
@@ -2128,79 +1925,20 @@ export async function runShipSetup(
     })));
   }
 
-  const sourceAndTargetInputRoots: DeclaredInputSnapshotRoot[] = [
-    { location: 'source', verification: sourceVerification, rootDir: projectDir },
-    { location: 'target', verification: targetVerification, rootDir: targetDir },
-  ];
-  const targetInputRoots: DeclaredInputSnapshotRoot[] = [
-    { location: 'target', verification: targetVerification, rootDir: targetDir },
-  ];
-  const baselineInputSnapshot = captureDeclaredInputSnapshot(targetInputRoots, deps.fs);
-  const initialBaselineSnapshotCheck = initialDeclaredInputSnapshotCheck(
-    'target_validation_baseline',
-    baselineInputSnapshot,
-  );
-  if (initialBaselineSnapshotCheck) {
-    facts = {
-      ...facts,
-      declaredInputStability: [...facts.declaredInputStability, initialBaselineSnapshotCheck],
-    };
-    return refuse([declaredInputStabilityBlocker(initialBaselineSnapshotCheck)]);
-  }
-  const observedBaseline = await observeDeclaredInputStability(
-    'target_validation_baseline',
-    baselineInputSnapshot,
-    targetInputRoots,
-    deps.fs,
-    () => runProjectValidationBaseline(targetDir, {
-      fs: { exists: deps.fs.exists, readText: deps.fs.readText },
-      ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
-      declaredCommands: declaredValidation.commands,
-    }),
-  );
-  facts = {
-    ...facts,
-    declaredInputStability: [...facts.declaredInputStability, observedBaseline.check],
-  };
-  if (observedBaseline.check.state === 'changed') {
-    return refuse([declaredInputStabilityBlocker(observedBaseline.check)]);
-  }
-  if (!observedBaseline.outcome.ok) throw observedBaseline.outcome.error;
-  const validationBaseline = observedBaseline.outcome.value;
+  const validationBaseline = await runProjectValidationBaseline(targetDir, {
+    fs: { exists: deps.fs.exists, readText: deps.fs.readText },
+    ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
+    declaredCommands: declaredValidation.commands,
+  });
   facts = { ...facts, validationBaseline };
 
-  const stableInputSnapshot = captureDeclaredInputSnapshot(sourceAndTargetInputRoots, deps.fs);
-  const initialSnapshotCheck = initialDeclaredInputSnapshotCheck('test_collection', stableInputSnapshot);
-  if (initialSnapshotCheck) {
-    facts = {
-      ...facts,
-      declaredInputStability: [...facts.declaredInputStability, initialSnapshotCheck],
-    };
-    return refuse([declaredInputStabilityBlocker(initialSnapshotCheck)]);
-  }
-
-  const observedCollection = await observeDeclaredInputStability(
-    'test_collection',
-    stableInputSnapshot,
-    sourceAndTargetInputRoots,
+  const populationComparison = await compareTestPopulations(
+    projectDir,
+    targetDir,
     deps.fs,
-    () => compareTestPopulations(
-      projectDir,
-      targetDir,
-      deps.fs,
-      deps.runTestCollectionCommand,
-      declaredValidation.commands,
-    ),
+    deps.runTestCollectionCommand,
+    declaredValidation.commands,
   );
-  facts = {
-    ...facts,
-    declaredInputStability: [...facts.declaredInputStability, observedCollection.check],
-  };
-  if (observedCollection.check.state === 'changed') {
-    return refuse([declaredInputStabilityBlocker(observedCollection.check)]);
-  }
-  if (!observedCollection.outcome.ok) throw observedCollection.outcome.error;
-  const populationComparison = observedCollection.outcome.value;
   const testPopulation = populationComparison.population;
   if (testPopulation) facts = { ...facts, testPopulation };
   if (testPopulation?.state === 'mismatched') {

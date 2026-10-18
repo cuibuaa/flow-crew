@@ -557,7 +557,8 @@ describe('compressed acceptance loop', () => {
 
     expect(buildGateDispatchPreamble({ runDirPath, gateId: 'initial_review', evaluationRound: 1, priorAttemptCount: 0 }))
       .toContain('Check every assigned criterion');
-    expect(base).toContain('Say briefly what you did not examine and why');
+    expect(base).toContain('Reviewers say briefly in their reason what they did not examine and why');
+    expect(base.split('did not examine')).toHaveLength(2);
     expect(preamble).toContain('record any other difference you find as a stated limitation');
     expect(preamble).toContain('a failure that a user of the outcome the brief describes would meet');
     expect(planner).toContain('returns concrete repairable findings');

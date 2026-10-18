@@ -119,7 +119,6 @@ describe('eight-cell atomic scope state matrix', () => {
       const requestedPath = 'src/requested.ts';
       const outsidePath = 'src/outside.ts';
       const requestedPaths = [requestedPath];
-      const prewriteCase = stageKind === 'ordinary' && scopePresence === 'missing' && decision === 'rejected';
       const adapter: Adapter = { async run(prompt, _agent, opts) {
         const summary = summaryResult(opts);
         if (summary) return fixtureResult(summary, opts);
@@ -128,28 +127,26 @@ describe('eight-cell atomic scope state matrix', () => {
         expect(prompt).toContain('an omitted legacy declaration has no live scope guard');
         if (gate) expect(prompt).toContain('Gate project writes remain subject to isolation policy');
         const directory = join(opts.runDir, 'stages', opts.stageId);
-        if (prewriteCase) writeFileSync(join(projectDir, requestedPath), 'write before request must not be ratified\n');
         writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
           version: 1,
           kind: 'scope_revision',
           requestId: `${stageKind}-${scopePresence}-${decision}`,
           runId: created.runId,
           stageId: opts.stageId,
-          attemptIndex: decision === 'rejected' && !prewriteCase ? 2 : 1,
+          attemptIndex: decision === 'rejected' ? 2 : 1,
           requestedPaths,
           pathDigest: scopePathDigest(requestedPaths),
-          reason: decision === 'accepted' || prewriteCase ? 'fixture requires the requested path' : '',
+          reason: decision === 'accepted' ? 'fixture requires the requested path' : '',
         }));
         const policyDecision = await waitForDecision(directory);
         expect(policyDecision).toMatchObject({
           runId: created.runId,
           stageId: opts.stageId,
-          attemptIndex: decision === 'rejected' && !prewriteCase ? 2 : 1,
+          attemptIndex: decision === 'rejected' ? 2 : 1,
           pathDigest: scopePathDigest(requestedPaths),
           decision,
           accepted: decision === 'accepted',
         });
-        if (prewriteCase) expect(policyDecision.rejectionReason).toContain('requested content changed before scope approval');
         writeFileSync(join(projectDir, requestedPath), 'requested raw write\n');
         writeFileSync(join(projectDir, outsidePath), 'outside raw write\n');
         if (gate) {
@@ -262,7 +259,7 @@ describe('scheduler-authoritative full-tree enforcement', () => {
     expect(existsSync(result.absolutePath)).toBe(false);
   });
 
-  it('directory prewrite is rejected before tree scope can be authorized', { timeout: 15_000 }, async () => {
+  it('directory grants capture the current tree after earlier changes', { timeout: 15_000 }, async () => {
     const requestedTree = 'src/';
     const prewrittenPath = 'src/prewritten.txt';
     const { config, yaml } = singleStageWorkflow({ gate: false, scopePresent: false, name: 'm3-directory-prewrite' });
@@ -291,15 +288,14 @@ describe('scheduler-authoritative full-tree enforcement', () => {
       config, yaml, projectDir, adapter, new Map(), undefined,
       writeRoles('coder'), created.runId, 'M3 directory prewrite', true,
     );
-    expect(decision).toMatchObject({ accepted: false, decision: 'rejected', authorizedPaths: [] });
-    expect(String(decision?.rejectionReason)).toContain(`requested content changed before scope approval: ${prewrittenPath}`);
+    expect(decision).toMatchObject({ accepted: true, decision: 'accepted', authorizedPaths: [requestedTree] });
     const status = readStageStatus(projectDir, created.runId, 'subject');
     const audit = readJson(join(created.runDirPath, status.constraintAudit!.path));
     expect(audit).toMatchObject({
       rawWrites: [prewrittenPath], appliedWrites: [],
-      rolledBackWrites: [prewrittenPath], rollbackFailures: [], durableWrites: [],
+      rolledBackWrites: [], rollbackFailures: [], durableWrites: [],
     });
-    expect(existsSync(join(projectDir, prewrittenPath))).toBe(false);
+    expect(readFileSync(join(projectDir, prewrittenPath), 'utf8')).toBe('written before requesting the tree\n');
   });
 
 

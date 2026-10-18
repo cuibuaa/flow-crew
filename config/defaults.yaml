@@ -1,6 +1,7 @@
-# Sole operator control for a scheduled stage attempt. The deadline is immutable
-# once an attempt starts; a timeout retry gets a larger derived attempt budget.
-# Longer values reduce premature timeouts but also delay terminal failure.
+# Normal authoring budget per execution. A live wrap-up warning arrives before
+# the finishing interval (10% of the budget, capped at 5 minutes), reserving a
+# further 5.5 seconds for child retirement. Hard stop = max(budget, 5.5s + interval).
+# Wrapped work continues in the next finite workflow iteration, without growth.
 default_timeout_ms: 10800000
 # Minimum observed silence before deterministic idle abort, including local commands.
 # Changed output, artifact, CPU/I/O or provider socket receive counters advance progress.
@@ -15,8 +16,8 @@ default_stage_idle_timeout_ms: 600000
 # load.
 default_validation_timeout_ms: 2700000
 
-# Regenerated tool caches are outside the project-write contract only while
-# untracked. A matching path present in Git's index is always guarded.
+# Untracked tool caches are outside input content and the project-write contract.
+# A matching path present in Git's index is always guarded.
 live_constraint_exempt_patterns:
   - "**/__pycache__/**"
   - "**/*.pyc"
@@ -53,11 +54,8 @@ adapter: auto
 # edge. Reuse is opt-in. This settlement establishes compatible routing, not
 # a measured wall-clock benefit that would justify enabling it by default.
 session_reuse: false
-# model/reasoning_effort resolution (adapter, since 7aa5818): explicit value
-# here > user's global ~/.codex/config.toml > CLI built-in default. 'default'
-# auto-follows the user's own codex setup across CLI upgrades — pin an explicit
-# model here only to lock an experiment.
-model: default   # Inherit ~/.codex/config.toml; set a model here to override it.
-reasoning_effort: default   # Inherit model_reasoning_effort from the adapter config.
-# Role files may pin their own effort, which wins over this value. The shipped
-# coder, qa, planner, doc_writer and doc_reviewer roles pin high.
+# Model/effort: explicit role or engine value > adapter user settings read at
+# invocation time > CLI built-in default. Codex reads config.toml; Claude reads
+# only model/effort from settings.json while keeping other settings isolated.
+model: default
+reasoning_effort: default

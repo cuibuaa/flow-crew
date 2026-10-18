@@ -1,4 +1,5 @@
 // Boundary: Publish iteration accounting, advance only fully settled research evidence, and dispatch admitted policy finalizers before deciding to continue.
+import { pendingResearchGateCandidates, readResearchGateCandidate, rejectPendingResearchGateCandidates, settleResearchGateCandidate } from '../../research-candidate.js';
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
 import { recordRunEvent } from '../../run-events.js';
@@ -12,7 +13,7 @@ import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isRunningStage
 import { IterationDisposition } from './iteration-outcome.js';
 import { executeIteration } from './iteration.js';
 import { appendIterationLog, concludeRepeatedBlockage, tryAdvanceResearch, writeCampaignEntry } from './services.js';
-import { createHash } from 'node:crypto';
+import { hashRollbackFileSync } from '../../rollback-content-store.js';
 import { unlinkSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -54,14 +55,37 @@ export async function advanceSettledResearch(
     state = readRunState(projectDir, runId);
     if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };
     const settledResearchGates = collectGateRuntimeFacts(sorted, state, projectDir, runId);
-    if (state.research && researchAdvanceEligible({
+    const eligible = researchAdvanceEligible({
       gatesSettled: settledResearchGates.allPass,
       stageFailed: anyFailed(state),
-    })) {
+    });
+    if (state.research && !eligible) {
+      rejectPendingResearchGateCandidates(projectDir, runDirPath, `Iteration did not settle green: failed gates ${settledResearchGates.failedGateIds.join(', ') || 'none'}; stageFailed=${anyFailed(state)}`);
+    }
+    if (state.research && eligible) {
       const recoveredSettlement = recoverVerifiedResearchSettlement(sorted, state, projectDir, runId, runDirPath);
-      const researchResult = recoveredSettlement
-        ? null
-        : await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter });
+      const candidates = pendingResearchGateCandidates(runDirPath);
+      let researchResult: StoreState | null = null;
+      if (recoveredSettlement) {
+        rejectPendingResearchGateCandidates(projectDir, runDirPath, 'Verified terminal settlement superseded unconsumed round evidence');
+      } else if (candidates.length) {
+        for (const candidate of candidates) {
+          if (existsSync(join(runDirPath, 'signals', 'research_terminal_ready.json'))) {
+            settleResearchGateCandidate(projectDir, runDirPath, candidate, 'rejected', 'Research policy already reached a terminal outcome');
+            continue;
+          }
+          if (!settledResearchGates.evaluations.some(gate => gate.id === candidate.gateStageId && gate.effectiveVerdict?.pass === true)) {
+            settleResearchGateCandidate(projectDir, runDirPath, candidate, 'rejected', 'Captured outcome has no accepted gate in the active iteration');
+            continue;
+          }
+          researchResult = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter, candidate });
+          if (researchResult) return { kind: 'settled', state: researchResult };
+        }
+      } else {
+        // Legacy workflows without an outcome gate still submit the mutable slot.
+        const hasOutcomeCapture = sorted.some(stage => stage.is_gate && readResearchGateCandidate(runDirPath, stage.id));
+        if (!hasOutcomeCapture) researchResult = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter });
+      }
       if (researchResult) return { kind: 'settled', state: researchResult };
       state = readRunState(projectDir, runId);
       const repeatedAfterResearch = concludeRepeatedBlockage(
@@ -105,7 +129,7 @@ export async function advanceSettledResearch(
             detail: finalized.stages[finalizer.id]?.error ?? 'terminal finalizer failed',
             evidenceDigest: (() => {
               const path = join(runDirPath, 'stages', finalizer.id, 'output.md');
-              try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return undefined; }
+              try { return hashRollbackFileSync(path).sha256; } catch { return undefined; }
             })(),
             threshold: state.campaignTriggers?.repeatedFailureAfter,
           });

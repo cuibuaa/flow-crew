@@ -29,7 +29,7 @@ rehearsal's actual options); the tables below follow parsers, not just help text
 | `audit-reality`, `land`, `export`, `clean` | Recheck, preserve, export or reclaim records |
 | `version` | Which package version is this? |
 
-`race` is removed. `quick --supervise`, `--no-supervise`, `--foreground`, `--hold-gates`
+`quick --supervise`, `--no-supervise`, `--foreground`, `--hold-gates`
 and unknown long options refuse with exit 1. `--timeout`/`--timeout=...` refuses with a
 engine-default migration hint. Foreground is the absence of `--background`.
 Standing approval rules are retired. Historic usage records remain readable.
@@ -109,10 +109,13 @@ Source: [core status/steering](../src/cli.ts), [state](../src/run-state-access.t
 | `start` | Starts dashboard only. `PORT` and `PROJECT_DIR` select listener/project. It can build missing UI; occupied port refuses before that write. Long-running process. |
 | `dashboard status` | `--port N`, otherwise PORT/3000. Exit 0 verified fresh; 1 unreachable/invalid arguments; 2 stale or unverified response. |
 | `daemon start\|serve\|stop\|restart\|status\|logs` | `--port` or `--socket` selects socket path (port is a compatibility spelling). Start/restart accept `--force`; logs `--tail N` (default 100), `--follow`. Serve is the resident internal process. |
+| `daemon hold` | Fence launches and wait for settled stage groups; `--timeout-ms N` (default 60000). Timeout leaves the hold active and returns failure. |
+| `daemon hold-status` | Report the durable deployment hold and each registered unit/scheduler's settlement; exit 0 only when ready. |
+| `daemon continue` | Validate held runs, release the deployment fence, and continue compatible runs through the queue. Per-run incompatibility returns failure and remains visible. See [deployment procedure](operations.md#deploy-while-tasks-are-in-flight). |
 | `task list` | `--status active\|all\|<task-status>`, `--limit N`, `--with-summary` |
 | `task show <numeric-id>` | `--summary-only`, `--raw` for tick JSON |
 | `task cancel <numeric-id>` | Record cancellation and attempt owned worker cleanup; an active run becomes `stopped` |
-| `task resume <numeric-id>` | Continue the task's stopped, failed or incomplete run, preserving completed stages, history, plan and iteration budget |
+| `task resume <numeric-id>` | Explicitly continue compatible stopped (including cancelled), failed or incomplete work after settlement checks, preserving completed stages, history, plan and budget. |
 | `task retry <numeric-id>` | Request another launch attempt; a settled terminal run starts fresh, discarding its continuation state |
 | `task tail <numeric-id>` | `--tail N` (default 100), `--follow`/`-f` |
 
@@ -126,7 +129,7 @@ These commands can control other work; use them only for an intentionally select
 Resume resolves the saved run and project from the task ID. The dashboard offers the
 same Resume control beside Cancel. A completed nonpassing gate in an incomplete run
 is retried in the next remaining iteration; exhausted iteration budget is an error.
-Stopped and failed work continues its current iteration. CLI output exits quietly
+Legacy stopped and failed work continues its current iteration. CLI output exits quietly
 when a pipe reader closes early. Restart, recovery and automatic retry never resume
 a stopped run. Retry remains distinct: before a run settles it requests another launch;
 after terminal settlement it starts a new run instead of continuing the previous one.
@@ -162,6 +165,7 @@ Sources: [inbox parser](../src/cli-inbox.ts), [campaign/brief dispatch](../src/c
 | `audit-reality` | `--task <numeric-id>`, `--range last-21-days`, `--output <path>`; executes recorded deterministic checks and prints Markdown. Exit 0 for completed audit, including failed/unverifiable rows. |
 | `land` | Required `--run`; `--json`; `--remove`, `--acknowledge-regenerable=<count>`; optional closure pair `--complete-fc-task`, `--fc-task-session`, `--fc-tasks-root`. Value options also accept separate syntax. Audit/removal outcomes can refuse nonzero; read reasons. |
 | `export [run-id]` | Writes a JSON bundle to the current directory, default latest global run |
+| `prune [--run <run-id>] [--dry-run \| --apply] [--json]` | Compacts terminal run workspaces while preserving history, products and cited evidence. Defaults to dry-run; reports bytes/kept paths. Refuses live, nonterminal or unverifiable owners. See [retention](operations.md#storage-ownership). |
 | `clean` | `--keep N`, default 5; removes selected old readable runs and expired reservations, skipping verified live schedulers; zero keeps no recent readable runs |
 
 These are execution or deletion authority, not passive status commands. Detailed preservation

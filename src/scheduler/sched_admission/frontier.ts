@@ -1,5 +1,5 @@
 /** DAG reachability, topological order, readiness and conservative parallel scope conflicts. Gate readers are explicit services. */
-import { type StoreState, isPendingStageStatus, isSatisfiedStageDependencyStatus, runDir, type WriteAttribution, type StageStatus } from '../../store.js';
+import { STAGE_STATUS, type StoreState, isPendingStageStatus, isSatisfiedStageDependencyStatus, runDir, type WriteAttribution, type StageStatus } from '../../store.js';
 import { existsSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { parseDeclaredScope, scopeLanguagesMayOverlap } from './scope-services.js';
@@ -55,6 +55,23 @@ export interface GateReadServices {
   readGateVerdict(projectDir: string, stageId: string, runId?: string, contract?: GateContract | null, allowSharedFallback?: boolean, requireValidationDelta?: boolean): { pass: boolean; reason?: string } | null;
 }
 
+/** Follow observed conditional skips upstream, without re-evaluating conditions.
+ * A gate skipping itself does not verify its producer's work. Completed,
+ * running and failed work still needs settlement even if an ancestor was skipped. */
+export function isStageInSkippedBranch(stageId: string, stages: ReadonlyMap<string, StageConfig>, state: StoreState): boolean {
+  const seen = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const stage = stages.get(id);
+    const status = state.stages[id]?.status;
+    if (!stage || (status !== STAGE_STATUS.PENDING && status !== STAGE_STATUS.SKIPPED)) return false;
+    if (id !== stageId && status === STAGE_STATUS.SKIPPED && stage.condition?.trim()) return true;
+    return (stage.depends_on ?? []).some(visit);
+  };
+  return visit(stageId);
+}
+
 export function createReadyFinder({ loadGateContract, readGateVerdict }: GateReadServices) {
   return (function findAllReady(stages: StageConfig[], state: StoreState): StageConfig[] {
     const ready: StageConfig[] = [];
@@ -65,7 +82,7 @@ export function createReadyFinder({ loadGateContract, readGateVerdict }: GateRea
       if (!ss || !isPendingStageStatus(ss.status)) continue;
       const depsReady = (s.depends_on ?? []).every((d) => {
         const ds = state.stages[d];
-        if (!ds || !isSatisfiedStageDependencyStatus(ds.status)) return false;
+        if (!ds || ds.continuation || !isSatisfiedStageDependencyStatus(ds.status)) return false;
         const dependency = stagesById.get(d);
         const hasRunLocation = typeof state.projectDir === 'string' && typeof state.runId === 'string';
         if (hasRunLocation && contract === undefined) {

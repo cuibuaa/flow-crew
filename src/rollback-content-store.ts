@@ -1,9 +1,9 @@
 import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync } from './engine-fs.js';
 import { createReadStream, existsSync, fstatSync, lstatSync, readSync } from 'node:fs';
 import { constants as fsConstants } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, type Hash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 
 export interface RollbackStatIdentity {
   type: 'file' | 'symlink' | 'other';
@@ -73,14 +73,13 @@ function descriptorIdentity(descriptor: number): RollbackStatIdentity {
   };
 }
 
-/** Constant-memory synchronous hashing, used only during initial/preimage capture. */
-export function hashRollbackFileSync(path: string): RollbackHashResult {
+/** Feed exact file bytes into a digest with bounded memory and stable identity. */
+export function updateFileHashSync(path: string, hash: Hash): Omit<RollbackHashResult, 'sha256'> {
   let descriptor: number | undefined;
   try {
     descriptor = openSync(path, 'r');
     const before = descriptorIdentity(descriptor);
     if (before.type !== 'file') throw new Error(`${path} is not a regular file`);
-    const hash = createHash('sha256');
     const chunk = Buffer.allocUnsafe(256 * 1024);
     let byteLength = 0;
     while (true) {
@@ -93,10 +92,17 @@ export function hashRollbackFileSync(path: string): RollbackHashResult {
     if (!rollbackStatIdentitiesEqual(before, after) || byteLength !== Number(after.size)) {
       throw new Error(`${path} changed while its content was hashed`);
     }
-    return { sha256: hash.digest('hex'), byteLength, statIdentity: after };
+    return { byteLength, statIdentity: after };
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
+}
+
+/** Constant-memory synchronous content identity. */
+export function hashRollbackFileSync(path: string): RollbackHashResult {
+  const hash = createHash('sha256');
+  const result = updateFileHashSync(path, hash);
+  return { ...result, sha256: hash.digest('hex') };
 }
 
 /**
@@ -125,7 +131,6 @@ export async function hashRollbackFileCooperatively(path: string): Promise<Rollb
 
 export class RollbackContentStore {
   readonly root: string;
-  private sequence = 0;
 
   constructor(runDirPath?: string) {
     this.root = runDirPath
@@ -134,16 +139,14 @@ export class RollbackContentStore {
     mkdirSync(this.root, { recursive: true });
   }
 
-  capture(sourcePath: string, logicalPath: string): RollbackCaptureResult {
+  capture(sourcePath: string, _logicalPath: string): RollbackCaptureResult {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const before = rollbackStatIdentity(sourcePath);
       if (!before || before.type !== 'file') throw new Error(`${sourcePath} is not a regular file`);
-      this.sequence += 1;
-      const key = createHash('sha256')
-        .update(`${logicalPath}\0${this.sequence}`)
-        .digest('hex');
-      const target = join(this.root, `${key}-${basename(logicalPath) || 'preimage'}`);
+      const hashed = hashRollbackFileSync(sourcePath);
+      const target = join(this.root, hashed.sha256);
+      if (existsSync(target)) return { ...hashed, backingPath: target };
       try {
         // COPYFILE_FICLONE requests copy-on-write but portably falls back to a
         // kernel copy. Neither route retains the file in a JavaScript Buffer.
@@ -152,7 +155,10 @@ export class RollbackContentStore {
         if (!rollbackStatIdentitiesEqual(before, after)) {
           throw new Error(`${sourcePath} changed while its rollback preimage was captured`);
         }
-        const hashed = hashRollbackFileSync(target);
+        const copied = hashRollbackFileSync(target);
+        if (copied.sha256 !== hashed.sha256 || copied.byteLength !== hashed.byteLength) {
+          throw new Error(`${sourcePath} changed while its rollback preimage was captured`);
+        }
         return { ...hashed, statIdentity: after!, backingPath: target };
       } catch (error) {
         lastError = error;

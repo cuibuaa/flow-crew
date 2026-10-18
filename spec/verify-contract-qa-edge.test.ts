@@ -139,31 +139,6 @@ describe('verification-owned orchestration edge probes', () => {
     expect(guidanceForStageFromText(ledger, 'implement')).toEqual([]);
   });
 
-  it('classifies a terminal finalizer\'s conservative extra capability as validation-only', () => {
-    const finalizer = parseDispatchedStageConfig({ artifact_contract: artifacts([], [], [], []),
-      id: 'finalize',
-      role: 'writer',
-      scope: ['docs/final.md', 'docs/new_measurement.json'],
-      depends_on: [],
-      dependency_reasons: {},
-      prompt_template: 'write the terminal report',
-      skills: [],
-      is_gate: false,
-      criterion_refs: [],
-    });
-
-    const admission = inspectDispatchAdmission({
-      dispatched: [finalizer],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      terminalStates: { complete: { paths: ['docs/final.md'] } },
-    });
-    expect(admission.pass, admission.errors.join('\n')).toBe(true);
-    expect(admission.terminalValidationScopes).toEqual({
-      finalize: ['docs/new_measurement.json'],
-    });
-  });
-
   it('rejects a hard check on the optional result even when a mandatory stage owns that path', () => {
     const projectDir = temporaryRoot('flowcrew-qa-optional-result-');
     const measure = parseDispatchedStageConfig({ artifact_contract: artifacts([], [], [], []),

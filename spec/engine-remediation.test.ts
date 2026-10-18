@@ -1,3 +1,4 @@
+import { hashRollbackFileSync } from '../src/rollback-content-store.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
 import {
@@ -46,7 +47,7 @@ import type {
   ProjectValidationBaseline,
   ValidationCommandResult,
 } from '../src/project-validation.js';
-import { readResearchGateCandidate } from '../src/research-candidate.js';
+import { beginResearchInputGeneration, readResearchGateCandidate } from '../src/research-candidate.js';
 import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
@@ -58,6 +59,7 @@ import {
   inspectDispatchAdmission,
   loadWorkflow,
   parseBriefFrontmatter,
+  parseDispatchedStageConfig,
   readGateVerdict,
   recordGateValidationDelta,
   restoreProjectPath,
@@ -82,6 +84,7 @@ import {
   setFcGlobalDir,
   writeStageStatus,
   writeRunState,
+  type StoreState,
 } from '../src/store.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..');
@@ -262,7 +265,7 @@ describe('engine behaviour contracts', () => {
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
     setFcGlobalDir(join(root, 'fc-home'));
-    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalize']);
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalize', 'review']);
     const terminalPath = 'docs/final.md';
     const outputPath = 'docs/report.md';
     write(join(projectDir, terminalPath), '# final\n');
@@ -275,10 +278,19 @@ describe('engine behaviour contracts', () => {
     state.declaredOutputs = [{
       path: outputPath, line: 2, source: 'outputs', disposition: 'create', expectedType: 'file',
     }];
+    const producedAt = new Date(Date.now() - 500).toISOString();
+    const reviewedAt = new Date(Date.now() - 250).toISOString();
     state.stages.finalize = {
       status: 'complete', retries: 0,
-      attempts: [{ index: 1, status: 'complete', startedAt, writes: [terminalPath, outputPath] }],
+      attempts: [{ index: 1, status: 'complete', startedAt, completedAt: producedAt, writes: [terminalPath, outputPath] }],
     };
+    state.stages.review = { status: 'complete', retries: 0,
+      attempts: [{ index: 1, status: 'complete', startedAt: reviewedAt, completedAt: reviewedAt }] };
+    state.dispatchedStages = [
+      parseDispatchedStageConfig({ id: 'finalize', role: 'writer', scope: [terminalPath, outputPath] }),
+      parseDispatchedStageConfig({ id: 'review', role: 'qa', is_gate: true, depends_on: ['finalize'], scope: [] }),
+    ];
+    write(join(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Accepted the produced report.' }));
     writeRunState(projectDir, created.runId, state);
     write(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
       version: 1, pass: true, checkedAt: new Date().toISOString(), errors: [],
@@ -291,11 +303,11 @@ describe('engine behaviour contracts', () => {
     const archivedPath = join(created.runDirPath, 'declared_outputs', outputPath);
     const manifest = JSON.parse(readFileSync(join(created.runDirPath, 'declared_outputs_manifest.json'), 'utf-8')) as { outputs: unknown[] };
     const safe = isPathSafelyArchived(projectDir, created.runDirPath, outputPath, {
-      exists: existsSync, readBytes: (path) => readFileSync(path),
+      hashFile: hashRollbackFileSync,
     });
     write(join(projectDir, outputPath), 'changed after archive\n');
     const changedSafe = isPathSafelyArchived(projectDir, created.runDirPath, outputPath, {
-      exists: existsSync, readBytes: (path) => readFileSync(path),
+      hashFile: hashRollbackFileSync,
     });
     expect(result.decision).toBe('matched');
     expect(readFileSync(archivedPath, 'utf-8')).toBe('archived report\n');
@@ -332,6 +344,7 @@ describe('engine behaviour contracts', () => {
   it('re-queries cancellation convergence after an ambiguous response', async () => {
     const requests: string[] = [];
     const result = await cancelRunThroughControlPlane('cancel-after', undefined, {
+      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
       sendRequest: async (request) => {
         requests.push(request.cmd);
         if (request.cmd === 'cancel-run') throw new RpcOutcomeUnknownError('response lost after delivery.');
@@ -346,6 +359,7 @@ describe('engine behaviour contracts', () => {
     });
     const unresolvedCalls: string[] = [];
     const unresolved = await cancelRunThroughControlPlane('cancel-control', undefined, {
+      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
       sendRequest: async (request) => {
         unresolvedCalls.push(request.cmd);
         throw new RpcOutcomeUnknownError('both responses lost.');
@@ -617,11 +631,14 @@ describe('engine behaviour contracts', () => {
       label: 'prior', outcome: 'no_candidate', reason: 'prior round',
     }));
     const resultFile = join(projectDir, 'docs', 'result.json');
-    write(resultFile, JSON.stringify({ label: 'current', result: 42 }));
-    write(join(currentDirectory, 'run.json'), JSON.stringify({
+    const currentState = {
       runId: 'current-run', startedAt: new Date(Date.now() - 1_000).toISOString(),
+      stages: {},
       research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/result.json', stop: {} },
-    }));
+    } as StoreState;
+    beginResearchInputGeneration(projectDir, currentState);
+    write(join(currentDirectory, 'run.json'), JSON.stringify(currentState));
+    write(resultFile, JSON.stringify({ label: 'current', result: 42 }));
     const measuredPrompt = buildStagePrompt({
       dependsOn: [], promptTemplate: 'audit current result', projectDir, runId: 'current-run', runDir: currentDirectory,
       taskDescription: '# fixture', isGate: true, researchOutcomeGate: true,

@@ -14,10 +14,10 @@ Parser field names are listed exactly.
 
 | Key | Shipped value | Effect |
 |---|---:|---|
-| `default_timeout_ms` | 10800000 | Base scheduled execution deadline |
+| `default_timeout_ms` | 10800000 | Normal execution budget including wrap-up; see [timing](agent-protocol.md#stage-budgets-and-retained-continuation) |
 | `default_stage_idle_timeout_ms` | 600000 | Minimum observed silence before watchdog abort |
 | `default_validation_timeout_ms` | 2700000 | Bound for one configured validation command |
-| `default_max_iterations` | 5 | Workflow iteration limit |
+| `default_max_iterations` | 5 | Workflow iteration limit, including each retained budget slice |
 | `default_gate_retry_loops` | 3 | Gate repair-loop bound |
 | `default_stage_technical_retries` | 1 | Technical execution retry bound; fallback ordinary retry default |
 | `default_plan_stage_retries` | 2 | Re-prompts for an empty or invalid injected plan |
@@ -60,8 +60,13 @@ writing that runtime resolution back. `mock` is a registered test adapter; `scri
 
 Role `model` and `reasoning_effort` pins win over engine defaults; missing or `default` role
 values resolve to engine defaults. For Codex, remaining `default` values inherit its global
-configuration, then its CLI defaults. Claude receives an explicit model when configured
-and forwards an explicit effort to its CLI; otherwise its native default is unresolved.
+configuration, then its CLI defaults. Claude reads `$CLAUDE_CONFIG_DIR/settings.json`
+(or `~/.claude/settings.json`) at every invocation: `model` supplies the model, and
+`modelSettings[model].effortLevel` takes precedence over `effortLevel` for the selected
+model key. Model aliases are passed unchanged. Explicit model and effort pins each win
+over settings; missing or invalid settings leave the corresponding CLI flag unset.
+Claude keeps other user settings isolated. Its invocation transport records each passed
+value and source (`role`, `user-settings`, or `cli-default`), with `null` for an omitted flag.
 Both adapters keep model choice an operator policy: they do not force a cheaper model or
 translate another provider's model name. Rejected model/effort parameters can be removed by
 bounded native-error repair; that does not verify the suitability of the resulting model.
@@ -128,7 +133,9 @@ in new static workflows rather than relying on that compatibility gap.
 See [scope reconciliation](../src/scheduler/sched_scope/reconciliation.ts).
 
 The shipped `default` and `research` workflows begin with a dynamic planner. `direct` supplies
-a fixed author, independent read-only gate and conditional repair plan. It has broad author
+a fixed author, independent read-only gate and conditional repair plan, and is selected for
+ordinary tasks without an explicit workflow choice. Research and program briefs retain their
+planner loops; `workflow: planner` or `--workflow default` requests dynamic planning. Direct has broad author
 scope; a dedicated workspace and the brief's constraints still matter. Brief `workflow`
 selection and refusal of direct research/program loops belong to [brief contract](brief-contract.md).
 

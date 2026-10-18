@@ -5,7 +5,7 @@ import { existsSync, fsyncSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { ArtifactContractSchema } from './artifact-declarations.js';
-import type { StageConfig } from './scheduler.js';
+import type { StageConfig, RecordedStageConfig } from './scheduler/sched_admission/configuration.js';
 import { RUN_STATUS, STAGE_STATUS, readStageStatus, runDir, updateRunState, type StoreState } from './store.js';
 
 const requestId = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/);
@@ -19,7 +19,7 @@ export const PlanRevisionRequestSchema = z.object({
 export type PlanRevisionRequest = z.infer<typeof PlanRevisionRequestSchema>;
 export interface PlanControl {
   version: 1;
-  stages: StageConfig[];
+  stages: RecordedStageConfig[];
   capabilities: string[];
 }
 export function planDigest(stages: readonly StageConfig[]): string { return sha256Canonical(stages); }
