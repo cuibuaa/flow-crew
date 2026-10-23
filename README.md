@@ -10,7 +10,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22.5-brightgreen.svg" alt="Node >= 22.5" />
-  <img src="https://img.shields.io/badge/release-v0.10.2-2563eb.svg" alt="FlowCrew v0.10.2" />
+  <img src="https://img.shields.io/badge/release-v0.11.0-2563eb.svg" alt="FlowCrew v0.11.0" />
   <img src="https://img.shields.io/badge/default_backend-Codex-111827.svg" alt="Codex default backend" />
 </p>
 
@@ -22,14 +22,14 @@ An illustrative conversation:
 > /ship
 ```
 
-Use `/ship` in Claude Code or `$ship` in Codex. FlowCrew turns a written brief into planning, scoped workers,
+Use `/ship` in Claude Code or `$ship` in Codex. FlowCrew turns a written brief into planning, workers,
 independent reviews and retained evidence. **You probably don't need FlowCrew** for one bounded task;
 [choose your path](#choose-your-path) when the work needs a persistent run with checks and repair loops.
 
 ## You bring the problem. It brings the rigor.
 
-- **Checks before opinions.** Engine-owned configured validation settles against the setup baseline before every
-  gate review. Recorded regressions go straight to admitted repair; reviewers cannot approve them.
+- **Checks before opinions.** For runs with a setup baseline, engine-owned configured validation settles against it
+  before every gate review. Recorded regressions go straight to admitted repair; reviewers cannot approve them.
   Unresolved validation stops review.
 - **Independent gates, bounded repairs.** Authors have downstream independent gates. Rejected work returns through
   admitted repairs to the same gates within a configured budget. Exhaustion stops work instead of repeating the whole plan.
@@ -49,7 +49,7 @@ See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
 | Point it at… | Kind | What comes back |
 |---|---|---|
 | Improve a measured baseline | Research | Journaled measurements and a ship, ceiling, incomplete or failure outcome; confirmation when declared |
-| Implement a module to a spec | Engineering | Scoped implementation, independent verdicts and configured validation results |
+| Implement a module to a spec | Engineering | Implementation, independent verdicts and configured validation results |
 | Refactor while preserving behavior | Engineering | Reviewed changes checked against the brief's criteria and configured tests |
 | Investigate an intermittent defect | Engineering / campaign | Related run history and evidence for the reproducer, diagnosis and fix required by the brief |
 
@@ -59,7 +59,7 @@ See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
 
 ## From brief to verified run
 
-<img src="assets/architecture.png" width="900" alt="FlowCrew architecture: the ship procedure and quick or daemon launch lead to scheduler planning, scoped authors, engine validation, independent gates and bounded repair; declared reality checks guard successful outcomes, with adapters, roles, dashboard, campaigns and persistent evidence alongside." />
+<img src="assets/architecture.png" width="900" alt="FlowCrew architecture: the ship procedure and quick or daemon launch lead to scheduler planning, authors, engine validation, independent gates and bounded repair; declared reality checks guard successful outcomes, with adapters, roles, dashboard, campaigns and persistent evidence alongside." />
 
 Each authoring stage has one author. Independent gates receive their own stage budgets,
 including configured validation. Declared reality checks govern terminal success, with advisory
@@ -131,6 +131,11 @@ Use `daemon hold` and `daemon continue` for the [deployment procedure](guide/ope
 preserving completed work and remaining budget. Cancellation stays cancelled until explicit continuation; retry starts fresh after settlement.
 Parked approvals use Inbox decisions. [CLI](guide/cli.md#services-and-tasks) · [Operations](guide/operations.md#inspect-guide-and-stop).
 
+When launch records a supported frontend and session, session-push queues terminal and attention
+events for delivery to the launcher. Keep the daemon running for delivery retries. ACK each
+handled event; terminal wrap-up still requires independent verification, preservation of unique
+work and explicit ledger closure. [Launch-side delivery](guide/session-push.md).
+
 ## What you can run
 
 These prompts are illustrative; only [`examples/hello-research.brief.md`](examples/hello-research.brief.md)
@@ -175,13 +180,13 @@ they do not guarantee novel proposals.
 ## What makes it work
 
 - **Roles with limited authority.** The planner proposes a graph; admission checks roles,
-  scope, topology and criterion coverage. Authors produce work; independent gates judge it.
-  Their verdicts cannot override engine validation, admitted scope or check thresholds.
+  topology and criterion coverage. Authors produce work; independent gates judge it.
+  Their verdicts cannot override engine validation, frozen-input protection or check thresholds.
 - **Every hand-off is a checkable artifact.** Typed stage answers, gate verdicts and declared
   output/input locations make results inspectable. Location checks establish required paths
   and producer bindings; content quality still needs criteria and review.
-- **Stopping is a rule.** Research policy owns numeric keep/stop decisions. Repair limits,
-  live wrap-up guidance retains over-budget work for the next bounded iteration;
+- **Stopping is a rule.** Research policy owns numeric keep/stop decisions. Live wrap-up
+  guidance retains over-budget work for the next bounded iteration; repair limits,
   independent gate budgets and a deterministic idle watchdog bound execution.
 
 The [architecture](guide/architecture.md) and [artifact protocol](guide/agent-protocol.md) explain these boundaries.
@@ -195,7 +200,7 @@ Checks and their inputs need to express the outcome you actually want.
 
 > [!WARNING]
 > **Live runs receive unattended shell access.** The adapters select bypass modes for normal
-> approval and sandbox prompts. Scope checks and approval requests govern the engine's protocol;
+> approval and sandbox prompts. Input protection and approval requests govern the engine's protocol;
 > they are not an operating-system sandbox. Use a dedicated workspace, read the brief and review
 > its evidence before accepting the result. To stop an intentionally selected registered task,
 > use `flowcrew task cancel <id>` and inspect settlement as explained in [operations](guide/operations.md#inspect-guide-and-stop).

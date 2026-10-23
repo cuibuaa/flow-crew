@@ -8,12 +8,20 @@ retained as reported release history, not current guarantees or benchmark eviden
 
 # Changelog
 
-## Unreleased
+## [0.11.0] - 2026-10-23
+
+This release removes retired control mechanisms, consolidates execution and settlement decisions,
+and delivers wrap-up requests to the launching session.
 
 ### Migration
 
-The first deploy across the RPC command/reply change must use separate CLI invocations
-from the deployment checkout, with the same `FC_HOME` and socket throughout:
+**Upgrade the CLI and daemon together.** RPC success replies are now `{ok:true,result}`;
+refusals are `{ok:false,code,message}`. RPC commands `deploy-hold`, `deploy-status` and
+`deploy-continue` become `hold`, `hold-status` and `continue`; `cancel-run` becomes `cancel`
+with `runId`, and `cancel-status` is removed. The renamed commands have no compatibility aliases.
+
+The first deploy across this boundary must use separate CLI invocations from the deployment
+checkout, with the same `FC_HOME` and socket throughout:
 
 1. `flowcrew daemon hold` with the **old CLI**; proceed only on exit 0 and `ready: true`.
 2. `flowcrew daemon stop` with the **old CLI**; wait for the old daemon/socket to retire.
@@ -21,10 +29,141 @@ from the deployment checkout, with the same `FC_HOME` and socket throughout:
 4. `flowcrew daemon start` with the **new CLI**.
 5. `flowcrew daemon continue` with the **new CLI**; verify the hold was released.
 
-The old CLI's `daemon deploy` cannot read the new daemon's `{ok:true,result}` replies.
-The renamed RPC commands have no compatibility aliases. Cancel requests from a new client
-to a still-running old daemon fail as not-found until the restart. The durable hold survives
-the stop/build/start boundary; see [deployment operations](guide/operations.md#deploy-while-tasks-are-in-flight).
+The old CLI's `daemon deploy` cannot read the new daemon's replies. Cancel requests from a
+new client to a still-running old daemon fail as not-found until the restart. The durable hold
+survives the stop/build/start boundary; see [deployment operations](guide/operations.md#deploy-while-tasks-are-in-flight).
+
+- **Socket selection is explicit.** `FLOWCREW_DAEMON_SOCKET` is ignored, and daemon/task
+  `--port` is removed. Use `FC_HOME` for the state root and default socket, or `--socket`
+  for an explicit endpoint. Validation no longer installs the retired socket-environment fuse;
+  use an isolated `FC_HOME` for private state.
+- **Engine budget keys are renamed.** In the installed engine's `config/defaults.yaml`, change
+  `default_stage_idle_timeout_ms` to `stage_idle_timeout_ms`, `default_validation_timeout_ms`
+  to `validation_timeout_ms`, `default_max_iterations` to `max_iterations`,
+  `default_gate_retry_loops` to `gate_retry_loops`, `default_stage_technical_retries` to
+  `stage_technical_retries`, and `default_plan_stage_retries` to `plan_stage_retries`.
+  `default_timeout_ms` is unchanged. Remove custom role-template uses of `{default_timeout_ms}`;
+  that substitution is gone. The shipped planner file is now `config/workflows/planner.yaml`;
+  `--workflow default` and saved default-workflow names still resolve to it.
+- **Task record readers use canonical launch settings.** `launch_options` replaces `launch_args`,
+  `max_attempts` replaces `max_retries`, and one-based `launch` replaces zero-based `launch_seq`.
+  `attempt` still counts consumed launch budget. Legacy registration fields and records are
+  normalized on read. Read bound run outcomes from `run.{status,failureReason,completedAt}`
+  separately from the task's launch-control `status`.
+- **Planner scope is an estimate.** It no longer grants or forbids project writes, and authors
+  sharing a project execute serially. Scope-revision requests no longer suspend execution or
+  grant paths. Remove `live_constraint_exempt_patterns`, `live_constraint_fallback_scan_ms`
+  and `live_constraint_monitor_deadline_ms`; Git ignore rules own disposable-output inventory.
+  Declare evidence that must remain unchanged as frozen inputs.
+- **Declare inputs and freezing in frontmatter.** Prose paths no longer declare inputs or
+  authorize reuse of existing outputs. Use `inputs` and boolean `frozen: true` on structured
+  entries for immutable files or trees; ordinary inputs remain mutable. Preservation prose,
+  headings and role text do not enforce freezing. Exact declared outputs take precedence.
+  Setup no longer verifies row-count, date-span, file-count or SHA-256 assertions inferred from
+  input annotations; put required assertions in explicit validation or declared reality checks.
+- **Retired commands and options are removed.** Replace `campaign status|pending|review` and
+  `brief head|log|diff|rollback` integrations; campaign brief/diff/review endpoints and the brief
+  patch workflow are gone. Campaign grouping and history remain. Remove the preflight option
+  `ship-preflight --no-baseline` and `events --include-maintenance`; preflight collects facts without
+  running validation. New artifact contracts must omit `artifact_contract.replays`; historical
+  replay metadata remains readable but is not executed.
+- **Versioned-JSON check failures are no longer demoted.** Fix checks that assume the wrong
+  JSON shape, or explicitly declare an advisory check when intended. A recognized missing
+  command at exit 127 still records an advisory environment failure.
+- **Program and gate controls are retired.** The `program` frontmatter block no longer enforces
+  `max_phases`, `max_wall_hours`, `stop_file` or `halt_after_consecutive_no_improvement`, or
+  updates the phase ledger. Move those controls to operator tooling. Gate controls for
+  `remedyFeasibility` and per-criterion `checkAssessments`/`rulingTreatments` are removed;
+  state required evidence in the brief and use ordinary guidance.
+  Research supports only `greedy_stack`: replace `best_of_n` or `replace_if_better` only when
+  cumulative stacking is intended, otherwise keep that policy outside the engine.
+- **Lifecycle readers must use the current vocabulary.** New cancellation records use
+  `cancelled`; archived `stopped` remains a read alias. `awaiting_approval` and `phase_complete`
+  are no longer known run statuses; inspect historical records before attempting continuation.
+  Resume no longer repairs unsettled legacy cancelled attempts during admission: recover their
+  execution records before resuming, or request a fresh run after settlement.
+- **A continuation refusal keeps the deployment hold active.** Any incompatible held run keeps
+  compatible peers parked too. Resolve or explicitly cancel the refused work, then retry
+  `daemon continue` with the same state root and socket.
+- **Record consumers must use retained sources.** New runs no longer write `progress.md`,
+  per-stage `input.md`, `trace.jsonl` or duplicate deadline-event logs.
+  Use `summary.md`, immutable invocation records, state and the canonical event feed. Retired
+  scope, lease, supervisor, command-start/completion and synthetic artifact lifecycle events
+  are no longer emitted.
+  Markdown task-summary PASS/FAIL labels no longer determine a task's verdict; the run does.
+- **Scratch cleanup no longer compacts historical workspaces.** Put disposable compiler output
+  and caches in invocation `$TMPDIR`, and copy final evidence to declared locations. Daemon
+  startup no longer sweeps retained run history; explicit `prune --apply` retires invocation
+  scratch, while historical stage build/scratch trees remain durable history.
+- **Supplied numbers are explicit.** `supplied_numbers` must be an array of finite YAML numbers.
+  A nonempty array requires both `within_expected_range` and
+  `method_was_not_adjusted_to_match_expectation` as positive result requirements. Prose-only
+  expectations now warn; malformed declarations or missing declared requirements make brief
+  preflight report a failure and rehearsal refuse. Malformed YAML is refused before setup
+  or launch; fix its syntax rather than relying on a partial interpretation.
+- **Scripts must honor shared parsing and exits.** Unknown options, duplicate value options
+  and malformed counts refuse with exit 1. Ordinary commands use 0 for completion, 1 for known
+  failure/refusal and 2 for an unknown outcome that may have taken effect; inspect state before
+  retrying after 2. Status probes retain their fresh/unavailable/stale contract, and session-push
+  hook/wake uses its frontend blocking contract. See the [CLI reference](guide/cli.md).
+
+### Changed
+
+- **One owner for each execution decision.** Attempt write evidence, content settlement,
+  gate-group results, run conclusions, retries and native usage accounting share their persisted
+  decisions instead of independently recomputing them. Gates settle after their complete stage
+  group and validation receipt; repair and terminal choices use that settled result.
+- **Setup baselines can be reused by content identity.** Matching project/base content,
+  declared inputs, validation commands, dependency preparation, executables, effective command
+  environments and timeout can reuse a measured baseline across briefs, targets and caller
+  sessions. Unknown identities, corrupt records and unmeasured results run validation again;
+  live gate validation still prepares dependencies from current lockfiles.
+- **Wrap-up returns to the launcher.** Foreground and background launches record their session
+  address. Durable session-push events request verification, preservation and explicit wrap-up
+  through Claude's hook wake/session inbox or Codex's queue, with retries and notifier fallback.
+  Delivery receipts, event ACK and ledger completion remain separate; terminal status closes
+  none of those obligations. Reinstall the shipped integrations and check `flowcrew doctor`;
+  see [launch-side delivery](guide/session-push.md).
+- **CLI help follows the parser.** One command grammar supplies argument validation and help;
+  `--help` and `-h` return before engine operations, and usage failures include the relevant
+  synopsis. Equivalent value spellings and command exits follow the shared contract.
+- **Daemon startup pins an immutable runtime.** Portable backend/UI build files are snapshotted
+  with configuration at startup, so later imports and scheduler children keep the loaded
+  generation. Startup verifies its own child, socket and RPC identity; `serve` binds before
+  registry maintenance. Deployment uses the durable hold without a separate transaction receipt.
+- **Landing can archive before reclamation.** `land --archive` copies unique outputs and the
+  run store with SHA-256 manifests and verifies both copies. Reclamation still requires
+  `--remove` and the existing non-force removal gate. Ordinary audits remain read-only.
+
+### Removed
+
+- Retired runtime negotiation, resource leases, replay machinery, campaign directories and
+  brief patching, prose implementation lint, setup population collectors, redundant planner
+  admission/fingerprint checks, model-supervisor readers and systemd fallback mirrors.
+- Duplicate run projections, command lifecycle event channels, workspace citation scans and
+  historical startup retention scans. Invocation scratch and explicit preservation own their
+  respective lifetimes.
+
+### Fixed
+
+- The daemon replaces a stale Unix socket left by an unclean exit while refusing a second live
+  listener. Process-bound locks publish atomically, startup reaps a failed child, and tick
+  failures are recorded without escaping the daemon loop.
+- Bound task failures retain their public run outcome after lifecycle unification. Explicit
+  continuation selects the latest bound task and preserves completed work, remaining budgets
+  and genuine approval requirements.
+- Frozen-input restoration preserves admitted bytes and topology, refuses outward ancestor
+  substitutions and retains unknown preimages without treating them as deletion authority.
+- Product review and research publication use retained content and attempt evidence, including
+  same-value publication, without accepting unrelated equal-content copies or stale results.
+- Provider retries are limited to temporary failures; authentication and permanent refusals
+  keep their failure kind, and native session recovery remains owned by the adapter.
+- Validation recognizes failed exits against green baselines and retains dependency-preparation
+  failures with their direct exit codes. Baseline reuse recovers from missing executables and
+  corrupt cache entries without reusing unmeasured results.
+- Brief metadata and dispatch declarations share refusal diagnostics. Persistent plan retries
+  retain admission evidence, and ordinary prose numbers no longer trigger supplied-number
+  refusals without a declaration.
 
 ## [0.10.2] - 2026-10-18
 
