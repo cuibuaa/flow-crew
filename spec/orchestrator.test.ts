@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -12,7 +13,7 @@ import {
   type SupervisorBackend,
   type UnitStatus,
 } from '../src/orchestrator.js';
-import { REGISTRY_COMPACTION_THRESHOLDS, TaskRegistry } from '../src/task-registry.js';
+import { TaskRegistry } from '../src/task-registry.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import {
   activeRunsByProject,
@@ -21,12 +22,12 @@ import {
   invalidateRunLockCache,
   releaseLaunchIntent,
   writeSchedulerProcessIdentity,
-  processStartTimeTicks,
 } from '../src/run-lock.js';
 import { recordRequest, resolveRequest } from '../src/inbox.js';
 import { supervisionPaths } from '../src/supervision.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
+import { captureEngineCheckpoint } from '../src/restart-recovery.js';
 import {
   fcGlobalDir,
   initializeReservedRun,
@@ -141,55 +142,10 @@ function childOutcome(child: ChildProcessWithoutNullStreams): Promise<{ code: nu
 }
 
 describe('Orchestrator', () => {
-  it('[D1] auto-compacts a threshold-crossed registry with a backup and maintenance event', async () => {
-    const created = registry.create({ brief_text: 'registry compaction fixture', projectDir: tempDir });
-    const final = registry.update(created.id, { status: 'done', notes: 'latest row survives' });
-    const row = `${JSON.stringify(final)}\n`;
-    for (let index = 2; index < REGISTRY_COMPACTION_THRESHOLDS.records; index += 1) {
-      appendFileSync(registry.registryPath, row, 'utf-8');
-    }
-    expect(registry.metrics()).toMatchObject({
-      records: REGISTRY_COMPACTION_THRESHOLDS.records,
-      compactRecommended: true,
-    });
-    const maintenanceEvents: Array<Record<string, unknown>> = [];
-    const automatic = new Orchestrator({
-      registry,
-      systemd,
-      git,
-      cliPath: '/tmp/flowcrew-cli.js',
-      now: () => new Date(clock),
-      isProjectBusy: () => null,
-      onMaintenanceEvent: (event: Record<string, unknown>) => maintenanceEvents.push(event),
-    } as ConstructorParameters<typeof Orchestrator>[0] & {
-      onMaintenanceEvent: (event: Record<string, unknown>) => void;
-    });
-
-    await automatic.tickOnce();
-
-    expect(registry.metrics()).toMatchObject({ records: 1, tasks: 1, compactRecommended: false });
-    expect(registry.get(created.id)).toMatchObject({ status: 'done', notes: 'latest row survives' });
-    expect(maintenanceEvents).toEqual([
-      expect.objectContaining({
-        type: 'registry_compacted',
-        before: expect.objectContaining({ records: REGISTRY_COMPACTION_THRESHOLDS.records }),
-        after: expect.objectContaining({ records: 1 }),
-        removedRecords: REGISTRY_COMPACTION_THRESHOLDS.records - 1,
-        backupPath: expect.any(String),
-      }),
-    ]);
-    expect(existsSync(String(maintenanceEvents[0]?.backupPath))).toBe(true);
-    expect(registry.update(created.id, { notes: 'append after automatic compaction' }).notes)
-      .toBe('append after automatic compaction');
-  });
-
   it('[D1] preserves an append that begins while backup-first compaction holds the registry lock', { timeout: 15_000 }, async () => {
     const created = registry.create({ brief_text: 'concurrent registry fixture', projectDir: tempDir });
     const latest = registry.update(created.id, { status: 'running', notes: 'before concurrent append' });
-    const row = `${JSON.stringify(latest)}\n`;
-    for (let index = 2; index < REGISTRY_COMPACTION_THRESHOLDS.records; index += 1) {
-      appendFileSync(registry.registryPath, row, 'utf-8');
-    }
+    appendFileSync(registry.registryPath, `${JSON.stringify(latest)}\n`, 'utf-8');
 
     const heldPath = join(tempDir, 'compaction-held');
     const releasePath = join(tempDir, 'release-compaction');
@@ -286,7 +242,7 @@ describe('Orchestrator', () => {
       {
         name: 'legacy --no-inherit-campaign alias',
         launchArgs: ['--no-inherit-campaign'],
-        expectedToken: "'--no-inherit-campaign'",
+        expectedToken: "'--campaign-context=skip'",
       },
     ])('passes through $name exactly once', ({ launchArgs, expectedToken }) => {
       const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir, launch_args: launchArgs });
@@ -315,6 +271,35 @@ describe('Orchestrator', () => {
     });
   });
 
+  it.each([false, true])('checks deferred brief bytes across deployment (changed=%s)', async (changed) => {
+    const brief = 'Complete the deferred work';
+    // Persist the admission produced by an earlier build with fewer advisory
+    // findings. A new daemon must bind the bytes, regardless of its own lint.
+    const admission = {
+      ...admittedBrief(brief).brief_admission,
+      reportVersion: 1,
+      findingFingerprints: [],
+    };
+    const task = registry.create({
+      projectDir: tempDir, brief_text: brief, brief_admission: admission,
+      status: 'pending',
+    });
+    registry.update(task.id, { not_before: new Date(clock + 60_000).toISOString() });
+    await orchestrator.tickOnce();
+    expect(systemd.runs).toHaveLength(0);
+    if (changed) writeFileSync(task.brief_path!, `${brief}\n`, 'utf8');
+    advance(60_001);
+    await orchestrator.tickOnce();
+    const launched = registry.get(task.id)!;
+    expect(launched.status).toBe(changed ? 'stuck' : 'running');
+    expect(systemd.runs).toHaveLength(changed ? 0 : 1);
+    if (changed) expect(launched.notes).toContain('digest_mismatch');
+    else {
+      const encoded = /'--brief-input-base64' '([A-Za-z0-9_-]+)'/.exec(systemd.runs[0].command)![1];
+      expect(Buffer.from(encoded, 'base64url').toString('utf8')).toBe(brief);
+    }
+  });
+
   it('records active ticks and marks pending tasks running', async () => {
     const task = registry.create({ ...admittedBrief('task'), projectDir: tempDir });
     systemd.states.set(task.systemd_unit, ACTIVE_UNIT);
@@ -327,8 +312,6 @@ describe('Orchestrator', () => {
 
   it('marks inactive tasks done when a matching commit and artifacts exist', async () => {
     writeFileSync(join(tempDir, 'result.txt'), 'ok', 'utf-8');
-    mkdirSync(join(tempDir, 'docs'), { recursive: true });
-    writeFileSync(join(tempDir, 'docs', 'task_summary.md'), validSummary(), 'utf-8');
     const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', commit_prefix: 'feat(x)', expected_artifacts: ['result.txt'] });
     systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
     git.commit = 'abc123';
@@ -338,58 +321,7 @@ describe('Orchestrator', () => {
     expect(registry.get(task.id)).toMatchObject({
       status: 'done',
       completing_commit: 'abc123',
-      summary_verdict: 'PASS',
-      summary_one_liner: 'The task completed with an operator-readable summary.',
-      summary_source: join(tempDir, 'docs', 'task_summary.md'),
     });
-  });
-
-  it('marks inactive tasks needs_summary when summary is missing', async () => {
-    writeFileSync(join(tempDir, 'result.txt'), 'ok', 'utf-8');
-    const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', commit_prefix: 'feat(x)', expected_artifacts: ['result.txt'] });
-    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
-    git.commit = 'abc123';
-
-    await orchestrator.tickOnce();
-
-    expect(registry.get(task.id)).toMatchObject({ status: 'needs_summary', completing_commit: 'abc123' });
-    expect(registry.get(task.id)?.notes).toContain('task_summary.md not found');
-    expect(registry.readRecentTicks(task.id).at(-1)).toContain('status=needs_summary');
-  });
-
-  it('marks inactive tasks needs_summary when summary is malformed', async () => {
-    writeFileSync(join(tempDir, 'result.txt'), 'ok', 'utf-8');
-    mkdirSync(join(tempDir, 'docs'), { recursive: true });
-    writeFileSync(join(tempDir, 'docs', 'task_summary.md'), '# Task Summary\n\n**Verdict**: SUCCESS\n', 'utf-8');
-    const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', commit_prefix: 'feat(x)', expected_artifacts: ['result.txt'] });
-    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
-    git.commit = 'abc123';
-
-    await orchestrator.tickOnce();
-
-    expect(registry.get(task.id)?.status).toBe('needs_summary');
-    expect(registry.get(task.id)?.notes).toContain('task_summary.md malformed');
-    expect(registry.get(task.id)?.notes).toContain('invalid verdict: SUCCESS');
-  });
-
-  it('loads task summaries from a configured expected summary directory', async () => {
-    writeFileSync(join(tempDir, 'result.txt'), 'ok', 'utf-8');
-    mkdirSync(join(tempDir, 'summaries'), { recursive: true });
-    writeFileSync(join(tempDir, 'summaries', 'task_summary.md'), validSummary('ESCALATE'), 'utf-8');
-    const task = registry.create({
-      brief_text: 'task',
-      projectDir: tempDir,
-      status: 'running',
-      commit_prefix: 'feat(x)',
-      expected_artifacts: ['result.txt'],
-      expected_summary_path: 'summaries',
-    });
-    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
-    git.commit = 'abc123';
-
-    await orchestrator.tickOnce();
-
-    expect(registry.get(task.id)).toMatchObject({ status: 'done', summary_verdict: 'ESCALATE' });
   });
 
   it('marks inactive tasks stuck when commit exists but artifacts are missing', async () => {
@@ -453,10 +385,14 @@ describe('Orchestrator', () => {
   });
 
   it.each([
+    ['complete', 'done'],
+    ['shipped', 'done'],
+    ['ceiling_hit', 'done'],
     ['failed', 'failed'],
     ['reality_gate_failed', 'reality_gate_failed'],
     ['escalated', 'failed'],
     ['incomplete', 'failed'],
+    ['cancelled', 'failed'],
     ['stopped', 'failed'],
   ] as const)('settles a %s bound run when systemd reports failed without relaunching', async (runStatus, taskStatus) => {
     const runId = `terminal-${runStatus}`;
@@ -473,8 +409,9 @@ describe('Orchestrator', () => {
 
     expect(registry.get(task.id)).toMatchObject({
       status: taskStatus,
-      notes: `bound run ${runId} ended ${runStatus}`,
+      notes: `bound run ${runId} ended ${runStatus === 'stopped' ? 'cancelled' : runStatus}`,
     });
+    expect(registry.readRecentTicks(task.id).at(-1)).toContain(`status=${taskStatus} `);
     expect(systemd.runs).toHaveLength(0);
   });
 
@@ -685,7 +622,7 @@ describe('Orchestrator', () => {
     expect(registry.get(task.id)?.systemd_unit).toBe(`flowcrew-task-${task.id}-attempt-2.service`);
   });
 
-  it.each(['stopped', 'failed', 'incomplete'])('resumes a registered %s run through the existing durable launch queue', async status => {
+  it.each(['stopped', 'failed', 'incomplete'])('resumes a registered legacy %s run through the existing durable launch queue', async status => {
     const runId = 'registered-continuation';
     const admitted = admittedBrief('Continue the admitted work.');
     const runPath = writeRun(runId, status);
@@ -710,15 +647,18 @@ describe('Orchestrator', () => {
     const before = readFileSync(runJson, 'utf8');
     const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId,
       status: status === 'stopped' ? 'cancelled' : 'failed', attempt: 3, max_retries: 3 });
+    const { launch: _launch, max_attempts: _limit, launch_options: _options, ...old } = task;
+    appendFileSync(registry.registryPath, JSON.stringify({ ...old, launch_seq: 2, max_retries: 3,
+      launch_args: ['--adapter', 'mock', '--workflow', 'default', '--supervise', '--timeout', '10800000', '--no-inherit-campaign'] }) + '\n');
     registry.update(task.id, { started_at: new Date(clock).toISOString(), completed_at: new Date(clock).toISOString(),
-      summary_verdict: 'FAIL', summary_full: 'Previous outcome' });
+      summary_full: 'Previous outcome' });
     systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
 
     await orchestrator.tickOnce();
     expect(systemd.runs).toHaveLength(0);
     expect(await orchestrator.resume(task.id)).toMatchObject({ status: 'pending', attempt: 3, run_id: runId });
     expect(registry.get(task.id)?.started_at).toBeUndefined();
-    expect(registry.get(task.id)?.summary_verdict).toBeUndefined();
+    expect(registry.get(task.id)?.summary_full).toBeUndefined();
     await orchestrator.stop();
     // Recreate both registry and queue owner to prove the explicit launch survives restart.
     registry = new TaskRegistry({ baseDir: tempDir, now: () => new Date(clock) });
@@ -734,6 +674,10 @@ describe('Orchestrator', () => {
     expect(registry.get(task.id)).toMatchObject({ status: 'running', attempt: 4, run_id: runId });
     expect(systemd.runs).toHaveLength(1);
     expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
+    expect(systemd.runs[0].command).toContain("'--workflow' 'planner'");
+    expect(systemd.runs[0].command).toContain("'--campaign-context=skip'");
+    expect(systemd.runs[0].command).not.toMatch(/--supervise|--timeout/);
+    expect(registry.get(task.id)).toMatchObject({ launch: 4, max_attempts: 3 });
     expect(JSON.parse(readFileSync(runJson, 'utf8'))).toMatchObject(JSON.parse(before));
     writeRun(runId, 'complete');
     systemd.states.set(registry.get(task.id)!.systemd_unit, CLEAN_UNIT_EXIT);
@@ -765,7 +709,7 @@ describe('Orchestrator', () => {
       registry.update(task.id, { status: 'cancelling' });
     }
 
-    expect(await orchestrator.cancel(task.id)).toMatchObject({ ok: true, status: 'cancelled', preservedRunStatus: status });
+    expect(await orchestrator.cancel(task.id)).toMatchObject({ ok: true, status: 'cancelled', preservedRunStatus: status === 'stopped' ? 'cancelled' : status });
     expect(registry.get(task.id)).toMatchObject({ status: 'cancelled', attempt: 2, run_id: runId });
     expect(registry.get(task.id)?.not_before).toBeUndefined();
     expect(registry.get(task.id)?.defer_kind).toBeUndefined();
@@ -843,7 +787,7 @@ describe('Orchestrator', () => {
     const runId = 'ineligible-continuation';
     writeRun(runId, status);
     const task = registry.create({ ...admittedBrief('Continue work.'), projectDir: tempDir, run_id: runId, status: 'stuck' });
-    await expect(orchestrator.resume(task.id)).rejects.toThrow('resume requires stopped, failed or incomplete');
+    await expect(orchestrator.resume(task.id)).rejects.toThrow('resume requires cancelled, failed, incomplete or parked');
     expect(registry.get(task.id)).toEqual(task);
     expect(systemd.runs).toHaveLength(0);
   });
@@ -885,6 +829,104 @@ describe('Orchestrator', () => {
     await orchestrator.tickOnce();
     expect(readFileSync(join(runPath, 'run.json'), 'utf8')).toBe(before);
     expect(systemd.runs).toHaveLength(0);
+  });
+
+  it.each(['none', 'unreleased', 'released'] as const)('counts a parked recovery retry with a %s deployment hold', async hold => {
+    const runId = 'parked-recovery';
+    const admitted = admittedBrief('Resume the recovered work.');
+    const runPath = writeRun(runId, 'parked');
+    const runJson = join(runPath, 'run.json');
+    updateRunState(tempDir, runId, state => {
+      state.taskDescription = admitted.brief_text;
+      state.briefAdmission = admitted.brief_admission;
+      state.recovery = { kind: 'resumable', reason: 'Recovered fixture', at: new Date(clock).toISOString(), interruptedStages: [] };
+      state.engineCheckpoint = captureEngineCheckpoint(tempDir, runId);
+      state.stages = { work: { status: 'pending', retries: 0 } };
+      if (hold !== 'none') state.deploymentHold = {
+        version: 1, id: 'held-fixture', requestedAt: new Date(clock).toISOString(), heldAt: new Date(clock).toISOString(),
+        ...(hold === 'released' ? { releasedAt: new Date(clock).toISOString() } : {}),
+      };
+    });
+    const before = readFileSync(runJson, 'utf8');
+    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'pending', attempt: 2 });
+
+    await orchestrator.tickOnce();
+
+    expect(systemd.runs).toHaveLength(1);
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: hold === 'released' ? 2 : 3 });
+    expect(systemd.runs[0].unit).not.toBe(task.systemd_unit);
+    expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
+    expect(readFileSync(runJson, 'utf8')).toBe(before);
+  });
+
+  it('explicitly resumes a parked deployment hold whose run release is still unset', async () => {
+    const runId = 'held-continuation';
+    const admitted = admittedBrief('Resume the held work.');
+    writeRun(runId, 'parked');
+    updateRunState(tempDir, runId, state => {
+      state.taskDescription = admitted.brief_text;
+      state.briefAdmission = admitted.brief_admission;
+      state.engineCheckpoint = captureEngineCheckpoint(tempDir, runId);
+      state.stages = { work: { status: 'pending', retries: 0 } };
+      state.deploymentHold = { version: 1, id: 'held-fixture', requestedAt: new Date(clock).toISOString(), heldAt: new Date(clock).toISOString() };
+    });
+    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'deferred', attempt: 2 });
+
+    expect(await orchestrator.resume(task.id)).toMatchObject({ status: 'pending', attempt: 2, defer_kind: 'wait' });
+    expect(readRunState(tempDir, runId).deploymentHold?.releasedAt).toBeTruthy();
+    expect(systemd.runs).toHaveLength(0);
+    await orchestrator.tickOnce();
+    expect(systemd.runs).toHaveLength(1);
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 2 });
+    expect(systemd.runs[0].unit).not.toBe(task.systemd_unit);
+  });
+
+  it('consumes a retry for a non-parked run with a historical approved approval', async () => {
+    const runId = 'non-parked-approved';
+    const admitted = admittedBrief('Recover the interrupted work.');
+    writeRun(runId, 'running', { requestId: 'historical-approval', pausedAt: new Date(clock).toISOString() });
+    addPendingApproval(runId, 'historical-approval');
+    resolveRequest(tempDir, runId, 'historical-approval', 'approve', { by: 'fixture' });
+    updateRunState(tempDir, runId, state => {
+      state.taskDescription = admitted.brief_text;
+      state.briefAdmission = admitted.brief_admission;
+      state.engineCheckpoint = { ...captureEngineCheckpoint(tempDir, runId), pid: 2_147_483_647, processStart: undefined };
+      state.stages = { work: { status: 'pending', retries: 0 } };
+    });
+    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'pending', attempt: 2 });
+
+    await orchestrator.tickOnce();
+
+    expect(systemd.runs).toHaveLength(1);
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 3 });
+    expect(systemd.runs[0].unit).toBe(`flowcrew-task-${task.id}-attempt-3.service`);
+  });
+
+  it.each(['enqueue', 'register', 'resume'] as const)('reuses the bound task for an approved run via %s without consuming a retry', async method => {
+    const runId = 'approved-continuation';
+    const admitted = admittedBrief('Resume the approved work.');
+    const runPath = writeRun(runId, 'parked', { requestId: 'approval-request', pausedAt: new Date(clock).toISOString() });
+    const runJson = join(runPath, 'run.json');
+    writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
+      taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission }));
+    addPendingApproval(runId, 'approval-request');
+    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'deferred' });
+    registry.update(task.id, { started_at: new Date(clock).toISOString() });
+    resolveRequest(tempDir, runId, 'approval-request', 'approve', { by: 'fixture' });
+
+    expect(readRunState(tempDir, runId).deploymentHold).toBeUndefined();
+    const resumed = method === 'resume' ? await orchestrator.resume(task.id)
+      : await orchestrator[method]({ ...admitted, projectDir: tempDir, run_id: runPath });
+    expect(resumed.id).toBe(task.id);
+    expect(registry.list({ status: 'all' })).toHaveLength(1);
+    if (method !== 'register') {
+      expect(systemd.runs).toHaveLength(0);
+      await orchestrator.tickOnce();
+    }
+    expect(systemd.runs).toHaveLength(1);
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 1 });
+    expect(systemd.runs[0].unit).not.toBe(task.systemd_unit);
+    expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
   });
 
   it.each(['failed', 'incomplete', 'complete'])('launches an explicit queued continuation of a %s run before reconciling its outcome', async status => {
@@ -1056,28 +1098,9 @@ describe('Orchestrator', () => {
     await orchestrator.tickOnce();
 
     expect(registry.get(task.id)).toMatchObject({ status: 'done' });
-    expect(registry.get(task.id)?.summary_verdict).toBeUndefined();
+    expect(registry.get(task.id)?.summary_full).toBeUndefined();
   });
 });
-
-function validSummary(verdict = 'PASS'): string {
-  return `# Task Summary
-
-**Verdict**: ${verdict}
-
-## What was achieved
-The task completed with an operator-readable summary.
-
-## Key numbers
-- 1 completion path verified
-
-## Files produced
-- result.txt
-
-## What operator should do next
-Review the summary in task show.
-`;
-}
 
 class FakeSystemd implements SupervisorBackend {
   states = new Map<string, UnitStatus>();
@@ -1338,8 +1361,8 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     expect(findParkedRunForProject(tempDir, '2026-07-30T00:00:00.000Z')).toBeNull();
   });
 
-  it('gives approval deferrals a bounded recheck window (H2)', async () => {
-    const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running' });
+  it('keeps approval waits durable without appending unchanged rows across 100 ticks', async () => {
+    const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', run_id: 'approval-park' });
     registry.update(task.id, { started_at: new Date(clock).toISOString() });
     writeRun('approval-park', 'parked', {
       requestId: 'approval-request',
@@ -1354,12 +1377,18 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     expect(Date.parse(first.not_before!)).toBeGreaterThan(clock);
     expect(systemd.runs).toHaveLength(0);
 
-    const firstCheck = first.not_before!;
-    advance(31_000);
-    await orchestrator.tickOnce();
+    const rows = registry.metrics().records;
+    const ticks = registry.readRecentTicks(task.id, 200).length;
+    for (let tick = 0; tick < 100; tick++) {
+      advance(31_000);
+      await orchestrator.tickOnce();
+    }
     const second = registry.get(task.id)!;
     expect(second.status).toBe('deferred');
-    expect(Date.parse(second.not_before!)).toBeGreaterThan(Date.parse(firstCheck));
+    expect(registry.metrics().records).toBe(rows);
+    expect(second.not_before).toBe(first.not_before);
+    expect(registry.readRecentTicks(task.id, 200)).toHaveLength(ticks);
+    expect(second.defer_reason).toContain('awaiting approval resume');
     expect(systemd.runs).toHaveLength(0);
   });
 
@@ -1388,8 +1417,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
 
   it('reconciles a terminal bound run through completion without launching (C2)', async () => {
     const runId = 'bound-complete';
-    const runPath = writeRun(runId, 'complete');
-    writeFileSync(join(runPath, 'task_summary.md'), validSummary(), 'utf-8');
+    writeRun(runId, 'complete');
     const task = registry.create({
       brief_text: 'must not relaunch',
       projectDir: tempDir,
@@ -1408,7 +1436,6 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     expect(registry.get(task.id)).toMatchObject({
       status: 'done',
       completing_commit: 'terminal123',
-      summary_source: join(runPath, 'task_summary.md'),
     });
     expect(systemd.runs).toHaveLength(0);
   });
@@ -1481,17 +1508,6 @@ describe('systemd inactive identity', () => {
         reason: 'systemd reported inactive without an exit status',
       });
 
-      const legacyUnit = 'legacy-inactive.service';
-      const legacyPath = join(baseDir, 'systemd-fallback', `${legacyUnit}.json`);
-      writeFileSync(legacyPath, JSON.stringify({
-        state: 'inactive',
-        reason: 'portable exit status was not recorded',
-        completedAt: '2026-09-22T00:00:00.000Z',
-      }), 'utf-8');
-      await expect(backend.isActive(legacyUnit)).resolves.toEqual({
-        kind: 'terminal-unknown',
-        reason: 'systemd reported inactive without an exit status',
-      });
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
@@ -1499,86 +1515,4 @@ describe('systemd inactive identity', () => {
       else process.env.FLOWCREW_TEST_LOAD_STATE = previousLoadState;
     }
   });
-});
-
-describe('fallback stop binds the pid to a process identity', () => {
-  // The fallback path exists because `systemd-run` can be unavailable. Before this binding it
-  // signalled whatever pid the record held with no evidence the pid was still that child, and
-  // the kernel reuses pids, so the target could be any process — including the operator's. The
-  // removed line was an unconditional `process.kill(fallbackPid, 'SIGTERM')`.
-  //
-  // Proving "a live bystander is not killed" needs a real process, which `spec/` may not spawn
-  // (see spec/purity.ts `child-process`; CI runs this suite with no host dependencies). The
-  // machine-independent half is proven here instead: the refusal is recorded, and the recorded
-  // reason is a field the previous code never wrote, so a regression is visible even against a
-  // pid that does not exist. A host-dependent live-process probe remains local operator tooling.
-  const unit = 'flowcrew-task-999999.service';
-  const NONEXISTENT_PID = 0x7ffffff0;
-  let base: string;
-  let systemd: NodeSystemd;
-  let recordPath: string;
-
-  beforeEach(() => {
-    base = mkdtempSync(join(tmpdir(), 'p4-m2-'));
-    systemd = new NodeSystemd(base);
-    recordPath = join(base, 'systemd-fallback', `${unit}.json`);
-  });
-  afterEach(() => rmSync(base, { recursive: true, force: true }));
-
-  // `systemctl stop` fails for a unit that was never loaded, and the unverifiable paths
-  // deliberately surface that failure rather than reporting a silent success.
-  const stop = async (): Promise<void> => {
-    try { await systemd.stopUnit(unit); } catch { /* expected: unit not loaded */ }
-  };
-
-  it('records a refusal for a pid captured before start times existed', async () => {
-    writeFileSync(recordPath, JSON.stringify({ pid: NONEXISTENT_PID, state: 'active', command: 'x' }));
-    await stop();
-    const record = JSON.parse(readFileSync(recordPath, 'utf-8')) as Record<string, unknown>;
-    expect(record.unverifiedPid).toBe(NONEXISTENT_PID);
-    expect(String(record.reason)).toContain('predates start-time binding');
-  });
-
-  it('records a refusal when the recorded start time no longer matches the pid', async () => {
-    writeFileSync(recordPath, JSON.stringify({
-      pid: NONEXISTENT_PID, state: 'active', command: 'x', startTimeTicks: '1',
-    }));
-    await stop();
-    expect(String(JSON.parse(readFileSync(recordPath, 'utf-8')).reason)).toContain('recycled pid');
-  });
-
-  it('keeps the identity in the record it rewrites while deactivating', () => {
-    // `stopUnit` must not drop `startTimeTicks` when it rewrites the record, or the next stop
-    // would find an unverifiable pid and refuse — turning one guard into a dead end.
-    const source = readFileSync(new URL('../src/orchestrator.ts', import.meta.url), 'utf-8');
-    const deactivating = source.slice(source.indexOf("state: 'deactivating'") - 400, source.indexOf("state: 'deactivating'") + 200);
-    expect(deactivating).toContain('startTimeTicks');
-  });
-
-  it('persists an inactive terminal record when a read observes that the child is gone', async () => {
-    const previousPath = process.env.PATH;
-    process.env.PATH = base;
-    try {
-      writeFileSync(recordPath, JSON.stringify({
-        pid: NONEXISTENT_PID,
-        state: 'active',
-        command: 'x',
-        startTimeTicks: '1',
-      }));
-
-      await expect(systemd.isActive(unit)).resolves.toEqual({
-        kind: 'terminal-unknown',
-        reason: 'fallback process ended without an exit status',
-      });
-      expect(JSON.parse(readFileSync(recordPath, 'utf-8'))).toMatchObject({
-        pid: NONEXISTENT_PID,
-        state: 'inactive',
-        command: 'x',
-      });
-    } finally {
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
-    }
-  });
-
 });

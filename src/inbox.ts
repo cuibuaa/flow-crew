@@ -31,7 +31,7 @@ import { readJsonlFile } from './jsonl.js';
 import { runDir, runsRoot, withRunStateLock } from './store.js';
 import { appendRunEventAtRunDir, readRunEvents } from './run-events.js';
 import { inspectRunScheduler } from './run-lock.js';
-import { publishJsonCreateOnly } from './runtime-negotiation.js';
+import { publishJsonCreateOnly } from './canonical-json.js';
 
 /** Only external authority needs a human. Other risks are legacy transport metadata. */
 export type ApprovalRisk = 'external' | 'exec' | 'write' | 'unknown';

@@ -8,8 +8,9 @@ import { Orchestrator, type SupervisorBackend } from '../src/orchestrator.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import * as recovery from '../src/restart-recovery.js';
 import * as runLock from '../src/run-lock.js';
-import { beginStageAttempt, createRun, fcGlobalDir, readRunState, runsRoot, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
-import { listRunningRunIdsFromIndex, removeRunIndexFiles } from '../src/run-index.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, fcGlobalDir, readRunState, runsRoot, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
+import { listRunningRunIdsFromIndex } from '../src/run-index.js';
 
 let root: string, project: string, previousStore: string, registry: TaskRegistry;
 const scratchAliases: string[] = [];
@@ -28,14 +29,14 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const alias of scratchAliases.splice(0)) rmSync(alias, { force: true });
-  removeRunIndexFiles(project); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true });
+  setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true });
 });
 function orphan() {
   const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runId;
   writeStageStatus(project, id, 'work', { status: 'pending', retries: 0 });
   beginStageAttempt(project, id, 'work', 0, '2026-01-01T00:00:00.000Z');
   updateRunState(project, id, state => {
-    state.engineCheckpoint = { version: 1, runId: id, projectDir: project, bootId: 'previous-boot', generation: 'fixture-generation', pid: 2147483647, at: '2026-01-01T00:00:00.000Z' };
+    state.engineCheckpoint = { version: 2, runId: id, projectDir: project, bootId: 'previous-boot', generation: 'fixture-generation', pid: 2147483647, at: '2026-01-01T00:00:00.000Z' };
     state.currentIteration = 2; state.maxIterations = 3; state.maxRetries = 4;
   });
   return id;
@@ -116,7 +117,7 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     const directory = join(runsRoot(), id); mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, 'run.json'), JSON.stringify({
       runId: id, projectDir: project, status: 'running', workflowName: 'fixture', startedAt: '2026-01-01T00:00:00.000Z', stages: {},
-      engineCheckpoint: { version: 1, runId: id, projectDir: project, bootId: 'previous-boot',
+      engineCheckpoint: { version: 2, runId: id, projectDir: project, bootId: 'previous-boot',
         generation: 'fixture-generation', pid: 2147483647, at: '2026-01-01T00:00:00.000Z' },
     }));
     createDaemonReconciler(registry, vi.fn())();
@@ -129,7 +130,7 @@ describe('daemon-owned previous-boot orphan recovery', () => {
       const directory = join(runsRoot(), id); mkdirSync(directory, { recursive: true });
       writeFileSync(join(directory, 'run.json'), JSON.stringify({
         runId: id, projectDir: project, status: 'running', workflowName: 'fixture', startedAt: '2026-01-01T00:00:00.000Z', stages: {},
-        engineCheckpoint: { version: 1, runId: id, projectDir: project, bootId: 'previous-boot',
+        engineCheckpoint: { version: 2, runId: id, projectDir: project, bootId: 'previous-boot',
           generation: 'fixture-generation', pid: 2147483647, at: '2026-01-01T00:00:00.000Z' },
       }));
     }
@@ -140,6 +141,7 @@ describe('daemon-owned previous-boot orphan recovery', () => {
 
   it('reobserves scheduler ownership under the publication lock', () => {
     const id = orphan();
+    expect(listRunningRunIdsFromIndex(project)).toContain(id);
     const bytes = readFileSync(join(runsRoot(), id, 'run.json'), 'utf8');
     const ledger = readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8');
     vi.mocked(runLock.inspectRunScheduler).mockReturnValueOnce({ kind: 'missing' }).mockReturnValue({ kind: 'live', pid: 10 });

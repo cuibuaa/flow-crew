@@ -1,9 +1,10 @@
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from './engine-fs.js';
+import { atomicWrite, copyFileSync, mkdirSync, renameSync, rmSync, symlinkSync } from './engine-fs.js';
 import { lstatSync, readFileSync, readlinkSync, readdirSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { externalOutputDirectory, type BriefOutputDeclaration } from './ship-inputs.js';
+import { normalizedProjectPath } from './scheduler/sched_admission/scope-services.js';
 
 export const DECLARED_OUTPUT_MANIFEST = 'declared_outputs_manifest.json';
 
@@ -30,13 +31,6 @@ export interface DeclaredOutputArchiveManifest {
   outputs: Array<ArchivedDeclaredOutput | { path: string; expectedType: 'directory'; external: true }>;
 }
 
-function normalized(path: string): string | undefined {
-  const value = posix.normalize(path.replace(/\\/g, '/').replace(/^\.\//, ''));
-  return !value || value === '.' || value === '..' || value.startsWith('../') || isAbsolute(value)
-    ? undefined
-    : value;
-}
-
 function memberRecord(path: string, bytes: Buffer, symlink: boolean): ArchivedMember {
   return { path, bytes: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), ...(symlink ? { type: 'symlink' as const } : {}) };
 }
@@ -47,7 +41,7 @@ function digestMembers(members: readonly ArchivedMember[]): string {
   return hash.digest('hex');
 }
 
-function walkDeclaredOutput(source: string, path: string, visit: (source: string, path: string, type: 'file' | 'directory' | 'symlink') => void): void {
+export function walkDeclaredOutput(source: string, path: string, visit: (source: string, path: string, type: 'file' | 'directory' | 'symlink') => void): void {
   const current = lstatSync(source);
   const type = current.isSymbolicLink() ? 'symlink' : current.isDirectory() ? 'directory' : current.isFile() ? 'file' : undefined;
   if (!type) throw new Error(`declared output contains unsupported entry ${path}`);
@@ -64,7 +58,7 @@ export function declaredOutputSource(projectDir: string, declaration: BriefOutpu
     if (!lstatSync(source).isDirectory()) throw new Error(`external output is not a directory: ${source}`);
     return source;
   }
-  const path = normalized(declaration.path);
+  const path = normalizedProjectPath(declaration.path);
   if (!path) throw new Error(`declared output is not a project-relative path: ${declaration.path}`);
   const source = resolve(projectDir, path);
   const stat = statSync(source);
@@ -78,7 +72,7 @@ export function declaredOutputSource(projectDir: string, declaration: BriefOutpu
 
 function archiveOne(projectDir: string, archiveBase: string, declaration: BriefOutputDeclaration): ArchivedDeclaredOutput {
   const source = declaredOutputSource(projectDir, declaration);
-  const path = normalized(declaration.path)!;
+  const path = normalizedProjectPath(declaration.path)!;
   const archiveRoot = `declared_outputs/${path}`;
   const destination = join(archiveBase, path);
   const members: ArchivedMember[] = [];
@@ -127,10 +121,8 @@ export function archiveDeclaredOutputs(
     const manifest: DeclaredOutputArchiveManifest = {
       version: 1, archivedAt: new Date().toISOString(), complete: true, outputs,
     };
-    const temporaryManifest = join(runDir, `${DECLARED_OUTPUT_MANIFEST}.tmp`);
-    mkdirSync(dirname(temporaryManifest), { recursive: true });
-    writeFileSync(temporaryManifest, `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
-    renameSync(temporaryManifest, join(runDir, DECLARED_OUTPUT_MANIFEST));
+    // The manifest is the durable evidence index; publish only after the tree is in place.
+    atomicWrite(join(runDir, DECLARED_OUTPUT_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, { durability: 'durable' });
     return manifest;
   } finally {
     rmSync(temporary, { recursive: true, force: true });
@@ -141,33 +133,55 @@ interface ArchiveReadFileSystem {
   hashFile?(path: string): { sha256: string; byteLength: number };
 }
 
-/** True only while both the worktree bytes and archived bytes still match the
- * committed manifest. This is the narrow permission `land --remove` needs. */
-export function isPathSafelyArchived(
+/** Load one manifest per inspection and index its members. Each predicate call
+ * still hashes both current copies; no file identities are cached. */
+export function createArchivedPathVerifier(
   projectDir: string,
   runDir: string,
-  rawPath: string,
   fs: ArchiveReadFileSystem,
-): boolean {
-  if (!fs.hashFile) return false;
-  let manifest: DeclaredOutputArchiveManifest;
-  try { manifest = JSON.parse(readFileSync(join(runDir, DECLARED_OUTPUT_MANIFEST), 'utf-8')) as DeclaredOutputArchiveManifest; }
-  catch { return false; }
-  if (manifest.version !== 1 || manifest.complete !== true || !Array.isArray(manifest.outputs)) return false;
-  const path = normalized(rawPath);
-  if (!path) return false;
-  for (const output of manifest.outputs) {
-    if (output.external) continue;
-    const memberPath = output.expectedType === 'file'
-      ? (path === output.path ? posix.basename(output.path) : undefined)
-      : path === output.path ? '' : path.startsWith(`${output.path}/`) ? path.slice(output.path.length + 1) : undefined;
-    if (memberPath === undefined) continue;
-    const member = output.members.find((entry) => entry.path === memberPath);
-    if (!member) return false;
+): (rawPath: string) => boolean {
+  if (!fs.hashFile) return () => false;
+  const indexed = new Map<string, { member: ArchivedMember; archivedPath: string }>();
+  try {
+    const manifest = JSON.parse(readFileSync(join(runDir, DECLARED_OUTPUT_MANIFEST), 'utf-8')) as DeclaredOutputArchiveManifest;
+    if (manifest.version !== 1 || manifest.complete !== true || !Array.isArray(manifest.outputs)) return () => false;
+    const files = new Map<string, number>(), directories = new Map<string, number>();
+    manifest.outputs.forEach((output, index) => {
+      if (output.external) return;
+      if (normalizedProjectPath(output.path) !== output.path || normalizedProjectPath(output.archiveRoot) !== output.archiveRoot
+        || !['file', 'directory'].includes(output.expectedType) || !Array.isArray(output.members)) throw new Error('invalid archived output');
+      const scopes = output.expectedType === 'file' ? files : directories;
+      if (!scopes.has(output.path)) scopes.set(output.path, index);
+    });
+    // Earlier declarations own their whole scope, including missing members.
+    // Looking up ancestors preserves that rule without scanning every output.
+    const firstOutput = (path: string): number => {
+      let first = files.get(path) ?? Infinity;
+      for (let parent = path; parent !== '.'; parent = posix.dirname(parent)) {
+        first = Math.min(first, directories.get(parent) ?? Infinity);
+      }
+      return first;
+    };
+    manifest.outputs.forEach((output, index) => {
+      if (output.external) return;
+      for (const member of output.members) {
+        if (typeof member.path !== 'string' || !Number.isSafeInteger(member.bytes) || member.bytes < 0
+          || typeof member.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(member.sha256)
+          || (member.type !== undefined && member.type !== 'symlink')) throw new Error('invalid archived member');
+        const path = output.expectedType === 'file' ? output.path : member.path ? `${output.path}/${member.path}` : output.path;
+        if (output.expectedType === 'file' && member.path !== posix.basename(output.path)) continue;
+        if (normalizedProjectPath(path) !== path || firstOutput(path) !== index || indexed.has(path)) continue;
+        indexed.set(path, { member, archivedPath: output.expectedType === 'file'
+          ? join(runDir, output.archiveRoot) : join(runDir, output.archiveRoot, member.path) });
+      }
+    });
+  } catch { return () => false; }
+  return (rawPath: string): boolean => {
+    const path = normalizedProjectPath(rawPath);
+    const archived = path ? indexed.get(path) : undefined;
+    if (!path || !archived) return false;
+    const { member, archivedPath } = archived;
     const projectPath = join(resolve(projectDir), path);
-    const archivedPath = output.expectedType === 'file'
-      ? join(runDir, output.archiveRoot)
-      : join(runDir, output.archiveRoot, memberPath);
     try {
       const symlink = member.type === 'symlink';
       if (lstatSync(projectPath).isSymbolicLink() !== symlink || lstatSync(archivedPath).isSymbolicLink() !== symlink) return false;
@@ -181,6 +195,5 @@ export function isPathSafelyArchived(
       return current.byteLength === member.bytes && archived.byteLength === member.bytes
         && current.sha256 === member.sha256 && archived.sha256 === member.sha256;
     } catch { return false; }
-  }
-  return false;
+  };
 }

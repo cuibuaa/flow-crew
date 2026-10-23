@@ -1,4 +1,4 @@
-import { publishRunCompletion, settleTerminalResearchCandidates } from './run-completion.js';
+import { concludeRun } from './run-completion.js';
 /** Research artifact identity, round ingestion/advancement, confirmation and best-effort terminal hooks; file inventory, rollback settlement and campaign writer are supplied. */
 import { type ResearchRound, evaluateResearch, evaluateResearchCeilingFloor } from '../../research-policy.js';
 import { createHash } from 'node:crypto';
@@ -9,10 +9,10 @@ import { copyFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from '
 import { readFileSync, existsSync } from 'node:fs';
 import { researchEvidenceFiles, researchInputIsFresh } from '../../research-candidate.js';
 import { type Adapter } from '../../adapters/base.js';
-import { RUN_STATUS, type StoreState, enforceRealityGateBeforeTerminal, type PostTerminateHook } from '../../store.js';
+import { RUN_STATUS, type StoreState, type PostTerminateHook } from '../../store.js';
 import { RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
 import { log } from '../sched_admission/shared.js';
-import { markLeftoverStagesSkipped, recordConfirmNotRun } from '../sched_admission/brief-contract.js';
+import { recordConfirmNotRun } from '../sched_admission/brief-contract.js';
 import { recordRunEvent } from '../../run-events.js';
 import { resolveResearchPaths } from '../../research-paths.js';
 import { runAllChecks } from '../../reality-gate/index.js';
@@ -196,7 +196,6 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         kind: 'research_round_input',
         detail: kind,
         evidenceDigest,
-        threshold: state.campaignTriggers?.repeatedFailureAfter,
       });
       appendSchedulerGuidanceOnce(
         ctx.runDirPath,
@@ -303,7 +302,6 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         kind: 'research_round_duplicate',
         detail: `duplicate research round label ${label}`,
         evidenceDigest: sourceEvidenceDigest,
-        threshold: state.campaignTriggers?.repeatedFailureAfter,
       });
       appendSchedulerGuidanceOnce(
         ctx.runDirPath,
@@ -327,7 +325,6 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         kind: 'research_integrity',
         detail: `research integrity rejection: ${reason}`,
         evidenceDigest: sourceEvidenceDigest,
-        threshold: state.campaignTriggers?.repeatedFailureAfter,
       });
       try { removeReviewedSource(); } catch { /* non-critical */ }
       appendSchedulerGuidanceOnce(
@@ -374,19 +371,12 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
           recordConfirmNotRun(ctx.runDirPath, rc.confirm, RUN_STATUS.CEILING_HIT);
           return null;
         }
-        state.status = 'ceiling_hit';
-        // FIX D — non-ship terminal: record any brief-declared confirm as not-run (observability).
-        recordConfirmNotRun(ctx.runDirPath, rc.confirm, state.status);
-        state.completedAt = new Date().toISOString();
-        const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
-        
-        if (!gate.allowed) {
-          settleTerminalResearchCandidates(ctx.projectDir, gate.state);
-          writeCampaignEntry(ctx.projectDir, gate.state);
-          return gate.state;
-        }
-        publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({ iteration: ctx.iteration, detail: `Research ceiling: ${totalRej} integrity-gate rejections (reasons: ${Object.keys(rejData).join(',')})` }), writeCampaignEntry);
-        return state;
+        recordConfirmNotRun(ctx.runDirPath, rc.confirm, RUN_STATUS.CEILING_HIT);
+        return concludeRun(state, {
+          status: RUN_STATUS.CEILING_HIT, reasonCode: 'research_integrity_ceiling',
+          eventFields: () => ({ iteration: ctx.iteration, detail: `Research ceiling: ${totalRej} integrity-gate rejections (reasons: ${Object.keys(rejData).join(',')})` }),
+          writeCampaignEntry,
+        });
       }
       try {
         mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
@@ -657,17 +647,10 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
 
     // Legacy/static workflows without an admitted terminal owner retain the
     // framework-authored terminal path for compatibility.
-    state.status = policyTerminalStatus;
     // FIX D — if confirm was declared but this is a non-ship terminal, record that it was not run
     // (the confirm gate above only writes research_confirm.json on a ship). Observability only.
-    if (terminalDecision !== 'ship') recordConfirmNotRun(ctx.runDirPath, rc.confirm, state.status);
-    state.completedAt = new Date().toISOString();
-    // Engine bug #3 (event-drift audit): the research loop terminates the run between
-    // iterations, so stages dispatched for the current iteration (verify_*/fix_*) can be
-    // left 'pending' forever in run.json. Mark them skipped with the reason, honestly.
-    markLeftoverStagesSkipped(state, `research loop terminated (${state.status}) before this stage ran`);
-    
-    const declaredPath = state.terminalStates?.[state.status]?.paths?.[0];
+    if (terminalDecision !== 'ship') recordConfirmNotRun(ctx.runDirPath, rc.confirm, policyTerminalStatus);
+    const declaredPath = state.terminalStates?.[policyTerminalStatus]?.paths?.[0];
     if (declaredPath) state.terminalArtifact = declaredPath;
     
     try {
@@ -700,23 +683,21 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     } catch (error) {
       log.warn({ runId: ctx.runId, error }, 'Could not materialize the research terminal candidate before reality verification');
     }
-    const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
-    // GAP-1: write a campaign jsonl row on the reality_gate_failed downgrade too, so the
-    // outer loop sees the truthful terminal status (not a silent return with no envelope).
-    if (!gate.allowed) {
-      const quarantine = (source: string, label: string): void => {
-        if (!existsSync(source)) return;
-        try { renameSync(source, join(ctx.runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
-      };
-      if (wroteDeclaredCandidate && declaredPath) quarantine(join(ctx.projectDir, declaredPath), declaredPath.split('/').pop() ?? 'terminal_candidate');
-      settleTerminalResearchCandidates(ctx.projectDir, gate.state);
-      writeCampaignEntry(ctx.projectDir, gate.state);
-      return gate.state;
+    state = await concludeRun(state, {
+      status: policyTerminalStatus, reasonCode: terminalDecision === 'ship' ? 'research_shipped' : 'research_ceiling',
+      pendingStageNote: `research loop terminated (${policyTerminalStatus}) before this stage ran`,
+      eventFields: () => ({ iteration: ctx.iteration, detail: `Research ${terminalDecision}: ${finalEval.reason}` }),
+      writeCampaignEntry,
+    });
+    if (state.status === RUN_STATUS.REALITY_GATE_FAILED) {
+      if (wroteDeclaredCandidate && declaredPath) {
+        const source = join(ctx.projectDir, declaredPath);
+        if (existsSync(source)) {
+          try { renameSync(source, join(ctx.runDirPath, `reality_rejected_${declaredPath.split('/').pop() ?? 'terminal_candidate'}`)); } catch { /* preserve evidence in place if move fails */ }
+        }
+      }
+      return state;
     }
-    publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
-      iteration: ctx.iteration,
-      detail: `Research ${terminalDecision}: ${finalEval.reason}`,
-    }), writeCampaignEntry);
     log.info({ runId: ctx.runId, decision: terminalDecision, runningBest: finalEval.runningBest }, 'Research loop terminated');
     return state;
   }

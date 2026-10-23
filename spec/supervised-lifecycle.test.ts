@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
@@ -36,7 +37,6 @@ interface Harness {
   defaultProject: string;
   daemon: ChildProcess;
   daemonOutput: string;
-  ownedLegacyPids: Set<number>;
   ownedShimPids: Set<number>;
   ownedAgentPids: Set<number>;
 }
@@ -64,7 +64,7 @@ afterEach(async () => {
 });
 
 describe('portable supervised lifecycle through the real CLI', () => {
-  it('[1] confirms cancellation through the daemon when systemd tools are absent', async ({ signal }) => {
+  it('[1] launches, cancels and restarts a task without legacy mirror files', { timeout: 60_000 }, async ({ signal }) => {
     const harness = await createHarness();
     const task = registerBackgroundTask(harness, createProject(harness, 'cancel-cli'), HOLD_MARKER);
     const pid = await waitForRecordedAgentPid(harness, task.unit);
@@ -86,6 +86,26 @@ describe('portable supervised lifecycle through the real CLI', () => {
       `cancel did not converge for recorded pid ${pid} (${pidProbe(pid)}), shim ${shimState}, exit=${existsSync(exitPath)}: ${output}; daemon=${harness.daemonOutput.slice(-500)}`,
     ).toMatchObject({ status: 0, output: expect.stringContaining(`Task #${task.id} cancelled`) });
     expect(pidProbe(pid), `cancel returned before agent ${pid} exited`).toBe('esrch');
+
+    const retried = runCliSync(harness, task.project, ['task', 'resume', String(task.id)]);
+    expect(retried.status, `${retried.stdout}${retried.stderr}`).toBe(0);
+    let restarted: TaskEntry | undefined;
+    expect(await waitUntil(async () => {
+      restarted = await showTask(harness, task.id);
+      return restarted.systemd_unit !== task.unit && restarted.status === TASK_STATUS.RUNNING;
+    }, 35_000)).toBe(true); // The daemon drains its queue every 30 s.
+    const restartedPid = await waitForRecordedAgentPid(harness, restarted!.systemd_unit);
+    await waitForHeldAgent(harness, restartedPid, signal);
+    expect(restartedPid).not.toBe(pid);
+    const stopped = runCliSync(harness, task.project, ['task', 'cancel', String(task.id)]);
+    expect(stopped.status, `${stopped.stdout}${stopped.stderr}`).toBe(0);
+    expect(pidProbe(restartedPid)).toBe('esrch');
+    for (const unit of [task.unit, restarted!.systemd_unit]) {
+      const directory = join(harness.fcHome, 'supervise', safeUnit(unit));
+      expect(readdirSync(directory)).toEqual(expect.arrayContaining(['launch.json', 'running.json', 'exit.json']));
+    }
+    const mirrorDir = join(harness.fcHome, 'systemd-fallback');
+    expect(existsSync(mirrorDir) ? readdirSync(mirrorDir) : []).toEqual([]);
   });
 
   it('[3] shows a natural exit code 3 and a terminal status', async () => {
@@ -155,7 +175,7 @@ async function createHarness(): Promise<Harness> {
   const bin = join(root, 'bin');
   const mockDir = join(root, 'mock');
   const defaultProject = join(root, 'project');
-  const socketPath = join(root, 'd.sock');
+  const socketPath = join(root, 'daemon.sock');
   const preloadPath = join(root, 'portable-fixture.cjs');
   for (const directory of [home, bin, mockDir, defaultProject]) {
     mkdirSync(directory, { recursive: true });
@@ -214,7 +234,6 @@ async function createHarness(): Promise<Harness> {
     defaultProject,
     daemon,
     daemonOutput,
-    ownedLegacyPids: new Set(),
     ownedShimPids: new Set(),
     ownedAgentPids: new Set(),
   };
@@ -366,16 +385,6 @@ async function waitForRecordedAgentPid(harness: Harness, unit: string): Promise<
         recorded = running.agentPid;
         return true;
       }
-    } catch { /* phase 0/1 fallback has no running.json */ }
-
-    const fallbackPath = join(harness.fcHome, 'systemd-fallback', `${safeUnit(unit)}.json`);
-    try {
-      const fallback = JSON.parse(readFileSync(fallbackPath, 'utf-8')) as { pid?: number };
-      if (Number.isInteger(fallback.pid) && (fallback.pid ?? 0) > 0) {
-        harness.ownedLegacyPids.add(fallback.pid!);
-        recorded = fallback.pid;
-        return true;
-      }
     } catch { /* launcher has not recorded the pid yet */ }
     return false;
   }, 5_000);
@@ -440,11 +449,9 @@ async function cleanupHarness(harness: Harness): Promise<void> {
 
   for (const pid of harness.ownedShimPids) signalOwnedPid(pid, 'SIGTERM', false);
   for (const pid of harness.ownedAgentPids) signalOwnedPid(pid, 'SIGTERM', true);
-  for (const pid of harness.ownedLegacyPids) signalOwnedPid(pid, 'SIGTERM', true);
   await delay(100);
   for (const pid of harness.ownedShimPids) signalOwnedPid(pid, 'SIGKILL', false);
   for (const pid of harness.ownedAgentPids) signalOwnedPid(pid, 'SIGKILL', true);
-  for (const pid of harness.ownedLegacyPids) signalOwnedPid(pid, 'SIGKILL', true);
 
   if (harness.root.startsWith(join(tmpdir(), 'fc-sl-'))) {
     rmSync(harness.root, { recursive: true, force: true });
@@ -452,16 +459,6 @@ async function cleanupHarness(harness: Harness): Promise<void> {
 }
 
 function collectRecordedPids(harness: Harness): void {
-  const fallbackDir = join(harness.fcHome, 'systemd-fallback');
-  if (existsSync(fallbackDir)) {
-    for (const entry of readdirSync(fallbackDir)) {
-      if (!entry.endsWith('.json')) continue;
-      try {
-        const record = JSON.parse(readFileSync(join(fallbackDir, entry), 'utf-8')) as { pid?: number };
-        if (Number.isInteger(record.pid) && (record.pid ?? 0) > 0) harness.ownedLegacyPids.add(record.pid!);
-      } catch { /* ignore malformed test-owned evidence during cleanup */ }
-    }
-  }
   const superviseDir = join(harness.fcHome, 'supervise');
   if (existsSync(superviseDir)) {
     for (const entry of readdirSync(superviseDir)) {

@@ -1,23 +1,21 @@
+import { atomicWrite } from '../../engine-fs.js';
+import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Admit idle-boundary plan amendments through the existing revision transaction; receives the shared full-dispatch admission predicate.
 import { inspectArtifactDeclarations } from '../../artifact-declarations.js';
 import { BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { RevisionAdmission, applyPlanRevision, recordAdmittedPlan } from '../../plan-revisions.js';
 import { recordRunEvent } from '../../run-events.js';
-import { STAGE_STATUS, StoreState, atomicWrite, writeRunState } from '../../store.js';
+import { STAGE_STATUS, StoreState, writeRunState } from '../../store.js';
 import { StageConfig, WorkflowConfig, parseDispatchedStageConfig, refreshRunQueryState } from '../sched_admission/configuration.js';
-import { readBriefCriteriaForAdmission, type createDispatchAdmission, validatedCriterionDischarges } from '../sched_admission/dispatch.js';
-import { parseDeclaredScope, topoSort } from '../sched_admission/frontier.js';
+import { admissionError, readBriefCriteriaForAdmission, type createDispatchAdmission, validatedCriterionDischarges } from '../sched_admission/dispatch.js';
+import { topoSort } from '../sched_admission/frontier.js';
 import { inspectRealityCheckReachability } from '../sched_admission/reality-reads.js';
-import { resolveDeclaredInputWriteBindings, scopeRequestAlreadyAuthorized } from '../sched_scope/path-capabilities.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 
 export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof createDispatchAdmission>) {
-
-  const revisionScopeContained = (scope: string, capabilities: readonly string[]): boolean =>
-    capabilities.includes(scope) || scopeRequestAlreadyAuthorized(parseDeclaredScope(scope), capabilities.map(parseDeclaredScope));
 
   function publishRevisedWorkflow(stages: StageConfig[], sorted: StageConfig[], state: StoreState, projectDir: string, runId: string, directory: string, workflow: WorkflowConfig): void {
     sorted.splice(0, sorted.length, ...topoSort(stages));
@@ -30,17 +28,15 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
     let criteria: BriefCriteriaArtifact | undefined;
     try { criteria = readBriefCriteriaForAdmission(directory); }
     catch (error) { return { pass: false, errors: [`PLAN_REVISION_CRITERIA_UNREADABLE: ${String(error)}`] }; }
-    const briefPath = join(directory, 'task_brief.md');
-    const declaredInputs = existsSync(briefPath) ? resolveDeclaredInputWriteBindings(projectDir, readFileSync(briefPath, 'utf8')) : [];
     const report = inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId: stages.find((stage) => stage.dynamic_dispatch)?.id ?? 'plan',
       terminalStates: state.terminalStates, research: state.research,
       criteria: criteria?.criteria.length === 0 && !state.briefAdmission ? undefined : criteria,
-      criterionDischarges: validatedCriterionDischarges(directory, state, criteria?.briefDigest), declaredInputs, projectDir, runDir: directory });
-    for (const stage of stages) if (!roles.has(stage.role)) report.errors.push(`PLAN_REVISION_ROLE_UNKNOWN: ${stage.id}.role ${stage.role} is not configured`);
+      criterionDischarges: validatedCriterionDischarges(directory, state, criteria?.briefDigest), projectDir, runDir: directory });
+    for (const stage of stages) if (!roles.has(stage.role)) report.errors.push(admissionError('role_unknown', `PLAN_REVISION_ROLE_UNKNOWN: ${stage.id}.role ${stage.role} is not configured`, 'role', stage.id));
     const checksPath = join(directory, 'reality_checks.md');
-    if (existsSync(checksPath)) report.errors.push(...inspectRealityCheckReachability({ markdown: readFileSync(checksPath, 'utf8'), projectDir, runDir: directory, stages, terminalStates: state.terminalStates, research: state.research }));
+    if (existsSync(checksPath)) report.errors.push(...inspectRealityCheckReachability({ markdown: readFileSync(checksPath, 'utf8'), projectDir, runDir: directory, stages, terminalStates: state.terminalStates, research: state.research }).map(message => admissionError('reality_check_invalid', message, 'reality_checks')));
     report.pass = report.errors.length === 0;
-    return report;
+    return { ...report, errors: report.errors.map(error => error.message) };
   }
 
   /** A single idle scheduling boundary; rejected amendments leave the current plan intact. */
@@ -52,9 +48,7 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
       // coverage belongs to the future dispatch, not the planner-only shell.
       const errors = inspectArtifactDeclarations({ stages: sorted, projectDir, runDir: directory });
       if (errors.length) {
-        state.status = 'failed'; state.failureReason = errors.join('; '); state.completedAt = new Date().toISOString();
-        writeRunState(projectDir, runId, state);
-        return state;
+        return concludeRun(state, { status: 'failed', reasonCode: 'dispatch_refused', detail: errors.join('; ') });
       }
     }
     // A dynamic planner's complete proposal records its admitted plan at injection.
@@ -66,9 +60,7 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
         recordAdmittedPlan(state, sorted, directory, 'Initial typed workflow admitted', true, admission);
         writeRunState(projectDir, runId, state);
       } else {
-        state.status = 'failed'; state.failureReason = admission.errors.join('; '); state.completedAt = new Date().toISOString();
-        writeRunState(projectDir, runId, state);
-        return state;
+        return concludeRun(state, { status: 'failed', reasonCode: 'dispatch_refused', detail: admission.errors.join('; ') });
       }
     }
     for (const stage of [...sorted]) {
@@ -88,7 +80,6 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
         const result = applyPlanRevision({ projectDir, runId, request,
           parseStage: parseDispatchedStageConfig,
           admit: (candidate, current) => admitRevisionCandidate(candidate, current, projectDir, directory, roles),
-          scopeContained: revisionScopeContained,
         });
         state = result.state;
         if (result.decision.pending) continue;

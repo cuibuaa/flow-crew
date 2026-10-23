@@ -1,27 +1,24 @@
+import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Validate declared launch inputs and claim one run/project owner; preserves cancellation and park/resume transactions before execution.
 import { writeBriefCriteriaArtifact } from '../../brief-criteria.js';
 import { BriefAdmissionRecord, verifyBriefAdmission } from '../../brief-preflight.js';
 import { resolveRunIdentity } from '../../cancellation-policy.js';
 import { reconcileHostInterruptedRun } from '../../restart-recovery.js';
 import { claimLaunchIntent, describeLiveRunOwner, findLiveRunOwnerForProject, inspectRunScheduler, invalidateRunLockCache, releaseLaunchIntent } from '../../run-lock.js';
-import { StageConfig, WorkflowConfig, loadDefaults, normalizeStageContracts, RecordedWorkflowConfigSchema, refuseCompetition } from '../sched_admission/configuration.js';
+import { StageConfig, WorkflowConfig, loadDefaults, normalizeStageContracts, RecordedWorkflowConfigSchema } from '../sched_admission/configuration.js';
 import { topoSort } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
 import { claimSchedulerPid, removeSchedulerPidIfOwned } from '../sched_policy/identity.js';
 import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { snapshotShipSetupValidationBaseline } from '../sched_settlement/gate-validation.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, isContinuingStage, atomicWrite, initializeReservedRun, isPausedRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
-import { mkdirSync, rmSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
+import { atomicWrite, mkdirSync, rmSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deploymentHeld } from '../../deployment-hold.js';
 import { assertContinuationCompatible } from '../../engine-continuation.js';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-
-function isContinuationStatus(status: string): boolean {
-  return isPausedRunStatus(status) || status === RUN_STATUS.FAILED || status === RUN_STATUS.INCOMPLETE || status === RUN_STATUS.STOPPED;
-}
 
 /** Interrupted work keeps its iteration; a settled rejection spends the next one. */
 export function workflowContinuation(state: StoreState, projectDir: string, runId: string, workflow?: WorkflowConfig): { iteration: number; gateIds: string[] } {
@@ -53,7 +50,7 @@ export function prepareWorkflowLaunch(
   if (existingRunId && existsSync(join(runDir(projectDir, existingRunId), 'run.json'))) {
     const archived = readRunState(projectDir, existingRunId);
     launchState = archived;
-    if ((!isPausedRunStatus(archived.status) && isContinuationStatus(archived.status))
+    if ((!isPausedRunStatus(archived.status) && isResumableRunStatus(archived.status))
       || archived.deploymentHold || archived.recovery?.kind === 'resumable' || (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint)) {
       // Resume the admitted contract, validated by this engine's ordinary
       // parser, even if engine configuration changed during the redeploy.
@@ -62,7 +59,7 @@ export function prepareWorkflowLaunch(
       Object.assign(workflow, admitted);
     }
   }
-  if (!launchState) refuseCompetition(workflow);
+  if (workflow.name === 'default') workflow.name = 'planner';
   normalizeStageContracts(workflow.stages);
   if (briefAdmission) {
     if (taskDescription === undefined) {
@@ -72,7 +69,7 @@ export function prepareWorkflowLaunch(
     if (verification.status !== 'valid') {
       throw new Error(
         `Brief admission ${verification.status}; scheduler launch stopped before run creation `
-        + `(current digest ${verification.report.digest.slice(0, 12)}).`,
+        + `(current digest ${verification.digest.slice(0, 12)}).`,
       );
     }
   }
@@ -104,7 +101,7 @@ export function prepareWorkflowLaunch(
       let archived = readRunState(projectDir, runId);
       requireKnownRunStatus(archived.status, `resume run ${runId}`);
       if (!launchUnchanged(archived)) return { kind: 'settled', state: archived };
-      // createRun prepares a running projection before dispatch. Every consumer
+      // Run initialization prepares a running projection before dispatch. Every consumer
       // gets a durable attempt before launch; an untouched preparation is not an
       // interrupted execution. Every interrupted execution needs current proof;
       // an earlier recovery does not authorize a later checkpoint or crash.
@@ -117,7 +114,7 @@ export function prepareWorkflowLaunch(
       }
       if (archived.recovery?.kind === 'blocked') throw new Error(archived.recovery.reason);
       if (!launchUnchanged(archived)) return { kind: 'settled', state: archived };
-      if (isContinuationStatus(archived.status)) {
+      if (isResumableRunStatus(archived.status)) {
         assertContinuationCompatible(projectDir, runId);
         ({ iteration: resumeAtIteration, gateIds } = workflowContinuation(archived, projectDir, runId, workflow));
       }
@@ -133,10 +130,8 @@ export function prepareWorkflowLaunch(
       if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
         writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
       }
-      blocked.status = 'failed';
-      blocked.failureReason = `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project.`;
-      blocked.completedAt = new Date().toISOString();
-      writeRunState(projectDir, runId, blocked);
+      concludeRun(blocked, { status: 'failed', reasonCode: 'launch_conflict',
+        detail: `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project.` });
       return { kind: 'settled', state: blocked };
     }
     launchIntentOwned = true;
@@ -145,7 +140,6 @@ export function prepareWorkflowLaunch(
       const state = readRunState(projectDir, runId);
       state.maxIterations = maxIterations;
       state.currentIteration = 1;
-      state.timeoutMs = loadDefaults().timeout_ms;
       if (taskDescription) state.taskDescription = taskDescription;
       if (briefAdmission) state.briefAdmission = briefAdmission;
       if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
@@ -164,7 +158,7 @@ export function prepareWorkflowLaunch(
     }
     maxIterations = state.maxIterations ?? maxIterations;
     // Preserve the continuation's iteration, lifecycle clock and signals.
-    resumingExistingRun = isContinuationStatus(state.status);
+    resumingExistingRun = isResumableRunStatus(state.status);
     if (!resumingExistingRun) for (const s of baseStages) {
       if (!state.stages[s.id]) state.stages[s.id] = { status: 'pending', retries: 0 };
     }
@@ -178,7 +172,6 @@ export function prepareWorkflowLaunch(
       state.status = 'running';
       state.workflowName = workflow.name;
       state.maxIterations = maxIterations;
-      state.timeoutMs = loadDefaults().timeout_ms;
       state.currentIteration = 1;
       // Relaunch hygiene: this run previously reached a terminal state. Refresh the
       // lifecycle markers and purge prior-run signals so we don't (a) compute a
@@ -189,6 +182,7 @@ export function prepareWorkflowLaunch(
       state.startedAt = new Date().toISOString();
       delete state.completedAt;
       delete state.failureReason;
+      delete state.reasonCode;
       delete state.terminalArtifact;
       try { rmSync(join(runDirPath, 'signals'), { recursive: true, force: true }); } catch { /* best effort */ }
       // Reset the integrity-rejection tally so a prior run's rejections don't shrink
@@ -217,15 +211,12 @@ export function prepareWorkflowLaunch(
       writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
     }
     if (!launchClaim.claimed) {
-      state.status = 'failed';
-      state.failureReason = `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project.`;
-      state.completedAt = new Date().toISOString();
-      writeRunState(projectDir, runId, state);
+      concludeRun(state, { status: 'failed', reasonCode: 'launch_conflict',
+        detail: `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project.` });
       return { kind: 'settled', state };
     }
     state.maxIterations = maxIterations;
     state.currentIteration = 1;
-    state.timeoutMs = loadDefaults().timeout_ms;
     writeRunState(projectDir, runId, state);
     launchState = state;
   }
@@ -289,10 +280,8 @@ export function prepareWorkflowLaunch(
       }
       return { kind: 'settled', state };
     }
-    state.status = 'failed';
-    state.failureReason = `Single-in-flight: another active run (${siblingDescription}) exists for this project. Stop it first or wait for it to finish.`;
-    state.completedAt = new Date().toISOString();
-    writeRunState(projectDir, runId, state);
+    concludeRun(state, { status: 'failed', reasonCode: 'launch_conflict',
+      detail: `Single-in-flight: another active run (${siblingDescription}) exists for this project. Stop it first or wait for it to finish.` });
     log.error({ runId, sibling: siblingDescription, projectDir }, 'Refusing to start: another active run exists for this project');
     return { kind: 'settled', state };
   }
@@ -302,7 +291,7 @@ export function prepareWorkflowLaunch(
   if (resumingExistingRun) {
     let resumed = false;
     const state = updateRunState(projectDir, runId, (current) => {
-      if (!launchUnchanged(current) || !isContinuationStatus(current.status)) return;
+      if (!launchUnchanged(current) || !isResumableRunStatus(current.status)) return;
       for (const [stageId, status] of Object.entries(current.stages)) {
         if (status.status !== STAGE_STATUS.FAILED && status.status !== STAGE_STATUS.SKIPPED && !gateIds.includes(stageId)) continue;
         const pending = rependStageStatus(status);
@@ -312,7 +301,6 @@ export function prepareWorkflowLaunch(
       current.status = 'running';
       current.workflowName = workflow.name;
       current.maxIterations = maxIterations;
-      current.timeoutMs = loadDefaults().timeout_ms;
       current.currentIteration = resumeAtIteration;
       if (briefAdmission) current.briefAdmission = briefAdmission;
       for (const stage of baseStages) {
@@ -321,6 +309,7 @@ export function prepareWorkflowLaunch(
       delete current.parked;
       delete current.completedAt;
       delete current.failureReason;
+      delete current.reasonCode;
       delete current.continuationFailure;
       // Release is authority for this parked continuation only, never for a
       // later failure/approval or a future manual retry of the same run.

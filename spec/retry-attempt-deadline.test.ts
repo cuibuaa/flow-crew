@@ -1,11 +1,12 @@
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
 import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
-import { createRun, readStageStatus } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { readStageStatus } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 const role: AgentConfig = { name: 'coder', description: 'fixture', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'fixture' };
@@ -45,8 +46,7 @@ describe('each retained execution owns one immutable hard stop', () => {
       let calls = 0;
       const adapter: Adapter = { async run(prompt, _role, opts) {
           const status = readStageStatus(project, created.runId, 'work');
-          const ledger = JSON.parse(readFileSync(join(created.runDirPath, 'stages/work', `attempt_deadline_execution_${opts.attemptIndex}_budget.jsonl`), 'utf8').split('\n')[0]);
-          observed.push({ attempt: opts.attemptIndex!, id: ledger.attemptId, budgetMs: ledger.budgetMs, prompt, resume: opts.resumeSessionId, remaining: status.timeout!.remainingMs });
+          observed.push({ attempt: opts.attemptIndex!, id: status.timeout!.attemptId, budgetMs: status.timeout!.budgetMs, prompt, resume: opts.resumeSessionId, remaining: status.timeout!.remainingMs });
           expect(status.attempts?.at(-1)).toMatchObject({ index: execution, status: 'running', timeout: status.timeout });
           expect(status.continuation).toBeUndefined();
           if (execution === 2 || calls++)
@@ -75,9 +75,9 @@ describe('each retained execution owns one immutable hard stop', () => {
     const time = manualClock();
     let calls = 0;
     await expect(runStage({ async run() { calls++; return { exitCode: 0, output: 'unused', duration_ms: 1 }; } }, {
-      stageId: 'work', role, dependsOn: [], promptTemplate: 'fixture', artifactContract: fixtureArtifactContract('work'),
+      stageId: 'work', role, dependsOn: [], artifactContract: fixtureArtifactContract('work'),
       projectDir: project, runId: created.runId, runDir: created.runDirPath, retries: 0, timeout_ms: 20000, deadlineClock: time.clock,
-      liveConstraintGuardFactory: () => { expect(time.timers.size).toBe(1); throw new Error('setup refused'); },
+      get promptTemplate() { throw new Error('setup refused'); },
     })).rejects.toThrow('setup refused');
     expect(time.timers.size).toBe(0);
     expect(calls).toBe(0);

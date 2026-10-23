@@ -1,3 +1,5 @@
+import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
+import { EXIT_CODE } from './exit-code.js';
 /**
  * `flowcrew rehearse <brief.md>` — pre-flight wind tunnel for a research brief.
  *
@@ -21,17 +23,15 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from './engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { inspectBrief, type BriefPreflightContext } from './brief-preflight.js';
+import { inspectBrief } from './brief-preflight.js';
 import { extractBriefCriteria } from './brief-criteria.js';
 import { routeLogsToFile } from './logging.js';
 import { assessResearchShipTarget } from './research-policy.js';
-import { extractBriefPathMentions, inspectBriefOutputs } from './ship-inputs.js';
+import { inspectBriefOutputs } from './ship-inputs.js';
 import { resolveRunStatus, RUN_STATUS, type RunStatus } from './store.js';
 
-export { lintInstrumentCriteria } from './brief-preflight.js';
-export type { CriterionLintWarning } from './brief-preflight.js';
-
 export interface Finding {
+  code?: string;
   level: 'ok' | 'warn' | 'fail';
   text: string;
 }
@@ -76,11 +76,6 @@ interface RunRehearsalOptions extends IsolatedRehearsalOptions {
   render?: boolean;
 }
 
-export type GitIgnoreProbe = (
-  projectDir: string,
-  candidatePaths: readonly string[],
-) => readonly string[];
-
 type RehearsalRunConsequence = 'ship_warning' | 'ceiling_ok' | 'fail';
 
 /** A rehearsal's verdict is an operator consequence distinct from process success. */
@@ -90,49 +85,13 @@ const REHEARSAL_RUN_CONSEQUENCES = {
   [RUN_STATUS.PARKED]: 'fail',
   [RUN_STATUS.COMPLETE]: 'fail',
   [RUN_STATUS.FAILED]: 'fail',
-  [RUN_STATUS.AWAITING_APPROVAL]: 'fail',
   [RUN_STATUS.SHIPPED]: 'ship_warning',
   [RUN_STATUS.CEILING_HIT]: 'ceiling_ok',
   [RUN_STATUS.ESCALATED]: 'fail',
   [RUN_STATUS.REALITY_GATE_FAILED]: 'fail',
-  [RUN_STATUS.PHASE_COMPLETE]: 'fail',
-  [RUN_STATUS.STOPPED]: 'fail',
+  [RUN_STATUS.CANCELLED]: 'fail',
   [RUN_STATUS.INCOMPLETE]: 'fail',
 } as const satisfies Record<RunStatus, RehearsalRunConsequence>;
-
-function probeGitignoredPaths(projectDir: string, candidatePaths: readonly string[]): string[] {
-  if (candidatePaths.length === 0) return [];
-  try {
-    const output = execFileSync('git', ['check-ignore', '--stdin', '-z'], {
-      cwd: projectDir,
-      input: `${candidatePaths.join('\0')}\0`,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'ignore'],
-      timeout: 5_000,
-      maxBuffer: 1024 * 1024,
-    });
-    return output.split('\0').filter(Boolean);
-  } catch {
-    // Exit 1 means none are ignored. A missing Git repository/tool likewise
-    // contributes no exact ignore facts; the normal launch/rehearsal checks
-    // retain ownership of reporting those environment failures.
-    return [];
-  }
-}
-
-/** Build the repository-dependent part of brief inspection from exact Git facts. */
-export function projectBriefPreflightContext(
-  projectDir: string,
-  brief: string,
-  probe: GitIgnoreProbe = probeGitignoredPaths,
-): BriefPreflightContext {
-  const candidates = [...new Set(extractBriefPathMentions(brief).map((mention) => mention.path))];
-  if (candidates.length === 0) return {};
-  const candidateSet = new Set(candidates);
-  const ignored = [...new Set(probe(projectDir, candidates))]
-    .filter((path) => candidateSet.has(path));
-  return ignored.length > 0 ? { gitignoredPathPrefixes: ignored } : {};
-}
 
 const mark = { ok: '✓', warn: '⚠', fail: '✗' } as const;
 
@@ -161,7 +120,7 @@ export function briefDeclaresNoCandidateOutcome(brief: string): boolean {
 }
 
 export function rehearsalExitCode(findings: ReadonlyArray<Finding>): 0 | 1 {
-  return findings.some((finding) => finding.level === 'fail') ? 1 : 0;
+  return findings.some((finding) => finding.level === 'fail') ? EXIT_CODE.failed : EXIT_CODE.completed;
 }
 
 function shellQuote(value: string): string {
@@ -234,35 +193,26 @@ function initializeTemporaryGitRepository(projectDir: string, stateDir: string):
 
 export async function cmdRehearse(argv: string[]): Promise<void> {
   try {
-    const result = await runRehearsal(argv);
+    const result = await rehearseBrief(argv);
     process.exitCode = result.exitCode;
   } catch (error) {
     const briefPath = argv.find((arg) => !arg.startsWith('--')) ?? '<brief.md>';
-    console.error(`Rehearsal could not complete safely: ${conciseError(error)}`);
+    console.error(`Rehearsal could not complete safely: ${error instanceof CliUsageError ? error.message : conciseError(error)}`);
     console.error(`Next: flowcrew rehearse ${shellQuote(briefPath)} --static-only`);
     process.exitCode = 1;
   }
 }
 
-async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): Promise<IsolatedRehearsalResult> {
-  let briefPath: string | undefined;
-  let explicitProject: string | undefined;
-  let targetDir = options.targetDir;
-  for (let index = 0; index < argv.length; index++) {
-    const arg = argv[index];
-    if (arg === '--target' || arg === '--project' || arg.startsWith('--target=') || arg.startsWith('--project=')) {
-      const [flag, inline] = arg.split(/=(.*)/s);
-      const value = inline ?? argv[++index];
-      if (!value || value.startsWith('--')) throw new Error(`${flag} requires a path`);
-      if (flag === '--target') targetDir = value;
-      else explicitProject = value;
-    } else if (!arg.startsWith('--') && !briefPath) briefPath = arg;
-  }
+export async function rehearseBrief(argv: string[], options: RunRehearsalOptions = {}): Promise<IsolatedRehearsalResult> {
+  const parsed = parseCommandArgs('rehearse', ['rehearse', ...argv]);
+  const briefPath = parsed.positionals[0];
+  const explicitProject = parsed.values.get('--project');
+  const targetDir = parsed.values.get('--target') ?? options.targetDir;
   if (!briefPath || (options.briefText === undefined && !existsSync(briefPath))) {
-    throw new Error('Usage: flowcrew rehearse <brief.md> [--keep] [--static-only] [--project <path>] [--target <path>]');
+    throw new Error(commandUsage('rehearse'));
   }
-  const keep = options.keep ?? argv.includes('--keep');
-  const staticOnly = options.staticOnly ?? argv.includes('--static-only');
+  const keep = options.keep ?? parsed.flags.has('--keep');
+  const staticOnly = options.staticOnly ?? parsed.flags.has('--static-only');
   const brief = options.briefText ?? readFileSync(briefPath, 'utf-8');
   const briefLabel = options.label ?? briefPath;
   const diagnosticsDir = mkdtempSync(join(tmpdir(), 'flowcrew-rehearse-diagnostics-'));
@@ -279,12 +229,11 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
 
   // ---------- static contract checks ----------
   const projectDir = explicitProject ?? options.projectDir ?? process.env.PROJECT_DIR ?? process.cwd();
-  const preflightContext = projectBriefPreflightContext(projectDir, brief);
-  const preflight = inspectBrief(brief, preflightContext);
+  const preflight = inspectBrief(brief);
   for (const finding of preflight.findings) {
-    add(finding.code === 'brief_criteria_missing' ? 'fail' : finding.level, finding.message
+    findings.push({ code: finding.code, level: finding.level, text: finding.message
       + (finding.risk ? `\n  Risk: ${finding.risk}` : '')
-      + (finding.suggestion ? `\n  Suggestion: ${finding.suggestion}` : ''));
+      + (finding.suggestion ? `\n  Suggestion: ${finding.suggestion}` : '') });
   }
   const outputInventory = inspectBriefOutputs(brief, projectDir, undefined,
     { launchProject: targetDir ?? explicitProject ?? null });
@@ -312,7 +261,6 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
     && !preflight.findings.some((finding) => (
       finding.level === 'fail' && finding.code !== 'research_ship_target_unreachable'
     ))
-    && !preflight.findings.some((finding) => finding.code === 'brief_criteria_missing')
     && outputInventory.blocking.length === 0;
 
   // ---------- simulated run ----------
@@ -348,7 +296,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
       const resultRel = rc.resultFile ?? 'docs/research_round_result.json';
       const terminalOutputs = [...new Set(Object.values(ts ?? {}).flatMap((entry) => entry.paths ?? []))]
         .map((path, index) => ({ id: `terminal_${index}`, root: 'project' as const, path }));
-      const terminalContract = { version: 1, produces: terminalOutputs, reads: [], replays: [], groups: terminalOutputs.length > 1
+      const terminalContract = { version: 1, produces: terminalOutputs, reads: [], groups: terminalOutputs.length > 1
         ? [{ id: 'terminal_outcome', mode: 'exactly_one', members: terminalOutputs.map((output) => output.id) }] : [] };
       const criterionIds = extractBriefCriteria(brief).criteria.map((criterion) => criterion.id);
       mkdirSync(join(tempProject, dirname(resultRel)), { recursive: true });
@@ -415,7 +363,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
           is_gate: true,
           criterion_refs: criterionIds,
           prompt_template: 'verify the rehearsal round and report canonical criterion evidence',
-          artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_rehearsal_gate.json' }], reads: [], replays: [] },
+          artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_rehearsal_gate.json' }], reads: [] },
         },
         { id: 'rehearsal_repair', role: 'researcher', depends_on: ['rehearsal_gate'], retry_to: ['rehearsal_gate'],
           scope: [resultRel, `${resultRel}.no_candidate.json`], criterion_refs: criterionIds,
@@ -434,7 +382,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
               scope: [resultRel, `${resultRel}.no_candidate.json`],
               criterion_refs: criterionIds,
               prompt_template: `rehearsal round ${r.label}`,
-              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: resultRel }], reads: [], replays: [] },
+              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: resultRel }], reads: [] },
             },
           ];
           stages.push(...reviewStages(measureId));
@@ -606,7 +554,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
               prompt_template: round.noCandidate
                 ? 'write the declared no-candidate sidecar with outcome, label, and reason'
                 : `rehearsal round ${round.label}`,
-              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: round.noCandidate ? `${resultRel}.no_candidate.json` : resultRel }], reads: [], replays: [] },
+              artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: round.noCandidate ? `${resultRel}.no_candidate.json` : resultRel }], reads: [] },
             }];
             stages.push(...reviewStages(measureId));
             stages.push({
@@ -708,7 +656,7 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
   const warns = findings.filter((f) => f.level === 'warn').length;
   if (options.render !== false) {
     console.log(`\nRehearsal report — ${briefLabel}${simulated ? '' : ' (static checks only)'}\n`);
-    for (const f of findings) console.log(`${mark[f.level]} ${f.text}`);
+    for (const f of findings) console.log(`${mark[f.level]} ${f.code ? `[${f.code}] ` : ''}${f.text}`);
     console.log(`\nBrief admission: launch binds exact digest ${preflight.digest}; preflight findings are advisory.`);
     console.log(`\n${fails === 0 ? '✅ Contract ready' : `❌ ${fails} contract problem${fails === 1 ? '' : 's'}`}${warns ? ` · ${warns} warning${warns === 1 ? '' : 's'}` : ''}`);
     console.log(`Engine diagnostics (not part of the verdict): ${diagnosticLogPath}`);
@@ -729,19 +677,4 @@ async function runRehearsal(argv: string[], options: RunRehearsalOptions = {}): 
     ...(retainedArtifacts ? { retainedArtifacts } : {}),
     ...(retainedOutcomeArtifacts ? { retainedOutcomeArtifacts } : {}),
   };
-}
-
-/**
- * Programmatic rehearsal for generated briefs. It has no CLI exit side effect and the
- * scheduler simulation remains confined to OS-temporary FC/project directories.
- */
-export async function rehearseBriefIsolated(
-  brief: string,
-  options: IsolatedRehearsalOptions = {},
-): Promise<IsolatedRehearsalResult> {
-  return runRehearsal([options.label ?? 'generated-successor.md'], {
-    ...options,
-    briefText: brief,
-    render: false,
-  });
 }

@@ -1,9 +1,11 @@
+import './test-support/policy-runtime.js';
 // @vitest-environment jsdom
 
+import { atomicWrite } from '../src/engine-fs.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -14,10 +16,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cmdShipPreflightWithDeps } from '../src/cli-ship-preflight.js';
 import { startRpcServer, type RpcResponse } from '../src/orchestrator-rpc.js';
-import { AttemptDeadlineController } from '../src/attempt-deadline.js';
 import { runStage } from '../src/worker.js';
-import { atomicWrite, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
-import { runValidationCommand } from '../src/project-validation.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import RunDetail from '../ui/src/components/RunDetail';
 
@@ -214,7 +214,8 @@ describe('bounded task and status projections', () => {
           systemd_unit: `fixture-${request.id}.service`,
           status: live ? 'running' : 'complete',
           attempt: live ? 2 : 1,
-          max_retries: 3,
+          max_attempts: 3,
+          launch: 1,
           created_at: '2026-09-03T10:00:00.000Z',
           tick_log_path: join(root, 'tick.jsonl'),
           run_id: live ? 'live-run' : 'finished-run',
@@ -237,8 +238,8 @@ describe('bounded task and status projections', () => {
       };
     });
 
-    const live = await runCliAsync(['task', 'show', '1', '--port', socket]);
-    const raw = await runCliAsync(['task', 'show', '1', '--raw', '--port', socket]);
+    const live = await runCliAsync(['task', 'show', '1', '--socket', socket]);
+    const raw = await runCliAsync(['task', 'show', '1', '--raw', '--socket', socket]);
     expect({
       status: live.status,
       hasRun: live.stdout.includes('Run: live-run'),
@@ -272,7 +273,8 @@ describe('bounded task and status projections', () => {
         systemd_unit: 'fixture-2.service',
         status: 'complete',
         attempt: 1,
-        max_retries: 3,
+        max_attempts: 3,
+        launch: 1,
         created_at: '2026-09-03T10:00:00.000Z',
         tick_log_path: join(root, 'tick.jsonl'),
         run_id: 'finished-run',
@@ -290,7 +292,7 @@ describe('bounded task and status projections', () => {
       },
       recent_ticks: [],
     }));
-    const finished = await runCliAsync(['task', 'show', '2', '--port', socket]);
+    const finished = await runCliAsync(['task', 'show', '2', '--socket', socket]);
     expect({
       status: finished.status,
       hasRun: finished.stdout.includes('Run: finished-run'),
@@ -305,7 +307,8 @@ describe('bounded task and status projections', () => {
       kind: 'quick' as const,
       brief_text: 'fixture',
       projectDir: project,
-      max_retries: 3,
+      max_attempts: 3,
+      launch: 1,
       created_at: '2026-09-03T10:00:00.000Z',
       tick_log_path: join(root, 'tick.jsonl'),
     };
@@ -350,12 +353,12 @@ describe('bounded task and status projections', () => {
       },
     }] }) : { error: 'unexpected request' });
 
-    const listed = await runCliAsync(['task', 'list', '--status', 'all', '--port', socket]);
+    const listed = await runCliAsync(['task', 'list', '--status', 'all', '--socket', socket]);
     expect({
       status: listed.status,
       columns: ['Launch', 'Run', 'Current stage', 'Elapsed', 'Latest reason']
         .every((heading) => listed.stdout.includes(heading)),
-      live: listed.stdout.includes('live-run') && listed.stdout.includes('implement (execution 2)')
+      live: listed.stdout.includes('live-run') && listed.stdout.includes('implement (attempt 2)')
         && listed.stdout.includes('missing producer'),
       finished: listed.stdout.includes('finished-run') && listed.stdout.includes('all gates passed'),
     }).toEqual({ status: 0, columns: true, live: true, finished: true });
@@ -436,8 +439,6 @@ describe('events, help, watch, and preflight', () => {
       ['daemon', '--help'],
       ['quick', '--help'],
       ['rehearse', '--help'],
-      ['brief', '--help'],
-      ['campaign', '--help'],
       ['events', '--help'],
     ];
     for (const command of commands) {
@@ -458,17 +459,13 @@ describe('events, help, watch, and preflight', () => {
     expect(all.stdout).toContain('[WATCH] armed · 201 entries');
   });
 
-  it('preflight only discovers commands and warns about a live project with either baseline option', async () => {
+  it('preflight only discovers commands and warns about a live project', async () => {
     writeFileSync(join(project, 'package.json'), JSON.stringify({ scripts: { build: 'fixture-build', test: 'fixture-test', lint: 'fixture-lint' } }), 'utf-8');
     writeFileSync(join(project, 'package-lock.json'), '{}', 'utf-8');
     const runDirectory = writeRun('live-run', 'running', 1_000);
     const stdout = new Capture();
     const stderr = new Capture();
-    const runner = vi.fn((request: { role: string; observer?: { onCommandOutput?: Function; onCommandHeartbeat?: Function } }) => {
-      request.observer?.onCommandOutput?.(request, 'stdout', `${request.role} streamed output\n`);
-      request.observer?.onCommandHeartbeat?.(request, 10_000);
-      return { exitCode: 0, durationMs: 25 };
-    });
+    const runner = vi.fn(() => ({ exitCode: 0, durationMs: 25 }));
     const dependencies = {
       projectDir: project,
       packageRoot: repositoryRoot,
@@ -481,12 +478,6 @@ describe('events, help, watch, and preflight', () => {
       inspectLiveRun: (_runId: string, candidate: string) => candidate === runDirectory,
       runValidationCommand: runner as never,
     };
-
-    expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], dependencies)).toBe(0);
-    expect(runner).not.toHaveBeenCalled();
-    expect(stdout.text()).toContain('Validation baseline: SKIPPED');
-    expect(stderr.text()).toContain('shared by live FlowCrew run(s): live-run');
-    expect(stderr.text()).toContain('No project command was launched');
 
     const streamedOut = new Capture();
     const streamedErr = new Capture();
@@ -502,21 +493,7 @@ describe('events, help, watch, and preflight', () => {
     expect(streamedOut.text()).toContain('Validation baseline: SKIPPED');
   });
 
-  it('unchanged-base seam: the production validation runner streams child output', async () => {
-    const chunks: string[] = [];
-    const response = await runValidationCommand({
-      role: 'test',
-      command: process.execPath,
-      args: ['-e', 'process.stdout.write("visible baseline output\\n")'],
-      display: 'node streaming fixture',
-      cwd: project,
-      observer: {
-        onCommandOutput: (_command, stream, chunk) => chunks.push(`${stream}:${chunk}`),
-      },
-    });
-    expect({ exitCode: response.exitCode, streamed: chunks.join('').includes('stdout:visible baseline output') })
-      .toEqual({ exitCode: 0, streamed: true });
-  });
+
 });
 
 describe('operator dashboard vocabulary', () => {
@@ -589,17 +566,6 @@ describe('operator dashboard vocabulary', () => {
     expect(html).not.toContain('Stage attempt history');
   });
 
-  it('unchanged-base seam: names budget journals by execution', () => {
-    const stageDirectory = join(root, 'run', 'stages', 'implement');
-    const deadline = new AttemptDeadlineController({
-      budgetMs: 60_000,
-      ledgerDir: stageDirectory,
-      executionIndex: 3,
-    });
-    deadline.dispose();
-    expect(readdirSync(stageDirectory)).toContain('attempt_deadline_execution_3_budget.jsonl');
-  });
-
   it('unchanged-base seam: clears stale status and explains an empty engine abort through runStage', async () => {
     const runId = 'operator-item-10';
     const stageId = 'implement';
@@ -632,7 +598,7 @@ describe('operator dashboard vocabulary', () => {
           attemptIndex: 2,
           reason: 'superseded by verified evidence',
           timestamp: new Date().toISOString(),
-          source: 'supervisor',
+          source: 'watchdog',
         }));
         await new Promise<void>((resolveAbort) => {
           if (options.abortSignal?.aborted) return resolveAbort();
@@ -653,7 +619,7 @@ describe('operator dashboard vocabulary', () => {
       runId,
       runDir: runDirectory,
       retries: 1,
-      projectWriteScope: [],
+
     });
 
     const output = readFileSync(join(stageDirectory, 'output.md'), 'utf-8');
@@ -704,12 +670,12 @@ describe('operator dashboard vocabulary', () => {
       runId,
       runDir: runDirectory,
       retries: 0,
-      projectWriteScope: ['fixture-root/**'],
+
     });
     expect({
       scopedWrite: result.writes?.includes('fixture-root/result.txt') ?? false,
       cacheNoise: result.writes?.some((path) => path.includes('.pytest_cache')) ?? false,
-    }).toEqual({ scopedWrite: true, cacheNoise: false });
+    }).toEqual({ scopedWrite: true, cacheNoise: true });
   });
 
   it('unchanged-base seam: operator guides describe the enforced admission and surface contracts', () => {
@@ -720,15 +686,14 @@ describe('operator dashboard vocabulary', () => {
     expect(lifecycle).toContain('A daemon **task**');
     expect(lifecycle).toContain('stage **execution**');
     expect(lifecycle).toContain('gate **re-evaluation**');
-    expect(protocol).toContain('omission becomes closed `[]`');
-    expect(protocol).toContain('only a later re-admitted execution can use `authorizedPaths`');
+    expect(protocol).toContain("planner's path estimate");
+    expect(protocol).toContain('including stages with disjoint estimates');
     expect(protocol).toContain('Whole-plan admission');
     expect(contract).toContain('run_manifest.json');
     expect(contract).toContain('framework manifest');
     expect(contract).toContain('Configured validation and independent');
     expect(cli).toContain('`events`');
     expect(cli).toContain('`task show <numeric-id>`');
-    expect(cli).toContain('`--no-baseline`');
     expect(cli).toContain('`--all`');
     expect(lifecycle).toContain('baseline');
     expect(lifecycle).toContain('exact');

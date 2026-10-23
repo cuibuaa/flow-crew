@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { createRun } from './test-support/create-run.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -58,7 +60,7 @@ async function run(
   brief: string,
   script: ConstructorParameters<typeof ScriptedAdapter>[0],
 ) {
-  const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config', 'workflows', 'default.yaml'));
+  const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config', 'workflows', 'planner.yaml'));
   config.defaults.max_iterations = 3;
   const adapter = new ScriptedAdapter(script);
   const state = await scheduler.runWorkflow(
@@ -87,12 +89,125 @@ const dispatch = (id: string, scope = ['docs/task_summary.md'], outputs = ['docs
       '  dependency_reasons: {plan: "execute the planned terminal work"}',
       `  scope: [${scope.join(', ')}]`,
       '  prompt_template: do the work',
-      `  artifact_contract: ${JSON.stringify({ version: 1, produces: outputs.map((path, index) => ({ id: `output_${index}`, root: 'project', path })), reads: [], replays: [] })}`,
+      `  artifact_contract: ${JSON.stringify({ version: 1, produces: outputs.map((path, index) => ({ id: `output_${index}`, root: 'project', path })), reads: [] })}`,
     ].join('\n') + '\n'),
   },
 });
 
 describe('terminal artifact freshness', () => {
+  it.each(['file', 'directory'] as const)('finishes an old run whose owner wrote its terminal %s before deployment without rerunning the owner', async kind => {
+    const projectDir = project();
+    const path = 'docs/task_summary.md';
+    const workflow = scheduler.WorkflowConfigSchema.parse({
+      name: 'legacy-terminal', defaults: { max_iterations: 1, max_retries: 0 },
+      stages: [{ id: 'deliver', role: 'coder', depends_on: [], scope: [path],
+        artifact_contract: { version: 1, produces: [{ id: 'report', root: 'project', path, kind }], reads: [] } }],
+    });
+    const created = store.reserveRun(projectDir);
+    const startedAt = '2026-01-01T00:00:00.000Z';
+    const writtenAt = '2026-01-01T00:00:01.000Z';
+    const owner = { status: 'complete', retries: 0, startedAt, completedAt: writtenAt,
+      attempts: [{ index: 1, status: 'complete', startedAt, completedAt: writtenAt, exitCode: 0, writes: [path] }] };
+    // Literal pre-deploy carriers: initialization never observes the owner's existing result.
+    const legacyState = {
+      runId: created.runId, workflowName: workflow.name, projectDir, status: 'incomplete',
+      startedAt, completedAt: writtenAt, currentIteration: 1, maxIterations: 1,
+      stages: { deliver: owner }, terminalStates: { shipped: { paths: [path] } },
+    };
+    mkdirSync(join(created.runDirPath, 'stages/deliver'), { recursive: true });
+    writeFileSync(join(created.runDirPath, 'run.json'), JSON.stringify(legacyState));
+    writeFileSync(join(created.runDirPath, 'workflow.yaml'), JSON.stringify(workflow));
+    writeFileSync(join(created.runDirPath, 'stages/deliver/status.json'), JSON.stringify(owner));
+    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+      pass: true, terminalOwners: { [path]: 'deliver' },
+    }));
+    mkdirSync(join(projectDir, 'docs'));
+    const artifact = join(projectDir, path);
+    if (kind === 'directory') mkdirSync(artifact);
+    else writeFileSync(artifact, '# delivered by the old engine\n');
+    utimesSync(artifact, new Date(writtenAt), new Date(writtenAt));
+    const before = statSync(artifact).mtimeMs;
+    const adapter = new ScriptedAdapter({});
+
+    const state = await scheduler.runWorkflow(
+      workflow, JSON.stringify(workflow), projectDir, adapter, new Map(), undefined,
+      join(PROJECT_ROOT, 'config', 'agents'), created.runId,
+    );
+
+    expect(state.status, state.failureReason).toBe('shipped');
+    expect(state.startedAt).toBe(startedAt);
+    expect(state).not.toHaveProperty('terminalArtifactBaselines');
+    expect(state.stages.deliver).toEqual(owner);
+    expect(JSON.parse(readFileSync(join(created.runDirPath, 'run.json'), 'utf8')).stages.deliver).toEqual(owner);
+    expect(JSON.parse(readFileSync(join(created.runDirPath, 'stages/deliver/status.json'), 'utf8'))).toEqual(owner);
+    expect(adapter.calls).toEqual([]);
+    expect(statSync(artifact).mtimeMs).toBe(before);
+  }, 60_000);
+
+  it('resumes an old on-disk run without terminal baselines and reaches its declared terminal state', async () => {
+    const projectDir = project();
+    const { config, raw } = scheduler.loadWorkflow(join(PROJECT_ROOT, 'config', 'workflows', 'planner.yaml'));
+    config.defaults.max_iterations = 3;
+    const created = createRun(projectDir, config.name, raw, ['plan']);
+    store.beginStageAttempt(projectDir, created.runId, 'plan', 0);
+    store.completeStageAttempt(projectDir, created.runId, 'plan', 0, {
+      exitCode: 1, duration_ms: 1, error: 'The old engine stopped before producing its plan.',
+    });
+    const legacyRunPath = join(created.runDirPath, 'run.json');
+    const legacyState = JSON.parse(readFileSync(legacyRunPath, 'utf8'));
+    delete legacyState.terminalArtifactBaselines;
+    legacyState.status = 'failed';
+    legacyState.completedAt = new Date().toISOString();
+    writeFileSync(legacyRunPath, JSON.stringify(legacyState));
+    expect(JSON.parse(readFileSync(legacyRunPath, 'utf8'))).not.toHaveProperty('terminalArtifactBaselines');
+    const adapter = new ScriptedAdapter({
+      plan: dispatch('deliver'),
+      deliver: { projectFiles: { 'docs/task_summary.md': '# delivered after deploy\n' } },
+    });
+
+    const state = await scheduler.runWorkflow(
+      config, raw, projectDir, adapter, new Map(), undefined,
+      join(PROJECT_ROOT, 'config', 'agents'), created.runId, `---
+terminal_states:
+  shipped:
+    paths: [docs/task_summary.md]
+---
+# Resume the admitted old-engine run
+`, true, undefined, false,
+    );
+
+    expect(state.status, state.failureReason).toBe('shipped');
+    expect(state.runId).toBe(created.runId);
+    expect(state.startedAt).toBe(legacyState.startedAt);
+    expect(state).not.toHaveProperty('terminalArtifactBaselines');
+    expect(state.stages.deliver?.status).toBe('complete');
+    expect(adapter.calls.map(call => call.stageId)).toEqual(['plan', 'deliver']);
+  }, 60_000);
+
+  it('accepts an admitted owner regenerating a preexisting terminal artifact with identical bytes', async () => {
+    const projectDir = project();
+    const artifact = join(projectDir, 'docs/task_summary.md');
+    const content = '# unchanged but regenerated terminal result\n';
+    writeOld(artifact, content);
+
+    const { state, adapter } = await run(projectDir, `---
+terminal_states:
+  shipped:
+    paths: [docs/task_summary.md]
+---
+# Regenerate the terminal result
+`, {
+      plan: dispatch('regenerate'),
+      regenerate: { projectFiles: { 'docs/task_summary.md': content } },
+    });
+
+    expect(state.status, state.failureReason).toBe('shipped');
+    expect(readFileSync(artifact, 'utf8')).toBe(content);
+    expect(state.stages.regenerate?.status).toBe('complete');
+    expect(state.stages.regenerate?.attempts?.at(-1)?.writes).toContain('docs/task_summary.md');
+    expect(adapter.calls.map(call => call.stageId)).toEqual(['plan', 'regenerate']);
+  }, 60_000);
+
   it('rejects an artifact older than run start, records explicit guidance, then accepts the same path after a non-plan stage rewrites it', async () => {
     const projectDir = project();
     const artifact = join(projectDir, 'docs', 'task_summary.md');
@@ -112,7 +227,7 @@ terminal_states:
     expect(state.status).toBe('shipped');
     expect(state.stages.implement?.status).toBe('complete');
     expect(adapter.calls.some((call) => call.stageId === 'implement')).toBe(true);
-    expect(guidance).toContain('docs/task_summary.md exists but predates this run start');
+    expect(guidance).toContain("docs/task_summary.md exists but its content is unchanged from this run's initial content");
     expect(guidance).not.toContain('早于本次 run 启动');
     expect(statSync(artifact).mtimeMs).toBeGreaterThanOrEqual(Date.parse(state.startedAt));
   }, 60_000);
@@ -145,14 +260,14 @@ terminal_states:
   it.each(['attempt', 'retired'] as const)('accepts a completed admitted owner write from %s evidence when its current stage is pending', async (kind) => {
     const projectDir = project();
     const path = 'docs/task_summary.md';
-    const created = store.createRun(projectDir, 'fixture', 'name: fixture', ['plan', 'finalize']);
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['plan', 'finalize']);
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
     writeFileSync(join(projectDir, path), '# attributed terminal result\n');
     writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
       pass: true, terminalOwners: { [path]: 'finalize' },
     }));
     const state: StoreState = {
-      runId: created.runId, workflowName: 'fixture', projectDir, status: 'running',
+      runId: created.runId, workflowName: 'fixture', projectDir, status: 'running', terminalArtifactBaselines: {},
       startedAt: new Date(Date.now() - 1000).toISOString(),
       stages: { plan: { status: 'complete', retries: 0 }, finalize: { status: 'pending', retries: 0 } },
       terminalStates: { shipped: { paths: [path] } },

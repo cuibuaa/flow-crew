@@ -1,8 +1,5 @@
-import { appendFileSync, mkdirSync } from './engine-fs.js';
-
 import { randomBytes } from 'node:crypto';
 
-import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { ATTEMPT_TERMINATION_GRACE_MS } from './adapters/base.js';
 
@@ -22,15 +19,6 @@ export function stageWrapUpTiming(budgetMs: number): { warningAfterMs: number; f
 }
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
-
-export interface AttemptDeadlineEvent {
-  type: string;
-  attemptId: string;
-  observedAt: string;
-  elapsedMs: number;
-  remainingMs: number;
-  [key: string]: unknown;
-}
 
 export interface AttemptDeadlineSnapshot {
   attemptId: string;
@@ -79,7 +67,6 @@ export class AttemptDeadlineController {
   readonly budgetDeadlineAt: string;
   readonly wrapUpAt?: string;
   readonly finishingMs?: number;
-  readonly ledgerPath?: string;
 
   private readonly clock: AttemptDeadlineClock;
   private readonly startedMono: number;
@@ -92,9 +79,6 @@ export class AttemptDeadlineController {
   constructor(input: {
     budgetMs: number;
     wrapUp?: boolean;
-    ledgerDir?: string;
-    /** Human-facing one-based execution number used only for the journal name. */
-    executionIndex?: number;
     attemptId?: string;
     clock?: AttemptDeadlineClock;
   }) {
@@ -113,19 +97,6 @@ export class AttemptDeadlineController {
     this.attemptStartedAt = new Date(wallStarted).toISOString();
     this.deadlineAt = new Date(wallStarted + hardLimitMs).toISOString();
     this.signal = this.controller.signal;
-    if (input.ledgerDir) {
-      mkdirSync(input.ledgerDir, { recursive: true });
-      const journalIdentity = input.executionIndex === undefined
-        ? this.attemptId
-        : `execution_${positiveSafeInteger(input.executionIndex, 'execution index')}_budget`;
-      this.ledgerPath = join(input.ledgerDir, `attempt_deadline_${journalIdentity}.jsonl`);
-    }
-    this.append('attempt_deadline_created', {
-      budgetMs: this.budgetMs,
-      attemptStartedAt: this.attemptStartedAt,
-      deadlineAt: this.deadlineAt,
-      ...(this.finishingMs ? { budgetDeadlineAt: this.budgetDeadlineAt, wrapUpAt: this.wrapUpAt, finishingMs: this.finishingMs } : {}),
-    });
     this.scheduleDeadlineCheck();
   }
 
@@ -139,18 +110,6 @@ export class AttemptDeadlineController {
 
   wallNow(): number {
     return this.clock.wallNow();
-  }
-
-  scheduleTimer(callback: () => void, delayMs: number): ReturnType<typeof setTimeout> {
-    return this.clock.setTimer(callback, delayMs);
-  }
-
-  clearScheduledTimer(timer: ReturnType<typeof setTimeout>): void {
-    this.clock.clearTimer(timer);
-  }
-
-  isExpired(): boolean {
-    return this.signal.aborted || this.remainingMs() <= 0;
   }
 
   terminationCause(): 'attempt_timeout' | undefined {
@@ -182,19 +141,6 @@ export class AttemptDeadlineController {
       deadlineReachedAt: this.deadlineReachedAt(),
       terminationCause: this.terminationCause(),
     };
-  }
-
-  append(type: string, detail: Record<string, unknown> = {}): void {
-    if (!this.ledgerPath) return;
-    const event: AttemptDeadlineEvent = {
-      type,
-      attemptId: this.attemptId,
-      observedAt: new Date(this.clock.wallNow()).toISOString(),
-      elapsedMs: Math.round(this.elapsedMs()),
-      remainingMs: Math.max(0, Math.floor(this.remainingMs())),
-      ...detail,
-    };
-    try { appendFileSync(this.ledgerPath, `${JSON.stringify(event)}\n`, 'utf-8'); } catch { /* status also records the deadline result */ }
   }
 
   async boundedSleep(delayMs: number, externalAbortSignal?: AbortSignal): Promise<boolean> {
@@ -231,7 +177,6 @@ export class AttemptDeadlineController {
   private observeWrapUp(): void {
     if (this.wrapUpAt && !this.wrapUpSignal.aborted
       && this.clock.monotonicNow() - this.startedMono >= stageWrapUpTiming(this.budgetMs).warningAfterMs) {
-      this.append('stage_wrap_up_due', { finishingMs: this.finishingMs });
       this.wrapUpController.abort('stage_budget_wrap_up');
     }
   }
@@ -255,7 +200,6 @@ export class AttemptDeadlineController {
   private abortAtDeadline(): void {
     if (this.controller.signal.aborted) return;
     this.deadlineReachedWall = this.clock.wallNow();
-    this.append('attempt_deadline_reached', { terminationCause: 'attempt_timeout' });
     this.controller.abort('attempt_timeout');
   }
 }

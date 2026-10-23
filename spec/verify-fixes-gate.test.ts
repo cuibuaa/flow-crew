@@ -363,15 +363,6 @@ describe('independent session-ledger release gate', () => {
     }
   }, 10_000);
 
-  it('documents the exact per-row engine registry compatibility limit and migration boundary', () => {
-    const source = readFileSync(fileURLToPath(new URL('../src/fc-tasks.ts', import.meta.url)), 'utf-8');
-    const guide = readFileSync(fileURLToPath(new URL('../guide/fc_tasks.md', import.meta.url)), 'utf-8');
-    expect(source).toMatch(/MAX_ENGINE_REGISTRY_ROW_BYTES\s*=\s*4\s*\*\s*1024\s*\*\s*1024/u);
-    expect(guide).toMatch(
-      /(?:(?:4,194,304\s+bytes|4\s+MiB)[^\n]*(?:registry|tasks\.jsonl)[^\n]*(?:row|record)|(?:registry|tasks\.jsonl)[^\n]*(?:row|record)[^\n]*(?:4,194,304\s+bytes|4\s+MiB))/iu,
-    );
-  });
-
   it('does not promise unchanged JSON for every refusal while documenting post-publication ambiguity', () => {
     const guide = readFileSync(fileURLToPath(new URL('../guide/fc_tasks.md', import.meta.url)), 'utf-8');
     const promisesEveryRefusalIsUnchanged = guide.includes(

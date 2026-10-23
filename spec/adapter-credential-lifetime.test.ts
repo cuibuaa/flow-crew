@@ -1,9 +1,10 @@
+import { readSession } from '../src/adapter-session.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as adapterHome from '../src/adapter-home.js';
-import { CodexAdapter, readCodexSession, stageCodexHome, writeCodexConfig } from '../src/adapters/codex.js';
+import { CodexAdapter, stageCodexHome, writeCodexConfig } from '../src/adapters/codex.js';
 import type { AgentConfig, RunOpts } from '../src/adapters/base.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 
@@ -94,7 +95,7 @@ async function ready(home: string): Promise<void> {
 
 function run(stageId = 'work', overrides: Partial<RunOpts> = {}) {
   return withEngineIntegrity({ projectDir: project, runDir, stageId,
-    artifactContract: { version: 1, produces: [], reads: [], groups: [], replays: [] } },
+    artifactContract: { version: 1, produces: [], reads: [], groups: [] } },
   () => new CodexAdapter().run('fixture', role, { workDir: project, runDir, stageId, timeout_ms: 10_000, ...overrides }));
 }
 
@@ -144,7 +145,7 @@ describe('execution owns copied credentials', () => {
         writeFileSync(join(home, 'release'), 'go');
         expect((await execution).exitCode).toBe(mode === 'failure' ? 1 : 0);
         credentials(home, false);
-        expect(readCodexSession(runDir, 'work')?.sessionId).toBe(uuid);
+        expect(readSession(runDir, 'work', 'codex')?.sessionId).toBe(uuid);
         expect(readFileSync(join(home, 'sessions', 'conversation'), 'utf8')).toBe('fixture conversation');
       } finally { controller.abort(); await execution; }
     }

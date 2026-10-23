@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assertDistFresh } from '../src/build-manifest.js';
+import { assertDistFresh, pinBuildRuntime, readBuildManifest, assertBuildArtifactInventory } from '../src/build-manifest.js';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cleanupPaths: string[] = [];
@@ -61,6 +61,7 @@ describe('transactional TypeScript build staging', () => {
     const first = runBuild(projectDir);
     expect(first.status, `${first.stdout ?? ''}\n${first.stderr ?? ''}`).toBe(0);
     const previous = assertDistFresh(projectDir);
+    const runtime = pinBuildRuntime(join(projectDir, 'dist'), join(projectDir, 'daemon-runtime'));
     for (const extension of ['js', 'd.ts']) {
       expect(existsSync(join(projectDir, `dist/nested/obsolete.${extension}`))).toBe(true);
     }
@@ -70,8 +71,10 @@ describe('transactional TypeScript build staging', () => {
     for (const extension of ['js', 'd.ts']) {
       expect(existsSync(join(stagingRoot, `dist/nested/obsolete.${extension}`))).toBe(false);
       expect(existsSync(join(projectDir, `dist/nested/obsolete.${extension}`))).toBe(false);
-      expect(existsSync(join(projectDir, '.cache/build-generations', previous.generation, `nested/obsolete.${extension}`))).toBe(true);
+      expect(existsSync(join(runtime, `nested/obsolete.${extension}`))).toBe(true);
     }
+    expect(readBuildManifest(runtime)?.generation).toBe(previous.generation);
+    expect(assertBuildArtifactInventory(runtime, previous).backend).toEqual(previous.artifacts!.backend);
     const next = assertDistFresh(projectDir);
     expect(next.artifacts?.backend).toEqual(next.outputs);
   }, 180_000);

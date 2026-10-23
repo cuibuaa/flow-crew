@@ -1,6 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from './engine-fs.js';
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, symlinkSync, writeFileSync } from './engine-fs.js';
 import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync } from 'node:fs';
-import { pruneTerminalWorkAreasUnderLock } from './run-retention.js';
 import { isTerminalRunStatus } from './lifecycle-status.js';
 import { withRunStateLock } from './store.js';
 import { createHash } from 'node:crypto';
@@ -64,8 +63,9 @@ export function createInvocationScratch(runDir?: string): { path: string; cleanu
   });
 }
 
-/** Retire at terminal publication, startup reconciliation, or history deletion.
- * Validate the alias before removing it, then remove the physical scratch tree.
+/** Retire at terminal publication, explicit cleanup, or history deletion.
+ * Validate alias ownership, then remove the tree before its alias so interrupted
+ * retirement can be retried by explicit cleanup.
  * Run records and final artifacts have their own, longer history lifetime. */
 export function retireRunScratch(runDir: string): void {
   const root = resolve(runDir, 'scratch');
@@ -79,57 +79,33 @@ export function retireRunScratch(runDir: string): void {
   checkAlias(alias, root);
   try {
     if (resolve(readlinkSync(alias)) !== root) throw new Error('SCRATCH_ALIAS_CHANGED');
-    rmSync(alias);
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   rmSync(root, { recursive: true, force: true });
+  rmSync(alias, { force: true });
 }
 
-/** Startup repairs interrupted retirement, including dangling aliases. Only
- * this store's owners are eligible; malformed/unknown records stay untouched. */
+/** Repair aliases for deleted owners without entering any retained run tree. */
 export function sweepRunScratch(runRoot: string, warn: (message: string) => void): void {
-  const owners = new Set<string>();
-  const collect = (directory: string): string[] => {
-    try { return readdirSync(directory); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
-  };
-  runRoot = resolve(runRoot);
-  for (const name of collect(runRoot)) owners.add(join(runRoot, name));
   const parent = scratchParent();
-  for (const name of collect(parent)) {
-    if (!/^fc-[a-f0-9]{16}$/.test(name)) continue;
+  let names: string[];
+  try { names = readdirSync(parent); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  for (const name of names) {
+    const alias = join(parent, name);
+    let root: string;
     try {
-      const root = readlinkSync(join(parent, name));
-      if (!isAbsolute(root) || basename(root) !== 'scratch' || dirname(dirname(root)) !== runRoot) continue;
-      checkAlias(join(parent, name), root);
-      owners.add(dirname(root));
-    } catch { /* unrelated temporary entries are not owned scratch */ }
-  }
-  for (const owner of owners) {
+      root = readlinkSync(alias);
+      if (!isAbsolute(root) || basename(root) !== 'scratch' || dirname(dirname(root)) !== resolve(runRoot)) continue;
+      checkAlias(alias, root);
+    } catch { continue; } // unrelated temporary entries are not owned scratch
     try {
-      const sweep = (): void => {
-        let status: unknown;
-        let missing = false;
-        try { status = (JSON.parse(readFileSync(join(owner, 'run.json'), 'utf8')) as { status?: unknown }).status; }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-          missing = true;
-        }
-        if (missing || isTerminalRunStatus(status)) {
-          retireRunScratch(owner);
-          if (!missing) pruneTerminalWorkAreasUnderLock(owner);
-        }
-      };
-      try {
-        // Fence an explicit resume while rechecking the terminal record. Never
-        // traverse a substituted run-directory symlink during a store sweep.
-        if (!lstatSync(owner).isDirectory()) continue;
-        withRunStateLock(owner, sweep);
-      } catch (error) {
+      try { lstatSync(dirname(root)); }
+      catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        sweep();
+        unlinkSync(alias);
       }
     } catch (error) {
-      warn(`scratch retirement ${owner}: ${error instanceof Error ? error.message : String(error)}`);
+      warn(`scratch retirement ${dirname(root)}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }

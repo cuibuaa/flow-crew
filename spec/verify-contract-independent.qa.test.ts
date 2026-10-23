@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { describe, expect, it } from 'vitest';
 import {
@@ -29,9 +30,9 @@ describe('independent dispatch-admission QA probes', () => {
       const report = inspectDispatchAdmission({
         dispatched: [owner], baseStages: [], dispatchStageId: 'plan',
         terminalStates: { complete: { paths: ['docs/final.md'] } },
-        research: { baseline: 0, policy: 'best_of_n', resultFile: 'docs/round.json' },
+        research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json' },
       });
-      expect(report.errors.join('\n'), scope.join(',')).toContain('research result producer path docs/round.json');
+      expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n'), scope.join(',')).toContain('research result producer path docs/round.json');
     }
   });
 
@@ -49,10 +50,10 @@ describe('independent dispatch-admission QA probes', () => {
       const report = inspectDispatchAdmission({
         dispatched: [owner], baseStages: [], dispatchStageId: 'plan',
         terminalStates: { complete: { paths: ['docs/final.md'] } },
-        research: { baseline: 0, policy: 'best_of_n' },
+        research: { baseline: 0, policy: 'greedy_stack' },
       });
       expect(report.pass, String(condition)).toBe(false);
-      expect(report.errors.join('\n')).toContain('must be mechanically false when research.decision is continue');
+      expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('must be mechanically false when research.decision is continue');
     }
   });
 
@@ -70,9 +71,9 @@ describe('independent dispatch-admission QA probes', () => {
       const report = inspectDispatchAdmission({
         dispatched: [owner], baseStages: [], dispatchStageId: 'plan',
         terminalStates: { complete: { paths: ['docs/final.md'] } },
-        research: { baseline: 0, policy: 'best_of_n' },
+        research: { baseline: 0, policy: 'greedy_stack' },
       });
-      expect(report.pass, `${condition}: ${report.errors.join('\n')}`).toBe(true);
+      expect(report.pass, `${condition}: ${report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')}`).toBe(true);
     }
   });
 
@@ -87,7 +88,7 @@ describe('independent dispatch-admission QA probes', () => {
       dispatched: [first, second], baseStages: [], dispatchStageId: 'plan',
       terminalStates: { complete: { paths: ['docs/final.md'] } },
     });
-    expect(report.errors.join('\n')).toContain('expected exactly one final producer, found 2');
+    expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('expected exactly one final producer, found 2');
   });
 
   it('transports a terminal-only criterion without requiring an impossible downstream gate', () => {
@@ -103,7 +104,7 @@ describe('independent dispatch-admission QA probes', () => {
         { id: criterion, text: 'Choose the truthful terminal path.', line: 1, section: 'Report' },
       ] },
     });
-    expect(report.pass, report.errors.join('\n')).toBe(true);
+    expect(report.pass, report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
     expect(report.criterionTerminalRefs).toEqual({ finalize: [criterion] });
   });
 
@@ -127,12 +128,12 @@ describe('independent dispatch-admission QA probes', () => {
         depends_on: ['verify'], dependency_reasons: { verify: 'Correct rejected work.' }, retry_to: ['verify'], criterion_refs: [] })], baseStages: [],
       dispatchStageId: 'plan', criteria,
     });
-    expect(gateOnly.pass, gateOnly.errors.join('\n')).toBe(true);
+    expect(gateOnly.pass, gateOnly.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
 
     const ungated = inspectDispatchAdmission({
       dispatched: [work], baseStages: [],
       dispatchStageId: 'plan', criteria,
     });
-    expect(ungated.errors.join('\n')).toContain('not assigned to a gate');
+    expect(ungated.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('not assigned to a gate');
   });
 });

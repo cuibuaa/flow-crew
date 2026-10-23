@@ -29,7 +29,8 @@ same combined builder. `npm run build -- "$BUILD_ROOT"` sends `dist`, `ui/dist` 
 to a chosen output root; set `BUILD_ROOT` to a directory you own. Staging uses the temporary
 root. Vite may write its bootstrap cache in UI dependencies, so use an isolated source and
 dependency copy when those dependencies are shared or a checkout serves other work.
-Build publication refuses replacement of a live distribution. Tests use the checkout's
+Build publishes real `dist` and `ui/dist` directories. Daemon startup pins an immutable
+runtime beside its socket, so rebuilds cannot change that daemon's later imports. Tests use the checkout's
 `dist` and its manifest: a private build alone does not redirect them. Validate an isolated
 copy with identical source/configuration and its freshly built distribution.
 

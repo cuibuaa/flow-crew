@@ -2,9 +2,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStageOutput, readStageStatus } from './store.js';
-import { getDefaultTimeout } from './config.js';
 import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
-import { renderCriterionRulings, renderGateControlContract } from './verdict-controls.js';
 import { validate, type Schema } from './reality-gate/checks/json-schema-match.js';
 import { captureResearchGateCandidate } from './research-candidate.js';
 
@@ -146,7 +144,6 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     available_roles: opts.availableRoles ?? '',
     available_skills: opts.availableSkills ?? '',
     task_description: opts.taskDescription ?? '',
-    default_timeout_ms: getDefaultTimeout(),
   };
   const body = substituteTemplate(opts.promptTemplate, vars);
   const criterionBlock = (() => {
@@ -174,17 +171,6 @@ export function buildStagePrompt(opts: HandoffOpts): string {
   const guidanceDelivery = opts.stageId
     ? renderGuidanceDelivery(readGuidanceForStage(opts.runDir, opts.stageId))
     : '';
-  const criterionRulingBlock = opts.criterionRefs?.length
-    ? renderCriterionRulings(opts.runDir, opts.criterionRefs)
-    : '';
-  const gateControlBlock = opts.isGate && opts.stageId && opts.criterionRefs?.length
-    ? renderGateControlContract({
-        projectDir: opts.projectDir,
-        runDir: opts.runDir,
-        gateStageId: opts.stageId,
-        criterionRefs: opts.criterionRefs,
-      })
-    : '';
   const researchCandidateBlock = (() => {
     if (!opts.isGate || !opts.researchOutcomeGate || !opts.stageId) return '';
     const candidate = captureResearchGateCandidate(opts.projectDir, opts.runDir, opts.stageId);
@@ -202,8 +188,6 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     context,
     body,
     criterionBlock,
-    criterionRulingBlock,
-    gateControlBlock,
     researchCandidateBlock,
     anchor,
     skillsContent,

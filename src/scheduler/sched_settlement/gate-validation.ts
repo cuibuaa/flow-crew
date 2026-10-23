@@ -2,9 +2,9 @@ import { writeFileSync } from '../../engine-fs.js';
 
 // Boundary: Setup baseline capture, attempt-bound validation delta and guarded configured command execution; no gate repair or topology changes.
 import { ProjectValidationBaseline, ProjectValidationDependencies, ValidationCommandRunner, ValidationDeltaResult, evaluateValidationDelta, runProjectValidationBaseline, runValidationCommand } from '../../project-validation.js';
-import { publishJsonCreateOnly } from '../../runtime-negotiation.js';
+import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { readShipSetupReadyValidationBaseline } from '../../ship-setup-record.js';
-import { GateVerdict, STAGE_STATUS, readStageStatus, runDir } from '../../store.js';
+import { GateVerdict, STAGE_STATUS, readStageStatus, readRunState, runDir } from '../../store.js';
 import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
@@ -41,7 +41,7 @@ export interface GateValidationExecutionIdentity {
   executionId: string;
 }
 
-function readValidationDelta(path: string): GateValidationDeltaArtifact | undefined {
+export function readValidationDelta(path: string): GateValidationDeltaArtifact | undefined {
   try {
     const value = JSON.parse(readFileSync(path, 'utf8')) as GateValidationDeltaArtifact;
     if (value.version !== 2 || typeof value.pass !== 'boolean' || !Array.isArray(value.current) || !Array.isArray(value.delta)
@@ -82,7 +82,7 @@ export function settledGateValidationExecution(projectDir: string, runId: string
   return gateValidationExecution(projectDir, runId, stageId, STAGE_STATUS.COMPLETE);
 }
 
-function closedGateValidationExecution(projectDir: string, runId: string, stageId: string): GateValidationExecutionIdentity | undefined {
+export function closedGateValidationExecution(projectDir: string, runId: string, stageId: string): GateValidationExecutionIdentity | undefined {
   return settledGateValidationExecution(projectDir, runId, stageId)
     ?? gateValidationExecution(projectDir, runId, stageId, STAGE_STATUS.FAILED);
 }
@@ -115,7 +115,7 @@ export function gateValidationRefusal(projectDir: string, runId: string, stageId
   if (!existsSync(baselinePath)) return undefined;
   const execution = closedGateValidationExecution(projectDir, runId, stageId);
   const prefix = `Validation baseline delta for gate ${stageId}`;
-  const refuse = (reason: string): GateVerdict => ({ pass: false, reason });
+  const refuse = (reason: string): GateVerdict => ({ pass: false, reason, refusal: { kind: 'validation_unresolved' } });
   if (!execution) return refuse(`${prefix} cannot be matched to a settled gate execution; run configured validation for the current gate attempt`);
   const delta = readValidationDelta(join(base, `validation_delta_${stageId}.json`));
   if (!delta) return refuse(`${prefix} is missing for current execution ${execution.executionId}; run configured validation for this gate attempt`);
@@ -131,6 +131,7 @@ export function gateValidationRefusal(projectDir: string, runId: string, stageId
   if (regressions.length) {
     const named = regressions.map(entry => `${entry.role}: ${entry.newFailureIdentifiers.join(', ') || entry.reason}`).join('; ');
     return { ...refuse(`${prefix} recorded regressions for current execution ${execution.executionId} (${named}); repair the named failures, then rerun configured validation`),
+      refusal: { kind: 'validation_regression' },
       repairability: { version: 1, disposition: 'repairable', evidence: join(base, delta.immutablePath ?? `validation_delta_${stageId}.json`) } };
   }
   const unresolved = delta.delta.filter(entry => entry.state !== 'pass').map(entry => `${entry.role}: ${entry.reason}`).join('; ');
@@ -264,8 +265,16 @@ export async function settleGateValidationEvidence(
   if (!execution) return { kind: 'refused', reason: `Validation settlement for ${stageId} requires a current execution` };
   const previous = readValidationDelta(join(base, `validation_delta_${stageId}.json`));
   const digest = createHash('sha256').update(readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex');
+  // Serialization can put a former wave peer after review. Its later project
+  // writes invalidate the receipt, through this same validation owner.
   const bound = previous?.version === 2 && previous.stageId === stageId
-    && validationDeltaMatchesExecution(previous, execution) && previous.baselineSha256 === digest;
+    && validationDeltaMatchesExecution(previous, execution) && previous.baselineSha256 === digest
+    && !Object.entries(readRunState(projectDir, runId).stages).some(([id, status]) =>
+      (existsSync(join(base, 'stages', id, 'status.json')) ? readStageStatus(projectDir, runId, id) : status).attempts?.some(attempt =>
+        (!attempt.completedAt || Date.parse(attempt.completedAt) >= Date.parse(previous.checkedAt))
+        && (attempt.status === STAGE_STATUS.RUNNING || attempt.writeAttribution === 'unknown'
+          || !Array.isArray(attempt.writes) || attempt.writes.some(path => !path.startsWith('run:'))
+          || Boolean(attempt.validationGeneratedWrites?.length))));
   if (previous && bound && (previous.pass === true || previous.delta.some((entry) => entry.state === 'regression'))) return { kind: 'unchanged' };
   const refuse = (delta?: GateValidationDeltaArtifact) => ({ kind: 'refused' as const,
     reason: `Validation settlement for ${stageId} remains unresolved after its mechanical retry. Evidence: ${join(base, delta?.immutablePath ?? `validation_delta_${stageId}.json`)}. ${delta?.delta.filter((entry) => entry.state !== 'pass').map((entry) => `${entry.display ?? entry.role}: ${entry.reason}`).join('; ') ?? 'No comparable validation receipt'}` });

@@ -26,8 +26,8 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { isTerminalStatus, parseBriefFrontmatter, runWorkflow, type WorkflowConfig } from '../../src/scheduler.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
+import { createRun } from '../test-support/create-run.js';
 import {
-  createRun,
   isTerminalRunStatus,
   isSuccessfulRunStatus,
   readRunState,
@@ -44,8 +44,7 @@ describe('GAP-1 — scheduler isTerminalStatus is unified with store isTerminalR
     expect(isTerminalStatus('shipped')).toBe(true);
     expect(isTerminalStatus('ceiling_hit')).toBe(true);
     expect(isTerminalStatus('escalated')).toBe(true);
-    expect(isTerminalStatus('phase_complete')).toBe(true);
-    expect(isTerminalStatus('stopped')).toBe(true);
+    expect(isTerminalStatus('cancelled')).toBe(true);
     expect(isTerminalStatus('complete')).toBe(true);
   });
 
@@ -192,8 +191,8 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
   afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
   const planWorkflow: { config: WorkflowConfig; yaml: string } = {
-    yaml: ['name: plan-only', 'defaults:', '  max_iterations: 3', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}'].join('\n'),
-    config: {description: '',  name: 'plan-only', defaults: { max_iterations: 3 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } }] },
+    yaml: ['name: plan-only', 'defaults:', '  max_iterations: 3', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: []}'].join('\n'),
+    config: {description: '',  name: 'plan-only', defaults: { max_iterations: 3 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [] } }] },
   };
   const ok = (output: string): RunResult => ({ output, exitCode: 0, duration_ms: 1 });
 
@@ -228,7 +227,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
             'stages:', '  - id: check', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "evaluate only after this iteration is planned"}',
             '    is_gate: true', '    task: gate',
-            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_check.json}], reads: [], replays: []}',
+            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_check.json}], reads: []}',
             '  - id: repair', '    role: planner', '    depends_on: [check]', '    retry_to: [check]',
             '    scope: []', '    task: inspect the rejected evidence',
           ].join('\n')));

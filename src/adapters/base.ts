@@ -4,9 +4,9 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 
 import { dirname } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { runDir, updateRunState, type StageContinuation } from '../store.js';
+import { runDir, updateRunState, type StageContinuation, type AttemptTerminationCause } from '../store.js';
 import { createInvocationScratch } from '../invocation-scratch.js';
-import { processStartToken } from '../run-lock.js';
+import { processGroupIsAlive, processStartToken } from '../process-liveness.js';
 import type { ProviderFailure } from '../provider-result.js';
 import { CommandActivityTracker } from '../command-activity.js';
 import type { InvocationUsage, NativeInvocationUsage } from '../invocation-usage.js';
@@ -84,13 +84,10 @@ export interface RunResult extends InvocationUsage {
   /** Direct child close facts, before timeout/control/adapter outcome overrides. */
   processExitCode?: number | null;
   processSignal?: NodeJS.Signals | null;
-  /** Provider-owned refusal attribution; does not enable transport retries. */
+  /** Adapter-owned terminal failure, independent of assistant and tool messages. */
   providerFailure?: ProviderFailure;
   duration_ms: number;
   timedOut?: boolean;
-  adapterError?: boolean;
-  /** Closed adapter-level classification; absent means the stage itself failed. */
-  adapterFailureKind?: AdapterFailureKind;
   /** One actionable sentence explaining a diagnosed failure (see adapters/diagnose.ts). */
   friendlyError?: string;
   tokens_in?: number;
@@ -107,10 +104,11 @@ export interface RunResult extends InvocationUsage {
   /** Immutable budget assigned to this scheduler attempt. */
   effectiveTimeoutMs?: number;
   /** Worker-owned authoritative termination attribution. */
-  timeoutTerminationCause?: string;
+  terminationCause?: AttemptTerminationCause;
+  engineVoid?: boolean;
   /** Scheduler/worker control boundary: the stage must be re-dispatched, not completed. */
   suspended?: boolean;
-  suspensionReason?: 'scope_revision' | 'approval';
+  suspensionReason?: 'approval';
   suspensionRequestId?: string;
   suspensionRequestingStageId?: string;
   /** Original launch failure; ENOENT can name a missing cwd or interpreter too. */
@@ -251,12 +249,8 @@ function createChildTerminator(
   const hardKill = (): void => hardKillChild(child);
   const groupIsAlive = (): boolean => {
     if (process.platform === 'win32' || !child.pid) return false;
-    try {
-      process.kill(-child.pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
+    // Keep waiting when group fate is unobservable.
+    try { return processGroupIsAlive(child.pid); } catch { return true; }
   };
   const completeTermination = (): void => {
     if (terminationCompleted) return;
@@ -332,8 +326,6 @@ function commandEnvironment(inherited: NodeJS.ProcessEnv = process.env, unsetEnv
   const scratch = createInvocationScratch(runDirectory ?? (owner && runDir(owner.projectDir, owner.runId)));
   const env: NodeJS.ProcessEnv = { ...inherited, TMPDIR: scratch.path, TMP: scratch.path, TEMP: scratch.path };
   for (const name of unsetEnv) delete env[name];
-  // Daemon transport belongs to the scheduler/operator, never a command child.
-  delete env.FLOWCREW_DAEMON_SOCKET;
   return { env, cleanup: scratch.cleanup };
 }
 
@@ -469,7 +461,7 @@ export function execWithStdin(
     try {
       activity?.bindProcess(child.pid, 'provider');
       opts.onChild?.({ kill: terminator.hardKill, pid: child.pid });
-    } catch (error) { executionError = error; terminator.hardKill(); finish(1); }
+    } catch (error) { executionError = error; terminator.hardKill(); }
   });
 }
 

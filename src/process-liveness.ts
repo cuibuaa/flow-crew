@@ -2,6 +2,71 @@ import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
+// Process identity is a control-plane primitive and must not disappear when a
+// caller intentionally removes service-manager tools from PATH. macOS/BSD has
+// no procfs fallback, so resolve the standard system ps independently of PATH.
+export const POSIX_PS_COMMAND = ['/bin/ps', '/usr/bin/ps'].find((path) => existsSync(path)) ?? 'ps';
+
+export type ProcessStartToken =
+  | { kind: 'linux'; value: string }
+  | { kind: 'posix-lstart'; value: string };
+
+export function linuxProcessStartTimeTicks(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+    const commEnd = stat.lastIndexOf(')');
+    if (commEnd < 0) return undefined;
+    const fieldsFromState = stat.slice(commEnd + 1).trim().split(/\s+/);
+    const startTime = fieldsFromState[19];
+    return startTime && /^\d+$/.test(startTime) ? startTime : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function posixProcessStartToken(pid: number): ProcessStartToken | undefined {
+  try {
+    const rendered = execFileSync(
+      POSIX_PS_COMMAND,
+      ['-ww', '-o', 'lstart=', '-p', String(pid)],
+      {
+        encoding: 'utf-8',
+        timeout: 2_000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
+      },
+    ).trim().replace(/\s+/g, ' ');
+    return rendered ? { kind: 'posix-lstart', value: rendered } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A PID-reuse-resistant identity token on every supported POSIX platform.
+ * Linux keeps the precise /proc field-22 token. A procfs-less Linux host and
+ * Darwin/BSD use a locale- and timezone-stable `ps lstart` value instead.
+ */
+export function processStartToken(pid: number): ProcessStartToken | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  if (process.platform === 'linux') {
+    const ticks = linuxProcessStartTimeTicks(pid);
+    if (ticks !== undefined) return { kind: 'linux', value: ticks };
+  }
+  if (process.platform !== 'win32') return posixProcessStartToken(pid);
+  return undefined;
+}
+
+export function processStartTokensMatch(
+  recorded: ProcessStartToken | undefined,
+  current: ProcessStartToken | undefined,
+): boolean {
+  return recorded !== undefined
+    && current !== undefined
+    && recorded.kind === current.kind
+    && recorded.value === current.value;
+}
+
 /** TCP receive bytes advance before a provider emits an item. Socket inodes
  * bind the kernel counters to this group, including native clients launched
  * by a wrapper. CPU polling, writes and TCP timers are not receive progress.
@@ -100,23 +165,39 @@ export function processGroupIsAlive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
-/** Conservative liveness used by build ownership and run identity. Linux
- * zombies have no execution left even while their parent has not reaped them. */
-export function processIsAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    if (process.platform === 'linux') {
-      try {
-        const state = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1)!.split(' ')[0];
-        if (state === 'Z' || state === 'X') return false;
-      } catch { /* an inaccessible observation cannot prove no execution */ }
-    }
-    return true;
-  } catch (error) {
-    // signal 0 has exactly one portable death proof: ESRCH. EPERM means the
-    // process exists but this user cannot signal it; unfamiliar probe failures
-    // must remain fail-closed rather than being upgraded into death evidence.
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+export type ProcessLiveness = 'alive' | 'dead' | 'unknown';
+
+export function validProcessStartToken(token: ProcessStartToken): boolean {
+  return typeof token.value === 'string' && (token.kind === 'linux' ? /^\d+$/.test(token.value)
+    : token.kind === 'posix-lstart' && token.value.trim().length > 0);
+}
+
+/** Only positive death or same-kind start-time mismatch proves absence.
+ * Callers choose whether unknown permits observation, admission or signalling. */
+export function processLiveness(pid: number, recorded?: ProcessStartToken): ProcessLiveness {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return 'dead';
+  if (recorded && !validProcessStartToken(recorded)) return 'unknown';
+  try { process.kill(pid, 0); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return 'dead';
+    // EPERM proves existence. A readable start token can still prove PID reuse.
+    if (code !== 'EPERM' || !recorded) return 'unknown';
   }
+  if (process.platform === 'linux') {
+    try {
+      const state = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1)!.split(' ')[0];
+      if (state === 'Z' || state === 'X') return 'dead';
+    } catch { return 'unknown'; }
+  }
+  if (!recorded) return 'alive';
+  const current = processStartToken(pid);
+  if (!current || current.kind !== recorded.kind) return 'unknown';
+  return processStartTokensMatch(recorded, current) ? 'alive' : 'dead';
+}
+
+/** Compatibility for conservative build/group callers; admission callers use
+ * the three-state observation and declare their unknown policy explicitly. */
+export function processIsAlive(pid: number): boolean {
+  return processLiveness(pid) !== 'dead';
 }

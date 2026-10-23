@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cmdDashboard } from '../src/cli-dashboard.js';
 import { startDashboard } from '../src/dashboard.js';
-import { createRun, fcGlobalDir, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
 
 let originalFcRoot: string;
 let root: string;

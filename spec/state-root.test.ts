@@ -24,7 +24,6 @@ describe('FC_HOME state-root isolation', () => {
       import { join } from 'node:path';
       import { campaignsRoot, fcGlobalDir, runsRoot } from ${JSON.stringify(moduleUrl('src/store.ts'))};
       import { listRunIdsFromIndex, rebuildRunIndex } from ${JSON.stringify(moduleUrl('src/run-index.ts'))};
-      import { campaignReviewDir } from ${JSON.stringify(moduleUrl('src/campaign-review.ts'))};
       import { defaultSocketPath } from ${JSON.stringify(moduleUrl('src/orchestrator-rpc.ts'))};
       import { TaskRegistry } from ${JSON.stringify(moduleUrl('src/task-registry.ts'))};
       import { cmdAuditReality } from ${JSON.stringify(moduleUrl('src/reality-gate/audit-reality.ts'))};
@@ -52,7 +51,6 @@ describe('FC_HOME state-root isolation', () => {
         fcGlobalDir: fcGlobalDir(),
         runsRoot: runsRoot(),
         campaignsRoot: campaignsRoot(),
-        reviewDir: campaignReviewDir('fixture-campaign'),
         socketPath: defaultSocketPath(),
         registryRoot: registry.baseDir,
         indexed,
@@ -86,7 +84,6 @@ describe('FC_HOME state-root isolation', () => {
         fcGlobalDir: fcHome,
         runsRoot: join(fcHome, 'runs'),
         campaignsRoot: join(fcHome, 'campaigns'),
-        reviewDir: join(fcHome, 'campaigns', 'fixture-campaign'),
         socketPath: join(fcHome, 'daemon.sock'),
         registryRoot: fcHome,
         indexed: 1,
@@ -104,7 +101,6 @@ describe('FC_HOME state-root isolation', () => {
   it('keeps owned production resolvers free of hard-coded homedir/.fc paths', () => {
     const ownedModules = [
       'src/run-index.ts',
-      'src/campaign-review.ts',
       'src/orchestrator-rpc.ts',
       'src/task-registry.ts',
       'src/cli-task.ts',

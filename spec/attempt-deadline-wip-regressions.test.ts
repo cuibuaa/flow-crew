@@ -1,4 +1,4 @@
-import { atomicWrite } from '../src/store.js';
+import { atomicWrite } from '../src/engine-fs.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   readStageStatus,
   setFcGlobalDir,
@@ -104,10 +104,10 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
     expect(existsSync(home)).toBe(true);
     expect(status).toMatchObject({
       status: 'complete',
+      attempts: [expect.objectContaining({ terminationCause: 'exit' })],
       timeout: {
         budgetMs,
         remainingMs: 0,
-        terminationCause: 'budget_forced_stop',
         deadlineReachedAt: expect.any(String),
         deadlineOverrunMs: expect.any(Number),
       },
@@ -145,17 +145,17 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
     expect(result).toMatchObject({ exitCode: 0, timedOut: false, continuation: { forced: true } });
     expect(status).toMatchObject({
       status: 'complete',
+      attempts: [expect.objectContaining({ terminationCause: 'exit' })],
       timeout: {
         budgetMs,
-        terminationCause: 'budget_forced_stop',
         deadlineReachedAt: expect.any(String),
       },
     });
   });
 
-  it('QA17 keeps a current-attempt supervisor ABORT authoritative at starved settlement', { timeout: 10_000 }, async () => {
+  it('QA17 keeps a current-attempt watchdog ABORT authoritative at starved settlement', { timeout: 10_000 }, async () => {
     const stageId = 'starved_stage_abort';
-    const created = createRun(projectRoot, 'starved-supervisor-abort', 'name: starved-supervisor-abort', [stageId]);
+    const created = createRun(projectRoot, 'starved-watchdog-abort', 'name: starved-watchdog-abort', [stageId]);
     const signalDirectory = join(created.runDirPath, 'signals');
     const signalPath = join(signalDirectory, `abort_${stageId}.json`);
     mkdirSync(signalDirectory, { recursive: true });
@@ -167,9 +167,9 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
           version: 1,
           stageId,
           attemptIndex: 1,
-          reason: 'authoritative starved supervisor abort',
+          reason: 'authoritative starved watchdog abort',
           timestamp: new Date(deadlineClock.wallNow()).toISOString(),
-          source: 'supervisor',
+          source: 'watchdog',
         }));
         return { output: 'late success', exitCode: 0, duration_ms: 120, sessionId: '123e4567-e89b-42d3-a456-426614174000' };
       },
@@ -179,7 +179,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
       stageId,
       role,
       dependsOn: [],
-      promptTemplate: 'starved supervisor ABORT fixture',
+      promptTemplate: 'starved watchdog ABORT fixture',
       deadlineClock,
       artifactContract: emptyArtifactContract(),
       timeout_ms: 40,
@@ -193,17 +193,17 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
     expect(result).toMatchObject({
       exitCode: 137,
       timedOut: false,
-      timeoutTerminationCause: 'stage_abort',
+      terminationCause: 'stage_abort',
     });
     expect(status).toMatchObject({
       status: 'failed',
-      timeout: { terminationCause: 'stage_abort' },
+      attempts: [expect.objectContaining({ terminationCause: 'stage_abort' })],
     });
   });
 
-  it('QA18 normalizes exit telemetry when supervisor ABORT arrives after deadline but before settlement', { timeout: 10_000 }, async () => {
+  it('QA18 normalizes exit telemetry when watchdog ABORT arrives after deadline but before settlement', { timeout: 10_000 }, async () => {
     const stageId = 'deadline_then_stage_abort';
-    const created = createRun(projectRoot, 'deadline-then-supervisor', 'name: deadline-then-supervisor', [stageId]);
+    const created = createRun(projectRoot, 'deadline-then-watchdog', 'name: deadline-then-watchdog', [stageId]);
     const signalDirectory = join(created.runDirPath, 'signals');
     const signalPath = join(signalDirectory, `abort_${stageId}.json`);
     mkdirSync(signalDirectory, { recursive: true });
@@ -217,7 +217,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
           attemptIndex: 1,
           reason: 'authoritative abort after deadline signal',
           timestamp: new Date(deadlineClock.wallNow()).toISOString(),
-          source: 'supervisor',
+          source: 'watchdog',
         }));
         return { output: 'settled after both signals', exitCode: 0, duration_ms: 80 };
       },
@@ -227,7 +227,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
       stageId,
       role,
       dependsOn: [],
-      promptTemplate: 'deadline then supervisor ABORT fixture',
+      promptTemplate: 'deadline then watchdog ABORT fixture',
       deadlineClock,
       artifactContract: emptyArtifactContract(),
       timeout_ms: 40,
@@ -241,11 +241,11 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
     expect(result).toMatchObject({
       exitCode: 137,
       timedOut: false,
-      timeoutTerminationCause: 'stage_abort',
+      terminationCause: 'stage_abort',
     });
     expect(status).toMatchObject({
       status: 'failed',
-      timeout: { terminationCause: 'stage_abort' },
+      attempts: [expect.objectContaining({ terminationCause: 'stage_abort' })],
     });
   });
 });

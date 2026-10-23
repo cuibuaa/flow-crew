@@ -2,15 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspectBrief, lintInstrumentCriteria } from '../src/brief-preflight.js';
 import { discoverProjectValidation, evaluateValidationDelta, reconcileProjectValidation, runProjectValidationBaseline } from '../src/project-validation.js';
 import { reconcileHostInterruptedRun } from '../src/restart-recovery.js';
 import { createDaemonReconciler } from '../src/daemon-reconciliation.js';
 import * as recovery from '../src/restart-recovery.js';
 import * as runLock from '../src/run-lock.js';
 import { TaskRegistry } from '../src/task-registry.js';
-import { beginStageAttempt, createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
-import { readGateVerdict } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
+import { readGateEvaluation } from '../src/scheduler.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { prepareWorkflowLaunch } from '../src/scheduler/sched_loop/launch.js';
@@ -26,12 +26,12 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
 function interrupted(checkpoint = true) {
-  const workflow = { name: 'fixture', stages: [{ id: 'work', role: 'coder', scope: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } }] };
+  const workflow = { name: 'fixture', stages: [{ id: 'work', role: 'coder', scope: [], artifact_contract: { version: 1, produces: [], reads: [] } }] };
   const id = createRun(project, 'fixture', JSON.stringify(workflow), ['work']).runId;
   writeStageStatus(project, id, 'work', { status: 'pending', retries: 0 });
   beginStageAttempt(project, id, 'work', 0, '2026-01-01T00:00:00.000Z');
   if (checkpoint) updateRunState(project, id, state => {
-    state.engineCheckpoint = { version: 1, runId: id, projectDir: project, bootId: 'same-boot', generation: 'fixture-generation', pid: 2147483647, at: '2026-01-01T00:00:00.000Z', processes: [] };
+    state.engineCheckpoint = { version: 2, runId: id, projectDir: project, bootId: 'same-boot', generation: 'fixture-generation', pid: 2147483647, at: '2026-01-01T00:00:00.000Z', processes: [] };
   });
   return id;
 }
@@ -39,7 +39,7 @@ function interrupted(checkpoint = true) {
 describe('interrupted runs have a durable outcome without takeover', () => {
   it('resumes the archived workflow contract after project configuration changes', () => {
     const id = interrupted(), base = runDir(project, id);
-    const stage = StageConfigSchema.parse({ id: 'work', role: 'coder', scope: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } });
+    const stage = StageConfigSchema.parse({ id: 'work', role: 'coder', scope: [], artifact_contract: { version: 1, produces: [], reads: [] } });
     writeFileSync(join(base, 'workflow.yaml'), JSON.stringify({ name: 'admitted', defaults: { max_iterations: 1 }, stages: [stage] }));
     vi.spyOn(recovery, 'readHostBootId').mockReturnValue('same-boot');
     vi.spyOn(runLock, 'inspectRunScheduler').mockReturnValue({ kind: 'dead', pid: 2147483647 });
@@ -84,7 +84,7 @@ describe('interrupted runs have a durable outcome without takeover', () => {
     const reconcile = recovery.reconcileHostInterruptedRun;
     vi.spyOn(recovery, 'reconcileHostInterruptedRun').mockImplementation((directory, runId) => reconcile(directory, runId, proof));
     vi.spyOn(recovery, 'engineGeneration').mockReturnValue(proof.currentGeneration);
-    const checkpoint = { version: 1 as const, runId: id, projectDir: project, bootId: proof.currentBootId, generation: proof.currentGeneration, pid: 2147483647, at: new Date().toISOString(), processes: [] };
+    const checkpoint = { version: 2 as const, runId: id, projectDir: project, bootId: proof.currentBootId, generation: proof.currentGeneration, pid: 2147483647, at: new Date().toISOString(), processes: [] };
     updateRunState(project, id, state => { state.engineCheckpoint = { ...checkpoint, bootId: 'first-fixture-boot' }; });
     expect(reconcile(project, id, proof).recovery?.kind).toBe('resumable');
     // A resumed scheduler claims a new checkpoint before dispatching again.
@@ -151,16 +151,16 @@ describe('declared products are part of gate admission', () => {
   it.each([false, true])('keeps later report ownership distinct from repair wiring (repair=%s)', repair => {
     const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['review', 'report']).runId;
     const base = runDir(project, id);
-    const stage = (name: string, extra: object) => StageConfigSchema.parse({ id: name, role: 'coder', scope: [], depends_on: [], prompt_template: 'fixture', artifact_contract: { version: 1, produces: [], reads: [], replays: [] }, ...extra });
+    const stage = (name: string, extra: object) => StageConfigSchema.parse({ id: name, role: 'coder', scope: [], depends_on: [], prompt_template: 'fixture', artifact_contract: { version: 1, produces: [], reads: [] }, ...extra });
     updateRunState(project, id, state => {
       state.declaredOutputs = [{ path: 'report.md', expectedType: 'file' }];
       state.planControl = { version: 1, capabilities: ['report.md'], stages: [stage('review', { is_gate: true }), stage('report', { scope: ['report.md'], depends_on: ['review'], ...(repair ? { retry_to: ['review'] } : {}) })] };
     });
     writeFileSync(join(base, 'verdict_review.json'), '{"pass":true}');
-    expect(readGateVerdict(project, 'review', id, undefined, false, false)?.pass).toBe(!repair);
+    expect(readGateEvaluation(project, 'review', id, undefined, false)?.pass).toBe(!repair);
     if (!repair) {
       writeStageStatus(project, id, 'report', { status: 'complete', retries: 0 });
-      expect(readGateVerdict(project, 'review', id, undefined, false, false)?.reason).toContain('DECLARED_OUTPUT_REQUIRED');
+      expect(readGateEvaluation(project, 'review', id, undefined, false)?.reason).toContain('DECLARED_OUTPUT_REQUIRED');
     }
   });
 
@@ -169,7 +169,7 @@ describe('declared products are part of gate admission', () => {
     writeFileSync(join(runDir(project, id), 'task_brief.md'), '---\noutputs: [report.md]\n---\n# Goal\nDeliver the report.');
     writeFileSync(join(root, 'outside.md'), 'fixture'); symlinkSync(join(root, 'outside.md'), join(project, 'report.md'));
     writeFileSync(join(runDir(project, id), 'verdict_review.json'), '{"pass":true}');
-    expect(readGateVerdict(project, 'review', id, undefined, false, false)?.pass).toBe(true);
+    expect(readGateEvaluation(project, 'review', id, undefined, false)?.pass).toBe(true);
   });
 
   it('retains declared products and an actual conflicting constraint after frontmatter stripping', () => {
@@ -188,25 +188,9 @@ describe('declared products are part of gate admission', () => {
     writeFileSync(join(base, 'verdict_review.json'), '{"pass":true}');
     if (kind === 'present') writeFileSync(join(project, 'report.md'), 'Required product');
     if (kind === 'wrong-type') mkdirSync(join(project, 'report.md'));
-    const verdict = readGateVerdict(project, 'review', id, undefined, false, false);
+    const verdict = readGateEvaluation(project, 'review', id, undefined, false);
     expect(verdict?.pass).toBe(kind === 'present');
     if (kind !== 'present') expect(verdict?.reason).toContain('DECLARED_OUTPUT');
-  });
-});
-
-describe('statistics and instrument policy is sentence-local', () => {
-  it.each([
-    '# Goal\nUpdate the headline in the README.\n\n# Evidence\nThe numeric rate in unrelated logs remains an input.',
-    '# Goal\nUpdate the headline in the README. Retain the numeric rate in unrelated logs.',
-  ])('does not combine unrelated headline and numeric requirements', brief => {
-    expect(inspectBrief(brief).findings.some(f => f.code === 'headline_distribution_missing')).toBe(false);
-  });
-  it('still refuses a headline statistic without distribution evidence', () => {
-    expect(inspectBrief('# Goal\nReport the headline statistic.').findings.some(f => f.code === 'headline_distribution_missing')).toBe(true);
-  });
-  it('does not combine a data inclusion directive with a neighboring implementation citation', () => {
-    expect(lintInstrumentCriteria('The report must include the observed result. The source `src/reader.ts` is read-only evidence.')).toEqual([]);
-    expect(lintInstrumentCriteria('The source must import `src/reader.ts`.')).toHaveLength(1);
   });
 });
 

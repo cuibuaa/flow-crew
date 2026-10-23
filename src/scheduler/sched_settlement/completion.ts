@@ -1,4 +1,4 @@
-import { publishRunCompletion } from '../sched_policy/run-completion.js';
+import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Reconcile exact-ID outstanding obligations, guard plain completion, archive declared outputs and read existing study completion; receives only campaign publication.
 import { archiveDeclaredOutputs } from '../../declared-output-archive.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, runDir, writeRunState } from '../../store.js';
@@ -6,37 +6,30 @@ import { StageConfig } from '../sched_admission/configuration.js';
 import { isStageInSkippedBranch } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
 import { orderedGateIdsForState } from '../sched_policy/campaign.js';
-import { scopePlanningDigestsBlockingStage, scopePlanningDispositionDigests } from '../sched_scope/scope-planning.js';
 import { readTerminalStudyCompletionEvidence, writeTerminalStudyCompletionArtifacts } from './gate-verdict.js';
 
 export function reconcileUnresolvedStageObligations(
   state: StoreState,
   dispatchedStages: readonly StageConfig[],
   declaredIteration: number,
-  runDirPath: string,
+  _runDirPath: string,
 ): { changed: boolean; stageIds: string[] } {
   const before = state.unresolvedStageObligations ?? [];
   const obligations = new Map(before.map((entry) => [entry.stageId, entry]));
   const stagesById = new Map(dispatchedStages.map(stage => [stage.id, stage]));
-  const disposedScopeDigests = scopePlanningDispositionDigests(runDirPath);
 
   // Engine-observed success or a skip of the stage or its dependency branch
   // discharges its obligation. A planner may also use the existing, durable
   // scope-negotiation resolve/defer contract when that exact digest is what
   // blocked the old downstream stage. Missing and failed stages otherwise stay.
-  for (const [stageId, obligation] of obligations) {
+  for (const [stageId] of obligations) {
     const status = state.stages[stageId]?.status;
     if (status === STAGE_STATUS.COMPLETE || status === STAGE_STATUS.SKIPPED
         || isStageInSkippedBranch(stageId, stagesById, state)) {
       obligations.delete(stageId);
       continue;
     }
-    if (
-      obligation.scopePlanningDigests?.length
-      && obligation.scopePlanningDigests.every((digest) => disposedScopeDigests.has(digest))
-    ) {
-      obligations.delete(stageId);
-    }
+
   }
 
   for (const stage of dispatchedStages) {
@@ -47,23 +40,7 @@ export function reconcileUnresolvedStageObligations(
         || isStageInSkippedBranch(stage.id, stagesById, state)) continue;
     const status = state.stages[stage.id]?.status;
     if (status === STAGE_STATUS.PENDING || status === STAGE_STATUS.RUNNING) {
-      const scopePlanningDigests = scopePlanningDigestsBlockingStage(runDirPath, stage.id, dispatchedStages);
-      const existing = obligations.get(stage.id);
-      if (!existing) {
-        obligations.set(stage.id, {
-          stageId: stage.id,
-          declaredIteration,
-          ...(scopePlanningDigests.length > 0 ? { scopePlanningDigests } : {}),
-        });
-      } else if (scopePlanningDigests.length > 0) {
-        obligations.set(stage.id, {
-          ...existing,
-          scopePlanningDigests: [...new Set([
-            ...(existing.scopePlanningDigests ?? []),
-            ...scopePlanningDigests,
-          ])].sort(),
-        });
-      }
+      if (!obligations.has(stage.id)) obligations.set(stage.id, { stageId: stage.id, declaredIteration });
     }
   }
 
@@ -107,18 +84,16 @@ export function guardPlainCompletionWithStageObligations(
 export function appendUnresolvedStageObligationContext(prompt: string, state: StoreState): string {
   const obligations = state.unresolvedStageObligations ?? [];
   if (obligations.length === 0) return prompt;
-  const rows = obligations.map((entry) => {
-    const disposition = entry.scopePlanningDigests?.length
-      ? `; alternatively record the pending scope disposition(s): ${entry.scopePlanningDigests.join(', ')}`
-      : '';
-    return `- ${entry.stageId} (declared in iteration ${entry.declaredIteration}${disposition})`;
-  }).join('\n');
+  const rows = obligations.map(entry => `- ${entry.stageId} (declared in iteration ${entry.declaredIteration})`).join('\n');
   return `${prompt}\n\n# Engine-owned unresolved stage obligations\n${rows}\n`
-    + `A replacement plan cannot supersede these obligations by omission. Re-dispatch every exact stage ID above and let it reach complete or an explicit skipped disposition, unless the row names an existing scope-negotiation digest that this plan explicitly resolves or defers. `
+    + `A replacement plan cannot supersede these obligations by omission. Re-dispatch every exact stage ID above and let it reach complete or an explicit skipped disposition. `
     + `Until then, the engine will reject plain completion and will end incomplete if the iteration budget is exhausted.`;
 }
 
-export function recoverTerminalStudyCompletion(projectDir: string, runId: string, state: StoreState): StoreState | null {
+export async function recoverTerminalStudyCompletion(
+  projectDir: string, runId: string, state: StoreState,
+  writeCampaignEntry: (projectDir: string, state: StoreState) => void = () => {},
+): Promise<StoreState | null> {
   // Recover an already authored gate terminal contract from its settled
   // evidence; terminal-file selection has its own required-settlement barrier.
   const gateIds = orderedGateIdsForState(projectDir, state);
@@ -128,8 +103,6 @@ export function recoverTerminalStudyCompletion(projectDir: string, runId: string
     writeTerminalStudyCompletionArtifacts(projectDir, runId, gateId, evidence);
     const next: StoreState = {
       ...state,
-      status: RUN_STATUS.COMPLETE,
-      completedAt: state.completedAt ?? new Date().toISOString(),
       campaignAlert: undefined,
       researchInjection: undefined,
       stages: { ...state.stages },
@@ -140,7 +113,10 @@ export function recoverTerminalStudyCompletion(projectDir: string, runId: string
         next.stages[stage.id] = { ...next.stages[stage.id], status: STAGE_STATUS.SKIPPED };
       }
     }
-    return next;
+    if (!createPlainCompletionArchiver(writeCampaignEntry)(next, {
+      projectDir, runId, runDirPath: runDir(projectDir, runId), iteration: state.currentIteration ?? 1,
+    }, 'terminal_study_recovery')) return next;
+    return concludeRun(next, { status: RUN_STATUS.COMPLETE, reasonCode: 'study_complete', writeCampaignEntry });
   }
   return null;
 }
@@ -161,15 +137,13 @@ export function createPlainCompletionArchiver(writeCampaignEntry: (projectDir: s
       return true;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      state.status = RUN_STATUS.FAILED;
-      state.failureReason = `Declared output archival refused plain completion (${completionPath}): ${detail}`;
-      state.completedAt = new Date().toISOString();
-      publishRunCompletion(state, context.projectDir, context.runId, () => ({
+      concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: 'declared_output_archival_refused',
+        detail: `Declared output archival refused plain completion (${completionPath}): ${detail}`, eventFields: () => ({
         iteration: context.iteration,
         detail: state.failureReason,
         level: 'warning',
         source: 'scheduler',
-      }), writeCampaignEntry);
+      }), writeCampaignEntry });
       log.error({ runId: context.runId, completionPath, detail }, 'Plain completion refused because declared outputs could not be archived');
       return false;
     }

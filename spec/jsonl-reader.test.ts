@@ -1,7 +1,13 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, renameSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readCampaignEntries } from '../src/campaigns.js';
+import { readOperatorEvents, readOperationalProjection } from '../src/cli-events.js';
+import { readRunDriftProjection } from '../src/run-drift.js';
+import { readRunStateView } from '../src/run-state-view.js';
+import { SessionPush } from '../src/session-push.js';
+import { createRun } from './test-support/create-run.js';
 import { getItem, recordRequest, resolveRequest } from '../src/inbox.js';
 import { readJsonlFile, readJsonlFileWithDiagnostics, type JsonlReadCursor } from '../src/jsonl.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
@@ -124,9 +130,52 @@ describe('tolerant shared JSONL reader', () => {
     const first = registry.create({ projectDir: tempDir, name: 'first' });
     appendFileSync(registry.registryPath, '{"id":\n', 'utf-8');
     const second = registry.create({ projectDir: tempDir, name: 'second' });
+    appendFileSync(registry.registryPath, '{"id":', 'utf-8');
 
     expect(registry.get(first.id)?.name).toBe('first');
     expect(registry.get(second.id)?.name).toBe('second');
+  });
+
+  it('keeps the same event history through operator, drift, fenced state and session readers with a torn tail', () => {
+    const projectDir = join(tempDir, 'project');
+    mkdirSync(projectDir);
+    const { runId, runDirPath } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', []);
+    const path = join(runDirPath, 'events.jsonl');
+    const event = { runId, type: 'admission_rejected', attemptIndex: 1, timestamp: '2026-07-01T00:00:00Z' };
+    writeFileSync(path, `${JSON.stringify(event)}\n`);
+    const drift = () => readRunDriftProjection(runDirPath).rows.find(row => row.id === 'first_plan_admission');
+    expect(drift()?.value).toBe('rejected');
+    const before = drift();
+    appendFileSync(path, '{"type":');
+    expect(readOperatorEvents(runDirPath)).toEqual([event]);
+    expect(readOperationalProjection(runDirPath, { includeDrift: false }).sourceCoverage.events).toBe('read');
+    expect(drift()).toEqual(before);
+    const view = readRunStateView(projectDir, runId);
+    expect(view.events).toEqual({ rows: [event], malformedRecords: 1 });
+    expect(view.diagnostics.some(row => row.code === 'STATE_EVENT_ROWS_UNREADABLE')).toBe(true);
+
+    const registry = new TaskRegistry({ baseDir: fcGlobalDir() });
+    const task = registry.create({ projectDir, run_id: runId, status: 'running', launcher: { frontend: 'claude', sessionId: 'reader-session', cwd: projectDir } });
+    const push = new SessionPush(registry);
+    push.capture(task);
+    expect(push.events()).toEqual([]);
+    const failure = { ...event, type: 'attempt_failed' };
+    appendFileSync(path, `\n${JSON.stringify(failure)}\n{"type":`);
+    push.capture(task);
+    expect(push.events()).toHaveLength(1);
+    expect(push.events()[0]).toMatchObject({ runId });
+    expect(readOperatorEvents(runDirPath)).toEqual([event, failure]);
+    expect(readRunStateView(projectDir, runId).events).toEqual({ rows: [event, failure], malformedRecords: 2 });
+  });
+
+  it('keeps legacy campaign sequence positions when malformed rows precede a valid row and a torn tail', () => {
+    const projectDir = join(tempDir, 'project');
+    const history = join(projectDir, '.fc', 'campaigns');
+    mkdirSync(history, { recursive: true });
+    const row = { runId: 'campaign-run', kind: 'task_started', timestamp: '2026-07-01T00:00:00Z' };
+    const path = join(history, 'reader-campaign.jsonl');
+    writeFileSync(path, `malformed\n\n${JSON.stringify(row)}\n{"runId":`);
+    expect(readCampaignEntries(projectDir, 'reader-campaign')).toMatchObject([{ ...row, seq: 2 }]);
   });
 
   it('preserves inbox first-resolution-wins folding', () => {

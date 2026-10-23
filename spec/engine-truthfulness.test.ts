@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { atomicWrite } from '../src/engine-fs.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { portCanBind } from './test-support/engine-fixtures.js';
@@ -13,11 +14,10 @@ import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/b
 import { deriveRunTokenCost } from '../src/campaign-page.js';
 import { startDashboard } from '../src/dashboard.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  atomicWrite,
   beginStageAttempt,
   completeStageAttempt,
-  createRun,
   fcGlobalDir,
   readRunState,
   readStageStatus,
@@ -75,10 +75,10 @@ function dynamicWorkflow(name: string): { config: WorkflowConfig; yaml: string }
   ].join('\n');
   return {
     yaml,
-    config: {description: '', 
+    config: {description: '',
       name,
       defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -263,7 +263,6 @@ describe('inbox stale truth', () => {
       metric: null,
       iterations: null,
       phases: null,
-      brief_revisions: null,
       runs: [],
       runs_total: 1,
       staleRunId,
@@ -303,35 +302,13 @@ describe('campaign cost honesty', () => {
   it('does not turn historical one-sided token telemetry into a complete total', () => {
     const state = readRunState(projectDir, createRun(projectDir, 'p6-partial-cost', 'name: p6-partial-cost', ['work']).runId);
     state.status = 'complete';
-    state.supervise = false;
     state.stages.work = { status: 'complete', retries: 0, tokens_out: 24_055 };
     const cost = deriveRunTokenCost(state);
     console.info(`[P6_COST_ONE_SIDED] ${JSON.stringify(cost)}`);
     expect(cost).toEqual({
       tokens: 24_055,
-      supervisorTokens: 0,
       complete: false,
       attemptEvidence: { known: 0, recordedUnknown: 0, unrecorded: 1 },
-    });
-  });
-
-  it('keeps an absent historical supervisor ledger unknown when the run enabled supervision', () => {
-    const created = createRun(projectDir, 'p6-supervisor-cost', 'name: p6-supervisor-cost', ['work']);
-    const state = readRunState(projectDir, created.runId);
-    state.status = 'complete';
-    state.stages.work = { status: 'skipped', retries: 0 };
-    delete state.supervisor;
-    state.supervise = true;
-    const unknown = deriveRunTokenCost(state);
-    state.supervise = false;
-    const disabled = deriveRunTokenCost(state);
-    console.info(`[P6_COST_SUPERVISOR] ${JSON.stringify({ unknown, disabled })}`);
-    expect(unknown.complete).toBe(false);
-    expect(disabled).toEqual({
-      tokens: 0,
-      supervisorTokens: 0,
-      complete: true,
-      attemptEvidence: { known: 0, recordedUnknown: 0, unrecorded: 0 },
     });
   });
 
@@ -346,10 +323,10 @@ describe('campaign cost honesty', () => {
       '    role: planner',
       '    dynamic_dispatch: true',
     ].join('\n');
-    const config: WorkflowConfig = {description: '', 
+    const config: WorkflowConfig = {description: '',
       name: 'p6-replan-cost',
       defaults: { max_iterations: 2, max_retries: 0 },
-      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [], 
+      stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],
         id: 'plan', role: 'planner', depends_on: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -358,7 +335,6 @@ describe('campaign cost honesty', () => {
     writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
-    initial.supervise = false;
     writeRunState(projectDir, created.runId, initial);
     let planCalls = 0;
     const planPrompts: string[] = [];
@@ -438,10 +414,19 @@ describe('campaign cost honesty', () => {
     expect(replanEvents).toEqual([]);
     expect(cost).toEqual({
       tokens: 407,
-      supervisorTokens: 0,
-      complete: true,
-      attemptEvidence: { known: 6, recordedUnknown: 0, unrecorded: 0 },
+      complete: false,
+      attemptEvidence: { known: 6, recordedUnknown: 0, unrecorded: 2 },
     });
+    const unexecuted = [final.stages.repair_two, final.stageEvidence!.find(entry => entry.stageId === 'repair_one')!.status];
+    for (const stage of unexecuted) {
+      expect(stage.status).toBe('skipped');
+      expect(stage.attempts ?? []).toHaveLength(0);
+    }
+    expect(final.stageEvidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stageId: 'work_one', status: expect.objectContaining({ tokens_in: 100, tokens_out: 10 }) }),
+      expect.objectContaining({ stageId: 'gate_one', status: expect.objectContaining({ tokens_in: 20, tokens_out: 2 }) }),
+    ]));
+    expect(final.retiredStageUsage ?? []).toHaveLength(0);
   });
 });
 
@@ -504,211 +489,5 @@ describe('gate-aware DAG ordering', () => {
     console.info(`[P6_BASELINE_45] ${JSON.stringify({ status: final.status, calls })}`);
     expect(final.status).toBe('complete');
     expect(calls).toEqual(['plan', 'gate:fail', 'repair', 'gate:pass', 'downstream']);
-  });
-});
-
-interface ScopeRevisionRequest {
-  version: 1;
-  requestId: string;
-  stageId: string;
-  attemptIndex: number;
-  requestedPaths: string[];
-  reason: string;
-}
-
-interface ScopeRevisionDecision {
-  accepted: boolean;
-  raw: Record<string, unknown>;
-  path: string;
-}
-
-function scopeDecision(stagePath: string, requestId: string): ScopeRevisionDecision | undefined {
-  let files: string[] = [];
-  try { files = readdirSync(stagePath); } catch { return undefined; }
-  for (const file of files.sort()) {
-    if (file === 'scope_revision_request.json' || !/scope.*\.json$/i.test(file)) continue;
-    const path = join(stagePath, file);
-    try {
-      const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
-      if (raw.requestId !== undefined && raw.requestId !== requestId) continue;
-      const decision = String(raw.decision ?? raw.status ?? '').toLowerCase();
-      if (raw.accepted === true || decision === 'accepted' || decision === 'approved') return { accepted: true, raw, path };
-      if (raw.accepted === false || decision === 'rejected' || decision === 'denied') return { accepted: false, raw, path };
-    } catch { /* another process may still be completing an atomic write */ }
-  }
-  return undefined;
-}
-
-async function awaitScopeDecision(stagePath: string, requestId: string): Promise<ScopeRevisionDecision> {
-  return waitForPathEvent(stagePath, () => scopeDecision(stagePath, requestId));
-}
-
-async function runScopeRevisionScenario(input: {
-  requestedPath: string;
-  reason: string;
-  expectAcceptance: boolean;
-  peerConflict?: boolean;
-}) {
-  // This fixture observes the first scope decision and its repair diff. Pin
-  // one repair round instead of inheriting repeated rejections from defaults.
-  mkdirSync(join(projectDir, 'config'), { recursive: true });
-  setEngineDefaults({ gate_retry_loops: 1 });
-  const { config, yaml } = dynamicWorkflow(`p6-scope-${input.expectAcceptance ? 'accept' : 'reject'}`);
-  const created = prepareRun(config, yaml);
-  mkdirSync(join(projectDir, 'src'), { recursive: true });
-  writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
-  writeFileSync(join(projectDir, 'src', 'store.ts'), 'original\n');
-  writeFileSync(join(projectDir, 'src', 'peer.ts'), 'peer-original\n');
-  let gateCalls = 0;
-  let observedDecision: ScopeRevisionDecision | undefined;
-  let releasePeer!: () => void;
-  const peerMayFinish = new Promise<void>((resolvePeer) => { releasePeer = resolvePeer; });
-  const requestId = `scope-${input.expectAcceptance ? 'accept' : 'reject'}`;
-  const adapter: Adapter = {
-    async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-      if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- scope scenario', exitCode: 0, duration_ms: 1 }, opts);
-      if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
-          'stages:',
-          '  - id: scope_gate',
-          '    role: qa',
-          '    scope: []',
-          '    depends_on: [plan]',
-          '    dependency_reasons: {plan: "verify the repair"}',
-          '    is_gate: true',
-          '    task: verify repair',
-          '  - id: repair_scope',
-          '    role: repair',
-          '    scope: [src/declared.ts]',
-          '    depends_on: [scope_gate]',
-          '    dependency_reasons: {scope_gate: "repair only after an explicit scope rejection"}',
-          '    retry_to: [scope_gate]',
-          '    task: repair with a reasoned scope revision',
-          ...(input.peerConflict ? [
-            '  - id: peer_repair',
-            '    role: repair',
-            '    scope: [src/peer.ts]',
-            '    depends_on: [scope_gate]',
-            '    dependency_reasons: {scope_gate: "peer repair follows the same rejected scope gate"}',
-            '    retry_to: [scope_gate]',
-            '    task: peer repair',
-          ] : []),
-        ].join('\n')));
-        return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1 }, opts);
-      }
-      if (opts.stageId === 'scope_gate') {
-        gateCalls++;
-        const pass = input.expectAcceptance && readFileSync(join(projectDir, 'src', 'store.ts'), 'utf-8').includes('audit fields');
-        writeFileSync(join(opts.runDir, 'fixture_verdict_scope_gate.json'), JSON.stringify({ pass, reason: pass ? 'fixed' : 'still missing' }));
-        return fixtureResult({ output: `gate ${gateCalls}`, exitCode: 0, duration_ms: 1 }, opts);
-      }
-      if (opts.stageId === 'peer_repair') {
-        writeFileSync(join(projectDir, 'src', 'peer.ts'), 'peer-active\n');
-        await peerMayFinish;
-        return fixtureResult({ output: 'peer complete', exitCode: 0, duration_ms: 1, writes: ['src/peer.ts'], writeAttribution: 'structured' }, opts);
-      }
-      if (opts.stageId === 'repair_scope') {
-        const stagePath = join(opts.runDir, 'stages', opts.stageId);
-        mkdirSync(stagePath, { recursive: true });
-        const request: ScopeRevisionRequest = {
-          version: 1,
-          requestId,
-          stageId: opts.stageId,
-          attemptIndex: 1,
-          requestedPaths: [input.requestedPath],
-          reason: input.reason,
-        };
-        writeFileSync(join(stagePath, 'scope_revision_request.json'), JSON.stringify(request, null, 2));
-        try {
-          observedDecision = await awaitScopeDecision(stagePath, requestId);
-        } finally {
-          if (input.peerConflict) releasePeer();
-        }
-        if (observedDecision?.accepted && input.requestedPath === 'src/store.ts') {
-          writeFileSync(join(projectDir, 'src', 'store.ts'), 'audit fields\n');
-        }
-        return fixtureResult({
-          output: observedDecision ? `scope ${observedDecision.accepted ? 'accepted' : 'rejected'}` : 'scope decision missing',
-          exitCode: input.expectAcceptance && !observedDecision?.accepted ? 1 : 0,
-          duration_ms: 800,
-          writes: observedDecision?.accepted && input.requestedPath === 'src/store.ts' ? ['src/store.ts'] : [],
-          writeAttribution: 'structured',
-        }, opts);
-      }
-      return fixtureResult({ output: 'unexpected', exitCode: 1, duration_ms: 1 }, opts);
-    },
-  };
-  const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('planner', 'qa', 'repair'), created.runId, 'scope revision fixture', true);
-  const diffPath = join(created.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1', 'repair_diff.json');
-  const diff = existsSync(diffPath) ? readFileSync(diffPath, 'utf-8') : '';
-  return {
-    final,
-    observedDecision,
-    diff,
-    storeText: readFileSync(join(projectDir, 'src', 'store.ts'), 'utf-8'),
-    peerText: readFileSync(join(projectDir, 'src', 'peer.ts'), 'utf-8'),
-  };
-}
-
-describe('reasoned scope revision', () => {
-  it('accepts a non-conflicting project-relative addition before the stage writes it and audits the reason', { timeout: 15_000 }, async () => {
-    const reason = 'The gate requires durable audit fields in the authoritative store type.';
-    const result = await runScopeRevisionScenario({ requestedPath: 'src/store.ts', reason, expectAcceptance: true });
-    const observation = {
-      status: result.final.status,
-      decision: result.observedDecision?.raw ?? null,
-      storeText: result.storeText.trim(),
-      diffHasPath: result.diff.includes('src/store.ts'),
-      diffHasReason: result.diff.includes(reason),
-      diffHasAcceptedDecision: /accepted|approved/i.test(result.diff),
-    };
-    console.info(`[P6_BASELINE_43_ACCEPT] ${JSON.stringify(observation)}`);
-    expect(observation).toMatchObject({
-      status: 'complete',
-      decision: { accepted: true },
-      storeText: 'audit fields',
-      diffHasPath: true,
-      diffHasReason: true,
-      diffHasAcceptedDecision: true,
-    });
-  });
-
-  it.each([
-    { requestedPath: '../outside.ts', reason: 'write outside the project', label: 'path traversal' },
-  ])('rejects $label before any newly requested path is written', { timeout: 15_000 }, async ({ requestedPath, reason }) => {
-    const result = await runScopeRevisionScenario({ requestedPath, reason, expectAcceptance: false });
-    const observation = {
-      decision: result.observedDecision?.raw ?? null,
-      storeUnchanged: result.storeText === 'original\n',
-      diffHasRejectedDecision: /rejected|denied/i.test(result.diff),
-      diffHasRequestedPath: result.diff.includes(requestedPath),
-    };
-    console.info(`[P6_BASELINE_43_REJECT] ${JSON.stringify({ requestedPath, ...observation })}`);
-    expect(observation).toMatchObject({
-      decision: { accepted: false },
-      storeUnchanged: true,
-      diffHasRejectedDecision: true,
-      diffHasRequestedPath: true,
-    });
-  });
-
-  it('rejects an addition that overlaps an active serialized repair peer', { timeout: 15_000 }, async () => {
-    const result = await runScopeRevisionScenario({
-      requestedPath: 'src/peer.ts',
-      reason: 'The repair would otherwise duplicate the peer type change.',
-      expectAcceptance: false,
-      peerConflict: true,
-    });
-    const observation = {
-      decision: result.observedDecision?.raw ?? null,
-      peerRan: result.peerText === 'peer-active\n',
-      diffHasConflict: /conflict|overlap|running peer/i.test(result.diff),
-    };
-    console.info(`[P6_BASELINE_43_CONFLICT] ${JSON.stringify(observation)}`);
-    expect(observation).toMatchObject({
-      decision: { accepted: false },
-      peerRan: true,
-      diffHasConflict: true,
-    });
   });
 });

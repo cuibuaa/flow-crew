@@ -3,9 +3,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from '../src/handoff.js';
-import { createRun, fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
-import { generateRunSummary } from '../src/run-summary.js';
-import { clearAttemptSummaryRefreshDebounce } from '../src/run-events.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { generateRunSummary } from './test-support/run-summary.js';
+
+
 import { runStage } from '../src/worker.js';
 
 const record = () => ({ status: 'delivered', summary: 'Delivered the requested report.',
@@ -18,7 +20,7 @@ beforeEach(() => {
   ({ runId } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']));
   directory = runDir(project, runId);
 });
-afterEach(() => { clearAttemptSummaryRefreshDebounce(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
 describe('author result reuses the engine write record', () => {
   it('delivers without typing a file list and records the actual write independently', async () => {
@@ -31,7 +33,7 @@ describe('author result reuses the engine write record', () => {
       stageId: 'work', projectDir: project, runDir: directory, runId,
       role: { name: 'coder', description: '', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Deliver the requested report.' },
       dependsOn: [], promptTemplate: 'Write report.md.', timeout_ms: 10000, retries: 0,
-      projectWriteScope: ['report.md'], outputSchema: HANDOFF_SCHEMA,
+       outputSchema: HANDOFF_SCHEMA,
       artifactContract: { version: 1, produces: [{ id: 'report', root: 'project', path: 'report.md' }], reads: [], groups: [] },
     });
     expect(result.exitCode, result.friendlyError).toBe(0);

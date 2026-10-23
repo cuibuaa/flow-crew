@@ -1,23 +1,11 @@
 /** Shared checkpoint fate probes; reading these never loads recovery/admission policy. */
 import { readFileSync } from 'node:fs';
-import { processStartToken, processStartTokensMatch } from './run-lock.js';
-import { processGroupIsAlive } from './process-liveness.js';
+import { processGroupIsAlive, processStartToken, processStartTokensMatch } from './process-liveness.js';
 import type { EngineCheckpoint } from './restart-recovery.js';
-import type { StoreState } from './store.js';
 
 export function readHostBootId(): string | undefined {
   if (process.platform !== 'linux') return undefined;
   try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined; } catch { return undefined; }
-}
-
-/** Version 1 race parents omitted nested consumers. An empty historical list
- * cannot prove their death; a different known host boot can. */
-export function checkpointCommandFateKnown(state: Pick<StoreState, 'engineCheckpoint' | 'planControl'> | undefined,
-  options: { currentBootId?: string } = {}): boolean {
-  const boot = Object.hasOwn(options, 'currentBootId') ? options.currentBootId : readHostBootId();
-  const checkpoint = state?.engineCheckpoint;
-  if (checkpoint?.bootId && boot && checkpoint.bootId !== boot) return true;
-  return checkpoint?.version === 2 || !state?.planControl?.stages.some(stage => stage.race);
 }
 
 /** Query the existing ownership ledger. A proven current boot also retires

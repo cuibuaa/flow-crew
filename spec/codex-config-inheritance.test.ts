@@ -35,7 +35,7 @@ beforeEach(() => {
 describe('codex capability executable selection', () => {
   async function identity(): Promise<string> {
     return withEngineIntegrity({ projectDir: globalHome, runDir: stageHome, stageId: 'work',
-      artifactContract: { version: 1, produces: [], reads: [], replays: [], groups: [] } },
+      artifactContract: { version: 1, produces: [], reads: [], groups: [] } },
     async () => resolveCodexCapabilityIdentity(role('fixture', 'low'), { cwd: globalHome }).version);
   }
 

@@ -70,7 +70,7 @@ function legacyIndex(campaigns: Campaign[]): CampaignOperatorIndex {
     const runStatus = campaignStatus(campaign.status);
     const runs = campaign.runs ?? [];
     const running = runStatus === "running" || runs.some((run) => run.outcome === "running") ? 1 : 0;
-    const waiting = runStatus === "pending" || runStatus === "parked" || runStatus === "awaiting_approval" ? 1 : 0;
+    const waiting = runStatus === "pending" || runStatus === "parked" ? 1 : 0;
     const latestStartedAt = campaign.latest_run_started_at
       ?? campaign.latestRunStartedAt
       ?? campaign.started_at
@@ -331,7 +331,7 @@ export default function Workspaces({
     const created = await createTask({
       brief: draft.brief,
       projectDir: draft.projectDir.trim() || undefined,
-      workflow: draft.workflow,
+      workflow: draft.workflow || undefined,
       maxIterations: draft.maxIter,
       noCampaign: draft.campaign === "standalone",
       campaignId: draft.campaign === "new" ? draft.campaignId : existingCampaign,

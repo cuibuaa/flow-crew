@@ -32,17 +32,16 @@ async function reproduce(options: { workflow?: 'planner' | 'direct'; status?: 'b
   missing?: 'measurement' | 'bounds' | 'criterion'; fallback?: boolean; repairMeasurement?: boolean } = {}) {
   const task = brief(options.fallback !== false);
   const criteria = extractBriefCriteria(task).criteria;
-  const calls: string[] = [], gateInputs: string[] = [], plannerInputs: string[] = [];
+  const calls: string[] = [], gateInputs: string[] = [];
   const plan = { stages: [
     { id: 'implement', role: 'coder', scope: ['docs/'] },
     { id: 'review', role: 'qa', depends_on: ['implement'], is_gate: true, scope: [], prompt_template: conflicting },
     { id: 'repair', role: 'coder', depends_on: ['review'], retry_to: ['review'], scope: ['docs/'] },
   ] };
-  const adapter: Adapter = { async run(prompt, role, opts) {
+  const adapter: Adapter = { async run(prompt, _role, opts) {
     if (opts.stageId === '_summary') return { output: 'Fixture summary', exitCode: 0, duration_ms: 1 };
     calls.push(opts.stageId);
     if (opts.stageId === 'plan') {
-      plannerInputs.push(role.prompt);
       writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify(plan));
       return { output: JSON.stringify({ status: 'delivered', summary: 'Authored the execution plan.', checks: [], caveats: [] }),
         exitCode: 0, duration_ms: 1, writes: ['run:dispatch.yaml'], writeAttribution: 'structured' };
@@ -90,19 +89,18 @@ async function reproduce(options: { workflow?: 'planner' | 'direct'; status?: 'b
     exitCode: 0, duration_ms: 1 };
   } };
   const workflow = join(project, 'workflow.yaml');
-  writeFileSync(workflow, 'name: bounded-result\ndefaults: {max_iterations: 1, max_retries: 0}\nstages:\n  - id: plan\n    role: planner\n    dynamic_dispatch: true\n    artifact_contract: {version: 1, produces: [], reads: [], groups: [], replays: []}\n');
+  writeFileSync(workflow, 'name: bounded-result\ndefaults: {max_iterations: 1, max_retries: 0}\nstages:\n  - id: plan\n    role: planner\n    dynamic_dispatch: true\n    artifact_contract: {version: 1, produces: [], reads: [], groups: []}\n');
   const { config, raw } = loadWorkflow(options.workflow === 'direct' ? join(repository, 'config/workflows/direct.yaml') : workflow);
   const final = await runWorkflow(config, raw, project, adapter, new Map(), undefined, join(repository, 'config/agents'), undefined, task, true);
-  return { final, calls, gateInputs, plannerInputs, directory: runDir(project, final.runId), criteria };
+  return { final, calls, gateInputs, directory: runDir(project, final.runId), criteria };
 }
 
 describe('gate acceptance follows the full brief outcome contract', () => {
   it.each(['blocked', 'delivered'] as const)('accepts an evidenced 0.923x bounds report labeled %s despite a stricter planner instruction', async status => {
-    const { final, calls, gateInputs, plannerInputs, directory, criteria } = await reproduce({ status });
+    const { final, calls, gateInputs, directory, criteria } = await reproduce({ status });
     expect(criteria[0].text).not.toContain('4x');
     expect(gateInputs[0]).toContain(conflicting);
     expect(final.status, final.failureReason).toBe('complete');
-    expect(plannerInputs[0]).toMatch(/stage instructions.*cannot.*(?:narrow|replace).*outcomes/i);
     expect(calls).toEqual(['plan', 'implement', 'review']);
     expect(JSON.parse(readFileSync(join(directory, 'verdict_review.json'), 'utf8'))).toMatchObject({ pass: true });
   });

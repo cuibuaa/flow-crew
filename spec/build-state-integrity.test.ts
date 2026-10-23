@@ -1,12 +1,12 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fcGlobalDir, setFcGlobalDir, type StoreState } from '../src/store.js';
 import * as ownership from '../src/run-lock.js';
-import { listOperationalRunIdsFromIndex, readRunIndexRecords, rebuildRunIndex, removeRunIndexFiles, setRunSchedulerActive, upsertRunIndex } from '../src/run-index.js';
+import { listOperationalRunIdsFromIndex, readRunIndexRecords, rebuildRunIndex, setRunSchedulerActive, upsertRunIndex } from '../src/run-index.js';
 
 let root: string;
 let previous: string;
@@ -22,7 +22,7 @@ beforeEach(() => {
   setFcGlobalDir(root);
 });
 afterEach(() => {
-  removeRunIndexFiles(''); setFcGlobalDir(previous);
+  setFcGlobalDir(previous);
   rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks();
 });
 
@@ -58,6 +58,34 @@ describe('scheduler candidate derivation', () => {
     upsertRunIndex('', state); rebuildRunIndex('');
     expect(readRunIndexRecords('')?.[0]).toMatchObject({ status: 'running', schedulerActive: false });
     expect(listOperationalRunIdsFromIndex('')).toEqual(['run']);
+  });
+
+  it('hydrates restored and removed runs only when directory membership changes', () => {
+    const first = record('first');
+    upsertRunIndex('', first);
+    expect(readRunIndexRecords('')?.map((row) => row.runId)).toEqual(['first']);
+    const observation = vi.spyOn(ownership, 'inspectRunScheduler').mockReturnValue({ kind: 'missing' });
+    for (let index = 0; index < 100; index += 1) readRunIndexRecords('');
+    expect(observation).not.toHaveBeenCalled();
+    record('restored');
+    expect(readRunIndexRecords('')?.map((row) => row.runId)).toEqual(['first', 'restored']);
+    observation.mockClear();
+    rmSync(join(root, 'runs', 'first'), { recursive: true });
+    expect(readRunIndexRecords('')?.map((row) => row.runId)).toEqual(['restored']);
+    expect(observation).toHaveBeenCalledTimes(1);
+  });
+
+  it('discovers a restore made between index readers in separate processes', () => {
+    upsertRunIndex('', record('before'));
+    expect(readRunIndexRecords('')?.map((row) => row.runId)).toEqual(['before']);
+    record('restored');
+    const entry = new URL('../dist/run-index.js', import.meta.url).href;
+    const output = execFileSync(process.execPath, ['--input-type=module', '-e',
+      `import { readRunIndexRecords } from ${JSON.stringify(entry)};
+       console.log(JSON.stringify(readRunIndexRecords('').map(row => row.runId)));`], {
+      cwd: root, env: { ...process.env, HOME: root, FC_HOME: root }, encoding: 'utf8',
+    });
+    expect(JSON.parse(output)).toEqual(['before', 'restored']);
   });
 
   it('serializes an external ownership update after the rebuild transaction', async () => {

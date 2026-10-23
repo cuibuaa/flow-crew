@@ -1,9 +1,10 @@
+import type { ArtifactContractInput } from './fixture-types.js';
 import { existsSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { scriptedRecord } from '../../src/adapters/scripted.js';
 import type { RunOpts, RunResult } from '../../src/adapters/base.js';
 import { parse, stringify } from 'yaml';
-import { ArtifactContractSchema, type ArtifactContractInput } from '../../src/artifact-declarations.js';
+import { ArtifactContractSchema } from '../../src/artifact-declarations.js';
 
 /** A synthetic control with no product duties; gates explicitly own their verdict. */
 export function fixtureArtifactContract(stageId: string, isGate = false) {
@@ -11,7 +12,6 @@ export function fixtureArtifactContract(stageId: string, isGate = false) {
     version: 1,
     produces: isGate ? [{ id: 'verdict', root: 'run', path: `verdict_${stageId}.json` }] : [],
     reads: [],
-    replays: [],
   });
 }
 

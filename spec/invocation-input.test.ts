@@ -1,14 +1,16 @@
+import { readSession } from '../src/adapter-session.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildCodexExecArgs, CodexAdapter, readCodexSession } from '../src/adapters/codex.js';
+import { buildCodexExecArgs, CodexAdapter } from '../src/adapters/codex.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
 import type { AgentConfig } from '../src/adapters/base.js';
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { recordStageOutcome } from '../src/run-events.js';
-import { createRun, fcGlobalDir, readStageStatus, runDir, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readStageStatus, runDir, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 
 const UUID = '11111111-1111-4111-8111-111111111111';
@@ -74,8 +76,8 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const options = () => ({ stageId: 'writer', role, dependsOn: [], promptTemplate: 'Exact user duties\n🌿', timeout_ms: 10_000, projectDir: project, runId, runDir: directory, retries: 0, outputSchema: HANDOFF_SCHEMA, artifactContract: { version: 1 as const, produces: [], reads: [], groups: [], replays: [] }, projectWriteScope: [] });
-const view = () => readRunStateView(project, runId, { includePromptText: true, resourceRegistryPath: join(root, 'resources.json') });
+const options = () => ({ stageId: 'writer', role, dependsOn: [], promptTemplate: 'Exact user duties\n🌿', timeout_ms: 10_000, projectDir: project, runId, runDir: directory, retries: 0, outputSchema: HANDOFF_SCHEMA, artifactContract: { version: 1 as const, produces: [], reads: [], groups: [] }, });
+const view = () => readRunStateView(project, runId, { includePromptText: true });
 
 describe('one recoverable record per native invocation', () => {
   it('publishes settled events synchronously without mutating the run after completion', async () => {
@@ -119,7 +121,7 @@ describe('one recoverable record per native invocation', () => {
     }
     expect(readFileSync(join(owner, 'config.toml'), 'utf8')).toBe('model = "author-model"\n');
     expect(readFileSync(join(owner, 'witness'), 'utf8')).toBe('ordinary filesystem access');
-    expect(readCodexSession(directory, 'writer')).toMatchObject({ ownerStageId: 'writer', sessionId: freshUUID });
+    expect(readSession(directory, 'writer', 'codex')).toMatchObject({ ownerStageId: 'writer', sessionId: freshUUID });
   });
 
   it('keeps same-stage continuation and technical attempts in the stage home', async () => {

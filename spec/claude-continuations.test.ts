@@ -8,7 +8,8 @@ import { requestStageCommandInterrupt } from '../src/command-interrupt.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
 import { readRunStateView } from '../src/run-state-view.js';
-import { createRun, fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 
@@ -102,7 +103,7 @@ describe('Claude same-attempt native session continuations (G03)', () => {
     const result = await runStage(new ObservedClaudeAdapter(), {
       stageId: 'work', role, dependsOn: [], promptTemplate: duties,
       timeout_ms: 10_000, projectDir: project, runId: created.runId, runDir: created.runDirPath,
-      retries: 0, outputSchema: HANDOFF_SCHEMA, artifactContract: fixtureArtifactContract('work'), projectWriteScope: [],
+      retries: 0, outputSchema: HANDOFF_SCHEMA, artifactContract: fixtureArtifactContract('work'),
     });
     expect(injectionError).toBeUndefined();
     expect(result.exitCode, result.output).toBe(0);
@@ -124,7 +125,7 @@ describe('Claude same-attempt native session continuations (G03)', () => {
       join(root, 'source'),
     ]);
     const inputs = readRunStateView(project, created.runId, {
-      includePromptText: true, resourceRegistryPath: join(root, 'resources.json'),
+      includePromptText: true,
     }).prompts.invocations;
     expect(inputs).toHaveLength(2);
     expect(inputs.map(input => input.record?.attemptIndex)).toEqual([1, 1]);
@@ -135,7 +136,7 @@ describe('Claude same-attempt native session continuations (G03)', () => {
     if (mode !== 'correction') {
       const events = readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf8').trim().split('\n')
         .map(line => JSON.parse(line) as { type: string; boundary?: string; delivered?: boolean });
-      expect(events.some(event => event.type === 'stage_command_started')).toBe(true);
+      expect(events.some(event => event.type === 'stage_command_started')).toBe(false);
       expect(events.some(event => mode === 'guidance'
         ? event.type === 'guidance_delivery_checked' && event.boundary === 'tool_call_completion' && event.delivered === true
         : event.type === 'stage_command_interrupted')).toBe(true);

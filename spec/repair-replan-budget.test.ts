@@ -64,33 +64,11 @@ async function scenario(options: { negotiation?: boolean; includeRepair?: boolea
       if (options.negotiation && plans === 1 && !attemptedInput) {
         attemptedInput = true;
         writeFileSync(join(projectDir, 'input.txt'), 'unauthorized edit\n');
-        // Wait for the real live guard to restore the declared input preimage.
-        await waitForPathEvent(projectDir, () => readFileSync(join(projectDir, 'input.txt'), 'utf8') === 'frozen evidence\n' ? true : undefined);
-        const stageDir = join(opts.runDir, 'stages/author');
-        const { runId } = JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8'));
-        writeFileSync(join(stageDir, 'scope_revision_request.json'), JSON.stringify({
-          version: 1, kind: 'scope_revision', requestId: 'readonly-input', runId,
-          stageId: opts.stageId, attemptIndex: opts.attemptIndex, requestedPaths: ['input.txt'],
-        }));
-        const decision = await waitForPathEvent(stageDir, () => {
-          const file = readdirSync(stageDir).find(name => name.startsWith('scope_revision_decision_') && name.endsWith('.json'));
-          return file ? JSON.parse(readFileSync(join(stageDir, file), 'utf8')) : undefined;
-        });
-        expect(decision).toMatchObject({ accepted: false });
         return fixtureResult({ output: 'Report produced; input write restored.', exitCode: 0, duration_ms: 1,
           writes: ['report.md', 'input.txt'], writeAttribution: 'structured' }, opts);
       }
     } else if (opts.stageId === 'review') {
       reviews++;
-      if (options.negotiation && plans === 1) {
-        const pending = pendingScopePlanningInputs(opts.runDir);
-        expect(pending).toHaveLength(1);
-        pendingDigest = pending[0].digest;
-        expect(pending[0]).toMatchObject({ stageId: 'author', requestedPaths: ['input.txt'] });
-        const status = JSON.parse(readFileSync(join(opts.runDir, 'stages/author/status.json'), 'utf8'));
-        expect(status.attempts.at(-1)).toMatchObject({ status: 'complete', disposition: 'repaired' });
-        firstAuthorAudit = JSON.parse(readFileSync(join(opts.runDir, status.constraintAudit.path), 'utf8'));
-      }
       const pass = !options.alwaysReject && repairs > 0;
       writeFileSync(join(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ pass, reason: pass ? 'Cleanup verified.' : 'Report needs cleanup.',
         ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Correct report.md and review it again.' } } : {}) }));
@@ -101,7 +79,7 @@ async function scenario(options: { negotiation?: boolean; includeRepair?: boolea
     return fixtureResult({ output: `${opts.stageId} settled`, exitCode: 0, duration_ms: 1 }, opts);
   } };
   const state = await runWorkflow(workflow, stringify(workflow), projectDir, adapter, new Map(), undefined, agentsDir,
-    undefined, '---\ninputs: [input.txt]\n---\n# Clean up the report\n', true, undefined, false);
+    undefined, '---\ninputs: [{path: input.txt, frozen: true}]\n---\n# Clean up the report\nKeep `input.txt` frozen.\n', true, undefined, false);
   const directory = runDir(projectDir, state.runId);
   return { state, plans, repairs, reviews, pendingDigest, firstAuthorAudit, directory,
     events: readRunEvents(projectDir, state.runId), log: existsSync(join(directory, 'iteration_log.md')) ? readFileSync(join(directory, 'iteration_log.md'), 'utf8') : '' };
@@ -127,12 +105,12 @@ describe('admitted repair routes and budgets', () => {
     expect([result.plans, result.repairs, result.reviews]).toEqual([1, 1, 2]);
   });
 
-  it('retains denied input-write evidence while using the admitted repair route', async () => {
+  it('rejects frozen evidence corruption at settlement without a live handshake', async () => {
     const result = await scenario({ negotiation: true });
-    expect(result.state.status, result.state.failureReason).toBe('complete');
-    expect([result.plans, result.repairs, result.reviews]).toEqual([1, 1, 2]);
-    expect(result.firstAuthorAudit).toMatchObject({ rolledBackWrites: ['input.txt'], rollbackFailures: [], planningDigests: [result.pendingDigest] });
-    expect(pendingScopePlanningInputs(result.directory).map(entry => entry.digest)).toEqual([result.pendingDigest]);
+    expect(result.state.status).not.toBe('complete');
+    const audit = JSON.parse(readFileSync(join(result.directory, 'stages/author/constraint_audit_attempt_1.json'), 'utf8'));
+    expect(audit).toMatchObject({ rolledBackWrites: ['input.txt'], rollbackFailures: [] });
+    expect(pendingScopePlanningInputs(result.directory)).toEqual([]);
     expect(readFileSync(join(projectDir, 'input.txt'), 'utf8')).toBe('frozen evidence\n');
   });
 

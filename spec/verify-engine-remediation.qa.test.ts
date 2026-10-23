@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { artifacts, coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
@@ -23,13 +24,11 @@ import {
   type LandGitRunner,
 } from '../src/cli-land.js';
 import { archiveDeclaredOutputs } from '../src/declared-output-archive.js';
-import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
 import {
-  checkCampaignHealth,
   findGateRecoveryStages,
   loadWorkflow,
-  readGateVerdict,
+  readGateEvaluation,
   recordGateValidationDelta,
   runWorkflow,
   tryTerminateOnTerminalState,
@@ -37,8 +36,8 @@ import {
   type CampaignEntry,
   type StageConfig,
 } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   campaignsRoot,
   fcGlobalDir,
   readRunState,
@@ -87,15 +86,7 @@ function writeRole(projectDir: string, role: string): string {
   return agentsDir;
 }
 
-async function waitForDecision(directory: string): Promise<string> {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    const match = readdirSync(directory).find((name) => name.startsWith('scope_revision_decision_'));
-    if (match) return join(directory, match);
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-  }
-  throw new Error(`scope decision was not published in ${directory}`);
-}
+
 
 function landRunner(
   projectDir: string,
@@ -140,7 +131,7 @@ describe('independent engine-remediation verification', () => {
     const projectDir = join(root, 'project');
     const globalRoot = join(root, 'fc-home');
     mkdirSync(projectDir);
-    setEngineDefaults({ timeout_ms: 60000, max_iterations: 1, gate_retry_loops: 0 });
+    setEngineDefaults({ default_timeout_ms: 60000, max_iterations: 1, gate_retry_loops: 0 });
     write(join(projectDir, 'validation-probe.mjs'), 'process.stderr.write("FAIL spec/new.test.ts\\n"); process.exit(1);\n');
     const agentsDir = writeRole(projectDir, 'qa');
     setFcGlobalDir(globalRoot);
@@ -152,7 +143,7 @@ describe('independent engine-remediation verification', () => {
     ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
     write(readyPath, `${JSON.stringify(ready, null, 2)}\n`);
     let gatePrompt = '';
-    const qa = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true });
+    const qa = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []), id: 'qa', role: 'qa', is_gate: true });
     const final = await runWorkflow(
       { name: 'validation-wire-qa', defaults: { max_iterations: 1, max_retries: 0 }, stages: [...coveredStages(qa, brief),
         stage({ id: 'repair_qa', role: 'qa', scope: [], depends_on: ['qa'], retry_to: ['qa'], artifact_contract: artifacts([]) })] },
@@ -190,7 +181,7 @@ describe('independent engine-remediation verification', () => {
       delta: [{ state: 'regression' }],
     });
     expect(existsSync(join(runDirectory, delta.immutablePath))).toBe(true);
-    expect(readGateVerdict(projectDir, 'qa', final.runId)).toMatchObject({
+    expect(readGateEvaluation(projectDir, 'qa', final.runId)).toMatchObject({
       pass: false,
       reason: expect.stringContaining('spec/new.test.ts'),
     });
@@ -224,7 +215,7 @@ describe('independent engine-remediation verification', () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
-    setEngineDefaults({ timeout_ms: 60000, max_iterations: 1 });
+    setEngineDefaults({ default_timeout_ms: 60000, max_iterations: 1 });
     const agentsDir = writeRole(projectDir, 'worker');
     setFcGlobalDir(join(root, 'fc-home'));
     const outputPath = 'docs/report.md';
@@ -294,7 +285,7 @@ describe('independent engine-remediation verification', () => {
       '  - .unlisted_cache/**',
       '',
     ].join('\n'));
-    expect(loadEngineDefaults().live_constraint_exempt_patterns).not.toContain('.unlisted_cache/**');
+    expect(loadEngineDefaults()).not.toHaveProperty('live_constraint_exempt_patterns');
   });
 
   it('rejects an impossible status literal when loading a static workflow', () => {
@@ -399,15 +390,14 @@ describe('independent engine-remediation verification', () => {
     expect(artifact.excluded).toBeUndefined();
   });
 
-  it('does not redispatch a completed producer when the gate says no measurement is missing', () => {
-    const measure = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'measure', role: 'researcher', scope: ['docs/round.json'] });
-    const gate = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true, depends_on: ['measure'] });
-    const repair = stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'repair_report', role: 'writer', depends_on: ['qa'], retry_to: ['qa'] });
+  it('retains product repair for a legacy rejection without typed omission evidence', () => {
+    const measure = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'measure', role: 'researcher', scope: ['docs/round.json'] });
+    const gate = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []), id: 'qa', role: 'qa', is_gate: true, depends_on: ['measure'] });
+    const repair = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'repair_report', role: 'writer', depends_on: ['qa'], retry_to: ['qa'] });
     const selected = findGateRecoveryStages(
       [measure, gate, repair],
       ['qa'],
-      { qa: 'The report needs prose edits; no missing measurement remains.' },
-      { baseline: 0, policy: 'best_of_n', resultFile: 'docs/round.json' },
+      { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json' },
     );
     expect(selected.map((entry) => entry.id)).toEqual(['repair_report']);
   });
@@ -426,7 +416,7 @@ describe('independent engine-remediation verification', () => {
     state.status = 'running';
     state.currentIteration = 5;
     state.maxIterations = 5;
-    state.research = { baseline: 0, policy: 'best_of_n', resultFile: 'docs/round.json', stop: { maxRounds: 5 } };
+    state.research = { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json', stop: { maxRounds: 5 } };
     state.terminalStates = { complete: { paths: [terminalPath] } };
     state.stages.finalizer = {
       status: 'complete',
@@ -450,66 +440,6 @@ describe('independent engine-remediation verification', () => {
     });
     expect(result).toMatchObject({ decision: 'matched' });
     expect(state).toMatchObject({ status: 'complete', currentIteration: 5, maxIterations: 5 });
-  });
-
-  it('accepts and re-dispatches an ordinary non-terminal scope request', { timeout: 20_000 }, async () => {
-    const root = temporaryRoot();
-    const projectDir = join(root, 'project');
-    mkdirSync(projectDir);
-    setEngineDefaults({ timeout_ms: 60000, max_iterations: 1 });
-    const agentsDir = writeRole(projectDir, 'worker');
-    setFcGlobalDir(join(root, 'fc-home'));
-    const requestedPath = 'docs/report.md';
-    const brief = '# Goal\n## What the report must show\n1. Exercise ordinary scope negotiation.\n';
-    const work = stage({ artifact_contract: artifacts([]), id: 'work', role: 'worker', scope: [] });
-    let calls = 0;
-    let decisionPath = '';
-    const final = await runWorkflow(
-      { name: 'ordinary-scope-control', defaults: { max_iterations: 1, max_retries: 0 }, stages: [...coveredStages(work, brief),
-        stage({ id: 'repair_fixture_audit', role: 'worker', scope: [], depends_on: ['fixture_audit'], retry_to: ['fixture_audit'], artifact_contract: artifacts([]) })] },
-      'name: ordinary-scope-control',
-      projectDir,
-      { async run(prompt, _role, options) {
-        if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
-        if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
-        calls += 1;
-        if (calls === 1) {
-          const directory = join(options.runDir, 'stages', options.stageId);
-          write(join(directory, 'scope_revision_request.json'), JSON.stringify({
-            version: 1,
-            kind: 'scope_revision',
-            requestId: 'ordinary-control',
-            runId: basename(options.runDir),
-            stageId: options.stageId,
-            attemptIndex: 1,
-            requestedPaths: [requestedPath],
-            pathDigest: scopePathDigest([requestedPath]),
-            reason: 'write the ordinary report',
-          }));
-          decisionPath = await waitForDecision(directory);
-          return fixtureResult({ output: 'accepted at control boundary', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
-        }
-        expect(prompt.match(/# Accepted scope revision\n/g)).toHaveLength(1);
-        expect(prompt).toContain(`Continue the stage work in execution ${options.attemptIndex}`);
-        expect(prompt).toContain(`Newly admitted paths: ${JSON.stringify([requestedPath])}`);
-        expect(prompt).toContain(`stages/${options.stageId}/${basename(decisionPath)}`);
-        expect(prompt).not.toContain('This attempt stops at the control boundary');
-        write(join(projectDir, requestedPath), 'ordinary report\n');
-        return fixtureResult({ output: 'ordinary path written', exitCode: 0, duration_ms: 1, writes: [requestedPath], writeAttribution: 'structured' }, options);
-      } },
-      new Map(), undefined, agentsDir, undefined,
-      brief, true,
-    );
-    const decision = JSON.parse(readFileSync(decisionPath, 'utf-8')) as Record<string, unknown>;
-    expect(final.status).toBe('complete');
-    expect(calls).toBe(2);
-    expect(decision).toMatchObject({
-      accepted: true, decision: 'accepted', requestId: 'ordinary-control',
-      authorizedPaths: [requestedPath], pathDigest: scopePathDigest([requestedPath]),
-    });
-    expect(readRunEvents(projectDir, final.runId)).toContainEqual(expect.objectContaining({
-      type: 'scope_revision_decided', stageId: 'work', decision: 'accepted',
-    }));
   });
 
   it('quarantines a non-owner terminal file and accepts a later owner-attributed replacement', async () => {
@@ -571,8 +501,8 @@ describe('independent engine-remediation verification', () => {
     const state = readRunState(projectDir, created.runId);
     state.campaignId = 'lower-is-better';
     state.campaignStorageKey = 'lower-is-better';
-    state.research = { baseline: 30, policy: 'best_of_n', higherIsBetter: false };
-    state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true })];
+    state.research = { baseline: 30, policy: 'greedy_stack', higherIsBetter: false };
+    state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []), id: 'qa', role: 'qa', is_gate: true })];
     state.stages.qa = { status: 'complete', retries: 0 };
     write(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({
       pass: false, phase: 'research', phaseComplete: false, score: 10, metric: 'error_count',
@@ -585,10 +515,5 @@ describe('independent engine-remediation verification', () => {
     expect(entry).toMatchObject({ phase: 'research', pass: false });
     expect(entry.score).toBeUndefined();
     expect(entry.metric).toBeUndefined();
-    expect(checkCampaignHealth([
-      { ...entry, seq: 1, runId: 'first', score: 30, metric: 'error_count' },
-      { ...entry, seq: 2, runId: 'second', score: 20, metric: 'error_count' },
-      { ...entry, seq: 3, runId: 'third', score: 10, metric: 'error_count' },
-    ], { enabled: true, repeatedFailureAfter: 99 })).toBeNull();
   });
 });

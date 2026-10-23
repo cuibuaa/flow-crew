@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -224,7 +225,7 @@ describe('baseline failure identity extraction', () => {
     expect(evaluateValidationDelta(partialBaseline, [passed]).find(({ role }) => role === 'test'))
       .toMatchObject({ state: 'pass', reason: expect.stringContaining('improved to green') });
     expect(evaluateValidationDelta(greenBaseline, [partial]).find(({ role }) => role === 'test'))
-      .toMatchObject({ state: 'unresolved', reason: expect.stringContaining('partial') });
+      .toMatchObject({ state: 'regression', reason: 'A green baseline no longer passes' });
   });
 
   it('keeps opaque non-TAP unknown, records its cause, and leaves the delta unresolved', async () => {

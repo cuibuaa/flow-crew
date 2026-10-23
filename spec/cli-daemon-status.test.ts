@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import net, { type Server, type Socket } from 'node:net';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -191,7 +192,7 @@ describe('daemon status local diagnosis', () => {
       { stdout: output.stdout as never, stderr: output.stderr as never, controls: forbiddenControls },
     );
 
-    expect(code).toBe(3);
+    expect(code).toBe(1);
     expect(output.error()).toContain('flowcrew doctor --repair-registry\n');
     expect(output.error()).toContain('flowcrew doctor --repair-registry --apply');
     expect(output.error()).toContain('--force does not bypass registry corruption');
@@ -226,27 +227,44 @@ describe('daemon status local diagnosis', () => {
 
     expect(merged).toMatchObject({
       id: task.id,
-      status: 'complete',
-      completed_at: '2026-08-06T20:00:00.000Z',
+      status: 'running',
+      run: {
+        status: 'complete',
+        completedAt: '2026-08-06T20:00:00.000Z',
+        failureReason: 'retained diagnostic',
+      },
       run_verdict: 'PASS',
-      failure_reason: 'retained diagnostic',
       terminal_status_mismatch: {
         lifecycle_status: 'complete',
         terminal_status: 'escalated',
         terminal_artifact: 'escalation_note.md',
       },
     });
-    expect(merged.operational?.drift?.rows).toHaveLength(6);
+    expect(merged.completed_at).toBeUndefined();
+    expect(merged).not.toHaveProperty('failure_reason');
+    expect(merged.operational?.drift?.rows).toHaveLength(5);
     expect(merged.operational?.drift?.rows.map((row) => row.id)).toEqual([
       'research_dose',
       'first_plan_admission',
-      'supervisor_rejections',
       'engine_overhead',
       'registry_growth',
       'log_growth',
     ]);
     expect(registry.get(task.id)).toMatchObject({ status: 'running' });
     expect(registry.get(task.id)?.completed_at).toBeUndefined();
+  });
+
+  it('reads stopped as cancelled without replacing registry lifecycle fields', () => {
+    const registry = new TaskRegistry({ baseDir: tempDir });
+    const runPath = join(tempDir, 'runs', 'legacy-cancel');
+    mkdirSync(runPath, { recursive: true });
+    const task = registry.create({ projectDir: tempDir, run_id: 'legacy-cancel', status: 'cancelled' });
+    const settled = registry.update(task.id, { completed_at: '2026-08-06T20:01:00.000Z' });
+    writeFileSync(join(runPath, 'run.json'), JSON.stringify({ runId: 'legacy-cancel', status: 'stopped', completedAt: '2026-08-06T20:00:00.000Z' }));
+    expect(mergeTaskWithRunState(settled, join(tempDir, 'runs'))).toMatchObject({
+      status: 'cancelled', completed_at: '2026-08-06T20:01:00.000Z',
+      run: { status: 'cancelled', completedAt: '2026-08-06T20:00:00.000Z' },
+    });
   });
 
   it('projects a fresh terminal artifact mismatch while preserving a running lifecycle', () => {
@@ -269,6 +287,7 @@ describe('daemon status local diagnosis', () => {
       projectDir,
       status: 'running',
       startedAt: '2000-01-01T00:00:00.000Z',
+      terminalArtifactBaselines: {},
       stages: {
         implementation: { status: 'complete' },
         verification: { status: 'complete' },

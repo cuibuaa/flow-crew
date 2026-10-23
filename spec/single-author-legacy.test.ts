@@ -7,8 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { stringify } from 'yaml';
 import { PLAN_SCHEMA, RECORDED_PLAN_SCHEMA, renderPlanInterface } from '../src/plan-interface.js';
 import { parseStageRecord } from '../src/handoff.js';
-import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
-import { StageConfigSchema, RecordedStageConfigSchema, RecordedWorkflowConfigSchema, WorkflowConfigSchema, parseDispatchedStageConfig } from '../src/scheduler/sched_admission/configuration.js';
+import { StageConfigSchema, RecordedStageConfigSchema, RecordedWorkflowConfigSchema, WorkflowConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { loadWorkflow } from '../src/scheduler/sched_admission/dispatch.js';
 import { readRunEvents } from '../src/run-events.js';
 import { assertContinuationCompatible } from '../src/engine-continuation.js';
@@ -17,11 +16,13 @@ import { captureEngineCheckpoint, persistedPlanErrors } from '../src/restart-rec
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import type { SupervisorBackend } from '../src/supervision.js';
-import { beginStageAttempt, completeStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatus, updateRunState, writeStageStatus } from '../src/store.js';
-import { runWorkflow, readGateVerdict, normalizeStageContracts } from '../src/scheduler.js';
-import { prepareWorkflowLaunch, workflowContinuation } from '../src/scheduler/sched_loop/launch.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, updateRunState, writeStageStatus } from '../src/store.js';
+import { runWorkflow, readGateEvaluation, normalizeStageContracts } from '../src/scheduler.js';
+import { workflowContinuation } from '../src/scheduler/sched_loop/launch.js';
 import type { RunOpts, RunResult } from '../src/adapters/base.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
+import { ArtifactContractSchema, RecordedArtifactContractSchema } from '../src/artifact-declarations.js';
 let root: string, project: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'fc-single-author-')); project = join(root, 'project'); mkdirSync(project); });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -33,20 +34,32 @@ function completed(opts: RunOpts, summary: string): RunResult {
 }
 const units: SupervisorBackend = { isActive: async () => ({ kind: 'absent' }), runUnit: async () => { }, stopUnit: async () => { }, journalTail: async () => '' };
 describe('single-author admission and historical competition records', () => {
-  it.each([true, false, null, {}, 'yes', 2, [], { candidates: 2 }])('S01 refuses an explicit race request before live workflow/dispatch schemas can strip it (%j)', race => {
-    const stage = { id: 'work', role: 'coder', race };
-    expect(() => StageConfigSchema.parse(stage)).toThrow('race is no longer supported');
-    expect(() => parseDispatchedStageConfig(stage)).toThrow('race is no longer supported');
-    expect(() => WorkflowConfigSchema.parse({ name: 'fixture', stages: [stage] })).toThrow('race is no longer supported');
-    expect(() => WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'plan', role: 'planner', dynamic_dispatch: true }], dispatch: [stage] })).toThrow('race is no longer supported');
-    expect(parseBriefFrontmatter(`---\nrace: ${JSON.stringify(race)}\n---\nTask.`).frontmatterError).toBeUndefined();
-    expect(parseBriefFrontmatter(`---\nworkflow: planner\nplan:\n  stages:\n    - id: work\n      race: ${JSON.stringify(race)}\n---\nTask.`).workflowError).toBeUndefined();
+  it('S07 ignores only the retired replay field in recorded contracts and refuses unknown contract keys', () => {
+    const contract = { version: 1, produces: [], reads: [] };
+    const legacy = { ...contract, replays: [] };
+    expect(RecordedArtifactContractSchema.parse(legacy)).toEqual({ ...contract, groups: [] });
+    expect(ArtifactContractSchema.safeParse(legacy).success).toBe(false);
+    for (const value of [{ ...contract, typo: true }, { ...legacy, typo: true }]) {
+      expect(RecordedArtifactContractSchema.safeParse(value).success).toBe(false);
+      expect(RecordedStageConfigSchema.safeParse({ id: 'work', role: 'coder', artifact_contract: value }).success).toBe(false);
+      expect(RecordedWorkflowConfigSchema.safeParse({ name: 'legacy', stages: [{ id: 'work', role: 'coder', artifact_contract: value }] }).success).toBe(false);
+    }
+  });
+  it('S08 refuses a digest-bound retained plan with unknown contract keys or a missing contract', () => {
+    const stage = StageConfigSchema.parse({ id: 'work', role: 'coder', artifact_contract: { version: 1, produces: [], reads: [] } });
+    const created = createRun(project, 'legacy', '', ['work']);
+    const state = readRunState(project, created.runId);
+    for (const artifact_contract of [{ ...stage.artifact_contract!, typo: true }, undefined]) {
+      recordAdmittedPlan(state, [{ ...stage, artifact_contract }], created.runDirPath, 'Invalid contract fixture');
+      expect(persistedPlanErrors(state)).toEqual(['RECOVERY_PLAN_INCOMPATIBLE: work does not satisfy the current execution contract']);
+    }
   });
   it('S02 removes competition from generation, implementation and public authoring instructions while retaining explicit historical readers', () => {
     const stage = { id: 'work', role: 'coder', race: true };
     expect(() => parseStageRecord(JSON.stringify({ stages: [stage] }), PLAN_SCHEMA)).toThrow('unknown field');
     expect(parseStageRecord(JSON.stringify({ stages: [stage] }), RECORDED_PLAN_SCHEMA)).toMatchObject({ stages: [stage] });
     expect(RecordedStageConfigSchema.parse(stage).race).toBe(true);
+    expect(StageConfigSchema.parse(stage)).not.toHaveProperty('race');
     expect(renderPlanInterface()).not.toContain('race');
     const repository = join(import.meta.dirname, '..');
     expect(existsSync(join(repository, 'src/race.ts'))).toBe(false);
@@ -55,10 +68,6 @@ describe('single-author admission and historical competition records', () => {
     expect(existsSync(join(repository, 'assets/architecture.png'))).toBe(true);
     expect(readFileSync(join(repository, 'config/agents/planner.yaml'), 'utf8')).not.toMatch(/\brace\b/);
     expect(readFileSync(join(repository, 'src/scheduler/sched_loop/ordinary-stage.ts'), 'utf8')).not.toContain('stage.race');
-  });
-  it('S05 refuses competition at direct launch even when a caller bypasses the live parser', () => {
-    const workflow = RecordedWorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'work', role: 'coder', race: true }] });
-    expect(() => prepareWorkflowLaunch(workflow, stringify(workflow), project)).toThrow('race is no longer supported');
   });
   it('S06 the public CLI resumes a cancelled recorded competition as one author', async () => {
     const workflow = RecordedWorkflowConfigSchema.parse({ name: 'legacy', defaults: { max_iterations: 2 }, stages: [
@@ -116,15 +125,17 @@ describe('single-author admission and historical competition records', () => {
     const recorded = { name: 'legacy', defaults: { max_iterations: 2 }, stages: [
         { id: 'done', role: 'coder', scope: [] },
         { id: 'accepted', role: 'qa', is_gate: true, depends_on: ['done'], scope: [] },
-        { id: 'work', role: 'coder', race: true, depends_on: ['done'], scope: ['work.txt'] },
+        { id: 'work', role: 'coder', race: true, depends_on: ['done'], scope: ['work.txt'],
+          timeout_ms: 1000, resources: { retired: true },
+          artifact_contract: { version: 1, produces: [], reads: [], replays: [] } },
         { id: 'review', role: 'qa', is_gate: true, depends_on: ['work'], scope: [] },
       ] };
     const bytes = stringify(recorded);
     const fixturePath = join(root, 'recorded-workflow.yaml');
     writeFileSync(fixturePath, bytes);
-    expect(() => loadWorkflow(fixturePath)).toThrow('race is no longer supported');
     const workflow = loadWorkflow(fixturePath, true).config;
     expect(RecordedWorkflowConfigSchema.parse(recorded).stages[2].race).toBe(true);
+    expect(workflow.stages[2].artifact_contract).toEqual({ version: 1, produces: [], reads: [], groups: [] });
     const created = createRun(project, 'legacy', bytes, workflow.stages.map(stage => stage.id));
     beginStageAttempt(project, created.runId, 'done', 0);
     completeStageAttempt(project, created.runId, 'done', 0, { exitCode: 0, duration_ms: 1 });
@@ -138,7 +149,7 @@ describe('single-author admission and historical competition records', () => {
     writeFileSync(join(patches, 'race_1.json'), receipt);
     writeFileSync(join(project, 'work.txt'), 'retained unfinished work\n');
     const deadPid = Number(execFileSync(process.execPath, ['-e', 'console.log(process.pid)'], { cwd: project, encoding: 'utf8', timeout: 3000, env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir() } }).trim());
-    updateRunState(project, created.runId, state => { recordAdmittedPlan(state, workflow.stages, created.runDirPath, 'Recorded legacy fixture'); state.engineCheckpoint = { ...captureEngineCheckpoint(project, created.runId), pid: deadPid, processStart: undefined, processes: [] }; state.maxIterations = 2; state.currentIteration = 1; });
+    updateRunState(project, created.runId, state => { recordAdmittedPlan(state, workflow.stages.map(stage => ({ ...stage, artifact_contract: { ...stage.artifact_contract!, replays: [] } })), created.runDirPath, 'Recorded legacy fixture'); state.engineCheckpoint = { ...captureEngineCheckpoint(project, created.runId), pid: deadPid, processStart: undefined, processes: [] }; state.maxIterations = 2; state.currentIteration = 1; });
     const original = readRunState(project, created.runId);
     const originalDone = readStageStatus(project, created.runId, 'done');
     expect(persistedPlanErrors(original)).toEqual([]);
@@ -161,12 +172,13 @@ describe('single-author admission and historical competition records', () => {
     expect(calls).toEqual(['work', 'review']);
     expect(readStageStatus(project, created.runId, 'done')).toEqual(originalDone);
     expect(resumed.stages.accepted.acceptedFrom).toEqual(accepted);
-    expect(readGateVerdict(project, 'accepted', created.runId)).toEqual(accepted.verdict);
+    expect(readGateEvaluation(project, 'accepted', created.runId)).toEqual(accepted.verdict);
     expect(resumed.stages.work.attempts?.map(attempt => attempt.status)).toEqual(['failed', 'complete']);
     expect(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf8')).toBe(bytes);
     expect(readFileSync(join(patches, 'candidate_1_a.patch'), 'utf8')).toBe(patch);
     expect(readFileSync(join(patches, 'race_1.json'), 'utf8')).toBe(receipt);
     expect(resumed.queryState?.planRevision?.digest).toBe(original.queryState?.planRevision?.digest);
+    expect(resumed.planControl?.stages.find(stage => stage.id === 'work')?.artifact_contract).toHaveProperty('replays', []);
     expect(resumed.planControl?.stages.find(stage => stage.id === 'work')?.race).toBe(true);
   });
 });

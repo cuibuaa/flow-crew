@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,7 +39,7 @@ describe('engine boundaries from recorded runs', () => {
         ].join('\n'));
         const state = {
           runId, status: 'running', startedAt: new Date(Date.now() - 2_000).toISOString(), stages: {},
-          research: { baseline: 0, policy: 'best_of_n', higherIsBetter: true,
+          research: { baseline: 0, policy: 'greedy_stack', higherIsBetter: true,
             resultFile: resultRel, reportDir: 'research',
             stop: { beat: 0.1, maxRounds: 1, haltAfterNoImprovement: 1 },
             confirm: { command: `node confirm.cjs ${resultRel}`, requires: 'result and evidence match', timeoutSeconds: 10 } },
@@ -165,7 +166,7 @@ describe('engine boundaries from recorded runs', () => {
     const criterionId = 'criterion_report_1_deadbeef';
     const criteria = { version: 1 as const, briefDigest: 'fixture', criteria: [{ id: criterionId, text: 'Audit the work', line: 1, section: 'Report' }] };
     const stage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({ prompt_template: 'fixture', skills: [], criterion_refs: [], scope: [], is_gate: false, depends_on: [], dependency_reasons: {}, ...raw,
-      artifact_contract: { version: 1, produces: raw.is_gate ? [{ id: 'verdict', root: 'run', path: `verdict_${raw.id}.json` }] : [], reads: [], replays: [] } });
+      artifact_contract: { version: 1, produces: raw.is_gate ? [{ id: 'verdict', root: 'run', path: `verdict_${raw.id}.json` }] : [], reads: [] } });
     const work = stage({ id: 'work', role: 'coder', criterion_refs: [criterionId], scope: ['src/**'] });
     const gate = stage({ id: 'verify', role: 'qa', is_gate: true, depends_on: ['work'], dependency_reasons: { work: 'audits work' } });
     const repair = stage({ id: 'repair', role: 'coder', scope: ['src/**'], depends_on: ['verify'], dependency_reasons: { verify: 'Repairs rejected work' }, retry_to: ['verify'] });
@@ -175,6 +176,6 @@ describe('engine boundaries from recorded runs', () => {
     expect(inspectDispatchAdmission({ dispatched: [work, { ...gate, criterion_refs: [criterionId] }, repair], baseStages: [], dispatchStageId: 'plan', criteria }).pass).toBe(true);
     const absentGate = inspectDispatchAdmission({ dispatched: [{ ...work, criterion_refs: [] }], baseStages: [], dispatchStageId: 'plan', criteria });
     expect(absentGate.pass).toBe(false);
-    expect(absentGate.errors.join('\n')).toContain('not assigned to a gate');
+    expect(absentGate.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('not assigned to a gate');
   });
 });

@@ -132,7 +132,6 @@ function campaignView(rows: CampaignRunRow[], total: number, nextCursor: string 
     cost: complete({
       wallMs: total * 60_000,
       tokens: total * 100,
-      supervisorTokens: 0,
       runCoverage: { succeeded: total, failed: 0, total },
       wallCoverage: { succeeded: total, failed: 0, total },
       tokenCoverage: { succeeded: total, failed: 0, total },

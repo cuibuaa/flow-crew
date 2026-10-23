@@ -1,4 +1,3 @@
-import { publishRunCompletion } from '../sched_policy/run-completion.js';
 // Boundary: Own bounded gate repair and re-evaluation cycles from fresh runtime facts; resume admitted successors and required rework without bypassing rejection.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
@@ -10,18 +9,17 @@ import { archiveGateRoundEvidence, archiveRejectedGateRuntimeFacts, gateArchiveC
 import { classifyGateRecoveryFact, collectGateRuntimeFacts, findGateRecoveryStages, gateIdsForRecoveryStages, gateRetryDiagnosticSnapshot } from '../sched_settlement/gate-recovery.js';
 import { executeSingleStage } from '../sched_settlement/stage-execution.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, isContinuingStage, isPausedRunStatus, isPendingStageStatus, isTerminalRunStatus, readRunState, rependStageStatus, writeRunState } from '../../store.js';
-import { readRunValidationBaseline, settleGateValidationEvidence } from '../sched_settlement/gate-validation.js';
 import { executeIteration } from './iteration.js';
 import { consumePlanRevisions, findAllReady, runScopeSafeStageGroup, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
 import { mkdirSync, unlinkSync } from '../../engine-fs.js';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parkAtDeploymentBoundary } from '../../deployment-hold.js';
 
 export async function settleGateRetries(
   state: StoreState, sorted: StageConfig[], iteration: number,
   injectedDispatchStages: Set<string>,
-  planStageRetries: Map<string, number>,
+
   projectDir: string, runId: string, runDirPath: string, workflow: WorkflowConfig,
   adapter: Adapter, agents: Map<string, AgentConfig>, resolvedAgentsDir: string,
   roleRegistry: Map<string, { name: string; description: string }>,
@@ -39,16 +37,8 @@ export async function settleGateRetries(
     const maxInnerRetries = Math.max(0, Math.floor(Number(
       state.maxRetries ?? loadDefaults().gate_retry_loops,
     )));
-    let innerRetriesUsed = 0;
-    // Completed rounds already own durable evidence. Resume the same budget
-    // and archive coordinates after a park instead of granting fresh repairs.
+    let innerRetriesUsed = state.gateRetryRound?.iteration === iteration ? state.gateRetryRound.round : 0;
     const retryArchive = join(runDirPath, 'gate_reevaluation', `iteration_${iteration}`);
-    if (existsSync(retryArchive)) for (const name of readdirSync(retryArchive)) {
-      const round = /^round_(\d+)$/.exec(name);
-      if (round && existsSync(join(retryArchive, name, 'repair_diff.json'))) {
-        innerRetriesUsed = Math.max(innerRetriesUsed, Number(round[1]));
-      }
-    }
     // Pending attempted repair remains admitted work. Continue its unfinished
     // round without repeating completed companions or restoring the budget.
     const resumedRepairStages = sorted.filter(stage => {
@@ -71,21 +61,6 @@ export async function settleGateRetries(
     revisitRuntimeFacts = false;
     state = readRunState(projectDir, runId);
     if (budgetPending()) return { kind: 'continue', state, maxInnerRetries, innerRetriesUsed };
-      // Gate and retry_to topology owns verification for every admitted plan.
-      if (readRunValidationBaseline(runDirPath)) {
-        for (const gate of sorted.filter((stage) => stage.is_gate && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE && !state.stages[stage.id]?.acceptedFrom)) {
-          const validation = await settleGateValidationEvidence(projectDir, runId, gate.id);
-          state = readRunState(projectDir, runId);
-          if (isTerminalRunStatus(state.status) || isPausedRunStatus(state.status)) return { kind: 'settled', state };
-          if (validation.kind === 'refused') {
-            state.status = RUN_STATUS.FAILED;
-            state.failureReason = validation.reason;
-            state.completedAt = new Date().toISOString();
-            publishRunCompletion(state, projectDir, runId, () => ({ iteration, detail: validation.reason }));
-            return { kind: 'settled', state };
-          }
-        }
-      }
       const outerCheck = collectGateRuntimeFacts(sorted, state, projectDir, runId);
       if (outerCheck.evaluations.some((entry) => entry.rejectionKind === 'irreparable_rejection')
           && terminateForGateContractRefusal(state, outerCheck, projectDir, runId, iteration)) return { kind: 'settled', state };
@@ -115,7 +90,6 @@ export async function settleGateRetries(
         const retryStages = resumedRepairStages.length ? resumedRepairStages : findGateRecoveryStages(
           sorted,
           rejectedGateIds,
-          Object.fromEntries(outerCheck.evaluations.map((entry) => [entry.id, entry.effectiveVerdict?.reason])),
           state.research,
           Object.fromEntries(outerCheck.evaluations.map((entry) => [entry.id, classifyGateRecoveryFact(
             entry.id,
@@ -172,7 +146,6 @@ export async function settleGateRetries(
             const activeRecoveryStages = resumingRepair ? resumedRepairStages : findGateRecoveryStages(
               sorted,
               currentRejectedGateIds,
-              Object.fromEntries(currentCheck.evaluations.map((entry) => [entry.id, entry.effectiveVerdict?.reason])),
               state.research,
               Object.fromEntries(currentCheck.evaluations.map((entry) => [entry.id, classifyGateRecoveryFact(
                 entry.id,
@@ -258,9 +231,10 @@ export async function settleGateRetries(
             let repairBatch = activeWorkRecoveryStages.slice();
             let workBlocked = false;
             innerRetriesUsed = inner + 1;
+            state.gateRetryRound = { iteration, round: innerRetriesUsed };
             // Reset the whole round before computing readiness. Otherwise an
             // earlier round's COMPLETE dependency can release its successor.
-            for (const retryStage of repairBatch) {
+            if (!resumingRepair) for (const retryStage of repairBatch) {
               state.stages[retryStage.id] = rependStageStatus(state.stages[retryStage.id], 0);
             }
             writeRunState(projectDir, runId, state);
@@ -284,7 +258,7 @@ export async function settleGateRetries(
                 projectDir,
                 runId,
                 state.currentIteration ?? 1,
-                (retryStage, liveConstraintGuardFactory, settlementBoundary) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList, attemptDeadlineClockFactory, liveConstraintGuardFactory, settlementBoundary),
+                (retryStage, settlementBoundary) => executeSingleStage(retryStage, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, undefined, undefined, availableSkillsList, attemptDeadlineClockFactory, settlementBoundary),
                 repairSnapshot,
               );
               syncStageStatuses(projectDir, runId, ready.map(s => s.id));
@@ -356,7 +330,7 @@ export async function settleGateRetries(
                 projectDir,
                 runId,
                 state.currentIteration ?? 1,
-                (gate, liveConstraintGuardFactory, settlementBoundary) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeWorkRecoveryStages.map(s => s.id), roundDiffPath, availableSkillsList, attemptDeadlineClockFactory, liveConstraintGuardFactory, settlementBoundary),
+                (gate, settlementBoundary) => executeSingleStage(gate, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, state, sorted, skills, taskDescription, inner, activeWorkRecoveryStages.map(s => s.id), roundDiffPath, availableSkillsList, attemptDeadlineClockFactory, settlementBoundary),
               );
               syncStageStatuses(projectDir, runId, gatesToRerun.map(s => s.id));
             }
@@ -411,7 +385,7 @@ export async function settleGateRetries(
       ));
       await executeIteration(
         sorted, projectDir, runId, runDirPath, workflow, adapter, agents,
-        resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries,
+        resolvedAgentsDir, roleRegistry, injectedDispatchStages,
         skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory,
       );
       state = readRunState(projectDir, runId);

@@ -1,10 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { updateFileHashSync } from './rollback-content-store.js';
-import { mkdirSync, renameSync, rmSync, writeFileSync } from './engine-fs.js';
+import { atomicWrite, mkdirSync } from './engine-fs.js';
 import { existsSync, readFileSync, readdirSync, realpathSync, readlinkSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir, userInfo } from 'node:os';
 import { readBuildManifest, collectBuildArtifacts, assertBuildArtifactInventory } from './build-manifest.js';
+import { processLiveness } from './process-liveness.js';
 
 export const DAEMON_METADATA_FILENAME = 'daemon.json';
 export const STALE_DAEMON_MESSAGE = 'STALE: dist is newer than the running daemon — its fixes are NOT loaded';
@@ -101,23 +102,7 @@ export function assertCommandSocketAuthority(socketPath: string, home: string, s
 
 export interface SocketOwnerLookupOptions {
   procRoot?: string;
-  netUnixPath?: string;
   platform?: NodeJS.Platform;
-}
-
-export interface DeployedDistConsumer {
-  pid: number;
-  kind: 'daemon' | 'run' | 'process';
-  label: string;
-  runId?: string;
-}
-
-export interface DeployedDistConsumerOptions {
-  fcHome?: string;
-  procRoot?: string;
-  processAlive?: (pid: number) => boolean;
-  diskBuildHash?: string;
-  readProcessCwd?: (pid: number) => string | undefined;
 }
 
 /**
@@ -126,7 +111,7 @@ export interface DeployedDistConsumerOptions {
  * mtimes are deliberately diagnostic-only: identical rebuilds remain fresh.
  */
 export function computeBuildFingerprint(distDir: string): DaemonBuildFingerprint {
-  const root = resolve(distDir);
+  const root = realpathSync(distDir);
   const uiRoot = join(root, '..', 'ui', 'dist');
   const manifest = readBuildManifest(root);
   const inventory = manifest ? assertBuildArtifactInventory(root, manifest)
@@ -204,14 +189,9 @@ export function daemonMetadataPath(socketPath: string): string {
 
 export function writeDaemonIdentity(socketPath: string, identity: DaemonIdentity): string {
   const metadataPath = daemonMetadataPath(socketPath);
-  const tempPath = `${metadataPath}.${process.pid}.${randomUUID()}.tmp`;
   mkdirSync(dirname(metadataPath), { recursive: true });
-  try {
-    writeFileSync(tempPath, `${JSON.stringify(identity, null, 2)}\n`, 'utf-8');
-    renameSync(tempPath, metadataPath);
-  } finally {
-    rmSync(tempPath, { force: true });
-  }
+  // Discovery metadata is valid only for the matching live process and socket.
+  atomicWrite(metadataPath, `${JSON.stringify(identity, null, 2)}\n`, { durability: 'replace-only' });
   return metadataPath;
 }
 
@@ -232,7 +212,7 @@ export function readDaemonIdentity(socketPath: string): DaemonIdentity | undefin
  * caller can still tell "no listener" from "a listener I cannot attest to".
  */
 function recordedDaemonPidIfAlive(socketPath: string, opts: SocketOwnerLookupOptions = {}): number | undefined {
-  if (opts.procRoot !== undefined || opts.netUnixPath !== undefined) return undefined;
+  if (opts.procRoot !== undefined) return undefined;
   let identity: DaemonIdentity | undefined;
   try {
     identity = readDaemonIdentity(socketPath);
@@ -241,13 +221,7 @@ function recordedDaemonPidIfAlive(socketPath: string, opts: SocketOwnerLookupOpt
   }
   const pid = identity?.pid;
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined;
-  try {
-    process.kill(pid, 0);
-    return pid;
-  } catch (error) {
-    // EPERM: the process exists but is owned by another user.
-    return (error as NodeJS.ErrnoException)?.code === 'EPERM' ? pid : undefined;
-  }
+  return processLiveness(pid) === 'alive' ? pid : undefined;
 }
 
 /**
@@ -270,11 +244,10 @@ export function findUnixSocketOwnerPid(socketPath: string, opts: SocketOwnerLook
     return recordedDaemonPidIfAlive(socketPath, opts);
   }
   const procRoot = opts.procRoot ?? '/proc';
-  const netUnixPath = opts.netUnixPath ?? join(procRoot, 'net', 'unix');
   const normalizedSocketPath = resolve(socketPath);
   const inodes = new Set<string>();
 
-  for (const line of readFileSync(netUnixPath, 'utf-8').split(/\r?\n/).slice(1)) {
+  for (const line of readFileSync(join(procRoot, 'net', 'unix'), 'utf-8').split(/\r?\n/).slice(1)) {
     const match = /^\S+:\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+)(?:\s+(.*))?$/.exec(line.trim());
     if (match?.[2] === normalizedSocketPath) inodes.add(match[1]);
   }
@@ -309,177 +282,6 @@ export function findUnixSocketOwnerPid(socketPath: string, opts: SocketOwnerLook
     throw new Error(`Unix socket ${normalizedSocketPath} has multiple owning pids: ${[...owners].sort((a, b) => a - b).join(', ')}`);
   }
   return owners.values().next().value as number | undefined;
-}
-
-function pidIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-function runIdFromArguments(args: string[]): string | undefined {
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === '--existing-run-id' && args[index + 1]) return args[index + 1];
-    if (argument.startsWith('--existing-run-id=')) return argument.slice('--existing-run-id='.length) || undefined;
-  }
-  return undefined;
-}
-
-function argumentReferencesDist(argument: string, distDir: string): boolean {
-  const normalized = distDir.endsWith(sep) ? distDir : `${distDir}${sep}`;
-  return argument === distDir
-    || argument.startsWith(normalized)
-    || argument === `file://${distDir}`
-    || argument.startsWith(`file://${normalized}`);
-}
-
-function executionPathReferencesDist(
-  argument: string,
-  distDir: string,
-  cwd: string | undefined,
-  bareRelativeIsPath: boolean,
-): boolean {
-  if (argumentReferencesDist(argument, distDir)) return true;
-  if (!cwd || argument.startsWith('file:')) return false;
-  const pathLike = bareRelativeIsPath
-    || argument.startsWith('./')
-    || argument.startsWith('../')
-    || argument.startsWith(`.${sep}`)
-    || argument.startsWith(`..${sep}`);
-  return pathLike && argumentReferencesDist(resolve(cwd, argument), distDir);
-}
-
-const MODULE_LOADING_OPTIONS = new Set([
-  '--experimental-loader',
-  '--import',
-  '--loader',
-  '--require',
-  '-r',
-]);
-
-function evaluatedSourceReferencesDist(source: string, distDir: string, cwd: string | undefined): boolean {
-  const moduleSpecifiers = [
-    ...source.matchAll(/\b(?:import|require)\s*\(\s*(["'])(.*?)\1\s*\)/g),
-    ...source.matchAll(/\b(?:import|export)\s+(?:[^"']*?\s+from\s+)?(["'])(.*?)\1/g),
-  ];
-  return moduleSpecifiers.some((match) => executionPathReferencesDist(match[2], distDir, cwd, false));
-}
-
-/** Inspect only argv positions that select executable code. A path carried as
- * opaque application data (for example --output=<dist>/diagnostic.txt) does
- * not make the process a consumer of that distribution. */
-function executionReferencesDist(
-  args: readonly string[],
-  distDir: string,
-  cwd: string | undefined,
-): boolean {
-  if (args.length === 0) return false;
-  const executable = basename(args[0]).toLowerCase();
-  const nodeLike = /^(?:node|nodejs)(?:\.exe)?$/.test(executable);
-  if (!nodeLike && executionPathReferencesDist(args[0], distDir, cwd, true)) return true;
-  if (!nodeLike) return false;
-
-  for (let index = 1; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === '--') {
-      return Boolean(args[index + 1]
-        && executionPathReferencesDist(args[index + 1], distDir, cwd, true));
-    }
-    const evaluatedAssignment = /^(?:--eval|--print)=(.*)$/.exec(argument);
-    if (evaluatedAssignment) return evaluatedSourceReferencesDist(evaluatedAssignment[1], distDir, cwd);
-    if (['--eval', '--print', '-e', '-p'].includes(argument)) {
-      return Boolean(args[index + 1] && evaluatedSourceReferencesDist(args[index + 1], distDir, cwd));
-    }
-    const optionAssignment = /^(--(?:experimental-loader|import|loader|require))=(.*)$/.exec(argument);
-    if (optionAssignment) {
-      if (executionPathReferencesDist(optionAssignment[2], distDir, cwd, false)) return true;
-      continue;
-    }
-    if (MODULE_LOADING_OPTIONS.has(argument)) {
-      const modulePath = args[index + 1];
-      if (modulePath && executionPathReferencesDist(modulePath, distDir, cwd, false)) return true;
-      index += 1;
-      continue;
-    }
-    if (argument.startsWith('-')) continue;
-    return executionPathReferencesDist(argument, distDir, cwd, true);
-  }
-  return false;
-}
-
-/**
- * Identify live processes that are executing this checkout's deployed dist.
- * Linux process arguments provide the strong path binding. The daemon's
- * persisted build hash is a portable fallback and is accepted only while its
- * recorded PID is alive and the on-disk generation still matches.
- */
-export function findDeployedDistConsumers(
-  distDir: string,
-  options: DeployedDistConsumerOptions = {},
-): DeployedDistConsumer[] {
-  const root = resolve(distDir);
-  const processAlive = options.processAlive ?? pidIsAlive;
-  const consumers = new Map<number, DeployedDistConsumer>();
-  let diskBuildHash = options.diskBuildHash;
-  if (!diskBuildHash) {
-    try { diskBuildHash = computeBuildFingerprint(root).hash; } catch { /* an empty dist has no deployed consumers */ }
-  }
-
-  if (options.fcHome) {
-    const metadataPath = join(resolve(options.fcHome), DAEMON_METADATA_FILENAME);
-    try {
-      const value = JSON.parse(readFileSync(metadataPath, 'utf-8')) as unknown;
-      if (isDaemonIdentity(value)) {
-        const boundToDist = value.distDir !== undefined
-          ? resolve(value.distDir) === root
-          : diskBuildHash !== undefined && value.build.hash === diskBuildHash;
-        if (boundToDist && processAlive(value.pid)) {
-          consumers.set(value.pid, {
-            pid: value.pid,
-            kind: 'daemon',
-            label: `daemon pid ${value.pid} (${value.socketPath})`,
-          });
-        }
-      }
-    } catch { /* no valid identity at this state root */ }
-  }
-
-  const procRoot = options.procRoot ?? (process.platform === 'linux' ? '/proc' : undefined);
-  if (!procRoot) return [...consumers.values()].sort((left, right) => left.pid - right.pid);
-  let entries: string[];
-  try { entries = readdirSync(procRoot); } catch { return [...consumers.values()]; }
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry)) continue;
-    const pid = Number.parseInt(entry, 10);
-    let args: string[];
-    try {
-      args = readFileSync(join(procRoot, entry, 'cmdline'))
-        .toString('utf-8')
-        .split('\0')
-        .filter(Boolean);
-    } catch {
-      continue;
-    }
-    let cwd: string | undefined;
-    try {
-      cwd = options.readProcessCwd
-        ? options.readProcessCwd(pid)
-        : readlinkSync(join(procRoot, entry, 'cwd'));
-    } catch { /* cwd can disappear or be unreadable while procfs is scanned */ }
-    if (!executionReferencesDist(args, root, cwd)) continue;
-    const runId = runIdFromArguments(args);
-    const daemon = args.some((argument, index) => argument === 'daemon' && args[index + 1] === 'serve');
-    consumers.set(pid, daemon
-      ? { pid, kind: 'daemon', label: `daemon pid ${pid}` }
-      : runId
-        ? { pid, kind: 'run', runId, label: `run ${runId} (pid ${pid})` }
-        : { pid, kind: 'process', label: `process pid ${pid}` });
-  }
-  return [...consumers.values()].sort((left, right) => left.pid - right.pid);
 }
 
 function isDaemonIdentity(value: unknown): value is DaemonIdentity {

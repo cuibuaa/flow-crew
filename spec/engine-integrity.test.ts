@@ -1,18 +1,21 @@
-import { RollbackContentStore } from '../src/rollback-content-store.js';
-import { renameSync as publishRename } from '../src/engine-fs.js';
+import * as rollbackFiles from '../src/rollback-content-store.js';
+import * as engineFs from '../src/engine-fs.js';
+import { atomicWrite, renameSync as publishRename } from '../src/engine-fs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import fs, { closeSync, cpSync, ftruncateSync, openSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createRequire } from 'node:module';
+import { Hash, type BinaryLike, type Encoding } from 'node:crypto';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { execWithStdin, type Adapter } from '../src/adapters/base.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 import { registerEngineOwnedSqlitePath } from '../src/engine-owned-carriers.js';
-import { producesEngineOwnedArtifact } from '../src/artifact-declarations.js';
+import { inspectArtifactDeclarations, producesEngineOwnedArtifact } from '../src/artifact-declarations.js';
 import { queueOperatorGuidance, routePendingOperatorGuidanceToStage } from '../src/guidance.js';
 import { appendTextRecord } from '../src/append-boundary.js';
-import { atomicWrite, createRun, fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import { startSchedulerHeartbeat } from '../src/scheduler-heartbeat.js';
 import { writeSchedulerProcessIdentity, removeSchedulerProcessIdentity } from '../src/run-lock.js';
@@ -20,9 +23,10 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { runValidationCommand } from '../src/project-validation.js';
 import { runAllChecks } from '../src/reality-gate/index.js';
-import { generateRunSummary } from '../src/run-summary.js';
+import { generateRunSummary } from './test-support/run-summary.js';
+
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
-import { clearAttemptSummaryRefreshDebounce } from '../src/run-events.js';
+
 
 // External products belong beside the fixture project, while the installation
 // remains a distinct sibling namespace even when TMPDIR is inside this repo.
@@ -39,7 +43,7 @@ vi.mock('../src/ship-inputs.js', async importOriginal => {
 });
 
 let root: string, project: string, run: string, store: string, previous: string;
-const contract = { version: 1 as const, produces: [], reads: [], groups: [], replays: [] };
+const contract = { version: 1 as const, produces: [], reads: [], groups: [] };
 beforeEach(() => {
   installation.install();
   root = mkdtempSync(join(tmpdir(), 'engine-integrity-'));
@@ -47,7 +51,7 @@ beforeEach(() => {
   store = join(root, 'store'); previous = fcGlobalDir(); setFcGlobalDir(store);
   run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runDirPath;
 });
-afterEach(() => { clearAttemptSummaryRefreshDebounce(); setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); });
 const input = () => ({ projectDir: project, runDir: run, stageId: 'work', artifactContract: contract, structuredResult: true });
 const write = (path: string, bytes = 'engine record') => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, bytes); };
 const command = (code: string) => execWithStdin(process.execPath, ['-e', code], '', { cwd: project, timeout_ms: 5000 });
@@ -92,10 +96,10 @@ describe('structural engine state protection', () => {
     expect(readFileSync(carrier, 'utf8')).toBe('trusted result');
   });
 
-  it('restores engine decisions from memory without creating rollback backing', async () => {
+  it('restores engine decisions without creating rollback evidence payloads', async () => {
     const carrier = join(run, 'stage_watchdog.json');
     write(carrier, 'trusted state');
-    const capture = vi.spyOn(RollbackContentStore.prototype, 'capture');
+    const capture = vi.spyOn(rollbackFiles.RollbackContentStore.prototype, 'capture');
     await voided(async () => { writeFileSync(carrier, 'child edit'); });
     expect(readFileSync(carrier, 'utf8')).toBe('trusted state');
     expect(capture).not.toHaveBeenCalled();
@@ -113,11 +117,11 @@ describe('structural engine state protection', () => {
 
   it.each(['run.json', 'events.jsonl', 'run-history.jsonl', 'run-history.v1.jsonl', 'workflow.yaml', 'validation_baseline.json',
     'validation_delta_review.json', 'verdict_review.json', 'summary.md', 'goal_met.json',
-    'rollback_change_journal.jsonl', 'approvals/decision.json', 'stages/work/status.json', 'stages/work/invocations/attempt/input.json.gz',
+    'approvals/decision.json', 'stages/work/status.json', 'stages/work/invocations/attempt/input.json.gz',
     'stage_evidence/review/verdict.json', 'dispatch.yaml', 'handoff_previous.md', 'scheduler.identity.json', 'scheduler.pid'])('voids a successful child overwriting %s', async local => {
     const path = join(run, local); write(path);
     await voided(() => command(`require('node:fs').writeFileSync(${JSON.stringify(path)},'counterfeit pass')`));
-    expect(readFileSync(path, 'utf8')).toBe('engine record');
+    expect(readFileSync(path, 'utf8')).toBe(local === 'events.jsonl' ? 'counterfeit pass' : 'engine record');
   });
 
   it.each(['write', 'unlink', 'rename', 'symlink', 'hardlink', 'directory-view'])('voids the historical local carrier route: %s', async route => {
@@ -146,15 +150,17 @@ describe('structural engine state protection', () => {
     await voided(() => command(`require('node:fs').writeFileSync(${JSON.stringify(alias)},'counterfeit')`));
   });
 
-  it.each(['direct', 'import', 'preload', 'descendant', 'shell', 'make', 'retained-generation'])('voids writes to a real isolated engine distribution via %s', async route => {
+  it.each(['same-content', 'direct', 'import', 'preload', 'descendant', 'shell', 'make', 'retained-generation'])('checks content in a real isolated engine distribution via %s', async route => {
     const engine = join(root, 'engine'); mkdirSync(engine);
     const backend = join(engine, route === 'retained-generation' ? 'generation' : 'dist');
-    cpSync(join(import.meta.dirname, '../dist'), backend, { recursive: true });
+    cpSync(realpathSync(join(import.meta.dirname, '../dist')), backend, { recursive: true });
     const dependencies = dirname(dirname(createRequire(import.meta.url).resolve('yaml/package.json')));
     symlinkSync(dependencies, join(engine, 'node_modules'), 'dir');
     write(join(engine, 'package.json'), '{"type":"module"}');
     const carrier = join(backend, 'integrity-probe.txt'); write(carrier);
-    const code = `require('node:fs').writeFileSync(${JSON.stringify(carrier)},'counterfeit')`;
+    const code = route === 'same-content'
+      ? `const fs=require('node:fs'),p=${JSON.stringify(carrier)};fs.copyFileSync(p,p+'.republished');fs.renameSync(p+'.republished',p)`
+      : `require('node:fs').writeFileSync(${JSON.stringify(carrier)},'counterfeit')`;
     const module = join(project, 'overwrite.cjs'); write(module, code);
     const program = route === 'shell' ? '/bin/sh' : route === 'make' ? 'make' : process.execPath;
     const args = route === 'shell' ? ['-c', `printf counterfeit > '${carrier}'`]
@@ -175,8 +181,165 @@ describe('structural engine state protection', () => {
       }));process.exitCode=0;}catch(e){console.log(e.message);process.exitCode=125;}
     `;
     const result = await execWithStdin(process.execPath, ['--input-type=module', '-e', harness], '', { cwd: project, timeout_ms:10000 });
-    expect(result.exitCode, result.output).toBe(125);
-    expect(result.output).toContain('ENGINE_STATE_TAMPERED');
+    expect(result.exitCode, result.output).toBe(route === 'same-content' ? 0 : 125);
+    if (route !== 'same-content') expect(result.output).toContain('ENGINE_STATE_TAMPERED');
+  });
+
+  it('reads only the published tail when a parent appends to a log', async () => {
+    const log = join(run, 'events.jsonl'); write(log, 'x'.repeat(4096));
+    const read = fs.readSync; let bytes = 0;
+    fs.readSync = ((...args: Parameters<typeof read>) => {
+      const count = read(...args); bytes += count; return count;
+    }) as typeof read;
+    syncBuiltinESMExports();
+    try {
+      await withEngineIntegrity(input(), async () => {
+        bytes = 0;
+        engineFs.appendFileSync(log, 'parent event\n');
+        expect(bytes).toBe(Buffer.byteLength('parent event\n'));
+      });
+    } finally { fs.readSync = read; syncBuiltinESMExports(); }
+  });
+
+  it.each(['append', 'rename'])('keeps %s publication work independent of prior records and carrier size', async operation => {
+    const log = join(run, 'events.jsonl'), carrier = join(run, 'stages/work/command_activity.json');
+    const staged = `${carrier}.tmp-parent`, record = 'parent event\n';
+    const keys = Map.prototype.keys, update = Hash.prototype.update, stat = fs.lstatSync, readdir = fs.readdirSync;
+    let work = { ledgerEntries: 0, bytesHashed: 0, stats: 0, descents: 0 };
+    // Count entries consumed, rather than calls to keys(): spreading a whole
+    // ledger still makes just one call while doing work for every old record.
+    Map.prototype.keys = function () {
+      const iterator = keys.call(this), next = iterator.next;
+      iterator.next = () => {
+        const result = next.call(iterator);
+        if (!result.done) work.ledgerEntries++;
+        return result;
+      };
+      return iterator;
+    };
+    Hash.prototype.update = function (this: Hash, data: BinaryLike, encoding?: Encoding) {
+      work.bytesHashed += typeof data === 'string' ? Buffer.byteLength(data, encoding) : data.byteLength;
+      return Reflect.apply(update, this, [data, encoding]);
+    };
+    fs.lstatSync = ((...args: Parameters<typeof stat>) => {
+      work.stats++; return stat(...args);
+    }) as typeof stat;
+    fs.readdirSync = ((...args: Parameters<typeof readdir>) => {
+      work.descents++; return readdir(...args);
+    }) as typeof readdir;
+    syncBuiltinESMExports();
+    try {
+      const samples: typeof work[] = [];
+      for (const [priorRecords, carrierBytes] of [[0, 0], [128, 0], [128, 64 * 1024]]) {
+        for (let index = 0; index < priorRecords; index++) write(join(run, 'stage_evidence/work', `record-${index}.json`));
+        write(log, `${'x'.repeat(carrierBytes)}\n`); write(carrier);
+        await withEngineIntegrity(input(), async () => {
+          for (let index = 0; index < 3; index++) {
+            writeFileSync(staged, record);
+            work = { ledgerEntries: 0, bytesHashed: 0, stats: 0, descents: 0 };
+            if (operation === 'append') appendTextRecord(log, record);
+            else engineFs.renameSync(staged, carrier);
+            samples.push({ ...work });
+          }
+        });
+      }
+      expect(samples[0].stats).toBeGreaterThan(0);
+      expect(samples[0].bytesHashed).toBe(Buffer.byteLength(record));
+      expect(samples[0].descents).toBe(0);
+      expect(samples).toEqual(Array.from({ length: 9 }, () => samples[0]));
+    } finally {
+      Map.prototype.keys = keys; Hash.prototype.update = update; fs.lstatSync = stat; fs.readdirSync = readdir;
+      syncBuiltinESMExports();
+    }
+  });
+
+  it('does not scan the protected tree for an ordinary parent file rename', async () => {
+    const carrier = join(run, 'stage_watchdog.json'), staged = `${carrier}.tmp-parent`;
+    const readdir = fs.readdirSync; let descents = 0;
+    fs.readdirSync = ((...args: Parameters<typeof readdir>) => {
+      descents++; return readdir(...args);
+    }) as typeof readdir;
+    syncBuiltinESMExports();
+    try {
+      await withEngineIntegrity(input(), async () => {
+        writeFileSync(staged, 'parent replacement'); descents = 0;
+        engineFs.renameSync(staged, carrier);
+        expect(descents).toBe(0);
+      });
+    } finally { fs.readdirSync = readdir; syncBuiltinESMExports(); }
+  });
+
+  it('does not descend unprotected stage build directories', async () => {
+    const build = join(run, 'stages/work/build');
+    write(join(build, 'nested', 'artifact'), 'authored build');
+    const readdir = fs.readdirSync;
+    let descents = 0;
+    fs.readdirSync = ((...args: Parameters<typeof readdir>) => {
+      if (String(args[0]).startsWith(build)) descents++;
+      return readdir(...args);
+    }) as typeof readdir;
+    syncBuiltinESMExports();
+    try { await withEngineIntegrity(input(), async () => {}); }
+    finally { fs.readdirSync = readdir; syncBuiltinESMExports(); }
+    expect(descents).toBe(0);
+  });
+
+  it.each(['overwrite', 'append'])('recognizes parent descriptor %s of a protected log', async operation => {
+    const log = join(run, 'stages/work/live.log'); write(log, 'old');
+    await withEngineIntegrity(input(), async () => {
+      const descriptor = engineFs.openSync(log, operation === 'append' ? 'a' : 'w');
+      try { engineFs.writeSync(descriptor, 'new parent bytes'); }
+      finally { engineFs.closeSync(descriptor); }
+    });
+    expect(readFileSync(log, 'utf8')).toBe((operation === 'append' ? 'old' : '') + 'new parent bytes');
+  });
+
+  it.each(['path', 'descriptor', 'numeric'])('respects non-append flags passed to appendFileSync (%s)', async target => {
+    const log = join(run, 'stages/work/live.log'); write(log, 'old');
+    await withEngineIntegrity(input(), async () => {
+      if (target !== 'descriptor') engineFs.appendFileSync(log, 'replacement', { flag: target === 'path' ? 'w'
+        : fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_TRUNC });
+      else {
+        const descriptor = engineFs.openSync(log, 'r+');
+        try { engineFs.appendFileSync(descriptor, 'replacement'); }
+        finally { engineFs.closeSync(descriptor); }
+      }
+    });
+    expect(readFileSync(log, 'utf8')).toBe('replacement');
+  });
+
+  it('accepts a parent overwrite of a protected log and rejects a later prefix forgery', async () => {
+    const log = join(run, 'stages/work/live.log'); write(log, 'old');
+    await expect(withEngineIntegrity(input(), async () => {
+      engineFs.writeFileSync(log, 'replacement');
+      writeFileSync(log, 'counterfeit');
+    })).rejects.toThrow('ENGINE_STATE_TAMPERED');
+  });
+
+  it('detects a rewritten log prefix at exit even after parent appends', async () => {
+    const log = join(run, 'stages/work/live.log'); write(log, 'trusted');
+    fs.utimesSync(log, 1, 1);
+    await expect(withEngineIntegrity(input(), async () => {
+      const before = fs.statSync(log);
+      writeFileSync(log, 'forgery'); fs.utimesSync(log, before.atime, before.mtime);
+      engineFs.appendFileSync(log, 'parent append');
+    })).rejects.toThrow('ENGINE_STATE_TAMPERED');
+  });
+
+  it('trims an untrusted log tail by reading the trusted prefix on demand', async () => {
+    const log = join(run, 'stages/work/live.log'); write(log, 'trusted');
+    await expect(withEngineIntegrity(input(), async () => {
+      fs.appendFileSync(log, 'untrusted');
+    })).rejects.toThrow('ENGINE_STATE_TAMPERED');
+    expect(readFileSync(log, 'utf8')).toBe('trusted');
+  });
+
+  it('accepts protected records larger than the whole-file Buffer limit', async () => {
+    const record = join(run, 'stages/work/live.log');
+    const descriptor = openSync(record, 'w');
+    try { ftruncateSync(descriptor, 2 ** 31 + 1); } finally { closeSync(descriptor); }
+    await withEngineIntegrity(input(), async () => { engineFs.appendFileSync(record, 'parent append'); });
+    expect(fs.statSync(record).size).toBe(2 ** 31 + 1 + 'parent append'.length);
   });
 
   it('permits ordinary external files and unknown hardlink closure without filesystem grants', async () => {
@@ -318,18 +481,18 @@ describe('structural engine state protection', () => {
     expect(called).toBe(false);
   });
 
-  it('guards a stage directory identity even when its status bytes and inode survive replacement', async () => {
+  it('accepts a replaced stage directory with unchanged protected members', async () => {
     const stage = join(run, 'stages/previous'), moved = join(root, 'previous');
     const status = join(stage, 'status.json'); write(status, '{"status":"complete"}');
-    await voided(async () => {
+    await withEngineIntegrity(input(), async () => {
       renameSync(stage, moved); mkdirSync(stage);
       renameSync(join(moved, 'status.json'), status);
     });
     expect(readFileSync(status, 'utf8')).toBe('{"status":"complete"}');
   });
 
-  it('voids replacement of an engine storage ancestor even when record bytes and inodes survive', async () => {
-    await voided(async()=>{
+  it('accepts a replaced storage ancestor with unchanged protected members', async () => {
+    await withEngineIntegrity(input(), async()=>{
       const parent = dirname(run);renameSync(parent,parent+'.moved');mkdirSync(parent);
       renameSync(join(parent+'.moved',run.split('/').at(-1)!),run);
     });
@@ -387,7 +550,7 @@ describe('structural engine state protection', () => {
     await voided(async () => { unlinkSync(hop); symlinkSync(join(root, 'missing'), hop, 'dir'); });
   });
 
-  it.each(['resource-leases.v1.sqlite', 'run-index.sqlite'])('accepts concurrent shared database transactions: %s', async name => {
+  it.each(['run-index.sqlite'])('accepts concurrent shared database transactions: %s', async name => {
     const path = join(store, name); registerEngineOwnedSqlitePath(path);
     const db = new DatabaseSync(path);
     db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS fixture(value)');
@@ -447,13 +610,57 @@ describe('structural engine state protection', () => {
   it('does not let a later parent overwrite or append hide tampering', async () => {
     const path = join(run, 'events.jsonl'); write(path, 'original\n');
     await voided(async () => { writeFileSync(path, 'counterfeit'); try { appendTextRecord(path, 'parent'); } catch { /* observer may ignore display failure */ } });
-    expect(readFileSync(path, 'utf8')).toBe('original\n');
+    expect(readFileSync(path, 'utf8')).toBe('counterfeit');
     await voided(async () => { writeFileSync(path, 'counterfeit'); try { atomicWrite(path, 'parent replacement'); } catch { /* still latched */ } });
   });
 
-  it('refuses an output directory containing engine records', async () => {
-    const args = { ...input(), artifactContract: { ...contract, produces: [{ id: 'out', root: 'run' as const, path: 'stages/work', kind: 'directory' as const, nonempty: true }] } };
-    await expect(withEngineIntegrity(args, async () => {})).rejects.toThrow('ENGINE_STATE_REFUSED');
+  it.each(['record', 'record-parent', 'database', 'database-parent'])('refuses engine carrier outputs at admission: %s', mode => {
+    const database = mode.startsWith('database');
+    if (database) symlinkSync(mode === 'database' ? join(store, 'run-index.sqlite') : store, join(project, 'storage'));
+    const artifact = { id: 'out', root: database ? 'project' as const : 'run' as const,
+      path: database ? 'storage' : mode === 'record' ? 'run.json' : 'stages/work',
+      kind: mode.endsWith('parent') ? 'directory' as const : 'file' as const };
+    expect(inspectArtifactDeclarations({ stages: [{ id: 'work', depends_on: [], artifact_contract: { ...contract, produces: [artifact] } }],
+      runDir: run, projectDir: project })).toContain(`ARTIFACT_FRAMEWORK_PATH: work.out cannot produce engine-owned evidence ${artifact.path}`);
+  });
+
+  it.each(['handoff_work.md', 'handoff_previous.md'])('refuses a non-structured handoff output through the guard: %s', async path => {
+    let called = false;
+    await expect(withEngineIntegrity({ ...input(), structuredResult: false,
+      artifactContract: { ...contract, produces: [{ id: 'out', root: 'run', path, kind: 'file' }] },
+    }, async () => { called = true; })).rejects.toThrow('ENGINE_STATE_REFUSED');
+    expect(called).toBe(false);
+  });
+
+  it.each(['namespace', 'symlink', 'hardlink'])('refuses an output directory containing engine records through the guard: %s', async mode => {
+    const carrier = join(run, 'run.json'), output = 'reports';
+    if (mode === 'symlink') { mkdirSync(join(run, output)); symlinkSync(carrier, join(run, output, 'alias')); }
+    if (mode === 'hardlink') { mkdirSync(join(run, output)); linkSync(carrier, join(run, output, 'alias')); }
+    let called = false;
+    await expect(withEngineIntegrity({ ...input(), artifactContract: { ...contract,
+      produces: [{ id: 'out', root: 'run', path: mode === 'namespace' ? 'stages/work' : output, kind: 'directory' }],
+    } }, async () => { called = true; })).rejects.toThrow('ENGINE_STATE_REFUSED');
+    expect(called).toBe(false);
+  });
+
+  it.each([false, true])('allows independent interrupt requests with an initially present signals directory: %s', async present => {
+    const directory = join(run, 'signals');
+    rmSync(directory, { recursive: true, force: true });
+    if (present) mkdirSync(directory);
+    const path = join(directory, 'interrupt_operator.json');
+    await withEngineIntegrity(input(), async () => {
+      const result = await command(`const fs=require('node:fs');fs.mkdirSync(${JSON.stringify(directory)},{recursive:true});fs.writeFileSync(${JSON.stringify(path)},'operator request')`);
+      expect(result.exitCode).toBe(0);
+    });
+    expect(readFileSync(path, 'utf8')).toBe('operator request');
+  });
+
+  it.each([false, true])('protects abort records with an initially present signals directory: %s', async present => {
+    const directory = join(run, 'signals'), path = join(directory, 'abort_work.json');
+    rmSync(directory, { recursive: true, force: true });
+    if (present) write(path, 'trusted abort');
+    await voided(async () => { write(path, 'counterfeit abort'); });
+    if (present) expect(readFileSync(path, 'utf8')).toBe('trusted abort');
   });
 
   it('refuses an external output containing a future registered engine database', async () => {
@@ -510,7 +717,7 @@ describe('structural engine state protection', () => {
     expect(readStageStatus(project,runId,'work').status).toBe('failed');
   });
 
-  it.each(['scheduler.identity.json','resource-leases.v1.sqlite','run-index.sqlite-wal'])('refuses a declared hardlink output alias of %s', async name => {
+  it.each(['scheduler.identity.json','run-index.sqlite-wal'])('refuses a declared hardlink output alias of %s', async name => {
     const carrier = name.startsWith('scheduler') ? join(run,name) : join(store,name); write(carrier);
     const alias = join(project,'declared-alias');linkSync(carrier,alias);
     expect(producesEngineOwnedArtifact({id:'out',root:'project',path:'declared-alias',kind:'file'},{id:'work',depends_on:[]},run,project)).toBe(true);

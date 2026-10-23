@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -5,8 +6,8 @@ import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
-import { engineConfigDir, loadEngineDefaults, resetConfigCache } from '../src/config.js';
-import { readExecutionDefaults } from '../src/dashboard.js';
+import { engineConfigDir, loadEngineDefaults } from '../src/config.js';
+
 import { applyBasePrompt, loadBasePrompt, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
 import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
 import { cmdPlanCheck } from '../src/plan-interface.js';
@@ -27,18 +28,16 @@ beforeEach(() => {
   mkdirSync(projectDir);
   previousFcHome = fcGlobalDir();
   setFcGlobalDir(join(fixtureRoot, 'state'));
-  resetConfigCache();
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
-  resetConfigCache();
   setFcGlobalDir(previousFcHome);
   rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
 async function launch(): Promise<{ timeoutMs: number; maxIterations: number; role?: AgentConfig }> {
-  const yaml = 'name: defaults-fixture\nstages:\n  - id: work\n    role: coder\n    scope: []\n    artifact_contract: {version: 1, produces: [], reads: [], replays: []}\n';
+  const yaml = 'name: defaults-fixture\nstages:\n  - id: work\n    role: coder\n    scope: []\n    artifact_contract: {version: 1, produces: [], reads: []}\n';
   const workflow = WorkflowConfigSchema.parse(parseYaml(yaml));
   const observed: { timeoutMs: number; maxIterations: number; role?: AgentConfig } = { timeoutMs: -1, maxIterations: -1 };
   const adapter: Adapter = {
@@ -57,11 +56,11 @@ async function launch(): Promise<{ timeoutMs: number; maxIterations: number; rol
 function expectEngineValues(observed: Awaited<ReturnType<typeof launch>>): void {
   expect(observed).toMatchObject({
     timeoutMs: engineRaw.default_timeout_ms,
-    maxIterations: engineRaw.default_max_iterations,
+    maxIterations: engineRaw.max_iterations,
     role: { model: engineCoder.model, reasoning_effort: engineCoder.reasoning_effort },
   });
   expect(observed.role?.prompt).toContain(engineCoder.prompt);
-  expect(readExecutionDefaults()).toMatchObject({ timeoutMs: engineRaw.default_timeout_ms, maxIterations: engineRaw.default_max_iterations });
+  expect(loadEngineDefaults()).toEqual(engineRaw);
   expect(loadEngineDefaults()).toMatchObject({ model: engineRaw.model, reasoning_effort: engineRaw.reasoning_effort, adapter: engineRaw.adapter });
 }
 
@@ -70,7 +69,7 @@ describe('engine configuration owns execution defaults', () => {
     const configDir = join(projectDir, 'config');
     mkdirSync(join(configDir, 'agents'), { recursive: true });
     mkdirSync(join(configDir, 'workflows'));
-    const content = JSON.stringify({ ...engineRaw, default_timeout_ms: 3600000, default_max_iterations: 1, model: 'retired-model', reasoning_effort: 'low', paths: { agents: 'config/agents', workflows: 'config/workflows' } });
+    const content = JSON.stringify({ ...engineRaw, default_timeout_ms: 3600000, max_iterations: 1, model: 'retired-model', reasoning_effort: 'low', paths: { agents: 'config/agents', workflows: 'config/workflows' } });
     writeFileSync(join(configDir, 'defaults.yaml'), content);
     writeFileSync(join(configDir, 'agents', 'coder.yaml'), 'name: coder\nprompt: stale project coder\nmodel: retired-model\nreasoning_effort: low\n');
     writeFileSync(join(configDir, 'workflows', 'default.yaml'), 'broken: [project workflow\n');
@@ -82,7 +81,7 @@ describe('engine configuration owns execution defaults', () => {
     const briefPath = join(projectDir, 'brief.md');
     const planPath = join(projectDir, 'dispatch.yaml');
     writeFileSync(briefPath, '# Check the plan\n');
-    writeFileSync(planPath, 'stages:\n  - id: work\n    role: coder\n    scope: []\n    artifact_contract: {version: 1, produces: [], reads: [], replays: []}\n');
+    writeFileSync(planPath, 'stages:\n  - id: work\n    role: coder\n    scope: []\n    artifact_contract: {version: 1, produces: [], reads: []}\n');
     expect(await cmdPlanCheck(['plan-check', '--project', projectDir, '--brief', briefPath, planPath])).toBe(0);
   });
 
@@ -98,7 +97,7 @@ describe('engine configuration owns execution defaults', () => {
     expect(skill).not.toContain('--timeout');
     expect(skill).not.toContain('--max-iterations');
     const configuration = readFileSync(join(root, 'guide', 'configuration.md'), 'utf8');
-    for (const key of ['default_timeout_ms', 'default_max_iterations']) {
+    for (const key of ['default_timeout_ms', 'max_iterations']) {
       expect(skill).toContain('`' + key + '`');
       const row = configuration.split('\n').find(line => line.startsWith('| `' + key + '` |'));
       expect(Number(row?.split('|')[2].trim()), key).toBe(engineRaw[key]);

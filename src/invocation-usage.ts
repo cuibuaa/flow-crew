@@ -12,6 +12,7 @@ export interface InvocationUsage {
   tokens_reasoning?: number;
   cost_usd?: number;
   tokenUsage?: TokenUsage;
+  costUsage?: TokenUsage;
 }
 export interface NativeInvocationUsage extends InvocationUsage {
   startedAt: string;
@@ -25,13 +26,16 @@ export interface NativeInvocationUsage extends InvocationUsage {
 const fields = ['tokens_in', 'tokens_out', 'tokens_cached', 'tokens_cache_created', 'tokens_reasoning'] as const;
 const quantity = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 const cost = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
-/** Carry the same evidence through worker, attempt and stage settlement. */
+/** Carry observed fields only: a later settlement cannot erase earlier usage. */
 export function invocationUsageFields(value: InvocationUsage | undefined): InvocationUsage {
-  return Object.fromEntries([...fields, 'cost_usd', 'tokenUsage'].map(field => [field, value?.[field as keyof InvocationUsage]]));
+  return Object.fromEntries([...fields, 'cost_usd', 'tokenUsage', 'costUsage'].map(field => [field, value?.[field as keyof InvocationUsage]]).filter(([, value]) => value !== undefined));
 }
-export function usageComplete(value: InvocationUsage): boolean {
+export function tokensComplete(value: InvocationUsage): boolean {
   return value.tokenUsage !== 'partial' && value.tokenUsage !== 'unknown'
     && quantity(value.tokens_in) && quantity(value.tokens_out);
+}
+export function usageComplete(value: InvocationUsage): boolean {
+  return tokensComplete(value) && cost(value.cost_usd) && value.costUsage !== 'partial' && value.costUsage !== 'unknown';
 }
 export function sumInvocationUsage(values: InvocationUsage[]): InvocationUsage {
   const result: InvocationUsage = {};
@@ -43,8 +47,9 @@ export function sumInvocationUsage(values: InvocationUsage[]): InvocationUsage {
   const costs = values.map(v => v.cost_usd).filter(cost);
   const totalCost = costs.reduce((n, v) => n + v, 0);
   if (costs.length && cost(totalCost)) result.cost_usd = totalCost;
-  result.tokenUsage = values.length > 0 && values.every(usageComplete) && usageComplete(result) ? 'known'
+  result.tokenUsage = values.length > 0 && values.every(tokensComplete) && tokensComplete(result) ? 'known'
     : fields.some(field => result[field] !== undefined) ? 'partial' : 'unknown';
+  result.costUsage = values.length > 0 && values.every(value => cost(value.cost_usd) && value.costUsage !== 'partial' && value.costUsage !== 'unknown') ? 'known' : costs.length ? 'partial' : 'unknown';
   return result;
 }
 
@@ -102,9 +107,10 @@ export class NativeUsageAccumulator {
       const key = field as 'tokens_in' | 'tokens_out';
       return usage[key] !== undefined && modelTotal[key] !== undefined && usage[key] !== modelTotal[key];
     });
-    usage.tokenUsage = complete && (usageComplete(this.cumulative ?? {}) || usageComplete(modelTotal ?? {})) && !mismatch
+    usage.tokenUsage = complete && (tokensComplete(this.cumulative ?? {}) || tokensComplete(modelTotal ?? {})) && !mismatch
       && quantity(usage.tokens_in) && quantity(usage.tokens_out) ? 'known'
       : fields.some(field => usage[field] !== undefined) ? 'partial' : 'unknown';
+    usage.costUsage = complete && cost(usage.cost_usd) ? 'known' : cost(usage.cost_usd) ? 'partial' : 'unknown';
     return { ...usage, ...(this.models ? { models: this.models } : {}),
       ...(mismatch ? { reason: 'native_model_usage_disagreement' } : {}) };
   }

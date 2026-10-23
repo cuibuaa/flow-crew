@@ -1,3 +1,14 @@
+/** Stage execution is a separate state machine from the enclosing run. Shared
+ * here so renderers need not initialize the persistence layer for constants. */
+export const STAGE_STATUS = {
+  PENDING: 'pending',
+  RUNNING: 'running',
+  COMPLETE: 'complete',
+  FAILED: 'failed',
+  SKIPPED: 'skipped',
+} as const;
+export type StageState = typeof STAGE_STATUS[keyof typeof STAGE_STATUS];
+
 /** Exact run lifecycle vocabulary. Semantic groups and guards derive from this table. */
 export const RUN_STATUS = {
   PENDING: 'pending',
@@ -5,13 +16,11 @@ export const RUN_STATUS = {
   PARKED: 'parked',
   COMPLETE: 'complete',
   FAILED: 'failed',
-  AWAITING_APPROVAL: 'awaiting_approval',
   SHIPPED: 'shipped',
   CEILING_HIT: 'ceiling_hit',
   ESCALATED: 'escalated',
   REALITY_GATE_FAILED: 'reality_gate_failed',
-  PHASE_COMPLETE: 'phase_complete',
-  STOPPED: 'stopped',
+  CANCELLED: 'cancelled',
   INCOMPLETE: 'incomplete',
 } as const;
 export type RunStatus = typeof RUN_STATUS[keyof typeof RUN_STATUS];
@@ -20,7 +29,6 @@ export type RunLifecycleBucket =
   | 'queued'
   | 'executing'
   | 'paused'
-  | 'legacy_approval'
   | 'terminal';
 
 export interface RunStatusSemantics {
@@ -30,23 +38,23 @@ export interface RunStatusSemantics {
   successful: boolean;
   /** Dashboard/history mutations must not race this lifecycle owner. */
   mutationBlocked: boolean;
+  /** An explicit continuation can resume admitted work. */
+  resumable: boolean;
 }
 
 /** A new status cannot compile until its lifecycle, outcome, and mutation behavior are chosen. */
 export const RUN_STATUS_SEMANTICS = {
-  [RUN_STATUS.PENDING]: { lifecycle: 'queued', successful: false, mutationBlocked: false },
-  [RUN_STATUS.RUNNING]: { lifecycle: 'executing', successful: false, mutationBlocked: true },
-  [RUN_STATUS.PARKED]: { lifecycle: 'paused', successful: false, mutationBlocked: true },
-  [RUN_STATUS.COMPLETE]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
-  [RUN_STATUS.FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.AWAITING_APPROVAL]: { lifecycle: 'legacy_approval', successful: false, mutationBlocked: true },
-  [RUN_STATUS.SHIPPED]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
-  [RUN_STATUS.CEILING_HIT]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
-  [RUN_STATUS.ESCALATED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.REALITY_GATE_FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.PHASE_COMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.STOPPED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.INCOMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
+  [RUN_STATUS.PENDING]: { lifecycle: 'queued', successful: false, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.RUNNING]: { lifecycle: 'executing', successful: false, mutationBlocked: true, resumable: false },
+  [RUN_STATUS.PARKED]: { lifecycle: 'paused', successful: false, mutationBlocked: true, resumable: true },
+  [RUN_STATUS.COMPLETE]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: true },
+  [RUN_STATUS.SHIPPED]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.CEILING_HIT]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.ESCALATED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.REALITY_GATE_FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.CANCELLED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: true },
+  [RUN_STATUS.INCOMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: true },
 } as const satisfies Record<RunStatus, RunStatusSemantics>;
 
 export type RunStatusResolution =
@@ -75,6 +83,7 @@ function displayUnknownRunStatus(value: unknown): string {
 
 /** Resolve untrusted run.json text without inventing a lifecycle meaning. */
 export function resolveRunStatus(value: unknown): RunStatusResolution {
+  if (value === 'stopped') value = RUN_STATUS.CANCELLED;
   if (typeof value === 'string'
       && Object.prototype.hasOwnProperty.call(RUN_STATUS_SEMANTICS, value)) {
     const status = value as RunStatus;
@@ -122,12 +131,6 @@ export function isTerminalRunStatus(status: unknown): status is RunStatus {
   return resolution.kind === 'known' && resolution.semantics.lifecycle === 'terminal';
 }
 
-export const PAUSED_STATUSES = [
-  ...Object.values(RUN_STATUS).filter((status) => (
-    RUN_STATUS_SEMANTICS[status].lifecycle === 'paused'
-  )),
-] as readonly RunStatus[];
-
 export function isPausedRunStatus(status: unknown): status is RunStatus {
   const resolution = resolveRunStatus(status);
   return resolution.kind === 'known' && resolution.semantics.lifecycle === 'paused';
@@ -138,25 +141,17 @@ export function isPendingRunStatus(status: unknown): status is RunStatus {
   return resolution.kind === 'known' && resolution.semantics.lifecycle === 'queued';
 }
 
-export function isActiveRunStatus(status: unknown): status is RunStatus {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'known'
-    && (resolution.semantics.lifecycle === 'executing' || resolution.semantics.lifecycle === 'paused');
-}
 
 export function isRunningRunStatus(status: unknown): status is RunStatus {
   const resolution = resolveRunStatus(status);
   return resolution.kind === 'known' && resolution.semantics.lifecycle === 'executing';
 }
 
-export function isAwaitingApprovalRunStatus(status: unknown): status is RunStatus {
-  const resolution = resolveRunStatus(status);
-  return resolution.kind === 'known' && resolution.semantics.lifecycle === 'legacy_approval';
-}
 
-export function isRunMutationBlockedStatus(status: unknown): boolean {
+
+export function isResumableRunStatus(status: unknown): status is RunStatus {
   const resolution = resolveRunStatus(status);
-  return resolution.kind === 'unknown' || resolution.semantics.mutationBlocked;
+  return resolution.kind === 'known' && resolution.semantics.resumable;
 }
 
 export function isSuccessfulRunStatus(status: unknown): status is RunStatus {
@@ -192,4 +187,13 @@ export function isKnownTaskStatus(status: unknown): status is TaskStatus {
 
 export function isActiveTaskStatus(status: string): boolean {
   return (ACTIVE_TASK_STATUSES as readonly string[]).includes(status);
+}
+
+/** Launch controls stay visible; settled tasks display their bound run outcome. */
+export function taskDisplayStatus(taskStatus: string, runStatus?: unknown): string {
+  if ([TASK_STATUS.PENDING, TASK_STATUS.DEFERRED, TASK_STATUS.RUNNING,
+    TASK_STATUS.CANCELLING, TASK_STATUS.STUCK, TASK_STATUS.NEEDS_SUMMARY].some(status => status === taskStatus)
+      || runStatus === undefined) return taskStatus;
+  const resolved = resolveRunStatus(runStatus);
+  return resolved.kind === 'known' ? resolved.status : typeof runStatus === 'string' ? runStatus : taskStatus;
 }

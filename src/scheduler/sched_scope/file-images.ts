@@ -1,5 +1,4 @@
 // Boundary: Represent exact content and Git-index/file-kind evidence, materialize small images and compare content; use rollback-content-store hashing rather than a second store.
-import { type LiveConstraintGitIndexEntryKind, type LiveConstraintGitIndexEntry } from "../../live-constraint-guard.js";
 import { type RollbackStatIdentity, RollbackContentStore, hashRollbackFileSync } from "../../rollback-content-store.js";
 import { type Stats, readdirSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -21,12 +20,10 @@ export interface RepairFileImage {
   backingPath?: string;
   /** Trusted nomination metadata. Content equality still uses the hash. */
   statIdentity?: RollbackStatIdentity;
-  /** Latest current identity whose bytes were verified equal to this preimage. */
-  verifiedStatIdentity?: RollbackStatIdentity;
   symlink?: boolean;
-  type?: 'file' | 'symlink' | 'gitlink' | 'sparse_tree' | 'unmerged';
+  type?: 'file' | 'directory' | 'symlink' | 'gitlink' | 'sparse_tree' | 'unmerged';
   /** The index kind stays explicit even when filesystem bytes are readable. */
-  indexEntryKind?: LiveConstraintGitIndexEntryKind;
+  indexEntryKind?: GitIndexEntryKind;
   /** Git blob identity proves bytes even when the blob cannot be materialized. */
   gitObjectId?: string;
   /** Exact preimage bytes could not be obtained; never interpret this as absence. */
@@ -35,6 +32,8 @@ export interface RepairFileImage {
   inspectionFailure?: string;
   /** Retained only as restoration metadata; never part of content equality. */
   mode?: number;
+  /** Admitted physical parent for frozen restoration; never follow a replacement alias. */
+  restorationParent?: string;
 }
 
 export function describeRepairError(error: unknown): string {
@@ -43,11 +42,11 @@ export function describeRepairError(error: unknown): string {
   return `${code}${error.message}`;
 }
 
-export function stageZeroIndexEntry(entries: readonly LiveConstraintGitIndexEntry[] | undefined): LiveConstraintGitIndexEntry | undefined {
+export function stageZeroIndexEntry(entries: readonly GitIndexEntry[] | undefined): GitIndexEntry | undefined {
   return entries?.find((entry) => entry.stage === 0);
 }
 
-function indexEntryKind(entries: readonly LiveConstraintGitIndexEntry[] | undefined): LiveConstraintGitIndexEntryKind | undefined {
+function indexEntryKind(entries: readonly GitIndexEntry[] | undefined): GitIndexEntryKind | undefined {
   const stageZero = stageZeroIndexEntry(entries);
   if (stageZero) return stageZero.kind;
   return entries?.length ? 'unmerged' : undefined;
@@ -56,7 +55,7 @@ function indexEntryKind(entries: readonly LiveConstraintGitIndexEntry[] | undefi
 function readGitlinkFileImage(
   projectDir: string,
   normalized: string,
-  entry: LiveConstraintGitIndexEntry,
+  entry: GitIndexEntry,
   stat: Stats,
 ): RepairFileImage {
   const absolute = join(projectDir, normalized);
@@ -131,7 +130,7 @@ function readGitlinkFileImage(
 export function readRepairFileImage(
   projectDir: string,
   relativePath: string,
-  indexEntries?: readonly LiveConstraintGitIndexEntry[],
+  indexEntries?: readonly GitIndexEntry[],
   options: { contentStore?: RollbackContentStore } = {},
 ): RepairFileImage {
   const normalized = normalizedProjectPath(relativePath);
@@ -186,6 +185,8 @@ export function readRepairFileImage(
       };
     }
   }
+  if (stat.isDirectory()) return { exists: true, type: 'directory', byteLength: 0,
+    sha256: createHash('sha256').update('directory').digest('hex'), mode: stat.mode & 0o7777 };
   if (!stat.isFile()) return { exists: false, provenance: 'unknown', ...(kind ? { indexEntryKind: kind } : {}) };
   try {
     let backingPath: string | undefined;
@@ -294,4 +295,59 @@ export function compareRepairFileContents(
     return actual === undefined ? 'unavailable' : actual === after.gitObjectId ? 'equal' : 'different';
   }
   return 'unavailable';
+}
+
+export type GitIndexEntryKind =
+  | 'regular'
+  | 'executable'
+  | 'symlink'
+  | 'gitlink'
+  | 'sparse_tree'
+  | 'unmerged'
+  | 'unknown';
+
+export interface GitIndexEntry {
+  path: string;
+  objectId: string;
+  mode: string;
+  stage: number;
+  kind: GitIndexEntryKind;
+}
+
+export function classifyGitIndexEntry(mode: string, stage: number): GitIndexEntryKind {
+  if (stage !== 0) return 'unmerged';
+  switch (mode) {
+    case '100644': return 'regular';
+    case '100755': return 'executable';
+    case '120000': return 'symlink';
+    case '160000': return 'gitlink';
+    case '040000': return 'sparse_tree';
+    default: return 'unknown';
+  }
+}
+
+/** Retain every index stage; stage 1/2/3 entries are evidence, not noise. */
+export function parseGitIndexEntries(output: string): Map<string, GitIndexEntry[]> {
+  const entries = new Map<string, GitIndexEntry[]>();
+  for (const record of output.split('\0')) {
+    if (!record) continue;
+    const tab = record.indexOf('\t');
+    if (tab < 0) continue;
+    const [mode, objectId, rawStage] = record.slice(0, tab).split(' ');
+    const path = record.slice(tab + 1).replace(/\\/g, '/');
+    const stage = Number(rawStage);
+    if (!mode || !/^[0-7]{6}$/.test(mode) || !/^[0-9a-f]{40,64}$/i.test(objectId ?? '')
+        || !Number.isInteger(stage) || stage < 0 || stage > 3 || !path) continue;
+    const row: GitIndexEntry = {
+      path,
+      objectId,
+      mode,
+      stage,
+      kind: classifyGitIndexEntry(mode, stage),
+    };
+    const prior = entries.get(path) ?? [];
+    prior.push(row);
+    entries.set(path, prior);
+  }
+  return entries;
 }

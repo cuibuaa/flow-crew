@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 import {
   REGISTRY_COMPACTION_THRESHOLDS,
   TaskRegistry,
+  sessionTaskIndexPath,
   type TaskEntry,
 } from '../src/task-registry.js';
 
@@ -71,6 +72,23 @@ describe('TaskRegistry repair', () => {
     expect(tasks.get(created.id)).toEqual(intendedFinal);
     expect(tasks.update(created.id, { notes: 'updates work after repair' }).notes).toBe('updates work after repair');
     expect(tasks.health()).toEqual({ unreadableRecords: 0 });
+  });
+
+  it('rebuilds session ownership indexes while repairing the damaged registry', () => {
+    const tasks = registry();
+    const launcher = { frontend: 'claude' as const, sessionId: 'repaired', cwd: tempDir, ledgerRoot: tempDir };
+    const created = tasks.create({ brief_text: 'recover ownership', projectDir: tempDir, launcher });
+    const index = sessionTaskIndexPath(tempDir, launcher);
+    rmSync(index);
+    const final = completeRow(created, { status: 'done' });
+    appendFileSync(tasks.registryPath, `{"id":${created.id},"name":"torn${JSON.stringify(final)}\nnot recoverable\n`);
+    const original = readFileSync(tasks.registryPath);
+    const result = tasks.repair({ apply: true });
+    expect(result).toMatchObject({ repairedRecords: 1, quarantinedRecords: 1 });
+    expect(readFileSync(result.backupPath!)).toEqual(original);
+    expect(tasks.get(created.id)).toEqual(final);
+    expect(JSON.parse(readFileSync(index, 'utf8'))).toEqual([created.id]);
+    expect(tasks.compact({ apply: true }).after.unreadableRecords).toBe(0);
   });
 
   it('moves an unprovable unreadable row to quarantine and reports its exact line without silent loss', () => {

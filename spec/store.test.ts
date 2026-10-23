@@ -6,7 +6,8 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRun, fcGlobalDir, requireRunArtifactDirectory, setFcGlobalDir, writeStageOutput } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, requireRunArtifactDirectory, setFcGlobalDir, writeStageOutput } from '../src/store.js';
 import { requireSafeRunId } from '../src/cancellation-policy.js';
 
 describe('run path segment identity', () => {

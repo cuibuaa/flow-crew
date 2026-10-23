@@ -1,10 +1,11 @@
+import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
-import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir } from '../src/store.js';
-import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, runDir, setFcGlobalDir } from '../src/store.js';
 import { createResearchBudgetFinalizer } from '../src/scheduler/sched_loop/research-terminal.js';
 import { createResearchAdvancer } from '../src/scheduler/sched_policy/research.js';
 import { beginResearchInputGeneration } from '../src/research-candidate.js';
@@ -24,17 +25,6 @@ afterEach(() => {
 });
 
 describe('engine bookkeeping stays outside the project', () => {
-  it('refuses a program safeguard through run state without creating an abort document', () => {
-    writeFileSync(join(project, 'STOP'), 'Stop requested');
-    const { runId } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []);
-    const brief = '---\nprogram:\n  name: fixture\n  phase: first\n  ledger: records/ledger.json\n  safeguards:\n    stop_file: STOP\n---\n# Goal\nExercise safeguard refusal.';
-    const configured = configureWorkflowBrief(workflow, project, runId, runDir(project, runId), 1, false, brief);
-    expect(configured.kind).toBe('settled');
-    expect(readRunState(project, runId)).toMatchObject({ status: 'failed', failureReason: expect.stringContaining('STOP') });
-    expect(readdirSync(project)).toEqual(['STOP']);
-    expect(readFileSync(join(runDir(project, runId), 'task_brief.md'), 'utf8')).toBe(brief);
-  });
-
   it.each(['budget', 'round'] as const)('keeps only the declared research report (%s terminal)', async kind => {
     const { runId } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []);
     const state = readRunState(project, runId);
@@ -49,7 +39,7 @@ describe('engine bookkeeping stays outside the project', () => {
     if (kind === 'budget') {
       writeFileSync(join(base, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'first', outcome: 'no_candidate', reason: 'No safe candidate' }] }));
       const finish = createResearchBudgetFinalizer(project, state.runId, base, workflow, adapter, new Map(), project, new Map());
-      settled = await finish(state, 1, 'Budget exhausted', { stages: [], injectedDispatchStages: new Set(), planStageRetries: new Map() });
+      settled = await finish(state, 1, 'Budget exhausted', { stages: [], injectedDispatchStages: new Set() });
       expect(readdirSync(project)).toEqual(['declared.md']);
     } else {
       writeFileSync(join(project, 'round.json.no_candidate.json'), JSON.stringify({ label: 'first', outcome: 'no_candidate', reason: 'No safe candidate' }));

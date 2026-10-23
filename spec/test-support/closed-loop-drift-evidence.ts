@@ -43,7 +43,6 @@ export interface ClosedLoopDriftEvidence {
     doseMinutes: number[];
     doseFloorMinutes: number;
     firstPlan: { attemptIndex: 1; admitted: false; laterAdmittedAttemptIndex: number };
-    supervisorRejections: { total: number; maxPerStage: number; laterOverturned: number; budgetPerStage: number };
     overhead: OverheadRecord[];
     registry: { bytes: number; records: number; tasks: number };
     serviceLogBytes: number;
@@ -73,7 +72,6 @@ export interface MaterializedClosedLoopDriftFixture {
 export const EXPECTED_DRIFT_ROW_IDS = new Set<RunDriftRowId>([
   'research_dose',
   'first_plan_admission',
-  'supervisor_rejections',
   'engine_overhead',
   'registry_growth',
   'log_growth',
@@ -91,7 +89,7 @@ export function loadClosedLoopDriftEvidence(): ClosedLoopDriftEvidence {
   if (fixture.baseFailure.exitCode !== 1 || !/^[0-9a-f]{64}$/.test(fixture.baseFailure.logSha256)) {
     throw new Error('closed-loop drift unchanged-base failure is not bound');
   }
-  if (fixture.anchors.length < 7 || fixture.anchors.some((anchor) => (
+  if (fixture.anchors.length < EXPECTED_DRIFT_ROW_IDS.size || fixture.anchors.some((anchor) => (
     !/^[0-9a-f]{64}$/.test(anchor.sha256)
     || ((anchor.byteStart === undefined) !== (anchor.byteEndExclusive === undefined))
     || (anchor.byteStart !== undefined && anchor.byteEndExclusive! <= anchor.byteStart)
@@ -162,7 +160,6 @@ export function materializeClosedLoopDriftFixture(): MaterializedClosedLoopDrift
     });
   }
   writeFileSync(join(runDir, 'events.jsonl'), `${evidence.events.map((event) => JSON.stringify(event)).join('\n')}\n`, 'utf-8');
-  writeJson(join(runDir, 'signals', 'reject_counts.json'), { run_round: 1, run_round2: 1 });
   writeFileSync(join(runDir, 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
 
   mkdirSync(fcHome, { recursive: true });

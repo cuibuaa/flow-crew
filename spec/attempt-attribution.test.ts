@@ -1,12 +1,13 @@
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
-import { atomicWrite } from '../src/store.js';
+import { atomicWrite } from '../src/engine-fs.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig, RunResult } from '../src/adapters/base.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  beginStageAttempt, completeStageAttempt, createRun, fcGlobalDir, readRunState,
+  beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState,
   readStageStatus, setFcGlobalDir, writeRunState,
 } from '../src/store.js';
 import { readRunEvents, recordStageOutcome } from '../src/run-events.js';
@@ -18,7 +19,6 @@ import { createApprovalMonitor } from '../src/scheduler/sched_policy/approvals.j
 import { recordRequest } from '../src/inbox.js';
 import { admitPlannerDispatches } from '../src/scheduler/sched_loop/planner-dispatch.js';
 import type { StageConfig } from '../src/scheduler/sched_admission/configuration.js';
-import { LiveConstraintGuard } from '../src/live-constraint-guard.js';
 
 let root: string, project: string, prior: string;
 const role: AgentConfig = {
@@ -47,7 +47,7 @@ function workerOpts(created: ReturnType<typeof fixture>) {
     stageId: 'opaque', role, attribution, dependsOn: [], promptTemplate: 'fixture',
     timeout_ms: 60000, projectDir: project, runId: created.runId, runDir: created.runDirPath,
     retries: 0, preserveSession: true,
-    artifactContract: { version: 1 as const, produces: [], reads: [], replays: [] },
+    artifactContract: { version: 1 as const, produces: [], reads: [] },
   };
 }
 const result = (exitCode = 0): RunResult => ({ output: 'fixture', exitCode, duration_ms: 1, tokens_out: 5 });
@@ -104,7 +104,7 @@ describe('durable attempt attribution on every publisher', () => {
     ]);
   });
 
-  it.each(['scheduler', 'supervisor'] as const)('attributes the worker control signal from %s', async source => {
+  it.each(['scheduler', 'watchdog'] as const)('attributes the worker control signal from %s', async source => {
     const created = fixture();
     await runStage({ run: async () => {
       mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
@@ -167,27 +167,6 @@ describe('durable attempt attribution on every publisher', () => {
       disposition: 'discarded', attemptIndex: 1, attemptStartedAt: '2026-01-01T00:00:00.000Z' });
   });
 
-  it.each([0, 1])('attributes a live-corrected result with final exit %s', async exitCode => {
-    const created = fixture();
-    let calls = 0, dirty = false;
-    await runStage({ run: async () => {
-      if (++calls === 1) dirty = true;
-      return result(calls === 1 ? 0 : exitCode);
-    } }, { ...workerOpts(created), liveConstraintGuardFactory: ({ attemptIndex }) => new LiveConstraintGuard({
-      projectDir: project, runDir: created.runDirPath, stageId: 'opaque', attemptIndex,
-      effectiveScope: () => [], watchProject: () => undefined,
-      scopeRevisionInstruction: () => 'correct the unauthorized write',
-      scanAndRestore: () => {
-        if (!dirty) return { scannedPaths: 0, violations: [] };
-        dirty = false;
-        return { scannedPaths: 1, violations: [{ path: 'product.txt', reason: 'outside scope', restored: true }] };
-      },
-    }) });
-    expect(calls).toBe(2);
-    expect(settled(created)).toMatchObject({ ...attribution, disposition: exitCode === 0 ? 'repaired' : 'discarded' });
-    expect(readStageStatus(project, created.runId, 'opaque').attempts).toHaveLength(1);
-  });
-
   it('retains the original attribution when another execution supersedes the accepted result', async () => {
     const created = fixture();
     await runStage({ run: async () => result() }, workerOpts(created));
@@ -205,16 +184,19 @@ describe('durable attempt attribution on every publisher', () => {
     expect(status.attempts?.map(attempt => byStart.get(attempt.startedAt)?.role)).toEqual(['reviewer', 'repair']);
   });
 
-  it('carries attribution through stage-outcome artifact publication', async () => {
+  it('carries attribution in the stage outcome without derived artifact events', async () => {
     const created = fixture();
     await runStage({ run: async () => result() }, workerOpts(created));
     const status = readStageStatus(project, created.runId, 'opaque');
     status.artifacts = ['results.json'];
+    const priorEvents = readRunEvents(project, created.runId).length;
     recordStageOutcome(project, created.runId, 'opaque', 9, status);
-    expect(events(created).find(event => event.type === 'attempt_results_updated')).toMatchObject({
-      ...attribution, disposition: 'accepted', attemptIndex: 1,
+    const published = readRunEvents(project, created.runId).slice(priorEvents);
+    expect(published).toEqual([expect.objectContaining({
+      type: 'stage_complete', ...attribution, disposition: 'accepted', attemptIndex: 1,
       attemptStartedAt: status.attempts?.[0].startedAt,
-    });
+    })]);
+    expect(published[0]).not.toHaveProperty('artifacts');
   });
 
   it.each([0, 1])('records refused planner output even with %s retries already used', retries => {
@@ -225,7 +207,7 @@ describe('durable attempt attribution on every publisher', () => {
     writeFileSync(join(created.runDirPath, 'dispatch.yaml'), 'stages: []\n');
     const planner: StageConfig = { id: 'opaque', role: 'reviewer', depends_on: [], skills: [],
       dynamic_dispatch: true, is_gate: false, criterion_refs: [], prompt_template: 'plan',
-      artifact_contract: { version: 1, produces: [], reads: [], replays: [] } };
+      artifact_contract: { version: 1, produces: [], reads: [] } };
     admitPlannerDispatches([planner], readRunState(project, created.runId), project, created.runId,
       created.runDirPath, new Map([['reviewer', { name: 'reviewer', description: 'fixture' }]]),
       new Set(), new Map([['opaque', retries]]));

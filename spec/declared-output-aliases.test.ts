@@ -3,7 +3,7 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { archiveDeclaredOutputs, isPathSafelyArchived } from '../src/declared-output-archive.js';
+import { archiveDeclaredOutputs, createArchivedPathVerifier } from '../src/declared-output-archive.js';
 import { inspectBriefOutputs, type BriefOutputDeclaration } from '../src/ship-inputs.js';
 
 let root: string, project: string, run: string;
@@ -19,6 +19,19 @@ const declaration = (path: string, expectedType: 'file' | 'directory' = 'file'):
 });
 const inventory = (disposition?: string) => inspectBriefOutputs(`---\noutputs:\n  - path: report.md\n${disposition ? `    on_existing: ${disposition}\n` : ''}---\n`, project);
 const archiveFs = { hashFile: hashRollbackFileSync };
+
+it('indexes a manifest once while rehashing source and archive bytes on every check', () => {
+  archiveDeclaredOutputs(project, run, [declaration('source.md')]);
+  const proof = createArchivedPathVerifier(project, run, archiveFs);
+  expect(proof('source.md')).toBe(true);
+  writeFileSync(join(project, 'source.md'), 'changed source');
+  expect(proof('source.md')).toBe(false);
+  writeFileSync(join(project, 'source.md'), 'source bytes');
+  expect(proof('source.md')).toBe(true);
+  writeFileSync(join(run, 'declared_outputs/source.md'), 'corrupt archive');
+  expect(proof('source.md')).toBe(false);
+  expect(proof('../source.md')).toBe(false);
+});
 
 it.each(['update', 'append', 'replace'])('admits an output alias with explicit %s authority', disposition => {
   symlinkSync('source.md', join(project, 'report.md'));
@@ -65,14 +78,14 @@ it('archives file and directory link objects without copying their target member
     const archived = join(run, 'declared_outputs', 'reports', name);
     expect(lstatSync(archived).isSymbolicLink()).toBe(true);
     expect(readlinkSync(archived, { encoding: 'buffer' })).toEqual(readlinkSync(join(project, 'reports', name), { encoding: 'buffer' }));
-    expect(isPathSafelyArchived(project, run, `reports/${name}`, archiveFs)).toBe(true);
+    expect(createArchivedPathVerifier(project, run, archiveFs)(`reports/${name}`)).toBe(true);
   }
   writeFileSync(join(project, 'source.md'), 'changed target bytes');
-  expect(isPathSafelyArchived(project, run, 'reports/report.md', archiveFs)).toBe(true);
+  expect(createArchivedPathVerifier(project, run, archiveFs)('reports/report.md')).toBe(true);
   rmSync(join(project, 'reports/report.md')); symlinkSync('../future.md', join(project, 'reports/report.md'));
-  expect(isPathSafelyArchived(project, run, 'reports/report.md', archiveFs)).toBe(false);
+  expect(createArchivedPathVerifier(project, run, archiveFs)('reports/report.md')).toBe(false);
   rmSync(join(project, 'reports/report.md')); writeFileSync(join(project, 'reports/report.md'), '../source.md');
-  expect(isPathSafelyArchived(project, run, 'reports/report.md', archiveFs)).toBe(false);
+  expect(createArchivedPathVerifier(project, run, archiveFs)('reports/report.md')).toBe(false);
   for (const target of protectedTargets) expect(readFileSync(target, 'utf8')).toBe('protected bytes');
 });
 
@@ -84,5 +97,5 @@ it('archives an output through a confined directory ancestor and preserves a dec
   expect(archiveDeclaredOutputs(project, run, [declaration('alias', 'directory')]).complete).toBe(true);
   expect(lstatSync(join(run, 'declared_outputs/alias')).isSymbolicLink()).toBe(true);
   expect(readlinkSync(join(run, 'declared_outputs/alias'))).toBe('reports');
-  expect(isPathSafelyArchived(project, run, 'alias', archiveFs)).toBe(true);
+  expect(createArchivedPathVerifier(project, run, archiveFs)('alias')).toBe(true);
 });

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, renameSync, writeFileSync } from './engine-fs.js';
+import { atomicWrite, mkdirSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -55,9 +55,8 @@ function readLedger(path: string): BlockageLedger {
 
 function writeAtomic(path: string, value: BlockageLedger): void {
   mkdirSync(dirname(path), { recursive: true });
-  const temp = `${path}.tmp-${process.pid}`;
-  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, 'utf-8');
-  renameSync(temp, path);
+  // Escalation counts must survive retries and scheduler recovery.
+  atomicWrite(path, `${JSON.stringify(value, null, 2)}\n`, { durability: 'durable' });
 }
 
 /** Count a stable, identical blockage across attempts/iterations. The third

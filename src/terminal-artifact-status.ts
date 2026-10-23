@@ -1,4 +1,5 @@
 import { realpathSync, statSync } from 'node:fs';
+import { compareContentIdentities, readContentIdentity, type ContentIdentity } from './content-identity.js';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { within } from './source_services/cli-inputs.js';
 import { isTerminalRunStatus, terminalArtifactSnapshotName } from './store.js';
@@ -11,9 +12,10 @@ export interface TerminalArtifactStatusMismatch {
 
 export interface PersistedTerminalArtifactState {
   status?: unknown;
+  startedAt?: unknown;
   terminalArtifact?: unknown;
   terminalStates?: unknown;
-  startedAt?: unknown;
+  terminalArtifactBaselines?: Record<string, ContentIdentity>;
   projectDir?: unknown;
   stages?: unknown;
 }
@@ -22,6 +24,7 @@ export interface TerminalArtifactStatusEvidence {
   projectDir?: string;
   runDir?: string;
   artifactMtimeMs?: (path: string) => number | undefined;
+  artifactIdentity?: (path: string) => ContentIdentity;
 }
 
 const SETTLED_STAGE_STATUSES = new Set(['complete', 'failed', 'skipped']);
@@ -58,27 +61,35 @@ function safeDeclaredCandidate(root: string, declaredPath: string): string | und
   return within(resolve(root), candidate) ? candidate : undefined;
 }
 
-function defaultArtifactMtimeMs(path: string, root: string): number | undefined {
+export function terminalArtifactIdentity(path: string, root: string, evidence: TerminalArtifactStatusEvidence = {}): ContentIdentity {
   try {
-    const canonicalRoot = realpathSync.native(root);
-    const canonicalPath = realpathSync.native(path);
-    if (!within(canonicalRoot, canonicalPath)) return undefined;
-    const stat = statSync(canonicalPath);
-    return stat.isFile() && Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : undefined;
-  } catch {
-    return undefined;
+    const canonical = evidence.artifactIdentity ? path : realpathSync.native(path);
+    return within(evidence.artifactIdentity ? root : realpathSync.native(root), canonical)
+      ? evidence.artifactIdentity?.(canonical) ?? readContentIdentity(canonical)
+      : { state: 'unavailable', reason: 'terminal artifact escapes its root' };
+  } catch (error) {
+    return ['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')
+      ? { state: 'absent' } : { state: 'unavailable', reason: String(error) };
   }
 }
 
-function artifactMtimeMs(
-  path: string,
-  root: string,
-  evidence: TerminalArtifactStatusEvidence,
-): number | undefined {
-  const value = evidence.artifactMtimeMs
-    ? evidence.artifactMtimeMs(path)
-    : defaultArtifactMtimeMs(path, root);
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+/** Run-start content is the shared freshness boundary, independent of wall clocks. */
+export function freshTerminalArtifact(
+  state: PersistedTerminalArtifactState, declaredPath: string, path: string, root: string,
+  evidence: TerminalArtifactStatusEvidence = {},
+): boolean {
+  // Pre-deploy runs have no content boundary: retain their original timestamp meaning.
+  if (!state.terminalArtifactBaselines) {
+    try {
+      const mtimeMs = evidence.artifactMtimeMs ? evidence.artifactMtimeMs(path) : statSync(path).mtimeMs;
+      return typeof state.startedAt === 'string' && typeof mtimeMs === 'number'
+        && Number.isFinite(mtimeMs) && mtimeMs >= Date.parse(state.startedAt);
+    }
+    catch { return false; }
+  }
+  const identity = terminalArtifactIdentity(path, root, evidence);
+  if (identity.state !== 'present' || identity.type !== 'file') return false;
+  return compareContentIdentities(state.terminalArtifactBaselines[declaredPath] ?? { state: 'absent' }, identity) === 'different';
 }
 
 function everyStageSettled(stages: unknown): boolean {
@@ -99,9 +110,6 @@ function discoverFreshTerminalArtifact(
   if (typeof state.status !== 'string' || isTerminalRunStatus(state.status)) return undefined;
   if (typeof state.terminalArtifact === 'string' && state.terminalArtifact) return undefined;
   if (!everyStageSettled(state.stages)) return undefined;
-  if (typeof state.startedAt !== 'string') return undefined;
-  const startedAtMs = Date.parse(state.startedAt);
-  if (!Number.isFinite(startedAtMs)) return undefined;
   if (!state.terminalStates || typeof state.terminalStates !== 'object' || Array.isArray(state.terminalStates)) {
     return undefined;
   }
@@ -131,12 +139,7 @@ function discoverFreshTerminalArtifact(
         const snapshot = safeDeclaredCandidate(evidence.runDir, terminalArtifactSnapshotName(rawPath));
         if (snapshot) candidates.push({ path: snapshot, root: evidence.runDir });
       }
-      if (!candidates.some((candidate) => {
-        const mtimeMs = artifactMtimeMs(candidate.path, candidate.root, evidence);
-        return mtimeMs !== undefined && mtimeMs >= startedAtMs;
-      })) {
-        continue;
-      }
+      if (!candidates.some(candidate => freshTerminalArtifact(state, rawPath, candidate.path, candidate.root, evidence))) continue;
       fresh.set(`${terminalStatus}\0${rawPath}`, {
         terminalStatus,
         terminalArtifact: rawPath,

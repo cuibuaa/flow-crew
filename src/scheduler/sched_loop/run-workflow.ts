@@ -1,5 +1,4 @@
 // Boundary: Manage admitted run lifetime, verified checkpoint, heartbeat, deterministic watchdog and unconditional owned cleanup around the iteration driver.
-import { pruneSettledWorkAreas } from '../../run-retention.js';
 import { Adapter, AgentConfig, withRunProcessOwnership } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
 import { BriefAdmissionRecord } from '../../brief-preflight.js';
@@ -16,8 +15,8 @@ import { StageWatchdog } from '../../stage-watchdog.js';
 import { configureWorkflowBrief } from './brief.js';
 import { prepareWorkflowLaunch } from './launch.js';
 import { runWorkflowIterations } from './workflow-loop.js';
-import { publishRunCompletion } from './iteration-outcome.js';
-import { settleTerminalResearchCandidates } from '../sched_policy/run-completion.js';
+import { writeCampaignEntry } from './services.js';
+import { concludeRun, settleTerminalResearchCandidates } from '../sched_policy/run-completion.js';
 import { join } from 'node:path';
 import { engineConfigDir } from '../../config.js';
 import { recordRunEvent } from '../../run-events.js';
@@ -62,7 +61,7 @@ export async function runWorkflow(
   return withRunProcessOwnership(projectDir, runId, async () => {
   try {
   const checkpointState = updateRunState(projectDir, runId, (state) => {
-    if (state.status === RUN_STATUS.STOPPED) return;
+    if (state.status === RUN_STATUS.CANCELLED) return;
     state.engineCheckpoint = captureEngineCheckpoint(projectDir, runId);
     const checkpoint = state.engineCheckpoint;
     state.engineHistory ??= [];
@@ -70,7 +69,7 @@ export async function runWorkflow(
       generation: checkpoint.generation, pid: checkpoint.pid, processStart: checkpoint.processStart });
     if (state.recovery?.kind === 'resumable') state.recovery.kind = 'resuming';
   });
-  if (checkpointState.status === RUN_STATUS.STOPPED) return settled = checkpointState;
+  if (checkpointState.status === RUN_STATUS.CANCELLED) return settled = checkpointState;
   const heartbeatDefaults = loadDefaults();
   schedulerHeartbeat = startSchedulerHeartbeat({
     runPath: runDirPath,
@@ -100,22 +99,20 @@ export async function runWorkflow(
   } catch (error) {
     const reason = `Scheduler failed: ${error instanceof Error ? error.message : String(error)}`;
     log.error({ err: error }, reason);
+    let publish: (() => void) | undefined;
     settled = updateRunState(projectDir, runId, state => {
       if (state.status !== RUN_STATUS.RUNNING) return;
-      state.status = RUN_STATUS.FAILED;
-      state.failureReason = reason;
-      state.completedAt = new Date().toISOString();
+      const completedAt = new Date().toISOString();
       for (const stage of Object.values(state.stages)) {
         if (stage.status !== STAGE_STATUS.RUNNING) continue;
         stage.status = STAGE_STATUS.FAILED;
         stage.error = reason;
-        stage.completedAt = state.completedAt;
+        stage.completedAt = completedAt;
       }
-    });
-    if (settled.status === RUN_STATUS.FAILED && settled.failureReason === reason) {
-      const failed = settled;
-      publishRunCompletion(failed, projectDir, runId, () => ({ iteration: failed.currentIteration, detail: reason }));
-    }
+      concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: 'scheduler_failed', detail: reason,
+        eventFields: () => ({ iteration: state.currentIteration, detail: reason }), writeCampaignEntry },
+      (_state, notify) => { publish = notify; });
+    }, () => publish?.());
     return settled;
   } finally {
     // Complete research bookkeeping while this scheduler still owns the run.
@@ -124,7 +121,6 @@ export async function runWorkflow(
     await schedulerHeartbeat?.stop();
     watchdog?.stop();
     removeSchedulerPidIfOwned(schedulerPidPath);
-    pruneSettledWorkAreas(runDirPath);
     if (launchIntentOwned) {
       releaseLaunchIntent(projectDir, runId);
       invalidateRunLockCache();

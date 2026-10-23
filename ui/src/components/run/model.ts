@@ -1,21 +1,19 @@
 import type { RunDetailData, RunEvent, RunStage, RunStageAttempt } from "../../types";
 
 import { isTerminalRunStatus, isSuccessfulRunStatus } from "../../lib/run-status";
-export { NON_TERMINAL_RUN_STATUSES, TERMINAL_RUN_STATUSES, isTerminalRunStatus, isSuccessfulRunStatus } from "../../lib/run-status";
+export { NON_TERMINAL_RUN_STATUSES, TERMINAL_RUN_STATUSES, isTerminalRunStatus, isSuccessfulRunStatus, runStatusTone } from "../../lib/run-status";
 
 const STATUS_DESCRIPTIONS: Record<string, string> = {
   pending: "Registered and waiting to start.",
   running: "Workers are executing this run.",
   parked: "No worker is active; the run is waiting for an operator decision.",
-  awaiting_approval: "The legacy plan approval is waiting; no stage is executing.",
   complete: "The engineering stage graph completed.",
   failed: "Execution ended after a stage or run failure.",
   shipped: "Research or declared delivery was confirmed by its gate.",
   ceiling_hit: "The search reached an honest ceiling without a better result.",
   escalated: "The run ended by escalating an issue for operator intervention.",
   reality_gate_failed: "A deterministic Reality Gate rejected the success claim.",
-  phase_complete: "This phase ended as a non-success outcome; inspect its artifact and program ledger before advancing.",
-  stopped: "The run was stopped by an operator or the system.",
+  cancelled: "The run was cancelled by an operator or the system.",
   incomplete: "The budget ended while useful work was still in progress.",
 };
 
@@ -23,16 +21,8 @@ export function runStatusDescription(status: string): string {
   return STATUS_DESCRIPTIONS[status] ?? "This lifecycle status is unknown to this dashboard build.";
 }
 
-export function runStatusTone(status: string): "success" | "error" | "warning" | "active" | "neutral" {
-  if (isSuccessfulRunStatus(status)) return "success";
-  if (["failed", "reality_gate_failed", "incomplete", "escalated"].includes(status)) return "error";
-  if (["parked", "awaiting_approval", "stopped", "ceiling_hit"].includes(status)) return "warning";
-  if (status === "running") return "active";
-  return "neutral";
-}
-
 export function realRunStages(stages: RunStage[] | null | undefined): RunStage[] {
-  return Array.isArray(stages) ? stages.filter((stage) => stage?.id && stage.id !== "_supervisor") : [];
+  return Array.isArray(stages) ? stages.filter((stage) => stage?.id) : [];
 }
 
 export function historicalRunStages(run: RunDetailData): Array<RunStage & { historyIteration: number }> {
@@ -190,37 +180,6 @@ export function runFailureHistory(stages: RunStage[], historical: RunStage[] = [
   return { failedAttempts, failedAttemptsExact, stageIds, failedStageIds, failedGateIds };
 }
 
-interface UsageSlice {
-  value: number;
-  complete: boolean;
-}
-
-function tokenPair(record: { tokens_in?: number; tokens_out?: number }): UsageSlice {
-  const input = finiteNumber(record.tokens_in);
-  const output = finiteNumber(record.tokens_out);
-  return {
-    value: Math.max(0, input ?? 0) + Math.max(0, output ?? 0),
-    complete: input != null && output != null,
-  };
-}
-
-function stageUsage(stage: RunStage): UsageSlice {
-  if (!stageHasExecution(stage)) return { value: 0, complete: true };
-  const aggregate = tokenPair(stage);
-  if (aggregate.complete) return aggregate;
-  const attempts = Array.isArray(stage.attempts) ? stage.attempts.filter(Boolean) : [];
-  if (attempts.length > 0) {
-    const slices = attempts.map(tokenPair);
-    if (slices.every((slice) => slice.complete)) {
-      return { value: slices.reduce((sum, slice) => sum + slice.value, 0), complete: true };
-    }
-    if (aggregate.value === 0) {
-      return { value: slices.reduce((sum, slice) => sum + slice.value, 0), complete: false };
-    }
-  }
-  return aggregate;
-}
-
 export interface RunUsageTotal {
   tokens: number;
   complete: boolean;
@@ -228,52 +187,16 @@ export interface RunUsageTotal {
 }
 
 export function runUsageTotal(run: RunDetailData): RunUsageTotal {
-  // The state reader accounts for active, retired, evidence and auxiliary
-  // attempts once by execution identity. Summing display rows would count
-  // references twice and omit retired work on older dashboard surfaces.
-  if (run.budget) {
-    const settled = isTerminalRunStatus(run.status) && run.supervisor?.status !== 'running';
-    return {
-      tokens: run.budget.tokens.knownInputTokens + run.budget.tokens.knownOutputTokens,
-      complete: run.budget.tokens.complete && settled,
-      notes: [
-        ...(!run.budget.tokens.complete ? ['recorded attempt usage is incomplete'] : []),
-        ...(!settled ? ['the run or supervisor is still open'] : []),
-      ],
-    };
-  }
-  const stages = realRunStages(run.stages);
-  const executedStages = stages.filter(stageHasExecution);
-  let tokens = 0;
-  let complete = true;
-  const notes: string[] = [];
-
-  for (const stage of executedStages) {
-    const usage = stageUsage(stage);
-    tokens += usage.value;
-    if (!usage.complete) {
-      complete = false;
-      notes.push(`usage for ${stage.id} is incomplete`);
-    }
-  }
-
-  if (run.supervisor) {
-    const supervisor = tokenPair(run.supervisor);
-    tokens += supervisor.value;
-    if (!supervisor.complete || run.supervisor.status === "running") {
-      complete = false;
-      notes.push("supervisor usage is not settled");
-    }
-  } else if (run.supervise === true) {
-    complete = false;
-    notes.push("supervisor usage is unavailable");
-  }
-
-  if (!isTerminalRunStatus(run.status)) {
-    complete = false;
-    notes.push("the run is still open");
-  }
-  return { tokens, complete, notes: [...new Set(notes)] };
+  const budget = run.budget;
+  const settled = isTerminalRunStatus(run.status);
+  return {
+    tokens: budget ? budget.tokens.knownTotalTokens ?? budget.tokens.knownInputTokens + budget.tokens.knownOutputTokens : 0,
+    complete: !!budget?.tokens.complete && settled,
+    notes: [
+      ...(!budget ? ['run usage is unavailable'] : !budget.tokens.complete ? ['recorded attempt usage is incomplete'] : []),
+      ...(!settled ? ['the run is still open'] : []),
+    ],
+  };
 }
 
 export type SummarySectionKind = "conclusion" | "delivery" | "attention" | "audit";
@@ -322,7 +245,6 @@ export interface HumanRunEvent {
   kind: "complete" | "error" | "guide" | "warning" | "neutral";
 }
 
-const MAINTENANCE_EVENTS = new Set(["attempt_summary_refresh_requested"]);
 
 function eventContext(event: RunEvent): string {
   const rawStage = event.stage ?? event.stageId;
@@ -348,7 +270,6 @@ export function humanizeRunEvents(events: RunEvent[] | null | undefined): HumanR
     const timestamp = String(event.ts ?? event.timestamp ?? "").trim();
     if (!timestamp) return [];
     const type = String(event.event ?? event.type ?? "").trim();
-    if (MAINTENANCE_EVENTS.has(type)) return [];
     const context = eventContext(event);
     const known: Record<string, [string, HumanRunEvent["kind"]]> = {
       stage_complete: ["Stage completed", "complete"],
@@ -366,22 +287,13 @@ export function humanizeRunEvents(events: RunEvent[] | null | undefined): HumanR
       run_completed: ["The run reached its recorded outcome", "complete"],
       campaign_alert: ["The campaign raised an alert", "warning"],
       research_injected: ["New research guidance was added", "guide"],
-      supervisor_replan: ["The supervisor changed the execution plan", "guide"],
-      supervisor_reject: ["The supervisor requested another execution", "warning"],
-      supervisor_reject_requested: ["The supervisor requested another execution", "warning"],
-      supervisor_reject_discarded: ["A stale supervisor rejection was discarded", "warning"],
       guidance_written: ["Stage guidance was recorded", "guide"],
-      scope_revision_requested: ["A scope revision was requested", "warning"],
-      scope_revision_decided: ["A scope revision was decided", "guide"],
       admission_rejected: ["Admission rejected a proposal", "error"],
       run_status_changed: ["The canonical run status changed", "neutral"],
-      supervisor_guide: ["The supervisor recorded guidance", "guide"],
       guide: ["Execution guidance was recorded", "guide"],
       plan_dispatch_retry: ["Plan dispatch was retried", "warning"],
-      research_mode_degraded: ["Research mode continued with reduced evidence", "warning"],
       reality_gate_advisory: ["Reality Gate recorded an advisory", "warning"],
       parallel_scope_serialized: ["Parallel work was serialized to protect scope", "warning"],
-      parallel_write_conflict: ["Parallel stages reported a write conflict", "error"],
       approval_parked: ["The run paused for operator approval", "warning"],
       approval_resolved: ["The approval was resolved", "complete"],
     };

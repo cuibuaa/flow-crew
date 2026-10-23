@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,6 +9,8 @@ import { runWorkflow, StageConfigSchema, WorkflowConfigSchema } from '../src/sch
 import { fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir } from '../src/store.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
 let root: string, project: string, previousStore: string;
 beforeEach(() => {
@@ -24,7 +27,7 @@ async function scenario(options: { denied?: boolean; failed?: boolean; rejectAga
   const stage = (id: string, extra: Record<string, unknown> = {}) => StageConfigSchema.parse({
     id, role: 'coder', scope: ['report.txt'], depends_on: [], criterion_refs: [],
     prompt_template: 'Produce the declared outcome.',
-    artifact_contract: { version: 1, produces: [], reads: [], groups: [], replays: [] }, ...extra,
+    artifact_contract: { version: 1, produces: [], reads: [], groups: [] }, ...extra,
   });
   const workflow = WorkflowConfigSchema.parse({ name: 'repair-plan-revision', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
     stage('author', { scope: ['report.txt', 'sample.txt', 'final.txt'] }),
@@ -94,17 +97,17 @@ it('admits and finishes dependent repair slices at the last repair boundary befo
   expect(JSON.parse(readFileSync(join(archive, 'rejected_verdict_review.json'), 'utf8')).pass).toBe(false);
   const diff = JSON.parse(readFileSync(join(archive, 'repair_diff.json'), 'utf8'));
   expect(diff.repairStageIds).toEqual(['repair', 'measure', 'publish']);
-  expect(diff.files.find((file: { path: string }) => file.path === 'sample.txt')).toMatchObject({ preimageAvailable: true, before: { text: 'baseline sample\n' }, after: { text: 'measured\n' } });
-  expect(diff.files.find((file: { path: string }) => file.path === 'final.txt')).toMatchObject({ preimageAvailable: true, before: { exists: false }, after: { text: 'measurement reported\n' } });
+  expect(diff.effectiveScopes).toEqual(Object.fromEntries(result.state.planControl!.stages
+    .filter(stage => diff.repairStageIds.includes(stage.id)).map(stage => [stage.id, stage.scope ?? []])));
+  expect(diff.files.find((file: { path: string }) => file.path === 'sample.txt')).toMatchObject({ before: { sha256: sha256('baseline sample\n') }, after: { sha256: sha256('measured\n') } });
+  expect(diff.files.find((file: { path: string }) => file.path === 'final.txt')).toMatchObject({ before: { exists: false }, after: { sha256: sha256('measurement reported\n') } });
 });
 
-it('retains admission rejection and the original bounded review when a repair widens authority', async () => {
+it('admits changed path estimates without a capability-union veto', async () => {
   const result = await scenario({ denied: true });
-  expect(result.decision).toMatchObject({ accepted: false });
-  expect(result.decision.errors.join(';')).toContain('PLAN_REVISION_SCOPE_WIDENED');
-  expect(result.state.status).toBe('incomplete');
-  expect(result.calls).toEqual(['author', 'review', 'repair', 'review']);
-  expect(result.state.queryState!.planRevision!.revision).toBe(0);
+  expect(result.decision).toMatchObject({ accepted: true });
+  expect(result.decision.errors).toEqual([]);
+  expect(result.state.queryState!.planRevision!.revision).toBe(1);
 });
 
 it('does not release a failed slice to its successor or re-review', async () => {
@@ -135,11 +138,13 @@ it.each([false, true])('reruns dependent repair work with current inputs and fre
   expect(readFileSync(join(project, 'sample.txt'), 'utf8')).toBe('measured 2\n');
   const diff = JSON.parse(readFileSync(join(result.directory, 'gate_reevaluation/iteration_1/round_2/repair_diff.json'), 'utf8'));
   expect(diff.repairStageIds).toEqual(['repair', 'measure', 'publish']);
-  expect(diff.files.find((file: { path: string }) => file.path === 'sample.txt')).toMatchObject({ preimageAvailable: true, before: { text: 'measured 1\n' }, after: { text: 'measured 2\n' } });
+  expect(diff.effectiveScopes).toEqual(Object.fromEntries(result.state.planControl!.stages
+    .filter(stage => diff.repairStageIds.includes(stage.id)).map(stage => [stage.id, stage.scope ?? []])));
+  expect(diff.files.find((file: { path: string }) => file.path === 'sample.txt')).toMatchObject({ before: { sha256: sha256('measured 1\n') }, after: { sha256: sha256('measured 2\n') } });
   for (const id of ['repair', 'measure', 'publish']) {
     const audit = JSON.parse(readFileSync(join(result.directory, `stages/${id}/constraint_audit_attempt_2.json`), 'utf8'));
     expect(audit.violations).toEqual([]);
-    expect(audit.liveIncidents).toEqual([]);
+    expect(audit).not.toHaveProperty('liveIncidents');
     expect(audit.rolledBackWrites).toEqual([]);
   }
 });

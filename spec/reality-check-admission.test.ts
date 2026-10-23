@@ -1,3 +1,4 @@
+import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   existsSync,
@@ -10,10 +11,9 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
+import { parseChecksFromMarkdown, readRealityGateReport } from '../src/reality-gate/index.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
-  enforceRealityGateBeforeTerminal,
   fcGlobalDir,
   readRunState,
   runDir,
@@ -60,15 +60,11 @@ async function expectMalformedAdmission(
   }]);
 
   const created = createRealityRun(markdown);
-  const gate = await enforceRealityGateBeforeTerminal(
-    projectDir,
-    created.runId,
-    created.state,
-    'complete',
-  );
+  const gate = await concludeRun(created.state, { status: 'complete', reasonCode: 'workflow_complete' });
+  const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
 
-  expect(gate.allowed).toBe(false);
-  expect(gate.report).toMatchObject({
+  expect(gate.status).toBe('reality_gate_failed');
+  expect(gateReport).toMatchObject({
     pass: false,
     checksRun: 1,
     results: [{
@@ -78,8 +74,8 @@ async function expectMalformedAdmission(
       details: expect.stringContaining(expectedDiagnostic),
     }],
   });
-  expect(gate.report?.results[0].advisory).not.toBe(true);
-  expect(gate.report?.results[0].details).toMatch(/Fix the named declaration.*rerun Reality-Gate/i);
+  expect(gateReport.results[0].advisory).not.toBe(true);
+  expect(gateReport.results[0].details).toMatch(/Fix the named declaration.*rerun Reality-Gate/i);
 
   const persisted = readRunState(projectDir, created.runId);
   expect(persisted.status).toBe('reality_gate_failed');
@@ -109,15 +105,9 @@ describe('malformed Reality-check admission', () => {
     expect(parseChecksFromMarkdown(markdown)).toEqual([]);
     const created = createRealityRun(markdown);
 
-    const gate = await enforceRealityGateBeforeTerminal(
-      projectDir,
-      created.runId,
-      created.state,
-      'complete',
-    );
+    const gate = await concludeRun(created.state, { status: 'complete', reasonCode: 'workflow_complete' });
 
-    expect(gate.allowed).toBe(true);
-    expect(gate.report).toBeUndefined();
+    expect(gate.status).toBe('complete');
     expect(existsSync(join(created.runDirPath, '.reality-gate.json'))).toBe(false);
   });
 
@@ -137,15 +127,11 @@ describe('malformed Reality-check admission', () => {
     })]);
 
     const created = createRealityRun(markdown);
-    const gate = await enforceRealityGateBeforeTerminal(
-      projectDir,
-      created.runId,
-      created.state,
-      'complete',
-    );
+    const gate = await concludeRun(created.state, { status: 'complete', reasonCode: 'workflow_complete' });
+    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
 
-    expect(gate.allowed).toBe(false);
-    expect(gate.report).toMatchObject({
+    expect(gate.status).toBe('reality_gate_failed');
+    expect(gateReport).toMatchObject({
       pass: false,
       checksRun: 1,
       results: [{ name: 'Reality checks declaration', pass: false }],
@@ -221,15 +207,11 @@ describe('malformed Reality-check admission', () => {
     ]);
     const created = createRealityRun(markdown);
 
-    const gate = await enforceRealityGateBeforeTerminal(
-      projectDir,
-      created.runId,
-      created.state,
-      'complete',
-    );
+    const gate = await concludeRun(created.state, { status: 'complete', reasonCode: 'workflow_complete' });
+    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
 
-    expect(gate.allowed).toBe(false);
-    expect(gate.report?.results.map(({ name, pass }) => ({ name, pass }))).toEqual([
+    expect(gate.status).toBe('reality_gate_failed');
+    expect(gateReport.results.map(({ name, pass }) => ({ name, pass }))).toEqual([
       { name: 'present-first', pass: true },
       { name: 'missing-second', pass: false },
     ]);

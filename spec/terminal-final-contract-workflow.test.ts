@@ -10,7 +10,8 @@ import {
   type WorkflowConfig,
 } from '../src/scheduler.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { createRun, readRunState, runDir, writeRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { readRunState, runDir, writeRunState } from '../src/store.js';
 
 let projectDir: string;
 
@@ -211,8 +212,7 @@ describe('terminal final contract workflow behavior', () => {
           return fixtureResult(result('phase complete'), opts);
         }
         if (opts.stageId === finalGate) {
-          const verdict = terminalVerdict();
-          writeJson(join(opts.runDir, `pre_gate_verdict_${finalGate}.json`), verdict);
+          const verdict = { ...terminalVerdict(), pass: true };
           writeJson(join(opts.runDir, `fixture_verdict_${finalGate}.json`), verdict);
           return fixtureResult(result('terminal final completion'), opts);
         }

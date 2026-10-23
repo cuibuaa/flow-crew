@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { inputFile } from './spec_contracts/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -5,14 +7,12 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parseChecksFromBrief, parseChecksFromMarkdown, runAllChecks, listCheckTypes, readRealityGateReport } from '../src/reality-gate/index.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
-  enforceRealityGateBeforeTerminal,
   fcGlobalDir,
   readRunState,
   runDir,
   setFcGlobalDir,
-  writeRunState,
 } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
 import { execWithStdin } from '../src/adapters/base.js';
@@ -273,7 +273,6 @@ describe('reality gate parser and aggregation', () => {
 describe('store integration', () => {
   it.each([0, 7])('retains run-owned scratch and retires standalone check scratch after exit %s', async exitCode => {
     for (const name of ['TMP', 'TEMP']) vi.stubEnv(name, undefined);
-    vi.stubEnv('FLOWCREW_DAEMON_SOCKET', join(taskDir, 'unavailable.sock'));
     const node = "'" + process.execPath.replaceAll("'", "'\"'\"'") + "'";
     const script = [
       `${node} <<'JS'`,
@@ -281,7 +280,7 @@ describe('store integration', () => {
       'const scratch = process.env.TMPDIR;',
       'if (!scratch) { console.error("Invocation-private TMPDIR is required"); process.exit(1); }',
       'fs.writeFileSync(require("node:path").join(scratch, "probe"), "fixture");',
-      'console.log(JSON.stringify({ scratch, tmp: process.env.TMP, temp: process.env.TEMP, socket: process.env.FLOWCREW_DAEMON_SOCKET ?? null }));',
+      'console.log(JSON.stringify({ scratch, tmp: process.env.TMP, temp: process.env.TEMP }));',
       `process.exit(${exitCode});`,
       'JS',
     ].join('\n');
@@ -297,10 +296,11 @@ describe('store integration', () => {
       `## Reality checks\n\`\`\`yaml\n${JSON.stringify({ checks: [{ name: 'scratch', type: 'exec-script-exit-zero', reads: [], params: { script } }] })}\n\`\`\`\n`);
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
-    const evidence = gate.report?.results[0].evidence as { stdout: string; exit: { code: number } };
-    expect(evidence.exit.code, gate.report?.results[0].details).toBe(exitCode);
-    expect(gate.allowed).toBe(exitCode === 0);
+    const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
+    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const evidence = gateReport.results[0].evidence as { stdout: string; exit: { code: number } };
+    expect(evidence.exit.code, gateReport.results[0].details).toBe(exitCode);
+    expect(gate.status).toBe(exitCode === 0 ? 'complete' : 'reality_gate_failed');
     const gateEnvironment = JSON.parse(evidence.stdout);
     const validation = await runValidationCommand({ role: 'test', command: 'bash', args: ['-c', script],
       display: 'scratch check', cwd: projectDir, timeoutMs: 5000 });
@@ -310,7 +310,7 @@ describe('store integration', () => {
     // outside the caller's disposable invocation TMPDIR.
     const scratchAlias = readFileSync(join(taskDir, 'scratch', '.tmpdir'), 'utf8');
     for (const environment of [stageEnvironment, gateEnvironment, validationEnvironment]) {
-      expect(environment).toEqual({ scratch: expect.any(String), tmp: environment.scratch, temp: environment.scratch, socket: null });
+      expect(environment).toEqual({ scratch: expect.any(String), tmp: environment.scratch, temp: environment.scratch });
       if (environment === stageEnvironment) {
         expect(dirname(environment.scratch)).toBe(scratchAlias);
         expect(realpathSync(environment.scratch)).toBe(join(realpathSync(join(taskDir, 'scratch')), basename(environment.scratch)));
@@ -339,11 +339,12 @@ describe('store integration', () => {
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
+    const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
+    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
 
-    expect(gate.allowed).toBe(true);
-    expect(gate.report?.pass).toBe(true);
-    expect(gate.report?.results).toContainEqual(expect.objectContaining({
+    expect(gate.status).toBe('complete');
+    expect(gateReport.pass).toBe(true);
+    expect(gateReport.results).toContainEqual(expect.objectContaining({
       name: 'unavailable-tool',
       pass: false,
       advisory: true,
@@ -383,14 +384,15 @@ describe('store integration', () => {
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
+    const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
+    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
 
-    expect(gate.allowed).toBe(false);
-    expect(gate.report?.results).toContainEqual(expect.objectContaining({
+    expect(gate.status).toBe('reality_gate_failed');
+    expect(gateReport.results).toContainEqual(expect.objectContaining({
       name: 'genuine-failure',
       pass: false,
     }));
-    expect(gate.report?.results[0].advisory).not.toBe(true);
+    expect(gateReport.results[0].advisory).not.toBe(true);
     expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
   });
 
@@ -411,7 +413,7 @@ describe('store integration', () => {
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
-    await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
+    await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
     const diagnostic = readRunState(projectDir, created.runId).realityGate?.results[0];
 
     expect(diagnostic).toMatchObject({
@@ -440,10 +442,10 @@ describe('store integration', () => {
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
+    const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
     const persisted = readRunState(projectDir, created.runId);
 
-    expect(gate.allowed).toBe(false);
+    expect(gate.status).toBe('reality_gate_failed');
     expect(persisted.status).toBe('reality_gate_failed');
     expect(persisted.failureReason).toContain('required-build-proof');
     expect(persisted.failureReason).toContain('script exited 3');
@@ -482,7 +484,7 @@ describe('store integration', () => {
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
-    await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
+    await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
     const result = readRunState(projectDir, created.runId).realityGate?.results[0];
 
     expect(result?.stdout?.tail).toMatch(/stdout-tail$/);
@@ -513,14 +515,15 @@ describe('store integration', () => {
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
+    const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
+    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
 
-    expect(gate.allowed).toBe(false);
-    expect(gate.report?.results[0]).toMatchObject({
+    expect(gate.status).toBe('reality_gate_failed');
+    expect(gateReport.results[0]).toMatchObject({
       name: 'unexplained-127',
       pass: false,
     });
-    expect(gate.report?.results[0].advisory).not.toBe(true);
+    expect(gateReport.results[0].advisory).not.toBe(true);
     expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
   });
 
@@ -539,15 +542,15 @@ describe('store integration', () => {
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
-    writeRunState(projectDir, created.runId, state);
+    const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
+    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
     const persisted = readRunState(projectDir, created.runId);
 
-    expect(gate.allowed).toBe(true);
-    expect(gate.state).toBe(state);
+    expect(gate.status).toBe('complete');
+    expect(gate).toBe(state);
     expect(persisted.status).toBe('complete');
     expect(persisted.failureReason).toBeUndefined();
-    expect(gate.report?.results).toContainEqual(expect.objectContaining({
+    expect(gateReport.results).toContainEqual(expect.objectContaining({
       name: 'optional-environment-check', pass: false, advisory: true,
     }));
     const report = JSON.parse(readFileSync(join(runDir(projectDir, created.runId), '.reality-gate.json'), 'utf8'));
@@ -591,10 +594,11 @@ describe('store integration', () => {
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
+    const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
+    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
 
-    expect(gate.allowed).toBe(false);
-    expect(gate.report?.pass).toBe(false);
+    expect(gate.status).toBe('reality_gate_failed');
+    expect(gateReport.pass).toBe(false);
     expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
   });
 
@@ -607,9 +611,10 @@ describe('store integration', () => {
       '    params: { paths: [artifact.txt] }',
     ].join('\n'), 'utf8');
     const state = readRunState(projectDir, created.runId); state.status = 'complete';
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
-    expect(gate.allowed).toBe(present);
-    expect(gate.report?.pass).toBe(present);
+    const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
+    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    expect(gate.status).toBe(present ? 'complete' : 'reality_gate_failed');
+    expect(gateReport.pass).toBe(present);
     expect(existsSync(join(runDir(projectDir, created.runId), '.reality-gate.json'))).toBe(true);
     if (!present) expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
   });

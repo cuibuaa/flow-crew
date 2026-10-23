@@ -1,28 +1,29 @@
 import { appendFileSync, readFileSync, statSync, truncateSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   readOperationalRunState,
   readRunState,
   writeRunState,
-  type SupervisorAttempt,
+  type RetiredStageUsage,
 } from '../src/store.js';
 
-function attempt(index: number): SupervisorAttempt {
+function retired(index: number): RetiredStageUsage {
   return {
-    index,
-    startedAt: `2026-09-24T00:00:${String(index).padStart(2, '0')}.000Z`,
-    completedAt: `2026-09-24T00:00:${String(index).padStart(2, '0')}.100Z`,
-    status: 'complete',
-    duration_ms: 100,
-    exitCode: 0,
-    tokens_in: undefined,
-    tokens_out: undefined,
-    unverifiedAssessment: undefined,
-    verdict: 'WAIT',
-    effectiveReason: undefined,
-    error: undefined,
+    stageId: 'work',
+    iteration: index,
+    status: { status: 'complete', retries: 0, attempts: [{
+      index: 1,
+      startedAt: `2026-09-24T00:00:${String(index).padStart(2, '0')}.000Z`,
+      completedAt: `2026-09-24T00:00:${String(index).padStart(2, '0')}.100Z`,
+      status: 'complete',
+      duration_ms: 100,
+      exitCode: 0,
+      tokens_in: undefined,
+      tokens_out: undefined,
+      error: undefined,
+    }] },
   };
 }
 
@@ -31,20 +32,17 @@ describe('scheduler history polling boundary', () => {
     const projectDir = process.env.FLOWCREW_VITEST_ROOT!;
     const created = createRun(projectDir, 'history-poll', 'name: history-poll', ['work']);
     const state = readRunState(projectDir, created.runId);
-    state.supervisor = {
-      status: 'running', calls: 1, tokens_in: 0, tokens_out: 0,
-      duration_ms: 100, startedAt: state.startedAt, attempts: [attempt(1)],
-    };
+    state.retiredStageUsage = [retired(1)];
     writeRunState(projectDir, created.runId, state);
 
     const operational = readOperationalRunState(projectDir, created.runId);
-    expect(operational.supervisor?.attempts).toEqual([]);
-    expect(readRunState(projectDir, created.runId).supervisor?.attempts).toHaveLength(1);
+    expect(operational.retiredStageUsage).toBeUndefined();
+    expect(readRunState(projectDir, created.runId).retiredStageUsage).toHaveLength(1);
 
     const historyPath = join(created.runDirPath, 'run-history.jsonl');
     const acknowledged = operational.stateFormat!.history!.committedBytes;
     truncateSync(historyPath, acknowledged - 1);
-    expect(readOperationalRunState(projectDir, created.runId).supervisor?.attempts).toEqual([]);
+    expect(readOperationalRunState(projectDir, created.runId).retiredStageUsage).toBeUndefined();
     expect(() => readRunState(projectDir, created.runId)).toThrow(/history is truncated/i);
   });
 
@@ -52,10 +50,7 @@ describe('scheduler history polling boundary', () => {
     const projectDir = process.env.FLOWCREW_VITEST_ROOT!;
     const created = createRun(projectDir, 'stable-delta', 'name: stable-delta', []);
     const state = readRunState(projectDir, created.runId);
-    state.supervisor = {
-      status: 'running', calls: 1, tokens_in: 0, tokens_out: 0,
-      duration_ms: 100, startedAt: state.startedAt, attempts: [attempt(1)],
-    };
+    state.retiredStageUsage = [retired(1)];
     writeRunState(projectDir, created.runId, state);
     const historyPath = join(created.runDirPath, 'run-history.jsonl');
     const oneAttemptBytes = statSync(historyPath).size;
@@ -64,8 +59,7 @@ describe('scheduler history polling boundary', () => {
     expect(statSync(historyPath).size).toBe(oneAttemptBytes);
     expect(readFileSync(historyPath, 'utf-8').trim().split('\n')).toHaveLength(1);
 
-    state.supervisor.attempts.push(attempt(2));
-    state.supervisor.calls = 2;
+    state.retiredStageUsage!.push(retired(2));
     writeRunState(projectDir, created.runId, state);
     const afterGenuineAppend = statSync(historyPath).size;
     expect(afterGenuineAppend).toBeGreaterThan(oneAttemptBytes);

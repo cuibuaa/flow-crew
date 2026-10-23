@@ -1,3 +1,4 @@
+import { cancelRunStateAtPath } from './scheduler/sched_policy/run-completion.js';
 import { readFileSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import {
@@ -12,7 +13,6 @@ import {
   resolveRunStatus,
   RUN_STATUS,
   runsRoot,
-  cancelRunStateAtPath,
   type StoreState,
 } from './store.js';
 import { requireSafeRunId, resolveRunIdentity } from './cancellation-policy.js';
@@ -25,7 +25,7 @@ import {
   schedulerProcessIsAliveForCancellation,
 } from './run-lock.js';
 import type { SupervisorBackend, UnitStatus } from './supervision.js';
-import { checkpointCommandFateKnown, checkpointConsumers } from './restart-recovery.js';
+import { checkpointConsumers } from './restart-recovery.js';
 
 /** Blocked recovery ends the workflow without asserting consumer death. An
  * explicit interrupt still closes control state and attempts owned cleanup. */
@@ -188,7 +188,7 @@ export class RunCancellationCoordinator {
 
   cancelTask(taskId: number): Promise<CancellationResult> {
     const task = this.registry.get(taskId);
-    if (!task) throw new Error(`Task not found: ${taskId}`);
+    if (!task) throw Object.assign(new Error(`Task not found: ${taskId}`), { code: 'TASK_NOT_FOUND' });
     const run = this.readRunTarget(task.run_id);
     return this.coordinate({ task, run, runBinding: run?.binding ?? task.run_id });
   }
@@ -196,7 +196,7 @@ export class RunCancellationCoordinator {
   cancelRun(runId: string, unit?: string): Promise<CancellationResult> {
     requireSafeRunId(runId);
     const run = this.readRunTarget(runId);
-    if (!run) throw new Error(`Run not found: ${runId}`);
+    if (!run) throw Object.assign(new Error(`Run not found: ${runId}`), { code: 'RUN_NOT_FOUND' });
     const task = this.registry.list({ status: TASK_LIST_STATUS.ALL })
       .filter((entry) => this.taskRunId(entry) === run.runId)
       .sort((left, right) => (
@@ -204,33 +204,6 @@ export class RunCancellationCoordinator {
         || right.id - left.id
       ))[0];
     return this.coordinate({ task, run, runBinding: run.binding, unit });
-  }
-
-  /** Read-only convergence check used after a client loses the mutating RPC
-   * response. It never sends another stop signal. */
-  async statusRun(runId: string, unit?: string): Promise<CancellationResult> {
-    requireSafeRunId(runId);
-    const run = this.readRunTarget(runId);
-    if (!run) throw new Error(`Run not found: ${runId}`);
-    const task = this.registry.list({ status: TASK_LIST_STATUS.ALL })
-      .filter((entry) => this.taskRunId(entry) === run.runId)
-      .sort((left, right) => right.id - left.id)[0];
-    const target: CancellationTarget = { task, run, runBinding: run.binding, unit };
-    const observation = await this.observe(target);
-    const current = this.readRunTarget(run.binding) ?? run;
-    const runAlreadyTerminal = preservesTerminalRun(current.state);
-    if (runAlreadyTerminal && (current.state.status === RUN_STATUS.STOPPED || this.isStopped(observation))) {
-      return {
-        ok: true,
-        status: current.state.status === RUN_STATUS.STOPPED ? 'cancelled' : 'already-terminal',
-        runId,
-        ...(task ? { taskId: task.id } : {}),
-        observation,
-        preservedRunStatus: current.state.status,
-        message: this.observationMessage('Terminal control state was preserved', observation),
-      };
-    }
-    return { ok: false, status: 'cancelling', runId, ...(task ? { taskId: task.id } : {}), observation, message: this.observationMessage('cancellation has not converged', observation) };
   }
 
   private coordinate(target: CancellationTarget): Promise<CancellationResult> {
@@ -499,7 +472,7 @@ export class RunCancellationCoordinator {
     let commandFateKnown = false;
     try {
       activeCommandPids = checkpointConsumers(latestRun?.state.engineCheckpoint);
-      commandFateKnown = checkpointCommandFateKnown(latestRun?.state);
+      commandFateKnown = true;
     } catch { /* invalid or unreadable ownership is unknown evidence */ }
     return {
       unit,
@@ -547,6 +520,8 @@ export class RunCancellationCoordinator {
       const runPath = identity.directory;
       const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as StoreState;
       if (!state || typeof state.projectDir !== 'string' || typeof state.status !== 'string') return undefined;
+      const status = resolveRunStatus(state.status);
+      if (status.kind === 'known') state.status = status.status;
       const runId = identity.runId;
       return { runId, binding: runPath, runPath, projectDir: state.projectDir, state };
     } catch {

@@ -9,7 +9,8 @@ import {
   runStage,
 } from '../src/worker.js';
 import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
-import { createRun, fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 
 const ATTEMPT_STARTED_WALL_MS = Date.parse('2030-01-01T00:00:00.000Z');
 const role: AgentConfig = {
@@ -88,11 +89,12 @@ describe('bounded wrap-up settlement accounting', () => {
       runDir: created.runDirPath,
       retries: 0,
     });
-    return readStageStatus(projectDir, created.runId, stageId).timeout?.terminationCause;
+    const status = readStageStatus(projectDir, created.runId, stageId);
+    return { cause: status.attempts?.at(-1)?.terminationCause, forced: status.continuation?.forced };
   }
 
   it('keeps the same forced-wrap cause while child settlement is observed', async () => {
-    await expect(persistedTerminationCause(true)).resolves.toBe('budget_forced_stop');
-    await expect(persistedTerminationCause(false)).resolves.toBe('budget_forced_stop');
+    await expect(persistedTerminationCause(true)).resolves.toEqual({ cause: 'exit', forced: true });
+    await expect(persistedTerminationCause(false)).resolves.toEqual({ cause: 'exit', forced: true });
   });
 });

@@ -5,7 +5,7 @@
 set -e
 
 usage() {
-  printf '%s\n' 'Usage: ./install.sh [--claude] [--codex] [--global|--project]'
+  printf '%s\n' 'Usage: ./install.sh [--claude] [--codex] [--global|--project] [--uninstall]'
   printf '%s\n' ''
   printf '%s\n' '  --claude   Install /ship and /fc-status for Claude Code'
   printf '%s\n' '  --codex    Install ship and fc-status skills for Codex'
@@ -26,6 +26,7 @@ SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd -P)"
 INSTALL_CLAUDE=false
 INSTALL_CODEX=false
 GLOBAL=true
+UNINSTALL=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -33,6 +34,7 @@ for arg in "$@"; do
     --codex) INSTALL_CODEX=true ;;
     --global) GLOBAL=true ;;
     --project) GLOBAL=false ;;
+    --uninstall) UNINSTALL=true ;;
     --help|-h)
       usage
       exit 0
@@ -57,11 +59,11 @@ if $GLOBAL && [ -z "${HOME:-}" ]; then
 fi
 
 install_bundles() {
-  "$NODE_BIN" --input-type=module - "$SCRIPT_DIR" "$1" "${2:-}" <<'NODE'
+  "$NODE_BIN" --input-type=module - "$SCRIPT_DIR" "$1" "${2:-}" "$UNINSTALL" <<'NODE'
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 
-const [sourceDir, targetRoot, legacyRoot] = process.argv.slice(2);
+const [sourceDir, targetRoot, legacyRoot, uninstall] = process.argv.slice(2);
 const guideDir = resolve(sourceDir, '../guide');
 const linkPattern = /\[([^\]]+)\]\(([^\s)]+)\)/g;
 const external = (href) => /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href);
@@ -92,6 +94,16 @@ function bundle(name) {
 
 // Read the complete sources before changing either installed definition.
 const bundles = ['ship', 'fc-status'].map(bundle);
+if (uninstall === 'true') {
+  for (const { root, files } of bundles) {
+    for (const [path, content] of files) {
+      const target = resolve(root, path);
+      try { if (readFileSync(target, 'utf8') === content) unlinkSync(target); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+  }
+  process.exit(0);
+}
 for (const { root, files } of bundles) {
   for (const [path, content] of files) {
     const target = resolve(root, path);
@@ -133,124 +145,14 @@ verify_codex_enumeration() {
       ;;
   esac
 
-  "$NODE_BIN" --input-type=module - "$codex_bin" "$PWD" "$ship_path" "$status_path" "$timeout_ms" <<'NODE'
-import { spawn } from 'node:child_process';
-import { resolve } from 'node:path';
-
-const [codexBin, cwd, shipPath, statusPath, timeoutArg] = process.argv.slice(2);
-const timeoutMs = Number.parseInt(timeoutArg, 10);
-const timeoutLabel = timeoutMs % 1_000 === 0 ? `${timeoutMs / 1_000} seconds` : `${timeoutMs} ms`;
-try {
-  const child = spawn(codexBin, ['app-server'], {
-    cwd,
-    env: process.env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  const listed = await new Promise((resolveList, reject) => {
-    let buffer = '';
-    let stderr = '';
-    let answer;
-    let settled = false;
-    let shutdownTimer;
-    let forceKillTimer;
-    let detachTimer;
-    let stopping = false;
-    let stopError;
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutTimer);
-      clearTimeout(shutdownTimer);
-      clearTimeout(forceKillTimer);
-      clearTimeout(detachTimer);
-      if (error) reject(error);
-      else resolveList(answer);
-    };
-    const stopChild = (error) => {
-      if (settled || stopping) return;
-      stopping = true;
-      stopError = error;
-      child.stdin.end();
-      child.kill('SIGTERM');
-      forceKillTimer = setTimeout(() => {
-        if (settled) return;
-        child.kill('SIGKILL');
-        detachTimer = setTimeout(() => {
-          if (settled) return;
-          child.stdin.destroy();
-          child.stdout.destroy();
-          child.stderr.destroy();
-          child.unref();
-          finish(stopError || new Error('Codex app-server did not exit after forced shutdown'));
-        }, 1_000);
-      }, 500);
-    };
-    const timeoutTimer = setTimeout(() => {
-      stopChild(new Error(`Codex skills/list timed out after ${timeoutLabel}`));
-    }, timeoutMs);
-
-    child.stdin.on('error', () => {});
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      buffer += chunk;
-      for (;;) {
-        const newline = buffer.indexOf('\n');
-        if (newline < 0) break;
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        if (!line.trim()) continue;
-        let message;
-        try { message = JSON.parse(line); } catch { continue; }
-        if (message.id !== 25) continue;
-        if (message.error) {
-          stopChild(new Error(`Codex skills/list returned an error: ${JSON.stringify(message.error)}`));
-          return;
-        }
-        answer = message.result?.data?.flatMap((row) => row.skills || []) || [];
-        child.stdin.end();
-        shutdownTimer = setTimeout(() => stopChild(), 1_000);
-      }
-    });
-    child.on('error', (error) => finish(new Error(`Codex skills/list could not run: ${error.message}`)));
-    child.on('exit', (code) => {
-      if (stopError) finish(stopError);
-      else if (answer) finish();
-      else finish(new Error(stderr.trim() || `Codex app-server exited without skills/list (status ${String(code)})`));
-    });
-    const send = (message) => child.stdin.write(JSON.stringify(message) + '\n');
-    send({ method: 'initialize', id: 0, params: { clientInfo: { name: 'flowcrew_installer', title: 'FlowCrew Installer', version: '1' } } });
-    send({ method: 'initialized', params: {} });
-    send({ method: 'skills/list', id: 25, params: { cwds: [cwd], forceReload: true } });
-  });
-
-  const expected = [
-    ['ship', resolve(shipPath)],
-    ['fc-status', resolve(statusPath)],
-  ];
-  for (const [name, path] of expected) {
-    const found = listed.some((entry) => (
-      entry.name === name
-      && typeof entry.path === 'string'
-      && resolve(entry.path) === path
-      && entry.enabled !== false
-    ));
-    if (!found) throw new Error(`Codex did not enumerate ${name} at ${path}`);
-  }
-  process.stdout.write('  Codex skills/list enumerated ship and fc-status.\n');
-} catch (error) {
-  const detail = error instanceof Error ? error.message : 'unknown verification error';
-  process.stderr.write(`Codex verification failed: ${detail}\n`);
-  process.exitCode = 1;
-}
-NODE
+  "$NODE_BIN" "$SCRIPT_DIR/codex-verify.mjs" install "$codex_bin" "$PWD" "$ship_path" "$status_path" "$CODEX_ROOT" "$timeout_ms"
 }
 
 CLAUDE_BIN=''
 CODEX_BIN=''
 if $INSTALL_CLAUDE; then
-  if CLAUDE_BIN="$(command -v claude 2>/dev/null)"; then
+  if $UNINSTALL; then CLAUDE_BIN=uninstall
+  elif CLAUDE_BIN="$(command -v claude 2>/dev/null)"; then
     :
   else
     CLAUDE_BIN=''
@@ -258,7 +160,8 @@ if $INSTALL_CLAUDE; then
   fi
 fi
 if $INSTALL_CODEX; then
-  if CODEX_BIN="$(command -v codex 2>/dev/null)"; then
+  if $UNINSTALL; then CODEX_BIN=uninstall
+  elif CODEX_BIN="$(command -v codex 2>/dev/null)"; then
     :
   else
     CODEX_BIN=''
@@ -279,27 +182,46 @@ fi
 
 if [ -n "$CLAUDE_BIN" ]; then
   if $GLOBAL; then
-    CLAUDE_ROOT="$HOME/.claude"
+    CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
   else
     CLAUDE_ROOT=".claude"
   fi
   CLAUDE_TARGET="$CLAUDE_ROOT/skills"
   install_bundles "$CLAUDE_TARGET" "$CLAUDE_ROOT/commands"
+  ACTION=install
+  $UNINSTALL && ACTION=remove
+  "$NODE_BIN" "$SCRIPT_DIR/session-integration.mjs" "$ACTION" claude "$CLAUDE_ROOT" "$SCRIPT_DIR/.."
+  if $UNINSTALL; then
+    printf '%s\n' 'Claude Code FlowCrew integration removed; changed skill files are preserved.'
+  else
   printf '✓ Claude Code skills installed and byte-verified at %s/\n' "$CLAUDE_TARGET"
   printf '%s\n' '  /ship       — hand off a plan to FlowCrew'
   printf '%s\n' '  /fc-status  — check run progress'
+  printf '%s\n' '  Restart Claude Code to load the Stop wake hook (Claude >= 2.1.308); run flowcrew doctor.'
   INSTALLED_CLAUDE=true
+  fi
 fi
 
 if [ -n "$CODEX_BIN" ]; then
   if $GLOBAL; then
     CODEX_TARGET="$HOME/.agents/skills"
+    CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
   else
     CODEX_TARGET=".agents/skills"
+    CODEX_ROOT=".codex"
   fi
   CODEX_SHIP="$CODEX_TARGET/ship/SKILL.md"
   CODEX_STATUS="$CODEX_TARGET/fc-status/SKILL.md"
+  if $UNINSTALL && [ -f "$CODEX_ROOT/hooks/flowcrew-session.json" ] && command -v codex >/dev/null 2>&1; then
+    "$NODE_BIN" "$SCRIPT_DIR/codex-verify.mjs" remove "$(command -v codex)" "$PWD" "$CODEX_SHIP" "$CODEX_STATUS" "$CODEX_ROOT" "${FLOWCREW_CODEX_VERIFY_TIMEOUT_MS:-20000}"
+  fi
   install_bundles "$CODEX_TARGET"
+  ACTION=install
+  $UNINSTALL && ACTION=remove
+  "$NODE_BIN" "$SCRIPT_DIR/session-integration.mjs" "$ACTION" codex "$CODEX_ROOT" "$SCRIPT_DIR/.."
+  if $UNINSTALL; then
+    printf '%s\n' 'Codex FlowCrew integration removed; changed skill files are preserved.'
+  else
   if ! verify_codex_enumeration "$CODEX_BIN" "$CODEX_SHIP" "$CODEX_STATUS"; then
     printf '%s\n' 'Codex skill verification failed; installation was not reported as successful.' >&2
     exit 1
@@ -308,9 +230,14 @@ if [ -n "$CODEX_BIN" ]; then
   printf '%s\n' '  $ship       — hand off a plan to FlowCrew (or choose ship from /skills)'
   printf '%s\n' '  $fc-status  — check run progress (or choose fc-status from /skills)'
   INSTALLED_CODEX=true
+  fi
 fi
 
 printf '\n'
+if $UNINSTALL; then
+  printf '%s\n' 'Done. FlowCrew hooks removed; other user hooks and status line restored.'
+  exit 0
+fi
 if $INSTALLED_CLAUDE && $INSTALLED_CODEX; then
   printf '%s\n' 'Done. In Claude Code use /ship; in Codex use $ship or choose ship from /skills.'
 elif $INSTALLED_CLAUDE; then

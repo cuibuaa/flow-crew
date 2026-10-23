@@ -1,3 +1,4 @@
+import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   mkdirSync,
@@ -11,9 +12,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readRealityGateReport } from '../src/reality-gate/index.js';
 import type { RealityGateExit, RealityGateReport } from '../src/reality-gate/types.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
-  enforceRealityGateBeforeTerminal,
   fcGlobalDir,
   readRunState,
   runDir,
@@ -119,12 +119,7 @@ describe('failure evidence transport', () => {
     };
     writeRunState(projectDir, failureRun.runId, deceptiveState);
 
-    const failureGate = await enforceRealityGateBeforeTerminal(
-      projectDir,
-      failureRun.runId,
-      deceptiveState,
-      'complete',
-    );
+    const failureGate = await concludeRun(deceptiveState, { status: 'complete', reasonCode: 'workflow_complete' });
     const failureArtifact = join(runDir(projectDir, failureRun.runId), '.reality-gate.json');
     expect(statSync(failureArtifact).size).toBeGreaterThan(0);
     const failureArtifactRaw = readFileSync(failureArtifact, 'utf-8');
@@ -143,8 +138,8 @@ describe('failure evidence transport', () => {
       exit: failureExit,
     });
 
-    expect(failureGate.allowed).toBe(false);
-    expect(failureGate.report).toEqual(replayedFailure.report);
+    expect(failureGate.status).toBe('reality_gate_failed');
+    expect(failureGate.realityGate).toMatchObject({ pass: replayedFailure.report.pass, checksRun: replayedFailure.report.checksRun });
     expect(replayedFailure.report.results[0]).toMatchObject({
       name: 'deleted-private-log-failure',
       type: 'exec-script-exit-zero',
@@ -196,12 +191,7 @@ describe('failure evidence transport', () => {
     const longState = readRunState(projectDir, longRun.runId);
     longState.status = 'complete';
 
-    const longGate = await enforceRealityGateBeforeTerminal(
-      projectDir,
-      longRun.runId,
-      longState,
-      'complete',
-    );
+    const longGate = await concludeRun(longState, { status: 'complete', reasonCode: 'workflow_complete' });
     const longArtifact = join(runDir(projectDir, longRun.runId), '.reality-gate.json');
     const replayedLong = replayExpectedExecution(longArtifact, {
       command: longCommand,
@@ -209,8 +199,8 @@ describe('failure evidence transport', () => {
       stderr: longStderr,
       exit: longExit,
     });
-    expect(longGate.allowed).toBe(false);
-    expect(longGate.report).toEqual(replayedLong.report);
+    expect(longGate.status).toBe('reality_gate_failed');
+    expect(longGate.realityGate).toMatchObject({ pass: replayedLong.report.pass, checksRun: replayedLong.report.checksRun });
     expect(replayedLong.evidence.stdout).toContain(startSentinel);
     expect(replayedLong.evidence.stdout).toContain(deceptivePass);
     expect(replayedLong.evidence.stdout).toMatch(new RegExp(`${finalVerdict.replace('=', '\\=')}\\n$`));
@@ -289,7 +279,7 @@ describe('failure evidence transport', () => {
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
 
-    const gate = await enforceRealityGateBeforeTerminal(projectDir, created.runId, state, 'complete');
+    const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
     const artifactPath = join(runDir(projectDir, created.runId), '.reality-gate.json');
     const replayed = replayExpectedExecution(artifactPath, {
       command,
@@ -299,7 +289,7 @@ describe('failure evidence transport', () => {
     });
     const display = readRunState(projectDir, created.runId).realityGate?.results[0].stderr;
 
-    expect(gate.allowed).toBe(false);
+    expect(gate.status).toBe('reality_gate_failed');
     expect(replayed.evidence.stderr).toBe(stderr);
     expect(display).toMatchObject({
       sourceChars: stderr.length,

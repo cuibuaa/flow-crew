@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir,
-  TERMINAL_STATUSES, updateRunState, updateRunStateAtPath, writeRunState,
+  fcGlobalDir, readRunState, runDir, setFcGlobalDir,
+  TERMINAL_STATUSES, updateRunState, writeRunState,
 } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
-import { publishRunCompletion } from '../src/scheduler/sched_loop/iteration-outcome.js';
+import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
 
 // Setup imports the store before this file; reload it with the rename observer.
@@ -39,14 +40,13 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-const readers = ['write', 'update', 'path'] as const;
+const readers = ['write', 'update'] as const;
 
 describe('terminal publication', () => {
   it.each(TERMINAL_STATUSES.flatMap(status => readers.map(writer => ({ status, writer }))))(
     'publishes the candidate artifacts before $status via $writer becomes observable',
     ({ status, writer }) => {
       fs.writeFileSync(join(directory, 'summary.md'), 'stale summary');
-      fs.writeFileSync(join(directory, 'progress.md'), 'stale progress');
       const state = readRunState(project, id);
       state.status = status;
       state.completedAt = new Date().toISOString();
@@ -54,45 +54,39 @@ describe('terminal publication', () => {
       state.stages.work = { status: 'complete', retries: 0 };
       state.retiredStageUsage = [{ stageId: 'earlier', iteration: 1,
         status: { status: 'complete', retries: 0, duration_ms: 12 } }];
-      // A path publisher must use its bound directory, even when another store
-      // is currently selected. No selected-store artifact may stand in for it.
-      if (writer === 'path') setFcGlobalDir(join(root, 'other-store'));
       const originalRename = fs.renameSync;
       const actual = vi.mocked(originalRename).getMockImplementation()!;
       let observed = 0;
       vi.mocked(fs.renameSync).mockImplementation((from, to) => {
         if (String(to) === join(directory, 'run.json')) {
           expect(JSON.parse(fs.readFileSync(String(to), 'utf8')).status).toBe('running');
-          for (const artifact of ['summary.md', 'progress.md']) {
-            const content = fs.readFileSync(join(directory, artifact), 'utf8');
-            expect(content).toContain(`Status: **${status}**`);
-            expect(content).toContain('Final outcome evidence');
-            expect(content).toContain('work: complete');
-            expect(content).toContain('earlier [iteration 1, archived]: complete');
-          }
+          const content = fs.readFileSync(join(directory, 'summary.md'), 'utf8');
+          expect(content).toContain(`Status: **${status}**`);
+          expect(content).toContain('Final outcome evidence');
+          expect(content).toContain('work: complete');
+          expect(content).toContain('earlier [iteration 1, archived]: complete');
         }
         actual(from, to);
         if (String(to) === join(directory, 'run.json')) observed++;
       });
       if (writer === 'write') writeRunState(project, id, state);
-      else if (writer === 'update') updateRunState(project, id, current => Object.assign(current, state));
-      else updateRunStateAtPath(directory, current => Object.assign(current, state));
+      else updateRunState(project, id, current => Object.assign(current, state));
       expect(observed).toBe(1);
       expect(JSON.parse(fs.readFileSync(join(directory, 'run.json'), 'utf8')).status).toBe(status);
     },
   );
 
-  it.each(['summary.md', 'progress.md'])('keeps status and completion events unpublished when %s fails', artifact => {
+  it('keeps status and completion events unpublished when summary publication fails', async () => {
     const state = readRunState(project, id);
     state.status = 'complete';
     state.completedAt = new Date().toISOString();
     // A directory at the artifact destination deterministically rejects rename.
-    fs.mkdirSync(join(directory, artifact));
-    expect(() => publishRunCompletion(state, project, id, () => ({ iteration: 1, detail: state.status }))).toThrow();
+    fs.mkdirSync(join(directory, 'summary.md'));
+    await expect(concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' })).rejects.toThrow();
     expect(readRunState(project, id).status).toBe('running');
     expect(readRunEvents(project, id).some(event => event.type === 'run_completed')).toBe(false);
-    fs.rmSync(join(directory, artifact), { recursive: true });
-    publishRunCompletion(state, project, id, () => ({ iteration: 1, detail: state.status }));
+    fs.rmSync(join(directory, 'summary.md'), { recursive: true });
+    await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
     expect(readRunState(project, id).status).toBe('complete');
     expect(readRunEvents(project, id).some(event => event.type === 'run_completed')).toBe(true);
   });
@@ -111,19 +105,20 @@ describe('terminal publication', () => {
     expect(summary).toContain('**Rounds:** 0');
     expect(summary).not.toContain('kept:');
     expect(summary).not.toContain('no-improvement streak:');
-    expect(fs.readFileSync(join(directory, 'progress.md'), 'utf8')).toBe(summary);
+    expect(fs.existsSync(join(directory, 'progress.md'))).toBe(false);
   });
 
-  it('keeps terminal progress when a watchdog ticks after settlement', async () => {
+  it('keeps the terminal summary when a watchdog ticks after settlement', async () => {
     const watchdog = new StageWatchdog(project, id, { idleThresholdMs: 600_000 });
     await watchdog.tick();
     updateRunState(project, id, state => {
       state.status = 'complete';
       state.completedAt = new Date().toISOString();
     });
-    const progress = fs.readFileSync(join(directory, 'progress.md'), 'utf8');
-    expect(progress).toContain('Status: **complete**');
+    const summary = fs.readFileSync(join(directory, 'summary.md'), 'utf8');
+    expect(summary).toContain('Status: **complete**');
     await watchdog.tick();
-    expect(fs.readFileSync(join(directory, 'progress.md'), 'utf8')).toBe(progress);
+    expect(fs.readFileSync(join(directory, 'summary.md'), 'utf8')).toBe(summary);
+    expect(fs.existsSync(join(directory, 'progress.md'))).toBe(false);
   });
 });

@@ -1,24 +1,29 @@
-import { atomicWrite } from '../src/store.js';
+import { atomicWrite } from '../src/engine-fs.js';
+import { providerFailureFromDiagnostic } from '../src/provider-result.js';
 import { readStageLiveLogPath, stageLiveLogPath } from '../src/stage-live-log.js';
 import { appendEngineFile } from '../src/engine-integrity.js';
 import { fixtureResult, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { runStage } from '../src/worker.js';
 import { createScopeSafeStageRunner } from '../src/scheduler/sched_scope/stage-group.js';
-import { createSchedulerLiveConstraintGuardFactory } from '../src/scheduler/sched_loop/services.js';
-import { beforeEach, afterEach, describe, it, expect } from 'vitest';
+import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
-import { createRun, setFcGlobalDir, fcGlobalDir, readStageStatus, readRunState, writeRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { setFcGlobalDir, fcGlobalDir, readStageStatus, readRunState, writeRunState } from '../src/store.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { readRunEvents } from '../src/run-events.js';
-import { publishConstraintDecision, scopePathDigest } from '../src/runtime-negotiation.js';
-import { decideScopeRevision } from '../src/scheduler/sched_scope/scope-revisions.js';
 import { appendGuidanceEnvelope, parseGuidanceLedger } from '../src/guidance.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
+// Exercise every same-attempt backoff slot without spending wall time on production delays.
+vi.mock('../src/worker.js', async importOriginal => {
+    const actual = await importOriginal<typeof import('../src/worker.js')>();
+    return { ...actual, runStage: (adapter: Adapter, opts: Parameters<typeof actual.runStage>[1]) =>
+        actual.runStage(adapter, { ...opts, technicalRetry: { delaysMs: [0, 0, 0] } }) };
+});
 let root: string, project: string, prior: string;
 const uuid = '11111111-1111-4111-8111-111111111111';
 const role: AgentConfig = { name: 'coder', description: 'deterministic', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'current duties' };
@@ -27,40 +32,6 @@ afterEach(() => { setFcGlobalDir(prior); rmSync(root, { recursive: true, force: 
 function ownSession(run: string, stage: string) { const home = join(run, 'stages', stage, 'codex_home'); mkdirSync(home, { recursive: true }); writeFileSync(join(home, 'progress'), 'verified progress'); atomicWrite(join(run, 'stages', stage, 'session.json'), JSON.stringify({ version: 1, adapter: 'codex', sessionId: uuid, ownerStageId: stage, updatedAt: new Date().toISOString() })); return home; }
 function workflow(): WorkflowConfig { return { name: 'settlement', description: '', defaults: { max_iterations: 1, max_retries: 0 }, stages: [{ id: 'work', role: 'coder', depends_on: [], scope: [], skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [], prompt_template: 'write the declared product after scope admission', artifact_contract: fixtureArtifactContract('work') }] }; }
 describe('scheduler attempt closure and own-stage retry progress', () => {
-    it.each(['synchronous', 'command-boundary', 'operator-before-command'] as const)('settles a %s scope handoff without completion and resumes the retained home', async (shape) => {
-        const config = workflow(), yaml = 'name: settlement\nstages: []\n', created = prepareFixtureRun(project, config, yaml);
-        let calls = 0;
-        let retained = false;
-        let resume: string | undefined;
-        const adapter: Adapter = { async run(prompt, _agent, opts) { if (opts.stageId === '_summary')
-                return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts); calls++; if (calls === 1) {
-                ownSession(opts.runDir, opts.stageId);
-                if (shape === 'operator-before-command') appendGuidanceEnvelope({ runDir: opts.runDir, target: 'work', source: 'operator', attemptIndex: 1, body: 'Retain the operator requirement.' });
-                if (shape !== 'synchronous')
-                    opts.onCommandLifecycle?.({ phase: 'started', id: 'request', command: 'declare write scope', timestamp: new Date().toISOString() });
-                const dir = join(opts.runDir, 'stages', opts.stageId);
-                writeFileSync(join(dir, 'scope_revision_request.json'), JSON.stringify({ version: 1, kind: 'scope_revision', requestId: 'write-product', runId: created.runId, stageId: opts.stageId, attemptIndex: opts.attemptIndex, requestedPaths: ['product.txt'], pathDigest: scopePathDigest(['product.txt']), reason: 'produce product' }));
-                if (shape !== 'synchronous') {
-                    await waitForPathEvent(dir, () => { const names = requireNames(dir); return names.some(x => x.startsWith('scope_revision_decision_')) || undefined; });
-                    opts.onCommandLifecycle?.({ phase: 'completed', id: 'request', timestamp: new Date().toISOString() });
-                }
-                return fixtureResult({ output: 'verified progress ready for continuation', sessionId: uuid, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
-            } expect(opts.attemptIndex).toBe(2); expect(prompt).not.toContain('This attempt stops at the control boundary'); if (shape === 'operator-before-command') expect(prompt).toContain('Retain the operator requirement.'); retained = existsSync(join(opts.runDir, 'stages', 'work', 'codex_home', 'progress')); resume = opts.resumeSessionId; writeFileSync(join(project, 'product.txt'), 'current product'); return fixtureResult({ output: 'product delivered', sessionId: uuid, exitCode: 0, duration_ms: 1, writes: ['product.txt'], writeAttribution: 'structured' }, opts); } };
-        const final = await runWorkflow(config, yaml, project, adapter, new Map(), undefined, join(project, 'config', 'agents'), created.runId, 'settle product', true);
-        const status = readStageStatus(project, created.runId, 'work'), events = readRunEvents(project, created.runId);
-        console.log('RUNTIME_PAIR ' + JSON.stringify({ shape, status: final.status, attempts: status.attempts?.map(x => x.status), retained, resume, firstEvents: events.filter(x => x.stageId === 'work' && x.attemptIndex === 1).map(x => ({ type: x.type, status: x.status, detail: x.detail })) }));
-        expect(calls).toBe(2);
-        const notices = parseGuidanceLedger(readFileSync(join(created.runDirPath, 'supervisor_guidance.md'), 'utf8')).filter(x => x.source === 'scheduler');
-        expect(notices).toHaveLength(1);
-        expect(notices[0]).toMatchObject({ attemptIndex: 2 });
-        expect(notices[0].body).toContain('Newly admitted paths:');
-        expect(notices[0].body).not.toContain('effective scope');
-        expect(final.status).toBe('complete');
-        expect(status.attempts?.map(x => x.status)).toEqual(['suspended', 'complete']);
-        expect(retained).toBe(true);
-        expect(resume).toBe(uuid);
-        expect(events.filter(x => x.stageId === 'work' && x.attemptIndex === 1 && x.status === 'complete')).toEqual([]);
-    });
     it('recomputes own-stage continuation after a refused technical attempt in the grouped executor', async () => {
         const config = workflow(), created = createRun(project, config.name, 'name: settlement', ['work']);
         const state = readRunState(project, created.runId);
@@ -75,11 +46,12 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
                     ownSession(o.runDir, 'work');
                     appendEngineFile(stageLiveLogPath(o.runDir, o.stageId, o.attemptIndex, o.attemptStartedAt), 'author finished verification; delivery remains\n');
                 }
-                return fixtureResult({ output: 'refused after progress', sessionId: uuid, exitCode: 1, duration_ms: 1, adapterFailureKind: 'provider_internal_error' }, o);
+                return fixtureResult({ output: 'refused after progress', sessionId: uuid, exitCode: 1, duration_ms: 1, providerFailure: providerFailureFromDiagnostic({ provider: 'codex', eventType: 'error', code: 503, message: 'delivery interrupted' }) }, o);
             } resume = o.resumeSessionId; prompt = p; return fixtureResult({ output: 'continued', sessionId: uuid, exitCode: 0, duration_ms: 1 }, o); } } as Adapter;
         await executeSingleStage(config.stages[0], project, created.runId, created.runDirPath, config, transport, new Map([['coder', role]]), join(project, 'config', 'agents'), state, config.stages);
         const priorLog = readStageLiveLogPath(created.runDirPath, 'work', 1);
         console.log('RUNTIME_RETRY ' + JSON.stringify({ resume, promptHasProgress: prompt.includes(priorLog), attempts: readStageStatus(project, created.runId, 'work').attempts?.map(x => x.status) }));
+        expect(calls).toBe(4);
         expect(resume).toBe(uuid);
         expect(prompt).toContain(priorLog);
         expect(prompt).not.toContain('timed out');
@@ -116,71 +88,17 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
         expect(prompt).toContain('write the declared product after scope admission');
         expect(readStageStatus(project, created.runId, 'work').attempts?.[0].providerFailure).toEqual(failure);
     });
-    it.each(['unobserved-child-close', 'tampered-state', 'failed-launch'] as const)('refuses clean scope suspension after %s', async (shape) => {
-        const config = workflow(), created = prepareFixtureRun(project, config, 'name: unknown-close');
-        let calls = 0;
-        const result = await runStage({ async run(_prompt, _role, opts) {
-            calls++;
-            opts.onCommandLifecycle?.({ phase: 'started', id: 'request', timestamp: new Date().toISOString() });
-            const paths = ['product.txt'];
-            const request = { version: 1 as const, kind: 'scope_revision' as const, requestId: 'closed-grant',
-                runId: created.runId, stageId: 'work', attemptIndex: 1, requestedBy: 'stage' as const,
-                requestedPaths: paths, pathDigest: scopePathDigest(paths), reason: 'produce product' };
-            const decision = decideScopeRevision({ request, stage: config.stages[0], priorScope: [], activePeers: [],
-                projectDir: project, runId: created.runId, attemptIndex: 1 });
-            publishConstraintDecision({ stagePath: join(created.runDirPath, 'stages/work'), request,
-                decidedBy: 'scheduler-policy', decision: decision as Parameters<typeof publishConstraintDecision>[0]['decision'] });
-            opts.onCommandLifecycle?.({ phase: 'completed', id: 'request', timestamp: new Date().toISOString() });
-            if (shape === 'unobserved-child-close') return fixtureResult(new Promise<import('../src/adapters/base.js').RunResult>(() => {}), opts);
-            if (shape === 'failed-launch') return fixtureResult({ output: 'launch failed', exitCode: 125, duration_ms: 1 }, opts);
-            return fixtureResult({ output: 'engine state tampered', exitCode: 125, duration_ms: 1 }, opts);
-        } }, { stageId: 'work', role, dependsOn: [], promptTemplate: 'current duties',
-            artifactContract: config.stages[0].artifact_contract, projectDir: project, runId: created.runId,
-            runDir: created.runDirPath, timeout_ms: 60000, retries: 0 });
-        expect(calls).toBe(1);
-        expect(result.exitCode).not.toBe(0);
-        expect(result.suspended).not.toBe(true);
-        const attempt = readStageStatus(project, created.runId, 'work').attempts?.[0];
-        expect(attempt?.status).toBe('failed');
-        if (shape === 'unobserved-child-close') expect(attempt?.timeout?.childClosedAt).toBeUndefined();
-    }, 15000);
-    it('honours current-execution ABORT immediately before scope settlement', async () => {
-        const config = workflow(), created = prepareFixtureRun(project, config, 'name: abort');
-        const paths = ['product.txt'];
-        const request = { version: 1 as const, kind: 'scope_revision' as const, requestId: 'abort-grant',
-            runId: created.runId, stageId: 'work', attemptIndex: 1, requestedBy: 'stage' as const,
-            requestedPaths: paths, pathDigest: scopePathDigest(paths), reason: 'produce product' };
-        const decision = decideScopeRevision({ request, stage: config.stages[0], priorScope: [], activePeers: [],
-            projectDir: project, runId: created.runId, attemptIndex: 1 });
-        publishConstraintDecision({ stagePath: join(created.runDirPath, 'stages/work'), request,
-            decidedBy: 'scheduler-policy', decision: decision as Parameters<typeof publishConstraintDecision>[0]['decision'] });
-        let calls = 0;
-        const result = await runStage({ async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { calls++; return fixtureResult({ output: 'closed child', exitCode: 0, duration_ms: 1 }, recordOpts); } }, {
-            stageId: 'work', role, dependsOn: [], promptTemplate: 'current duties', artifactContract: config.stages[0].artifact_contract,
-            projectDir: project, runId: created.runId, runDir: created.runDirPath, timeout_ms: 60000, retries: 0,
-            settlementBoundary: async phase => {
-                if (phase !== 'child_closed') return false;
-                atomicWrite(join(created.runDirPath, 'signals/abort_work.json'), JSON.stringify({ version: 1,
-                    stageId: 'work', attemptIndex: 1, source: 'supervisor', reason: 'ABORT before settlement', timestamp: new Date().toISOString() }));
-                return true;
-            },
-        });
-        expect(calls).toBe(1);
-        expect(result.exitCode).toBe(137);
-        expect(result.suspended).not.toBe(true);
-        expect(readStageStatus(project, created.runId, 'work').attempts?.[0].timeout?.terminationCause).toBe('stage_abort');
-    });
     it('records a reconciliation exception against the single closed child', async () => {
         const config = workflow(), created = createRun(project, config.name, 'name: settlement', ['work']);
         let calls = 0;
         const adapter: Adapter = { async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { calls++; return fixtureResult({ output: 'closed child output', exitCode: 0, duration_ms: 1 }, recordOpts); } };
-        const runner = createScopeSafeStageRunner({ monitorApprovalRequests: async () => null, monitorScopeRevisionRequests: async () => { }, createSchedulerLiveConstraintGuardFactory, reconcileCompletedStageAttempts: () => {
+        const runner = createScopeSafeStageRunner({ monitorApprovalRequests: async () => null, reconcileCompletedStageAttempts: () => {
             const closed = readStageStatus(project, created.runId, 'work');
             expect(closed.status).toBe('running');
             expect(closed.attempts?.at(-1)?.status).toBe('closed');
             throw Error('fixture reconciliation failure');
         } });
-        await expect(runner.runScopeSafeStageGroup(config.stages, project, created.runId, 1, async (stage, _guard, settlementBoundary) => runStage(adapter, { stageId: stage.id, role, dependsOn: [], promptTemplate: 'current duties', artifactContract: stage.artifact_contract, projectDir: project, runId: created.runId, runDir: created.runDirPath, timeout_ms: 60000, retries: 0, settlementBoundary }))).rejects.toThrow('fixture reconciliation failure');
+        await expect(runner.runScopeSafeStageGroup(config.stages, project, created.runId, 1, async (stage, settlementBoundary) => runStage(adapter, { stageId: stage.id, role, dependsOn: [], promptTemplate: 'current duties', artifactContract: stage.artifact_contract, projectDir: project, runId: created.runId, runDir: created.runDirPath, timeout_ms: 60000, retries: 0, settlementBoundary }))).rejects.toThrow('fixture reconciliation failure');
         const status = readStageStatus(project, created.runId, 'work'), events = readRunEvents(project, created.runId).filter(e => e.stageId === 'work');
         console.log('RUNTIME_EXCEPTION ' + JSON.stringify({ calls, attempts: status.attempts?.map(a => a.status), events: events.map(e => ({ type: e.type, status: e.status, attemptIndex: e.attemptIndex })) }));
         expect(calls).toBe(1);

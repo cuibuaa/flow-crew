@@ -1,94 +1,41 @@
-import { publishRunCompletion } from '../sched_policy/run-completion.js';
-// Boundary: Admit complete planner proposals through one refusal path with exact preflight and bounded retry evidence.
-import { PreparedPlanRetryCandidate, planRetryPairDigest, planRetryRequirement, preparePlanRetryCandidate, recordPlanRetryAdmission, recordPlanRetryRefusal } from '../../plan-retry-monotone.js';
-import { demoteRealityCheckAdvisories, formatRealityCheckPreflightFindings, type RealityCheckPreflightReport } from '../../reality-check-preflight.js';
+import { concludeRun } from '../sched_policy/run-completion.js';
+// Boundary: Admit complete planner proposals through one refusal path with bounded retry evidence.
+import { PreparedPlanRetryCandidate, planRetryRequirement, preparePlanRetryCandidate, recordPlanRetryAdmission, recordPlanRetryRefusal } from '../../plan-retry-monotone.js';
 import { attemptEventFields, recordRunEvent } from '../../run-events.js';
 import { StageConfig, loadDefaults } from '../sched_admission/configuration.js';
-import { archiveDispatchAdmissionRefusal, concludePlanRetryFailure, currentDispatchAdmissionReport, decideEmptyDispatchAction, diagnoseEmptyDispatch, planRetryRequirementsFromAdmission, restoreAdmittedRealityChecks, writeRealityCheckPreflightArtifact } from '../sched_admission/dispatch-retry.js';
+import { archiveDispatchAdmissionRefusal, concludePlanRetryFailure, currentDispatchAdmissionReport, decideEmptyDispatchAction, diagnoseEmptyDispatch, planRetryRequirementsFromAdmission, restoreAdmittedRealityChecks } from '../sched_admission/dispatch-retry.js';
 import { log } from '../sched_admission/shared.js';
 import { observeStableBlockage } from '../sched_policy/guidance.js';
-import { inspectProposalRealityChecks } from '../sched_policy/dispatch-injection.js';
 import { STAGE_STATUS, StageStatus, StoreState, isPendingStageStatus, readRunState, runDir, writeRunState, writeStageStatus } from '../../store.js';
 import { concludeRepeatedBlockage, injectDispatchedStages } from './services.js';
 import { createHash } from 'node:crypto';
-import { writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export function admitPlannerDispatches(
   sorted: StageConfig[], state: StoreState, projectDir: string, runId: string, runDirPath: string,
   roleRegistry: Map<string, {name: string; description: string}>,
-  injectedDispatchStages: Set<string>, planStageRetries: Map<string, number>, taskDescription?: string,
+  injectedDispatchStages: Set<string>,
 ): {kind: 'settled' | 'continue'; state: StoreState} {
     // Inject dispatched stages
     for (const stage of sorted) {
       if (stage.dynamic_dispatch && !injectedDispatchStages.has(stage.id) &&
           state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE) {
         const maxPlanRetries = Math.max(0, Math.floor(Number(loadDefaults().plan_stage_retries)));
-        const retriesUsed = planStageRetries.get(stage.id) ?? 0;
         let preparedPlanRetry: PreparedPlanRetryCandidate;
         try {
           preparedPlanRetry = preparePlanRetryCandidate({
             runDirPath,
             stageId: stage.id,
             iteration: state.currentIteration ?? 1,
-            attemptIndex: retriesUsed + 1,
+            attemptIndex: 1,
           });
         } catch (error) {
           const reason = `Plan retry incumbent integrity check failed before admission: ${error instanceof Error ? error.message : String(error)}`;
           return { kind: 'settled', state: concludePlanRetryFailure({ state, projectDir, runId, stageId: stage.id, reason }) };
         }
-        const plannerChecksPath = join(runDirPath, 'reality_checks.md');
-        let exactTaskBrief = state.taskDescription ?? taskDescription ?? '';
-        try {
-          const persistedBriefPath = join(runDirPath, 'task_brief.md');
-          if (existsSync(persistedBriefPath)) exactTaskBrief = readFileSync(persistedBriefPath, 'utf-8');
-        } catch { /* state.taskDescription remains the admitted fallback */ }
-
-        let preflight: RealityCheckPreflightReport | undefined;
-        if (exactTaskBrief.trim()) {
-          const plannerChecks = existsSync(plannerChecksPath)
-            ? readFileSync(plannerChecksPath, 'utf-8')
-            : '';
-          preflight = inspectProposalRealityChecks(projectDir, runDirPath, preparedPlanRetry.effective.dispatch, exactTaskBrief);
-          if (preflight.advisoryFindings.length > 0) {
-            const rewrite = demoteRealityCheckAdvisories(plannerChecks, preflight.advisoryFindings);
-            if (rewrite.markdown !== plannerChecks) {
-              writeFileSync(plannerChecksPath, rewrite.markdown, 'utf-8');
-              preparedPlanRetry.effective = {
-                ...preparedPlanRetry.effective,
-                realityChecks: rewrite.markdown,
-              };
-              preparedPlanRetry.effectivePairDigest = planRetryPairDigest(preparedPlanRetry.effective);
-            }
-            writeRealityCheckPreflightArtifact(
-              runDirPath,
-              stage.id,
-              preflight,
-              'admitted_with_advisories',
-              rewrite.demotedCheckIndexes,
-            );
-            const detail = formatRealityCheckPreflightFindings(preflight.advisoryFindings);
-            log.warn(
-              { stage: stage.id, demotedCheckIndexes: rewrite.demotedCheckIndexes, detail },
-              'Planner Reality-Gate intent findings admitted as runtime advisories before dispatch',
-            );
-            recordRunEvent(projectDir, runId, {
-              type: 'reality_gate_advisory',
-              runId,
-              timestamp: new Date().toISOString(),
-              iteration: state.currentIteration ?? 1,
-              stageId: stage.id,
-              level: 'warning',
-              detail: `Pre-dispatch lint demoted check indexes ${rewrite.demotedCheckIndexes.join(', ') || 'none'} to advisory: ${detail}`,
-            });
-          } else {
-            writeRealityCheckPreflightArtifact(runDirPath, stage.id, preflight, 'admitted');
-          }
-        }
-
         injectedDispatchStages.add(stage.id);
-        const injected = injectDispatchedStages(stage.id, roleRegistry, sorted, state, projectDir, runId, false, preflight);
+        const injected = injectDispatchedStages(stage.id, roleRegistry, sorted, state, projectDir, runId);
 
         if (injected.length === 0) {
           if (state.admittedRealityChecks) restoreAdmittedRealityChecks(runDirPath, state);
@@ -136,7 +83,7 @@ export function admitPlannerDispatches(
                   detail: [
                     'dispatch admission rejected the complete proposal before stage injection.',
                     'Exact admission errors:',
-                    ...archivedRefusal.report.errors.map((error) => `- ${error}`),
+                    ...archivedRefusal.report.errors.map((error) => `- ${error.message}`),
                     `Durable rejected proposal: ${join(runDirPath, archivedRefusal.proposalPath)}`,
                     `Durable admission report: ${join(runDirPath, archivedRefusal.admissionPath)}`,
                   ].join('\n'),
@@ -144,7 +91,7 @@ export function admitPlannerDispatches(
               : structuralDiagnosis;
             const admissionReport = archivedRefusal?.report ?? currentDispatchAdmissionReport(runDirPath);
             const unsatisfied = [
-              ...(admissionReport?.errors.length ? planRetryRequirementsFromAdmission(admissionReport) : [planRetryRequirement(diagnosis.detail, 'structure')]),
+              ...(admissionReport?.errors.length ? planRetryRequirementsFromAdmission(admissionReport) : [planRetryRequirement({ code: 'dispatch_structure', field: 'stages', message: diagnosis.detail }, 'structure')]),
             ];
             let ratchet;
             try {
@@ -167,7 +114,6 @@ export function admitPlannerDispatches(
               evidenceDigest: createHash('sha256')
                 .update(rawDispatchText ?? '<missing dispatch>', 'utf8')
                 .digest('hex'),
-              threshold: state.campaignTriggers?.repeatedFailureAfter,
             });
             if (blockage?.escalatedNow) {
               return { kind: 'settled', state: concludeRepeatedBlockage(state, {
@@ -183,44 +129,42 @@ export function admitPlannerDispatches(
                 reason: ratchet.reason ?? `Planner could not satisfy ${unsatisfied.map((item) => item.id).join(', ')}`,
               }) };
             }
-            const decision = decideEmptyDispatchAction(diagnosis, retriesUsed, maxPlanRetries);
+            const decision = decideEmptyDispatchAction(diagnosis);
 
             if (decision.action === 'retry') {
               // Re-pend against the observed refusal. The next complete proposal
               // is admitted independently; evidence never rewrites its bytes.
-              planStageRetries.set(stage.id, decision.nextRetry);
+              const nextRetry = ratchet.state.attempts.length;
               injectedDispatchStages.delete(stage.id); // allow re-injection after the re-run
               const replanStatus: StageStatus = {
                 ...state.stages[stage.id],
                 status: STAGE_STATUS.PENDING,
-                retries: decision.nextRetry,
-                error: decision.error,
+                retries: nextRetry,
+                error: diagnosis.detail,
+                admissionFailure: { code: 'dispatch_refused', attemptIndex: state.stages[stage.id].attempts?.at(-1)?.index ?? 0 },
               };
               writeStageStatus(projectDir, runId, stage.id, replanStatus);
               state.stages[stage.id] = replanStatus;
               writeRunState(projectDir, runId, state);
-              log.warn({ stage: stage.id, retry: decision.nextRetry, max: maxPlanRetries, detail: decision.detail }, 'Plan stage emitted no valid dispatch — bounded re-plan retry');
+              log.warn({ stage: stage.id, retry: nextRetry, max: maxPlanRetries, detail: decision.detail }, 'Plan stage emitted no valid dispatch — bounded re-plan retry');
               recordRunEvent(projectDir, runId, {
                 type: 'plan_dispatch_retry',
                 runId,
                 timestamp: new Date().toISOString(),
                 iteration: state.currentIteration ?? 1,
                 stageId: stage.id,
-                detail: `plan retry ${decision.nextRetry}/${maxPlanRetries}: ${decision.detail}`,
+                detail: `plan retry ${nextRetry}/${maxPlanRetries}: ${decision.detail}`,
               });
               break; // restart the while(true) loop → ready stages now include the re-pended plan stage
             }
 
             // Escalate with specifics (NOT the generic "refine the brief" punt).
             log.error({ stage: stage.id, status: decision.status, unknownRoles: diagnosis.unknownRoles }, decision.reason);
-            state.status = decision.status;
-            state.failureReason = decision.reason;
-            state.completedAt = new Date().toISOString();
-            publishRunCompletion(state, projectDir, runId, () => ({
+            state = concludeRun(state, { status: decision.status, reasonCode: 'dispatch_refused', detail: decision.reason, eventFields: () => ({
               iteration: state.currentIteration ?? 1,
               stageId: stage.id,
               detail: `${decision.status}: ${decision.reason}`,
-            }));
+            }) });
             return { kind: 'settled', state };
           }
           log.info({ stage: stage.id }, 'No dispatch.yaml — falling back to static stages');

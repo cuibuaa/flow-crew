@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 /** Current control-plane contract: private authority precedes every external
  * outlet; socket transport rejects ABI truncation; dashboards bind explicit
  * addresses and keep the operator's Tailscale route. */
@@ -86,18 +87,19 @@ describe('private manager authority', () => {
 });
 
 describe('socket authority and ABI', () => {
-  it('keeps the intentional custom fuse and does not change the default store', () => {
+  it('uses FC_HOME despite an inherited daemon socket', () => {
     const previousDefault = defaultSocketPath();
     const fuse = join(root, 'custom.sock');
     vi.stubEnv('FLOWCREW_DAEMON_SOCKET', fuse);
-    expect(commandSocketPath()).toBe(fuse);
+    expect(commandSocketPath()).toBe(previousDefault);
+    expect(commandSocketPath(fuse)).toBe(fuse);
     expect(defaultSocketPath()).toBe(previousDefault);
   });
 
   it('refuses positively foreign provenance before commands can connect or signal', async () => {
-    const socket = join(root, 'daemon.sock');
+    const socket = defaultSocketPath();
+    mkdirSync(fcGlobalDir(), { recursive: true });
     writeDaemonIdentity(socket, identity(socket, join(root, 'foreign-home')));
-    vi.stubEnv('FLOWCREW_DAEMON_SOCKET', socket);
     expect(() => commandSocketPath()).toThrow('another home');
     const out = output();
     expect(await cmdTask(['task', 'cancel', '1'], { stderr: out.stream })).toBe(1);

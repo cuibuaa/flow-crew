@@ -10,7 +10,8 @@ import { deploymentHeld, parkAtDeploymentBoundary, readDeploymentHold, requestDe
 import { Orchestrator, type SupervisorBackend } from '../src/orchestrator.js';
 import { captureEngineCheckpoint, reconcileHostInterruptedRun } from '../src/restart-recovery.js';
 import { normalizeStageContracts, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
-import { beginStageAttempt, completeStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatus, rependStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, rependStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import type { Adapter } from '../src/adapters/base.js';
@@ -18,10 +19,9 @@ import { cmdDaemon } from '../src/cli-daemon.js';
 import { writeStageStatus } from '../src/store.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { execFileSync } from 'node:child_process';
-import { captureRepairRoundSnapshot } from '../src/scheduler/sched_scope/snapshots.js';
-import { restoreProjectPath } from '../src/scheduler/sched_scope/restore.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import * as deployment from '../src/deployment-hold.js';
+import * as store from '../src/store.js';
 
 let root: string, project: string, previous: string, roles: string;
 let registry: TaskRegistry, orchestrator: Orchestrator;
@@ -77,7 +77,7 @@ function execute(config: ReturnType<typeof workflow>, adapter: Adapter, existing
     existingRunId, brief, true, undefined, true, admitted().brief_admission);
 }
 
-it.each([false, true])('holds a whole concurrent wave, preserves completed attempts and budgets, then continues (gate=%s)', async gate => {
+it.each([false, true])('holds at the current shared-tree owner, preserves completed attempts and budgets, then continues (gate=%s)', async gate => {
   const config = workflow();
   const enteredA = barrier(), enteredB = barrier(), releaseA = barrier(), releaseB = barrier();
   const calls: string[] = [];
@@ -93,7 +93,7 @@ it.each([false, true])('holds a whole concurrent wave, preserves completed attem
   } };
   const running = execute(config, adapter);
   try {
-    await Promise.race([Promise.all([enteredA.promise, enteredB.promise]), running.then(state => { throw new Error(`Fixture did not dispatch: ${state.failureReason ?? state.status}`); })]);
+    await Promise.race([enteredA.promise, running.then(state => { throw new Error(`Fixture did not dispatch: ${state.failureReason ?? state.status}`); })]);
     const task = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: runId });
     const before = readRunState(project, runId);
     const producer = readStageStatus(project, runId, 'producer');
@@ -111,8 +111,7 @@ it.each([false, true])('holds a whole concurrent wave, preserves completed attem
     expect(deploymentHeld()).toBe(true);
     releaseA.resolve();
     await new Promise<void>(resolve => setImmediate(resolve));
-    expect(readRunState(project, runId).status).toBe('running');
-    expect(calls).toEqual(['producer', 'active_a', 'active_b']);
+    expect(calls).toEqual(['producer', 'active_a']);
     releaseB.resolve();
     const held = await running;
     const workflowBefore = readFileSync(join(root, 'store/runs', runId, 'workflow.yaml'), 'utf8');
@@ -161,9 +160,9 @@ it.each([undefined, 'Cancelled by user'])('refuses an unsettled stopped ledger w
   const created = createRun(project, config.name, stringify(config), config.stages.map(s => s.id));
   beginStageAttempt(project, created.runId, 'producer', 1);
   writeStageStatus(project, created.runId, 'producer', { ...readStageStatus(project, created.runId, 'producer'), status: 'failed' });
-  updateRunState(project, created.runId, state => { state.status = 'stopped'; state.failureReason = failureReason; state.currentIteration = 2; state.maxIterations = 2; });
+  updateRunState(project, created.runId, state => { state.status = 'cancelled'; state.failureReason = failureReason; state.currentIteration = 2; state.maxIterations = 2; });
   const before = readStageStatus(project, created.runId, 'producer');
-  expect(reconcileHostInterruptedRun(project, created.runId).status).toBe('stopped');
+  expect(reconcileHostInterruptedRun(project, created.runId).status).toBe('cancelled');
   expect(() => assertContinuationCompatible(project, created.runId)).toThrow('unsettled attempt');
   expect(readStageStatus(project, created.runId, 'producer')).toEqual(before);
   expect(readRunState(project, created.runId)).toMatchObject({ currentIteration: 2, maxIterations: 2 });
@@ -182,14 +181,14 @@ it('does not convert an acknowledged cancellation into a deployment continuation
   const task = registry.create({ ...admitted(), projectDir: project, status: 'pending', run_id: created.runId });
   requestDeploymentHold();
   await orchestrator.cancel(task.id);
-  expect(readRunState(project, created.runId).status).toBe('stopped');
+  expect(readRunState(project, created.runId).status).toBe('cancelled');
   parkAtDeploymentBoundary(project, created.runId);
   await orchestrator.continueDeployment();
   await orchestrator.tickOnce();
   await orchestrator.stop();
   orchestrator = new Orchestrator({ registry, systemd: units, isProjectBusy: () => null });
   await orchestrator.tickOnce();
-  expect(readRunState(project, created.runId).status).toBe('stopped');
+  expect(readRunState(project, created.runId).status).toBe('cancelled');
   expect(registry.get(task.id)?.status).toBe('cancelled');
   expect(launches).toEqual([]);
 });
@@ -212,7 +211,7 @@ it.each([false, true])('explicitly resumes safely settled cancelled work with re
   units.stopUnit = async () => {};
   expect((await orchestrator.cancel(task.id)).ok).toBe(true);
   const stopped = readRunState(project, held.runId);
-  expect(stopped).toMatchObject({ status: 'stopped', failureReason: 'Cancelled by user', deploymentHold: { id: held.deploymentHold!.id } });
+  expect(stopped).toMatchObject({ status: 'cancelled', failureReason: 'Cancelled by user', deploymentHold: { id: held.deploymentHold!.id } });
   if (!released) {
     await expect(orchestrator.resume(task.id)).rejects.toThrow('Deployment hold');
     expect((await orchestrator.continueDeployment()).errors).toEqual([]);
@@ -258,17 +257,8 @@ it.each(['checkpoint', 'plan', 'plan_version', 'ledger', 'missing_projection', '
       .map(stage => ({ ...stage, depends_on: stage.depends_on.filter(id => id !== 'producer') })) });
     writeFileSync(join(root, 'store/runs', held.runId, 'workflow.yaml'), stringify(base));
   }
-  if (invalid === 'checkpoint') {
-    const interruption = vi.spyOn(deployment, 'releaseDeploymentHold').mockImplementationOnce(() => { throw new Error('Fixture controller lost before latch release'); });
-    try { await expect(orchestrator.continueDeployment()).rejects.toThrow('before latch release'); }
-    finally { interruption.mockRestore(); }
-    expect(deploymentHeld()).toBe(true);
-    expect(registry.get(task.id)?.status).toBe('stuck');
-    await orchestrator.stop();
-    orchestrator = new Orchestrator({ registry, systemd: units, isProjectBusy: () => null });
-  }
   const result = await orchestrator.continueDeployment();
-  expect(result.released).toBe(true);
+  expect(result.released).toBe(false);
   expect(result.errors.join('\n'), result.errors.join('\n')).toContain('CONTINUATION_INCOMPATIBLE');
   expect(registry.get(task.id)?.status).toBe('stuck');
   expect(readRunState(project, held.runId)).toMatchObject({ status: 'parked', continuationFailure: { reason: expect.stringContaining('CONTINUATION_INCOMPATIBLE') } });
@@ -279,6 +269,157 @@ it.each(['checkpoint', 'plan', 'plan_version', 'ledger', 'missing_projection', '
   expect(readRunState(project, held.runId).engineHistory).toEqual(held.engineHistory);
   expect(launches).toEqual([]);
   await expect(execute(config, { async run() { throw new Error('Unsafe work must not run'); } }, held.runId)).rejects.toThrow('CONTINUATION_INCOMPATIBLE');
+});
+
+it('retains the hold across a controller interruption and continues once on retry', async () => {
+  const held = await execute(workflow(), { async run(_prompt, _agent, opts) {
+    requestDeploymentHold();
+    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
+  } });
+  const task = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
+  const interruption = vi.spyOn(deployment, 'releaseDeploymentHold').mockImplementationOnce(() => { throw new Error('Fixture controller lost before latch release'); });
+  try { await expect(orchestrator.continueDeployment()).rejects.toThrow('before latch release'); }
+  finally { interruption.mockRestore(); }
+  expect(deploymentHeld()).toBe(true);
+  await orchestrator.tickOnce();
+  expect(launches).toEqual([]);
+  const queued = registry.get(task.id);
+  expect((await orchestrator.continueDeployment()).released).toBe(true);
+  expect(registry.get(task.id)).toEqual(queued);
+});
+
+it('keeps compatible peers held until every current-hold run is compatible', async () => {
+  const config = workflow();
+  const held = await execute(config, { async run(_prompt, _agent, opts) {
+    requestDeploymentHold();
+    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
+  } });
+  const compatible = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
+  const invalid = createRun(project, config.name, stringify(config), []);
+  updateRunState(project, invalid.runId, state => {
+    state.status = 'parked';
+    state.taskDescription = brief;
+    state.briefAdmission = admitted().brief_admission;
+    state.deploymentHold = held.deploymentHold;
+    state.engineCheckpoint = { ...held.engineCheckpoint!, version: 99 } as unknown as typeof state.engineCheckpoint;
+  });
+  writeFileSync(join(invalid.runDirPath, 'task_brief.md'), brief);
+  registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: invalid.runId });
+  const result = await orchestrator.continueDeployment();
+  expect(result.errors.join('\n'), JSON.stringify(result)).toContain('CONTINUATION_INCOMPATIBLE');
+  expect(result.released).toBe(false);
+  expect(deploymentHeld()).toBe(true);
+  expect(registry.get(compatible.id)?.status).toBe('running');
+  expect(Boolean(readRunState(project, held.runId).deploymentHold?.releasedAt)).toBe(false);
+  await orchestrator.tickOnce();
+  expect(launches).toEqual([]);
+  expect(readRunState(project, invalid.runId).deploymentHold?.releasedAt).toBeUndefined();
+  expect(readRunState(project, invalid.runId).continuationFailure).toBeDefined();
+});
+
+it.each(['repair', 'cancel'] as const)('can continue after resolving a refused held run by %s', async resolution => {
+  const held = await execute(workflow(), { async run(_prompt, _agent, opts) {
+    requestDeploymentHold();
+    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
+  } });
+  const task = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
+  updateRunState(project, held.runId, state => { Object.assign(state.engineCheckpoint!, { version: 99 }); });
+  expect((await orchestrator.continueDeployment()).released).toBe(false);
+  expect(registry.get(task.id)?.status).toBe('stuck');
+  expect(deploymentHeld()).toBe(true);
+  if (resolution === 'repair') {
+    updateRunState(project, held.runId, state => { state.engineCheckpoint = held.engineCheckpoint; });
+    const write = vi.spyOn(registry, 'update').mockImplementationOnce(() => { throw new Error('Fixture queue write failed'); });
+    try { await expect(orchestrator.continueDeployment()).rejects.toThrow('Fixture queue write failed'); }
+    finally { write.mockRestore(); }
+    expect(deploymentHeld()).toBe(true);
+    expect(readRunState(project, held.runId).deploymentHold?.releasedAt).toBeUndefined();
+    expect(readRunState(project, held.runId).continuationFailure).toBeDefined();
+  } else expect((await orchestrator.cancel(task.id)).ok).toBe(true);
+  expect((await orchestrator.continueDeployment()).released).toBe(true);
+  expect(deploymentHeld()).toBe(false);
+  expect(registry.get(task.id)).toMatchObject({ status: resolution === 'repair' ? 'pending' : 'stuck', attempt: task.attempt });
+  if (resolution === 'repair') expect(readRunState(project, held.runId).continuationFailure).toBeUndefined();
+  else expect(readRunState(project, held.runId).status).toBe('cancelled');
+  expect(launches).toEqual([]);
+});
+
+async function registeredHeldRun() {
+  const held = await execute(workflow(), { async run(_prompt, _agent, opts) {
+    requestDeploymentHold();
+    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
+  } });
+  const task = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
+  return { held, task };
+}
+
+it('revalidates a repaired stuck task before releasing its hold', async () => {
+  const { held, task } = await registeredHeldRun();
+  updateRunState(project, held.runId, state => { Object.assign(state.engineCheckpoint!, { version: 99 }); });
+  expect((await orchestrator.continueDeployment()).released).toBe(false);
+  updateRunState(project, held.runId, state => { state.engineCheckpoint = held.engineCheckpoint; });
+  expect(await orchestrator.continueDeployment()).toMatchObject({ released: true, ready: true, errors: [] });
+  expect(registry.get(task.id)?.status).toBe('pending');
+  expect(readRunState(project, held.runId).continuationFailure).toBeUndefined();
+});
+
+it('clears a prior refusal after compatibility is proved', async () => {
+  const { held, task } = await registeredHeldRun();
+  updateRunState(project, held.runId, state => {
+    state.continuationFailure = { at: new Date().toISOString(), reason: 'Prior refusal', generation: 'a'.repeat(64) };
+  });
+  expect(await orchestrator.continueDeployment()).toMatchObject({ released: true, ready: true, errors: [] });
+  expect(registry.get(task.id)?.status).toBe('pending');
+  expect(readRunState(project, held.runId).continuationFailure).toBeUndefined();
+});
+
+it('retains the global hold if a run changes during continuation', async () => {
+  const { held, task } = await registeredHeldRun();
+  const update = store.updateRunState;
+  const race = vi.spyOn(store, 'updateRunState').mockImplementationOnce((projectDir, runId, mutate) =>
+    update(projectDir, runId, current => { current.status = 'cancelled'; mutate(current); }));
+  try { await expect(orchestrator.continueDeployment()).rejects.toThrow(`Held run ${held.runId} changed during continuation; hold remains active`); }
+  finally { race.mockRestore(); }
+  expect(deploymentHeld()).toBe(true);
+  expect(registry.get(task.id)?.status).toBe('pending');
+  expect(readRunState(project, held.runId).deploymentHold?.releasedAt).toBeUndefined();
+});
+
+it('queues a continuation before releasing its run latch', async () => {
+  const { held } = await registeredHeldRun();
+  const original = registry.update.bind(registry);
+  const order = vi.spyOn(registry, 'update').mockImplementationOnce((id, patch) => {
+    expect(readRunState(project, held.runId).deploymentHold?.releasedAt).toBeUndefined();
+    expect(deploymentHeld()).toBe(true);
+    return original(id, patch);
+  });
+  try { expect((await orchestrator.continueDeployment()).released).toBe(true); expect(order).toHaveBeenCalledOnce(); }
+  finally { order.mockRestore(); }
+});
+
+it.each([false, true])('leaves settled cancelling tasks to cancellation (invalid=%s)', async invalid => {
+  const { held, task } = await registeredHeldRun();
+  registry.update(task.id, { status: 'cancelling' });
+  if (invalid) updateRunState(project, held.runId, state => { Object.assign(state.engineCheckpoint!, { version: 99 }); });
+  expect(await orchestrator.continueDeployment()).toMatchObject({ released: true, errors: [] });
+  expect(readRunState(project, held.runId).deploymentHold?.releasedAt).toBeUndefined();
+  expect(registry.get(task.id)?.status).toBe('cancelling');
+});
+
+it('keeps a same-hold refusal visible after the run stops', async () => {
+  const { held, task } = await registeredHeldRun();
+  updateRunState(project, held.runId, state => {
+    state.status = 'cancelled';
+    state.continuationFailure = { at: new Date().toISOString(), reason: 'Prior refusal', generation: 'a'.repeat(64) };
+  });
+  const status = await orchestrator.deploymentStatus();
+  expect(status.errors).toEqual([`Task ${task.id}: Prior refusal`]);
+  expect(status.tasks).toContainEqual(expect.objectContaining({ id: task.id, runId: held.runId, status: 'cancelled', settled: true }));
+  expect(await orchestrator.continueDeployment()).toMatchObject({ released: true, ready: true, errors: [] });
 });
 
 it('accepts a different supported generation and makes repeated continue idempotent', async () => {
@@ -329,7 +470,7 @@ it('continues an attemptless legacy preparation without inventing completed hist
   expect(result.stages.producer.attempts).toHaveLength(1);
 });
 
-it('uses completed uncommitted project work as the replacement scheduler rollback preimage', async () => {
+it('retains completed uncommitted project work across a deployment hold and scheduler replacement', async () => {
   writeFileSync(join(project, 'product.txt'), 'Original tracked product.\n');
   execFileSync(process.execPath, ['--input-type=module', '-e', "import { execFileSync } from 'node:child_process'; execFileSync('git', ['init', '-q']); execFileSync('git', ['add', 'product.txt']);"], {
     cwd: project, env: { ...process.env, HOME: project, FC_HOME: project }, timeout: 10_000,
@@ -345,9 +486,6 @@ it('uses completed uncommitted project work as the replacement scheduler rollbac
     if (opts.stageId === 'review') return { output: JSON.stringify({ pass: true, reason: 'Completed product retained.', criteria: { [criterion]: { status: 'pass', evidence: 'product.txt contains the completed producer bytes.' } }, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1 };
     if (opts.stageId === 'producer') writeFileSync(join(project, 'product.txt'), 'Completed product.\n');
     else {
-      const snapshot = captureRepairRoundSnapshot(project, [config.stages[1]], { runDirPath: opts.runDir });
-      writeFileSync(join(project, 'product.txt'), 'Later writer intermediate bytes.\n');
-      expect(restoreProjectPath(project, 'product.txt', snapshot.files.get('product.txt')!).restored).toBe(true);
       expect(readFileSync(join(project, 'product.txt'), 'utf8')).toBe('Completed product.\n');
     }
     writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Stage evidence.\n');

@@ -93,7 +93,6 @@ describe('campaign operator-view client contract', () => {
         cost: source({
           wallMs: 0,
           tokens: 0,
-          supervisorTokens: 0,
           runCoverage: { succeeded: 0, failed: 0, total: 0 },
           wallCoverage: { succeeded: 0, failed: 0, total: 0 },
           tokenCoverage: { succeeded: 0, failed: 0, total: 0 },

@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,8 +11,8 @@ import {
 import { inspectApprovalRunStanding } from '../src/run-standing.js';
 import { listAll, recordRequest } from '../src/inbox.js';
 import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   readRunState,
   runDir,
@@ -25,9 +26,9 @@ import {
   type StageConfig,
 } from '../src/scheduler.js';
 import {
-  classifyLiveConstraintGitIndexEntry,
-  parseLiveConstraintGitIndexEntries,
-} from '../src/live-constraint-guard.js';
+  classifyGitIndexEntry,
+  parseGitIndexEntries,
+} from '../src/scheduler/sched_scope/file-images.js';
 
 function validationResult(
   state: ValidationCommandResult['state'],
@@ -69,7 +70,7 @@ function stage(id: string, scope: string[], dependsOn: string[] = []): StageConf
     dependency_reasons: Object.fromEntries(dependsOn.map((dependency) => [dependency, `Consumes ${dependency}.`])),
     criterion_refs: [],
     prompt_template: 'work',
-    artifact_contract: { version: 1, produces: [], reads: [], replays: [] },
+    artifact_contract: { version: 1, produces: [], reads: [] },
   });
 }
 
@@ -91,7 +92,7 @@ describe('engine-recorded facts used at their decision boundaries', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('distinguishes unavailable green-to-red evidence while retaining a complete named regression', () => {
+  it('uses failed exits for green-to-red regressions while keeping launch failures unresolved', () => {
     const green = baseline(validationResult('passed'));
     const unknown = validationResult('failed', {
       exitCode: 2,
@@ -120,14 +121,14 @@ describe('engine-recorded facts used at their decision boundaries', () => {
     });
 
     expect(evaluateValidationDelta(green, [unknown])[0]).toMatchObject({
-      state: 'unresolved',
-      reason: expect.stringContaining('identity/count is unavailable'),
+      state: 'regression',
+      reason: 'A green baseline no longer passes',
       newFailureIdentifiers: [],
     });
     expect(evaluateValidationDelta(green, [partial])[0]).toMatchObject({
-      state: 'unresolved',
-      reason: expect.stringContaining('partial'),
-      newFailureIdentifiers: [],
+      state: 'regression',
+      reason: 'A green baseline no longer passes',
+      newFailureIdentifiers: ['spec/known.test.ts'],
     });
     expect(evaluateValidationDelta(green, [launchError])[0]).toMatchObject({
       state: 'unresolved',
@@ -154,7 +155,7 @@ describe('engine-recorded facts used at their decision boundaries', () => {
       createdAt: '2026-09-14T00:00:00.000Z',
     });
     const terminalState = readRunState(projectDir, terminal.runId);
-    terminalState.status = RUN_STATUS.STOPPED;
+    terminalState.status = RUN_STATUS.CANCELLED;
     terminalState.completedAt = '2026-09-18T00:00:00.000Z';
     writeRunState(projectDir, terminal.runId, terminalState);
 
@@ -173,7 +174,7 @@ describe('engine-recorded facts used at their decision boundaries', () => {
       expect.objectContaining({ requestId: 'terminal-cleanup', state: 'pending' }),
     ]);
     expect(inspectApprovalRunStanding(projectDir, terminal.runId)).toMatchObject({
-      kind: 'ended', live: false, runStatus: RUN_STATUS.STOPPED,
+      kind: 'ended', live: false, runStatus: RUN_STATUS.CANCELLED,
     });
     expect(inspectApprovalRunStanding(projectDir, parked.runId)).toMatchObject({
       kind: 'parked', live: false, runStatus: RUN_STATUS.PARKED,
@@ -188,7 +189,7 @@ describe('engine-recorded facts used at their decision boundaries', () => {
 
   it('retains every Git index stage and assigns explicit entry kinds', () => {
     const oid = 'a'.repeat(40);
-    const entries = parseLiveConstraintGitIndexEntries([
+    const entries = parseGitIndexEntries([
       `100644 ${oid} 0\tregular.txt`,
       `100755 ${oid} 0\texecutable.sh`,
       `120000 ${oid} 0\tlink`,
@@ -211,6 +212,6 @@ describe('engine-recorded facts used at their decision boundaries', () => {
         { path: 'conflicted.txt', mode: '100644', stage: 2, kind: 'unmerged' },
         { path: 'conflicted.txt', mode: '100644', stage: 3, kind: 'unmerged' },
       ]);
-    expect(classifyLiveConstraintGitIndexEntry('100600', 0)).toBe('unknown');
+    expect(classifyGitIndexEntry('100600', 0)).toBe('unknown');
   });
 });

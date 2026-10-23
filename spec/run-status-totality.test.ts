@@ -5,13 +5,12 @@ import { join } from 'node:path';
 import { statusExplanation } from '../src/campaign-page.js';
 import type { Adapter } from '../src/adapters/base.js';
 import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
+import { isActiveRunStatus } from './test-support/lifecycle-status.js';
+import { isRunMutationBlockedStatus } from './test-support/lifecycle-status.js';
 import {
   fcGlobalDir,
-  isActiveRunStatus,
-  isAwaitingApprovalRunStatus,
   isPausedRunStatus,
   isPendingRunStatus,
-  isRunMutationBlockedStatus,
   isRunningRunStatus,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
@@ -30,19 +29,17 @@ import {
 } from '../src/store.js';
 
 const EXPECTED_SEMANTICS = {
-  [RUN_STATUS.PENDING]: { lifecycle: 'queued', successful: false, mutationBlocked: false },
-  [RUN_STATUS.RUNNING]: { lifecycle: 'executing', successful: false, mutationBlocked: true },
-  [RUN_STATUS.PARKED]: { lifecycle: 'paused', successful: false, mutationBlocked: true },
-  [RUN_STATUS.COMPLETE]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
-  [RUN_STATUS.FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.AWAITING_APPROVAL]: { lifecycle: 'legacy_approval', successful: false, mutationBlocked: true },
-  [RUN_STATUS.SHIPPED]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
-  [RUN_STATUS.CEILING_HIT]: { lifecycle: 'terminal', successful: true, mutationBlocked: false },
-  [RUN_STATUS.ESCALATED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.REALITY_GATE_FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.PHASE_COMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.STOPPED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
-  [RUN_STATUS.INCOMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false },
+  [RUN_STATUS.PENDING]: { lifecycle: 'queued', successful: false, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.RUNNING]: { lifecycle: 'executing', successful: false, mutationBlocked: true, resumable: false },
+  [RUN_STATUS.PARKED]: { lifecycle: 'paused', successful: false, mutationBlocked: true, resumable: true },
+  [RUN_STATUS.COMPLETE]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: true },
+  [RUN_STATUS.SHIPPED]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.CEILING_HIT]: { lifecycle: 'terminal', successful: true, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.ESCALATED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.REALITY_GATE_FAILED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: false },
+  [RUN_STATUS.CANCELLED]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: true },
+  [RUN_STATUS.INCOMPLETE]: { lifecycle: 'terminal', successful: false, mutationBlocked: false, resumable: true },
 } as const satisfies Record<RunStatus, RunStatusSemantics>;
 
 describe('total run-status semantics', () => {
@@ -53,7 +50,6 @@ describe('total run-status semantics', () => {
     expect(isPendingRunStatus(status)).toBe(expected.lifecycle === 'queued');
     expect(isRunningRunStatus(status)).toBe(expected.lifecycle === 'executing');
     expect(isPausedRunStatus(status)).toBe(expected.lifecycle === 'paused');
-    expect(isAwaitingApprovalRunStatus(status)).toBe(expected.lifecycle === 'legacy_approval');
     expect(isActiveRunStatus(status)).toBe(
       expected.lifecycle === 'executing' || expected.lifecycle === 'paused',
     );
@@ -132,7 +128,7 @@ describe('unknown archived run status boundary', () => {
         id: 'work',
         role: 'worker',
         prompt_template: 'must not execute',
-        artifact_contract: { version: 1, produces: [], reads: [], replays: [] },
+        artifact_contract: { version: 1, produces: [], reads: [] },
         scope: ['src/**'],
       }],
     });

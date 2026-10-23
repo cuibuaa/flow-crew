@@ -1,6 +1,6 @@
-import { mkdirSync, renameSync, rmSync, writeFileSync } from './engine-fs.js';
+import { atomicWrite, mkdirSync, rmSync } from './engine-fs.js';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { RunResult } from './adapters/base.js';
 
 const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -40,14 +40,8 @@ export function readSession(runDir: string, stageId: string, adapter?: string): 
 export function writeSession(runDir: string, stageId: string, metadata: SessionMetadata): void {
   const dir = join(runDir, 'stages', stageId);
   mkdirSync(dir, { recursive: true });
-  const target = sessionPath(runDir, stageId);
-  const tmp = `${target}.tmp.${process.pid}.${Date.now()}`;
-  try {
-    writeFileSync(tmp, JSON.stringify(metadata, null, 2) + '\n', 'utf-8');
-    renameSync(tmp, target);
-  } catch {
-    try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
-  }
+  // The resume identity must survive a restart before it is reported as saved.
+  atomicWrite(sessionPath(runDir, stageId), JSON.stringify(metadata, null, 2) + '\n', { durability: 'durable' });
 }
 
 /** A native identity is evidence even on failure, but a different identity
@@ -66,12 +60,18 @@ export function settleSession(
   }
   const sessionId = nativeSessionId ?? (isSessionUuid(resumeId) ? resumeId : undefined);
   if (!sessionId) return;
-  result.sessionId = sessionId;
-  writeSession(runDir, stageId, {
-    version: 1, sessionId, ownerStageId: stageId, capturedAt: new Date().toISOString(),
-    resumedFromStageId: resumeId ? resumedFromStageId : undefined,
-    adapter: options.adapter,
-  });
+  try {
+    writeSession(runDir, stageId, {
+      version: 1, sessionId, ownerStageId: stageId, capturedAt: new Date().toISOString(),
+      resumedFromStageId: resumeId ? resumedFromStageId : undefined,
+      adapter: options.adapter ?? 'codex',
+    });
+    result.sessionId = sessionId;
+  } catch (error) {
+    if (![124, 125, 137].includes(result.exitCode)) result.exitCode = 1;
+    result.friendlyError = `Could not persist adapter session: ${error instanceof Error ? error.message : String(error)}`;
+    delete result.sessionId;
+  }
 }
 
 export function stageSessionHome(runDir: string, stageId: string, adapter = 'codex'): string {
@@ -95,12 +95,20 @@ export function finalizeStageSessions(runDir: string, stageId: string): void {
 }
 
 /** Native homes are transient on success unless retained for an admitted
- * continuation. Failure homes remain credential-free for diagnosis; completed
+ * continuation. Only metadata owned by this home is retired with it.
+ * Failure homes remain credential-free for diagnosis; completed
  * SQLite write-ahead logs can be discarded after the owned process exits. */
 export function finalizeSessionHome(home: string, exitCode: number, preserve = false): void {
   if (exitCode === 0) {
     if (!preserve) {
-      try { rmSync(home, { recursive: true, force: true }); } catch { /* best-effort */ }
+      try {
+        rmSync(home, { recursive: true, force: true });
+        const stageDir = dirname(home);
+        const adapter = basename(home).slice(0, -5);
+        if (isSessionHomeName(basename(home)) && readSession(dirname(dirname(stageDir)), basename(stageDir), adapter)) {
+          rmSync(join(stageDir, 'session.json'), { force: true });
+        }
+      } catch { /* best-effort */ }
     }
     return;
   }
@@ -111,4 +119,11 @@ export function finalizeSessionHome(home: string, exitCode: number, preserve = f
       }
     }
   } catch { /* best-effort */ }
+}
+
+/** A failed resume without a native identity may start fresh once. */
+export function shouldStartFreshSession(result: Pick<RunResult, 'exitCode' | 'providerFailure'> & { spawnError?: unknown },
+  resumeId?: string, nativeId?: string): boolean {
+  return !!resumeId && !nativeId && result.exitCode !== 0 && ![124, 125, 137].includes(result.exitCode)
+    && !result.spawnError && result.providerFailure?.kind !== 'authentication' && result.providerFailure?.kind !== 'refusal';
 }

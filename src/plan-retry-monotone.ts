@@ -1,5 +1,6 @@
+import { type DispatchAdmissionError } from './scheduler/sched_admission/dispatch.js';
 import { createHash } from 'node:crypto';
-import { mkdirSync, renameSync, writeFileSync } from './engine-fs.js';
+import { atomicWrite, mkdirSync, writeFileSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 
@@ -83,58 +84,17 @@ export function planRetryPairDigest(pair: PlanRetryPair): string {
   ].join('\n'));
 }
 
-function boundedSlug(value: string): string {
-  const slug = value.trim().toLowerCase().replace(/[^a-z0-9._/-]+/g, '-').replace(/^-+|-+$/g, '');
-  return slug.slice(0, 160) || 'unnamed';
-}
-
-/**
- * Convert admission prose into a stable obligation identity. The diagnostic is
- * retained separately; identity is deliberately tied to the governed object,
- * not to incidental counts or the exact wording of a later validation phase.
- */
-export function planRetryRealityCheckName(detail: string): string | undefined {
-  const match = /^(?:[A-Z][A-Z0-9_]*:\s+)?reality check\s+("(?:\\.|[^"\\])*")/i.exec(detail);
-  if (!match) return undefined;
-  try { return JSON.parse(match[1]) as string; } catch { return undefined; }
-}
-
+/** Identity comes from the producer's fields; prose is diagnostic only.
+ * Old recorded reports are read as opaque findings, never interpreted as rules. */
 export function planRetryRequirement(
-  detail: string,
+  error: DispatchAdmissionError | string,
   source: PlanRetryFindingSource = 'admission',
-  structuredId?: string,
 ): PlanRetryRequirement {
-  if (structuredId) return { id: structuredId, detail, source };
-  const check = planRetryRealityCheckName(detail);
-  if (check !== undefined) return { id: `reality-check:${boundedSlug(check)}`, detail, source };
-  const artifactStage = /^(?:([a-z][a-z0-9_]*): invalid schema at )?(?:ARTIFACT|REPLAY)_[A-Z_]+:\s+([a-z][a-z0-9_]*)\./i.exec(detail);
-  if (artifactStage && (!artifactStage[1] || artifactStage[1] === artifactStage[2])) {
-    return { id: `stage:${boundedSlug(artifactStage[2])}:artifact_contract`, detail, source };
-  }
-  const terminalPath = /^terminal_states path\s+(.+?):/i.exec(detail);
-  if (terminalPath) return { id: `terminal-owner:${boundedSlug(terminalPath[1])}`, detail, source };
-  const criterion = /^criterion\s+(\S+):/i.exec(detail);
-  if (criterion) return { id: `criterion:${boundedSlug(criterion[1])}`, detail, source };
-  const terminalOwner = /^terminal owner\s+([a-z][a-z0-9_]*)(?:\.([a-z_]+))?:/i.exec(detail);
-  if (terminalOwner) {
-    return {
-      id: `stage:${boundedSlug(terminalOwner[1])}${terminalOwner[2] ? `:${boundedSlug(terminalOwner[2])}` : ''}`,
-      detail,
-      source,
-    };
-  }
-  const stageField = /^([a-z][a-z0-9_]*)\.([a-z_]+)(?:\.\d+)?:/i.exec(detail);
-  if (stageField) {
-    return { id: `stage:${boundedSlug(stageField[1])}:${boundedSlug(stageField[2])}`, detail, source };
-  }
-  if (/dispatch\.yaml could not be parsed|dispatch contains no stages|contained no stages|no dispatch\.yaml/i.test(detail)) {
-    return { id: 'dispatch:structure', detail, source };
-  }
-  if (/unknown role/i.test(detail)) {
-    const stage = /(?:^|\s)([a-z][a-z0-9_]*)\s*:\s*unknown role/i.exec(detail);
-    return { id: stage ? `stage:${boundedSlug(stage[1])}:role` : 'dispatch:role', detail, source };
-  }
-  return { id: `admission:${sha256(detail.replace(/\d+/g, '#')).slice(0, 16)}`, detail, source };
+  const detail = typeof error === 'string' ? error : error.message;
+  const id = typeof error === 'string'
+    ? `legacy:${sha256(error).slice(0, 16)}`
+    : [error.code, error.stageId, error.field].filter(value => value !== undefined).join(':');
+  return { id, detail, source };
 }
 
 function statePath(runDirPath: string): string {
@@ -166,9 +126,8 @@ function readState(runDirPath: string): MonotonePlanRetryState | undefined {
 
 function atomicWriteJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  renameSync(temporary, path);
+  // Incumbent/attempt decisions are recovery authority for the retry budget.
+  atomicWrite(path, `${JSON.stringify(value, null, 2)}\n`, { durability: 'durable' });
 }
 
 function writeCreateOnly(path: string, bytes: string): void {
@@ -403,6 +362,6 @@ export function buildMonotonePlanRetryContext(
     `- remaining planner calls in this bounded chain: ${remaining}`,
     'Observed refusal requirements:',
     ...state.unsatisfied.map((requirement) => `- ${requirement.id}: ${requirement.detail}`),
-    'Write a complete replacement dispatch.yaml and reality_checks.md pair. Each replacement passes every admission rule independently; no prior component is merged or locked.',
+    'Write a complete replacement dispatch.yaml, including its reality_checks. Each replacement passes every admission rule independently; no prior component is merged or locked.',
   ].join('\n');
 }

@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 29 -->
+<!-- flowcrew-skill-revision: 37 -->
 
 # Ship a conversation to FlowCrew
 
@@ -29,9 +29,10 @@ Write a self-contained brief at `docs/task_brief.md` only after preflight facts 
 conversation. Include outcome, evidence paths, real constraints, extractable numbered
 criteria, required human outputs and allowed stopping outcomes. State required observable
 properties; label example mechanisms explicitly. Declare every source input in a leading
-frontmatter `inputs:` block. A path in prose or a table is only a reference, not a declaration;
-preflight can still discover candidate requirements there. Declare gitignored inputs in the
-block and intentional reuse of existing outputs. Explain evidence gaps and dependencies of quantities.
+frontmatter `inputs:` block. A path in prose or a table is only a reference, not a declaration.
+Declare gitignored inputs in the block and intentional reuse of existing outputs. Freeze a file
+or tree by declaring a structured input with `frozen: true`; inputs are mutable by default. Prose, headings and input notes do
+not enforce freezing. Explain evidence gaps and dependencies of quantities.
 
 Choose engineering for a known pass/fail outcome and research for candidate search with an
 allowed supported ceiling. Propose the mode/workflow and explain it to the operator. Use
@@ -92,17 +93,15 @@ flowcrew ship-preflight --brief docs/task_brief.md
 flowcrew rehearse docs/task_brief.md
 ```
 
-Fix blocking findings; treat ambiguous criterion wording, unexplained authored writable maps
-and unassigned evidence floors as authoring problems. Review every retained warning and
-explain it. Rehearsal is mandatory for this skill, including an engineering brief's static
-pass. Exit zero ending in `✅ Contract ready` establishes wiring, not implementation or
+Fix blocking findings. Review every retained warning and explain it. Rehearsal is mandatory
+for this skill, including an engineering brief's static pass. Exit zero ending in `✅ Contract ready` establishes wiring, not implementation or
 research quality. Nonzero means correct the brief/environment. It calls no model but can
 run declared shell confirmation; review that text first.
 If bytes change, repeat preflight and rehearsal.
 
 Show the final brief, complete findings, exact 64-hex digest and launch identity: source,
 target, base, new branch, workflow/mode, adapter, foreground/background, campaign/context,
-iteration bound and stage deadline read from engine configuration (`default_max_iterations`
+iteration bound and stage deadline read from engine configuration (`max_iterations`
 and `default_timeout_ms`). Do not hardcode defaults.
 Explain unattended shell authority and the scope-versus-host-isolation boundary.
 
@@ -123,9 +122,11 @@ Setup cannot choose the target identity. Run it with the approved identity and a
 flowcrew ship-setup --brief <brief-path> --project <source> --target <target> --base <ref> --branch <name>
 ```
 
-Proceed only on exit zero and `Ship setup: READY`; nonzero is a refusal. Do not replace refusals with manual links/worktree
-creation. The target baseline and ready record govern later checks. Unsupported population
-comparison remains unverified; show that limitation rather than claiming source-suite parity.
+Proceed only on exit zero and `Ship setup: READY`; nonzero is a refusal.
+On nonzero, inspect the refusal; do not bypass it with manual links/worktrees.
+Setup admits estimated declared-input copy bytes through `disk-guard need` before creating the worktree
+or copying inputs; resolve a capacity/tool refusal before retrying.
+Unsupported population comparison remains unverified; do not claim source-suite parity.
 
 ### Register or run
 
@@ -148,18 +149,20 @@ Choose the approved one. Add only approved adapter/workflow/campaign/iteration f
 for changed-run continuation, `--acknowledge-brief-warnings=<digest>`. Do not use command substitution to
 transport brief text or acknowledge a new digest automatically. A changed brief/settings
 requires returning to confirmation. A zero background exit means registration succeeded,
-not that the run passed. A nonzero launch/run exit needs diagnosis; neither proves the deliverable.
-Report the returned task/run identity. For a registered task, record this wrap-up obligation
-in existing conversation bookkeeping or the optional ledger:
-
-“FlowCrew task <id> is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.”
-
+not that the run passed. Exit 1 means a known refusal or failure; inspect the diagnosis before retrying. Exit 2 means
+the outcome is unknown and the request may have taken effect; inspect task/run state before
+retrying. Neither exit alone proves the deliverable.
+Report the returned task/run and ledger entry identities.
+The installer-owned [launch-side integration](../guide/session-push.md) records the
+launching frontend and address, displays engine progress and delivers wrap-up events.
+No hand-attached waiter is required. If a launch has no delivery target, surface that
+limitation; do not infer another session or treat registration as proof of delivery.
 After cancellation, update or remove that entry. After re-shipping, replace its id with the new one.
 
 ### Observe
 
 Precondition: successful background registration returned an exact task identity. Run the
-read-only watch command; `--once` exits 0, invalid options exit 1. It does not write run or task status:
+read-only watch command for a snapshot; `--once` exits 0, invalid options exit 1. It does not write run or task status. The existing `fc-notify` observer automatically discovers the registered task/run, writes `<FC_HOME>/runs/<run-id>/wake.json` for paused/terminal states or new failed attempts, and queues notifyd events. A session task-notification still uses a background tool (see fc-observe); `watch --once` is only a snapshot:
 
 ```bash
 flowcrew watch --once
@@ -185,16 +188,25 @@ run files, outside the collected public specification directory.
 When work ends, read the terminal report, durable rejection/repair evidence, configured
 validation delta and preservation inventory. Assess every criterion and unresolved limitation.
 A terminal status, exit zero or a model's summary alone does not establish acceptance.
+When handling a pushed FlowCrew event, check its event ID and current run/attempt first.
+After completing that event's duties, execute its explicit `session-push ack` command.
+Do not acknowledge merely because a message arrived, and do not repeat an already
+acknowledged event's wrap-up. ACK and explicit ledger closure are separate obligations.
 Do not discard a failed run's useful artifacts or infer that a ceiling is a metric win.
 Use `land` audit before any authorized removal; removal and optional ledger closure are
-explicit operator decisions. [Operations](../guide/operations.md#preserve-and-reclaim)
-defines the preservation boundary.
+explicit operator decisions.
 
-Once the result is accepted and independent verification/archival are complete, use
-`flowcrew land --run <run-id>` to audit preservation. Removal remains an explicit authorized
-choice. If the operator retained an exact ledger closure identity, carry
-`--complete-fc-task <entry-id> --fc-task-session <session-id>` into that authorized removal;
+Once the result is accepted and independently verified, inspect `flowcrew land --run <run-id>`
+and the sensitive evidence scope. For authorized archival and reclamation, use
+`flowcrew land --run <run-id> --archive --remove`, adding the exact audited regenerable count
+when required. Land copies unique worktree outputs and the terminal run store to the existing
+archive root with per-file sha256 manifests and verifies both copies before its existing removal
+gate. To select another existing root, use `--archive=<root>`.
+If the operator retained an exact ledger closure identity, carry
+`--complete-fc-task <entry-id> --fc-task-session <session-id>` into that command;
 otherwise omit the closure identity and leave the entry open. Closure occurs only after
-worktree removal, prune and non-force branch deletion all succeed. It is not an automatic
-reaction to terminal status; [operations](../guide/operations.md#preserve-and-reclaim) owns
-the full removal and closure contract.
+worktree removal, prune and non-force branch deletion all succeed. Inspect refusals and the
+removal/closure report; Git success with ledger failure still needs repair.
+Ledger closure is not an automatic reaction to terminal status, and terminal status alone does not
+authorize removal. [Operations](../guide/operations.md#preserve-and-reclaim) defines the
+preservation boundary and owns the full removal and closure contract.

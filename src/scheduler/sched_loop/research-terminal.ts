@@ -1,10 +1,10 @@
-import { publishRunCompletion } from './iteration-outcome.js';
+import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Settle policy-owned budget exhaustion and rejected research rounds through their admitted terminal owners or truthful incomplete outcomes.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
 import { ResearchRound } from '../../research-policy.js';
 import { recordRunEvent } from '../../run-events.js';
-import { markLeftoverStagesSkipped, recordConfirmNotRun } from '../sched_admission/brief-contract.js';
+import { recordConfirmNotRun } from '../sched_admission/brief-contract.js';
 import { StageConfig, WorkflowConfig } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
 import { appendSchedulerGuidanceOnce } from '../sched_policy/guidance.js';
@@ -12,7 +12,7 @@ import { admittedTerminalOwner } from '../sched_policy/terminal-ownership.js';
 import { syncStageStatuses } from '../sched_scope/stage-group.js';
 import { collectGateRuntimeFacts, structuredFailingGateCriteria } from '../sched_settlement/gate-recovery.js';
 import { executeSingleStage } from '../sched_settlement/stage-execution.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, enforceRealityGateBeforeTerminal, isPausedRunStatus, isTerminalRunStatus, readRunState, rependStageStatus, runDir, writeRunState, writeStageStatus } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isTerminalRunStatus, readRunState, rependStageStatus, runDir, writeRunState, writeStageStatus } from '../../store.js';
 import { executeIteration } from './iteration.js';
 import { runScopeSafeStageGroup, tryTerminateOnTerminalState, writeCampaignEntry } from './services.js';
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
@@ -33,7 +33,7 @@ export function createResearchBudgetFinalizer(
     execution: {
       stages: StageConfig[];
       injectedDispatchStages: Set<string>;
-      planStageRetries: Map<string, number>;
+
     },
   ): Promise<StoreState> => {
     // Banked (journaled) measured rounds — the rounds that survived the integrity gates.
@@ -118,34 +118,21 @@ export function createResearchBudgetFinalizer(
         try { unlinkSync(readyPath); } catch { /* one-shot */ }
         await executeIteration(
           execution.stages, projectDir, runId, runDirPath, workflow, adapter, agents,
-          resolvedAgentsDir, roleRegistry, execution.injectedDispatchStages, execution.planStageRetries,
+          resolvedAgentsDir, roleRegistry, execution.injectedDispatchStages,
           skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory,
         );
         const finalized = readRunState(projectDir, runId);
         if (isTerminalRunStatus(finalized.status) || isPausedRunStatus(finalized.status)) return finalized;
         const finalizerStatus = finalized.stages[admittedOwner];
-        finalized.status = RUN_STATUS.INCOMPLETE;
-        finalized.failureReason = finalizerStatus?.status === STAGE_STATUS.FAILED
+        const detail = finalizerStatus?.status === STAGE_STATUS.FAILED
           ? `Admitted terminal finalizer ${admittedOwner} failed after the budget-exhaustion decision: ${finalizerStatus.error ?? 'no error detail'}`
           : `Admitted terminal finalizer ${admittedOwner} completed without writing ${declaredPathBE}`;
-        finalized.completedAt = new Date().toISOString();
-        writeRunState(projectDir, runId, finalized);
-        writeCampaignEntry(projectDir, finalized);
-        return finalized;
+        return concludeRun(finalized, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'terminal_finalizer_unresolved', detail, writeCampaignEntry });
       }
-      state.status = RUN_STATUS.INCOMPLETE;
-      state.failureReason = `Budget exhaustion resolved terminal owner ${admittedOwner}, but that stage was absent from the active admitted DAG.`;
-      state.completedAt = new Date().toISOString();
-      writeRunState(projectDir, runId, state);
-      writeCampaignEntry(projectDir, state);
-      return state;
+      return concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'terminal_owner_unresolved',
+        detail: `Budget exhaustion resolved terminal owner ${admittedOwner}, but that stage was absent from the active admitted DAG.`, writeCampaignEntry });
     }
 
-    state.status = terminalStatus;
-    if (terminalFailureReason) state.failureReason = terminalFailureReason;
-    state.completedAt = new Date().toISOString();
-    // Every budget-exhaustion terminal honors skipped stages and the declared artifact.
-    markLeftoverStagesSkipped(state, `research terminal '${state.status}' committed (budget exhausted) before this stage ran`);
     if (declaredPathBE) state.terminalArtifact = declaredPathBE;
     let declaredAbs: string | undefined;
     let wroteDeclaredCandidate = false;
@@ -157,8 +144,8 @@ export function createResearchBudgetFinalizer(
           ? `- ${r.label}: no candidate (${r.reason ?? 'no reason recorded'})`
           : `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n');
       } catch { /* no journal */ }
-      const body = `# Research ${state.status === RUN_STATUS.CEILING_HIT ? 'Ceiling' : 'Incomplete'} Report\n\n`
-        + `Decision: budget-exhausted ${state.status}\n`
+      const body = `# Research ${terminalStatus === RUN_STATUS.CEILING_HIT ? 'Ceiling' : 'Incomplete'} Report\n\n`
+        + `Decision: budget-exhausted ${terminalStatus}\n`
         + `Reason: ${terminalDetail}\n\n`
         + `## Rounds\n${roundsMd}\n`;
       if (declaredPathBE) {
@@ -174,16 +161,17 @@ export function createResearchBudgetFinalizer(
     // Reality checks now observe the candidate they are expected to verify.
     // A rejected candidate is retained only inside the run directory as audit
     // evidence; it is not allowed to masquerade as committed terminal output.
-    const rg = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
-    if (!rg.allowed) {
+    state = await concludeRun(state, { status: terminalStatus, reasonCode: 'research_budget_exhausted', detail: terminalFailureReason,
+      pendingStageNote: `research terminal '${terminalStatus}' committed (budget exhausted) before this stage ran`,
+      eventFields: () => ({ iteration: iterationNum, detail: terminalDetail }), writeCampaignEntry });
+    if (state.status !== terminalStatus) {
       const quarantine = (source: string | undefined, label: string): void => {
         if (!source || !existsSync(source)) return;
         try { renameSync(source, join(runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
       };
       if (wroteDeclaredCandidate) quarantine(declaredAbs, declaredPathBE?.split('/').pop() ?? 'terminal_candidate');
-      return rg.state;
+      return state;
     }
-    publishRunCompletion(state, projectDir, runId, () => ({iteration: iterationNum, detail: terminalDetail}));
     log.info({ runId, iteration: iterationNum, status: state.status, bankedRounds, requiredRounds, totalRejected }, 'Research run: iteration budget exhausted — policy-owned terminal (no gate-pass complete)');
     return state;
   };;
@@ -283,11 +271,11 @@ export async function settleExhaustedResearchGates(
             projectDir,
             runId,
             iteration,
-            (stage, liveConstraintGuardFactory, settlementBoundary) => executeSingleStage(
+            (stage, settlementBoundary) => executeSingleStage(
               stage, projectDir, runId, runDirPath, workflow, adapter, agents,
               resolvedAgentsDir, state, sorted, skills, taskDescription,
               undefined, undefined, undefined, availableSkillsList,
-              attemptDeadlineClockFactory, liveConstraintGuardFactory, settlementBoundary,
+              attemptDeadlineClockFactory, settlementBoundary,
             ),
           );
           syncStageStatuses(projectDir, runId, [finalizer.id]);
@@ -302,13 +290,12 @@ export async function settleExhaustedResearchGates(
       }
 
       state = readRunState(projectDir, runId);
-      state.status = RUN_STATUS.INCOMPLETE;
-      state.failureReason = `${detail}; ${escalationSelection
+      const failureReason = `${detail}; ${escalationSelection
         ? `admitted escalation terminal ${escalationSelection.terminalPath} was not produced`
         : 'no admitted escalation terminal owner exists'}`;
-      state.completedAt = new Date().toISOString();
-      markLeftoverStagesSkipped(state, state.failureReason);
-      publishRunCompletion(state, projectDir, runId, () => ({iteration, detail: state.failureReason}));
+      state = await concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'research_gate_exhausted', detail: failureReason,
+        pendingStageNote: failureReason,
+        eventFields: () => ({ iteration, detail: state.failureReason }), writeCampaignEntry });
       return state;
     }
 }

@@ -102,6 +102,7 @@ class WatchFixture {
   }
 
   addArtifact(path: string, mtimeMs: number): void {
+    this.files.set(path, 'terminal result');
     this.mtimes.set(path, mtimeMs);
   }
 
@@ -121,7 +122,10 @@ class WatchFixture {
     const filename = `rejected_verdict_${gateId}.json`;
     this.addEntry(round, filename);
     const path = join(round, filename);
-    this.files.set(path, typeof verdict === 'string' ? verdict : JSON.stringify(verdict));
+    this.files.set(path, typeof verdict === 'string' ? verdict : JSON.stringify({ pass: false, ...verdict }));
+    if (typeof verdict !== 'string' && 'metric' in verdict) {
+      this.addMetric(runId, gateId, coordinate, { hasMetric: true, ...verdict });
+    }
     return path;
   }
 
@@ -165,7 +169,9 @@ class WatchFixture {
         return value;
       },
       isProcessAlive: this.livenessProbe,
-      artifactMtimeMs: (path) => this.mtimes.get(path),
+      artifactIdentity: (path) => this.files.has(path)
+        ? { state: 'present', type: 'file', byteLength: this.files.get(path)!.length, sha256: this.files.get(path)! }
+        : { state: 'absent' },
       readPathMetadata: (path) => {
         if (this.unreadableMetadata.has(path)) throw new Error(`unreadable metadata: ${path}`);
         const overriddenKind = this.metadataKinds.get(path);
@@ -263,6 +269,7 @@ describe('watch heartbeat and edge semantics', () => {
     fixture.addRun('settled-but-running', {
       status: 'running',
       startedAt: new Date(1_000).toISOString(),
+      terminalArtifactBaselines: {},
       projectDir,
       stages: {
         implement: { status: 'complete' },
@@ -380,7 +387,7 @@ describe('watch process-authoritative liveness', () => {
     const result = poll(fixture);
     expect(result.stats.liveRuns).toBe(0);
     expect(result.alerts).toEqual([]);
-    expect(fixture.livenessProbe).toHaveBeenCalledExactlyOnceWith(51);
+    expect(fixture.livenessProbe).toHaveBeenCalledExactlyOnceWith(51, 'orphan', join(fixture.root, 'orphan'));
   });
 
   it('does not turn a high attempt count into a stall when the scheduler becomes live', () => {
@@ -428,6 +435,7 @@ describe('watch delayed terminal indecision', () => {
     return {
       status: 'running',
       startedAt: new Date(1_000).toISOString(),
+      terminalArtifactBaselines: {},
       stages: {
         verify: { status: 'complete' },
         repair: { status: 'pending' },
@@ -893,23 +901,6 @@ describe('watch gate convergence judgements', () => {
     expect(poll(fixture).alerts).toEqual([]);
   });
 
-  it('still judges a pure legacy round-only archive without changing it', () => {
-    const fixture = new WatchFixture();
-    fixture.addRun('legacy-layout', { status: 'running', stages: {} }, { pid: 67 });
-    fixture.addVerdict('legacy-layout', 'verify_ship', { round: 1 }, {
-      metric: 'failing_tests', score: 5, threshold: 0,
-    });
-    fixture.addVerdict('legacy-layout', 'verify_ship', { round: 2 }, {
-      metric: 'failing_tests', score: 5, threshold: 0,
-    });
-    const before = fixture.snapshot();
-
-    expect(poll(fixture).alerts).toEqual([
-      expect.objectContaining({ kind: 'gate_not_converging', runId: 'legacy-layout' }),
-    ]);
-    expect(fixture.snapshot()).toBe(before);
-  });
-
   it('emits an evidence-gap edge for invalid verdicts without emitting a false stall', () => {
     const fixture = new WatchFixture();
     fixture.addRun('bad-evidence', { status: 'running', stages: {} }, { pid: 65 });
@@ -973,9 +964,7 @@ describe('watch gate convergence judgements', () => {
     const unchanged = poll(fixture, malformed.state);
     expect(unchanged.alerts).toEqual([]);
 
-    fixture.files.set(verdictPath, JSON.stringify({
-      metric: 'failing_tests', score: 1, threshold: 0,
-    }));
+    fixture.files.set(verdictPath, JSON.stringify({ pass: false }));
     const recovered = poll(fixture, unchanged.state);
     expect(recovered.alerts).toEqual([]);
     expect(recovered.state.activeConditionIds.size).toBe(0);

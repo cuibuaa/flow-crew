@@ -6,25 +6,21 @@ import { join } from 'node:path';
 import { type AgentConfig } from '../../adapters/base.js';
 import { z } from 'zod';
 import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type TerminalStatesConfig, type ResearchConfig } from '../../store.js';
-import type { RealityCheckPreflightReport } from '../../reality-check-preflight.js';
 import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { createHash } from 'node:crypto';
-import { inspectArtifactDeclarations } from '../../artifact-declarations.js';
+import { artifactDeclarationFindings } from '../../artifact-declarations.js';
 import { resolveResearchPaths } from '../../research-paths.js';
-import { discoverProjectValidation } from '../../project-validation.js';
 import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, EMITTED_RESEARCH_DECISIONS, RecordedWorkflowConfigSchema } from './configuration.js';
 import { finiteStatusConditionDomainError, researchTerminalConditionExcludesContinue, assessTerminalConditionCoverage } from './condition-coverage.js';
 import { normalizedProjectPath, scopeMatchesProjectPath } from './scope-services.js';
-import { inspectStageGraph, parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn, findScopeConflict } from './frontier.js';
-import { discoverConfiguredCommandScopes, configuredCommandRolesForStage } from './project-capabilities.js';
-import type { DeclaredInputScopeServices } from './scope-services.js';
-import type { DeclaredInputWriteBinding } from '../../scheduler.js';
+import { inspectStageGraph, parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
 
 export function loadWorkflow(yamlPath: string, recorded = false): { config: WorkflowConfig; raw: string } {
   const raw = readFileSync(yamlPath, 'utf-8');
   const parsed = parseYaml(raw);
   const config = (recorded ? RecordedWorkflowConfigSchema : WorkflowConfigSchema).parse(parsed);
+  if (config.name === 'default') config.name = 'planner';
   for (const stage of config.stages) {
     if (!stage.condition?.trim()) continue;
     const condition = parseCondition(stage.condition);
@@ -131,11 +127,22 @@ export function formatDispatchStageSchemaFailure(error: unknown): string {
   return `invalid schema at ${issues.join('; ')}; fix the named fields and regenerate dispatch.yaml`;
 }
 
+export interface DispatchAdmissionError {
+  code: string;
+  message: string;
+  stageId?: string;
+  field?: string;
+}
+
+export function admissionError(code: string, message: string, field?: string, stageId?: string): DispatchAdmissionError {
+  return { code, message, ...(stageId ? { stageId } : {}), ...(field ? { field } : {}) };
+}
+
 export interface DispatchAdmissionReport {
   version: 1;
   pass: boolean;
   checkedAt: string;
-  errors: string[];
+  errors: DispatchAdmissionError[];
   warnings: string[];
   proposalDigest?: string;
   terminalOwners: Record<string, string>;
@@ -145,26 +152,6 @@ export interface DispatchAdmissionReport {
   criterionTerminalRefs?: Record<string, string[]>;
   /** Engine-derived prior work/gate proofs used by this admission. */
   dischargedCriteria?: CriterionDischargeRecord[];
-  /** Exact framework-owned entries removed from admitted stage write scopes. */
-  frameworkReservedScopes?: Record<string, string[]>;
-  /** Closed planning-time relation between configured-command runners and generated outputs. */
-  configuredCommandScopes?: string[];
-  configuredCommandStageRoles?: Record<string, string[]>;
-  capabilityConflicts?: CapabilityAdmissionConflict[];
-  /** Same candidate's structured check findings; no second refusal pipeline. */
-  realityPreflight?: RealityCheckPreflightReport;
-}
-
-/** Materialize the admitted scope after subtracting exact framework-owned
- * reservations. The admission artifact retains the subtraction as evidence. */
-export function applyFrameworkScopeReservations(
-  stages: readonly StageConfig[],
-  reservations: Readonly<Record<string, readonly string[]>> = {},
-): void {
-  for (const stage of stages) {
-    const reserved = new Set(reservations[stage.id] ?? []);
-    if (reserved.size > 0) stage.scope = (stage.scope ?? []).filter((scope) => !reserved.has(scope));
-  }
 }
 
 export function readBriefCriteriaForAdmission(runDirPath: string): BriefCriteriaArtifact | undefined {
@@ -227,43 +214,7 @@ export function stageScopeOwnsPath(stage: StageConfig, rawPath: string): boolean
   });
 }
 
-export interface CapabilityAdmissionConflict {
-  path: string;
-  reason: string;
-  conflictingStageId?: string;
-}
-
-/** One prospective ownership decision, shared by static and dispatched revisions. */
-export function inspectCapabilityAdmission(
-  input: {
-    stage: StageConfig;
-    paths: readonly string[];
-    activePeers: readonly StageConfig[];
-    declaredInputs: readonly DeclaredInputWriteBinding[];
-    projectDir: string;
-    research?: ResearchConfig;
-  },
-  firstDeclaredInputScopeConflict: DeclaredInputScopeServices['firstDeclaredInputScopeConflict'],
-): CapabilityAdmissionConflict[] {
-  const conflicts: CapabilityAdmissionConflict[] = [];
-  const manifest = input.research && normalizedProjectPath(resolveResearchPaths(input.research).manifestFile);
-  for (const path of input.paths) {
-    if (manifest && scopeMatchesProjectPath(parseDeclaredScope(path), manifest)) {
-      conflicts.push({ path, reason: `requested capability contains framework-owned research manifest ${manifest}, which the scheduler rewrites between rounds` });
-    }
-    const preservedInput = firstDeclaredInputScopeConflict([path], input.declaredInputs, input.projectDir);
-    if (preservedInput) conflicts.push({ path, reason: `requested write capability ${JSON.stringify(preservedInput.scope)} overlaps declared read-only input ${preservedInput.inputPath} (${preservedInput.inputKind}, ${preservedInput.comparison})` });
-    for (const peer of input.activePeers) {
-      for (const peerScope of peer.scope ?? [undefined]) {
-        const conflict = findScopeConflict({ ...input.stage, scope: [...(input.stage.scope ?? []), path] }, { ...peer, scope: peerScope === undefined ? undefined : [peerScope] });
-        if (conflict) conflicts.push({ path, reason: `scope revision conflicts with running peer ${peer.id}: ${conflict.reason}`, conflictingStageId: peer.id });
-      }
-    }
-  }
-  return conflicts;
-}
-
-export function createDispatchAdmission(firstDeclaredInputScopeConflict: DeclaredInputScopeServices['firstDeclaredInputScopeConflict']) {
+export function createDispatchAdmission() {
   return (function inspectDispatchAdmission(input: {
     dispatched: StageConfig[];
     baseStages: StageConfig[];
@@ -272,118 +223,63 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
     research?: ResearchConfig;
     criteria?: BriefCriteriaArtifact;
     criterionDischarges?: CriterionDischargeRecord[];
-    declaredInputs?: readonly DeclaredInputWriteBinding[];
     projectDir?: string;
     runDir?: string;
-    scopeRevision?: { stageId: string; paths: string[]; priorScope: string[]; activePeers: StageConfig[] };
   }): DispatchAdmissionReport {
-    const errors: string[] = [];
+    const errors: DispatchAdmissionError[] = [];
     const all = [...input.baseStages, ...input.dispatched];
     const byId = new Map(all.map(stage => [stage.id, stage]));
-    const revision = input.scopeRevision;
-    const revisionStage = revision && byId.get(revision.stageId);
-    const capabilityConflicts = revision && revisionStage && input.projectDir
-      ? inspectCapabilityAdmission({ stage: { ...revisionStage, scope: revision.priorScope }, paths: revision.paths,
-        activePeers: revision.activePeers, declaredInputs: input.declaredInputs ?? [],
-        projectDir: input.projectDir, research: input.research }, firstDeclaredInputScopeConflict)
-      : [];
-    if (revision && revisionStage) {
-      const rejected = new Set(capabilityConflicts.map(conflict => conflict.path));
-      revisionStage.scope = [...new Set([...revision.priorScope, ...revision.paths.filter(path => !rejected.has(path))])];
-      if (revision.paths.every(path => rejected.has(path))) {
-        errors.push(...capabilityConflicts.map(conflict => `${conflict.path}: ${conflict.reason}`));
-      }
-    }
     const warnings = parallelScopeAdmissionWarnings(input.dispatched);
-    errors.push(...inspectArtifactDeclarations({ stages: all, projectDir: input.projectDir, runDir: input.runDir }));
+    errors.push(...artifactDeclarationFindings({ stages: all, projectDir: input.projectDir, runDir: input.runDir }));
     errors.push(...inspectStageGraph(all).errors);
-    const frameworkReservedScopes = new Map<string, string[]>();
-    const frameworkManifest = input.research
-      ? normalizedProjectPath(resolveResearchPaths(input.research).manifestFile)
-      : undefined;
-
     for (const stage of input.dispatched) {
       if (stage.is_gate && !all.some((repair) => !repair.is_gate && !repair.dynamic_dispatch && repair.retry_to?.includes(stage.id))) {
-        errors.push(`${stage.id}: missing repair route; declare an ordinary repair stage with retry_to: [${stage.id}], depends_on: [${stage.id}], and scope for the permitted repairs. The engine bounds repair rounds by default_gate_retry_loops without re-planning.`);
+        errors.push(admissionError('stage_retry_to', `${stage.id}: missing repair route; declare an ordinary repair stage with retry_to: [${stage.id}], depends_on: [${stage.id}], and scope for the permitted repairs. The engine bounds repair rounds by gate_retry_loops without re-planning.`, 'retry_to', stage.id));
       }
       if (input.research && stage.id === 'research') {
-        errors.push(`${stage.id}.id: reserved for framework-owned research policy facts; choose a different stage ID`);
+        errors.push(admissionError('stage_id', `${stage.id}.id: reserved for framework-owned research policy facts; choose a different stage ID`, 'id', stage.id));
       }
       if (stage.condition?.trim()) {
         try {
           const parsed = parseCondition(stage.condition);
           if (!input.research && parsed.stageId === 'research') {
-            errors.push(`${stage.id}.condition: references framework research facts in a non-research run; remove the condition or declare research mode`);
+            errors.push(admissionError('stage_condition', `${stage.id}.condition: references framework research facts in a non-research run; remove the condition or declare research mode`, 'condition', stage.id));
           }
           const finiteDomainError = finiteStatusConditionDomainError(stage.id, parsed);
-          if (finiteDomainError) errors.push(finiteDomainError);
+          if (finiteDomainError) errors.push(admissionError('stage_condition', finiteDomainError, 'condition', stage.id));
           if (parsed.stageId === 'research' && parsed.op === '==') {
             if (parsed.field === 'decision') {
               if (typeof parsed.value !== 'string' || !EMITTED_RESEARCH_DECISIONS.has(parsed.value)) {
-                errors.push(`${stage.id}.condition: research.decision literal ${JSON.stringify(parsed.value)} cannot occur; expected one of ${[...EMITTED_RESEARCH_DECISIONS].join(', ')}`);
+                errors.push(admissionError('stage_condition', `${stage.id}.condition: research.decision literal ${JSON.stringify(parsed.value)} cannot occur; expected one of ${[...EMITTED_RESEARCH_DECISIONS].join(', ')}`, 'condition', stage.id));
               }
             } else if (parsed.field === 'terminalStatus') {
               const statuses = new Set(Object.keys(input.terminalStates ?? {}));
               if (typeof parsed.value !== 'string' || !statuses.has(parsed.value)) {
-                errors.push(`${stage.id}.condition: research.terminalStatus literal ${JSON.stringify(parsed.value)} is not declared by terminal_states`);
+                errors.push(admissionError('stage_condition', `${stage.id}.condition: research.terminalStatus literal ${JSON.stringify(parsed.value)} is not declared by terminal_states`, 'condition', stage.id));
               }
             } else if (parsed.field === 'terminalPath') {
               const paths = new Set(Object.values(input.terminalStates ?? {}).flatMap((entry) => entry.paths));
               if (typeof parsed.value !== 'string' || !paths.has(parsed.value)) {
-                errors.push(`${stage.id}.condition: research.terminalPath literal ${JSON.stringify(parsed.value)} is not declared by terminal_states`);
+                errors.push(admissionError('stage_condition', `${stage.id}.condition: research.terminalPath literal ${JSON.stringify(parsed.value)} is not declared by terminal_states`, 'condition', stage.id));
               }
             }
           }
         } catch (error) {
-          errors.push(`${stage.id}.condition: ${error instanceof Error ? error.message : String(error)}`);
+          errors.push(admissionError('stage_condition', `${stage.id}.condition: ${error instanceof Error ? error.message : String(error)}`, 'condition', stage.id));
         }
       }
       for (const [index, scope] of (stage.scope ?? []).entries()) {
         const parsed = parseDeclaredScope(scope);
-        if (parsed.kind === 'unknown') errors.push(`${stage.id}.scope.${index}: ${parsed.reason}`);
-      }
-      if (stage.id !== revision?.stageId && frameworkManifest && stageScopeOwnsPath(stage, frameworkManifest)) {
-        const matchingScopes = (stage.scope ?? []).filter((rawScope) => (
-          scopeMatchesProjectPath(parseDeclaredScope(rawScope), frameworkManifest)
-        ));
-        const exactReservations = matchingScopes.filter((rawScope) => {
-          const parsed = parseDeclaredScope(rawScope);
-          return parsed.kind === 'exact' && parsed.value === frameworkManifest;
-        });
-        const nonSubtractable = matchingScopes.filter((rawScope) => !exactReservations.includes(rawScope));
-        if (nonSubtractable.length > 0) {
-          errors.push(`${stage.id}.scope: write capability ${JSON.stringify(nonSubtractable[0])} contains framework-owned research manifest ${frameworkManifest}; use narrower scopes because the scheduler rewrites that path between rounds`);
-        }
-        if (exactReservations.length > 0) frameworkReservedScopes.set(stage.id, exactReservations);
-      }
-      for (const artifact of stage.artifact_contract?.produces ?? []) {
-        if (artifact.root !== 'project') continue;
-        const conflict = firstDeclaredInputScopeConflict([artifact.path], input.declaredInputs ?? [], input.projectDir);
-        if (conflict) errors.push(`${stage.id}: declared output ${artifact.path} overlaps declared read-only input ${conflict.inputPath}`);
+        if (parsed.kind === 'unknown') errors.push(admissionError('stage_scope', `${stage.id}.scope.${index}: ${parsed.reason}`, `scope.${scope}`, stage.id));
       }
       if (stage.retry_to?.length) {
         const retrySet = new Set(stage.retry_to);
         for (const gateId of retrySet) {
           const gate = byId.get(gateId);
-          if (!gate) errors.push(`${stage.id}.retry_to: unknown gate ${JSON.stringify(gateId)}`);
-          else if (gate.is_gate !== true) errors.push(`${stage.id}.retry_to: ${gateId} is not declared is_gate: true`);
-          if (!stage.depends_on.includes(gateId)) errors.push(`${stage.id}.depends_on: missing retry gate ${gateId}`);
+          if (!gate) errors.push(admissionError('stage_retry_to', `${stage.id}.retry_to: unknown gate ${JSON.stringify(gateId)}`, `retry_to.${gateId}`, stage.id));
+          else if (gate.is_gate !== true) errors.push(admissionError('stage_retry_to', `${stage.id}.retry_to: ${gateId} is not declared is_gate: true`, `retry_to.${gateId}`, stage.id));
+          if (!stage.depends_on.includes(gateId)) errors.push(admissionError('stage_depends_on', `${stage.id}.depends_on: missing retry gate ${gateId}`, `depends_on.${gateId}`, stage.id));
         }
-      }
-    }
-
-    const configuredCommands = input.projectDir
-      ? discoverProjectValidation(input.projectDir).commands
-      : [];
-    const configuredCommandScopes = input.projectDir && configuredCommands.length > 0
-      ? discoverConfiguredCommandScopes(input.projectDir)
-      : [];
-    const configuredCommandStageRoles = new Map<string, string[]>();
-    if (configuredCommands.length > 0) {
-      for (const stage of input.dispatched) {
-        const roles = configuredCommandRolesForStage(stage, configuredCommands);
-        if (roles.length === 0) continue;
-        configuredCommandStageRoles.set(stage.id, roles);
       }
     }
 
@@ -401,7 +297,7 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
     }
     for (const [path, declarations] of declarationsByPath) {
       if (declarations.length > 1) {
-        errors.push(`terminal_states path ${path}: declared more than once (${declarations.map((item) => item.status).join(', ')}); one path cannot encode multiple outcomes`);
+        errors.push(admissionError('terminal_owner', `terminal_states path ${path}: declared more than once (${declarations.map((item) => item.status).join(', ')}); one path cannot encode multiple outcomes`, `terminal_states.${path}`));
       }
     }
     for (const declaration of terminalDeclarations) {
@@ -409,14 +305,14 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
         const writers = input.dispatched.filter((stage) => !stage.is_gate && !stage.retry_to?.length && stageScopeOwnsPath(stage, rawPath));
         const owners = writers.filter((stage) => !writers.some((other) => other.id !== stage.id && transitivelyDependsOn(other.id, stage.id, byId)));
         if (owners.length !== 1) {
-          errors.push(`terminal_states path ${rawPath}: expected exactly one final producer, found ${owners.length}${owners.length ? ` (${owners.map((stage) => stage.id).join(', ')})` : ''}`);
+          errors.push(admissionError('terminal_owner', `terminal_states path ${rawPath}: expected exactly one final producer, found ${owners.length}${owners.length ? ` (${owners.map((stage) => stage.id).join(', ')})` : ''}`, `terminal_states.${rawPath}`));
           continue;
         }
         const owner = owners[0];
         terminalOwners[rawPath] = owner.id;
         ownerIds.add(owner.id);
         if (input.research && !researchTerminalConditionExcludesContinue(owner.condition, declaration)) {
-          errors.push(`terminal owner ${owner.id}.condition: must be mechanically false when research.decision is continue; use research.terminalPath == ${JSON.stringify(rawPath)} (preferred), matching research.terminalStatus, or another narrow non-continue equality`);
+          errors.push(admissionError('terminal_owner_condition', `terminal owner ${owner.id}.condition: must be mechanically false when research.decision is continue; use research.terminalPath == ${JSON.stringify(rawPath)} (preferred), matching research.terminalStatus, or another narrow non-continue equality`, 'condition', owner.id));
         }
         if (input.research && !checkedResearchOwnerIds.has(owner.id)) {
           checkedResearchOwnerIds.add(owner.id);
@@ -428,7 +324,7 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
           ].filter((path): path is string => Boolean(path));
           for (const researchOutput of researchOutputs) {
             if (stageScopeOwnsPath(owner, researchOutput)) {
-              errors.push(`terminal owner ${owner.id}.scope: research result producer path ${researchOutput} cannot be owned by a terminal writer; separate measurement from terminalization`);
+              errors.push(admissionError('terminal_owner_scope', `terminal owner ${owner.id}.scope: research result producer path ${researchOutput} cannot be owned by a terminal writer; separate measurement from terminalization`, 'scope', owner.id));
             }
           }
         }
@@ -440,13 +336,13 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
         const assignment = Object.entries(coverage.uncoveredAssignment ?? {})
           .map(([stageId, status]) => `${stageId}.status=${status}`)
           .join(', ');
-        errors.push(`terminal owner conditions do not cover ordinary quiescence${assignment ? ` (${assignment})` : ''}; add a mutually exclusive owner condition that is true after successful required work`);
+        errors.push(admissionError('terminal_owner', `terminal owner conditions do not cover ordinary quiescence${assignment ? ` (${assignment})` : ''}; add a mutually exclusive owner condition that is true after successful required work`, 'terminal_states'));
       }
     }
 
     const criteria = input.criteria?.criteria ?? [];
     if (input.criteria && criteria.length === 0) {
-      errors.push('brief_criteria.json contains zero criteria; dispatch cannot prove coverage');
+      errors.push(admissionError('criteria_missing', 'brief_criteria.json contains zero criteria; dispatch cannot prove coverage', 'criteria'));
     }
     const discharged = new Map(
       (input.criterionDischarges ?? [])
@@ -461,7 +357,7 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
     }
     for (const stage of input.dispatched) {
       for (const ref of stage.criterion_refs ?? []) {
-        if (!criterionIds.has(ref)) errors.push(`${stage.id}.criterion_refs: unknown criterion ${JSON.stringify(ref)}`);
+        if (!criterionIds.has(ref)) errors.push(admissionError('stage_criterion_refs', `${stage.id}.criterion_refs: unknown criterion ${JSON.stringify(ref)}`, `criterion_refs.${ref}`, stage.id));
       }
     }
     const criterionTerminalRefs = new Map<string, string[]>();
@@ -471,12 +367,12 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       const ordinaryWorkers = workers.filter((stage) => !ownerIds.has(stage.id));
       const gates = input.dispatched.filter((stage) => stage.is_gate && stage.criterion_refs.includes(criterion.id));
       if (workers.length === 0 && gates.length === 0 && !discharged.has(criterion.id)) {
-        errors.push(`criterion ${criterion.id}: not assigned to a work stage or gate`);
+        errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: not assigned to a work stage or gate`, `${criterion.id}`));
       }
       // Review duties need no fictitious author. A gate with project write
       // authority still cannot stand in for the independent product author.
       if (workers.length === 0 && gates.some((gate) => gate.scope?.length)) {
-        errors.push(`criterion ${criterion.id}: product-writing gate requires an independent work stage`);
+        errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: product-writing gate requires an independent work stage`, `${criterion.id}`));
       }
       for (const owner of terminalWorkers) {
         const refs = criterionTerminalRefs.get(owner.id) ?? [];
@@ -491,9 +387,9 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
         const hint = emptyDownstreamGates.length === 1
           ? `; downstream ${emptyDownstreamGates[0].id}.criterion_refs is empty — assign this criterion there if that gate is responsible`
           : '';
-        errors.push(`criterion ${criterion.id}: not assigned to a gate${hint}`);
+        errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: not assigned to a gate${hint}`, `${criterion.id}`));
       } else if (ordinaryWorkers.length > 0 && !gates.some((gate) => ordinaryWorkers.some((worker) => transitivelyDependsOn(gate.id, worker.id, byId)))) {
-        errors.push(`criterion ${criterion.id}: no assigned gate is downstream of an assigned work stage`);
+        errors.push(admissionError('criterion_coverage', `criterion ${criterion.id}: no assigned gate is downstream of an assigned work stage`, `${criterion.id}`));
       }
     }
 
@@ -511,10 +407,6 @@ export function createDispatchAdmission(firstDeclaredInputScopeConflict: Declare
       ),
       criterionTerminalRefs: Object.fromEntries(criterionTerminalRefs),
       dischargedCriteria: [...discharged.values()],
-      frameworkReservedScopes: Object.fromEntries(frameworkReservedScopes),
-      ...(revision ? { capabilityConflicts } : {}),
-      configuredCommandScopes,
-      configuredCommandStageRoles: Object.fromEntries(configuredCommandStageRoles),
       ...(input.criteria ? { criteriaDigest: input.criteria.briefDigest } : {}),
     };
   });

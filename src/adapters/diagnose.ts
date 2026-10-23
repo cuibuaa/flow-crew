@@ -96,12 +96,6 @@ export type AdapterFix =
   | 'drop_model'
   /** Reasoning effort is not accepted for this model/request shape → drop it. */
   | 'drop_effort'
-  /**
-   * The session this attempt tried to resume no longer exists → abandon it and start a
-   * fresh one. Unlike the model fixes this changes the request, not the role config, so
-   * `applyFix` leaves the role untouched and the adapter rebuilds its arguments.
-   */
-  | 'fresh_session'
   /** Nothing safe to change automatically. */
   | 'none';
 
@@ -146,18 +140,6 @@ const ATTESTED_MODEL_ERROR = [
  * than no rule at all.
  */
 const RULES: Rule[] = [
-  {
-    // Observed twice, both on the re-verification that follows a repair stage: the attempt
-    // died in under two seconds with zero tokens because the session it meant to resume was
-    // gone, and with no rule here the stage ended as a verdict nobody had reached. Anchored
-    // on the JSON-RPC envelope as well as the message so a task whose own output happens to
-    // quote "no rollout found" cannot be misread as the CLI saying it — codex echoes every
-    // subprocess line the agent produced.
-    all: ['thread/resume', 'no rollout found for thread id'],
-    any: ['-32600', 'code:'],
-    fix: 'fresh_session',
-    friendly: 'The session this stage tried to resume no longer exists. Retried once with a fresh session; prior conversation context for this stage is not recoverable.',
-  },
   {
     // MUST precede the model rules: the real text "reasoning effort is not
     // supported with tools for this model" contains both 'model' and 'not

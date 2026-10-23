@@ -2,7 +2,7 @@ import type { ArtifactContract } from '../../src/artifact-declarations.js';
 
 /** Synthetic control fixtures demand no products, reads or replay evidence. */
 export function emptyArtifactContract(): ArtifactContract {
-  return { version: 1, produces: [], reads: [], groups: [], replays: [] };
+  return { version: 1, produces: [], reads: [], groups: [] };
 }
 
 /** The gate's authored verdict is its explicit framework output. */

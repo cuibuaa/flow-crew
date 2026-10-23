@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   isLiveFlowcrewSchedulerForRun,
-  processCommandMatches,
+  processCommandBinding,
   processStartToken,
   processStartTokensMatch,
   writeSchedulerProcessIdentity,
@@ -80,7 +80,7 @@ describe('darwin branch, driven from any platform', () => {
     process.env.PATH = root;
     try {
       expect(processStartToken(ownedChild.pid!)?.kind).toBe('posix-lstart');
-      expect(processCommandMatches(ownedChild.pid!, 'flowcrew-darwin-path-probe')).toBe(true);
+      expect(processCommandBinding(ownedChild.pid!, 'flowcrew-darwin-path-probe')).toBe('bound');
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
@@ -127,13 +127,13 @@ describe('darwin branch, driven from any platform', () => {
     setPlatform('darwin');
     const marker = "flowcrew-darwin-it's-quoted-probe";
     ownedChild = await spawnOwnedChild(marker);
-    expect(processCommandMatches(ownedChild.pid!, marker)).toBe(true);
+    expect(processCommandBinding(ownedChild.pid!, marker)).toBe('bound');
   });
 
   it('does not match a live process against an unrelated command', async () => {
     setPlatform('darwin');
     ownedChild = await spawnOwnedChild('flowcrew-darwin-negative-probe');
-    expect(processCommandMatches(ownedChild.pid!, 'some-entirely-different-command')).toBe(false);
+    expect(processCommandBinding(ownedChild.pid!, 'some-entirely-different-command')).toBe('unbound');
   });
 
   it('reports a dead pid as unbound rather than throwing', async () => {

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createRun, readRunState, type ResearchIntegrityConfig } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { readRunState, type ResearchIntegrityConfig } from '../src/store.js';
 import { assessResearchShipTarget } from '../src/research-policy.js';
 import { createResearchAdvancer } from '../src/scheduler/sched_policy/research.js';
 import { beginResearchInputGeneration } from '../src/research-candidate.js';
@@ -15,7 +16,7 @@ afterEach(() => { rmSync(project, { recursive: true, force: true }); });
 async function measure(baseline: number, result: number, resultStd?: number, integrity?: ResearchIntegrityConfig) {
   const created = createRun(project, 'research', 'name: research\nstages: []\n', []);
   const state = readRunState(project, created.runId);
-  state.research = { baseline, policy: 'best_of_n', integrity, stop: { maxRounds: 8 } };
+  state.research = { baseline, policy: 'greedy_stack', integrity, stop: { maxRounds: 8 } };
   beginResearchInputGeneration(project, state);
   mkdirSync(join(project, 'docs'), { recursive: true });
   writeFileSync(join(project, 'docs', 'research_round_result.json'), JSON.stringify({
@@ -53,7 +54,7 @@ describe('brief-declared research integrity bounds', () => {
 
   it('uses the same declared bounds when deciding whether a ship target is reachable', () => {
     const config = {
-      baseline: 1, policy: 'best_of_n' as const, stop: { beat: 6 },
+      baseline: 1, policy: 'greedy_stack' as const, stop: { beat: 6 },
       resultSchema: { properties: { result: { type: 'number', maximum: 6 }, result_std: { type: 'number', minimum: 4 } }, required: ['result_std'] },
     };
     expect(assessResearchShipTarget(config).status).toBe('reachable');

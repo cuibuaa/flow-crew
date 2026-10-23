@@ -1,8 +1,9 @@
 import { posix } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findScopeConflict, parseDeclaredScope, selectRunnableBatch } from '../src/scheduler/sched_admission/frontier.js';
-import { scopeLanguagesMayOverlap, scopeMatchesProjectPath, type ParsedScope } from '../src/scheduler/sched_admission/scope-services.js';
-import { firstDeclaredInputScopeConflict } from '../src/scheduler/sched_scope/path-capabilities.js';
+import { normalizedProjectPath, scopeMatchesProjectPath, type ParsedScope } from '../src/scheduler/sched_admission/scope-services.js';
+import { firstImmutableEvidenceConflict } from '../src/scheduler/sched_scope/path-capabilities.js';
+import { normalizeReportedWrite } from '../src/adapters/native-events.js';
 import type { StageConfig } from '../src/scheduler.js';
 
 function stage(id: string, scope?: string[]): StageConfig {
@@ -10,36 +11,50 @@ function stage(id: string, scope?: string[]): StageConfig {
 }
 
 describe('shared scope language', () => {
-  it.each([true, false])('admits an explicit reader beside a missing scope (reader first: %s)', readerFirst => {
+  it('normalizes project paths consistently for scope and native writes', () => {
+    for (const path of ['./src//file.ts', 'src\\file.ts', 'src/./file.ts', 'src/dir/../file.ts']) {
+      expect(normalizedProjectPath(path)).toBe('src/file.ts');
+      expect(normalizeReportedWrite(path)).toBe('src/file.ts');
+    }
+    expect(normalizeReportedWrite('/project/src/file.ts', '/project')).toBe('src/file.ts');
+    for (const path of ['.', '..', '../file.ts', '/outside/file.ts', 'C:/outside/file.ts']) {
+      expect(normalizedProjectPath(path)).toBeUndefined();
+      expect(normalizeReportedWrite(path, '/project')).toBeUndefined();
+    }
+    expect(parseDeclaredScope('src/../file.ts').kind).toBe('unknown');
+    expect(parseDeclaredScope('./src//')).toMatchObject({ kind: 'tree', value: 'src' });
+  });
+
+  it.each([true, false])('serializes an explicit reader beside a missing scope (reader first: %s)', readerFirst => {
     const reader = stage('reader', []), missing = stage('missing');
     const ready = readerFirst ? [reader, missing] : [missing, reader];
     const batch = selectRunnableBatch(ready);
-    expect(batch.selected).toEqual(ready);
-    expect(batch.deferred).toEqual([]);
+    expect(batch.selected).toEqual([ready[0]]);
+    expect(batch.deferred).toHaveLength(1);
   });
 
   it.each([undefined, ['src/**']])('serializes a missing scope beside another possible writer (%j)', scope => {
     for (const ready of [[stage('missing'), stage('writer', scope)], [stage('writer', scope), stage('missing')]]) {
       const batch = selectRunnableBatch(ready);
       expect(batch.selected).toEqual([ready[0]]);
-      expect(batch.deferred).toMatchObject([{ stage: ready[1], conflict: { reason: expect.stringContaining('no declared scope') } }]);
+      expect(batch.deferred).toMatchObject([{ stage: ready[1], conflict: { reason: expect.stringContaining('mutable project tree') } }]);
     }
   });
 
-  it('admits a wildcard-prefix tree beside an incompatible literal path', () => {
+  it('keeps wildcard membership for reporting while serializing a disjoint author', () => {
     const batch = selectRunnableBatch([
       stage('writer', ['workspace-*/**']),
       stage('publisher', ['skills/publish.md']),
     ]);
-    expect(batch.selected.map(item => item.id)).toEqual(['writer', 'publisher']);
-    expect(batch.deferred).toEqual([]);
+    expect(batch.selected.map(item => item.id)).toEqual(['writer']);
+    expect(batch.deferred).toHaveLength(1);
     const scope = parseDeclaredScope('workspace-*/**');
     expect(scopeMatchesProjectPath(scope, 'workspace-one/result.txt')).toBe(true);
     expect(scopeMatchesProjectPath(scope, 'skills/publish.md')).toBe(false);
   });
 
-  it('proves incompatible wildcard segment languages disjoint before a globstar', () => {
-    expect(findScopeConflict(stage('left', ['outputs/a*/**']), stage('right', ['outputs/b*/**']))).toBeUndefined();
+  it('serializes authors with disjoint wildcard scopes', () => {
+    expect(findScopeConflict(stage('left', ['outputs/a*/**']), stage('right', ['outputs/b*/**']))).toBeDefined();
   });
 
   it('preserves punctuation as literal content in a read-only input tree', () => {
@@ -48,10 +63,8 @@ describe('shared scope language', () => {
     const input = { path: inputPath, resolvedPath: inputPath, kind: 'tree' as const };
     expect(scopeMatchesProjectPath(inputTree, 'data/[raw]/file.txt')).toBe(true);
     expect(scopeMatchesProjectPath(inputTree, 'data/r/file.txt')).toBe(false);
-    expect(scopeLanguagesMayOverlap(inputTree, parseDeclaredScope('data/r/file.txt'))).toBe(false);
-    expect(firstDeclaredInputScopeConflict(['data/r/file.txt'], [input])).toBeUndefined();
-    expect(scopeLanguagesMayOverlap(inputTree, parseDeclaredScope('data/*/file.txt'))).toBe(true);
-    expect(firstDeclaredInputScopeConflict(['data/*/file.txt'], [input])).toMatchObject({
+    expect(firstImmutableEvidenceConflict(['data/r/file.txt'], [input])).toBeUndefined();
+    expect(firstImmutableEvidenceConflict(['data/[raw]/file.txt'], [input])).toMatchObject({
       inputPath, inputKind: 'tree', comparison: 'declared_path',
     });
   });

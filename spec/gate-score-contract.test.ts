@@ -14,11 +14,11 @@ describe('binding gate scores', () => {
   ])('checks the declared quantity and finite threshold mechanically: %j', (verdict, reason) => {
     const violation = validateVerdictAgainstContract(verdict, null, contract, 'gate');
     if (reason === null) expect(violation).toBeNull();
-    else expect(violation).toContain(reason);
+    else expect(violation?.reason).toContain(reason);
   });
   it('preserves lower-is-better thresholds and gate-specific applicability', () => {
     const lower = { metric: 'errors', threshold: 2, higherIsBetter: false, appliesToGates: ['audit'] };
-    expect(validateVerdictAgainstContract({ pass: true, metric: 'errors', score: 3 }, null, lower, 'audit')).toContain('does not satisfy');
+    expect(validateVerdictAgainstContract({ pass: true, metric: 'errors', score: 3 }, null, lower, 'audit')?.reason).toContain('does not satisfy');
     expect(validateVerdictAgainstContract({ pass: true }, null, lower, 'other')).toBeNull();
   });
 

@@ -1,16 +1,15 @@
-import { mkdirSync } from './engine-fs.js';
-import { isSessionHomeName } from './adapter-session.js';
+import { atomicWrite, mkdirSync } from './engine-fs.js';
 import { stageLiveLogPath } from './stage-live-log.js';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { processGroupWork } from './process-liveness.js';
-import { atomicWrite, isRunningStageStatus, isTerminalRunStatus, readRunState, readStageStatus,
+import { isRunningStageStatus, isTerminalRunStatus, readRunState, readStageStatus,
   runDir as getRunDirPath, runningStageAttempt, type StageStatus, type StoreState } from './store.js';
 import { ABORT_SIGNAL_VERSION, type StageAbortSignal } from './abort-signal.js';
-import { readRunEvents } from './run-events.js';
 import { createLogger } from './logging.js';
 import { reportRunProcessProgress } from './adapters/base.js';
+import { compareContentIdentities, readContentIdentity } from './content-identity.js';
+import type { AttemptEvidenceGeneration } from './worker.js';
 
 const log = createLogger({ name: 'stage-watchdog' });
 export const DEFAULT_WATCHDOG_POLL_INTERVAL_MS = 30_000;
@@ -20,10 +19,10 @@ export interface StageWatchdogOptions {
   pollIntervalMs?: number;
 }
 
-/** Current-attempt output, artifact and process work share one idle clock. */
+/** Current-attempt output and process work share one idle clock. */
 export function detectStalledStages(input: {
   runningStages: string[];
-  /** Stage ids that showed current-attempt output, artifact or process work THIS tick. */
+  /** Stage ids that showed current-attempt output or process work THIS tick. */
   progressedStageIds: Set<string>;
   /** Per-stage last-progress timestamps carried across ticks (caller-owned). */
   lastProgressMs: Record<string, number>;
@@ -53,11 +52,9 @@ export interface StageExecutionFacts {
   verdictObserved: boolean;
   outputObserved: boolean;
   handoffObserved: boolean;
-  commitObserved: boolean;
   liveProgressThisTick: boolean;
   /** Byte offset in this execution's stream, persisted with the observation. */
   liveLogBytes?: number;
-  artifactProgressThisTick: boolean;
   activeCommandCount: number;
   commandActivityValid: boolean;
   finalizing: boolean;
@@ -67,22 +64,9 @@ export interface StageExecutionFacts {
   processSample?: ReturnType<typeof processGroupWork>;
 }
 
-interface ProjectCommitFact {
-  hash: string;
-  committedAtMs: number;
-}
-
-interface AttemptGenerationRecord {
-  version: 1;
-  stageId: string;
-  attemptIndex: number;
-  attemptStartedAt: string;
-  segmentStart: number;
-}
-
-function readAttemptGeneration(runDirectory: string, stageId: string): AttemptGenerationRecord | undefined {
+function readAttemptGeneration(runDirectory: string, stageId: string): AttemptEvidenceGeneration | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(join(runDirectory, 'stages', stageId, 'attempt_generation.json'), 'utf-8')) as AttemptGenerationRecord;
+    const parsed = JSON.parse(readFileSync(join(runDirectory, 'stages', stageId, 'attempt_generation.json'), 'utf-8')) as AttemptEvidenceGeneration;
     if (parsed.version !== 1 || parsed.stageId !== stageId || !Number.isSafeInteger(parsed.attemptIndex)
       || typeof parsed.attemptStartedAt !== 'string' || !Number.isSafeInteger(parsed.segmentStart) || parsed.segmentStart < 0) return undefined;
     return parsed;
@@ -108,28 +92,23 @@ export function inspectStageExecutionFacts(input: {
   runDir: string;
   stageId: string;
   status: StageStatus;
-  sinceMs: number;
-  commitObserved?: boolean;
-  commitProgressThisTick?: boolean;
   previousProcessWork?: string;
   previousLiveLogBytes?: number;
 }): StageExecutionFacts {
   const attempt = runningStageAttempt(input.status);
-  const attemptStartedMs = attempt ? Date.parse(attempt.startedAt) : Number.NaN;
-  const belongsToAttempt = (path: string): boolean => {
-    if (!attempt || !Number.isFinite(attemptStartedMs)) return false;
-    try {
-      const stat = statSync(path);
-      return stat.isFile() && stat.size > 0 && stat.mtimeMs >= attemptStartedMs;
-    } catch {
-      return false;
+  const generation = readAttemptGeneration(input.runDir, input.stageId);
+  const generationMatches = generation?.attemptIndex === attempt?.index && generation?.attemptStartedAt === attempt?.startedAt;
+  const belongsToAttempt = (path: string, slot: string): boolean => {
+    const baseline = generationMatches ? generation?.artifactBaselines?.[slot] : undefined;
+    const current = readContentIdentity(path);
+    if (current.state !== 'present' || current.type !== 'file' || current.byteLength === 0) return false;
+    // Deployed legacy readers used timestamps even with hash/null baselines;
+    // their output hash described output_attempt_N.md, not output.md.
+    if (typeof baseline !== 'object' || baseline === null) {
+      try { return !!attempt && statSync(path).mtimeMs >= Date.parse(attempt.startedAt); }
+      catch { return false; }
     }
-  };
-  const changedThisTick = (path: string): boolean => {
-    if (!belongsToAttempt(path)) return false;
-    // Heartbeat cutoffs use Date.now() milliseconds. Sub-millisecond filesystem
-    // precision cannot make a previously observed clock tick new work again.
-    try { return Math.floor(statSync(path).mtimeMs) > input.sinceMs; } catch { return false; }
+    return compareContentIdentities(baseline, current) === 'different';
   };
 
   const stageRoot = join(input.runDir, 'stages', input.stageId);
@@ -137,10 +116,9 @@ export function inspectStageExecutionFacts(input: {
   const outputPath = join(stageRoot, 'output.md');
   const verdictPath = join(input.runDir, `verdict_${input.stageId}.json`);
   const handoffPath = join(input.runDir, `handoff_${input.stageId}.md`);
-  const verdictObserved = belongsToAttempt(verdictPath);
-  const outputObserved = belongsToAttempt(outputPath);
-  const handoffObserved = belongsToAttempt(handoffPath);
-  const commitObserved = input.commitObserved === true;
+  const verdictObserved = belongsToAttempt(verdictPath, 'verdict');
+  const outputObserved = belongsToAttempt(outputPath, 'output');
+  const handoffObserved = belongsToAttempt(handoffPath, 'handoff');
   let activeCommandCount = 0;
   let commandActivityValid = false;
   let processWork: string | undefined;
@@ -190,23 +168,7 @@ export function inspectStageExecutionFacts(input: {
     } catch { /* missing/malformed activity never grants protection */ }
   }
 
-  const internalName = /^(?:live(?:_attempt_\d+_[a-f0-9]{24})?\.log$|status\.json$|input\.md$|guidance(?:_consumed)?\.md$|command_activity\.json$|attempt_generation\.json$|attempt_deadline_|invocations$|session\.json$|constraint_audit_|write_boundary_|output_attempt_)/;
-  let stageArtifactChanged = false;
-  const walk = (dir: string, depth: number): void => {
-    if (stageArtifactChanged || depth > 3) return;
-    let entries: import('node:fs').Dirent[];
-    try { entries = readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent[]; } catch { return; }
-    for (const entry of entries) {
-      if (internalName.test(entry.name) || isSessionHomeName(entry.name)) continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path, depth + 1);
-      else if (entry.isFile() && changedThisTick(path)) stageArtifactChanged = true;
-      if (stageArtifactChanged) return;
-    }
-  };
-  walk(stageRoot, 0);
-  const generation = readAttemptGeneration(input.runDir, input.stageId);
-  const generationMatches = generation?.attemptIndex === attempt?.index && generation?.attemptStartedAt === attempt?.startedAt;
+
   // The native stream already has an execution-specific name. Neither its
   // membership nor newly appended bytes depend on a wall-clock timestamp.
   const currentStream = attempt && stageLiveLogPath(input.runDir, input.stageId, attempt.index, attempt.startedAt);
@@ -216,12 +178,9 @@ export function inspectStageExecutionFacts(input: {
   } catch { /* absent stream provides no progress */ }
   const liveProgressThisTick = liveLogBytes !== undefined
     && liveLogBytes > Math.max(input.previousLiveLogBytes ?? 0, generationMatches ? generation!.segmentStart : 0);
-  const artifactProgressThisTick = stageArtifactChanged
-    || changedThisTick(verdictPath)
-    || changedThisTick(handoffPath)
-    || (commitObserved && input.commitProgressThisTick !== false);
+
   const finalizing = outputObserved && !verdictObserved;
-  const protectedFromIdleAbort = artifactProgressThisTick || liveProgressThisTick || processProgress;
+  const protectedFromIdleAbort = liveProgressThisTick || processProgress;
   return {
     stageId: input.stageId,
     attemptIndex: attempt?.index,
@@ -229,10 +188,8 @@ export function inspectStageExecutionFacts(input: {
     verdictObserved,
     outputObserved,
     handoffObserved,
-    commitObserved,
     liveProgressThisTick,
     liveLogBytes,
-    artifactProgressThisTick,
     activeCommandCount,
     commandActivityValid,
     finalizing,
@@ -250,7 +207,6 @@ export function describeStageExecutionFacts(facts: StageExecutionFacts): string 
     facts.verdictObserved ? 'verdict observed' : 'no verdict observed',
     facts.outputObserved ? 'final output observed' : 'no final output observed',
     facts.handoffObserved ? 'handoff observed' : 'no handoff observed',
-    facts.commitObserved ? 'commit observed' : 'no current-attempt commit observed',
     facts.activeCommandCount > 0
       ? `${facts.activeCommandCount} active command${facts.activeCommandCount === 1 ? '' : 's'} observed`
       : facts.commandActivityValid ? 'no active command observed' : 'no valid command activity record',
@@ -318,7 +274,6 @@ export class StageWatchdog {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private readonly stageObservations = new StageObservations();
-  private lastArtifactCheckMs = 0;
 
   constructor(
     private projectDir: string,
@@ -353,29 +308,12 @@ export class StageWatchdog {
     try { return readStageStatus(this.projectDir, this.runId, stageId); } catch { return fallback; }
   }
 
-  private readProjectCommit(): ProjectCommitFact | undefined {
-    try {
-      const output = execFileSync('git', ['show', '-s', '--format=%H%x00%cI', 'HEAD'], {
-        cwd: this.projectDir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000,
-      }).trim();
-      const [hash, committedAt] = output.split('\0');
-      const committedAtMs = Date.parse(committedAt);
-      if (!/^[0-9a-f]{7,40}$/i.test(hash) || !Number.isFinite(committedAtMs)) return undefined;
-      return { hash, committedAtMs };
-    } catch { return undefined; }
-  }
-
-  private inspectFacts(stageId: string, status: StageStatus, sinceMs: number,
-    baseCommit?: string, projectCommit = this.readProjectCommit()): StageExecutionFacts {
+  private inspectFacts(stageId: string, status: StageStatus): StageExecutionFacts {
     const attempt = runningStageAttempt(status);
-    const attemptStartedMs = attempt ? Date.parse(attempt.startedAt) : Number.NaN;
-    const commitObserved = Boolean(attempt && projectCommit && projectCommit.hash !== baseCommit
-      && Number.isFinite(attemptStartedMs) && projectCommit.committedAtMs + 999 >= attemptStartedMs);
     const previous = this.stageObservations.facts(stageId);
     const sameAttempt = previous?.attemptIndex === attempt?.index && previous?.attemptStartedAt === attempt?.startedAt;
     return inspectStageExecutionFacts({
-      runDir: this.runDir(), stageId, status, sinceMs, commitObserved,
-      commitProgressThisTick: Boolean(projectCommit && projectCommit.committedAtMs + 999 >= sinceMs),
+      runDir: this.runDir(), stageId, status,
       previousProcessWork: this.stageObservations.facts(stageId)?.processWork,
       previousLiveLogBytes: sameAttempt ? previous?.liveLogBytes : undefined,
     });
@@ -385,7 +323,6 @@ export class StageWatchdog {
     try {
       atomicWrite(join(this.runDir(), 'stage_watchdog.json'), JSON.stringify({
         stageProgress: this.stageObservations.snapshot(this.options.idleThresholdMs),
-        stageProgressObservedAt: this.lastArtifactCheckMs,
       }, null, 2));
     } catch { /* cancellation does not depend on dashboard publication */ }
   }
@@ -393,11 +330,9 @@ export class StageWatchdog {
   /** Resume only observations bound to the current execution, including old runs. */
   restoreProgress(): void {
     try {
-      const current = join(this.runDir(), 'stage_watchdog.json');
-      const path = existsSync(current) ? current : join(this.runDir(), 'supervisor_state.json');
+      const path = join(this.runDir(), 'stage_watchdog.json');
       const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
         stageProgress?: Record<string, StageExecutionFacts & { lastProgressAt: number }>;
-        stageProgressObservedAt?: number;
       };
       const state = readRunState(this.projectDir, this.runId);
       for (const [stageId, facts] of Object.entries(parsed.stageProgress ?? {})) {
@@ -407,14 +342,11 @@ export class StageWatchdog {
           || !Number.isFinite(facts.lastProgressAt) || facts.lastProgressAt > Date.now()) continue;
         this.stageObservations.restore({ ...facts, stageId }, facts.lastProgressAt);
       }
-      if (Number.isFinite(parsed.stageProgressObservedAt) && parsed.stageProgressObservedAt! <= Date.now()) {
-        this.lastArtifactCheckMs = parsed.stageProgressObservedAt!;
-      }
     } catch { /* first start or missing historical progress */ }
   }
 
   /** Re-read execution ownership and progress immediately before cancellation. */
-  private writeVerifiedAbort(stageId: string, sinceMs: number): { written: boolean; reason: string } {
+  private writeVerifiedAbort(stageId: string): { written: boolean; reason: string } {
     let state: StoreState;
     try { state = readRunState(this.projectDir, this.runId); }
     catch { return { written: false, reason: 'no readable run state observed' }; }
@@ -422,32 +354,19 @@ export class StageWatchdog {
     if (!status || !isRunningStageStatus(status.status)) return { written: false, reason: 'no active running stage observed' };
     const authoritative = this.authoritativeStageStatus(stageId, status);
     if (!isRunningStageStatus(authoritative.status)) return { written: false, reason: 'no active running execution observed' };
-    const facts = this.inspectFacts(stageId, authoritative, sinceMs, state.baseCommit);
+    const facts = this.inspectFacts(stageId, authoritative);
     if (facts.attemptIndex === undefined || !this.stageObservations.owns(facts)) {
       return { written: false, reason: 'current execution changed during final verification' };
     }
     if (facts.protectedFromIdleAbort) {
       this.stageObservations.recordProgress(facts, Date.now());
       reportRunProcessProgress(this.projectDir, this.runId);
-      return { written: false, reason: 'current live, artifact or process work was observed during final verification' };
+      return { written: false, reason: 'current live or process work was observed during final verification' };
     }
     const lastProgressAt = this.stageObservations.lastProgressAt(stageId);
     const idleMs = lastProgressAt === undefined ? -1 : Date.now() - lastProgressAt;
     if (idleMs < this.options.idleThresholdMs) return { written: false, reason: 'verified idle duration is below the configured threshold' };
-    const environmentWaits = new Map<string, string>();
-    for (const event of readRunEvents(this.projectDir, this.runId)) {
-      const eventMs = Date.parse(event.timestamp);
-      if (event.stageId !== stageId || event.attemptIndex !== facts.attemptIndex
-        || !Number.isFinite(eventMs) || eventMs < Date.parse(facts.attemptStartedAt!)
-        || (event.attemptStartedAt !== undefined && event.attemptStartedAt !== facts.attemptStartedAt)) continue;
-      const key = event.observationId ?? 'legacy';
-      if (event.type === 'stage_environment_wait_started' && event.detail) environmentWaits.set(key, event.detail);
-      else if (event.type === 'stage_environment_wait_finished') environmentWaits.delete(key);
-    }
-    const waits = [...environmentWaits.values()];
-    const basis = waits.length
-      ? `pre_execution environment wait at watchdog threshold (${Math.round(idleMs / 1000)}s idle; threshold ${Math.round(this.options.idleThresholdMs / 1000)}s): ${waits.join('; ')}`
-      : `no verified live/artifact/process progress for ${idleMs}ms (threshold ${this.options.idleThresholdMs}ms)`;
+    const basis = `no verified live/process progress for ${idleMs}ms (threshold ${this.options.idleThresholdMs}ms)`;
     const reason = `Watchdog ABORT verified for ${stageId} attempt ${facts.attemptIndex}: ${basis}; ${describeStageExecutionFacts(facts)}.`;
     const signal: StageAbortSignal = { version: ABORT_SIGNAL_VERSION, stageId, attemptIndex: facts.attemptIndex,
       reason, timestamp: new Date().toISOString(), source: 'watchdog' };
@@ -465,20 +384,17 @@ export class StageWatchdog {
     if (isTerminalRunStatus(state.status)) { this.stop(); return; }
     const runningStages = Object.entries(state.stages).filter(([, status]) => isRunningStageStatus(status.status)).map(([id]) => id);
     const now = Date.now();
-    const cutoff = this.lastArtifactCheckMs || (now - this.options.idleThresholdMs);
-    this.lastArtifactCheckMs = now;
-    const projectCommit = this.readProjectCommit();
     const stageFacts = new Map<string, StageExecutionFacts>();
     for (const stageId of runningStages) {
       const status = this.authoritativeStageStatus(stageId, state.stages[stageId]);
-      const facts = this.inspectFacts(stageId, status, cutoff, state.baseCommit, projectCommit);
+      const facts = this.inspectFacts(stageId, status);
       stageFacts.set(stageId, facts);
     }
     const stalledStageIds = this.stageObservations.reconcile(stageFacts, now, this.options.idleThresholdMs);
     if ([...stageFacts.values()].some(facts => facts.protectedFromIdleAbort)) reportRunProcessProgress(this.projectDir, this.runId);
     for (const stageId of stalledStageIds) {
       if (this.stageObservations.wasAborted(stageId)) continue;
-      const abort = this.writeVerifiedAbort(stageId, cutoff);
+      const abort = this.writeVerifiedAbort(stageId);
       if (abort.written) {
         this.stageObservations.recordAbort(stageId);
         log.warn({ runId: this.runId, stageId, reason: abort.reason }, 'Stage watchdog idle cancellation');

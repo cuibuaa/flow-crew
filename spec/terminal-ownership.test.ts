@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { admittedTerminalOwner, stageAttemptWroteProjectPath, terminalProductWrites } from '../src/scheduler/sched_policy/terminal-ownership.js';
+import { admittedTerminalOwner, lastAttributedStageWriteMs, stageAttemptWroteProjectPath, terminalProductWrites } from '../src/scheduler/sched_policy/terminal-ownership.js';
 import { type StageAttempt, type StageConstraintAuditSummary, type StageStatus, type StoreState } from '../src/store.js';
 
 const temporary: string[] = [];
@@ -23,7 +23,7 @@ function state(projectDir: string, owner: StageStatus): StoreState {
 function audit(violationCount: number, unresolvedViolationCount?: number): StageConstraintAuditSummary {
   return {
     path: 'stages/owner/constraint_audit_attempt_1.json', declaredScope: [terminalPath], effectiveScope: [terminalPath],
-    acceptedRevisionCount: 0, rejectedRevisionCount: 0, mismatchCount: 0, unverifiedCount: 0,
+    unverifiedCount: 0,
     violationCount, ...(unresolvedViolationCount === undefined ? {} : { unresolvedViolationCount }),
   };
 }
@@ -59,6 +59,14 @@ describe('terminal provenance belongs to eligible settled attempts', () => {
     const owner: StageStatus = { status, retries: 0, attempts: [attempt(status, [join(project, terminalPath)])] };
     expect(stageAttemptWroteProjectPath(project, state(project, owner), 'owner', terminalPath, status)).toBe(true);
     expect(stageAttemptWroteProjectPath(project, state(project, owner), 'owner', 'results/unwritten.md', status)).toBe(false);
+  });
+
+  it('does not borrow an engine publication from a stale top-level write aggregate', () => {
+    const project = fixture();
+    const run = state(project, { status: 'complete', retries: 0, completedAt: at,
+      writes: [terminalPath], attempts: [attempt('complete', [])] });
+    expect(stageAttemptWroteProjectPath(project, run, 'owner', terminalPath)).toBe(false);
+    expect(lastAttributedStageWriteMs(project, run, 'owner', terminalPath)).toBeUndefined();
   });
 
   it('never uses failed-attempt writes as successful provenance', () => {
@@ -113,7 +121,7 @@ describe('terminal provenance belongs to eligible settled attempts', () => {
 
 
 describe('terminal product deltas use existing content and ownership evidence', () => {
-  it.each(['absent', 'legacy', 'unchanged', 'changed'] as const)('uses %s scope audit evidence without confusing run artifacts with product', shape => {
+  it.each(['absent', 'legacy', 'durable-only omission', 'unchanged', 'changed', 'ignored', 'unavailable'] as const)('uses the attempt delta despite %s scope audit evidence', shape => {
     const project = fixture();
     const completed = attempt('complete', [terminalPath, 'run:notes.md', '../state/notes.md', '.git/index', join(project, 'value.json')]);
     const owner: StageStatus = { status: 'complete', retries: 0, attempts: [completed] };
@@ -122,9 +130,15 @@ describe('terminal product deltas use existing content and ownership evidence', 
     writeFileSync(join(project, 'dispatch_admission.json'), JSON.stringify({ pass: true, terminalOwners: { [terminalPath]: 'owner' } }));
     if (shape !== 'absent') {
       completed.constraintAudit = { ...audit(0, 0), path: 'audit.json' };
-      writeFileSync(join(project, 'audit.json'), JSON.stringify(shape === 'legacy' ? {} : { durableWrites: shape === 'unchanged' ? [terminalPath] : [terminalPath, 'value.json'] }));
+      writeFileSync(join(project, 'audit.json'), JSON.stringify(
+        shape === 'legacy' ? {} : shape === 'durable-only omission' ? { durableWrites: [terminalPath] } : {
+          rawWrites: [terminalPath, 'value.json'], appliedWrites: shape === 'changed' ? ['value.json'] : [],
+          exemptedWrites: shape === 'ignored' ? ['value.json'] : [], rolledBackWrites: [], rollbackFailures: [],
+          unavailableComparisons: shape === 'unavailable' ? ['value.json'] : [],
+        }));
     }
-    expect(terminalProductWrites(project, run, 'owner')).toEqual(shape === 'unchanged' ? [] : [{ path: 'value.json', completedAt: Date.parse(at) }]);
+    expect(terminalProductWrites(project, run, 'owner')).toEqual(['unchanged', 'ignored', 'unavailable'].includes(shape)
+      ? [] : [{ path: 'value.json', completedAt: Date.parse(at) }]);
   });
 
   it.each(['owner', 'other'] as const)('uses a round evidence glob only for its %s terminal producer', evidenceOwner => {

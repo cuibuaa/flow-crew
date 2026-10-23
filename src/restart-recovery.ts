@@ -1,21 +1,22 @@
-export { readHostBootId, checkpointCommandFateKnown, checkpointConsumers } from './checkpoint-liveness.js';
+export { readHostBootId, checkpointConsumers } from './checkpoint-liveness.js';
 import { join, resolve } from 'node:path';
-import { sha256Canonical as digest } from './runtime-negotiation.js';
+import { sha256Canonical as digest } from './canonical-json.js';
 import { z } from 'zod';
 import { readBuildManifest } from './build-manifest.js';
-import { readHostBootId, checkpointCommandFateKnown, checkpointConsumers } from './checkpoint-liveness.js';
-import { inspectRunScheduler, processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './run-lock.js';
+import { readHostBootId, checkpointConsumers } from './checkpoint-liveness.js';
+import { inspectRunScheduler } from './run-lock.js';
+import { processLiveness, processStartToken, type ProcessStartToken } from './process-liveness.js';
 
 import { RUN_STATUS, STAGE_STATUS, interruptedStageStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
+import { concludeRun } from './scheduler/sched_policy/run-completion.js';
 import { planDigest } from './plan-revisions.js';
 import { canonicalRunId } from './cancellation-policy.js';
 import { runsRoot } from './store.js';
 import { RecordedStageConfigSchema } from './scheduler/sched_admission/configuration.js';
-import { artifactDeclarationErrors } from './artifact-declarations.js';
 
 export interface EngineCheckpoint {
-  version: 1 | 2; runId: string; projectDir: string; bootId?: string; generation?: string;
+  version: 2; runId: string; projectDir: string; bootId?: string; generation?: string;
   pid: number; processStart?: ProcessStartToken; at: string;
   processes?: { pid: number; processStart?: ProcessStartToken }[];
 }
@@ -56,15 +57,10 @@ function binding(state: StoreState): RecoveryIntent['binding'] {
 function interruptionError(previous: EngineCheckpoint): string {
   return `HOST_RESTART_INTERRUPTED: controller lost (boot ${previous.bootId ?? 'unknown'}); no authored product rejection or successful completion is inferred`;
 }
-/** Match the persisted closed attempt, including fields completeStageAttempt clears. */
+/** Match the persisted interrupted attempt, retaining collected usage. */
 function closedAttempt(stage: RecoveryIntent['stages'][number], previous: EngineCheckpoint): StageAttempt {
-  if (stage.attempt.status === 'closed') return { ...stage.attempt, status: 'failed', exitCode: 143, error: interruptionError(previous) } as StageAttempt;
-  return {
-    ...stage.attempt, status: 'failed', completedAt: stage.completedAt, duration_ms: stage.durationMs,
-    exitCode: 143, tokenUsage: 'unknown', error: interruptionError(previous),
-    tokens_in: undefined, tokens_out: undefined, adapterFailureKind: undefined, writes: undefined,
-    writeAttribution: undefined, validationGeneratedWrites: undefined, constraintAudit: undefined, timeout: undefined,
-  };
+  return interruptedStageStatus({ status: STAGE_STATUS.RUNNING, retries: stage.retries, attempts: [stage.attempt as StageAttempt] },
+    stage.completedAt, interruptionError(previous), 'host_restart').attempts!.at(-1)!;
 }
 function matchesStage(current: StageStatus | undefined, stage: RecoveryIntent['stages'][number], previous: EngineCheckpoint): boolean {
   const attempts = current?.attempts, attempt = attempts?.at(-1);
@@ -91,7 +87,7 @@ export function persistedPlanErrors(state: StoreState): string[] {
   if (Boolean(state.planControl) !== Boolean(state.queryState?.planRevision) || (state.planControl && planDigest(state.planControl.stages) !== state.queryState?.planRevision?.digest)) errors.push('RECOVERY_PLAN_UNBOUND: admitted plan revision is unavailable or does not match the persisted plan');
   for (const stage of state.planControl?.stages ?? []) {
     const parsed = RecordedStageConfigSchema.safeParse(stage);
-    if (!parsed.success || artifactDeclarationErrors(stage.artifact_contract, stage.id).length) errors.push(`RECOVERY_PLAN_INCOMPATIBLE: ${stage.id} does not satisfy the current execution contract`);
+    if (!parsed.success || !parsed.data.artifact_contract) errors.push(`RECOVERY_PLAN_INCOMPATIBLE: ${stage.id} does not satisfy the current execution contract`);
   }
   return errors;
 }
@@ -110,24 +106,26 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
   if (!state.engineCheckpoint) {
     const snapshot = digest(state);
     const reason = 'RECOVERY_CHECKPOINT_MISSING: controller absent but descendant fate, admitted plan and generation cannot be proved; run ended without resuming or claiming stage completion';
+    let publish: (() => void) | undefined;
     return updateRunState(projectDir, runId, current => {
       evidence.assertSchedulerAbsent!();
       if (digest(current) !== snapshot) throw new Error('RECOVERY_STATE_CHANGED: run changed before unknown-fate settlement');
-      current.status = RUN_STATUS.FAILED;
-      current.completedAt = new Date().toISOString();
-      current.failureReason = reason;
-      current.recovery = { kind: 'blocked', reason, at: current.completedAt, interruptedStages: Object.keys(current.stages).filter(id => current.stages[id].status === STAGE_STATUS.RUNNING) };
-    }, current => recordRunEvent(projectDir, runId, { type: 'recovery_reconciled', runId, timestamp: current.recovery!.at, detail: reason, source: 'scheduler', level: 'warning' }));
+      concludeRun(current, { status: RUN_STATUS.FAILED, reasonCode: 'recovery_blocked', detail: reason },
+        (_state, notify) => { publish = notify; });
+      current.recovery = { kind: 'blocked', reason, at: current.completedAt!, interruptedStages: Object.keys(current.stages).filter(id => current.stages[id].status === STAGE_STATUS.RUNNING) };
+    }, current => {
+      publish?.();
+      recordRunEvent(projectDir, runId, { type: 'recovery_reconciled', runId, timestamp: current.recovery!.at, detail: reason, source: 'scheduler', level: 'warning' });
+    });
   }
-  if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir) || !state.engineCheckpoint || ![1, 2].includes(state.engineCheckpoint.version) || state.engineCheckpoint.runId !== runId || resolve(state.engineCheckpoint.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: checkpoint is not bound to this run/project');
+  if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir) || !state.engineCheckpoint || state.engineCheckpoint.version !== 2 || state.engineCheckpoint.runId !== runId || resolve(state.engineCheckpoint.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: checkpoint is not bound to this run/project');
   const boot = Object.hasOwn(evidence, 'currentBootId') ? evidence.currentBootId : readHostBootId();
   const previous = state.engineCheckpoint;
   const errors: string[] = [];
-  if (!checkpointCommandFateKnown(state, { currentBootId: boot })) errors.push('RECOVERY_FATE_UNKNOWN: legacy race checkpoint omitted enclosing command ownership; candidate death is not proven');
   if (!previous.bootId || !boot || previous.bootId === boot) {
     if (!previous.processes) errors.push('RECOVERY_FATE_UNKNOWN: legacy checkpoint has no owned command groups and no proven previous-boot death');
     else {
-      if (processIsAlive(previous.pid) && (!previous.processStart || processStartTokensMatch(previous.processStart, processStartToken(previous.pid)))) throw new Error('RECOVERY_FATE_CHANGED: checkpoint controller is still alive');
+      if (processLiveness(previous.pid, previous.processStart) !== 'dead') throw new Error('RECOVERY_FATE_CHANGED: checkpoint controller is still alive');
       if (checkpointConsumers(previous, { currentBootId: boot, retire: true }).length) {
         throw new Error('RECOVERY_CONSUMERS_ACTIVE: waiting for interrupted command group retirement');
       }
@@ -164,7 +162,13 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
           : current.status !== STAGE_STATUS.RUNNING || !['running', 'closed'].includes(current.attempts?.at(-1)?.status ?? '') || digest(current) !== digest(state.stages[stageId])) errors.push(`RECOVERY_ATTEMPT_UNBOUND: ${stageId} has no matching interrupted execution ledger`);
       } catch (error) { errors.push(`RECOVERY_ATTEMPT_UNBOUND: ${stageId}: ${String(error)}`); }
     }
-    if (!intent && Object.values(state.stages).some((stage) => stage.status === STAGE_STATUS.FAILED && stage.attempts?.at(-1)?.exitCode === 143 && stage.attempts.at(-1)?.error?.startsWith('HOST_RESTART_INTERRUPTED:'))) {
+    if (!intent && Object.values(state.stages).some((stage) => {
+      const attempt = stage.attempts?.at(-1);
+      // Generic exit/143 is unauthenticated, regardless of display text. An
+      // explicit cancellation remains distinct from host interruption.
+      return stage.status === STAGE_STATUS.FAILED && (attempt?.terminationCause === 'host_restart'
+        || attempt?.terminationCause === 'exit' && attempt.exitCode === 143);
+    })) {
       errors.push('RECOVERY_INTENT_REQUIRED: failed143 interruption has no durable engine intent; retain the failure and migrate with authenticated attempt evidence');
     }
   }
@@ -195,7 +199,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       evidence.assertSchedulerAbsent?.();
       assertIntentAuthority(current, authority);
       // A closed failed143 attempt is retained, never completed a second time.
-      return interruptedStageStatus(ledger, stage.completedAt, interruptionError(previous));
+      return interruptedStageStatus(ledger, stage.completedAt, interruptionError(previous), 'host_restart');
     });
     if (state.status !== RUN_STATUS.RUNNING) return state;
     state = updateStageStatusUnderRunLock(projectDir, runId, stage.stageId, (current, ledger) => {
@@ -208,8 +212,10 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
   }
   const reason = errors.length ? errors.join('; ') : 'HOST_RESTART_RESUMABLE: interrupted executions retained; completed work and iteration budget preserved';
   let published = false;
+  let publish: (() => void) | undefined;
   updateRunState(projectDir, runId, (current) => {
     published = false;
+    publish = undefined;
     // This also fences the blocked/error route and the no-interrupted-work case.
     if (current.status !== RUN_STATUS.RUNNING) return;
     evidence.assertSchedulerAbsent?.();
@@ -219,13 +225,17 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       if (intent.stages.some((stage) => current.stages[stage.stageId]?.status !== STAGE_STATUS.PENDING || !matchesStage(current.stages[stage.stageId], stage, previous))) throw new Error('RECOVERY_NOT_RUNNABLE: interrupted work must be pending before resumable publication');
       current.recoveryIntent = { ...intent, phase: 'committed' };
     }
-    current.status = errors.length ? RUN_STATUS.FAILED : RUN_STATUS.PARKED;
-    if (errors.length) current.completedAt = new Date().toISOString();
-    else delete current.completedAt;
-    current.failureReason = reason;
+    if (errors.length) concludeRun(current, { status: RUN_STATUS.FAILED, reasonCode: 'recovery_blocked', detail: reason },
+      (_state, notify) => { publish = notify; });
+    else {
+      current.status = RUN_STATUS.PARKED;
+      delete current.completedAt;
+      current.failureReason = reason;
+    }
     current.recovery = { kind: errors.length ? 'blocked' : 'resumable', reason, at: new Date().toISOString(), fromBoot: previous.bootId, toBoot: boot, generation: previous.generation, interruptedStages };
     published = true;
   }, (current) => {
+    publish?.();
     if (published) recordRunEvent(projectDir, runId, { type: 'recovery_reconciled', runId, timestamp: current.recovery!.at, detail: reason, source: 'scheduler', level: errors.length ? 'warning' : 'info' });
   });
   // A native cancellation may commit immediately after our lock is released.

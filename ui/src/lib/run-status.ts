@@ -1,6 +1,4 @@
-import type { RunStatus } from "../components/campaign/types";
-
-export const NON_TERMINAL_RUN_STATUSES = ["pending", "running", "parked", "awaiting_approval"] as const;
+export const NON_TERMINAL_RUN_STATUSES = ["pending", "running", "parked"] as const;
 export const TERMINAL_RUN_STATUSES = [
   "complete",
   "failed",
@@ -8,14 +6,14 @@ export const TERMINAL_RUN_STATUSES = [
   "ceiling_hit",
   "escalated",
   "reality_gate_failed",
-  "phase_complete",
-  "stopped",
+  "cancelled",
   "incomplete",
 ] as const;
 
+export type RunStatus = typeof NON_TERMINAL_RUN_STATUSES[number] | typeof TERMINAL_RUN_STATUSES[number];
+
 const RUN_STATUS_SET = new Set<string>([...NON_TERMINAL_RUN_STATUSES, ...TERMINAL_RUN_STATUSES]);
 const TERMINAL_RUN_STATUS_SET = new Set<string>(TERMINAL_RUN_STATUSES);
-const SUCCESSFUL_RUN_STATUS_SET = new Set<string>(["complete", "shipped", "ceiling_hit"]);
 
 export function isRunStatus(status: string): status is RunStatus {
   return RUN_STATUS_SET.has(status);
@@ -26,5 +24,16 @@ export function isTerminalRunStatus(status: string): boolean {
 }
 
 export function isSuccessfulRunStatus(status: string): boolean {
-  return SUCCESSFUL_RUN_STATUS_SET.has(status);
+  return runStatusTone(status) === "success";
+}
+
+const RUN_STATUS_TONES: Record<string, "success" | "error" | "warning" | "active" | "neutral"> = {
+  pending: "neutral", running: "active", parked: "warning",
+  complete: "success", shipped: "success", ceiling_hit: "success",
+  failed: "error", reality_gate_failed: "error", incomplete: "error", escalated: "error",
+  cancelled: "warning", needs_summary: "warning", rejected: "error",
+};
+
+export function runStatusTone(status: string): "success" | "error" | "warning" | "active" | "neutral" {
+  return RUN_STATUS_TONES[status] ?? "neutral";
 }

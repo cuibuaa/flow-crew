@@ -103,10 +103,6 @@ async function waitUntil(
   return predicate();
 }
 
-function fallbackRecordPath(baseDir: string, unit: string): string {
-  return join(baseDir, 'systemd-fallback', `${unit}.json`);
-}
-
 async function launchOwnedProcessTree(
   backend: NodeSystemd,
   baseDir: string,
@@ -134,18 +130,16 @@ async function launchOwnedProcessTree(
     command: `exec ${shellJoin([process.execPath, '-e', agentSource])}`,
   });
 
-  const recordPath = fallbackRecordPath(baseDir, unit);
+  const recordPath = supervisionPaths(baseDir, unit).running;
   // The fixture creates the pid file before it writes it; wait for both pids, not only for the file.
   const initialized = await waitUntil(() => existsSync(recordPath) && existsSync(pidPath)
     && /^\d+,\d+/.test(readFileSync(pidPath, 'utf-8')));
-  expect(initialized, `fallback unit ${unit} never initialized`).toBe(true);
+  expect(initialized, `supervised unit ${unit} never initialized`).toBe(true);
   const [agentPid, childPid] = readFileSync(pidPath, 'utf-8').split(',').map(Number);
-  const recorded = JSON.parse(readFileSync(recordPath, 'utf-8')) as { pid?: number };
-  expect(recorded.pid).toEqual(expect.any(Number));
   const running = readSupervisionRunning(supervisionPaths(baseDir, unit).running);
   expect(running).toBeDefined();
   ownedShimPids.add(running!.shimPid);
-  const groupPid = recorded.pid!;
+  const groupPid = running!.agentPid;
   expect(agentPid, 'fixture agent must replace the shell process-group leader').toBe(groupPid);
   ownedProcessGroups.add(groupPid);
   return { groupPid, agentPid, childPid, recordPath };
@@ -240,30 +234,12 @@ describe('portable supervision safety invariants', () => {
     ownedChildren.delete(child);
   });
 
-  it('uses an ENOENT fallback terminal record authoritatively without deleting it', async () => {
-    const unit = 'gate-enoent-terminal.service';
-    const backend = new NodeSystemd(fixtureRoot);
-    const recordPath = fallbackRecordPath(fixtureRoot, unit);
-    writeFileSync(recordPath, JSON.stringify({ state: 'inactive', completedAt: '2026-08-06T00:00:00.000Z' }));
-
-    await expect(backend.isActive(unit)).resolves.toEqual({
-      kind: 'terminal-unknown',
-      reason: 'fallback process ended without an exit status (inactive)',
-    });
-    expect(JSON.parse(readFileSync(recordPath, 'utf-8'))).toMatchObject({
-      state: 'inactive',
-      completedAt: '2026-08-06T00:00:00.000Z',
-    });
-  });
-
   it('keeps a present but failing systemctl probe fail-closed', async () => {
     const unit = 'gate-present-systemctl.service';
     const backend = new NodeSystemd(fixtureRoot);
-    const recordPath = fallbackRecordPath(fixtureRoot, unit);
     const fakeSystemctl = join(emptyBin, 'systemctl');
     writeFileSync(fakeSystemctl, '#!/bin/sh\nexit 1\n');
     chmodSync(fakeSystemctl, 0o755);
-    writeFileSync(recordPath, JSON.stringify({ state: 'inactive' }));
 
     await expect(backend.isActive(unit)).resolves.toEqual({
       kind: 'unobservable',
@@ -302,10 +278,12 @@ describe('portable supervision safety invariants', () => {
     const backend = new NodeSystemd(fixtureRoot, { shellPath: '/bin/sh' });
     const launched = await launchOwnedProcessTree(backend, fixtureRoot, unit);
     const record = JSON.parse(readFileSync(launched.recordPath, 'utf-8')) as Record<string, unknown>;
-    writeFileSync(launched.recordPath, JSON.stringify({ ...record, command: "'not-the-owned-agent'" }));
+    writeFileSync(launched.recordPath, JSON.stringify({ ...record, shimCommand: "'not-the-owned-shim'" }));
 
-    await expect(backend.stopUnit(unit)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(backend.isActive(unit)).resolves.toEqual({ kind: 'active' });
+    const signals = vi.spyOn(process, 'kill');
+    await backend.stopUnit(unit);
+    expect(signals.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([]);
+    await expect(backend.isActive(unit)).resolves.toMatchObject({ kind: 'unobservable' });
     expect(processIsAlive(launched.groupPid)).toBe(true);
     expect(processIsAlive(launched.agentPid)).toBe(true);
   });
@@ -416,21 +394,10 @@ describe('portable supervision safety invariants', () => {
     const failingUnit = 'gate-spawn-error.service';
     const failing = new NodeSystemd(fixtureRoot, { shellPath: join(fixtureRoot, 'missing-shell') });
     await failing.runUnit({ unit: failingUnit, workingDirectory: fixtureRoot, command: "'ignored'" });
-    const failedRecord = fallbackRecordPath(fixtureRoot, failingUnit);
-    const persisted = await waitUntil(() => {
-      try {
-        // The compatibility record precedes the shim's final filesystem write.
-        // exit.json is the publication that makes fixture teardown safe.
-        return existsSync(supervisionPaths(fixtureRoot, failingUnit).exit)
-          && JSON.parse(readFileSync(failedRecord, 'utf-8')).state === 'failed';
-      } catch {
-        return false;
-      }
-    });
-    expect(persisted).toBe(true);
-    expect(JSON.parse(readFileSync(supervisionPaths(fixtureRoot, failingUnit).exit, 'utf-8')))
+    const exitPath = supervisionPaths(fixtureRoot, failingUnit).exit;
+    expect(await waitUntil(() => existsSync(exitPath))).toBe(true);
+    expect(JSON.parse(readFileSync(exitPath, 'utf-8')))
       .toMatchObject({ normalized: 127, reason: expect.stringMatching(/spawn failed:.*ENOENT/) });
-    expect(String(JSON.parse(readFileSync(failedRecord, 'utf-8')).reason)).toMatch(/spawn failed:.*ENOENT/);
     expect(processIsAlive(launched.agentPid)).toBe(true);
   });
 

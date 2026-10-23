@@ -4,10 +4,10 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, fcGlobalDir, readRunState, readStageStatus, writeStageStatus, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { checkpointConsumers, reconcileHostInterruptedRun } from '../src/restart-recovery.js';
 import { processStartToken, processStartTokensMatch } from '../src/run-lock.js';
-import * as locks from '../src/run-lock.js';
 import * as liveness from '../src/process-liveness.js';
 
 let root: string, project: string, previous: string, controller: ChildProcess | undefined;
@@ -31,6 +31,33 @@ afterEach(async () => {
   setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true });
 });
 
+it('retains sampled usage through interruption intent, settlement and repeated recovery', () => {
+  const { runId } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']);
+  updateRunState(project, runId, state => {
+    state.status = 'running';
+    state.engineCheckpoint = { version: 2, runId, projectDir: project, bootId: 'old-boot', pid: 101, at: new Date().toISOString(), processes: [] };
+  });
+  const status = beginStageAttempt(project, runId, 'work', 0, '2026-10-01T00:00:00.000Z');
+  const usage = { tokens_in: 30, tokens_out: 4, cost_usd: 0.03, tokenUsage: 'partial' as const, costUsage: 'partial' as const };
+  writeStageStatus(project, runId, 'work', { ...status, attempts: [{ ...status.attempts![0], ...usage }] });
+  expect(reconcileHostInterruptedRun(project, runId, { currentBootId: 'new-boot' }).recovery?.kind).toBe('resumable');
+  expect(readStageStatus(project, runId, 'work').attempts?.[0]).toMatchObject({ ...usage, exitCode: 143, status: 'failed' });
+  reconcileHostInterruptedRun(project, runId, { currentBootId: 'new-boot' });
+  expect(readRunState(project, runId).stages.work.attempts).toHaveLength(1);
+});
+
+it.each(['alive', 'unknown'] as const)('refuses %s checkpoint controller without settling execution', fate => {
+  const { runId } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []);
+  updateRunState(project, runId, state => {
+    state.engineCheckpoint = { version: 2, runId, projectDir: project, bootId: 'fixture-boot', pid: process.pid,
+      processStart: processStartToken(process.pid), at: new Date().toISOString(), processes: [] };
+  });
+  const before = readFileSync(join(runDir(project, runId), 'run.json'), 'utf8');
+  vi.spyOn(liveness, 'processLiveness').mockReturnValue(fate);
+  expect(() => reconcileHostInterruptedRun(project, runId, { currentBootId: 'fixture-boot' })).toThrow('RECOVERY_FATE_CHANGED');
+  expect(readFileSync(join(runDir(project, runId), 'run.json'), 'utf8')).toBe(before);
+});
+
 it('ignores a reused command group during recovery without signalling it', () => {
   const { runId } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []);
   updateRunState(project, runId, state => {
@@ -39,9 +66,9 @@ it('ignores a reused command group during recovery without signalling it', () =>
       at: new Date().toISOString(), processes: [{ pid: 202, processStart: { kind: 'linux', value: '100' } }],
     };
   });
-  vi.spyOn(locks, 'processIsAlive').mockReturnValue(false);
+  vi.spyOn(liveness, 'processLiveness').mockReturnValue('dead');
   vi.spyOn(liveness, 'processGroupIsAlive').mockReturnValue(true);
-  const token = vi.spyOn(locks, 'processStartToken').mockReturnValue({ kind: 'linux', value: '200' });
+  const token = vi.spyOn(liveness, 'processStartToken').mockReturnValue({ kind: 'linux', value: '200' });
   const signal = vi.spyOn(process, 'kill').mockReturnValue(true);
   const checkpoint = readRunState(project, runId).engineCheckpoint!;
   expect(reconcileHostInterruptedRun(project, runId, { currentBootId: 'fixture-boot' })).toMatchObject({ status: 'parked', recovery: { kind: 'resumable' } });
@@ -62,7 +89,8 @@ const [runtime,root,project,point] = process.argv.slice(1);
 const load = name => import(pathToFileURL(path.join(runtime,'dist',name+'.js')));
 const store = await load('store'); store.setFcGlobalDir(path.join(root,'store'));
 const recovery = await load('restart-recovery'); const locks = await load('run-lock'); const base = await load('adapters/base');
-const {runId,runDirPath} = store.createRun(project,'fixture','name: fixture\\nstages: []\\n',['done','work']);
+const reservation = store.reserveRun(project);
+const {runId,runDirPath} = store.initializeReservedRun(project,reservation.runId,'fixture','name: fixture\\nstages: []\\n',['done','work']);
 store.writeStageStatus(project,runId,'done',{status:'complete',retries:0,attempts:[{index:1,status:'complete',startedAt:new Date().toISOString(),exitCode:0}]});
 store.beginStageAttempt(project,runId,'work',0);
 store.updateRunState(project,runId,state=>{state.engineCheckpoint=recovery.captureEngineCheckpoint(project,runId)});

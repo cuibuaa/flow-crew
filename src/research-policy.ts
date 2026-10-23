@@ -5,7 +5,7 @@
  * After each measured research round (one direction tested + OOS-measured), the
  * scheduler calls evaluateResearch() with the full ordered history of rounds.
  * The evaluator computes:
- *   - which rounds are KEPT (cumulative stack), per the configured policy
+ *   - which improving rounds are KEPT in a cumulative stack
  *   - the running-best metric value
  *   - whether the latest round was kept
  *   - the consecutive-no-improvement streak
@@ -15,29 +15,26 @@
  * previously hand-wrote (e.g. "$144~$198 → continue, $128~$144 → ceiling").
  */
 import { z } from 'zod';
-import type { ResearchConfig, ResearchPolicy } from './store.js';
+import type { ResearchConfig } from './store.js';
 
 /**
  * Single source of truth for research policies (P4 of the Atom Architecture).
  * The runtime allow-list (scheduler frontmatter parse) derives from this — no
- * second hardcoded enum. Adding a policy = add a descriptor here + a branch in
- * applyPolicy below.
+ * second hardcoded enum.
  */
 export const RESEARCH_POLICIES = [
   { id: 'greedy_stack', description: 'Keep every round that improves running-best; stack improvements cumulatively.' },
-  { id: 'best_of_n', description: 'Keep only the single best round seen so far (no stacking).' },
-  { id: 'replace_if_better', description: 'Replace running-best only when a round strictly beats it.' },
 ] as const;
 
 export const RESEARCH_POLICY_IDS: readonly string[] = RESEARCH_POLICIES.map((p) => p.id);
 
 /**
- * The same three ids as a parse-time contract. `RESEARCH_POLICY_IDS.includes(...)`
+ * The supported policy as a parse-time contract. `RESEARCH_POLICY_IDS.includes(...)`
  * answers the membership question but leaves the caller to decide what an unknown
  * value means; every caller so far decided "use the default, say nothing". A schema
  * makes the rejection the caller's to handle rather than the caller's to remember.
  */
-export const ResearchPolicySchema = z.enum(['greedy_stack', 'best_of_n', 'replace_if_better']);
+export const ResearchPolicySchema = z.enum(['greedy_stack']);
 
 export interface ResearchRound {
   label: string;
@@ -356,11 +353,10 @@ export function assessResearchShipTarget(config: ResearchConfig): ResearchShipTa
 }
 
 /**
- * Compute the kept-set + running-best for the given policy over the ordered rounds.
+ * Compute the cumulative kept-set and running-best over the ordered rounds.
  * Returns kept labels (in round order) and the final running-best value.
  */
 function applyPolicy(
-  policy: ResearchPolicy,
   baseline: number,
   higherIsBetter: boolean,
   rounds: ResearchRound[],
@@ -370,29 +366,6 @@ function applyPolicy(
   const perRoundKept: boolean[] = [];
   const keptLabels: string[] = [];
 
-  if (policy === 'best_of_n' || policy === 'replace_if_better') {
-    // Single-slot: keep only the best round seen so far (replaces prior keep).
-    let best = baseline;
-    let bestLabel: string | null = null;
-    for (const r of rounds) {
-      if (r.confirmFailed || r.outcome === 'no_candidate' || typeof r.result !== 'number') {
-        perRoundKept.push(false);
-        continue;
-      }
-      if (isBetter(r.result, best, higherIsBetter, improvementMargin(r, minImprovement, seMultiple))) {
-        best = r.result;
-        bestLabel = r.label;
-        perRoundKept.push(true);
-      } else {
-        perRoundKept.push(false);
-      }
-    }
-    if (bestLabel) keptLabels.push(bestLabel);
-    return { keptLabels, runningBest: best, perRoundKept };
-  }
-
-  // greedy_stack (default): keep a round iff it improves the running best;
-  // gains accumulate.
   let runningBest = baseline;
   for (const r of rounds) {
     if (r.confirmFailed || r.outcome === 'no_candidate' || typeof r.result !== 'number') {
@@ -443,7 +416,7 @@ export function evaluateResearch(config: ResearchConfig, rounds: ResearchRound[]
   const minImprovement = config.stop?.minImprovement ?? 0;
   const seMultiple = config.stop?.improvementSEMultiple ?? 1; // default: improvement must clear ~1 SE
   const { keptLabels, runningBest, perRoundKept } = applyPolicy(
-    config.policy, config.baseline, higherIsBetter, rounds, minImprovement, seMultiple,
+    config.baseline, higherIsBetter, rounds, minImprovement, seMultiple,
   );
   const latestKept = perRoundKept.length > 0 ? perRoundKept[perRoundKept.length - 1] : false;
 

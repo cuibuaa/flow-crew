@@ -1,4 +1,5 @@
-import { errorMessage, optionValue } from './source_services/cli-inputs.js';
+import { errorMessage } from './source_services/cli-inputs.js';
+import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { createWatchState, pollWatch, type WatchAlert, type WatchPollDependencies, type WatchPollResult } from './watch.js';
 import { formatRunDriftRow } from './run-drift.js';
 
@@ -20,48 +21,18 @@ export interface CliWatchDependencies extends WatchPollDependencies {
 }
 
 export function parseWatchArgs(args: string[]): ParsedWatchArgs {
-  let help = false;
-  let once = false;
-  let all = false;
-  let pollMs = DEFAULT_WATCH_POLL_MS;
-  const start = args[0] === 'watch' ? 1 : 0;
-  for (let index = start; index < args.length;) {
-    const argument = args[index];
-    if (argument === '--help' || argument === '-h') {
-      help = true;
-      index += 1;
-      continue;
-    }
-    if (argument === '--once') {
-      once = true;
-      index += 1;
-      continue;
-    }
-    if (argument === '--all') {
-      all = true;
-      index += 1;
-      continue;
-    }
-    if (argument === '--poll' || argument.startsWith('--poll=')) {
-      const parsed = optionValue(args, index, '--poll');
-      if (!/^(?:\d+|\d+\.\d+)$/.test(parsed.value)) {
-        throw new Error('--poll must be a number of seconds');
-      }
-      pollMs = Number(parsed.value) * 1_000;
-      if (!Number.isFinite(pollMs) || pollMs <= 0 || pollMs > 2_147_483_647) {
-        throw new Error('--poll must be positive and fit the Node timer range (at most 2147483.647 seconds)');
-      }
-      index += parsed.consumed;
-      continue;
-    }
-    throw new Error(`unknown watch option: ${argument}`);
-  }
-  return { help, once, all, pollMs };
+  const { help, flags, values } = parseCommandArgs('watch', args);
+  return {
+    help,
+    once: flags.has('--once'),
+    all: flags.has('--all'),
+    pollMs: values.has('--poll') ? Number(values.get('--poll')) * 1_000 : DEFAULT_WATCH_POLL_MS,
+  };
 }
 
 export function watchUsage(): string {
   return [
-    'Usage: flowcrew watch [--once] [--poll <seconds>] [--all]',
+    commandUsage('watch'),
     'Reports a first-pass drift snapshot plus edge-triggered drift crossings, stalls, evidence gaps, and status contradictions.',
     'The default scans indexed operational runs. --all audits every entry under the runs directory.',
     `Poll interval must be positive and fit the Node timer range (at most 2147483.647 seconds; default ${DEFAULT_WATCH_POLL_MS / 1_000}).`,
@@ -165,7 +136,7 @@ export async function cmdWatchWithDeps(args: string[], overrides: CliWatchDepend
     parsed = parseWatchArgs(args);
   } catch (error) {
     stderr.write(`watch: ${errorMessage(error)}\n`);
-    stderr.write(`${watchUsage()}\n`);
+    if (!(error instanceof CliUsageError)) stderr.write(`${watchUsage()}\n`);
     return 1;
   }
   if (parsed.help) {

@@ -75,7 +75,7 @@ describe('shared native diagnosis and capability memory', () => {
     expect(repair.role).toEqual({ model: 'fixture-model', reasoning_effort: CLI_BUILTIN_DEFAULT });
     expect(repair.apply(diagnoseAdapterFailure('', 1, { parameter: 'effort' }))).toBe(false);
     expect(repair.apply(diagnoseAdapterFailure('', 1, { parameter: 'model' }))).toBe(true);
-    expect(repair.apply({ fix: 'fresh_session', friendly: '', matched: 'fixture' })).toBe(false);
+    expect(repair.apply({ fix: 'drop_model', friendly: '', matched: 'fixture' })).toBe(false);
     const next = new AdapterParameterRepair(role, root, identity);
     expect(next.role.reasoning_effort).toBe(CLI_BUILTIN_DEFAULT);
     expect(next.apply(diagnoseAdapterFailure('', 1, { parameter: 'effort' }))).toBe(false);

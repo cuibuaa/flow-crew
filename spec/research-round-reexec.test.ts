@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -7,8 +8,9 @@ import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-setup.js';
 import { createReadyFinder } from '../src/scheduler/sched_admission/frontier.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
-import { readGateVerdict } from '../src/scheduler/sched_settlement/gate-verdict.js';
-import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
 
 const repository = resolve(import.meta.dirname, '..');
 const resultPath = 'artifacts/research/round_result.json';
@@ -95,7 +97,7 @@ describe('research round identity across outer iteration resets', () => {
     // the reset must keep each retained gate's own authored verdict available.
     const ready = createReadyFinder({
       loadGateContract: () => null,
-      readGateVerdict: (projectDir, stageId, id, contract) => readGateVerdict(projectDir, stageId, id, contract, false, false),
+      readGateEvaluation: (projectDir, stageId, id, contract) => readGateEvaluation(projectDir, stageId, id, contract, false),
     })(prepared.sorted, prepared.state);
     expect(ready.map(stage => stage.id)).toEqual(['plan', 'recurring_input', 'recurring_gate', 'recurring_check', 'round_gamma']);
     expect(JSON.parse(readFileSync(join(project, resultPath), 'utf8')).label).toBe('measurement-new');
@@ -123,7 +125,7 @@ describe('research round identity across outer iteration resets', () => {
     expect(prepared.state.stages.review_beta.status).toBe('pending');
     expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
     const ready = createReadyFinder({ loadGateContract: () => null,
-      readGateVerdict: (dir, id, run, contract) => readGateVerdict(dir, id, run, contract, false, false),
+      readGateEvaluation: (dir, id, run, contract) => readGateEvaluation(dir, id, run, contract, false),
     })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
     expect(ready.map(stage => stage.id)).toContain('recurring_input');
     expect(ready.map(stage => stage.id)).not.toContain('round_gamma');
@@ -139,7 +141,7 @@ describe('research round identity across outer iteration resets', () => {
     expect(prepared.state.stages.review_beta.status).toBe('pending');
     expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
     const ready = createReadyFinder({ loadGateContract: () => null,
-      readGateVerdict: (dir, id, run, contract) => readGateVerdict(dir, id, run, contract, false, false),
+      readGateEvaluation: (dir, id, run, contract) => readGateEvaluation(dir, id, run, contract, false),
     })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
     expect(ready.map(stage => stage.id)).toContain('round_beta');
   });
@@ -162,7 +164,7 @@ describe('research round identity across outer iteration resets', () => {
     expect(prepared.state.stages.review_beta.status).toBe('pending');
     expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
     const ready = createReadyFinder({ loadGateContract: () => null,
-      readGateVerdict: (dir, id, run, contract) => readGateVerdict(dir, id, run, contract, false, false),
+      readGateEvaluation: (dir, id, run, contract) => readGateEvaluation(dir, id, run, contract, false),
     })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
     expect(ready.map(stage => stage.id)).toContain('round_beta');
   });
@@ -192,7 +194,7 @@ describe('research round identity across outer iteration resets', () => {
     updateRunState(project, runId, state => { state.stages.other_review = { status: 'complete', retries: 0 }; });
     writeFileSync(join(directory, 'verdict_other_review.json'), JSON.stringify({ pass: false, reason: 'Independent check failed.' }));
     const advance = () => advanceSettledResearch(readRunState(project, runId), active, stages, readRunState(project, runId).currentIteration!, [], 0, 1, 5,
-      new Set(), new Map(), project, runId, directory,
+      new Set(), project, runId, directory,
       { name: 'research-reexec', description: '', defaults: {}, stages: active }, new ScriptedAdapter({}),
       new Map(), join(repository, 'config/agents'), new Map());
     await advance();
@@ -203,7 +205,7 @@ describe('research round identity across outer iteration resets', () => {
     expect(prepared.state.stages.review_beta.status).toBe('pending');
     expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
     const ready = createReadyFinder({ loadGateContract: () => null,
-      readGateVerdict: (dir, id, run, contract) => readGateVerdict(dir, id, run, contract, false, false),
+      readGateEvaluation: (dir, id, run, contract) => readGateEvaluation(dir, id, run, contract, false),
     })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
     expect(ready.map(stage => stage.id)).toContain('round_beta');
     // Fresh measurement and accepted gates settle through the same ingestion path.

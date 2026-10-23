@@ -1,6 +1,9 @@
-import { writeFileSync, appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, renameSync, rmdirSync, unlinkSync, writeSync } from './engine-fs.js';
+import { processLiveness } from './process-liveness.js';
+import { resolveCampaignStorageKey } from './campaigns.js';
+import { observeRunStatusChange } from './run-events.js';
+import { latestInvocationInput } from './run-state-view.js';
+import { atomicWrite, writeFileSync, appendFileSync, closeSync, ftruncateSync, mkdirSync, openSync, rmdirSync, unlinkSync, writeSync } from './engine-fs.js';
 import { retireRunScratch } from './invocation-scratch.js';
-import { pruneTerminalWorkAreasUnderLock } from './run-retention.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -18,29 +21,28 @@ import type { BriefAdmissionRecord } from './brief-preflight.js';
 import type { ResearchFeasibilityConfig } from './research-feasibility.js';
 import type { AdapterFailureKind } from './adapters/base.js';
 import type { ProviderFailure } from './provider-result.js';
-import { invocationUsageFields, sumInvocationUsage, usageComplete, type InvocationUsage, type NativeInvocationUsage, type TokenUsage } from './invocation-usage.js';
+import { invocationUsageFields, sumInvocationUsage, tokensComplete, type InvocationUsage, type NativeInvocationUsage, type TokenUsage } from './invocation-usage.js';
 
 import {
   RUN_STATUS,
+  STAGE_STATUS,
   UnknownRunStatusError,
-  isSuccessfulRunStatus,
   isTerminalRunStatus,
   requireKnownRunStatus,
   resolveRunStatus,
   type RunStatus,
   type RunStatusResolution,
+  type StageState,
 } from './lifecycle-status.js';
 export {
-  PAUSED_STATUSES,
   RUN_STATUS,
+  STAGE_STATUS,
   RUN_STATUS_SEMANTICS,
   TERMINAL_STATUSES,
   UnknownRunStatusError,
-  isActiveRunStatus,
-  isAwaitingApprovalRunStatus,
   isPausedRunStatus,
+  isResumableRunStatus,
   isPendingRunStatus,
-  isRunMutationBlockedStatus,
   isRunningRunStatus,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
@@ -52,21 +54,14 @@ export type {
   RunStatus,
   RunStatusResolution,
   RunStatusSemantics,
+  StageState,
 } from './lifecycle-status.js';
-
-/** Stage execution is a separate state machine from the enclosing run. */
-export const STAGE_STATUS = {
-  PENDING: 'pending',
-  RUNNING: 'running',
-  COMPLETE: 'complete',
-  FAILED: 'failed',
-  SKIPPED: 'skipped',
-} as const;
-export type StageState = typeof STAGE_STATUS[keyof typeof STAGE_STATUS];
 
 export type StageAttemptState = 'running' | 'closed' | 'complete' | 'failed' | 'suspended';
 export type AttemptTokenUsage = TokenUsage;
 export type WriteAttribution = 'structured' | 'snapshot' | 'unknown';
+
+export type AttemptTerminationCause = 'exit' | 'stage_abort' | 'attempt_timeout' | 'cancelled' | 'host_restart' | 'engine_void';
 
 export interface StageAttemptTimeoutSummary {
   attemptId: string;
@@ -84,7 +79,8 @@ export interface StageAttemptTimeoutSummary {
   rejectedExtensionCount?: number;
   decisionPaths?: string[];
   mismatchPaths?: string[];
-  terminationCause?: 'complete' | 'stage_abort' | 'supervisor_abort' | 'approval_suspension' | 'scope_revision_suspension' | 'budget_wrap_up' | 'budget_forced_stop' | 'attempt_timeout' | 'adapter_error' | 'failed';
+  /** Legacy records only; new outcomes belong to StageAttempt. */
+  terminationCause?: string;
   deadlineReachedAt?: string;
   childClosedAt?: string;
   deadlineOverrunMs?: number;
@@ -94,19 +90,12 @@ export interface StageConstraintAuditSummary {
   path: string;
   declaredScope: string[] | null;
   effectiveScope: string[] | null;
-  acceptedRevisionCount: number;
-  rejectedRevisionCount: number;
-  mismatchCount: number;
   violationCount: number;
   unverifiedCount: number;
   rawWriteCount?: number;
   appliedWriteCount?: number;
   exemptedWriteCount?: number;
   rolledBackWriteCount?: number;
-  rejectedDigestCount?: number;
-  liveViolationCount?: number;
-  liveComparisonUnavailableCount?: number;
-  liveRestoredCount?: number;
   unresolvedViolationCount?: number;
 }
 
@@ -147,6 +136,8 @@ export interface StageAttempt extends InvocationUsage {
   /** Persisted evidence: both counters are known, or this settled attempt is explicitly unknown. */
   tokenUsage?: AttemptTokenUsage;
   error?: string;
+  terminationCause?: AttemptTerminationCause;
+  engineVoid?: boolean;
   adapterFailureKind?: AdapterFailureKind;
   writes?: string[];
   writeAttribution?: WriteAttribution;
@@ -159,9 +150,11 @@ export interface StageAttempt extends InvocationUsage {
   continuation?: StageContinuation;
 }
 
-export interface StageStatus {
+export interface StageStatus extends InvocationUsage {
+  admissionFailure?: { code: 'dispatch_refused'; attemptIndex: number };
   /** Acceptance already settled in an isolated child; no local gate execution. */
   acceptedFrom?: { runId: string; verdict: GateVerdict };
+  gate?: GateVerdict & { kind: NonNullable<GateVerdict['refusal']>['kind'] | 'pass' | 'repairable' | 'irreparable'; verdictSha256: string | null };
   status: StageState;
   exitCode?: number;
   processExitCode?: number | null;
@@ -173,12 +166,6 @@ export interface StageStatus {
   startedAt?: string;
   completedAt?: string;
   error?: string;
-  tokens_in?: number;
-  tokens_out?: number;
-  tokens_cached?: number;
-  tokens_cache_created?: number;
-  tokens_reasoning?: number;
-  cost_usd?: number;
   /** Append-only execution ledger. Top-level timing/token fields aggregate this array. */
   attempts?: StageAttempt[];
   /** Number of executions after the first; deliberately distinct from technical retries. */
@@ -264,103 +251,6 @@ export interface UnresolvedStageObligation {
   stageId: string;
   declaredIteration: number;
   /** Existing explicit scope-planning dispositions that may safely supersede a blocked downstream stage. */
-  scopePlanningDigests?: string[];
-}
-
-/** Archived model-supervisor records remain part of the read format. */
-export type SupervisorEventType =
-  | 'stage_transition'
-  | 'gate_verdict'
-  | 'artifact_change'
-  | 'deadline_margin'
-  | 'guidance_arrival'
-  | 'scope_request'
-  | 'adapter_failure';
-
-export interface SupervisorActiveAttemptQuantity {
-  stageId: string;
-  attemptIndex: number;
-  attemptStartedAt: string;
-  elapsedMs: number;
-  remainingMs?: number;
-  deadlineAt?: string;
-}
-
-export interface SupervisorEventQuantities {
-  iteration: number;
-  runningStageCount: number;
-  activeAttempts: SupervisorActiveAttemptQuantity[];
-  minArtifactDeltaBytes: number;
-  deadlineMarginMs: number;
-  pollIntervalMs: number;
-  changedBytes: number;
-  changedPathCount: number;
-  supervisorAssessmentBudget: {
-    used: number;
-    maximum: number;
-    remaining: number;
-  };
-  supervisorRejectBudget: {
-    maximum: number;
-  };
-  gateRetryBudget: {
-    maximum: number;
-  };
-  [key: string]: unknown;
-}
-
-export interface SupervisorEvent {
-  version: 1;
-  eventId: string;
-  type: SupervisorEventType;
-  observedAt: string;
-  source: string;
-  stageId?: string;
-  quantities: SupervisorEventQuantities;
-}
-
-export interface SupervisorAttempt extends InvocationUsage {
-  invocations?: NativeInvocationUsage[];
-  index: number;
-  startedAt: string;
-  completedAt: string;
-  status: 'complete' | 'failed';
-  duration_ms: number;
-  exitCode: number;
-  processExitCode?: number | null;
-  processSignal?: NodeJS.Signals | null;
-  providerFailure?: ProviderFailure;
-  tokens_in?: number;
-  tokens_out?: number;
-  /** Deterministic event and complete quantities that authorized the call. */
-  trigger?: SupervisorEvent;
-  /** Raw model output is retained for audit only and is never an effective action. */
-  unverifiedAssessment?: {
-    verdict: string;
-    targetStage: string | null;
-    reason: string;
-  };
-  /** Verdict and reason after supervisor-side fact validation and action guards. */
-  verdict?: string;
-  effectiveReason?: string;
-  error?: string;
-}
-
-/** Supervisor usage is separate from stages so it cannot affect DAG completion semantics. */
-export interface SupervisorUsage {
-  status: 'running' | 'complete';
-  calls: number;
-  tokens_in: number;
-  tokens_out: number;
-  duration_ms: number;
-  startedAt: string;
-  completedAt?: string;
-  attempts: SupervisorAttempt[];
-}
-
-export interface CampaignTriggers {
-  enabled?: boolean;
-  repeatedFailureAfter?: number;
 }
 
 /**
@@ -423,40 +313,6 @@ export interface TerminalStateEntry {
 export type TerminalStatesConfig = Record<string, TerminalStateEntry>;
 
 /**
- * Multi-phase program config parsed from a task brief's `---` YAML frontmatter
- * `program:` block. Each phase of a research program is one FlowCrew run; this
- * block lets the scheduler enforce program-level safeguards (max phases, max
- * cumulative wall time, manual stop file) and auto-append the phase's outcome
- * to a findings ledger when the run terminates via phase_complete.
- *
- * When a phase terminates via phase_complete, the scheduler runs that state's
- * post_terminate_hook command if the brief declared one — passing FC_PROGRAM_*
- * env vars so the hook can advance the program (parse the verdict, generate the
- * next phase's brief, launch the next run). If no hook is declared, the run
- * simply terminates; there is no implicit default script.
- *
- * Backwards-compatible: briefs without a `program:` block behave exactly as
- * before. Only multi-phase programs need this.
- */
-export interface ProgramSafeguards {
-  /** Refuse to start if findings_ledger.json already has >= this many phase rows. */
-  maxPhases?: number;
-  /** Refuse to start if findings_ledger.json sum of wall_hours >= this. */
-  maxWallHours?: number;
-  /** Refuse to start if this file exists (project-relative path). */
-  stopFile?: string;
-  /** Refuse to start after N consecutive phases with no improvement. */
-  haltAfterConsecutiveNoImprovement?: number;
-}
-export interface ProgramConfig {
-  name: string;
-  phase: string;
-  roadmap?: string;   // project-relative path to ROADMAP.md
-  ledger?: string;    // project-relative path to findings_ledger.json
-  safeguards?: ProgramSafeguards;
-}
-
-/**
  * Research-mode config parsed from a brief's `research:` frontmatter block.
  * Drives the native research loop (researcher → implement → measure → decide).
  * Replaces the per-phase prose decision-tables that brief authors previously
@@ -466,10 +322,8 @@ export interface ProgramConfig {
  * round:
  *   - greedy_stack: keep a direction iff it improves the running-best;
  *     continue while any round improves; stop when a full round yields no gain.
- *   - best_of_n: keep the single best direction (no stacking); stop after one round.
- *   - replace_if_better: replace the kept direction only if strictly better.
  */
-export type ResearchPolicy = 'greedy_stack' | 'best_of_n' | 'replace_if_better';
+export type ResearchPolicy = 'greedy_stack';
 export interface ResearchStopConditions {
   /** Ship + stop when running-best ≥ this value (the headline target / do-nothing baseline). */
   beat?: number;
@@ -620,7 +474,6 @@ export interface RunHistoryRef {
   /** Only this durable prefix is acknowledged by the atomic projection. */
   committedBytes: number;
   counts: {
-    supervisorAttempts: number;
     retiredStageUsage: number;
     stageEvidence: number;
   };
@@ -652,6 +505,8 @@ export interface StoreState {
   /** git HEAD SHA captured at run start, used to compute a real diff in the run summary. Absent when projectDir is not a git repo. */
   baseCommit?: string;
   status: RunStatus;
+  /** Engine-owned cause of the latest conclusion; absent in legacy records. */
+  reasonCode?: import('./scheduler/sched_policy/run-completion.js').RunConclusionReason;
   /**
    * Set while status==='parked': the approval request this run suspended on.
    * `pausedAt` freezes the elapsed clock so a park that waits a day does not
@@ -669,10 +524,10 @@ export interface StoreState {
   };
   /** Map of status → terminal-state file paths/floor (set from brief frontmatter). */
   terminalStates?: TerminalStatesConfig;
+  /** Terminal content captured before producers execute; retained on continuation. */
+  terminalArtifactBaselines?: Record<string, import('./content-identity.js').ContentIdentity>;
   /** Filename (basename) of the terminal file that triggered termination — used for handoff to /ship follow-ups. */
   terminalArtifact?: string;
-  /** Multi-phase program config (set from brief `program:` block). */
-  program?: ProgramConfig;
   /** Research-mode config (set from brief `research:` block). */
   research?: ResearchConfig;
   /** Content identities captured before this research run dispatches producers. */
@@ -696,8 +551,6 @@ export interface StoreState {
   admittedRealityChecks?: AdmittedRealityChecks;
   /** Required dynamic stages that a later plan must not silently forget. */
   unresolvedStageObligations?: UnresolvedStageObligation[];
-  /** Framework-owned supervisor cost ledger, rendered as a synthetic `_supervisor` row. */
-  supervisor?: SupervisorUsage;
   /** Engine-owned model work outside dispatched stages, with the same attempt ledger. */
   auxiliaryAttempts?: Record<string, StageAttempt[]>;
   startedAt: string;
@@ -708,14 +561,12 @@ export interface StoreState {
   /** Exact brief identity and recorded preflight findings admitted before launch. */
   briefAdmission?: BriefAdmissionRecord;
   currentIteration?: number;
+  gateRetryRound?: { iteration: number; round: number };
   maxIterations?: number;
   maxRetries?: number;
   autoApproveRetries?: boolean;
   autoApprove?: boolean;
-  /** Historical launch setting; new workflows always use deterministic protection. */
-  supervise?: boolean;
   timeoutMs?: number;
-  campaignTriggers?: CampaignTriggers;
   failureReason?: string;
   /** Bounded, ANSI-free operator diagnostics copied from the terminal reality gate. */
   realityGate?: RealityGateDiagnostics;
@@ -792,21 +643,6 @@ export function campaignsRoot(): string {
   return join(_fcGlobalDir, 'campaigns');
 }
 
-export function campaignDir(id: string): string {
-  return join(campaignsRoot(), id);
-}
-
-function campaignEventStorageKey(state: StoreState): string | undefined {
-  const value = state.campaignStorageKey ?? state.campaignId ?? state.campaignName;
-  if (typeof value !== 'string') return undefined;
-  const cleaned = value.trim().replace(/^new:/i, '').trim();
-  if (!cleaned) return undefined;
-  return cleaned
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '') || undefined;
-}
-
 function appendCampaignEvent(campaignStorageKey: string, event: Record<string, unknown>): void {
   if (!campaignStorageKey) return;
   const filePath = join(campaignsRoot(), `${campaignStorageKey}.jsonl`);
@@ -820,7 +656,7 @@ export interface GateVerdict {
   reason?: string;
   repairability?: { version: 1; disposition: 'repairable' | 'irreparable'; evidence: string };
   /** Engine-only refusal classification; authored fields never populate it. */
-  contractViolation?: 'repairability';
+  refusal?: { kind: 'repairability' | 'validation_regression' | 'validation_unresolved' | 'declared_output' | 'audit_findings' | 'research_outcome_absent' | 'research_outcome_invalid' | 'contradiction' | 'criterion_evidence' | 'numeric_evidence' | 'score_contract' | 'missing_verdict' };
 }
 export const VERDICT_CONTRACT_DOC = '{"pass": true|false, "reason": "<why>"}  (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>). '
   + 'A rejection may also declare "repairability": {"version":1,"disposition":"repairable"|"irreparable","evidence":"<reproducible evidence>"}. '
@@ -829,10 +665,6 @@ export const VERDICT_CONTRACT_DOC = '{"pass": true|false, "reason": "<why>"}  (s
 
 /** Field names a campaign multi-phase gate verdict may carry (consumed by campaign code). */
 export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, artifactSummary, reason';
-
-function isRealityGatedTerminal(status: string): boolean {
-  return isSuccessfulRunStatus(status);
-}
 
 const SETTLED_STAGE_STATUSES = [STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED] as const;
 const SATISFIED_STAGE_DEPENDENCY_STATUSES = [STAGE_STATUS.COMPLETE] as const;
@@ -943,13 +775,9 @@ function realityGateFailureReason(report: RealityGateDiagnostics, targetStatus: 
   return `Reality gate blocked terminal status ${targetStatus}; failed checks: ${summaries.join('; ')}`;
 }
 
-export async function enforceRealityGateBeforeTerminal(
-  projectDir: string,
-  runId: string,
-  state: StoreState,
-  targetStatus: StoreState['status'],
-): Promise<{ allowed: boolean; state: StoreState; report?: RealityGateReport }> {
-  if (!isRealityGatedTerminal(targetStatus)) return { allowed: true, state };
+export async function evaluateRealityGate(
+  projectDir: string, runId: string, targetStatus: StoreState['status'],
+): Promise<Pick<StoreState, 'realityGate' | 'failureReason'>> {
   const dir = runDir(projectDir, runId);
   const briefPath = join(dir, 'task_brief.md');
   // Checks come from two sources, both in the `## Reality checks` block format:
@@ -960,7 +788,7 @@ export async function enforceRealityGateBeforeTerminal(
   const checks = existsSync(briefPath) ? parseChecksFromBrief(briefPath) : [];
   const plannerChecksPath = join(dir, 'reality_checks.md');
   if (existsSync(plannerChecksPath)) checks.push(...parseChecksFromBrief(plannerChecksPath));
-  if (checks.length === 0) return { allowed: true, state };
+  if (checks.length === 0) return {};
   const report = await runAllChecks(checks, { taskDir: dir, projectDir, briefPath: existsSync(briefPath) ? briefPath : plannerChecksPath });
   const artifactPath = join(dir, REALITY_GATE_ARTIFACT_PATH);
   atomicWrite(artifactPath, JSON.stringify(report, null, 2) + '\n');
@@ -976,22 +804,9 @@ export async function enforceRealityGateBeforeTerminal(
     });
   }
   const diagnostics = realityGateDiagnostics(durableReport);
-  if (durableReport.pass) {
-    // Callers persist the original state object after an allowed gate, so attach
-    // advisory evidence in place rather than returning an otherwise-lost copy.
-    state.realityGate = diagnostics;
-    return { allowed: true, state, report: durableReport };
-  }
-  const next: StoreState = {
-    ...state,
-    status: 'reality_gate_failed',
-    failureReason: realityGateFailureReason(diagnostics, targetStatus),
-    realityGate: diagnostics,
-    completedAt: new Date().toISOString(),
-  };
+  if (durableReport.pass) return { realityGate: diagnostics };
   appendFileSync(join(dir, '.reality-gate.failures.md'), failureMarkdown(durableReport, targetStatus), 'utf-8');
-  writeRunState(projectDir, runId, next);
-  return { allowed: false, state: next, report: durableReport };
+  return { realityGate: diagnostics, failureReason: realityGateFailureReason(diagnostics, targetStatus) };
 }
 
 function oneLineOutcome(value: string): string | undefined {
@@ -1028,7 +843,7 @@ export function recordedTerminalArtifactSnapshotNames(artifact: string): string[
 }
 
 function emitCampaignEnvelopeEvents(projectDir: string, runId: string, state: StoreState): void {
-  const campaignStorageKey = campaignEventStorageKey(state);
+  const campaignStorageKey = resolveCampaignStorageKey(state);
   if (!campaignStorageKey) return;
   const dir = runDir(projectDir, runId);
   const startedMarker = join(dir, '.campaign_started_emitted');
@@ -1108,38 +923,6 @@ export function runDir(projectDir: string, runId: string): string {
 
 export function stageDir(projectDir: string, runId: string, stageId: string): string {
   return join(runDir(projectDir, runId), 'stages', stageId);
-}
-
-export function atomicWrite(filePath: string, data: string): void {
-  const tmp = filePath + '.tmp.' + randomBytes(4).toString('hex');
-  let fd: number | undefined;
-  try {
-    fd = openSync(tmp, 'wx');
-    const bytes = Buffer.from(data, 'utf-8');
-    let written = 0;
-    while (written < bytes.length) {
-      const count = writeSync(fd, bytes, written, bytes.length - written);
-      if (count <= 0) throw new Error(`Atomic write made no progress for ${filePath}`);
-      written += count;
-    }
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = undefined;
-    renameSync(tmp, filePath);
-    // Commit the rename itself. Some filesystems persist file contents but
-    // lose an unsynced directory entry across a crash.
-    let parent: number | undefined;
-    try {
-      parent = openSync(dirname(filePath), 'r');
-      fsyncSync(parent);
-    } finally {
-      try { if (parent !== undefined) closeSync(parent); } catch { /* best effort */ }
-    }
-  } catch (err) {
-    try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
-    try { unlinkSync(tmp); } catch { /* best effort cleanup */ }
-    throw err;
-  }
 }
 
 function generateRunId(at = new Date()): string {
@@ -1272,6 +1055,7 @@ export function initializeReservedRun(
     runId,
     workflowName,
     projectDir: normalizedProjectDir,
+    terminalArtifactBaselines: {},
     status: 'running',
     stages,
     startedAt: new Date().toISOString(),
@@ -1305,16 +1089,6 @@ function captureGitHead(projectDir: string): string | undefined {
   }
 }
 
-export function createRun(
-  projectDir: string,
-  workflowName: string,
-  workflowYaml: string,
-  stageIds: string[],
-): { runId: string; runDirPath: string } {
-  const reservation = reserveRun(projectDir);
-  return initializeReservedRun(projectDir, reservation.runId, workflowName, workflowYaml, stageIds);
-}
-
 export const RUN_HISTORY_FILE = 'run-history.jsonl' as const;
 export const RUN_STATE_LOCK_FILE = '.run-state.lock';
 const RUN_STATE_LOCK_TIMEOUT_MS = 5_000;
@@ -1329,7 +1103,6 @@ interface RunHistoryRecord {
 }
 
 interface RunHistories {
-  supervisorAttempts: SupervisorAttempt[];
   retiredStageUsage: RetiredStageUsage[];
   stageEvidence: StageEvidenceRecord[];
 }
@@ -1341,7 +1114,7 @@ interface RunStateProjectionExpectation {
 }
 
 function emptyRunHistories(): RunHistories {
-  return { supervisorAttempts: [], retiredStageUsage: [], stageEvidence: [] };
+  return { retiredStageUsage: [], stageEvidence: [] };
 }
 
 /**
@@ -1375,7 +1148,6 @@ function historyRef(value: unknown): RunHistoryRef | undefined {
     || !Number.isSafeInteger(ref.committedBytes)
     || (ref.committedBytes ?? -1) < 0
     || !counts
-    || !Number.isSafeInteger(counts.supervisorAttempts) || (counts.supervisorAttempts ?? -1) < 0
     || !Number.isSafeInteger(counts.retiredStageUsage) || (counts.retiredStageUsage ?? -1) < 0
     || !Number.isSafeInteger(counts.stageEvidence) || (counts.stageEvidence ?? -1) < 0
   ) throw new Error('Invalid run history reference in run.json');
@@ -1407,7 +1179,6 @@ function readPrefix(path: string, length: number): Buffer {
 function readRunHistories(runPath: string, ref: RunHistoryRef | undefined): RunHistories {
   if (!ref) return emptyRunHistories();
   const slots: Record<RunHistoryKind, Map<number, unknown>> = {
-    supervisorAttempts: new Map(),
     retiredStageUsage: new Map(),
     stageEvidence: new Map(),
   };
@@ -1419,7 +1190,7 @@ function readRunHistories(runPath: string, ref: RunHistoryRef | undefined): RunH
       throw new Error(`Malformed acknowledged run history record in ${join(runPath, ref.path)}`);
     }
     if (
-      (record.kind !== 'supervisorAttempts' && record.kind !== 'retiredStageUsage' && record.kind !== 'stageEvidence')
+      (record.kind !== 'retiredStageUsage' && record.kind !== 'stageEvidence')
       || !Number.isSafeInteger(record.index)
       || (record.index ?? -1) < 0
       || !Object.prototype.hasOwnProperty.call(record, 'value')
@@ -1436,34 +1207,33 @@ function readRunHistories(runPath: string, ref: RunHistoryRef | undefined): RunH
     return values;
   };
   return {
-    supervisorAttempts: materialize<SupervisorAttempt>('supervisorAttempts', ref.counts.supervisorAttempts),
     retiredStageUsage: materialize<RetiredStageUsage>('retiredStageUsage', ref.counts.retiredStageUsage),
     stageEvidence: materialize<StageEvidenceRecord>('stageEvidence', ref.counts.stageEvidence),
   };
 }
 
 function hydrateRunProjection(runPath: string, parsed: ArchivedStoreState): ArchivedStoreState {
+  if (parsed.workflowName === 'default') parsed.workflowName = 'planner';
+  const status = resolveRunStatus(parsed.status);
+  if (status.kind === 'known') parsed.status = status.status;
+  for (const status of Object.values(parsed.stages ?? {})) projectAttemptCauses(status);
+  // Old in-flight runs predate the persisted gate coordinate. Project once at
+  // read time; the next ordinary state write retains it without rescanning.
+  if (!parsed.gateRetryRound && parsed.currentIteration !== undefined) {
+    const archive = join(runPath, 'gate_reevaluation', `iteration_${parsed.currentIteration}`);
+    let round = 0;
+    if (existsSync(archive)) for (const name of readdirSync(archive)) {
+      const match = /^round_(\d+)$/.exec(name);
+      if (match && existsSync(join(archive, name, 'repair_diff.json'))) round = Math.max(round, Number(match[1]));
+    }
+    if (round > 0) parsed.gateRetryRound = { iteration: parsed.currentIteration, round };
+  }
   if (!parsed.stateFormat) return parsed;
   const ref = historyRef(parsed.stateFormat);
   const histories = readRunHistories(runPath, ref);
-  if (histories.supervisorAttempts.length > 0) {
-    if (!parsed.supervisor) throw new Error('Run projection has supervisor history without a supervisor summary');
-    parsed.supervisor.attempts = histories.supervisorAttempts;
-  } else if (parsed.supervisor) {
-    parsed.supervisor.attempts = [];
-  }
   if (histories.retiredStageUsage.length > 0) parsed.retiredStageUsage = histories.retiredStageUsage;
   if (histories.stageEvidence.length > 0) parsed.stageEvidence = histories.stageEvidence;
   return parsed;
-}
-
-function processExistsForStateLock(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
 }
 
 function stateLockSleep(ms: number): void {
@@ -1493,7 +1263,7 @@ export function withRunStateLock<T>(directory: string, fn: () => T): T {
         const owner = JSON.parse(readFileSync(path, 'utf-8')) as { pid?: unknown; acquiredAt?: unknown };
         const acquiredAt = typeof owner.acquiredAt === 'string' ? Date.parse(owner.acquiredAt) : Number.NaN;
         stale = typeof owner.pid === 'number'
-          ? !processExistsForStateLock(owner.pid)
+          ? processLiveness(owner.pid) === 'dead'
           : Number.isFinite(acquiredAt) && Date.now() - acquiredAt >= RUN_STATE_STALE_LOCK_MS;
       } catch {
         try { stale = Date.now() - statSync(path).mtimeMs >= RUN_STATE_STALE_LOCK_MS; } catch { /* leave the lock non-stale */ }
@@ -1530,59 +1300,9 @@ function mergeImmutableHistory<T>(name: string, current: T[], incoming: T[] | un
   return incoming.length > current.length ? incoming : current;
 }
 
-function mergeSupervisorAttempts(current: SupervisorAttempt[], incoming: SupervisorAttempt[] | undefined): SupervisorAttempt[] {
-  if (!incoming) return current;
-  const merged = current.map((attempt) => ({ ...attempt }));
-  for (let index = 0; index < incoming.length; index += 1) {
-    const next = incoming[index];
-    const prior = merged[index];
-    if (!prior) {
-      merged.push(next);
-      continue;
-    }
-    if (prior.index !== next.index || prior.startedAt !== next.startedAt) {
-      throw new Error(`Refusing to rewrite acknowledged supervisorAttempts[${index}] identity`);
-    }
-    const combined: SupervisorAttempt = { ...prior, ...next };
-    if (next.unverifiedAssessment === undefined && prior.unverifiedAssessment !== undefined) {
-      combined.unverifiedAssessment = prior.unverifiedAssessment;
-    }
-    if (next.verdict === undefined && prior.verdict !== undefined) combined.verdict = prior.verdict;
-    if (next.effectiveReason === undefined && prior.effectiveReason !== undefined) {
-      combined.effectiveReason = prior.effectiveReason;
-    }
-    if (next.error === undefined && prior.error !== undefined) combined.error = prior.error;
-    merged[index] = combined;
-  }
-  return merged;
-}
-
 function mergeStateHistories(current: StoreState | undefined, incoming: StoreState): StoreState {
-  const currentAttempts = current?.supervisor?.attempts ?? [];
-  const attempts = mergeSupervisorAttempts(currentAttempts, incoming.supervisor?.attempts);
-  let supervisor = incoming.supervisor;
-  if (!supervisor && current?.supervisor) supervisor = current.supervisor;
-  else if (supervisor && current?.supervisor) {
-    const base = supervisor.calls >= current.supervisor.calls ? supervisor : current.supervisor;
-    const completedAt = supervisor.completedAt ?? current.supervisor.completedAt;
-    supervisor = {
-      ...base,
-      status: supervisor.status === 'complete' || current.supervisor.status === 'complete' ? 'complete' : 'running',
-      calls: Math.max(supervisor.calls, current.supervisor.calls, attempts.length),
-      tokens_in: Math.max(supervisor.tokens_in, current.supervisor.tokens_in),
-      tokens_out: Math.max(supervisor.tokens_out, current.supervisor.tokens_out),
-      duration_ms: Math.max(supervisor.duration_ms, current.supervisor.duration_ms),
-      attempts,
-    };
-    if (completedAt !== undefined) supervisor.completedAt = completedAt;
-  } else if (supervisor) {
-    supervisor = { ...supervisor, attempts };
-  }
-
   return {
     ...incoming,
-    ...(supervisor ? { supervisor: { ...supervisor, attempts } } : {}),
-    ...(current?.supervisor && !supervisor ? { supervisor: current.supervisor } : {}),
     retiredStageUsage: mergeImmutableHistory(
       'retiredStageUsage',
       current?.retiredStageUsage ?? [],
@@ -1598,7 +1318,6 @@ function mergeStateHistories(current: StoreState | undefined, incoming: StoreSta
 
 function historiesFromState(state: StoreState): RunHistories {
   return {
-    supervisorAttempts: state.supervisor?.attempts ?? [],
     retiredStageUsage: state.retiredStageUsage ?? [],
     stageEvidence: state.stageEvidence ?? [],
   };
@@ -1635,7 +1354,7 @@ function appendHistoryDelta(
   committedBytes: number,
 ): number {
   const records: RunHistoryRecord[] = [];
-  for (const kind of ['supervisorAttempts', 'retiredStageUsage', 'stageEvidence'] as const) {
+  for (const kind of ['retiredStageUsage', 'stageEvidence'] as const) {
     for (let index = 0; index < desired[kind].length; index += 1) {
       if (index >= committed[kind].length || !isJsonPersistedEqual(committed[kind][index], desired[kind][index])) {
         records.push({ kind, index, value: desired[kind][index] });
@@ -1676,7 +1395,6 @@ function compactProjection(state: StoreState, ref: RunHistoryRef | undefined, re
   const projection: StoreState = { ...state };
   delete projection.retiredStageUsage;
   delete projection.stageEvidence;
-  if (projection.supervisor) projection.supervisor = { ...projection.supervisor, attempts: [] };
   projection.stateFormat = {
     version: 2,
     revision,
@@ -1687,7 +1405,6 @@ function compactProjection(state: StoreState, ref: RunHistoryRef | undefined, re
 
 function copyPersistedHistoryState(target: StoreState, source: StoreState): void {
   target.stateFormat = source.stateFormat;
-  target.supervisor = source.supervisor;
   target.retiredStageUsage = source.retiredStageUsage;
   target.stageEvidence = source.stageEvidence;
 }
@@ -1702,7 +1419,7 @@ function persistRunStateUnlocked(
   const runJsonPath = join(runPath, 'run.json');
   const publishesToSelectedStore = canonicalRunDirectory(runPath)
     === canonicalRunDirectory(runDir(projectDir, runId));
-  requireKnownRunStatus(state.status, `write run state ${runId}`);
+  state.status = requireKnownRunStatus(state.status, `write run state ${runId}`);
   if (state.runId !== runId) throw new Error(`Run state id ${state.runId} does not match target ${runId}`);
 
   let currentProjection: ArchivedStoreState | undefined;
@@ -1729,9 +1446,10 @@ function persistRunStateUnlocked(
   if (expectation && currentRaw !== expectation.raw) {
     throw new RunStateProjectionConflictError(`Run state changed before mutation commit for ${runId}`);
   }
-  if (currentState?.status === 'stopped') {
+  if (currentState?.status === RUN_STATUS.CANCELLED) {
     if (isJsonPersistedEqual(currentState, state)) {
       copyPersistedHistoryState(state, currentState);
+      observeRunStatusChange(runPath, runId, state.status);
       return;
     }
     // A fresh locked transition can continue admitted work. Compatibility
@@ -1765,7 +1483,6 @@ function persistRunStateUnlocked(
     committedBytes,
   );
   const counts: RunHistoryRef['counts'] = {
-    supervisorAttempts: desiredHistories.supervisorAttempts.length,
     retiredStageUsage: desiredHistories.retiredStageUsage.length,
     stageEvidence: desiredHistories.stageEvidence.length,
   };
@@ -1791,6 +1508,7 @@ function persistRunStateUnlocked(
   if (currentProjection && isJsonPersistedEqual(currentProjection, comparable)) {
     assertProjectionUnchanged();
     copyPersistedHistoryState(state, { ...merged, stateFormat: comparable.stateFormat });
+    observeRunStatusChange(runPath, runId, comparable.status);
     if (publishesToSelectedStore) {
       try { upsertRunIndex(projectDir, comparable); } catch { /* index is best-effort */ }
       emitCampaignEnvelopeEvents(projectDir, runId, merged);
@@ -1798,6 +1516,24 @@ function persistRunStateUnlocked(
     return;
   }
 
+  // Project the selected legacy ledger on its first v2 write, including the
+  // metadata-only writes that precede resumed execution.
+  if (currentProjection && !currentProjection.stateFormat) for (const [id, stage] of Object.entries(merged.stages)) {
+    const directory = join(runPath, 'stages', id);
+    mkdirSync(directory, { recursive: true });
+    const statusPath = join(directory, 'status.json');
+    if (existsSync(statusPath)) {
+      const ledger = JSON.parse(readFileSync(statusPath, 'utf8')) as StageStatus;
+      // Keep execution evidence absent from the selected legacy projection;
+      // run.json still selects the current stage status and matching attempt rows.
+      if (ledger.attempts?.length) stage.attempts = [...new Map([
+        ...ledger.attempts, ...(stage.attempts ?? []).map(attempt => ({
+          ...ledger.attempts?.find(previous => previous.index === attempt.index), ...attempt,
+        })),
+      ].map(attempt => [attempt.index, attempt])).values()].sort((a, b) => a.index - b.index);
+    }
+    atomicWrite(statusPath, JSON.stringify(stage, null, 2));
+  }
   const projection = compactProjection(merged, ref, currentRevision + 1);
   publishRunProjection(projectDir, runPath, projection, merged, assertProjectionUnchanged);
   copyPersistedHistoryState(state, { ...merged, stateFormat: projection.stateFormat });
@@ -1811,13 +1547,13 @@ function publishRunProjection(projectDir: string, runPath: string, projection: S
   if (isTerminalRunStatus(projection.status)) {
     const summary = renderRunSummary(projectDir, runPath, summaryState);
     atomicWrite(join(runPath, 'summary.md'), summary);
-    atomicWrite(join(runPath, 'progress.md'), summary);
     assertProjectionUnchanged();
   }
+
   atomicWrite(join(runPath, 'run.json'), JSON.stringify(projection) + '\n');
+  observeRunStatusChange(runPath, projection.runId, projection.status);
   if (isTerminalRunStatus(projection.status)) {
     retireRunScratch(runPath);
-    pruneTerminalWorkAreasUnderLock(runPath);
   }
   if (canonicalRunDirectory(runPath) === canonicalRunDirectory(runDir(projectDir, projection.runId))) {
     try { upsertRunIndex(projectDir, projection); } catch { /* index is best-effort */ }
@@ -1847,7 +1583,8 @@ export function readArchivedRunStateFromDirectory(path: string): ArchivedRunStat
 export function readOperationalRunState(projectDir: string, runId: string): StoreState {
   const path = runDir(projectDir, runId);
   const parsed = JSON.parse(readFileSync(join(path, 'run.json'), 'utf-8')) as ArchivedStoreState;
-  requireKnownRunStatus(parsed.status, `read operational run state ${runId}`);
+  if (parsed.workflowName === 'default') parsed.workflowName = 'planner';
+  parsed.status = requireKnownRunStatus(parsed.status, `read operational run state ${runId}`);
   if (parsed.runId !== runId) {
     throw new Error(`Run state id ${String(parsed.runId)} does not match target ${runId}`);
   }
@@ -1874,31 +1611,23 @@ export function updateRunState(projectDir: string, runId: string, mutator: (stat
   return updateRunStateInDirectory(projectDir, identity.runId, identity.directory, mutator, afterCommit);
 }
 
-/** A selected private/legacy store uses the same lock, hydration and publisher.
- * No raw JSON fallback may bypass committed history or cancellation fences. */
-export function updateRunStateAtPath(directory: string, mutator: (state: StoreState) => void): StoreState {
-  const identity = resolveRunIdentity(directory);
-  if (!identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: run has no project directory');
-  return updateRunStateInDirectory(identity.projectDir, identity.runId, identity.directory, mutator);
-}
-
 /** Mutate control state without requiring historical evidence. History bytes,
  * references and inline records remain untouched, even when evidence is lost. */
 export function updateOperationalRunStateAtPath(directory: string, mutator: (state: StoreState) => void): StoreState {
   return updateOperationalRunState(directory, mutator);
 }
 
-/** The two interruption entrances publish their changed stage ledgers under
- * the same cancellation lock. Cancellation preserves pre-existing disagreements;
- * continuation supplies its own exact ledger and ownership proof under this lock.
- * Ordinary operational writers retain the stopped fence. */
-function updateOperationalRunState(directory: string, mutator: (state: StoreState) => void, interruption?: 'cancellation' | 'continuation'): StoreState {
+/** Cancellation publishes matching changed stage ledgers under the run lock.
+ * Preserve pre-existing disagreements; ordinary writers retain the cancelled fence. */
+export function updateOperationalRunState(directory: string, mutator: (state: StoreState) => void, interruption?: 'cancellation', afterCommit?: () => void): StoreState {
   const identity = resolveRunIdentity(directory);
   if (!identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: run has no project directory');
   return withRunStateLock(identity.directory, () => {
     const path = join(identity.directory, 'run.json');
     const raw = readFileSync(path, 'utf8');
     const previous = JSON.parse(raw) as StoreState;
+    const status = resolveRunStatus(previous.status);
+    if (status.kind === 'known') previous.status = status.status;
     const state = structuredClone(previous);
     mutator(state);
     if (state.runId !== identity.runId || state.projectDir !== identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: operational mutation changed run identity');
@@ -1906,18 +1635,19 @@ function updateOperationalRunState(directory: string, mutator: (state: StoreStat
         || !isJsonPersistedEqual(historiesFromState(previous), historiesFromState(state))) {
       throw new Error('Operational mutation cannot change run history');
     }
-    if (isJsonPersistedEqual(previous, state)) return state;
+    if (isJsonPersistedEqual(previous, state)) {
+      observeRunStatusChange(identity.directory, identity.runId, state.status);
+      return state;
+    }
     requireKnownRunStatus(state.status, `write operational run state ${identity.runId}`);
-    if (previous.status === 'stopped' && !interruption) throw cancelledRunPublicationError(identity.runId);
+    if (previous.status === RUN_STATUS.CANCELLED && !interruption) throw cancelledRunPublicationError(identity.runId);
     if (interruption) for (const [id, status] of Object.entries(state.stages)) {
       if (isJsonPersistedEqual(previous.stages[id], status)) continue;
       const stagePath = join(identity.directory, 'stages', id);
-      if (interruption === 'cancellation') {
-        let ledger: unknown;
-        try { ledger = JSON.parse(readFileSync(join(stagePath, 'status.json'), 'utf8')); }
-        catch { continue; } // Missing or unreadable evidence cannot authorize a ledger write.
-        if (!isJsonPersistedEqual(previous.stages[id], ledger)) continue;
-      }
+      let ledger: unknown;
+      try { ledger = JSON.parse(readFileSync(join(stagePath, 'status.json'), 'utf8')); }
+      catch { continue; } // Missing or unreadable evidence cannot authorize a ledger write.
+      if (!isJsonPersistedEqual(previous.stages[id], ledger)) continue;
       mkdirSync(stagePath, { recursive: true });
       atomicWrite(join(stagePath, 'status.json'), JSON.stringify(status, null, 2));
     }
@@ -1925,52 +1655,21 @@ function updateOperationalRunState(directory: string, mutator: (state: StoreStat
     publishRunProjection(identity.projectDir, identity.directory, state, state, () => {
       if (readFileSync(path, 'utf8') !== raw) throw new RunStateProjectionConflictError(`Run state changed during operational mutation for ${identity.runId}`);
     });
+    afterCommit?.();
     return state;
   });
 }
 
 /** Close exactly the current interrupted execution without inventing another attempt. */
-export function interruptedStageStatus(previous: StageStatus, completedAt: string, error: string): StageStatus {
+export function interruptedStageStatus(previous: StageStatus, completedAt: string, error: string, terminationCause: 'cancelled' | 'host_restart' = 'cancelled'): StageStatus {
   const attempt = previous.attempts?.at(-1);
-  if (attempt?.status === 'closed') return settledStageAttemptStatus(previous, attempt.index, false, { exitCode: 143, error });
+  if (attempt?.status === 'closed') return settledStageAttemptStatus(previous, attempt.index, false, { exitCode: 143, error, terminationCause });
   if (attempt?.status === 'running') return completedStageAttemptStatus(previous, previous.retries, {
-    exitCode: 143, completedAt, duration_ms: Math.max(0, Date.parse(completedAt) - Date.parse(attempt.startedAt)), error,
+    // Sampled calls are a lower bound: interruption supplies no final usage.
+    ...sumInvocationUsage([{ ...attempt, tokenUsage: 'unknown', costUsage: 'unknown' }]),
+    terminationCause, exitCode: 143, completedAt, duration_ms: Math.max(0, Date.parse(completedAt) - Date.parse(attempt.startedAt)), error,
   });
   return previous.status === STAGE_STATUS.RUNNING ? { ...previous, status: STAGE_STATUS.FAILED } : previous;
-}
-
-/** Native cancellation fences the run and closes its interrupted stage ledgers together. */
-export function cancelRunStateAtPath(directory: string, completedAt: string): { state: StoreState; preservedRunStatus?: string } {
-  let preservedRunStatus: string | undefined;
-  const state = updateOperationalRunState(directory, state => {
-    if (resolveRunStatus(state.status).kind === 'unknown' || isTerminalRunStatus(state.status) && !(state.status === RUN_STATUS.FAILED && state.recovery?.kind === 'blocked')) {
-      preservedRunStatus = state.status;
-      return;
-    }
-    state.status = RUN_STATUS.STOPPED;
-    state.failureReason = 'Cancelled by user';
-    state.completedAt = completedAt;
-    for (const [id, stage] of Object.entries(state.stages)) {
-      state.stages[id] = interruptedStageStatus(stage, completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
-      // Pending stages have no current execution to settle. Keep them runnable
-      // for explicit continuation; the stopped run fences ordinary publication.
-    }
-  }, 'cancellation');
-  return { state, preservedRunStatus };
-}
-
-/** An explicit continuation may settle only its proven stopped interruption.
- * Admission supplies fresh ownership and exact ledger/projection evidence while
- * the run lock prevents a concurrent cancellation or scheduler publication. */
-export function settleInterruptedRunStagesAtPath(directory: string, stageIds: string[], completedAt: string, error: string, assertAuthority: (state: StoreState) => void): StoreState {
-  return updateOperationalRunState(directory, state => {
-    if (state.status !== RUN_STATUS.STOPPED) throw new Error('INTERRUPTION_STATE_CHANGED: run is no longer stopped');
-    assertAuthority(state);
-    for (const id of stageIds) {
-      if (!state.stages[id]) throw new Error(`INTERRUPTION_STATE_CHANGED: missing stage ${id}`);
-      state.stages[id] = interruptedStageStatus(state.stages[id], completedAt, error);
-    }
-  }, 'continuation');
 }
 
 function updateRunStateInDirectory(projectDir: string, runId: string, runPath: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState) => void): StoreState {
@@ -1997,10 +1696,31 @@ function updateRunStateInDirectory(projectDir: string, runId: string, runPath: s
   });
 }
 
+/** Project only pre-cause records; typed outcomes are never reclassified from prose. */
+function projectAttemptCauses(status: StageStatus): StageStatus {
+  if (!Array.isArray(status?.attempts)) return status;
+  for (const attempt of status.attempts ?? []) {
+    if (attempt.terminationCause !== undefined || attempt.status === 'running') continue;
+    const legacy = attempt.timeout?.terminationCause;
+    // A legacy restart marker requires intent even when an old nested cause
+    // disagrees. Neither legacy field authenticates an interruption.
+    const cause = attempt.error?.startsWith('HOST_RESTART_INTERRUPTED:') ? 'host_restart'
+      : legacy ? (legacy === 'attempt_timeout' || legacy === 'stage_abort' ? legacy : 'exit')
+        : attempt.exitCode === 143 ? 'cancelled'
+        : attempt.exitCode === 124 || attempt.error?.startsWith('timed out after') ? 'attempt_timeout'
+        : attempt.exitCode === 137 ? 'stage_abort'
+        : attempt.engineVoid ? 'engine_void' : undefined;
+    // Ordinary old outcomes need no new field: a no-op publication must retain
+    // their original bytes rather than materializing a default exit cause.
+    if (cause !== undefined) attempt.terminationCause = cause;
+  }
+  return status;
+}
+
 export function readStageStatus(projectDir: string, runId: string, stageId: string): StageStatus {
-  return JSON.parse(
+  return projectAttemptCauses(JSON.parse(
     readFileSync(join(stageDir(projectDir, runId, stageId), 'status.json'), 'utf-8'),
-  );
+  ));
 }
 
 /** The newest running execution in the ledger, shared by scope authority and
@@ -2025,7 +1745,7 @@ export function writeStageStatus(
   const runJsonPath = join(identity.directory, 'run.json');
   if (existsSync(runJsonPath)) {
     updateRunState(projectDir, identity.runId, (state) => {
-      if (state.status === 'stopped') throw cancelledRunPublicationError(identity.runId);
+      if (state.status === RUN_STATUS.CANCELLED) throw cancelledRunPublicationError(identity.runId);
       mkdirSync(dir, { recursive: true });
       atomicWrite(join(dir, 'status.json'), JSON.stringify(status, null, 2));
       state.stages[stageId] = status;
@@ -2054,7 +1774,7 @@ export function updateStageStatusUnderRunLock(
     const state = hydrateRunProjection(directory, JSON.parse(raw) as ArchivedStoreState) as StoreState;
     const status = mutator(state, readStageStatus(projectDir, runId, stageId));
     if (status === undefined) return state;
-    if (state.status === 'stopped') throw cancelledRunPublicationError(runId);
+    if (state.status === RUN_STATUS.CANCELLED) throw cancelledRunPublicationError(runId);
     atomicWrite(join(stageDir(projectDir, runId, stageId), 'status.json'), JSON.stringify(status, null, 2));
     state.stages[stageId] = status;
     persistRunStateUnlocked(projectDir, runId, state, { raw }, directory);
@@ -2102,6 +1822,7 @@ export function beginStageAttempt(
   attempts.push({ index: nextIndex, startedAt, status: 'running', ...attribution });
   const running: StageStatus = {
     ...previous,
+    gate: undefined,
     status: STAGE_STATUS.RUNNING,
     retries,
     attempts,
@@ -2131,6 +1852,8 @@ export interface CompleteStageAttemptInput extends InvocationUsage {
   completedAt?: string;
   artifacts?: string[];
   error?: string;
+  terminationCause?: AttemptTerminationCause;
+  engineVoid?: boolean;
   adapterFailureKind?: AdapterFailureKind;
   tokens_in?: number;
   tokens_out?: number;
@@ -2172,12 +1895,6 @@ export function completedStageAttemptStatus(
     currentIndex = attempts.length - 1;
   }
   const current = attempts[currentIndex];
-  const tokensIn = typeof completion.tokens_in === 'number' && Number.isFinite(completion.tokens_in)
-    ? completion.tokens_in
-    : undefined;
-  const tokensOut = typeof completion.tokens_out === 'number' && Number.isFinite(completion.tokens_out)
-    ? completion.tokens_out
-    : undefined;
   attempts[currentIndex] = {
     ...current,
     ...(completion.disposition ? { disposition: completion.disposition } : {}),
@@ -2189,11 +1906,11 @@ export function completedStageAttemptStatus(
     processSignal: completion.processSignal,
     providerFailure: completion.providerFailure,
     ...invocationUsageFields(completion),
-    tokens_in: tokensIn,
-    tokens_out: tokensOut,
-    tokenUsage: completion.tokenUsage ?? (usageComplete(completion) ? 'known' : 'unknown'),
-    invocations: completion.invocations,
+    tokenUsage: completion.tokenUsage ?? current.tokenUsage ?? (tokensComplete(completion) ? 'known' : 'unknown'),
+    invocations: completion.invocations ?? current.invocations,
     error: completion.error,
+    terminationCause: completion.terminationCause ?? 'exit',
+    engineVoid: completion.engineVoid,
     adapterFailureKind: completion.adapterFailureKind,
     writes: completion.writes,
     writeAttribution: completion.writeAttribution,
@@ -2222,6 +1939,7 @@ export function completedStageAttemptStatus(
     tokens_cache_created: usage.tokens_cache_created,
     tokens_reasoning: usage.tokens_reasoning,
     cost_usd: usage.cost_usd,
+    costUsage: usage.costUsage,
     attempts,
     reruns: Math.max(0, attempts.length - 1),
     writes,
@@ -2265,14 +1983,14 @@ export function closeStageAttempt(
 /** One owner projects a closed execution's final classification onto its stage. */
 export function settledStageAttemptStatus(
   previous: StageStatus, attemptIndex: number, suspended = false,
-  failure?: { exitCode: number; error: string },
+  failure?: { exitCode: number; error: string; terminationCause?: AttemptTerminationCause },
 ): StageStatus {
   const attempts = (previous.attempts ?? []).map(attempt => ({ ...attempt }));
   const attempt = attempts.at(-1);
   if (!attempt || attempt.index !== attemptIndex || attempt.status === 'running') {
     throw new Error(`Cannot settle attempt ${attemptIndex}: current execution is not the matching closed child`);
   }
-  if (failure) Object.assign(attempt, failure);
+  if (failure) Object.assign(attempt, failure, { terminationCause: failure.terminationCause ?? 'exit' });
   if (attempt.exitCode !== 0) delete attempt.continuation;
   // Reconciliation can already have refused or suspended this exact execution.
   attempt.status = attempt.exitCode !== 0 ? 'failed'
@@ -2289,7 +2007,7 @@ export function settledStageAttemptStatus(
 
 export function settleStageAttempt(
   projectDir: string, runId: string, stageId: string, attemptIndex: number,
-  suspended = false, failure?: { exitCode: number; error: string },
+  suspended = false, failure?: { exitCode: number; error: string; terminationCause?: AttemptTerminationCause },
 ): StageStatus {
   const status = settledStageAttemptStatus(readStageStatus(projectDir, runId, stageId), attemptIndex, suspended, failure);
   writeStageStatus(projectDir, runId, stageId, status);
@@ -2440,6 +2158,7 @@ export function rependStageStatus(
     status: STAGE_STATUS.PENDING,
     retries,
     error,
+    gate: undefined,
     acceptedFrom: undefined,
     continuation: undefined,
   };
@@ -2477,15 +2196,6 @@ export function suspendStageAttempt(
   return suspended;
 }
 
-export function writeStageInput(
-  projectDir: string,
-  runId: string,
-  stageId: string,
-  input: string,
-): void {
-  atomicWrite(join(stageDir(projectDir, runId, stageId), 'input.md'), input);
-}
-
 /**
  * `output.md` keeps its meaning — the latest attempt's output — because eighteen readers
  * depend on it. What it could not do was preserve an earlier attempt: each attempt
@@ -2513,7 +2223,7 @@ export function writeStageOutput(
 
 export function readStageInput(projectDir: string, runId: string, stageId: string): string {
   try {
-    return readFileSync(join(stageDir(projectDir, runId, stageId), 'input.md'), 'utf-8');
+    return latestInvocationInput(runDir(projectDir, runId), stageId)?.record.userPrompt ?? '';
   } catch { /* expected - optional resource */
     return '';
   }
@@ -2528,7 +2238,7 @@ export function readStageOutput(projectDir: string, runId: string, stageId: stri
 }
 
 export function listRuns(projectDir: string): string[] {
-  // Prefer the SQLite index: every createRun/writeRunState upserts into it, so it
+  // Prefer the SQLite index: every writeRunState upserts into it, so it
   // stays as fresh as the filesystem for listing, and returns ids directly without
   // a ~9900-entry readdir + a per-entry existsSync(run.json) on every call.
   const indexed = listRunIdsFromIndex(projectDir);

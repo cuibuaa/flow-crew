@@ -51,34 +51,13 @@ export function validateSettledGateVerdict(base: string, runId: string, stageId:
   return 'Gate contract violation: terminal disposition or finding-derived repair requires the unchanged exact verdict and protected artifact receipt of the current settled gate execution; rerun the gate';
 }
 
-export const CONTRADICTORY_REJECT_OUTCOMES = new Set([
-  'fail', 'failed', 'reject', 'rejected', 'repair_required', 'requires_repair',
-  'reject_repair_required', 'rejected_repair_required',
-]);
-
-export function structuredGateRejection(record: Record<string, unknown>): string | undefined {
-  if (record.repair_required === true || record.requires_repair === true) {
-    return 'repair_required=true';
-  }
-  const rawOutcome = typeof record.outcome === 'string'
-    ? record.outcome
-    : typeof record.status === 'string'
-      ? record.status
-      : undefined;
-  if (rawOutcome) {
-    const normalized = rawOutcome.trim().toLowerCase().replace(/[\s-]+/g, '_');
-    if (CONTRADICTORY_REJECT_OUTCOMES.has(normalized)) return `outcome=${rawOutcome}`;
-  }
-  return undefined;
-}
-
 export function explicitPassContradiction(
   record: Record<string, unknown>,
   source: 'verdict',
   effectivePass = record.pass === true,
 ): string | undefined {
   if (!effectivePass) return undefined;
-  const rejection = structuredGateRejection(record);
+  const rejection = record.repair_required === true || record.requires_repair === true ? 'repair_required=true' : undefined;
   return rejection
     ? `Gate verdict contradiction: pass=true cannot accompany ${source} ${rejection}`
     : undefined;
@@ -128,7 +107,7 @@ export function validateGateCriterionEvidence(
 export class GateVerdictDocument {
   readonly digest: string;
   readonly value: Record<string, unknown>;
-  constructor(readonly file: string, bytes: Buffer) {
+  constructor(bytes: Buffer) {
     this.value = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
     if (typeof this.value.pass !== 'boolean') throw new Error('Gate verdict requires boolean pass');
     this.digest = createHash('sha256').update(bytes).digest('hex');
@@ -140,11 +119,9 @@ export class GateVerdictDocument {
   }
 }
 
-/** Recorded shared carriers remain readable, but never own a new disposition. */
-export function readGateVerdictDocument(base: string, stageId: string, allowSharedFallback = true): GateVerdictDocument | null {
-  for (const file of [`verdict_${stageId}.json`, ...(allowSharedFallback ? ['verdict.json'] : [])]) {
-    try { return new GateVerdictDocument(file, readFileSync(join(base, file))); }
-    catch { /* optional, malformed and legacy carriers fall through in order */ }
-  }
-  return null;
+/** Read the gate's authored verdict carrier. */
+export function readGateVerdictDocument(base: string, stageId: string): GateVerdictDocument | null {
+  const file = `verdict_${stageId}.json`;
+  try { return new GateVerdictDocument(readFileSync(join(base, file))); }
+  catch { return null; }
 }

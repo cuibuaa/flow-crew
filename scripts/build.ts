@@ -19,7 +19,7 @@ import {
   computeBuildInputDigest,
   createBuildManifest,
   pruneStaleBuildOutputs,
-  publishBuildGeneration,
+  publishBuildOutputs,
 } from '../src/build-manifest.js';
 import { processIsAlive } from '../src/process-liveness.js';
 
@@ -117,8 +117,8 @@ function main(): void {
     if (manifest.inputs.hash !== before.hash) {
       throw new Error('Build inputs changed during compilation; rerun `npm run build` against a settled source tree.');
     }
-    // A live destination is immutable, including replacements and its marker.
-    publishBuildGeneration({
+    // Publish portable files; daemon startup owns immutable runtime snapshots.
+    publishBuildOutputs({
       projectRoot,
       stagedDistDir: stagingDist,
       stagedUiDir,
@@ -131,7 +131,7 @@ function main(): void {
     });
     process.stdout.write(
       `[flowcrew-build] committed ${manifest.generation.slice(0, 12)} `
-      + `(${manifest.outputs.length} files; manifest last)\n`,
+      + `(${manifest.outputs.length} files; outputs published)\n`,
     );
   } finally {
     closeSync(lockFd);

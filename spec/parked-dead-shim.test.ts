@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import './test-support/policy-runtime.js';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -14,7 +15,8 @@ import {
   atomicWriteJson, observePortableUnit, supervisionPaths, SUPERVISION_PROTOCOL_VERSION,
   type SupervisorBackend,
 } from '../src/supervision.js';
-import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
 
 const DEAD_PID = 2_147_483_647;
@@ -38,7 +40,7 @@ beforeEach(() => {
     state.status = 'parked';
     state.recovery = { kind: 'resumable', reason: 'HOST_RESTART_RESUMABLE', at: new Date().toISOString(), interruptedStages: [] };
     state.engineCheckpoint = {
-      version: 1, runId, projectDir: project, bootId: readHostBootId(),
+      version: 2, runId, projectDir: project, bootId: readHostBootId(),
       generation: 'fixture-generation', pid: DEAD_PID, processes: [], at: new Date().toISOString(),
     };
     state.currentIteration = 2; state.maxIterations = 3; state.maxRetries = 4;
@@ -83,16 +85,16 @@ describe('lost shim process proof and lifecycle settlement', () => {
     });
     expect(code, io.read()?.toString()).toBe(0);
     const settled = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
-    expect(settled).toMatchObject({ status: 'stopped', failureReason: 'Cancelled by user', completedAt: expect.any(String) });
+    expect(settled).toMatchObject({ status: 'cancelled', failureReason: 'Cancelled by user', completedAt: expect.any(String) });
     expect(settled.stateFormat.history).toEqual(projection.stateFormat.history);
     if (damagedBytes) expect(readFileSync(history)).toEqual(damagedBytes);
     else expect(() => readFileSync(history)).toThrow();
     expect(registry.get(task.id)?.status).toBe('cancelled');
     const summary = readFileSync(join(directory, 'summary.md'), 'utf8');
-    expect(summary).toContain('Status: **stopped**');
+    expect(summary).toContain('Status: **cancelled**');
     expect(summary).toContain('Historical evidence was not loaded');
-    expect(readFileSync(join(directory, 'progress.md'), 'utf8')).toBe(summary);
-    expect(await control.statusRun(runId)).toMatchObject({ ok: true, status: 'cancelled' });
+    expect(existsSync(join(directory, 'progress.md'))).toBe(false);
+    expect(await control.cancelRun(runId)).toMatchObject({ ok: true, status: 'cancelled' });
   });
 
   it.each(['absent', 'malformed', 'partial'])('closes task cancellation with an %s run projection', async damage => {
@@ -146,7 +148,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
     const task = registry.create({ projectDir: project, run_id: runId, status: 'running', systemd_unit: unit });
     const result = await cancellation(backend(), signal).cancelTask(task.id);
     expect(result).toMatchObject({ ok: true, status: 'cancelled', observation: { commandFateKnown: false } });
-    expect(readRunState(project, runId).status).toBe('stopped');
+    expect(readRunState(project, runId).status).toBe('cancelled');
     expect(registry.get(task.id)?.status).toBe('cancelled');
     expect(signal).not.toHaveBeenCalled();
   });
@@ -168,7 +170,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
     expect(registry.get(task.id)?.status).toBe('cancelled');
     expect(registry.get(task.id)?.not_before).toBeUndefined();
     expect(registry.get(task.id)?.defer_kind).toBeUndefined();
-    expect(readRunState(project, runId).status).toBe('stopped');
+    expect(readRunState(project, runId).status).toBe('cancelled');
   });
 
   it('resumes the same recovered run after manual retry of a terminal-unknown unit', async () => {
@@ -226,7 +228,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
 
     expect(result.ok).toBe(true);
     expect(readRunState(project, runId)).toMatchObject({
-      status: 'stopped', failureReason: 'Cancelled by user', completedAt: expect.any(String),
+      status: 'cancelled', failureReason: 'Cancelled by user', completedAt: expect.any(String),
       currentIteration: 2, maxIterations: 3, maxRetries: 4,
     });
     expect(registry.get(task.id)?.status).toBe(status === 'running' ? 'cancelled' : 'stuck');
@@ -270,6 +272,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
     await orchestrator.tickOnce();
 
     expect(registry.get(task.id)).toMatchObject({ status: 'failed', run_id: runId, attempt: 1 });
+    expect(readRunState(project, runId).status).toBe('failed');
     expect(registry.get(task.id)?.notes).toBe(`bound run ${runId} ended failed`);
     expect(launch).not.toHaveBeenCalled();
   });
@@ -300,7 +303,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
     const result = await cancellation(backend(), signal).cancelTask(task.id);
 
     expect(result).toMatchObject({ ok: true, status: 'cancelled', observation: { unitState: { kind: 'unobservable' } } });
-    expect(readRunState(project, runId).status).toBe('stopped');
+    expect(readRunState(project, runId).status).toBe('cancelled');
     expect(signal).not.toHaveBeenCalled();
   });
 
@@ -310,7 +313,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
 
     expect(observePortableUnit(registry.baseDir, unit).status.kind).toBe('unobservable');
     expect(await cancellation().cancelTask(task.id)).toMatchObject({ ok: true, status: 'cancelled', observation: { unitState: { kind: 'unobservable' } } });
-    expect(readRunState(project, runId).status).toBe('stopped');
+    expect(readRunState(project, runId).status).toBe('cancelled');
   });
 
   it('fences a live owned scheduler and attempts its stop despite a dead shim', async () => {
@@ -322,7 +325,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
     const result = await cancellation(backend(), signal).cancelTask(task.id);
 
     expect(result).toMatchObject({ ok: true, status: 'cancelled', observation: { schedulerAlive: true } });
-    expect(readRunState(project, runId).status).toBe('stopped');
+    expect(readRunState(project, runId).status).toBe('cancelled');
     expect(signal).toHaveBeenCalledWith(process.pid, 'SIGTERM');
   });
 
@@ -331,14 +334,15 @@ describe('lost shim process proof and lifecycle settlement', () => {
     writeSchedulerProcessIdentity(directory, runId);
     const identityPath = join(directory, 'scheduler.identity.json');
     const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
-    identity.startToken.value += '-previous-process';
+    identity.startToken.value = identity.startToken.kind === 'linux'
+      ? String(BigInt(identity.startToken.value) + 1n) : `${identity.startToken.value} previous-process`;
     writeFileSync(identityPath, JSON.stringify(identity));
     const signal = vi.fn();
     const task = registry.create({ projectDir: project, run_id: runId, status: 'running', systemd_unit: unit });
 
     expect(inspectRunScheduler(runId, directory)).toEqual({ kind: 'reused', pid: process.pid });
     expect(await cancellation(backend(), signal).cancelTask(task.id)).toMatchObject({ ok: true, status: 'cancelled' });
-    expect(readRunState(project, runId).status).toBe('stopped');
+    expect(readRunState(project, runId).status).toBe('cancelled');
     expect(signal).not.toHaveBeenCalled();
   });
 });

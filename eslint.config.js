@@ -59,7 +59,7 @@ export default tseslint.config(
     rules: { 'no-restricted-imports': 'off', 'no-restricted-syntax': 'off' },
   },
   {
-    files: ['src/run-index.ts', 'src/resource-leases.ts'],
+    files: ['src/run-index.ts'],
     rules: { 'no-restricted-syntax': ['error', ...filesystemSyntax] },
   },
 );

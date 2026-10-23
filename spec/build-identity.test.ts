@@ -1,12 +1,13 @@
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, statSync, copyFileSync, symlinkSync, realpathSync, chmodSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, statSync, lstatSync, copyFileSync, symlinkSync, realpathSync, chmodSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { assertBuildArtifactInventory, assertDistFresh, collectBuildArtifacts, createBuildManifest, publishBuildGeneration, computeBuildInputDigest, isBuildManifest, BUILD_MANIFEST_FILENAME, type BuildFileRecord, type BuildManifest } from '../src/build-manifest.js';
-import { computeBuildFingerprint, createDaemonIdentity } from '../src/daemon-identity.js';
+import { assertBuildArtifactInventory, assertDistFresh, collectBuildArtifacts, createBuildManifest, publishBuildOutputs, pinBuildRuntime, readBuildManifest, buildProjectRoot, computeBuildInputDigest, isBuildManifest, BUILD_MANIFEST_FILENAME, type BuildFileRecord, type BuildManifest } from '../src/build-manifest.js';
+import { computeBuildFingerprint } from '../src/daemon-identity.js';
+import { validationEnvironment } from '../src/validation-environment.js';
 
 const roots: string[] = [];
 function fixture() {
@@ -42,10 +43,10 @@ describe('one backend and UI build identity', () => {
     const f = fixture();
     const temporary = join(f.root, 'temporary'); mkdirSync(temporary);
     vi.stubEnv('TMPDIR', temporary);
-    const manifest = publishBuildGeneration({ projectRoot: f.root, ...f });
+    const manifest = publishBuildOutputs({ projectRoot: f.root, ...f });
     expect(assertDistFresh(f.root).generation).toBe(manifest.generation);
     for (const path of ['entry.js', 'entry.d.ts']) copyFileSync(join(f.stagedDistDir, path), join(temporary, path));
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f,
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f,
       stagedDistDir: temporary,
     })).toThrow('staging overlaps authored or published roots');
   });
@@ -54,17 +55,17 @@ describe('one backend and UI build identity', () => {
     const f = fixture();
     const alias = join(dirname(f.root), 'alias');
     writeFileSync(join(f.root, 'src/index.html'), '<html>authored</html>');
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, stagedUiDir: join(f.root, 'src') }))
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f, stagedUiDir: join(f.root, 'src') }))
       .toThrow('staging overlaps authored or published roots');
     writeFileSync(join(dirname(f.root), 'index.html'), '<html>ancestor</html>');
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, stagedUiDir: dirname(f.root) }))
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f, stagedUiDir: dirname(f.root) }))
       .toThrow('staging overlaps authored or published roots');
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, stagedDistDir: join(f.root, 'dist') }))
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f, stagedDistDir: join(f.root, 'dist') }))
       .toThrow('staging overlaps authored or published roots');
     symlinkSync(f.stagedDistDir, alias);
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, distDir: join(alias, 'future', 'dist') }))
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f, distDir: join(alias, 'future', 'dist') }))
       .toThrow('staging overlaps authored or published roots');
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, cacheDir: alias }))
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f, cacheDir: alias }))
       .toThrow('staging overlaps authored or published roots');
     expect(readFileSync(join(f.root, 'dist/entry.js'), 'utf8')).toContain('value = 0');
   });
@@ -75,7 +76,7 @@ describe('one backend and UI build identity', () => {
     symlinkSync(join(f.root, 'src'), alias);
     mkdirSync(join(f.root, 'staged-ui'));
     writeFileSync(join(f.root, 'staged-ui/index.html'), '<html>authored decoy</html>');
-    const manifest = publishBuildGeneration({ projectRoot: f.root, ...f, stagedUiDir: `${alias}/../staged-ui` });
+    const manifest = publishBuildOutputs({ projectRoot: f.root, ...f, stagedUiDir: `${alias}/../staged-ui` });
     expect(assertDistFresh(f.root).generation).toBe(manifest.generation);
     expect(readFileSync(join(f.root, 'ui/dist/index.html'), 'utf8')).toBe('<html>new</html>');
     expect(readFileSync(join(f.root, 'staged-ui/index.html'), 'utf8')).toBe('<html>authored decoy</html>');
@@ -90,7 +91,7 @@ describe('one backend and UI build identity', () => {
     copyFileSync(join(f.stagedUiDir, 'index.html'), join(external, 'staged-ui/index.html'));
     const alias = join(f.root, 'alias'); symlinkSync(join(external, 'child'), alias);
     const manifest = createBuildManifest(f.root, f.stagedDistDir, { stagedUiDir: normalized });
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, manifest, stagedUiDir: `${alias}/../staged-ui` }))
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f, manifest, stagedUiDir: `${alias}/../staged-ui` }))
       .toThrow('staging overlaps authored or published roots');
     expect(readFileSync(join(f.root, 'ui/dist/index.html'), 'utf8')).toBe('<html>old</html>');
   });
@@ -114,7 +115,7 @@ describe('one backend and UI build identity', () => {
     symlinkSync(physical, logical);
     // Both bundle and input validation succeed; only physical overlap refuses.
     const manifest = createBuildManifest(f.root, stagedDistDir, { stagedUiDir: f.stagedUiDir });
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, stagedDistDir, manifest }))
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f, stagedDistDir, manifest }))
       .toThrow('staging overlaps authored or published roots');
     expect(readFileSync(join(f.root, 'dist/entry.js'), 'utf8')).toContain('value = 0');
     expect(readFileSync(join(f.root, 'ui/dist/index.html'), 'utf8')).toBe('<html>old</html>');
@@ -122,7 +123,7 @@ describe('one backend and UI build identity', () => {
 
   it('checks declared compiler records within a complete inventory that includes static assets', () => {
     const f = fixture();
-    const manifest = publishBuildGeneration({ projectRoot: f.root, ...f });
+    const manifest = publishBuildOutputs({ projectRoot: f.root, ...f });
     const marker = join(f.root, 'dist', BUILD_MANIFEST_FILENAME);
     writeFileSync(join(f.root, 'dist/license.txt'), 'static license');
     manifest.artifacts!.backend = collectBuildArtifacts(join(f.root, 'dist'), true);
@@ -137,92 +138,135 @@ describe('one backend and UI build identity', () => {
     expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('incomplete or modified backend generation');
   });
 
-  it('replaces backend outputs and attests retained UI resources', () => {
+  it('pins complete generations and retains exactly the current and previous runtime', () => {
     const f = fixture();
-    writeFileSync(join(f.root, 'dist/retained.txt'), 'older runtime resource');
-    writeFileSync(join(f.root, 'ui/dist/older.html'), 'older UI resource');
-    const phases: string[] = [];
-    const manifest = publishBuildGeneration({ projectRoot: f.root, ...f, onPhase: phase => {
-      phases.push(phase);
-      if (phase === 'replacement_files_prepared') {
-        expect(readFileSync(join(f.root, 'dist/entry.js'), 'utf8')).toContain('value = 0');
-        expect(existsSync(join(f.root, 'dist', BUILD_MANIFEST_FILENAME))).toBe(false);
-      }
-      if (phase === 'runtime_files_published') {
-        expect(readFileSync(join(f.root, 'dist/entry.js'), 'utf8')).toContain('value = 1');
-        expect(existsSync(join(f.root, 'dist', BUILD_MANIFEST_FILENAME))).toBe(false);
-      }
-    } });
-    expect(phases.at(-1)).toBe('manifest_committed');
-    let unchangedCommits = 0;
-    publishBuildGeneration({ projectRoot: f.root, ...f, manifest,
-      beforeFileCommit: () => { unchangedCommits++; },
+    const runtimeRoot = join(dirname(f.root), 'daemon/runtime');
+    const publishAndPin = (value: number) => {
+      writeFileSync(join(f.root, 'src/entry.ts'), `export const value = ${value};`);
+      writeFileSync(join(f.stagedDistDir, 'entry.js'), `export const value = ${value};`);
+      const manifest = publishBuildOutputs({ projectRoot: f.root, ...f });
+      const runtime = pinBuildRuntime(join(f.root, 'dist'), runtimeRoot);
+      expect(assertBuildArtifactInventory(runtime, manifest)).toEqual(manifest.artifacts);
+      return { manifest, runtime };
+    };
+    const first = publishAndPin(1);
+    expect(buildProjectRoot(first.runtime)).toBe(f.root);
+    expect(readFileSync(join(first.runtime, '../ui/dist/index.html'), 'utf8')).toBe('<html>new</html>');
+    const second = publishAndPin(2);
+    expect(readFileSync(join(first.runtime, 'entry.js'), 'utf8')).toContain('value = 1');
+    const generations = join(runtimeRoot, '.cache/build-generations');
+    expect(readdirSync(generations).sort()).toEqual([first.manifest.generation, second.manifest.generation].sort());
+    const third = publishAndPin(3);
+    expect(readdirSync(generations).sort()).toEqual([second.manifest.generation, third.manifest.generation].sort());
+    expect(existsSync(first.runtime)).toBe(false);
+    expect(readFileSync(join(second.runtime, 'entry.js'), 'utf8')).toContain('value = 2');
+  });
+
+  it('keeps a running pinned daemon and its late imports on old code after a changed-source rebuild and re-pin', { timeout: 120_000 }, async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'fc-pinned-rebuild-')); roots.push(scratch);
+    const root = join(scratch, 'project');
+    const repository = resolve(import.meta.dirname, '..');
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    for (const path of ['src', 'tsconfig.json', 'package.json', 'scripts/build.ts']) {
+      cpSync(join(repository, path), join(root, path), { recursive: true });
+    }
+    symlinkSync(realpathSync(join(repository, 'node_modules')), join(root, 'node_modules'), 'dir');
+    roots.push(join(tmpdir(), `flowcrew-build-${createHash('sha256').update(root).digest('hex').slice(0, 16)}`));
+    writeFileSync(join(root, 'src/late.ts'), 'export const value = 1;');
+    writeFileSync(join(root, 'src/daemon-probe.ts'), [
+      "import { existsSync } from 'node:fs';",
+      "process.stdout.write('ready\\n');",
+      "while (!existsSync(process.argv[2])) await new Promise(r => setTimeout(r, 5));",
+      "process.stdout.write(String((await import('./late.js')).value));",
+    ].join('\n'));
+    const { env } = validationEnvironment(scratch, process.env);
+    const build = () => {
+      const result = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/build.ts'], {
+        cwd: root, encoding: 'utf8', timeout: 60_000,
+        env: { ...env, HOME: env.HOME, FC_HOME: env.FC_HOME },
+      });
+      expect(result.status, `${result.error ?? ''}\n${result.stdout}\n${result.stderr}`).toBe(0);
+      return assertDistFresh(root);
+    };
+    const first = build();
+    const runtimeRoot = join(scratch, 'daemon/runtime');
+    const runtime = pinBuildRuntime(join(root, 'dist'), runtimeRoot);
+    expect(runtime).toBe(join(runtimeRoot, '.cache/build-generations', first.generation, 'dist'));
+    const release = join(scratch, 'release');
+    const child = spawn(process.execPath, [join(runtime, 'daemon-probe.js'), release], {
+      cwd: root, env: { ...env, HOME: env.HOME, FC_HOME: env.FC_HOME }, stdio: ['ignore', 'pipe', 'pipe'],
     });
-    expect(unchangedCommits).toBe(0);
-    expect(manifest.artifacts?.backend).toEqual(manifest.outputs);
-    expect(readdirSync(join(f.root, 'dist'))).not.toContain('retained.txt');
-    expect(manifest.artifacts?.ui.some(r => r.path === 'older.html')).toBe(true);
-    expect(assertDistFresh(f.root).generation).toBe(manifest.generation);
-    writeFileSync(join(f.root, 'ui/dist/extra.html'), 'undeclared');
-    expect(() => assertDistFresh(f.root)).toThrow('undeclared outputs');
-    expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('undeclared outputs');
-    const next = publishBuildGeneration({ projectRoot: f.root, ...f });
-    expect(next.generation).not.toBe(manifest.generation);
-    expect(assertDistFresh(f.root).generation).toBe(next.generation);
-    expect(readFileSync(join(f.root, 'ui/dist/older.html'), 'utf8')).toBe('older UI resource');
-  });
-
-  it('rolls back orphan removals when publication fails before the manifest commit', () => {
-    const f = fixture();
-    mkdirSync(join(f.root, 'src/nested')); mkdirSync(join(f.stagedDistDir, 'nested'));
-    writeFileSync(join(f.root, 'src/nested/obsolete.ts'), 'export const obsolete = true;');
-    writeFileSync(join(f.stagedDistDir, 'nested/obsolete.js'), 'export const obsolete = true;');
-    writeFileSync(join(f.stagedDistDir, 'nested/obsolete.d.ts'), 'export declare const obsolete = true;');
-    const first = publishBuildGeneration({ projectRoot: f.root, ...f });
-    rmSync(join(f.root, 'src/nested'), { recursive: true });
-    rmSync(join(f.stagedDistDir, 'nested'), { recursive: true });
-    writeFileSync(join(f.stagedDistDir, 'entry.js'), 'export const value = 2;');
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, onPhase: phase => {
-      if (phase === 'runtime_files_published') {
-        expect(readdirSync(join(f.root, 'dist/nested'))).toEqual([]);
-        throw new Error('injected after removal');
+    let output = '';
+    const finished = new Promise<number | null>((resolveChild, reject) => {
+      child.stdout.on('data', chunk => output += String(chunk));
+      child.stderr.on('data', chunk => output += String(chunk));
+      child.once('error', reject); child.once('close', resolveChild);
+    });
+    try {
+      await vi.waitFor(() => expect(output).toBe('ready\n'), { timeout: 10_000 });
+      let second = first;
+      for (const value of [2, 3, 4]) {
+        writeFileSync(join(root, 'src/late.ts'), `export const value = ${value};`);
+        second = build();
+        expect(second.inputs.hash).not.toBe(first.inputs.hash);
+        expect(second.generation).not.toBe(first.generation);
+        expect(assertBuildArtifactInventory(runtime, first)).toEqual(first.artifacts);
       }
-    } })).toThrow('injected after removal');
-    expect(readFileSync(join(f.root, 'dist/nested/obsolete.js'), 'utf8')).toContain('obsolete = true');
-    expect(readFileSync(join(f.root, 'dist/nested/obsolete.d.ts'), 'utf8')).toContain('obsolete = true');
-    expect(readFileSync(join(f.root, 'dist/entry.js'), 'utf8')).toContain('value = 1');
-    expect(JSON.parse(readFileSync(join(f.root, 'dist', BUILD_MANIFEST_FILENAME), 'utf8')).generation).toBe(first.generation);
-    const next = publishBuildGeneration({ projectRoot: f.root, ...f });
-    expect(next.artifacts?.backend).toEqual(next.outputs);
-    expect(readdirSync(join(f.root, 'dist/nested'))).toEqual([]);
-    expect(assertDistFresh(f.root).generation).toBe(next.generation);
-    expect(readFileSync(join(f.root, '.cache/build-generations', first.generation, 'nested/obsolete.js'), 'utf8')).toContain('obsolete = true');
+      const nextRuntime = pinBuildRuntime(join(root, 'dist'), runtimeRoot);
+      expect(nextRuntime).not.toBe(runtime);
+      expect(existsSync(runtime)).toBe(true);
+      expect(assertBuildArtifactInventory(runtime, first)).toEqual(first.artifacts);
+      expect(assertBuildArtifactInventory(nextRuntime, second)).toEqual(second.artifacts);
+      expect(buildProjectRoot(runtime)).toBe(root);
+      expect(existsSync(join(root, '.cache/build-generations'))).toBe(false);
+      writeFileSync(release, 'release');
+      expect(await finished).toBe(0);
+      expect(output).toBe('ready\n1');
+      expect((await import(pathToFileURL(join(nextRuntime, 'late.js')).href)).value).toBe(4);
+      expect((await import(pathToFileURL(join(root, 'dist/late.js')).href)).value).toBe(4);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await finished;
+    }
   });
 
-  it('refuses orphan removal before any writes while a live daemon uses the previous root', async () => {
+  it('publishes real payload roots even when staging uses directory aliases', () => {
     const f = fixture();
-    writeFileSync(join(f.root, 'src/obsolete.ts'), 'export const obsolete = true;');
-    writeFileSync(join(f.stagedDistDir, 'obsolete.js'), 'export const obsolete = true;');
-    writeFileSync(join(f.stagedDistDir, 'obsolete.d.ts'), 'export declare const obsolete = true;');
-    publishBuildGeneration({ projectRoot: f.root, ...f });
-    const fcHome = join(f.root, 'control'); mkdirSync(fcHome);
-    vi.stubEnv('FC_HOME', fcHome);
-    writeFileSync(join(fcHome, 'daemon.json'), JSON.stringify(createDaemonIdentity({
-      pid: process.pid, socketPath: join(fcHome, 'daemon.sock'), distDir: join(f.root, 'dist'),
-    })));
-    const before = readdirSync(join(f.root, 'dist')).map(path => [path, readFileSync(join(f.root, 'dist', path), 'utf8')]);
-    rmSync(join(f.root, 'src/obsolete.ts'));
-    rmSync(join(f.stagedDistDir, 'obsolete.js'));
-    rmSync(join(f.stagedDistDir, 'obsolete.d.ts'));
+    const backend = join(dirname(f.root), 'backend-alias'), ui = join(dirname(f.root), 'ui-alias');
+    symlinkSync(f.stagedDistDir, backend); symlinkSync(f.stagedUiDir, ui);
+    const manifest = publishBuildOutputs({ projectRoot: f.root, stagedDistDir: backend, stagedUiDir: ui });
+    for (const path of ['dist', 'ui/dist']) expect(lstatSync(join(f.root, path)).isDirectory()).toBe(true);
+    expect(assertDistFresh(f.root)).toEqual(manifest);
+    expect(existsSync(join(f.stagedDistDir, BUILD_MANIFEST_FILENAME))).toBe(false);
+  });
+
+  it('pins a portable package without compiler sources and refuses modified served bytes', () => {
+    const f = fixture();
+    publishBuildOutputs({ projectRoot: f.root, ...f });
+    rmSync(join(f.root, 'src'), { recursive: true });
+    rmSync(join(f.root, 'tsconfig.json'));
+    expect(() => pinBuildRuntime(join(f.root, 'dist'), join(f.root, 'dist/runtime'))).toThrow('overlaps');
+    const runtime = pinBuildRuntime(join(f.root, 'dist'), join(dirname(f.root), 'daemon/runtime'));
+    expect(readFileSync(join(runtime, 'entry.js'), 'utf8')).toContain('value = 1');
+    writeFileSync(join(f.root, 'ui/dist/index.html'), 'modified');
+    expect(() => pinBuildRuntime(join(f.root, 'dist'), join(dirname(f.root), 'daemon/runtime'))).toThrow('modified UI');
+    expect(realpathSync(join(dirname(f.root), 'daemon/runtime/dist'))).toBe(runtime);
+    expect(assertBuildArtifactInventory(runtime, readBuildManifest(runtime)!)).toEqual(readBuildManifest(runtime)!.artifacts);
+  });
+
+  it('leaves the selected generation untouched when preparation fails', () => {
+    const f = fixture();
+    const first = publishBuildOutputs({ projectRoot: f.root, ...f });
+    const runtimeRoot = join(dirname(f.root), 'daemon/runtime');
+    const runtime = pinBuildRuntime(join(f.root, 'dist'), runtimeRoot);
     writeFileSync(join(f.stagedDistDir, 'entry.js'), 'export const value = 2;');
-    const phases: string[] = [];
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f,
-      onPhase: phase => phases.push(phase),
-    })).toThrow('Refusing to publish build outputs while dist has live consumers');
-    expect(phases).toEqual([]);
-    expect(readdirSync(join(f.root, 'dist')).map(path => [path, readFileSync(join(f.root, 'dist', path), 'utf8')])).toEqual(before);
-    const lateImport = await import(pathToFileURL(join(f.root, 'dist/obsolete.js')).href);
-    expect(lateImport.obsolete).toBe(true);
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f, onPhase: phase => {
+      if (phase === 'generation_prepared') throw new Error('injected');
+    } })).toThrow('injected');
+    expect(assertDistFresh(f.root).generation).toBe(first.generation);
+    expect(realpathSync(join(runtimeRoot, 'dist'))).toBe(runtime);
+    expect(assertBuildArtifactInventory(runtime, first)).toEqual(first.artifacts);
+    expect(readdirSync(join(runtimeRoot, '.cache/build-generations'))).toEqual([first.generation]);
   });
 
   it('publishes complete private backend, UI and cache trees without touching shared outputs', () => {
@@ -232,7 +276,7 @@ describe('one backend and UI build identity', () => {
     for (const author of ['left', 'right']) {
       const outputRoot = join(f.root, 'authors', author);
       const distDir = join(outputRoot, 'dist');
-      const manifest = publishBuildGeneration({ projectRoot: f.root, stagedDistDir: f.stagedDistDir,
+      const manifest = publishBuildOutputs({ projectRoot: f.root, stagedDistDir: f.stagedDistDir,
         stagedUiDir: f.stagedUiDir, distDir });
       expect(assertDistFresh(f.root, distDir).generation).toBe(manifest.generation);
       expect(readFileSync(join(outputRoot, 'ui/dist/index.html'), 'utf8')).toBe('<html>new</html>');
@@ -242,32 +286,9 @@ describe('one backend and UI build identity', () => {
     expect(readFileSync(join(f.root, 'ui/dist/index.html'), 'utf8')).toBe(sharedUi);
   });
 
-  it('refuses replacements and marker updates under a live consumer without removing any outputs', async () => {
-    const f = fixture();
-    publishBuildGeneration({ projectRoot: f.root, ...f });
-    const fcHome = join(f.root, 'control'); mkdirSync(fcHome);
-    vi.stubEnv('FC_HOME', fcHome);
-    writeFileSync(join(fcHome, 'daemon.json'), JSON.stringify(createDaemonIdentity({
-      pid: process.pid, socketPath: join(fcHome, 'daemon.sock'), distDir: join(f.root, 'dist'),
-    })));
-    const before = ['dist/entry.js', `dist/${BUILD_MANIFEST_FILENAME}`, 'ui/dist/index.html']
-      .map(path => readFileSync(join(f.root, path), 'utf8'));
-    writeFileSync(join(f.stagedDistDir, 'entry.js'), 'export const value = 2;');
-    writeFileSync(join(f.stagedUiDir, 'index.html'), '<html>replacement</html>');
-    const phases: string[] = [];
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f,
-      onPhase: phase => phases.push(phase),
-    })).toThrow('Refusing to publish build outputs while dist has live consumers');
-    expect(phases).toEqual([]);
-    expect(['dist/entry.js', `dist/${BUILD_MANIFEST_FILENAME}`, 'ui/dist/index.html']
-      .map(path => readFileSync(join(f.root, path), 'utf8'))).toEqual(before);
-    const lateImport = await import(pathToFileURL(join(f.root, 'dist/entry.js')).href);
-    expect(lateImport.value).toBe(1);
-  });
-
   it('refuses incomplete inventories, digest tampering and false absence provenance', () => {
     const f = fixture();
-    const manifest = publishBuildGeneration({ projectRoot: f.root, ...f });
+    const manifest = publishBuildOutputs({ projectRoot: f.root, ...f });
     const marker = join(f.root, 'dist', BUILD_MANIFEST_FILENAME);
     writeFileSync(marker, JSON.stringify({ ...manifest, generation: '0'.repeat(64) }));
     expect(() => assertDistFresh(f.root)).toThrow('generation digest is invalid');
@@ -281,76 +302,50 @@ describe('one backend and UI build identity', () => {
 
   it('rejects UI removal from a required build and keeps genuine absence explicit', () => {
     const f = fixture();
-    publishBuildGeneration({ projectRoot: f.root, ...f });
-    rmSync(join(f.root, 'ui'), { recursive: true });
+    publishBuildOutputs({ projectRoot: f.root, ...f });
+    rmSync(join(realpathSync(join(f.root, 'dist')), '..', 'ui'), { recursive: true });
+    rmSync(join(f.root, 'ui'), { recursive: true, force: true });
     expect(() => assertDistFresh(f.root)).toThrow();
     expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('incomplete UI');
-    const absent = publishBuildGeneration({ projectRoot: f.root, stagedDistDir: f.stagedDistDir });
+    const absent = publishBuildOutputs({ projectRoot: f.root, stagedDistDir: f.stagedDistDir });
     expect(absent.uiPresence).toBe('absent');
     expect(assertDistFresh(f.root).ui).toBeUndefined();
   });
 
-  it('refuses linked payloads and a late extra before committing the marker', () => {
+  it('refuses linked payloads in portable build outputs', () => {
     const f = fixture();
-    const first = publishBuildGeneration({ projectRoot: f.root, ...f });
+    publishBuildOutputs({ projectRoot: f.root, ...f });
     const linked = join(f.root, 'ui/dist/linked.css');
     symlinkSync(join(f.root, 'ui/dist/assets/view.css'), linked);
     expect(() => assertDistFresh(f.root)).toThrow('Nonregular build artifact');
     expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow();
     rmSync(linked);
-    writeFileSync(join(f.stagedDistDir, 'entry.js'), 'export const value = 2;');
-    const late = join(f.root, 'ui/dist/late.html');
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, onPhase: phase => {
-      if (phase === 'runtime_files_published') writeFileSync(late, 'late unowned file');
-    } })).toThrow('undeclared outputs');
-    rmSync(late);
-    expect(assertDistFresh(f.root).generation).toBe(first.generation);
   });
 
   it('rejects changed build inputs and modified backend or UI outputs', () => {
     const f = fixture();
     expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('without a combined build manifest');
-    publishBuildGeneration({ projectRoot: f.root, ...f });
+    publishBuildOutputs({ projectRoot: f.root, ...f });
     writeFileSync(join(f.root, 'src/entry.ts'), 'export const value = 2;');
     expect(() => assertDistFresh(f.root)).toThrow(/dist is stale.*npm run build/s);
     writeFileSync(join(f.root, 'src/entry.ts'), 'export const value = 1;');
     writeFileSync(join(f.root, 'dist/entry.js'), 'export const value = 9;');
     expect(() => assertDistFresh(f.root)).toThrow('modified backend generation');
-    publishBuildGeneration({ projectRoot: f.root, ...f });
+    writeFileSync(join(f.root, 'dist/entry.js'), readFileSync(join(f.stagedDistDir, 'entry.js')));
+    publishBuildOutputs({ projectRoot: f.root, ...f });
     writeFileSync(join(f.root, 'ui/dist/index.html'), 'changed');
     expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('modified UI');
-    publishBuildGeneration({ projectRoot: f.root, ...f });
+    writeFileSync(join(f.root, 'ui/dist/index.html'), readFileSync(join(f.stagedUiDir, 'index.html')));
+    publishBuildOutputs({ projectRoot: f.root, ...f });
     expect(assertDistFresh(f.root).ui?.outputs.map(r => r.path)).toEqual(['assets/view.css', 'index.html']);
     const digest = computeBuildInputDigest(f.root).hash;
     writeFileSync(join(f.root, 'ui/public/logo.svg'), 'asset');
     expect(computeBuildInputDigest(f.root).hash).not.toBe(digest);
     expect(() => assertDistFresh(f.root)).toThrow('stale');
-    publishBuildGeneration({ projectRoot: f.root, ...f });
+    publishBuildOutputs({ projectRoot: f.root, ...f });
     writeFileSync(join(f.root, 'ui/dist/assets/view.css'), 'partial');
     expect(() => assertDistFresh(f.root)).toThrow('modified UI generation');
     expect(() => computeBuildFingerprint(join(f.root, 'dist'))).toThrow('modified UI');
-  });
-
-  it('rolls back both roots and commits one manifest only after both outputs', () => {
-    const f = fixture();
-    const first = publishBuildGeneration({ projectRoot: f.root, ...f });
-    writeFileSync(join(f.stagedDistDir, 'entry.js'), 'export const value = 2;');
-    writeFileSync(join(f.stagedUiDir, 'index.html'), 'second');
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f,
-      beforeFileCommit: path => { if (path.startsWith('ui-dist/')) throw new Error('injected'); },
-    })).toThrow('injected');
-    expect(assertDistFresh(f.root).generation).toBe(first.generation);
-    expect(readFileSync(join(f.root, 'ui/dist/index.html'), 'utf8')).toBe('<html>new</html>');
-    const phases: string[] = [];
-    const second = publishBuildGeneration({ projectRoot: f.root, ...f, onPhase: phase => {
-      phases.push(phase);
-      if (phase === 'runtime_files_published') expect(() => assertDistFresh(f.root)).toThrow();
-    } });
-    expect(phases.at(-1)).toBe('manifest_committed');
-    expect(assertDistFresh(f.root).generation).toBe(second.generation);
-    expect(readdirSync(join(f.root, '.cache')).some(p => p.startsWith('build-rollback'))).toBe(false);
-    expect(statSync(join(f.root, 'dist/entry.js')).nlink).toBe(1);
-    expect(statSync(join(f.root, '.cache/build-generations', first.generation, 'entry.js')).nlink).toBe(1);
   });
 
   it('rejects backend-only and altered UI manifests without publishing', () => {
@@ -360,16 +355,16 @@ describe('one backend and UI build identity', () => {
     expect(isBuildManifest({ ...manifest, ui: null })).toBe(false);
     expect(isBuildManifest({ ...manifest, ui: { outputs: [null] } })).toBe(false);
     const valid = fixture();
-    const published = publishBuildGeneration({ projectRoot: valid.root, ...valid });
+    const published = publishBuildOutputs({ projectRoot: valid.root, ...valid });
     const marker = join(valid.root, 'dist', BUILD_MANIFEST_FILENAME);
     const incomplete = { ...published }; delete incomplete.ui;
     writeFileSync(marker, JSON.stringify(incomplete));
     expect(() => assertDistFresh(valid.root)).toThrow('has no UI outputs');
     writeFileSync(marker, JSON.stringify(published));
-    rmSync(join(valid.root, 'ui/dist'), { recursive: true });
+    rmSync(realpathSync(join(valid.root, 'ui/dist')), { recursive: true });
     expect(() => computeBuildFingerprint(join(valid.root, 'dist'))).toThrow('incomplete UI');
     manifest.ui!.outputs[0].sha256 = '0'.repeat(64);
-    expect(() => publishBuildGeneration({ projectRoot: f.root, ...f, manifest })).toThrow('UI whose output');
+    expect(() => publishBuildOutputs({ projectRoot: f.root, ...f, manifest })).toThrow('UI whose output');
     expect(readFileSync(join(f.root, 'dist/entry.js'), 'utf8')).toContain('value = 0');
   });
 

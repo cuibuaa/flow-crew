@@ -1,17 +1,19 @@
 // Boundary: Choose next iteration or truthful completion/failure from settled gates, required obligations and finite budgets; no stage execution.
 import { Adapter } from '../../adapters/base.js';
-import { publishRunCompletion as publishCompletion } from '../sched_policy/run-completion.js';
+import { concludeRun } from '../sched_policy/run-completion.js';
 import { StageConfig } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
 import { observeStableBlockage } from '../sched_policy/guidance.js';
+import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { isTerminalStatus } from '../sched_policy/identity.js';
 import { allDone, anyFailed } from '../sched_scope/stage-group.js';
 import { guardPlainCompletionWithStageObligations, reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { archiveRejectedGateRuntimeFacts, canonicalGateRoundArtifactDir, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
 import { loadGateContract } from '../sched_settlement/gate-contract.js';
-import { collectGateRuntimeFacts, lastGatePassed } from '../sched_settlement/gate-recovery.js';
-import { readGateVerdict } from '../sched_settlement/gate-verdict.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, enforceRealityGateBeforeTerminal, isPausedRunStatus, isPendingStageStatus, runDir, writeStageStatus } from '../../store.js';
+import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
+import { closedGateValidationExecution, readValidationDelta, validationDeltaMatchesExecution } from '../sched_settlement/gate-validation.js';
+import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isPendingStageStatus, runDir, writeStageStatus } from '../../store.js';
 import { createResearchBudgetFinalizer } from './research-terminal.js';
 import { archiveDeclaredOutputsBeforePlainCompletion, concludeDeclaredTerminalAtQuiescence, concludeRepeatedBlockage, terminateForGateContractRefusal, writeCampaignEntry } from './services.js';
 import { createHash } from 'node:crypto';
@@ -24,7 +26,7 @@ export async function concludeWorkflowIteration(
   innerRetriesUsed: number, maxInnerRetries: number, maxIterations: number,
   finishResearchCeiling: ReturnType<typeof createResearchBudgetFinalizer>,
   projectDir: string, runId: string, runDirPath: string, adapter: Adapter,
-  injectedDispatchStages: Set<string>, planStageRetries: Map<string, number>,
+  injectedDispatchStages: Set<string>,
 ): Promise<IterationDisposition> {
     // A retry stage that never ran because every related gate accepted the
     // work has a truthful terminal disposition: skipped, not indefinitely
@@ -41,7 +43,7 @@ export async function concludeWorkflowIteration(
       const allRelatedGatesPassed = relatedGates.length === repair.retry_to.length
         && relatedGates.every((gate) => (
           state.stages[gate.id]?.status === STAGE_STATUS.COMPLETE
-          && readGateVerdict(projectDir, gate.id, runId, terminalContract)?.pass === true
+          && readGateEvaluation(projectDir, gate.id, runId, terminalContract)?.pass === true
         ));
       if (!allRelatedGatesPassed) continue;
       const skipped = { ...repairStatus, status: STAGE_STATUS.SKIPPED };
@@ -50,7 +52,7 @@ export async function concludeWorkflowIteration(
     }
 
     // Check if last gate passed
-    if (iterationDispatchedIds.length > 0 && !anyFailed(state) && lastGatePassed(state, iterationDispatchedIds, sorted, projectDir, runId)) {
+    if (iterationDispatchedIds.length > 0 && !anyFailed(state) && collectGateRuntimeFacts(sorted, state, projectDir, runId).allPass) {
       // A passed gate may request another phase while iteration budget remains.
       const pendingNextPhase = (() => {
         try {
@@ -92,7 +94,7 @@ export async function concludeWorkflowIteration(
           state,
           iteration,
           'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)',
-          { stages: sorted, injectedDispatchStages, planStageRetries },
+          { stages: sorted, injectedDispatchStages },
         ) };
       }
       // Terminal-state already handled by the top gate + eager post-batch gate
@@ -121,7 +123,7 @@ export async function concludeWorkflowIteration(
           state,
           iteration,
           'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)',
-          { stages: sorted, injectedDispatchStages, planStageRetries },
+          { stages: sorted, injectedDispatchStages },
         ) };
       }
       // Terminal-state already handled by the top + eager gates (see above).
@@ -148,10 +150,8 @@ export async function concludeWorkflowIteration(
         const s = state.stages[id];
         return s?.error ? `${id} (${s.error})` : id;
       }).join(', ');
-      state.status = RUN_STATUS.FAILED;
-      state.failureReason = `Stage(s) failed: ${details}`;
-      state.completedAt = new Date().toISOString();
-      publishRunCompletion(state, projectDir, runId, () => ({iteration: iteration, detail: state.status}));
+      state = await concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: 'stage_failed',
+        detail: `Stage(s) failed: ${details}`, eventFields: () => ({ iteration, detail: state.status }), writeCampaignEntry });
       log.info({ runId, iteration, failedStageIds }, 'Stage failed with no gates — run failed');
       return { kind: 'settled', state };
     }
@@ -195,7 +195,6 @@ export async function concludeWorkflowIteration(
                 .digest('hex');
             } catch { return undefined; }
           })(),
-          threshold: state.campaignTriggers?.repeatedFailureAfter,
         });
       }
       const repeatedGate = concludeRepeatedBlockage(
@@ -230,14 +229,24 @@ export async function concludeWorkflowIteration(
         state.currentIteration ?? iteration,
         runDirPath,
       ).stageIds;
-      state.status = 'incomplete';
-      state.failureReason = unresolvedStageIds.length > 0
+      const detail = unresolvedStageIds.length > 0
         ? `Required stage obligation(s) remain unresolved: ${unresolvedStageIds.join(', ')}.`
         : iteration === maxIterations
         ? `Workflow iteration budget exhausted: gates did not pass or required work did not complete (iteration ${iteration}/${maxIterations}).`
         : `Workflow stopped after bounded stage/repair attempts: gates did not pass or required work did not complete (iteration ${iteration}/${maxIterations}; gate re-evaluations used: ${innerRetriesUsed}/${maxInnerRetries}).`;
-      state.completedAt = new Date().toISOString();
-      publishRunCompletion(state, projectDir, runId, () => ({iteration: iteration, detail: state.status}));
+      const failedStages = Object.values(state.stages).filter(stage => stage.status === STAGE_STATUS.FAILED);
+      const providerRefused = failedStages.some(stage => stage.attempts?.at(-1)?.providerFailure?.kind === 'refusal'
+        || stage.providerFailure?.kind === 'refusal');
+      const validationUnresolved = sorted.filter(stage => stage.is_gate).some(stage => {
+        const receipt = readValidationDelta(join(runDirPath, `validation_delta_${stage.id}.json`));
+        const baselinePath = join(runDirPath, RUN_VALIDATION_BASELINE_FILE);
+        return receipt?.stageId === stage.id && validationDeltaMatchesExecution(receipt, closedGateValidationExecution(projectDir, runId, stage.id))
+          && existsSync(baselinePath) && receipt.baselineSha256 === createHash('sha256').update(readFileSync(baselinePath)).digest('hex')
+          && receipt.delta.some(entry => entry.state === 'unresolved');
+      });
+      state = await concludeRun(state, { status: RUN_STATUS.INCOMPLETE,
+        reasonCode: providerRefused ? 'provider_refusal' : validationUnresolved ? 'validation_unresolved' : 'bounded_attempts',
+        detail, eventFields: () => ({ iteration, detail: state.status }), writeCampaignEntry });
       log.info({ runId, iteration }, 'Admitted stage and repair attempts exhausted, run incomplete');
       return { kind: 'settled', state };
     }
@@ -255,22 +264,11 @@ export async function completePlainWorkflow(
   if (!archiveDeclaredOutputsBeforePlainCompletion(
     state, {projectDir, runId, runDirPath, iteration}, source,
   )) return state;
-  state.status = RUN_STATUS.COMPLETE;
-  state.completedAt = new Date().toISOString();
-  const realityGate = await enforceRealityGateBeforeTerminal(projectDir, runId, state, state.status);
-  if (!realityGate.allowed) return realityGate.state;
-  publishRunCompletion(state, projectDir, runId, () => ({iteration: iteration, detail: state.status}));
+  state = await concludeRun(state, { status: RUN_STATUS.COMPLETE, reasonCode: 'workflow_complete',
+    eventFields: () => ({ iteration, detail: state.status }), writeCampaignEntry });
+  if (state.status !== RUN_STATUS.COMPLETE) return state;
   if (source === 'gate_pass') {
     log.info({runId, iteration}, 'All gates passed, run complete');
   }
   return state;
-}
-
-
-// Publication order is shared; callers set the truthful terminal state first.
-export function publishRunCompletion(
-  state: StoreState, projectDir: string, runId: string,
-  eventFields: () => {iteration: number | undefined; detail: string | undefined},
-): void {
-  publishCompletion(state, projectDir, runId, eventFields, writeCampaignEntry);
 }

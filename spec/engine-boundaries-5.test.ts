@@ -63,7 +63,7 @@ describe('planning and reality declaration admission', () => {
           write(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringifyYaml({ stages: [
             {dynamic_dispatch: false,  id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/work.md'],
               prompt_template: 'Write docs/work.md.', criterion_refs: refs,
-              artifact_contract:{version:1,produces:[{id:'work',root:'project',path:'docs/work.md'}],reads:[],replays:[]} },
+              artifact_contract:{version:1,produces:[{id:'work',root:'project',path:'docs/work.md'}],reads:[]} },
             {dynamic_dispatch: false,  id: 'gate', role: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Check the work.' },
               scope: [], is_gate: true, prompt_template: 'Check all criteria.', criterion_refs: refs },
             {dynamic_dispatch: false, id: 'repair', role: 'coder', depends_on: ['gate'], dependency_reasons: { gate: 'Correct rejected work.' },

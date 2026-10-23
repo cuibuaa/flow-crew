@@ -2,10 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { fetchOlderCampaignRuns } from "./client";
 import { formatDuration, formatTokens, statusClass } from "./format";
-import { BriefHistoryDisclosure } from "./LazyEvidence";
 import RunTitleDisclosure from "./RunTitleDisclosure";
 import SourceNotice, { IssueNotice } from "./SourceNotice";
-import { simulationSource } from "../../lib/simulation-source";
 import type {
   CampaignAttentionItem,
   CampaignOperatorView,
@@ -45,18 +43,11 @@ function RunConclusion({ value }: { value: string }) {
 }
 
 function AttentionItem({ item, expanded = false }: { item: CampaignAttentionItem; expanded?: boolean }) {
-  const simulated = item.simulated ?? simulationSource(item.source);
   return (
     <article>
       <strong>{item.title}</strong>
       <span>{item.reason}</span>
-      {item.kind === "brief_review" ? (
-        <span className="campaign-attention-source">
-          Source: {item.source ?? "not recorded"}
-          {simulated ? <em className="campaign-simulation-badge">Simulation/test source</em> : null}
-        </span>
-      ) : null}
-      <Link to={item.href}>{!expanded && (item.kind === "approval" || item.kind === "brief_review") ? "Open in Inbox" : "Open"}</Link>
+      <Link to={item.href}>{!expanded && item.kind === "approval" ? "Open in Inbox" : "Open"}</Link>
     </article>
   );
 }
@@ -347,7 +338,6 @@ export default function CampaignPage({
         <div>
           <div className="eyebrow">CAMPAIGN</div>
           <h1>{view.identity.name}</h1>
-          <BriefHistoryDisclosure campaignId={view.identity.id} />
         </div>
         {refreshError ? <p className="campaign-refresh-error" role="alert">Refresh failed. Showing data generated at {new Date(view.generatedAt).toLocaleTimeString()}: {refreshError}</p> : null}
       </header>
@@ -361,8 +351,8 @@ export default function CampaignPage({
                 ? `At least ${formatDuration(view.cost.value.wallMs)} of run wall-clock time`
                 : `Total run wall-clock time ${formatDuration(view.cost.value.wallMs)}`}</strong>
               <span>{tokenCostCoverage.failed
-                ? `At least ${formatTokens(view.cost.value.tokens)} total tokens (including supervisor)`
-                : `Total tokens ${formatTokens(view.cost.value.tokens)} (including supervisor)`}</span>
+                ? `At least ${formatTokens(view.cost.value.tokens)} total tokens`
+                : `Total tokens ${formatTokens(view.cost.value.tokens)}`}</span>
             </>}
           </div>
         </div>

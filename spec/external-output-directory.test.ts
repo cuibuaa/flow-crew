@@ -7,11 +7,12 @@ import { archiveDeclaredOutputs, declaredOutputSource } from '../src/declared-ou
 import { readRunStateView } from '../src/run-state-view.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { extractBriefOutputDeclarations, inspectBriefOutputs, nodeShipInputFileSystem } from '../src/ship-inputs.js';
-import { createRun, fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 import { registerEngineOwnedSqlitePath } from '../src/engine-owned-carriers.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
-import { clearAttemptSummaryRefreshDebounce } from '../src/run-events.js';
+
 
 // Runtime callers derive their installation from their module location. Model
 // a separate fixture installation when the entire fixture lives in this repo.
@@ -30,7 +31,7 @@ vi.mock('../src/ship-inputs.js', async importOriginal => {
 });
 
 let root: string, project: string, output: string, stateRoot: string, previousStore: string;
-const contract = { version: 1 as const, produces: [], reads: [], groups: [], replays: [] };
+const contract = { version: 1 as const, produces: [], reads: [], groups: [] };
 const brief = (path: string, type = 'directory') => `---\noutputs:\n  - path: ${JSON.stringify(path)}\n    type: ${type}\n---\n# Goal\nWrite per-item results.\n\n## Acceptance criteria\n1. Retain the per-item results in the declared directory.\n`;
 beforeEach(() => {
   installation.install();
@@ -40,12 +41,12 @@ beforeEach(() => {
   output = join(root, 'durable', 'items');
   stateRoot = join(root, 'state'); previousStore = fcGlobalDir(); setFcGlobalDir(stateRoot);
 });
-afterEach(() => { clearAttemptSummaryRefreshDebounce(); setFcGlobalDir(previousStore); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { setFcGlobalDir(previousStore); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
 function boundaryFixture(source = brief(output)) {
   const created = createRun(project, 'external-output', 'name: fixture\nstages: []\n', ['work']);
   writeFileSync(join(created.runDirPath, 'task_brief.md'), source);
-  const input = { projectDir: project, runDir: created.runDirPath, stageId: 'work', projectWriteScope: [], artifactContract: contract };
+  const input = { projectDir: project, runDir: created.runDirPath, stageId: 'work',  artifactContract: contract };
   const command = (code: string) => execWithStdin(process.execPath, ['-e', code], '', { cwd: project, timeout_ms: 5000 });
   return { ...created, input, command };
 }

@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { campaignSummary, schedulerIsAliveForRun } from '../src/dashboard.js';
+import { startDashboard, schedulerIsAliveForRun } from '../src/dashboard.js';
 import { processIsAlive, writeSchedulerProcessIdentity } from '../src/run-lock.js';
-import { fcGlobalDir, runsRoot, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { updateRunState, fcGlobalDir, runsRoot, setFcGlobalDir } from '../src/store.js';
 
 /**
  * Stale detection previously demoted a run to `stale` purely because nothing
@@ -24,7 +25,7 @@ import { fcGlobalDir, runsRoot, setFcGlobalDir } from '../src/store.js';
  */
 
 const PROJECT_DIR = '/does/not/need/to/exist';
-const RUN_ID = 'run-under-test';
+let RUN_ID: string;
 
 let fixtureRoot: string;
 let originalFcHome: string;
@@ -34,6 +35,12 @@ beforeEach(() => {
   originalFcHome = fcGlobalDir();
   fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-stale-liveness-'));
   setFcGlobalDir(join(fixtureRoot, '.fc'));
+  RUN_ID = createRun(PROJECT_DIR, 'fixture', 'name: fixture\nstages: []', []).runId;
+  updateRunState(PROJECT_DIR, RUN_ID, state => {
+    state.status = 'running';
+    state.campaignId = 'quiet-campaign';
+    state.campaignStorageKey = 'quiet-campaign';
+  });
   runPath = join(runsRoot(PROJECT_DIR), RUN_ID);
   mkdirSync(runPath, { recursive: true });
 });
@@ -90,30 +97,35 @@ describe('schedulerIsAliveForRun', () => {
  */
 describe('campaign stale status consults process liveness', () => {
   const CAMPAIGN_ID = 'quiet-campaign';
-  let campaignDir: string;
-
   function writeQuietCampaign(): void {
-    campaignDir = join(fixtureRoot, 'campaigns', CAMPAIGN_ID);
-    mkdirSync(campaignDir, { recursive: true });
-    writeFileSync(
-      join(campaignDir, 'state.json'),
-      JSON.stringify({ status: 'running', projectDir: PROJECT_DIR, runId: RUN_ID }),
-      'utf-8',
-    );
-    // Backdate well past the 30-minute silence threshold.
-    const hoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
-    utimesSync(join(campaignDir, 'state.json'), hoursAgo, hoursAgo);
+    const campaigns = join(fcGlobalDir(), 'campaigns');
+    mkdirSync(campaigns, { recursive: true });
+    writeFileSync(join(campaigns, `${CAMPAIGN_ID}.jsonl`), JSON.stringify({
+      kind: 'task_started', seq: 1, campaignId: CAMPAIGN_ID, runId: RUN_ID, status: 'running', pass: false,
+      timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+    }) + '\n');
   }
 
-  it('stays running when a live scheduler is bound to the quiet run', () => {
+  async function staleItems() {
+    const app = await startDashboard(PROJECT_DIR, 0, {
+      listTasks: async () => [], inboxSources: { listApprovals: () => [] },
+    });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/inbox/overview' });
+      expect(response.statusCode).toBe(200);
+      return response.json().stale.items;
+    } finally { await app.close(); }
+  }
+
+  it('stays running when a live scheduler is bound to the quiet run', async () => {
     writeQuietCampaign();
     writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(runPath, RUN_ID, process.pid);
 
-    expect(campaignSummary(CAMPAIGN_ID, campaignDir).status).toBe('running');
+    expect(await staleItems()).toEqual([]);
   });
 
-  it('still goes stale when a live pid is bound to some other run', () => {
+  it('still goes stale when a live pid is bound to some other run', async () => {
     writeQuietCampaign();
     writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     expect(() => writeSchedulerProcessIdentity(runPath, 'some-other-run', process.pid)).toThrow('RUN_IDENTITY_BINDING');
@@ -122,12 +134,12 @@ describe('campaign stale status consults process liveness', () => {
     const identity = JSON.parse(readFileSync(identityPath, 'utf-8'));
     writeFileSync(identityPath, JSON.stringify({ ...identity, runId: 'some-other-run' }));
 
-    expect(campaignSummary(CAMPAIGN_ID, campaignDir).status).toBe('stale');
+    expect(await staleItems()).toMatchObject([{ id: CAMPAIGN_ID, staleRunId: RUN_ID }]);
   });
 
-  it('still goes stale when the quiet run has no scheduler.pid at all', () => {
+  it('still goes stale when the quiet run has no scheduler.pid at all', async () => {
     writeQuietCampaign();
 
-    expect(campaignSummary(CAMPAIGN_ID, campaignDir).status).toBe('stale');
+    expect(await staleItems()).toMatchObject([{ id: CAMPAIGN_ID, staleRunId: RUN_ID }]);
   });
 });

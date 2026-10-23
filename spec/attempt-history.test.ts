@@ -6,10 +6,10 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
   beginStageAttempt,
   completeStageAttempt,
-  createRun,
   readRunState,
   readStageStatus,
   runDir,
@@ -39,14 +39,14 @@ function workflow(maxIterations = 1): { config: WorkflowConfig; yaml: string } {
     'stages:',
     '  - id: plan',
     '    role: planner',
-    '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
+    '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: []}',
   ].join('\n');
   return {
     yaml,
     config: {description: '', 
       name: 'attempts',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } }],
+      stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [] } }],
     },
   };
 }
@@ -105,7 +105,7 @@ describe('append-only stage attempts', () => {
             '    dependency_reasons: {plan: "evaluate the planned release"}',
             '    is_gate: true',
             '    task: verify release',
-            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_release_gate.json}], reads: [], replays: []}',
+            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_release_gate.json}], reads: []}',
             '  - id: fix_release',
             '    role: repair',
             '    scope: [src/release.ts]',
@@ -113,7 +113,7 @@ describe('append-only stage attempts', () => {
             '    dependency_reasons: {release_gate: "repair only after an explicit release rejection"}',
             '    retry_to: [release_gate]',
             '    task: fix release',
-            '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
+            '    artifact_contract: {version: 1, produces: [], reads: []}',
           ].join('\n')));
           return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 2000, tokens_out: 2 }, opts);
         }
@@ -166,7 +166,7 @@ describe('append-only stage attempts', () => {
             '    is_gate: true',
             '    max_retries: 1',
             '    task: verify release',
-            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_release_gate.json}], reads: [], replays: []}',
+            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_release_gate.json}], reads: []}',
             '  - id: fix_release',
             '    role: repair',
             '    scope: [src/release.ts]',
@@ -174,7 +174,7 @@ describe('append-only stage attempts', () => {
             '    dependency_reasons: {release_gate: "repair only after an explicit release rejection"}',
             '    retry_to: [release_gate]',
             '    task: fix release',
-            '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
+            '    artifact_contract: {version: 1, produces: [], reads: []}',
           ].join('\n')));
           return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 10 }, opts);
         }

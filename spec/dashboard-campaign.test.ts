@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { readRunIndexRecordsByCampaign, rebuildRunIndex } from '../src/run-index.js';
+import { readCampaignEntries, resolveCampaignStorageKey } from '../src/campaigns.js';
+import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { startDashboard } from '../src/dashboard.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { updateRunState, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 let app: FastifyInstance;
 let projectDir: string;
@@ -23,41 +27,6 @@ function makeProject() {
   writeFileSync(join(projectDir, 'config', 'workflows', 'default.yaml'), 'name: default\nstages: []\n', 'utf-8');
 }
 
-function makeCampaign(id: string, withIterations = true) {
-  const campaignDir = join(homeDir, '.fc', 'campaigns', id);
-  const briefDir = join(campaignDir, 'brief');
-  mkdirSync(briefDir, { recursive: true });
-  writeFileSync(join(campaignDir, 'state.json'), JSON.stringify({
-    status: 'running',
-    started_at: '2026-05-23T10:00:00.000Z',
-    projectDir,
-    briefDir,
-    goal: { metric: 'profit', validRange: '>= 10' },
-    budget: { max_iters: 3 },
-  }, null, 2), 'utf-8');
-  writeFileSync(join(briefDir, 'v1.md'), '# Brief\nold rule\n', 'utf-8');
-  writeFileSync(join(briefDir, 'v2.md'), '# Brief\nnew rule\n', 'utf-8');
-  writeJsonl(join(briefDir, 'revisions.jsonl'), [
-    { from_version: 'v1', to_version: 'v2', rule: 'tighten-risk', patch: { section: 'Risk', op: 'replace', value: 'new rule' } },
-  ]);
-  if (withIterations) {
-    writeJsonl(join(campaignDir, 'iteration_log.jsonl'), [
-      {
-        iter: 1,
-        run_id: 'run-1',
-        outcome: 'invalid_ship',
-        brief_version: 'v1',
-        completing_commit: 'abcdef1234567890',
-        patch_applied: { section: 'Risk', op: 'replace', value: 'new rule' },
-        rule_fired: 'tighten-risk',
-        rejections: { 'no-op': 1, unstable_seeds: 2 },
-      },
-      { iter: 2, run_id: 'run-2', outcome: 'valid_ship', brief_version: 'v2', rejection_counts: { stress_crashed: 1 } },
-    ]);
-  }
-  return campaignDir;
-}
-
 beforeEach(async () => {
   projectDir = mkdtempSync(join(tmpdir(), 'fc-dashboard-campaign-project-'));
   homeDir = mkdtempSync(join(tmpdir(), 'fc-dashboard-campaign-home-'));
@@ -66,9 +35,7 @@ beforeEach(async () => {
   process.env.HOME = homeDir;
   setFcGlobalDir(join(homeDir, '.fc'));
   makeProject();
-  makeCampaign('test-campaign');
-  makeCampaign('no-log', false);
-  app = await startDashboard(projectDir, 0);
+  app = await startDashboard(projectDir, 0, { listTasks: async () => [] });
 }, 30000);
 
 afterEach(async () => {
@@ -80,14 +47,83 @@ afterEach(async () => {
 });
 
 describe('dashboard campaign API', () => {
+  it.each([['ledger-only', 'ledger-only', 'Ledger only'], ['new:new:x', 'x', 'x'], ['新！', '', '新！']])('uses the same key for %s in persistence, index and campaign views', async (campaignName, expectedKey, expectedName) => {
+    const created = createRun(projectDir, 'default', 'name: default\nstages: []', []);
+    updateRunState(projectDir, created.runId, state => {
+      state.campaignId = campaignName;
+      state.campaignName = campaignName === 'ledger-only' ? 'Ledger only' : campaignName;
+      state.status = 'complete';
+    });
+    const campaigns = join(fcGlobalDir(), 'campaigns');
+    expectedKey ||= resolveCampaignStorageKey({ campaignId: campaignName, projectDir })!;
+    expect(resolveCampaignStorageKey({ campaignId: campaignName, projectDir })).toBe(expectedKey);
+    expect(readdirSync(campaigns)).toEqual([`${expectedKey}.jsonl`]);
+    expect(readRunIndexRecordsByCampaign(projectDir, expectedKey)).toMatchObject([{ runId: created.runId }]);
+    rebuildRunIndex(projectDir);
+    expect(readRunIndexRecordsByCampaign(projectDir, expectedKey)).toMatchObject([{ runId: created.runId }]);
+    const entries = readFileSync(join(campaigns, `${expectedKey}.jsonl`), 'utf-8')
+      .trim().split('\n').map(line => JSON.parse(line));
+    expect(entries).toMatchObject([
+      { kind: 'task_started', runId: created.runId },
+      { kind: 'task_ended', runId: created.runId, status: 'complete' },
+    ]);
+    const page = await app.inject({ method: 'GET', url: `/api/campaigns/${expectedKey}/operator-view` });
+    expect(page.statusCode).toBe(200);
+    expect(page.json().identity).toMatchObject({ id: expectedKey, name: expectedName, runCount: 1 });
+    expect(page.json().runs.value.items).toMatchObject([{ runId: created.runId, status: 'complete' }]);
+    const inbox = await app.inject({ method: 'GET', url: '/api/inbox/overview' });
+    expect(inbox.statusCode).toBe(200);
+    expect(inbox.json()).toEqual({
+      approvals: { status: 'complete', items: [] },
+      deferred: { status: 'complete', items: [] },
+      stale: { status: 'complete', items: [] },
+      campaignCount: 1,
+    });
+  });
 
-  it('GET /api/campaigns/:id/brief-diff returns unified diff text', async () => {
-    const res = await app.inject({ method: 'GET', url: '/api/campaigns/test-campaign/brief-diff?from=v1&to=v2' });
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('--- v1');
-    expect(res.body).toContain('+++ v2');
-    expect(res.body).toContain('-old rule');
-    expect(res.body).toContain('+new rule');
+  it.each(['default', 'explicit'])('keeps non-ASCII projects with %s campaigns in separate ledgers', mode => {
+    const projects = [join(projectDir, '项目一'), join(projectDir, '项目二')];
+    const campaignName = (project: string) => mode === 'default' ? basename(project) : '新！';
+    const runIds = projects.map(project => {
+      mkdirSync(project);
+      const created = createRun(project, 'default', 'name: default\nstages: []', []);
+      configureWorkflowBrief({ name: 'default', stages: [] }, project, created.runId, created.runDirPath, 1, false, undefined, false, campaignName(project));
+      updateRunState(project, created.runId, state => { state.status = 'complete'; });
+      return created.runId;
+    });
+    const keys = projects.map(project => resolveCampaignStorageKey({ campaignName: campaignName(project), projectDir: project }));
+    expect(keys[0]).toBeTruthy();
+    expect(keys[1]).toBeTruthy();
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(resolveCampaignStorageKey({ campaignName: '新！' })).toBeUndefined();
+    expect(resolveCampaignStorageKey({ campaignName: '新！', projectDir: projects[0] }))
+      .not.toBe(resolveCampaignStorageKey({ campaignName: '新！', projectDir: projects[1] }));
+    expect(readdirSync(join(fcGlobalDir(), 'campaigns')).sort()).toEqual(keys.map(key => `${key}.jsonl`).sort());
+    for (const [i, key] of keys.entries()) {
+      const rows = readFileSync(join(fcGlobalDir(), 'campaigns', `${key}.jsonl`), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      expect(rows.map(row => row.runId)).toEqual([runIds[i], runIds[i]]);
+      expect(readCampaignEntries(projects[i], campaignName(projects[i])).map(row => row.runId)).toEqual([runIds[i], runIds[i]]);
+      expect(readRunIndexRecordsByCampaign(projects[i], key!)).toMatchObject([{ runId: runIds[i] }]);
+      rebuildRunIndex(projects[i]);
+      expect(readRunIndexRecordsByCampaign(projects[i], key!)).toMatchObject([{ runId: runIds[i] }]);
+    }
+  });
+
+  it('matches a stored campaign name alias when editing runs', async () => {
+    const created = createRun(projectDir, 'default', 'name: default\nstages: []', []);
+    updateRunState(projectDir, created.runId, state => {
+      state.campaignId = 'stable-id';
+      state.campaignStorageKey = 'stable-key';
+      state.campaignName = 'Display Alias';
+      state.status = 'complete';
+    });
+    const response = await app.inject({ method: 'DELETE', url: '/api/run-campaigns/display-alias' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().orphaned).toBe(1);
+    const state = JSON.parse(readFileSync(join(fcGlobalDir(), 'runs', created.runId, 'run.json'), 'utf8'));
+    expect(state.campaignId).toBe('');
+    expect(state.campaignStorageKey).toBe('');
+    expect(state.campaignName).toBe('');
   });
 
   it('returns 404 for a missing campaign id', async () => {
@@ -121,43 +157,5 @@ describe('dashboard campaign API', () => {
     expect(runState).toMatchObject({ campaignId: '', campaign_id: '', campaignStorageKey: '', campaignName: '' });
   });
 
-  it('lists and accepts pending review patches', async () => {
-    const campaignDir = join(homeDir, '.fc', 'campaigns', 'test-campaign');
-    const briefDir = join(campaignDir, 'brief');
-    writeJsonl(join(campaignDir, 'pending_review.jsonl'), [
-      {
-        ts: '2026-05-23T10:01:00.000Z',
-        campaignId: 'test-campaign',
-        reason: 'operator should review',
-        severity: 'medium',
-        briefDir,
-        patch: { type: 'brief_patch', section: '# Brief', op: 'append', value: 'accepted by api' },
-      },
-    ]);
-    writeFileSync(join(briefDir, 'HEAD'), 'v2\n', 'utf-8');
 
-    const overview = await app.inject({ method: 'GET', url: '/api/inbox/overview' });
-    expect(overview.statusCode).toBe(200);
-    expect(overview.json()).toMatchObject({
-      patches: {
-        status: 'complete',
-        items: [{ campaignId: 'test-campaign', campaignName: 'test-campaign', index: 0 }],
-      },
-    });
-    expect(overview.json().campaignCount).toBeGreaterThanOrEqual(2);
-
-    const accept = await app.inject({
-      method: 'POST',
-      url: '/api/campaigns/test-campaign/review/0',
-      payload: { decision: 'accept' },
-    });
-    expect(accept.statusCode).toBe(200);
-
-    const conflict = await app.inject({
-      method: 'POST',
-      url: '/api/campaigns/test-campaign/review/0',
-      payload: { decision: 'accept' },
-    });
-    expect(conflict.statusCode).toBe(409);
-  });
 });

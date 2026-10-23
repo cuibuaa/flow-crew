@@ -1,8 +1,7 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { requestDeploymentHold } from '../src/deployment-hold.js';
 import { NodeSystemd, Orchestrator } from '../src/orchestrator.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { TaskRegistry, type TaskEntry, type TaskStatus } from '../src/task-registry.js';
@@ -55,7 +54,7 @@ function publish() {
 }
 function history() {
   for (const [status, runStatus, count] of [
-    ['cancelled', 'stopped', 661], ['stuck', 'failed', 132], ['done', 'complete', 45],
+    ['cancelled', 'cancelled', 661], ['stuck', 'failed', 132], ['done', 'complete', 45],
     ['reality_gate_failed', 'reality_gate_failed', 30], ['failed', 'failed', 20],
   ] as const) for (let i = 0; i < count; i++) seed(status, runStatus);
 }
@@ -99,26 +98,26 @@ it('computes large-registry status below 500 ms without a detailed probe per his
   expect(status.tasks).toHaveLength(2);
 });
 
-it.each(['running', 'parked', 'complete'])('refuses a live unit even with a historical registry row (run=%s)', async status => {
-  const run = seed('cancelled', status); publish();
+it.each(['running', 'parked', 'complete'])('refuses a live unit for an active task (run=%s)', async status => {
+  const run = seed('running', status); publish();
   writeFileSync(join(root, 'inventory.json'), JSON.stringify([{ unit: run.task.systemd_unit }]) + '\n');
   vi.spyOn(backend, 'isActive').mockResolvedValue({ kind: 'active' });
   expect((await orchestrator.holdDeployment()).ready).toBe(false);
 });
 
 it.each(['running', 'pending', 'unrecognized'])('refuses an absent unit for a non-settled run (run=%s)', async status => {
-  seed('stuck', status); publish();
+  seed('running', status); publish();
   expect((await orchestrator.holdDeployment()).ready).toBe(false);
 });
 
 it('refuses a corrupt scheduler identity on a terminal run', async () => {
-  const run = seed('cancelled', 'stopped'); publish();
+  const run = seed('running', 'cancelled'); publish();
   writeFileSync(join(run.path, 'scheduler.pid'), 'unreadable identity');
   expect((await orchestrator.holdDeployment()).ready).toBe(false);
 });
 
 it.each([0, 60_000])('preserves local supervision ownership after manager retirement (launch age=%s)', async age => {
-  const run = seed('cancelled', 'stopped'); publish();
+  const run = seed('running', 'cancelled'); publish();
   atomicWriteJson(supervisionPaths(fcGlobalDir(), run.task.systemd_unit).launch, {
     version: 1, unit: run.task.systemd_unit, workingDirectory: project, command: 'fixture',
     nodePath: process.execPath, shellPath: '/bin/sh', shutdownGraceMs: 100,
@@ -129,73 +128,31 @@ it.each([0, 60_000])('preserves local supervision ownership after manager retire
   expect(status.tasks[0].detail).toContain(`unit=${age ? 'unobservable' : 'active'}`);
 });
 
-it('refuses unresolved command fate even after unit and scheduler retirement', async () => {
-  const run = seed('cancelled', 'stopped'); publish();
-  writeFileSync(join(run.path, 'run.json'), JSON.stringify({ ...run.state, planControl: { stages: [{ race: {} }] } }));
-  expect((await orchestrator.holdDeployment()).ready).toBe(false);
-});
-
 it.each(['invalid', '{}', '[{}]'])('keeps an invalid manager inventory fail closed (%s)', async inventory => {
-  seed('done', 'complete'); publish();
+  seed('running', 'complete'); publish();
   writeFileSync(join(root, 'inventory.json'), inventory + '\n');
   expect((await orchestrator.holdDeployment()).ready).toBe(false);
 });
 
 it('keeps a manager failure fail closed instead of treating it as owner absence', async () => {
-  seed('done', 'complete'); publish();
+  seed('running', 'complete'); publish();
   writeFileSync(join(root, 'bin', 'systemctl'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
   expect((await orchestrator.holdDeployment()).ready).toBe(false);
 });
 
-// Include directory names as well as file bytes so an observation cannot hide
-// a repair by creating, replacing or deleting a different state artifact.
-function stateBytes(path = fcGlobalDir()): Record<string, Buffer | null> {
-  const snapshot: Record<string, Buffer | null> = {};
-  for (const entry of readdirSync(path, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      snapshot[entry.name + '/'] = null;
-      for (const [name, bytes] of Object.entries(stateBytes(join(path, entry.name)))) {
-        snapshot[entry.name + '/' + name] = bytes;
-      }
-    } else snapshot[entry.name] = readFileSync(join(path, entry.name));
+it('ignores 14 historical fixture tasks outside the current hold even when their recorded owners are unsettled', async () => {
+  for (let i = 0; i < 14; i++) {
+    const run = seed('stuck', i % 2 ? 'running' : 'parked');
+    writeFileSync(join(run.path, 'scheduler.pid'), 'historical fixture identity');
   }
-  return snapshot;
-}
+  publish();
+  const status = await orchestrator.holdDeployment();
+  expect(status).toMatchObject({ ready: true, tasks: [], errors: [] });
+});
 
-it.each(['absent', 'failed', 'unavailable', 'loaded-probe-failed'] as const)(
-  'reads legacy fallback records without changing any state bytes (manager=%s)', async manager => {
-    const records = [
-      { bytes: '{ "pid": 2147483632, "state": "active", "command": "fixture" }\n', kind: 'terminal-unknown' },
-      { bytes: '{malformed legacy record\n', kind: 'terminal-unknown' },
-      { bytes: '{ "state": "inactive", "reason": "fixture ended" }\n', kind: 'terminal-unknown' },
-      { bytes: JSON.stringify({ pid: process.pid, state: 'active' }), kind: 'active' },
-      { bytes: JSON.stringify({ pid: process.pid, state: 'deactivating' }), kind: 'deactivating' },
-    ];
-    for (const record of records) {
-      const { task } = seed('cancelled', 'stopped');
-      writeFileSync(join(fcGlobalDir(), 'systemd-fallback', task.systemd_unit + '.json'), record.bytes);
-    }
-    publish();
-    if (manager === 'failed') writeFileSync(join(root, 'inventory.json'), 'invalid\n');
-    if (manager === 'unavailable') rmSync(join(root, 'bin', 'systemctl'));
-    if (manager === 'loaded-probe-failed') {
-      writeFileSync(join(root, 'inventory.json'), JSON.stringify(rows.map(task => ({ unit: task.systemd_unit }))) + '\n');
-    }
-    requestDeploymentHold(); // Only the request owns this write; status must not.
-    const before = stateBytes();
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const status = await orchestrator.deploymentStatus();
-      expect(stateBytes()).toEqual(before);
-      expect(status.errors).toEqual([]);
-      expect(status.ready).toBe(false); // The live owners still veto readiness.
-      expect(status.tasks.map(task => task.id)).toEqual(
-        manager === 'absent' || manager === 'unavailable' ? [4, 5] : [1, 2, 3, 4, 5],
-      );
-      const observed = await backend.isActiveMany(rows.map(task => task.systemd_unit));
-      expect([...observed.values()].map(unit => unit.kind)).toEqual(records.map(record =>
-        (manager === 'failed' || manager === 'loaded-probe-failed') && record.kind === 'terminal-unknown'
-          ? 'unobservable' : record.kind));
-      expect(stateBytes()).toEqual(before);
-    }
-  },
-);
+it('checks an inactive task when its run belongs to the current hold', async () => {
+  const run = seed('stuck', 'running'); publish();
+  const hold = (await orchestrator.holdDeployment()).hold;
+  writeFileSync(join(run.path, 'run.json'), JSON.stringify({ ...run.state, deploymentHold: hold }));
+  expect(await orchestrator.deploymentStatus()).toMatchObject({ ready: false, tasks: [{ id: run.task.id, settled: false }] });
+});

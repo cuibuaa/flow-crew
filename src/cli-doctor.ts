@@ -1,3 +1,5 @@
+import { parseCommandArgs, commandUsage } from './cli-args.js';
+import { EXIT_CODE } from './exit-code.js';
 import { execFileSync } from 'node:child_process';
 import { findExecutableOnPath } from './adapters/availability.js';
 import { fcGlobalDir } from './store.js';
@@ -56,8 +58,6 @@ export interface DoctorMaintenanceOptions {
   stderr?: WritableLike;
 }
 
-const MAINTENANCE_FLAGS = new Set(['--repair-registry', '--compact-registry', '--apply']);
-
 /**
  * Registry maintenance is intentionally separate from the general doctor
  * probes: it is deterministic, injectable for tests, and never mutates unless
@@ -67,19 +67,19 @@ export function cmdDoctorMaintenance(
   argv: string[],
   options: DoctorMaintenanceOptions = {},
 ): number {
-  const args = argv[0] === 'doctor' ? argv.slice(1) : argv;
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
-  const unknown = args.filter((arg) => !MAINTENANCE_FLAGS.has(arg));
-  const repair = args.includes('--repair-registry');
-  const compact = args.includes('--compact-registry');
-  const apply = args.includes('--apply');
-
-  if (unknown.length > 0 || repair === compact) {
-    if (unknown.length > 0) stderr.write(`Unknown doctor option(s): ${unknown.join(', ')}\n`);
-    else if (repair && compact) stderr.write('Choose one registry maintenance operation at a time.\n');
-    stderr.write('Usage: flowcrew doctor --repair-registry|--compact-registry [--apply]\n');
-    return 2;
+  let parsed;
+  try { parsed = parseCommandArgs('doctor', argv); }
+  catch (error) { stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); return EXIT_CODE.failed; }
+  if (parsed.help) { stdout.write(`${commandUsage('doctor')}\n`); return EXIT_CODE.completed; }
+  const repair = parsed.flags.has('--repair-registry');
+  const compact = parsed.flags.has('--compact-registry');
+  const apply = parsed.flags.has('--apply');
+  if (repair === compact) {
+    if (repair) stderr.write('Choose one registry maintenance operation at a time.\n');
+    stderr.write(`${commandUsage('doctor')}\n`);
+    return EXIT_CODE.failed;
   }
 
   const registry = options.registry ?? new TaskRegistry({ baseDir: fcGlobalDir() });
@@ -88,11 +88,11 @@ export function cmdDoctorMaintenance(
     report = repair ? registry.repair({ apply }) : registry.compact({ apply });
   } catch (error) {
     stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    return 1;
+    return EXIT_CODE.failed;
   }
 
   printReport(report, stdout);
-  return 0;
+  return EXIT_CODE.completed;
 }
 
 function printReport(report: RegistryMaintenanceReport, stdout: WritableLike): void {

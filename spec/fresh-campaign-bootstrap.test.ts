@@ -16,7 +16,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Adapter } from '../src/adapters/base.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { buildRoleRegistry } from '../src/scheduler/sched_admission/dispatch.js';
-import { inspectRealityChecks } from '../src/reality-check-preflight.js';
 import {
   inspectDispatchAdmission,
   inspectRealityCheckReachability,
@@ -220,7 +219,7 @@ describe('first research round with generic roles', () => {
     expect(novel[0]).toContain(neverWritten);
   });
 
-  it('keeps the resolved manifest framework-owned instead of assigning it to a terminal writer', () => {
+  it('keeps manifest scope estimates without turning admission into provenance enforcement', () => {
     const stages = campaignStages();
     const finalShip = stages.find((stage) => stage.id === 'final_ship');
     expect(finalShip).toBeDefined();
@@ -234,7 +233,7 @@ describe('first research round with generic roles', () => {
       criteria,
     });
     expect(report.pass, report.errors.join('\n')).toBe(true);
-    expect(report.frameworkReservedScopes).toEqual({ final_ship: [MANIFEST_FILE] });
+    expect(finalShip!.scope).toContain(MANIFEST_FILE);
   });
 });
 
@@ -242,7 +241,7 @@ describe('single resolved framework output contract', () => {
   it('emits a sibling manifest for a custom result file without report_dir', async () => {
     const { projectDir, runDirPath } = await emitNoCandidate({
       baseline: 10,
-      policy: 'best_of_n',
+      policy: 'greedy_stack',
       resultFile: 'docs/fresh-campaign/round.json',
       stop: { maxRounds: 2 },
     });
@@ -271,7 +270,7 @@ describe('single resolved framework output contract', () => {
   it('keeps an explicit report_dir authoritative for emission and admission', async () => {
     const explicit: ResearchConfig = {
       baseline: 10,
-      policy: 'best_of_n',
+      policy: 'greedy_stack',
       resultFile: 'docs/fresh-campaign/round.json',
       reportDir: 'reports/explicit-campaign',
       stop: { maxRounds: 2 },
@@ -293,22 +292,10 @@ describe('single resolved framework output contract', () => {
     })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT')]);
   });
 
-  it('makes static preflight and reachability agree on exact and novel manifest paths', () => {
-    const brief = [
-      '---',
-      'research:',
-      '  baseline: 0',
-      `  result_file: ${RESULT_FILE}`,
-      '---',
-      '# Research contract',
-    ].join('\n');
+  it('checks reachability of exact and novel manifest paths', () => {
     const exact = onePathCheck('resolved framework manifest', MANIFEST_FILE);
     const novelPath = 'docs/another-campaign/run_manifest.json';
     const novel = onePathCheck('same basename elsewhere', novelPath);
-    expect(inspectRealityChecks(brief, exact).findings).toEqual([]);
-    expect(inspectRealityChecks(brief, novel).findings).toEqual([
-      expect.objectContaining({ code: 'undeclared_artifact_existence' }),
-    ]);
 
     const projectDir = temporaryRoot();
     expect(inspectRealityCheckReachability({
@@ -331,23 +318,10 @@ describe('single resolved framework output contract', () => {
       policy: 'greedy_stack',
       resultFile: 'round.json',
     };
-    const brief = [
-      '---',
-      'research:',
-      '  baseline: 0',
-      '  result_file: round.json',
-      '---',
-      '# Root research contract',
-    ].join('\n');
     const exactPath = 'run_manifest.json';
     const novelPath = 'other/run_manifest.json';
     const exact = onePathCheck('root framework manifest', exactPath);
     const novel = onePathCheck('nested same basename', novelPath);
-
-    expect(inspectRealityChecks(brief, exact).findings).toEqual([]);
-    expect(inspectRealityChecks(brief, novel).findings).toEqual([
-      expect.objectContaining({ code: 'undeclared_artifact_existence' }),
-    ]);
 
     const projectDir = temporaryRoot();
     expect(inspectRealityCheckReachability({
@@ -364,31 +338,17 @@ describe('single resolved framework output contract', () => {
     })).toEqual([expect.stringContaining('ARTIFACT_INPUT_ABSENT')]);
   });
 
-  it('credits an explicit project-root report_dir on both admission sides', () => {
+  it('checks reachability with an explicit project-root report_dir', () => {
     const explicitRoot: ResearchConfig = {
       baseline: 0,
       policy: 'greedy_stack',
       resultFile: 'docs/campaign/round.json',
       reportDir: '.',
     };
-    const brief = [
-      '---',
-      'research:',
-      '  baseline: 0',
-      '  result_file: docs/campaign/round.json',
-      '  report_dir: .',
-      '---',
-      '# Explicit root research contract',
-    ].join('\n');
     const exactPath = 'run_manifest.json';
     const inferredPath = 'docs/campaign/run_manifest.json';
     const exact = onePathCheck('explicit root manifest', exactPath);
     const inferred = onePathCheck('superseded inferred manifest', inferredPath);
-
-    expect(inspectRealityChecks(brief, exact).findings).toEqual([]);
-    expect(inspectRealityChecks(brief, inferred).findings).toEqual([
-      expect.objectContaining({ code: 'undeclared_artifact_existence' }),
-    ]);
 
     const projectDir = temporaryRoot();
     expect(inspectRealityCheckReachability({

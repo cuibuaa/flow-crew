@@ -1,4 +1,4 @@
-import { publishRunCompletion } from './iteration-outcome.js';
+import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Sequence prepared iterations, ordinary execution, fresh gate retry settlement, research advancement and final outcomes; calls responsibility owners.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
@@ -6,14 +6,14 @@ import { StageConfig, WorkflowConfig } from '../sched_admission/configuration.js
 import { clearGateContinuationsForStages } from '../sched_admission/sessions.js';
 import { isTerminalStatus } from '../sched_policy/identity.js';
 import { recoverTerminalStudyCompletion } from '../sched_settlement/completion.js';
-import { StoreState, RUN_STATUS, isContinuingStage, isPausedRunStatus, readRunState, writeRunState } from '../../store.js';
+import { StoreState, RUN_STATUS, isContinuingStage, isPausedRunStatus, readRunState } from '../../store.js';
 import { settleGateRetries } from './gate-loop.js';
 import { concludeWorkflowIteration } from './iteration-outcome.js';
 import { prepareWorkflowIteration } from './iteration-setup.js';
 import { executeIteration } from './iteration.js';
 import { advanceSettledResearch } from './research-progress.js';
 import { createResearchBudgetFinalizer, settleExhaustedResearchGates } from './research-terminal.js';
-import { archiveDeclaredOutputsBeforePlainCompletion, writeCampaignEntry } from './services.js';
+import { writeCampaignEntry } from './services.js';
 import { recordRunEvent } from '../../run-events.js';
 import { parkAtDeploymentBoundary } from '../../deployment-hold.js';
 
@@ -27,7 +27,7 @@ export async function runWorkflowIterations(
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock
 ): Promise<StoreState> {
   const finishResearchCeiling = createResearchBudgetFinalizer(projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
-  const budgetBoundary = (state: StoreState, iteration: number): boolean => {
+  const budgetBoundary = async (state: StoreState, iteration: number): Promise<boolean> => {
     const stageIds = Object.entries(state.stages).filter(([, stage]) => isContinuingStage(stage)).map(([id]) => id);
     if (!stageIds.length) return false;
     const maxWall = state.research?.stop?.maxWallHours;
@@ -35,10 +35,9 @@ export async function runWorkflowIterations(
     recordRunEvent(projectDir, runId, { type: 'iteration_completed', runId, timestamp: new Date().toISOString(), iteration,
       detail: `Retained budget handoff for ${stageIds.join(', ')}; ${iteration}/${maxIterations} iterations spent`, source: 'scheduler' });
     if (iteration >= maxIterations || wallExhausted) {
-      state.status = 'incomplete';
-      state.failureReason = `Retained stage work needs continuation, but ${wallExhausted ? 'research wall budget' : 'iteration budget'} is exhausted (${iteration}/${maxIterations}).`;
-      state.completedAt = new Date().toISOString();
-      publishRunCompletion(state, projectDir, runId, () => ({ iteration, detail: state.failureReason }));
+      await concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'bounded_attempts',
+        detail: `Retained stage work needs continuation, but ${wallExhausted ? 'research wall budget' : 'iteration budget'} is exhausted (${iteration}/${maxIterations}).`,
+        eventFields: () => ({ iteration, detail: state.failureReason }), writeCampaignEntry });
     }
     return true;
   };
@@ -47,11 +46,11 @@ export async function runWorkflowIterations(
     if (held) return held;
     const prepared = await prepareWorkflowIteration(iteration, resumeAtIteration, resumingExistingRun, projectDir, runId, runDirPath, adapter, baseStages, workflowYaml);
     if (prepared.kind === 'settled') return prepared.state;
-    const {sorted, injectedDispatchStages, planStageRetries} = prepared;
+    const {sorted, injectedDispatchStages} = prepared;
     // Inner execution loop for this iteration
     await executeIteration(
       sorted, projectDir, runId, runDirPath, workflow, adapter, agents,
-      resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription,
+      resolvedAgentsDir, roleRegistry, injectedDispatchStages, skills, taskDescription,
       availableSkillsList, attemptDeadlineClockFactory,
     );
 
@@ -68,21 +67,14 @@ export async function runWorkflowIterations(
     }
     if (isPausedRunStatus(state.status)) return state;
 
-    if (budgetBoundary(state, iteration)) {
+    if (await budgetBoundary(state, iteration)) {
       if (state.status !== RUN_STATUS.RUNNING) return state;
       continue;
     }
 
-    const recoveredTerminal = recoverTerminalStudyCompletion(projectDir, runId, state);
+    const recoveredTerminal = await recoverTerminalStudyCompletion(projectDir, runId, state, writeCampaignEntry);
     if (recoveredTerminal) {
       clearGateContinuationsForStages(runDirPath, sorted);
-      if (!archiveDeclaredOutputsBeforePlainCompletion(
-        recoveredTerminal,
-        { projectDir, runId, runDirPath, iteration },
-        'terminal_study_recovery',
-      )) return recoveredTerminal;
-      writeRunState(projectDir, runId, recoveredTerminal);
-      writeCampaignEntry(projectDir, recoveredTerminal);
       return recoveredTerminal;
     }
 
@@ -91,7 +83,7 @@ export async function runWorkflowIterations(
     const iterationDispatchedIds = sorted
       .filter(s => !baseIds.has(s.id))
       .map(s => s.id);
-    const retried = await settleGateRetries(state, sorted, iteration, injectedDispatchStages, planStageRetries, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
+    const retried = await settleGateRetries(state, sorted, iteration, injectedDispatchStages, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
     if (retried.kind === 'settled') return retried.state;
     const heldAfterRetries = parkAtDeploymentBoundary(projectDir, runId);
     if (heldAfterRetries) return heldAfterRetries;
@@ -101,25 +93,22 @@ export async function runWorkflowIterations(
     clearGateContinuationsForStages(runDirPath, sorted);
 
     state = readRunState(projectDir, runId);
-    if (budgetBoundary(state, iteration)) {
+    if (await budgetBoundary(state, iteration)) {
       if (state.status !== RUN_STATUS.RUNNING) return state;
       continue;
     }
     const exhaustedResearch = await settleExhaustedResearchGates(state, sorted, iteration, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
     if (exhaustedResearch) return exhaustedResearch;
-    const advanced = await advanceSettledResearch(state, sorted, baseStages, iteration, iterationDispatchedIds, innerRetriesUsed, maxInnerRetries, maxIterations, injectedDispatchStages, planStageRetries, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
+    const advanced = await advanceSettledResearch(state, sorted, baseStages, iteration, iterationDispatchedIds, innerRetriesUsed, maxInnerRetries, maxIterations, injectedDispatchStages, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
     if (advanced.kind === 'settled') return advanced.state;
     if (advanced.kind === 'next-iteration') continue;
-    const outcome = await concludeWorkflowIteration(advanced.state, sorted, iteration, iterationDispatchedIds, innerRetriesUsed, maxInnerRetries, maxIterations, finishResearchCeiling, projectDir, runId, runDirPath, adapter, injectedDispatchStages, planStageRetries);
+    const outcome = await concludeWorkflowIteration(advanced.state, sorted, iteration, iterationDispatchedIds, innerRetriesUsed, maxInnerRetries, maxIterations, finishResearchCeiling, projectDir, runId, runDirPath, adapter, injectedDispatchStages);
     if (outcome.kind === 'settled') return outcome.state;
   }
   // Should not reach here, but safety net
   const finalState = readRunState(projectDir, runId);
   // Preserve an already settled terminal or parked state.
   if (isTerminalStatus(finalState.status)) return finalState;
-  finalState.status = 'failed';
-  finalState.failureReason = 'Workflow ended unexpectedly.';
-  finalState.completedAt = new Date().toISOString();
-  publishRunCompletion(finalState, projectDir, runId, () => ({iteration: finalState.currentIteration, detail: finalState.status}));
-  return finalState;
+  return concludeRun(finalState, { status: RUN_STATUS.FAILED, reasonCode: 'scheduler_failed', detail: 'Workflow ended unexpectedly.',
+    eventFields: () => ({ iteration: finalState.currentIteration, detail: finalState.status }), writeCampaignEntry });
 }

@@ -1,28 +1,22 @@
-import type { AdapterFailureKind } from './base.js';
+export type ProviderFailureKind = 'refusal' | 'authentication' | 'transient';
 
-export const ADAPTER_FAILURE_PATTERNS: ReadonlyArray<{
-  kind: AdapterFailureKind;
-  pattern: RegExp;
-}> = [
-  { kind: 'authentication', pattern: /\b(?:not logged in|unauthorized|authentication[ _-](?:error|failed|failure|required)|invalid[ _-](?:api[ _-])?(?:key|token)|401)\b/i },
-  { kind: 'forbidden', pattern: /403 Forbidden/i },
-  { kind: 'connection_refused', pattern: /connection refused|ECONNREFUSED/i },
-  { kind: 'connection_reset', pattern: /ECONNRESET|connection reset/i },
-  { kind: 'rate_limited', pattern: /rate limit|429 Too Many/i },
-  { kind: 'transport_timeout', pattern: /ETIMEDOUT/i },
-  { kind: 'bad_gateway', pattern: /502 Bad Gateway/i },
-  { kind: 'service_unavailable', pattern: /503 Service Unavailable/i },
-  { kind: 'overloaded', pattern: /overloaded/i },
-  { kind: 'capacity', pattern: /(?:selected\s+)?model\s+is\s+at\s+capacity/i },
-];
-
-/** Classify adapter-owned diagnostics only. A stage's final message is not evidence. */
-export function classifyAdapterFailure(diagnostic: string): AdapterFailureKind | undefined {
-  const tail = diagnostic.length > 2048 ? diagnostic.slice(-2048) : diagnostic;
-  return ADAPTER_FAILURE_PATTERNS.find(({ pattern }) => pattern.test(tail))?.kind;
+/** Text is fallback evidence only when the provider supplies no error code. */
+export function classifyAdapterFailure(diagnostic: string, code?: unknown): ProviderFailureKind | undefined {
+  if (code !== undefined && code !== null) {
+    if ([401, '401', 'authentication', 'authentication_error', 'invalid_api_key', 'unauthorized'].includes(code as string)) return 'authentication';
+    if (['refusal', 'content_policy_violation', 'safety_violation'].includes(String(code))) return 'refusal';
+    // Provider error types and HTTP status codes: only known temporary failures replay.
+    if (/^(?:429|5\d{2})$/.test(String(code)) || ['overloaded_error', 'rate_limit_error', 'api_error', 'timeout', 'timeout_error',
+      'server_error', 'service_unavailable_error', 'server_is_overloaded', 'rate_limit_exceeded', 'slow_down'].includes(String(code))) return 'transient';
+    return undefined;
+  }
+  if (/\b(?:not logged in|unauthorized|authentication[ _-](?:error|failed|failure|required)|invalid[ _-](?:api[ _-])?(?:key|token)|401)\b/i.test(diagnostic)) return 'authentication';
+  if (/^This content was flagged for possible cybersecurity risk\./.test(diagnostic.trim())) return 'refusal';
+  if (/workspace routing discovery failed|403 Forbidden|connection refused|ECONNREFUSED|ECONNRESET|connection reset|rate limit|429 Too Many|ETIMEDOUT|502 Bad Gateway|503 Service Unavailable|overloaded|(?:selected\s+)?model\s+is\s+at\s+capacity/i.test(diagnostic)) return 'transient';
+  return undefined;
 }
 
-/** Authentication needs operator action; replaying the same credentials cannot recover it. */
-export function isRetryableAdapterFailure(kind: AdapterFailureKind | undefined): boolean {
-  return kind !== 'authentication';
+/** Operator intervention and provider refusals cannot recover by replay. */
+export function isRetryableAdapterFailure(kind: ProviderFailureKind | undefined): boolean {
+  return kind !== 'authentication' && kind !== 'refusal';
 }

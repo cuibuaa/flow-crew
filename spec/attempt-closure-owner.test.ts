@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRun } from './test-support/create-run.js';
 import {
-  beginStageAttempt, closeStageAttempt, createRun, fcGlobalDir, readStageStatus,
+  beginStageAttempt, closeStageAttempt, fcGlobalDir, readStageStatus,
   runDir, setFcGlobalDir, settleStageAttempt, updateRunState,
 } from '../src/store.js';
 import { reconcileHostInterruptedRun } from '../src/restart-recovery.js';

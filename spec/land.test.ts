@@ -2,6 +2,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -151,13 +152,13 @@ function realGit(args: string[], cwd = fixture.primary): string {
   return isolatedProjectCommand('git', args, cwd, fixture.root).trim();
 }
 
-function linkedGitFixture(): ReturnType<typeof vi.fn<LandGitRunner>> {
+function linkedGitFixture(ignore = 'ignored.txt\n'): ReturnType<typeof vi.fn<LandGitRunner>> {
   realGit(['init', '--initial-branch=main']);
   realGit(['config', 'user.name', 'Fixture']);
   realGit(['config', 'user.email', 'fixture@example.test']);
   mkdirSync(join(fixture.primary, 'docs'));
   writeFileSync(join(fixture.primary, 'docs/result.md'), '# Result\n');
-  writeFileSync(join(fixture.primary, '.gitignore'), 'ignored.txt\n');
+  writeFileSync(join(fixture.primary, '.gitignore'), ignore);
   realGit(['add', '.']); realGit(['commit', '-m', 'Baseline']);
   const baseCommit = realGit(['rev-parse', 'HEAD']);
   rmSync(fixture.project, { recursive: true });
@@ -853,6 +854,159 @@ describe('flowcrew land exact ledger completion boundary', () => {
     expect(report.fcTaskCompletion).toMatchObject({ state: 'verified' });
     expect(destructiveOperations(runner).at(-1)).toBe(operation);
     expect(fcTaskStatus(closure)).toBe('in_progress');
+  });
+});
+
+describe('flowcrew land external archive', () => {
+  function archiveRoot(): string {
+    const root = join(fixture.root, 'archive');
+    mkdirSync(root);
+    return root;
+  }
+
+  it('archives ignored docs and the entire terminal run store, then reclaims and closes the exact ledger', async () => {
+    const runner = linkedGitFixture('docs/\nevidence/\n');
+    const closure = seedFcTaskClosure();
+    writeProjectFile('docs/result.md', '# Unique ignored report\n');
+    writeProjectFile('evidence/only-copy.bin', 'unique evidence\n');
+    const runEvidence = join(fixture.runDir, 'stages', 'measure', 'evidence.bin');
+    mkdirSync(dirname(runEvidence), { recursive: true });
+    writeFileSync(runEvidence, 'unique run evidence\n');
+    const root = archiveRoot();
+    const before = await runLand(['land', '--run', fixture.runId, '--remove'], { git: runner });
+    expect(before.state).toBe('refused');
+    expect(destructiveOperations(runner)).toEqual([]);
+
+    const report = await runLand([...fcTaskClosureArgs(closure), `--archive=${root}`], { git: runner });
+
+    expect(report.state).toBe('removed');
+    expect(fcTaskStatus(closure)).toBe('completed');
+    expect(destructiveOperations(runner)).toEqual(['remove_worktree', 'prune_worktrees', 'delete_branch']);
+    expect(() => readFileSync(join(fixture.project, 'docs/result.md'))).toThrow();
+    expect(report.archive?.manifests).toHaveLength(2);
+    const archivedFiles = report.archive!.manifests.flatMap((manifestPath) => {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      expect(manifest.complete).toBe(true);
+      return manifest.outputs.flatMap((output: { archiveRoot: string; expectedType: string; members: Array<{ path: string; sha256: string; bytes: number }> }) =>
+        output.members.map((member) => {
+          const path = output.expectedType === 'file'
+            ? join(dirname(manifestPath), output.archiveRoot)
+            : join(dirname(manifestPath), output.archiveRoot, member.path);
+          const bytes = readFileSync(path);
+          expect(createHash('sha256').update(bytes).digest('hex')).toBe(member.sha256);
+          expect(bytes.byteLength).toBe(member.bytes);
+          return bytes.toString();
+        }));
+    });
+    expect(archivedFiles).toEqual(expect.arrayContaining([
+      '# Unique ignored report\n', 'unique evidence\n', 'unique run evidence\n',
+    ]));
+    expect(report.archive!.files).toBe(archivedFiles.length);
+    expect(report.archive!.bytes).toBeGreaterThan(0);
+    expect(readFileSync(runEvidence, 'utf8')).toBe('unique run evidence\n');
+  });
+
+  it.each(['tracked', 'untracked'] as const)('preserves %s unique work but keeps the non-force dirty-worktree catch', async (kind) => {
+    const runner = linkedGitFixture();
+    const path = kind === 'tracked' ? 'docs/result.md' : 'unique.py';
+    writeProjectFile(path, 'unique implementation\n');
+    const report = await runLand(['land', '--run', fixture.runId, '--remove', `--archive=${archiveRoot()}`], { git: runner });
+    expect(report.archive?.files).toBeGreaterThan(0);
+    expect(report.state).toBe('removal_failed');
+    expect(destructiveOperations(runner)).toEqual(['remove_worktree']);
+    expect(readFileSync(join(fixture.project, path), 'utf8')).toBe('unique implementation\n');
+    expect(realGit(['rev-parse', 'topic-work'])).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it.each(['source', 'destination', 'archive-alias', 'manifest', 'run-store', 'new-ignored'] as const)('refuses before any removal when %s changes after archival', async (mutation) => {
+    const underlying = linkedGitFixture('docs/\n');
+    const closure = seedFcTaskClosure();
+    writeProjectFile('docs/result.md', 'preserve these bytes\n');
+    const root = archiveRoot();
+    const runner = vi.fn<LandGitRunner>((request) => {
+      if (request.operation === 'worktrees') {
+        if (mutation === 'source') writeProjectFile('docs/result.md', 'changed source\n');
+        if (mutation === 'run-store') writeFileSync(join(fixture.runDir, 'late-evidence.json'), '{}\n');
+        if (mutation === 'new-ignored') writeProjectFile('docs/new.md', 'new unique evidence\n');
+        if (mutation === 'destination' || mutation === 'archive-alias' || mutation === 'manifest') {
+          const directory = join(root, readdirSync(root)[0]);
+          if (mutation === 'destination') writeFileSync(join(directory, 'worktree', 'declared_outputs', 'docs/result.md'), 'corrupt copy\n');
+          if (mutation === 'archive-alias') {
+            const copy = join(directory, 'worktree', 'declared_outputs', 'docs');
+            rmSync(copy, { recursive: true });
+            symlinkSync(join(fixture.project, 'docs'), copy, 'dir');
+          }
+          if (mutation === 'manifest') writeFileSync(join(directory, 'worktree', 'declared_outputs_manifest.json'), '{"version":1,"complete":false,"outputs":[]}');
+        }
+      }
+      return underlying(request);
+    });
+    const report = await runLand([...fcTaskClosureArgs(closure), `--archive=${root}`], { git: runner });
+    expect(report.state).toBe('refused');
+    expect(report.readyForRemoval).toBe(false);
+    expect(destructiveOperations(runner)).toEqual([]);
+    expect(fcTaskStatus(closure)).toBe('in_progress');
+  });
+
+  it('rechecks archived bytes after the final asynchronous Git census', async () => {
+    const underlying = linkedGitFixture('docs/\n');
+    writeProjectFile('docs/result.md', 'preserved evidence\n');
+    const closure = seedFcTaskClosure();
+    let inspections = 0;
+    const runner = vi.fn<LandGitRunner>((request) => {
+      if (request.operation === 'at_risk' && ++inspections === 3) {
+        writeProjectFile('docs/result.md', 'late changed evidence\n');
+      }
+      return underlying(request);
+    });
+    const report = await runLand([...fcTaskClosureArgs(closure), `--archive=${archiveRoot()}`], { git: runner });
+    expect(inspections).toBe(3);
+    expect(report.state).toBe('refused');
+    expect(destructiveOperations(runner)).toEqual([]);
+    expect(fcTaskStatus(closure)).toBe('in_progress');
+  });
+
+  it('refuses an unavailable or recursive archive root without removing source or closing the ledger', async () => {
+    const closure = seedFcTaskClosure();
+    for (const root of [join(fixture.root, 'absent-volume'), fixture.project, fixture.runDir]) {
+      const runner = gitRunner(cleanRemovalResponses());
+      const report = await runLand([...fcTaskClosureArgs(closure), `--archive=${root}`], { git: runner });
+      expect(report.state).toBe('refused');
+      expect(report.inspectionIssues).toContainEqual(expect.objectContaining({ operation: 'archive' }));
+      expect(destructiveOperations(runner)).toEqual([]);
+      expect(fcTaskStatus(closure)).toBe('in_progress');
+    }
+  });
+
+  it('refuses a source reached through an escaping directory symlink', async () => {
+    const outside = join(fixture.root, 'outside');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'only-copy'), 'outside bytes\n');
+    symlinkSync(outside, join(fixture.project, 'alias'));
+    const runner = gitRunner({ ...cleanRemovalResponses(), ignored: { exitCode: 0, stdout: 'alias/only-copy\0' } });
+    const report = await runLand(['land', '--run', fixture.runId, '--remove', `--archive=${archiveRoot()}`], { git: runner });
+    expect(report.state).toBe('refused');
+    expect(destructiveOperations(runner)).toEqual([]);
+    expect(readFileSync(join(outside, 'only-copy'), 'utf8')).toBe('outside bytes\n');
+  });
+
+  it.each(['running', 'future_archived_state'])('never archives or removes %s runs', async (status) => {
+    writeState({ status });
+    const root = archiveRoot();
+    const runner = gitRunner(cleanRemovalResponses());
+    const report = await runLand(['land', '--run', fixture.runId, '--remove', `--archive=${root}`], { git: runner });
+    expect(report.state).toBe('refused');
+    expect(readdirSync(root)).toEqual([]);
+    expect(destructiveOperations(runner)).toEqual([]);
+  });
+
+  it('never copies when inventory inspection is incomplete', async () => {
+    const root = archiveRoot();
+    const runner = gitRunner({ ...cleanRemovalResponses(), ignored: { exitCode: 2, stderr: 'unreadable index' } });
+    const report = await runLand(['land', '--run', fixture.runId, '--remove', `--archive=${root}`], { git: runner });
+    expect(report.state).toBe('refused');
+    expect(readdirSync(root)).toEqual([]);
+    expect(destructiveOperations(runner)).toEqual([]);
   });
 });
 

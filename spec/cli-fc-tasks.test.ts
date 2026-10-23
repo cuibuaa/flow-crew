@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import {
   appendFileSync,
   existsSync,
@@ -172,7 +173,7 @@ describe('fc_tasks CLI front-end adapters', () => {
     expect(cmdFcTasks(
       ['fc_tasks', 'render', '--unknown'],
       dependencies(invalid),
-    )).toBe(2);
+    )).toBe(1);
     expect(invalid.output).toContain('fc_tasks: usage error');
 
     const help = new Capture();
@@ -222,14 +223,14 @@ describe('fc_tasks CLI detail and write paths', () => {
     ['unexpected'],
   ])('refuses ambiguous or invalid list arguments %j', (...tokens) => {
     const capture = new Capture();
-    expect(cmdFcTasks(['fc_tasks', 'list', ...tokens], dependencies(capture))).toBe(2);
+    expect(cmdFcTasks(['fc_tasks', 'list', ...tokens], dependencies(capture))).toBe(1);
     expect(capture.output).toContain('fc_tasks: usage error');
     expect(capture.error).toBe('');
   });
 
-  it('creates and closes an entry through validated commands', () => {
+  it.each(['work', 'fc_tasks'])('creates and closes an entry %s through validated commands', (id) => {
     const capture = new Capture();
-    const pending = task('work');
+    const pending = task(id);
     const createCode = cmdFcTasks([
       'fc_tasks',
       'create',
@@ -240,13 +241,13 @@ describe('fc_tasks CLI detail and write paths', () => {
     ], dependencies(capture, JSON.stringify(pending)));
 
     expect(createCode).toBe(0);
-    expect(capture.output).toContain('fc_tasks: created write-session/work');
+    expect(capture.output).toContain(`fc_tasks: created write-session/${id}`);
 
     const completed = { ...pending, status: 'completed' as const };
     const updateCode = cmdFcTasks([
       'fc_tasks',
       'update',
-      'work',
+      id,
       '--session',
       'write-session',
       '--store-root',
@@ -256,7 +257,7 @@ describe('fc_tasks CLI detail and write paths', () => {
     ], dependencies(capture));
 
     expect(updateCode).toBe(0);
-    expect(JSON.parse(readFileSync(join(root, 'write-session', 'work.json'), 'utf-8')))
+    expect(JSON.parse(readFileSync(join(root, 'write-session', `${id}.json`), 'utf-8')))
       .toEqual(completed);
   });
 

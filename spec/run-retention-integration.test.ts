@@ -1,10 +1,10 @@
 import './test-support/policy-runtime.js';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { stringify } from 'yaml';
+import { parse, stringify } from 'yaml';
 import type { RunOpts, RunResult } from '../src/adapters/base.js';
 import { startDashboard } from '../src/dashboard.js';
 import { createInvocationScratch } from '../src/invocation-scratch.js';
@@ -13,9 +13,11 @@ import { captureEngineCheckpoint } from '../src/restart-recovery.js';
 import { pruneRunWorkAreas } from '../src/run-retention.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { normalizeStageContracts, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
-import { beginStageAttempt, completeStageAttempt, createRun, fcGlobalDir, readStageStatus, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readStageStatus, updateRunState } from '../src/store.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { appendPlannerAdmissionContract } from '../src/scheduler/sched_policy/prompt-contracts.js';
 
 let root: string, project: string, roles: string;
 beforeEach(() => {
@@ -25,7 +27,7 @@ beforeEach(() => {
   mkdirSync(project);
   mkdirSync(roles);
   writeFileSync(join(roles, 'coder.yaml'), 'name: coder\nprompt: Complete the fixture duties.\ntools: []\n');
-  setEngineDefaults({ timeout_ms: 60000, stage_technical_retries: 0 });
+  setEngineDefaults({ default_timeout_ms: 60000, stage_technical_retries: 0 });
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -40,7 +42,7 @@ function workflowFixture() {
   normalizeStageContracts(workflow.stages);
   for (const stage of workflow.stages) stage.artifact_contract = {
     ...fixtureArtifactContract(stage.id),
-    produces: [{ id: 'workspace', root: 'run', path: `stages/${stage.id}/build`, kind: 'directory', nonempty: false }],
+    produces: [{ id: 'evidence', root: 'run', path: `stages/${stage.id}/evidence`, kind: 'directory', nonempty: false }],
   };
   return workflow;
 }
@@ -50,6 +52,7 @@ function completed(opts: RunOpts, summary: string): RunResult {
 }
 
 function workspace(runDirectory: string, stage: string) {
+  mkdirSync(join(runDirectory, 'stages', stage, 'evidence'), { recursive: true });
   const directory = join(runDirectory, 'stages', stage, 'build');
   mkdirSync(directory, { recursive: true });
   const bulky = join(directory, 'corpus.bin');
@@ -57,45 +60,71 @@ function workspace(runDirectory: string, stage: string) {
   return { directory, bulky };
 }
 
+const storageGuidance = {
+  'planner role': () => parse(readFileSync(new URL('../config/agents/planner.yaml', import.meta.url), 'utf8')).prompt as string,
+  'planner admission': () => appendPlannerAdmissionContract('', undefined),
+};
+
 describe('run retention at scheduler and continuation boundaries', () => {
-  it('R30 prunes a settled predecessor before its successor runs and preserves readable dashboard records', async () => {
+  it.each(Object.entries(storageGuidance))('%s directs compiler output and caches to disposable scratch, with declared durable products', (_source, prompt) => {
+    const text = prompt().replace(/\s+/g, ' ');
+    expect(text).toContain('Put compiler output and caches in $TMPDIR');
+    expect(text).toMatch(/declare durable run products in artifact_contract\.produces/i);
+    expect(text).toMatch(/copy final.*from scratch to those.*paths before finishing/);
+    expect(text).not.toContain('stages/<stage-id>/build');
+  });
+
+  it.each(Object.entries(storageGuidance))('R30 follows %s build/cache guidance and preserves declared evidence after terminal scratch retirement', async (_source, guidance) => {
     const workflow = workflowFixture();
+    // Forward each real planner storage contract as the fixture author's instructions.
+    // The deterministic author understands the current destination and the historical
+    // stage-build destination, so reverting either contract changes where it writes.
+    for (const stage of workflow.stages) stage.prompt_template = guidance();
     let runDirectory = '';
-    let predecessorBulky = '';
-    let temporaryFile = '';
+    const scratchFiles: string[] = [];
     const result = await runWorkflow(workflow, stringify(workflow), project, {
-      async run(_prompt, _role, opts) {
+      async run(prompt, _role, opts) {
         runDirectory = opts.runDir;
-        const area = workspace(opts.runDir, opts.stageId);
-        if (opts.stageId === 'done') {
-          predecessorBulky = area.bulky;
-          const evidence = join(area.directory, 'evidence');
-          mkdirSync(evidence);
-          writeFileSync(join(evidence, 'result.json'), '{"passed":true}\n');
-          writeFileSync(join(opts.runDir, 'stages', 'done', 'change.patch'), 'fixture patch\n');
-          const scratch = createInvocationScratch(opts.runDir);
-          temporaryFile = join(scratch.path, 'temporary.bin');
-          writeFileSync(temporaryFile, Buffer.alloc(1024 * 1024 + 1, 8));
-        } else {
-          expect(existsSync(predecessorBulky), 'settled work must be retired before downstream execution').toBe(false);
-          expect(existsSync(temporaryFile), 'run scratch remains available through unfinished stages').toBe(true);
-          expect(readFileSync(join(opts.runDir, 'stages/done/build/evidence/result.json'), 'utf8')).toContain('true');
+        const scratch = createInvocationScratch(opts.runDir);
+        const buildRoot = prompt.includes('stages/<stage-id>/build')
+          ? join(opts.runDir, 'stages', opts.stageId, 'build')
+          : prompt.includes('Put compiler output and caches in $TMPDIR') ? scratch.path : undefined;
+        if (!buildRoot) throw new Error('Fixture author received no compiler/cache destination.');
+        const products = opts.stageId === 'done'
+          ? ['vite/dist/assets/bundle.js', 'vite/.vite/deps/_metadata.json']
+          : ['pytest/.pytest_cache/v/cache/nodeids', 'pytest/__pycache__/test_fixture.pyc'];
+        for (const path of products) {
+          const file = join(buildRoot, path);
+          mkdirSync(join(file, '..'), { recursive: true });
+          writeFileSync(file, `${opts.stageId} disposable build/cache fixture`);
+          scratchFiles.push(file);
         }
+        if (opts.stageId === 'work') {
+          expect(scratchFiles.every(file => existsSync(file)), 'scratch remains available until all stages finish').toBe(true);
+          expect(readFileSync(join(opts.runDir, 'stages/done/evidence/result.json'), 'utf8')).toContain('true');
+        }
+        const evidence = join(opts.runDir, 'stages', opts.stageId, 'evidence');
+        mkdirSync(evidence, { recursive: true });
+        writeFileSync(join(evidence, 'result.json'), '{"passed":true}\n');
+        expect(readdirSync(join(opts.runDir, 'stages', opts.stageId)).filter(name => ['build', 'scratch'].includes(name))).toEqual([]);
         return completed(opts, `${opts.stageId} completed.`);
       },
     }, new Map(), undefined, roles);
     expect(result.status, result.failureReason).toBe('complete');
-    expect(existsSync(join(runDirectory, 'stages/work/build/corpus.bin'))).toBe(false);
+    expect(scratchFiles.every(file => !existsSync(file))).toBe(true);
     expect(existsSync(join(runDirectory, 'scratch'))).toBe(false);
-    expect(readFileSync(join(runDirectory, 'stages/done/change.patch'), 'utf8')).toBe('fixture patch\n');
-    expect(readFileSync(join(runDirectory, 'stages/done/build/evidence/result.json'), 'utf8')).toContain('true');
+    for (const stage of ['done', 'work']) {
+      expect(readFileSync(join(runDirectory, 'stages', stage, 'evidence/result.json'), 'utf8')).toContain('true');
+      expect(existsSync(join(runDirectory, 'stages', stage, 'build'))).toBe(false);
+    }
     expect(readFileSync(join(runDirectory, 'summary.md'), 'utf8')).toContain('done completed.');
     const view = readRunStateView(project, result.runId);
     expect(view.run.status).toBe('complete');
     expect(view.stages.done.attempts).toHaveLength(1);
     expect(view.stages.work.attempts).toHaveLength(1);
     expect(view.artifactContracts.map(contract => contract.stageId)).toEqual(expect.arrayContaining(['done', 'work']));
-    expect(view.prompts.legacyInputs.map(input => input.stageId)).toEqual(expect.arrayContaining(['done', 'work']));
+    expect(view.prompts.invocations.map(input => input.record?.stageId)).toEqual(expect.arrayContaining(['done', 'work']));
+    expect(view.prompts.legacyInputs).toEqual([]);
     expect(view.events.malformedRecords).toBe(0);
     const app = await startDashboard(project, 0, { listTasks: async () => [] });
     try {
@@ -113,7 +142,7 @@ describe('run retention at scheduler and continuation boundaries', () => {
     } finally { await app.close(); }
   });
 
-  it.each(['incomplete', 'stopped', 'failed'] as const)('R31 a pruned %s run resumes from stage work after invocation scratch retirement', async status => {
+  it.each(['incomplete', 'cancelled', 'failed'] as const)('R31 a %s run resumes from historical stage work after invocation scratch retirement', async status => {
     const workflow = workflowFixture();
     const bytes = stringify(workflow);
     const created = createRun(project, workflow.name, bytes, workflow.stages.map(stage => stage.id));
@@ -145,13 +174,13 @@ describe('run retention at scheduler and continuation boundaries', () => {
       state.completedAt = new Date().toISOString();
     });
     const before = readStageStatus(project, created.runId, 'done');
-    // Populate an archived work area after publication so this exercises the
-    // operator command even when terminal publication also retires work.
+    // Historical build directories are durable; pruning no longer guesses
+    // their contents or removes settled predecessor work.
     mkdirSync(predecessor.directory, { recursive: true });
     writeFileSync(predecessor.bulky, Buffer.alloc(1024 * 1024 + 1, 7));
     const plan = pruneRunWorkAreas(created.runDirPath);
-    expect(plan.removeBytes).toBeGreaterThan(1024 * 1024);
-    expect(existsSync(predecessor.bulky)).toBe(false);
+    expect(plan.removeBytes).toBe(0);
+    expect(existsSync(predecessor.bulky)).toBe(true);
     expect(existsSync(unfinished.bulky)).toBe(true);
     expect(existsSync(temporaryFile), 'terminal publication retires invocation scratch').toBe(false);
     expect(existsSync(join(created.runDirPath, 'scratch'))).toBe(false);

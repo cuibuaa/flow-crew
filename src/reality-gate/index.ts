@@ -78,7 +78,7 @@ export function parseChecksFromMarkdown(markdown: string): CheckDecl[] {
         .trim();
       return [invalidBlockDeclaration(`YAML parsing failed${message ? `: ${message}` : ''}`)];
     }
-    if (parsed && Array.isArray(parsed.checks)) return normalizeChecks(parsed.checks);
+    if (parsed && Array.isArray(parsed.checks)) return parseRealityChecks(parsed.checks);
   }
   return [];
 }
@@ -92,7 +92,9 @@ function invalidBlockDeclaration(diagnostic: string): CheckDecl {
   };
 }
 
-function normalizeChecks(checks: unknown[]): CheckDecl[] {
+/** Typed dispatch declaration; fenced Markdown remains a read alias for one release. */
+export function parseRealityChecks(checks: unknown): CheckDecl[] {
+  if (!Array.isArray(checks)) return [invalidBlockDeclaration('reality_checks must be an array')];
   return checks.map((item, index): CheckDecl => {
     const position = index + 1;
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
@@ -167,7 +169,7 @@ export async function runAllChecks(decls: CheckDecl[], context: CheckContext): P
           if (run.runId !== basename(context.taskDir) || !run.projectDir || resolve(run.projectDir) !== resolve(context.projectDir) || !run.stages) throw new Error('ARTIFACT_READ_FACTS_UNBOUND: reality reads require this run\'s settled producer facts');
           statuses = run.stages;
         }
-        const errors = [...inspectRealityHandlerReads(decl, context.projectDir, context.taskDir), ...inspectDeclaredStageReads({ artifactContract: { version: 1, produces: [], reads: decl.reads, groups: [], replays: [] }, projectDir: context.projectDir, runDir: context.taskDir, statuses })];
+        const errors = [...inspectRealityHandlerReads(decl, context.projectDir, context.taskDir), ...inspectDeclaredStageReads({ artifactContract: { version: 1, produces: [], reads: decl.reads, groups: [] }, projectDir: context.projectDir, runDir: context.taskDir, statuses })];
         if (errors.length) {
           results.push({ name: decl.name, type: decl.type, ...checkResult(false, `${errors.join('; ')}. Create each missing file or fix the named declared inputs, then rerun Reality-Gate.`), ...(decl.advisory === true ? { advisory: true } : {}) });
           continue;

@@ -115,11 +115,10 @@ describe('acceptance gate: dashboard mutation peers', () => {
     ['whole-run rerun', (runId: string) => `/api/tasks/${runId}/rerun`],
     ['stage rerun', (runId: string) => `/api/tasks/${runId}/stages/gate/rerun`],
     ['gate re-evaluation', (runId: string) => `/api/tasks/${runId}/stages/gate/reeval`],
-  ])('refuses retired %s without mutating all three busy run states', async (_name, route) => {
+  ])('refuses retired %s without mutating busy run states', async (_name, route) => {
     for (const status of [
       RUN_STATUS.RUNNING,
       RUN_STATUS.PARKED,
-      RUN_STATUS.AWAITING_APPROVAL,
     ]) {
       const runId = `blocked-${status}`;
       const runJson = writeBlockedRun(runId, status);

@@ -1,9 +1,8 @@
-import { createHash } from 'node:crypto';
+import './test-support/policy-runtime.js';
 import {
   mkdirSync,
   existsSync,
   mkdtempSync,
-  linkSync,
   realpathSync,
   readFileSync,
   readdirSync,
@@ -20,18 +19,18 @@ import { BUILD_MANIFEST_FILENAME, createBuildManifest } from '../src/build-manif
 import {
   cmdShipPreflightWithDeps,
   collectShipPreflight,
-  extractBriefInputPaths,
   type DaemonLoadedBuildProbe,
   type ShipPreflightDependencies,
 } from '../src/cli-ship-preflight.js';
 import {
-  extractBriefPathMentions,
+  extractBriefOutputDeclarations,
   extractDeclaredBriefInputPaths,
   parseBriefInputs,
+  parseDeclaredBriefInputs,
   verifyDeclaredBriefInputs,
 } from '../src/ship-inputs.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
-import { runValidationCommand, runProjectValidationBaseline, type ValidationCommandRunner } from '../src/project-validation.js';
+import { type ValidationCommandRunner } from '../src/project-validation.js';
 
 class Capture {
   value = '';
@@ -115,7 +114,7 @@ it('reports the authored workflow and refuses an impossible direct loop', async 
   expect(await cmdShipPreflightWithDeps(args, deps)).toBe(0);
   expect(output.value).toContain('Workflow without --workflow: direct (brief declares workflow: direct)');
   writeFileSync(path, brief.replace('workflow: direct', 'workflow: direct\nresearch:\n  baseline: 0.5'));
-  expect(await cmdShipPreflightWithDeps(args, deps)).toBe(2);
+  expect(await cmdShipPreflightWithDeps(args, deps)).toBe(1);
   expect(output.value).toContain('direct cannot run the research loop');
 });
 
@@ -129,148 +128,39 @@ function writeRun(id: string, state: Record<string, unknown>, mtime: number): st
   return runPath;
 }
 
-describe('live engine distribution validation boundary', () => {
-  const consumers = [{ pid: 4242, kind: 'process' as const, label: 'fixture live engine process' }];
-
-  function configureValidation(project: string): void {
-    mkdirSync(project, { recursive: true });
-    writeFileSync(join(project, 'package.json'), JSON.stringify({
+describe('ship-preflight command discovery boundary', () => {
+  it('discovers a dist-writing engine build without launching any command', async () => {
+    writeFileSync(join(fixture.packageRoot, 'package.json'), JSON.stringify({
       scripts: { build: 'node build-dist.mjs', test: 'node check.mjs', lint: 'node style.mjs' },
     }));
-    writeFileSync(join(project, 'package-lock.json'), '{}\n');
-    // The guard must stop this real dist-writing recipe before command one.
-    writeFileSync(join(project, 'build-dist.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync("dist/probe.js", "replacement engine build");\n');
-  }
-
-  it('keeps consumers visible while validating an independent Python project', async () => {
-    writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tpython3 -m compileall -q package\ntest:\n\tpython3 -m pytest tests -q\nlint:\n\tpython3 -m compileall -q tests\n');
-    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, durationMs: 1, stdout: 'fixture passed\n' }));
-    const result = await collectShipPreflight(['ship-preflight'], commonDeps({
-      findDistConsumers: () => consumers, runValidationCommand: runner,
+    writeFileSync(join(fixture.packageRoot, 'package-lock.json'), '{}\n');
+    writeFileSync(join(fixture.packageRoot, 'build-dist.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync("dist/probe.js", "replacement engine build");\n');
+    const before = readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8');
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
+    const result = await collectShipPreflight(['ship-preflight', '--project', fixture.packageRoot], commonDeps({
+      runValidationCommand: runner,
     }));
-    expect(result.report.liveDistConsumers).toEqual(consumers);
-    expect(runner).not.toHaveBeenCalled();
     expect(result.report.validationBaseline.execution).toBe('skipped');
-  });
-
-  it('keeps unrelated validation independent when the consumed dist directory is absent', async () => {
-    rmSync(join(fixture.packageRoot, 'dist'), { recursive: true });
-    writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tpython3 -m compileall -q package\ntest:\n\tpython3 -m pytest tests -q\nlint:\n\tpython3 -m compileall -q tests\n');
-    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'passed' }));
-    const result = await collectShipPreflight(['ship-preflight'], commonDeps({
-      findDistConsumers: () => consumers, runValidationCommand: runner,
-    }));
-    expect(result.report.liveDistConsumers).toEqual(consumers);
+    expect(result.report.validationBaseline.discovery.commands.map(command => command.role)).toEqual(['build', 'test', 'lint']);
     expect(runner).not.toHaveBeenCalled();
+    expect(readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8')).toBe(before);
   });
 
-  it.each(['absolute', 'relative', 'alias', 'make-cd', 'output-alias', 'quoted-shell'])(
-    'collects separate-project %s delegation facts without launching a command', async (form) => {
-      configureValidation(fixture.packageRoot);
-      let build = `npm --prefix "${fixture.packageRoot}" run build`;
-      if (form === 'quoted-shell') build = `sh -c 'npm --prefix ${fixture.packageRoot} run build'`;
-      if (form === 'relative') build = 'npm --prefix=../package run build';
-      if (form === 'alias') {
-        const alias = join(fixture.root, 'linked-engine');
-        symlinkSync(fixture.packageRoot, alias, 'dir');
-        build = `npm --prefix "${alias}" run build`;
-      }
-      if (form === 'output-alias') {
-        symlinkSync(join(fixture.packageRoot, 'dist'), join(fixture.project, 'generated'), 'dir');
-        build = 'tsc --outDir=generated/new-build';
-      }
-      if (form === 'make-cd') {
-        writeFileSync(join(fixture.project, 'Makefile'), 'build:\n\tcd ../package && npm run build\ntest:\n\tpython3 -m pytest tests -q\nlint:\n\tpython3 -m compileall -q tests\n');
-      } else {
-        writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
-          scripts: { build, test: 'node check.mjs', lint: 'node style.mjs' },
-        }));
-        writeFileSync(join(fixture.project, 'package-lock.json'), '{}\n');
-      }
-      const before = readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8');
-      const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
-      const stderr = new Capture();
-      const deps = commonDeps({
-        findDistConsumers: () => consumers, runValidationCommand: runner,
-        stdout: new Capture().writer, stderr: stderr.writer,
-      });
-      expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
-      expect(stderr.value).toContain('No project command was launched');
-      expect(runner).not.toHaveBeenCalled();
-      expect(readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8')).toBe(before);
-      expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
-      expect(runner).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(['own', 'ancestor', 'nested', 'project-alias', 'package-alias', 'dist-alias', 'unknown-project', 'unknown-package'])(
-    'collects %s identity with live consumers without invoking a dist-writing build', async (relation) => {
-      configureValidation(fixture.packageRoot);
-      let project = fixture.packageRoot;
-      let packageRoot = fixture.packageRoot;
-      if (relation === 'ancestor') project = fixture.root;
-      if (relation === 'nested') project = join(fixture.packageRoot, 'nested-project');
-      if (relation === 'project-alias') {
-        project = join(fixture.root, 'linked-engine');
-        symlinkSync(fixture.packageRoot, project, 'dir');
-      }
-      if (relation === 'package-alias') {
-        packageRoot = join(fixture.root, 'linked-package');
-        symlinkSync(fixture.packageRoot, packageRoot, 'dir');
-      }
-      if (relation === 'dist-alias') {
-        project = fixture.project;
-        symlinkSync(join(fixture.packageRoot, 'dist'), join(project, 'dist'), 'dir');
-      }
-      if (relation === 'unknown-project' || relation === 'unknown-package') project = fixture.project;
-      if (relation !== 'own' && relation !== 'project-alias' && relation !== 'package-alias') configureValidation(project);
-      const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
-      const stderr = new Capture();
-      const realpath = (path: string): string => {
-        if ((relation === 'unknown-project' && path === resolve(project))
-          || (relation === 'unknown-package' && path === resolve(packageRoot))) throw new Error('identity unavailable');
-        return realpathSync.native(path);
-      };
-      const code = await cmdShipPreflightWithDeps(['ship-preflight', '--project', project], commonDeps({
-        packageRoot, realpath, findDistConsumers: () => consumers, runValidationCommand: runner,
-        stdout: new Capture().writer, stderr: stderr.writer,
-      }));
-      expect(code).toBe(0);
-      expect(runner).not.toHaveBeenCalled();
-      expect(stderr.value).toContain('No project command was launched');
-    },
-  );
-
-  it('collects an independent target shared by a verified live run without executing validation', async () => {
-    configureValidation(fixture.project);
+  it('reports a target shared by a verified live run without executing validation', async () => {
+    writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
+      scripts: { build: 'compile', test: 'check', lint: 'lint' },
+    }));
     writeRun('live-target', { projectDir: fixture.project, status: 'running' }, 3_000);
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));
     const stderr = new Capture();
     const deps = commonDeps({
-      inspectLiveRun: () => true, findDistConsumers: () => consumers, runValidationCommand: runner,
+      inspectLiveRun: () => true, runValidationCommand: runner,
       stdout: new Capture().writer, stderr: stderr.writer,
     });
     expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
     expect(stderr.value).toContain('live FlowCrew run(s): live-target');
-    expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
     expect(runner).not.toHaveBeenCalled();
   });
-
-  it('does not prepare command confinement when collecting facts', async () => {
-    configureValidation(fixture.project);
-    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0 }));
-    const stderr = new Capture();
-    const deps = commonDeps({
-      findDistConsumers: () => consumers, runValidationCommand: runner,
-      stdout: new Capture().writer, stderr: stderr.writer,
-    });
-    expect(await cmdShipPreflightWithDeps(['ship-preflight'], deps)).toBe(0);
-    expect(stderr.value).toContain('No project command was launched');
-    expect(runner).not.toHaveBeenCalled();
-    expect(await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], deps)).toBe(0);
-    expect(runner).not.toHaveBeenCalled();
-  });
-
 });
 
 describe('ship-preflight previous-run fact', () => {
@@ -385,7 +275,7 @@ describe('ship-preflight campaign hygiene fact', () => {
       { seq: 2, runId: 'one', kind: 'task_ended', status: 'failed', pass: false, timestamp: 'b' },
       { seq: 3, runId: 'two', kind: 'task_ended', status: 'complete', pass: true, timestamp: 'c' },
       { seq: 4, runId: 'three', kind: 'task_ended', status: 'ceiling_hit', pass: true, timestamp: 'd' },
-      { seq: 5, runId: 'four', kind: 'task_ended', status: 'stopped', pass: false, timestamp: 'e' },
+      { seq: 5, runId: 'four', kind: 'task_ended', status: 'cancelled', pass: false, timestamp: 'e' },
     ]);
 
     const result = await collectShipPreflight(
@@ -520,18 +410,19 @@ describe('ship-preflight validation baseline fact', () => {
 });
 
 describe('ship-preflight declared brief inputs fact', () => {
-  it('surfaces a nonempty declared output as blocking with its observed size', async () => {
+  it('blocks a nonempty declared output even when the body also reads it as context', async () => {
     mkdirSync(join(fixture.project, 'docs'), { recursive: true });
     writeFileSync(join(fixture.project, 'docs', 'research-result.json'), 'x'.repeat(286 * 1024));
     writeFileSync(join(fixture.project, 'brief.md'), [
       '---',
       'research:',
       '  baseline: 0',
-      '  policy: best_of_n',
+      '  policy: greedy_stack',
       '  result_file: docs/research-result.json',
       '---',
       '# Goal',
       'Measure a result.',
+      'Read `docs/research-result.json` as context before producing the result.',
     ].join('\n'), 'utf-8');
 
     const result = await collectShipPreflight(
@@ -581,40 +472,25 @@ describe('ship-preflight declared brief inputs fact', () => {
     expect(existsSync(path)).toBe(false);
   });
 
-  it('keeps leading declarations distinct from neutral path mentions', () => {
+  it('takes input and output roles only from declarations, including paths read in the body', () => {
     const brief = [
       '---',
-      'inputs:',
-      '  - ignored/declared.csv',
+      'inputs: [data/source.csv]',
+      'outputs:',
+      '  - docs/report.md',
+      '  - data/source.csv',
       '---',
-      '# Constraints',
-      '| path | role |',
-      '| --- | --- |',
-      '| `ignored/declared.csv` | source |',
-      '| `ignored/only-mentioned.csv` | source |',
-      'Do not read `ignored/excluded.csv`.',
-      '# Outputs',
-      '- Write `ignored/generated.csv`.',
+      '# Inputs',
+      'Read `docs/report.md` as context before writing the report.',
+      'Read `data/prose-only.csv`; it has 3 rows.',
+      'The historical table lists `data/only-mentioned.csv` as a source.',
     ].join('\n');
 
-    expect(extractDeclaredBriefInputPaths(brief)).toEqual(['ignored/declared.csv']);
-    expect(extractBriefPathMentions(brief).map((mention) => mention.path)).toEqual([
-      'ignored/declared.csv',
-      'ignored/only-mentioned.csv',
-    ]);
-  });
-
-  it('does not report escaped patterns or acronym pairs as prose paths', () => {
-    const brief = [
-      '# Pattern examples',
-      String.raw`\`input\.md\` and \`scheduler\.ts\` are regex fragments.`,
-      'V1389 CPI/FOMC is a corpus label.',
-      'The old warnings were `input/.md` and `scheduler/.ts`.',
-      'The literal input is `docs/report.md`.',
-    ].join('\n');
-
-    expect(extractBriefPathMentions(brief).map((mention) => mention.path)).toEqual([
-      'docs/report.md',
+    expect(extractDeclaredBriefInputPaths(brief)).toEqual(['data/source.csv']);
+    expect(parseDeclaredBriefInputs(brief).references.map(reference => reference.path)).toEqual(['data/source.csv']);
+    expect(extractBriefOutputDeclarations(brief)).toEqual([
+      expect.objectContaining({ path: 'docs/report.md', disposition: 'create' }),
+      expect.objectContaining({ path: 'data/source.csv', disposition: 'input' }),
     ]);
   });
 
@@ -640,7 +516,7 @@ describe('ship-preflight declared brief inputs fact', () => {
     expect(verification.unresolvedInputs).toEqual([
       expect.objectContaining({ value: '../outside-cache', line: 4, reason: expect.stringContaining('project-relative') }),
     ]);
-    expect(extractBriefInputPaths('# Background\nThe scheduler and generator remain ordinary nouns.')).toEqual([]);
+    expect(parseDeclaredBriefInputs('# Background\nThe scheduler and generator remain ordinary nouns.').references.map(reference => reference.path)).toEqual([]);
 
     writeFileSync(join(fixture.project, 'brief.md'), brief, 'utf-8');
     const stdout = new Capture();
@@ -691,71 +567,6 @@ describe('ship-preflight declared brief inputs fact', () => {
     expect(malformed.unresolvedInputs).toContainEqual(expect.objectContaining({
       value: '[unterminated', line: 3, reason: expect.stringContaining('YAML'),
     }));
-  });
-
-  it('rejects a numeric fraction while accepting a genuinely path-shaped numeric fixture', () => {
-    const inputs = extractBriefInputPaths([
-      '# Evidence',
-      'The suite passed 103/103 checks.',
-      'Read `fixtures/103/103.json` as the comparison input.',
-    ].join('\n'));
-
-    expect(inputs).not.toContain('103/103');
-    expect(inputs).toContain('fixtures/103/103.json');
-  });
-
-  it('ignores neutral bare sibling filenames but accepts an explicit root-level read directive', () => {
-    const neutral = extractBriefInputPaths([
-      '# Background',
-      'The generator has cost_model.py, metrics.py, delisting.py, and `package.json` siblings.',
-    ].join('\n'));
-    const explicit = extractBriefInputPaths([
-      '# Preparation',
-      'Read package.json before establishing the baseline.',
-    ].join('\n'));
-
-    expect(neutral).toEqual([]);
-    expect(explicit).toEqual(['package.json']);
-  });
-
-  it('binds paths to nearby input roles without promoting conceptual prose or rejected code spans', () => {
-    const neutral = extractBriefInputPaths([
-      'The report covers daemon/build freshness and whether declared inputs resolve.',
-      'Declared outputs are not inputs: `docs/<x>/conclusion.md` is what the run will write.',
-      'The command is dispatched from `src/cli.ts` following the existing pattern.',
-      'Tests in `spec/`, fixtures under a temporary directory, use injected processes.',
-    ].join('\n'));
-    const explicit = extractBriefInputPaths([
-      'Read package.json before establishing the baseline.',
-      '`fixtures/reference.csv` is required.',
-    ].join('\n'));
-
-    expect(neutral).toEqual([]);
-    expect(explicit).toEqual(['fixtures/reference.csv', 'package.json']);
-  });
-
-  it('extracts an unquoted root-level input without treating an unquoted output as input', () => {
-    const inputs = extractBriefInputPaths([
-      '# Inputs',
-      'Read package.json before making changes.',
-      'Write generated.json after the checks pass.',
-    ].join('\n'));
-
-    expect(inputs).toContain('package.json');
-    expect(inputs).not.toContain('generated.json');
-  });
-
-  it('classifies input and output paths independently when one sentence declares both', () => {
-    const inputs = extractBriefInputPaths([
-      '# Inputs and deliverable',
-      '- Read `data/input.arrow` and write `docs/report.md`.',
-      '# Notes',
-      '- `fixtures/generated-output.csv` is required.',
-    ].join('\n'));
-
-    expect(inputs).toContain('data/input.arrow');
-    expect(inputs).toContain('fixtures/generated-output.csv');
-    expect(inputs).not.toContain('docs/report.md');
   });
 
   it('reports readable, unreadable, and missing inputs while excluding outputs, globs, and escapes', async () => {
@@ -828,101 +639,4 @@ describe('ship-preflight declared brief inputs fact', () => {
     expect(missingError.value).toContain('Cannot read requested brief');
   });
 
-  it('confirms and refutes row-count, time-span, and sha256 assertions against file contents', () => {
-    mkdirSync(join(fixture.project, 'data'), { recursive: true });
-    const path = join(fixture.project, 'data', 'prices.csv');
-    const content = 'timestamp,price\n2022-01-01,10\n2022-01-03,12\n';
-    writeFileSync(path, content, 'utf-8');
-    const digest = createHash('sha256').update(content).digest('hex');
-
-    const confirmed = verifyDeclaredBriefInputs(
-      `---\ninputs: [data/prices.csv]\n---\n# Inputs\nRead \`data/prices.csv\`; it has 2 rows, spans 2022-01-01 .. 2022-01-03, sha256: ${digest}.`,
-      fixture.project,
-    ).inputs[0];
-    expect(confirmed.assertions.map(({ kind, state }) => ({ kind, state }))).toEqual([
-      { kind: 'row_count', state: 'confirmed' },
-      { kind: 'time_span', state: 'confirmed' },
-      { kind: 'sha256', state: 'confirmed' },
-    ]);
-
-    const refuted = verifyDeclaredBriefInputs(
-      `---\ninputs: [data/prices.csv]\n---\n# Inputs\nRead \`data/prices.csv\`; it has 3 rows, spans 2022-01-02 .. 2022-01-04, sha256: ${'0'.repeat(64)}.`,
-      fixture.project,
-    ).inputs[0];
-    expect(refuted.assertions.every((assertion) => assertion.state === 'refuted')).toBe(true);
-    expect(refuted.assertions.map((assertion) => assertion.observed)).toEqual([
-      2,
-      { start: '2022-01-01', end: '2022-01-03' },
-      digest,
-    ]);
-  });
-
-  it('binds structured input-manifest assertions without treating terminal paths as inputs', () => {
-    mkdirSync(join(fixture.project, 'data'), { recursive: true });
-    const content = 'id,value\n1,a\n2,b\n';
-    writeFileSync(join(fixture.project, 'data', 'manifest.csv'), content, 'utf-8');
-    const digest = createHash('sha256').update(content).digest('hex');
-    const verification = verifyDeclaredBriefInputs([
-      '---',
-      'inputs:',
-      '  - path: data/manifest.csv',
-      '    rows: 2',
-      `    sha256: ${digest}`,
-      'terminal_states:',
-      '  complete:',
-      '    paths: [docs/result.md]',
-      '---',
-      '# Goal',
-      'Use the frozen manifest.',
-    ].join('\n'), fixture.project);
-
-    expect(verification.inputs).toHaveLength(1);
-    expect(verification.inputs[0].path).toBe('data/manifest.csv');
-    expect(verification.inputs[0].assertions.map((assertion) => assertion.state)).toEqual([
-      'confirmed', 'confirmed',
-    ]);
-    expect(verification.inputs.map((input) => input.path)).not.toContain('docs/result.md');
-  });
-
-  it('confirms and refutes recursive file counts and labels ambiguous spans not checkable', () => {
-    mkdirSync(join(fixture.project, 'archive', 'nested'), { recursive: true });
-    writeFileSync(join(fixture.project, 'archive', 'one.txt'), 'one', 'utf-8');
-    writeFileSync(join(fixture.project, 'archive', 'nested', 'two.txt'), 'two', 'utf-8');
-    const confirmed = verifyDeclaredBriefInputs(
-      '---\ninputs: [archive/]\n---\n# Inputs\nConsume `archive/`; it contains 2 files.',
-      fixture.project,
-    ).inputs[0].assertions[0];
-    const refuted = verifyDeclaredBriefInputs(
-      '---\ninputs: [archive/]\n---\n# Inputs\nConsume `archive/`; it contains 3 files.',
-      fixture.project,
-    ).inputs[0].assertions[0];
-    expect(confirmed).toMatchObject({ kind: 'file_count', state: 'confirmed', observed: 2 });
-    expect(refuted).toMatchObject({ kind: 'file_count', state: 'refuted', observed: 2 });
-
-    writeFileSync(
-      join(fixture.project, 'ambiguous.csv'),
-      'start_date,end_date\n2022-01-01,2022-01-02\n',
-      'utf-8',
-    );
-    const ambiguous = verifyDeclaredBriefInputs(
-      '---\ninputs: [ambiguous.csv]\n---\n# Inputs\nRead `ambiguous.csv`; it spans 2022-01-01 .. 2022-01-02.',
-      fixture.project,
-    ).inputs[0].assertions[0];
-    expect(ambiguous).toMatchObject({
-      kind: 'time_span',
-      state: 'not_checkable',
-      reason: expect.stringContaining('unambiguous'),
-    });
-
-    const unbound = verifyDeclaredBriefInputs(
-      '---\ninputs:\n  - paths: [first.csv, second.csv]\n    rows: 2\n---',
-      fixture.project,
-    );
-    expect(unbound.inputs.every((input) => input.assertions.length === 0)).toBe(true);
-    expect(unbound.unboundAssertions).toContainEqual(expect.objectContaining({
-      kind: 'row_count',
-      state: 'not_checkable',
-      reason: expect.stringContaining('2 inputs'),
-    }));
-  });
 });

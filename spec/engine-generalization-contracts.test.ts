@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { firstImmutableEvidenceConflict } from '../src/scheduler/sched_scope/path-capabilities.js';
 import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
 import {
   mkdirSync,
@@ -9,27 +11,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  applyFrameworkScopeReservations,
-  assessResearchIterationBudget,
-  checkGates,
-  decideScopeRevision,
-  deriveCriterionDischarges,
-  inspectDispatchAdmission,
-  findAllRetryToStages,
-  parseBriefFrontmatter,
-  parseDispatchedStageConfig,
-  resolveDeclaredInputWriteBindings,
-  scopeContainsPath,
-  StageConfigSchema,
-  normalizeStageContracts,
-  type StageConfig,
-} from '../src/scheduler.js';
-import { scopePathDigest, type ScopeRevisionRequestV1 } from '../src/runtime-negotiation.js';
+import { assessResearchIterationBudget, checkGates, deriveCriterionDischarges, inspectDispatchAdmission, findAllRetryToStages, parseBriefFrontmatter, parseDispatchedStageConfig, resolveImmutableEvidenceBindings, scopeContainsPath, StageConfigSchema, normalizeStageContracts, type StageConfig } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
   STAGE_STATUS,
   fcGlobalDir,
-  createRun,
   updateRunState,
   runDir,
   setFcGlobalDir,
@@ -103,8 +89,8 @@ describe('engine generalization binding contracts', () => {
     expect(admission(stages).pass).toBe(true);
     expect(findAllRetryToStages(stages, ['review'])).toEqual([repair]);
     expect(findAllRetryToStages(stages, ['accepted'])).toEqual([repairAccepted]);
-    expect(admission([review, accepted, { ...repair, depends_on: ['accepted'] }, repairAccepted]).errors.join(';')).toContain('missing retry gate review');
-    expect(admission([stage({ id: 'work' }), { ...repair, depends_on: ['work'], retry_to: ['work'] }]).errors.join(';')).toContain('work is not declared is_gate: true');
+    expect(admission([review, accepted, { ...repair, depends_on: ['accepted'] }, repairAccepted]).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('missing retry gate review');
+    expect(admission([stage({ id: 'work' }), { ...repair, depends_on: ['work'], retry_to: ['work'] }]).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('work is not declared is_gate: true');
   });
 
   it('keeps terminal production with an ordinary finalizer rather than a gate or repair', () => {
@@ -114,7 +100,7 @@ describe('engine generalization binding contracts', () => {
     const finish = stage({ id: 'finish', scope: ['docs/final.md'], depends_on: ['work', 'review'] });
     const terminalStates = { complete: { paths: ['docs/final.md'] } };
     const ordinary = admission([work, review, repair, finish], { terminalStates });
-    expect(ordinary.pass, ordinary.errors.join(';')).toBe(true);
+    expect(ordinary.pass, ordinary.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toBe(true);
     expect(ordinary.terminalOwners).toEqual({ 'docs/final.md': 'finish' });
     for (const owner of [
       stage({ ...finish, role: 'qa', is_gate: true }),
@@ -122,12 +108,12 @@ describe('engine generalization binding contracts', () => {
     ]) {
       const rejected = admission([work, review, repair, owner], { terminalStates });
       expect(rejected.pass).toBe(false);
-      expect(rejected.errors.join(';')).toContain('expected exactly one final producer, found 0');
+      expect(rejected.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('expected exactly one final producer, found 0');
     }
   });
 
   it('derives canonical gate production for static, dynamic and retry-promoted gates while requiring the published verdict', () => {
-    const empty = { version: 1, produces: [], reads: [], groups: [], replays: [] };
+    const empty = { version: 1, produces: [], reads: [], groups: [] };
     const dynamic = parseDispatchedStageConfig({ id: 'audit', role: 'qa', is_gate: true, artifact_contract: empty });
     const omitted = parseDispatchedStageConfig({ id: 'audit', role: 'qa', is_gate: true });
     const configured = normalizeStageContracts([StageConfigSchema.parse({ id: 'audit', role: 'qa', is_gate: true, artifact_contract: empty })])[0];
@@ -155,71 +141,10 @@ describe('engine generalization binding contracts', () => {
     expect(observed.observations).toEqual([expect.objectContaining({ path: join(runDir, 'verdict_audit.json'), fresh: true, bytes: 13 })]);
   });
 
-  it('allows a declared output to acquire prospective scope while keeping writes closed and output settlement required', () => {
-    const root = temporaryRoot(), projectDir = join(root, 'project'); mkdirSync(projectDir); setFcGlobalDir(join(root, 'store'));
-    const plan = stage({ id: 'plan', role: 'planner', dynamic_dispatch: true });
-    const writer = stage({ id: 'writer', scope: ['src/work.ts'], artifact_contract: artifacts([{ id: 'result', root: 'project', path: 'docs/result.md' }]) });
-    const created = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['plan', 'writer']);
-    const directory = created.runDirPath;
-    writeFileSync(join(directory, 'task_brief.md'), '# Work\nProduce the declared report.\n');
-    expect(admission([writer], { baseStages: [plan], projectDir, runDir: directory }).pass).toBe(true);
-    expect(scopeContainsPath(writer.scope, 'docs/result.md', projectDir, [])).toBe(false);
-    expect(inspectStageArtifactContract({ stageId: writer.id, template: '', artifactContract: writer.artifact_contract, projectDir, runDir: directory }).violations[0]?.reason).toContain('ARTIFACT_OUTPUT_ABSENT');
-    updateRunState(projectDir, created.runId, (state) => {
-      state.dispatchedStages = [writer];
-      state.stages.writer = { status: STAGE_STATUS.RUNNING, retries: 0 };
-      recordAdmittedPlan(state, [plan, writer], directory, 'Prospective output fixture', true);
-    });
-    const requestedPaths = ['docs/result.md'];
-    const decision = decideScopeRevision({
-      request: { version: 1, kind: 'scope_revision', requestId: 'output', runId: created.runId, stageId: writer.id, attemptIndex: 1, requestedBy: 'stage', requestedPaths, pathDigest: scopePathDigest(requestedPaths), reason: 'Acquire the report path before production.' },
-      stage: writer, priorScope: writer.scope, activePeers: [], projectDir, runId: created.runId, attemptIndex: 1,
-    });
-    expect(decision, decision.rejectionReason).toMatchObject({ accepted: true, effectiveScope: ['src/work.ts', 'docs/result.md'] });
-    expect(scopeContainsPath(decision.effectiveScope, 'docs/result.md', projectDir, [])).toBe(true);
-  });
-
-  it('1 — reserves the framework research manifest at every stage binding while retaining outcome producers', () => {
+  it('keeps framework research provenance separate from planner path estimates', () => {
     const research = researchConfig();
-    const ordinary = admission([
-      stage({ id: 'ordinary', scope: ['artifacts/run_manifest.json'] }),
-    ], { research });
-    const nonSubtractable = admission([
-      stage({ id: 'broad_writer', scope: ['artifacts/'] }),
-    ], { research });
-    const terminal = admission([
-      stage({
-        id: 'finish',
-        scope: ['docs/final.md', 'artifacts/run_manifest.json'],
-        condition: 'research.terminalPath == "docs/final.md"',
-      }),
-    ], {
-      research,
-      terminalStates: { complete: { paths: ['docs/final.md'] } },
-    });
-    const resultProducer = admission([
-      stage({ id: 'measure', scope: ['artifacts/round.json', 'artifacts/round.json.no_candidate.json'] }),
-    ], { research });
-    const unrelated = admission([
-      stage({ id: 'write_report', scope: ['docs/report.md'] }),
-    ], { research });
-
-    expect(ordinary.pass).toBe(true);
-    expect(ordinary.frameworkReservedScopes).toEqual({
-      ordinary: ['artifacts/run_manifest.json'],
-    });
-    const effectiveOrdinary = stage({ id: 'ordinary', scope: ['artifacts/run_manifest.json'] });
-    applyFrameworkScopeReservations([effectiveOrdinary], ordinary.frameworkReservedScopes);
-    expect(effectiveOrdinary.scope).toEqual([]);
-    expect(nonSubtractable.pass).toBe(false);
-    expect(nonSubtractable.errors.join('\n')).toContain('contains framework-owned research manifest');
-    expect(terminal.pass, terminal.errors.join('\n')).toBe(true);
-    expect(terminal.frameworkReservedScopes).toEqual({ finish: ['artifacts/run_manifest.json'] });
-    const effectiveTerminal = stage({ id: 'finish', scope: ['docs/final.md', 'artifacts/run_manifest.json'] });
-    applyFrameworkScopeReservations([effectiveTerminal], terminal.frameworkReservedScopes);
-    expect(effectiveTerminal.scope).toEqual(['docs/final.md']);
-    expect(resultProducer.pass, resultProducer.errors.join('\n')).toBe(true);
-    expect(unrelated.pass, unrelated.errors.join('\n')).toBe(true);
+    const report = admission([stage({ id: 'writer', scope: ['artifacts/**'] })], { research });
+    expect(report.pass, report.errors.map(error => typeof error === 'string' ? error : error.message).join('; ')).toBe(true);
   });
 
   it('3 — compares and reports rounds, wall capacity, and every attempt deadline in explicit units', () => {
@@ -262,7 +187,7 @@ describe('engine generalization binding contracts', () => {
     mkdirSync(taskRunDir, { recursive: true });
     const criterionId = 'criterion_fixture';
     const work = stage({ id: 'work', criterion_refs: [criterionId] });
-    const gate = stage({ artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []),
+    const gate = stage({ artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []),
       id: 'qa', role: 'qa', is_gate: true, criterion_refs: [criterionId],
       depends_on: ['work'], dependency_reasons: { work: 'Judges the completed work.' },
     });
@@ -294,9 +219,9 @@ describe('engine generalization binding contracts', () => {
       criterionGateRefs: { qa: [criterionId] },
     })}\n`);
 
-    expect(admitted.pass, admitted.errors.join('\n')).toBe(true);
-    expect(noWorker.pass, noWorker.errors.join('\n')).toBe(true);
-    expect(noGate.errors.join('\n')).toContain('not assigned to a gate');
+    expect(admitted.pass, admitted.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
+    expect(noWorker.pass, noWorker.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
+    expect(noGate.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('not assigned to a gate');
     expect(checkGates([work, gate], state, projectDir, state.runId)).toEqual({
       allPass: false,
       failedGateIds: ['qa'],
@@ -344,109 +269,10 @@ describe('engine generalization binding contracts', () => {
     });
 
     expect(incomplete.pass).toBe(false);
-    expect(incomplete.errors.join('\n')).toContain('do not cover ordinary quiescence (work.status=complete)');
-    expect(covering.pass, covering.errors.join('\n')).toBe(true);
+    expect(incomplete.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('do not cover ordinary quiescence (work.status=complete)');
+    expect(covering.pass, covering.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
     expect(impossible.pass).toBe(false);
-    expect(impossible.errors.join('\n')).toContain('status literal "invented" cannot occur');
-  });
-
-  it('11 — intersects exact, tree, glob, alias, and revised write capabilities with declared inputs', () => {
-    const root = temporaryRoot();
-    const projectDir = join(root, 'project');
-    const frozenDir = join(root, 'frozen-recordings');
-    mkdirSync(projectDir, { recursive: true });
-    mkdirSync(frozenDir, { recursive: true });
-    writeFileSync(join(frozenDir, 'real.csv'), 'recorded\n');
-    symlinkSync(frozenDir, join(projectDir, 'recordings'));
-    symlinkSync(frozenDir, join(projectDir, 'alias'));
-    const brief = [
-      '---',
-      'inputs:',
-      '  - recordings/real.csv',
-      '---',
-      '# Frozen input fixture',
-    ].join('\n');
-    const declaredInputs = resolveDeclaredInputWriteBindings(projectDir, brief);
-    const inspect = (scope: string) => admission([
-      stage({ id: 'writer', scope: [scope] }),
-    ], { declaredInputs, projectDir });
-
-    for (const scope of ['recordings/real.csv', 'recordings/', 'recordings/**', 'alias/real.csv']) {
-      const report = inspect(scope);
-      expect(report.pass, `${scope}: ${report.errors.join('\n')}`).toBe(true);
-      expect(scopeContainsPath([scope], 'recordings/real.csv', projectDir, declaredInputs)).toBe(false);
-      expect(scopeContainsPath([scope], 'alias/real.csv', projectDir, declaredInputs)).toBe(false);
-    }
-    expect(inspect('artifacts/result.json').pass).toBe(true);
-    expect(inspect('*.ts').pass).toBe(true);
-    expect(admission([stage({ id: 'reader', scope: [] })], { declaredInputs, projectDir }).pass).toBe(true);
-
-    const declaredTree = resolveDeclaredInputWriteBindings(projectDir, [
-      '---',
-      'inputs:',
-      '  - recordings',
-      '---',
-      '# Frozen input tree fixture',
-    ].join('\n'));
-    const manufacturedChild = admission([
-      stage({ id: 'tree_writer', scope: ['recordings/manufactured.csv'] }),
-    ], { declaredInputs: declaredTree, projectDir });
-    expect(declaredTree).toEqual([expect.objectContaining({ path: 'recordings', kind: 'tree' })]);
-    expect(manufacturedChild.pass).toBe(true);
-    expect(scopeContainsPath(['recordings/**'], 'recordings/manufactured.csv', projectDir, declaredTree)).toBe(false);
-
-    const stateRoot = join(root, 'state');
-    setFcGlobalDir(stateRoot);
-    const runId = 'scope-fixture';
-    const taskRunDir = runDir(projectDir, runId);
-    mkdirSync(taskRunDir, { recursive: true });
-    writeFileSync(join(taskRunDir, 'task_brief.md'), brief);
-    const state: StoreState = {
-      runId,
-      workflowName: 'research',
-      projectDir,
-      status: 'running',
-      research: researchConfig(),
-      stages: { writer: { status: STAGE_STATUS.RUNNING, retries: 0 } },
-      startedAt: new Date(0).toISOString(),
-    };
-    writeFileSync(join(taskRunDir, 'run.json'), `${JSON.stringify(state)}\n`);
-    const writer = stage({ id: 'writer', scope: [] });
-    const revise = (requestedPath: string, requestId: string) => {
-      const request: ScopeRevisionRequestV1 = {
-        version: 1,
-        kind: 'scope_revision',
-        requestId,
-        runId,
-        stageId: writer.id,
-        attemptIndex: 1,
-        requestedBy: 'stage',
-        requestedPaths: [requestedPath],
-        pathDigest: scopePathDigest([requestedPath]),
-        reason: 'Exercise the bounded scope-revision contract.',
-      };
-      return decideScopeRevision({
-        request,
-        stage: writer,
-        priorScope: [],
-        activePeers: [],
-        projectDir,
-        runId,
-        attemptIndex: 1,
-      });
-    };
-
-    const revisedInput = revise('recordings/**', 'input-overlap');
-    const revisedAlias = revise('alias/real.csv', 'alias-overlap');
-    const revisedManifest = revise('artifacts/run_manifest.json', 'manifest-overlap');
-    const revisedOutput = revise('artifacts/result.json', 'disjoint-output');
-    expect(revisedInput).toMatchObject({ accepted: false, decision: 'rejected' });
-    expect(revisedInput.rejectionReason).toContain('declared read-only input');
-    expect(revisedAlias).toMatchObject({ accepted: false, decision: 'rejected' });
-    expect(revisedAlias.rejectionReason).toContain('resolved_identity');
-    expect(revisedManifest).toMatchObject({ accepted: false, decision: 'rejected' });
-    expect(revisedManifest.rejectionReason).toContain('framework-owned research manifest');
-    expect(revisedOutput).toMatchObject({ accepted: true, decision: 'accepted' });
+    expect(impossible.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('status literal "invented" cannot occur');
   });
 
   it('authorizes only declared output leaves and trees inside a preserved input, including aliases', () => {
@@ -454,25 +280,25 @@ describe('engine generalization binding contracts', () => {
     mkdirSync(join(projectDir, 'fixtures', 'source'), { recursive: true });
     writeFileSync(join(projectDir, 'fixtures', 'source', 'evidence.txt'), 'preserved evidence\n');
     symlinkSync('fixtures/source', join(projectDir, 'alias'));
-    const declaredInputs = resolveDeclaredInputWriteBindings(projectDir, [
-      '---', 'inputs: [fixtures/source]', 'outputs:',
+    const declaredInputs = resolveImmutableEvidenceBindings(projectDir, [
+      '---', 'inputs: [{path: fixtures/source, frozen: true}]', 'outputs:',
       '  - path: fixtures/source/report.md',
       '  - path: fixtures/source/generated', '    type: directory',
-      '---', '# Goal', 'Produce the declared report and generated tree.',
+      '---', '# Goal', 'Keep `fixtures/source` frozen. Produce the declared report and generated tree.',
     ].join('\n'));
     for (const scope of ['fixtures/source/report.md', 'fixtures/source/', 'fixtures/source/**', '**']) {
-      expect(scopeContainsPath([scope], 'fixtures/source/report.md', projectDir, declaredInputs), scope).toBe(true);
+      expect(!firstImmutableEvidenceConflict(['fixtures/source/report.md'], declaredInputs, projectDir), scope).toBe(true);
     }
     for (const path of ['fixtures/source/generated/round/result.json', 'alias/generated/index.json']) {
-      expect(scopeContainsPath(['**'], path, projectDir, declaredInputs), path).toBe(true);
+      expect(!firstImmutableEvidenceConflict([path], declaredInputs, projectDir), path).toBe(true);
     }
-    expect(scopeContainsPath(['alias/**'], 'alias/report.md', projectDir, declaredInputs)).toBe(true);
+    expect(!firstImmutableEvidenceConflict(['alias/report.md'], declaredInputs, projectDir)).toBe(true);
     for (const path of ['fixtures/source/evidence.txt', 'fixtures/source/undeclared.md',
       'alias/evidence.txt', 'alias/report.md/child.txt', 'fixtures/source/generated-peer/new.json']) {
-      expect(scopeContainsPath(['**'], path, projectDir, declaredInputs), path).toBe(false);
+      expect(!firstImmutableEvidenceConflict([path], declaredInputs, projectDir), path).toBe(false);
     }
     expect(scopeContainsPath([], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(false);
-    expect(scopeContainsPath(['fixtures/other/**'], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(false);
+    expect(scopeContainsPath(['fixtures/other/**'], 'fixtures/source/report.md')).toBe(false);
   });
 
   it('keeps an output directory alias from authorizing preserved siblings outside its canonical tree', () => {
@@ -481,15 +307,15 @@ describe('engine generalization binding contracts', () => {
     mkdirSync(join(projectDir, 'fixtures', 'source', 'evidence'), { recursive: true });
     writeFileSync(join(projectDir, 'fixtures', 'source', 'evidence', 'keep.txt'), 'preserved evidence\n');
     symlinkSync('../evidence', join(projectDir, 'fixtures', 'source', 'generated', 'alias'));
-    const declaredInputs = resolveDeclaredInputWriteBindings(projectDir, [
-      '---', 'inputs: [fixtures/source]', 'outputs:',
+    const declaredInputs = resolveImmutableEvidenceBindings(projectDir, [
+      '---', 'inputs: [{path: fixtures/source, frozen: true}]', 'outputs:',
       '  - path: fixtures/source/generated', '    type: directory',
-      '---', '# Goal', 'Produce the declared generated tree.',
+      '---', '# Goal', 'Keep `fixtures/source` frozen. Produce the declared generated tree.',
     ].join('\n'));
 
-    expect(scopeContainsPath(['**'], 'fixtures/source/generated/result.json', projectDir, declaredInputs)).toBe(true);
+    expect(!firstImmutableEvidenceConflict(['fixtures/source/generated/result.json'], declaredInputs, projectDir)).toBe(true);
     for (const path of ['fixtures/source/evidence/keep.txt', 'fixtures/source/generated/alias/keep.txt']) {
-      expect(scopeContainsPath(['**'], path, projectDir, declaredInputs), path).toBe(false);
+      expect(!firstImmutableEvidenceConflict([path], declaredInputs, projectDir), path).toBe(false);
     }
   });
 
@@ -500,21 +326,21 @@ describe('engine generalization binding contracts', () => {
     writeFileSync(join(source, 'prior.md'), 'previous output\n');
     writeFileSync(join(source, 'evidence.md'), 'preserved evidence\n');
     symlinkSync('prior.md', join(source, 'report.md'));
-    const declaredInputs = resolveDeclaredInputWriteBindings(projectDir, [
-      '---', 'inputs: [fixtures/source]', 'outputs:',
+    const declaredInputs = resolveImmutableEvidenceBindings(projectDir, [
+      '---', 'inputs: [{path: fixtures/source, frozen: true}]', 'outputs:',
       '  - path: fixtures/source/report.md', '    on_existing: replace',
-      '---', '# Goal', 'Replace the declared report.',
+      '---', '# Goal', 'Keep `fixtures/source` frozen. Replace the declared report.',
     ].join('\n'));
-    expect(scopeContainsPath(['**'], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(true);
+    expect(!firstImmutableEvidenceConflict(['fixtures/source/report.md'], declaredInputs, projectDir)).toBe(true);
 
     rmSync(join(source, 'report.md'));
     symlinkSync('evidence.md', join(source, 'report.md'));
-    expect(scopeContainsPath(['**'], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(false);
-    expect(scopeContainsPath(['**'], 'fixtures/source/evidence.md', projectDir, declaredInputs)).toBe(false);
+    expect(!firstImmutableEvidenceConflict(['fixtures/source/report.md'], declaredInputs, projectDir)).toBe(false);
+    expect(!firstImmutableEvidenceConflict(['fixtures/source/evidence.md'], declaredInputs, projectDir)).toBe(false);
 
     rmSync(join(source, 'report.md'));
     writeFileSync(join(source, 'report.md'), 'replacement output\n');
-    expect(scopeContainsPath(['**'], 'fixtures/source/report.md', projectDir, declaredInputs)).toBe(true);
-    expect(scopeContainsPath(['**'], 'fixtures/source/evidence.md', projectDir, declaredInputs)).toBe(false);
+    expect(!firstImmutableEvidenceConflict(['fixtures/source/report.md'], declaredInputs, projectDir)).toBe(true);
+    expect(!firstImmutableEvidenceConflict(['fixtures/source/evidence.md'], declaredInputs, projectDir)).toBe(false);
   });
 });

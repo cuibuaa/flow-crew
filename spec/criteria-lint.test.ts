@@ -4,11 +4,6 @@ import { join } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import {
-  lintInstrumentCriteria,
-  rehearsalExitCode,
-  type Finding,
-} from '../src/rehearse.js';
 import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
 import { applyBasePrompt, loadBasePrompt } from '../src/scheduler/sched_admission/dispatch.js';
 
@@ -18,21 +13,6 @@ function reviewerPrompt(): string {
   const directory = join(repositoryRoot, 'config', 'agents');
   const role = parseAgent(parseYaml(readFileSync(join(directory, 'qa.yaml'), 'utf8')));
   return applyBasePrompt(role, loadBasePrompt(directory)).prompt;
-}
-const criteriaCorpusPath = 'spec/fixtures/e8_criteria_lint_corpus.json';
-interface CriteriaCorpusCase {
-  id: string;
-  text: string;
-  tags: string[];
-}
-
-interface CriteriaCorpus {
-  version: number;
-  cases: CriteriaCorpusCase[];
-}
-
-function readCriteriaCorpus(): CriteriaCorpus {
-  return JSON.parse(readFileSync(join(repositoryRoot, criteriaCorpusPath), 'utf-8')) as CriteriaCorpus;
 }
 
 describe('QA property-versus-means contract', () => {
@@ -58,70 +38,6 @@ describe('QA property-versus-means contract', () => {
     );
     expect(prompt).toContain('never invent a threshold or waive a supplied one');
     expect(prompt).toContain('reproducible evidence');
-  });
-});
-
-describe('criterion wording lint', () => {
-  it('warns with source, risk, and rewrite advice for a broken instrument criterion', () => {
-    const source = '# 验收判据\n\n源码里必须出现 `new JSDOM(...)`。\n';
-    const warnings = lintInstrumentCriteria(source);
-
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatchObject({
-      line: 3,
-      excerpt: '源码里必须出现 `new JSDOM(...)`。',
-    });
-    expect(warnings[0].risk).toContain('hard assertion');
-    expect(warnings[0].risk).toContain('target property');
-    expect(warnings[0].suggestion).toContain('observable property');
-    expect(warnings[0].suggestion).toContain('example rather than a criterion');
-  });
-
-  it('recognizes concrete bare module names bound to mandatory import wording', () => {
-    const cases = [
-      '探针源码里必须出现 jsdom 的 import 与实例化。',
-      'The probe must import jsdom.',
-      'must import @scope/runtime-pool.',
-    ];
-
-    for (const source of cases) {
-      const warnings = lintInstrumentCriteria(source);
-      expect(warnings, source).toHaveLength(1);
-      expect(warnings[0].excerpt).toBe(source);
-      expect(warnings[0].risk).toContain('hard assertion');
-    }
-  });
-
-  it('does not promote an explicitly illustrative means into a warning', () => {
-    expect(lintInstrumentCriteria([
-      '# 要求',
-      '证明真实环境路径，例如源码里可以调用 `createEnvironment()`；这是例子，不是判据。',
-      '',
-      '可采用以下手段，例如:',
-      '- 源码里必须导入 `library-x`',
-      '- must call `createLibraryX()`',
-    ].join('\n'))).toEqual([]);
-  });
-
-  it('does not treat an ordinary prose object of import as a bare module name', () => {
-    expect(lintInstrumentCriteria(
-      'The probe must import the configuration produced by the operator.',
-    )).toEqual([]);
-  });
-
-  it('keeps criterion findings advisory in the rehearsal exit contract', () => {
-    const warnings: Finding[] = lintInstrumentCriteria('源码里必须出现 `new JSDOM(...)`。')
-      .map((warning) => ({ level: 'warn', text: warning.excerpt }));
-    expect(rehearsalExitCode(warnings)).toBe(0);
-    expect(rehearsalExitCode([...warnings, { level: 'fail', text: 'broken frontmatter' }])).toBe(1);
-  });
-
-  it('matches every committed corpus case to its independently authored classification', () => {
-    for (const entry of readCriteriaCorpus().cases) {
-      const warnings = lintInstrumentCriteria(entry.text);
-      if (entry.tags.includes('positive')) expect(warnings.length, entry.id).toBeGreaterThan(0);
-      else expect(warnings, entry.id).toEqual([]);
-    }
   });
 });
 

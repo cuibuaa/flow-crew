@@ -8,7 +8,6 @@ export type ArtifactLocation = { root: 'project' | 'run'; path: string };
 // Locations are literal filesystem names. Scope expressions own glob syntax;
 // punctuation here never expands into other paths or grants additional writes.
 const literalRelativePath = /^(?!\.{1,2}(?:\/|$))[^/\\\0]+(?:\/(?!\.{1,2}(?:\/|$))[^/\\\0]+)*$/;
-export const ARTIFACT_PATH_PATTERN = literalRelativePath.source;
 export const ArtifactPathSchema = z.string().min(1).refine(
   path => !isAbsolute(path) && literalRelativePath.test(path),
   'declare a literal, confined relative path');

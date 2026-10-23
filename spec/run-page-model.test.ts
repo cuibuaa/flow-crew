@@ -42,7 +42,7 @@ describe("run-page presentation model", () => {
     expect(runUsageTotal({ ...data, budget: { tokens: { ...data.budget!.tokens, complete: false } } }).complete).toBe(false);
   });
   it("uses the complete canonical status vocabulary for the only scene split", () => {
-    expect(NON_TERMINAL_RUN_STATUSES).toEqual(["pending", "running", "parked", "awaiting_approval"]);
+    expect(NON_TERMINAL_RUN_STATUSES).toEqual(["pending", "running", "parked"]);
     expect(TERMINAL_RUN_STATUSES).toEqual([
       "complete",
       "failed",
@@ -50,16 +50,13 @@ describe("run-page presentation model", () => {
       "ceiling_hit",
       "escalated",
       "reality_gate_failed",
-      "phase_complete",
-      "stopped",
+      "cancelled",
       "incomplete",
     ]);
     for (const status of NON_TERMINAL_RUN_STATUSES) expect(isTerminalRunStatus(status), status).toBe(false);
     for (const status of TERMINAL_RUN_STATUSES) expect(isTerminalRunStatus(status), status).toBe(true);
     expect(TERMINAL_RUN_STATUSES.filter(isSuccessfulRunStatus)).toEqual(["complete", "shipped", "ceiling_hit"]);
-    expect(new Set(["ceiling_hit", "incomplete", "reality_gate_failed", "stopped"].map(runStatusDescription)).size).toBe(4);
-    expect(runStatusDescription("phase_complete")).toContain("non-success outcome");
-    expect(runStatusDescription("phase_complete")).not.toContain("successfully");
+    expect(new Set(["ceiling_hit", "incomplete", "reality_gate_failed", "cancelled"].map(runStatusDescription)).size).toBe(4);
   });
 
   it("keeps a missing current-attempt start unknown instead of borrowing another clock", () => {
@@ -118,33 +115,26 @@ describe("run-page presentation model", () => {
     expect(legacy).toMatchObject({ legacyAggregate: true, executions: 3, reruns: 2, aggregateDurationMs: 45_000 });
   });
 
-  it("counts real stage aggregates plus supervisor once and marks unknown coverage partial", () => {
+  it("reads usage from the canonical budget and leaves absent coverage unknown", () => {
     const complete = run({
+      budget: { tokens: { knownInputTokens: 130, knownOutputTokens: 70, complete: true } },
       stages: [
         { id: "build", role: "coder", depends_on: [], status: "complete", tokens_in: 100, tokens_out: 50 },
         { id: "verify", role: "qa", depends_on: [], status: "complete", attempts: [
           { index: 1, status: "complete", startedAt: "2026-01-01T00:00:00.000Z", tokens_in: 30, tokens_out: 20 },
         ] },
-        { id: "_supervisor", role: "supervisor", depends_on: [], status: "complete", tokens_in: 999, tokens_out: 999 },
       ],
-      supervisor: {
-        status: "complete",
-        calls: 1,
-        tokens_in: 10,
-        tokens_out: 5,
-        duration_ms: 1,
-        startedAt: "2026-01-01T00:00:00.000Z",
-        completedAt: "2026-01-01T00:00:01.000Z",
-        attempts: [],
-      },
     });
     expect(realRunStages(complete.stages).map((stage) => stage.id)).toEqual(["build", "verify"]);
-    expect(runUsageTotal(complete)).toEqual({ tokens: 215, complete: true, notes: [] });
+    expect(runUsageTotal(complete)).toEqual({ tokens: 200, complete: true, notes: [] });
+    expect(runUsageTotal({ ...complete, budget: { tokens: { knownInputTokens: 0, knownOutputTokens: 0, knownTotalTokens: 24_055, complete: false } } })).toMatchObject({ tokens: 24_055, complete: false });
 
     const partial = run({ status: "running", stages: [{ id: "build", role: "coder", depends_on: [], status: "running", tokens_in: 7 }] });
-    expect(runUsageTotal(partial)).toMatchObject({ tokens: 7, complete: false });
-    expect(runUsageTotal(run())).toEqual({ tokens: 0, complete: true, notes: [] });
-    expect(runUsageTotal(run({ supervise: true }))).toMatchObject({ tokens: 0, complete: false, notes: ["supervisor usage is unavailable"] });
+    expect(runUsageTotal(partial)).toEqual({ tokens: 0, complete: false, notes: ['run usage is unavailable', 'the run is still open'] });
+    expect(runUsageTotal(run())).toEqual({ tokens: 0, complete: false, notes: ['run usage is unavailable'] });
+    expect(runUsageTotal({ ...complete, budget: { tokens: { knownInputTokens: 7, knownOutputTokens: 0, complete: false } } })).toEqual({
+      tokens: 7, complete: false, notes: ['recorded attempt usage is incomplete'],
+    });
   });
 
   it("recognizes only generated terminal summaries and keeps progress separate", () => {
@@ -189,12 +179,10 @@ describe("run-page presentation model", () => {
 
     const activity = humanizeRunEvents([
       { ts: "2026-01-01T00:00:00.000Z", event: "stage_complete", stageId: "build" },
-      { ts: "2026-01-01T00:01:00.000Z", event: "attempt_summary_refresh_requested" },
       { ts: "2026-01-01T00:02:00.000Z", event: "future_internal_event", message: "context retained" },
     ]);
     expect(activity.map(({ description }) => description)).toEqual(["Stage completed", "Run activity was recorded"]);
     expect(JSON.stringify(activity)).not.toContain("stage_complete");
-    expect(JSON.stringify(activity)).not.toContain("attempt_summary_refresh_requested");
     expect(JSON.stringify(activity)).not.toContain("future_internal_event");
     expect(activity[0].context).toContain("Stage build");
     expect(activity[1].context).toContain("context retained");

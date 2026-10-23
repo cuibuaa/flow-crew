@@ -13,11 +13,4 @@ export function formatTokens(value: number): string {
   return new Intl.NumberFormat().format(value);
 }
 
-export function statusClass(status: string): string {
-  if (status === "running") return "running";
-  if (status === "parked" || status === "awaiting_approval") return "parked";
-  if (["failed", "reality_gate_failed", "incomplete", "stopped"].includes(status)) return "failed";
-  if (["complete", "shipped", "ceiling_hit", "phase_complete"].includes(status)) return "successful";
-  if (status === "escalated") return "warning";
-  return "neutral";
-}
+export { runStatusTone as statusClass } from "../../lib/run-status";

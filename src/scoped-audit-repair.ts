@@ -12,5 +12,4 @@ export const AuditFindingsSchema = z.object({
     repair_role: z.string().min(1),
   }).strict()),
 }).strict();
-export type AuditFinding = z.infer<typeof AuditFindingsSchema>['findings'][number];
 

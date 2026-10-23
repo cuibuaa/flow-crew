@@ -92,35 +92,5 @@ describe("run-detail execution observability", () => {
     expect(history.textContent).toContain("Per-execution history is unavailable");
   });
 
-  it("includes supervisor usage once in the run total without a stage row or DAG node", () => {
-    renderRun(runDetail({
-      id: "build",
-      role: "coder",
-      depends_on: [],
-      status: "complete",
-      duration_ms: 1_000,
-    }, {
-      supervisor: {
-        status: "complete",
-        calls: 7,
-        tokens_in: 8_765,
-        tokens_out: 12_345,
-        duration_ms: 90_000,
-        startedAt: "2026-07-31T00:00:00.000Z",
-        completedAt: "2026-07-31T00:01:30.000Z",
-        attempts: [],
-      },
-    }));
 
-    const usage = byTestId("run-cost-summary");
-    expect(usage.textContent).toContain("21,110 tokens");
-    expect(usage.textContent).toContain("Known portion only");
-
-    const dag = byTestId("stage-dag");
-    expect(dag.querySelector('[data-testid="dag-node-build"]')).not.toBeNull();
-    expect(dag.textContent).not.toContain("_supervisor");
-    expect(document.querySelector('[data-testid="dag-node-_supervisor"]')).toBeNull();
-    expect(document.body.textContent).not.toContain("_supervisor");
-    expect(document.body.textContent?.match(/21,110 tokens/g)).toHaveLength(1);
-  });
 });

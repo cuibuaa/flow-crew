@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'vitest';
 import { extractBriefCriteria } from '../../src/brief-criteria.js';
-import { inspectBrief } from '../../src/brief-preflight.js';
 import { inspectRealityCheckReachability, parseDispatchedStageConfig } from '../../src/scheduler.js';
 
 describe('collected contract audit', () => {
@@ -17,15 +16,6 @@ describe('collected contract audit', () => {
     assert.equal(artifact.criteria.length, 1);
   });
 
-  it('does not treat a descriptive QA-stage heading as an assignment', () => {
-    const report = inspectBrief([
-      '# Historical evidence',
-      '## QA stage behavior in the prior run',
-      'The stage recorded evidence without changing project files.',
-    ].join('\n'));
-    assert.equal(report.findings.some((finding) => finding.code === 'stage_writable_paths_missing'), false);
-  });
-
   it('requires declared hard reads and refuses a missing declared producer', () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-contract-audit-'));
     try {
@@ -33,7 +23,7 @@ describe('collected contract audit', () => {
         id: 'work', role: 'coder', scope: ['docs/owned.json'], depends_on: [],
         dependency_reasons: {}, prompt_template: 'produce the admitted artifact', skills: [],
         is_gate: false, criterion_refs: [],
-        artifact_contract: { version: 1, produces: [{ id: 'owned', root: 'project', path: 'docs/owned.json' }], reads: [], replays: [] },
+        artifact_contract: { version: 1, produces: [{ id: 'owned', root: 'project', path: 'docs/owned.json' }], reads: [] },
       })];
       const check = (reads: string) => `## Reality checks\n\`\`\`yaml\nchecks:\n  - name: future file\n    type: exec-script-exit-zero\n${reads}    params:\n      script: test -s docs/not_owned.json\n\`\`\`\n`;
       assert.match(inspectRealityCheckReachability({ markdown: check(''), projectDir, stages }).join('\n'), /REALITY_READ_DECLARATION_REQUIRED.*future file/);
@@ -50,11 +40,11 @@ describe('collected contract audit', () => {
         id: 'measure', role: 'researcher', scope: ['docs/round.json'], depends_on: [],
         dependency_reasons: {}, prompt_template: 'measure or emit the no-candidate sidecar',
         skills: [], is_gate: false, criterion_refs: [],
-        artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: 'docs/round.json' }], reads: [], replays: [] },
+        artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: 'docs/round.json' }], reads: [] },
       })];
       const markdown = '## Reality checks\n```yaml\nchecks:\n  - name: numeric result exists\n    type: exec-script-exit-zero\n    reads: [{id: round, root: project, path: docs/round.json, source: {kind: stage, stage: measure, artifact: round}}]\n    params:\n      script: test -s docs/round.json\n```\n';
       assert.match(inspectRealityCheckReachability({ markdown, projectDir, stages,
-        research: { baseline: 0, policy: 'best_of_n', resultFile: 'docs/round.json', reportDir: 'docs' },
+        research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json', reportDir: 'docs' },
       }).join('\n'), /valid no-candidate round writes only its sidecar/);
     } finally { rmSync(projectDir, { recursive: true, force: true }); }
   });

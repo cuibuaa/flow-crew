@@ -58,15 +58,13 @@ check('atomic same-directory records and exit precedence', async () => {
     const paths = supervisionPaths(root, unit);
     assert.deepEqual(terminal, { kind: 'terminal', exitCode: 3 });
     assert.deepEqual(readSupervisionExit(paths.exit)?.normalized, 3);
-    assert.equal(readdirSync(paths.unitDir).some((entry) => entry.endsWith('.tmp')), false);
+    assert.equal(readdirSync(paths.unitDir).some((entry) => entry.includes('.tmp')), false);
     assert.match(await backend.journalTail(unit, 20), /GATE3_LOG/);
 
     installExecutable(bin, 'systemctl', '#!/bin/sh\necho active\n');
     assert.deepEqual(await backend.isActive(unit), { kind: 'terminal', exitCode: 3 });
 
-    const source = readFileSync(join(repositoryRoot, 'src', 'supervision.ts'), 'utf-8');
-    assert.match(source, /join\(dirname\(path\), `\.\$\{randomUUID\(\)\}\.tmp`\)/);
-    assert.match(source, /renameSync\(temporary, path\)/);
+
   });
 });
 
@@ -176,7 +174,7 @@ check('bare shim signal controls a distinct agent group and kills the agent', as
     assert.equal(await waitUntil(() => !processIsAlive(running.agentPid)), true);
 
     const stopSource = readFileSync(join(repositoryRoot, 'src', 'orchestrator.ts'), 'utf-8');
-    const stopBody = stopSource.slice(stopSource.indexOf('async stopUnit('), stopSource.indexOf('private async stopLegacyUnit'));
+    const stopBody = stopSource.slice(stopSource.indexOf('async stopUnit('), stopSource.indexOf('async journalTail('));
     assert.match(stopBody, /process\.kill\(running\.shimPid, 'SIGTERM'\)/);
     assert.doesNotMatch(stopBody, /process\.kill\(-running\.(?:shimPid|agentPid)/);
   });

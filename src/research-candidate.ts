@@ -6,7 +6,7 @@ import { basename, join } from 'node:path';
 import { STAGE_STATUS, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
 import { resolveResearchPaths } from './research-paths.js';
-import { readLiveConstraintContentIdentity } from './live-constraint-guard.js';
+import { readContentIdentity } from './content-identity.js';
 import { rollbackStatIdentity } from './rollback-content-store.js';
 import { resolveArtifactLocation } from './artifact-location.js';
 import { normalizedProjectContentPath } from './scheduler/sched_admission/scope-services.js';
@@ -21,7 +21,7 @@ export interface ResearchInputGeneration {
 function fingerprint(projectDir: string, path: string): string | null {
   try {
     resolveArtifactLocation({ root: 'project', path }, projectDir, projectDir);
-    const identity = readLiveConstraintContentIdentity(canonicalPotentialProjectPath(projectDir, path));
+    const identity = readContentIdentity(canonicalPotentialProjectPath(projectDir, path));
     return identity.state === 'present' && identity.type === 'file' ? identity.sha256 : null;
   } catch { return null; }
 }

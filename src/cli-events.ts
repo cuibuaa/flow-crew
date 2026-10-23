@@ -1,4 +1,5 @@
-import { optionValue } from './source_services/cli-inputs.js';
+import { parseJsonl } from './jsonl.js';
+import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { closeSync, openSync } from './engine-fs.js';
 import { existsSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -110,12 +111,7 @@ const ACTIONABLE_EVENT_TYPES = new Set([
   'attempt_failed',
   'stage_failed',
   'guidance_written',
-  'scope_revision_requested',
-  'scope_revision_decided',
   'admission_rejected',
-  'supervisor_reject_requested',
-  'supervisor_reject_discarded',
-  'supervisor_reject',
   'plan_dispatch_retry',
   'run_status_changed',
   'operator_wrap_up_required',
@@ -127,13 +123,9 @@ const REJECTION_EVENT_TYPES = new Set([
   'attempt_failed',
   'stage_failed',
   'admission_rejected',
-  'supervisor_reject_requested',
-  'supervisor_reject_discarded',
-  'supervisor_reject',
   'plan_dispatch_retry',
 ]);
 
-const MAINTENANCE_EVENT_TYPES = new Set(['attempt_summary_refresh_requested']);
 const DEFAULT_EVENT_TAIL_BYTES = 512 * 1024;
 
 function text(value: unknown): string | undefined {
@@ -252,29 +244,6 @@ function pendingApproval(state: OperationalRunState): OperationalProjection['pen
   };
 }
 
-function pendingScopeRequests(events: readonly EventLike[]): OperationalPendingScope[] {
-  const pending = new Map<string, OperationalPendingScope>();
-  for (const event of events) {
-    const type = eventType(event);
-    const requestId = text(event.requestId);
-    if (!requestId) continue;
-    if (type === 'scope_revision_requested') {
-      const stageId = eventStage(event);
-      const requestedAt = eventTimestamp(event);
-      const detail = eventDetail(event);
-      pending.set(requestId, {
-        requestId,
-        ...(stageId ? { stageId } : {}),
-        ...(requestedAt ? { requestedAt } : {}),
-        ...(detail ? { detail } : {}),
-      });
-    } else if (type === 'scope_revision_decided') {
-      pending.delete(requestId);
-    }
-  }
-  return [...pending.values()].slice(-20);
-}
-
 export function buildOperationalProjection(
   state: OperationalRunState | undefined,
   events: readonly EventLike[] = [],
@@ -349,7 +318,7 @@ export function buildOperationalProjection(
     ...(latestReason ? { latestReason } : {}),
     ...(lastRejection ? { lastRejection } : {}),
     ...(lastGuidance ? { lastGuidance } : {}),
-    pendingScope: pendingScopeRequests(events),
+    pendingScope: [],
     ...(approval ? { pendingApproval: approval } : {}),
     ...(drift ? { drift } : {}),
     sourceCoverage: {
@@ -383,17 +352,8 @@ function readTail(path: string, maxBytes = DEFAULT_EVENT_TAIL_BYTES): string {
 export function readOperatorEvents(runDirectory: string, maxEvents = 500): EventLike[] {
   const path = join(runDirectory, 'events.jsonl');
   if (!existsSync(path)) return [];
-  return readTail(path)
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .flatMap((line) => {
-      try {
-        const parsed = JSON.parse(line) as unknown;
-        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? [parsed as EventLike] : [];
-      } catch {
-        return [];
-      }
-    })
+  return parseJsonl<unknown>(readTail(path))
+    .filter((parsed): parsed is EventLike => !!parsed && typeof parsed === 'object' && !Array.isArray(parsed))
     .slice(-Math.max(0, maxEvents));
 }
 
@@ -444,7 +404,6 @@ interface ParsedEventArgs {
   help: boolean;
   follow: boolean;
   json: boolean;
-  includeMaintenance: boolean;
   limit: number;
   runId?: string;
   projectDir?: string;
@@ -456,7 +415,6 @@ export interface CliEventsDependencies {
   stdout?: Writer;
   stderr?: Writer;
   runsRoot?: string;
-  listOperationalRunIds?: (projectDir: string) => readonly string[] | null;
   sleep?: (milliseconds: number) => Promise<void>;
   followPollMs?: number;
   maxFollowPolls?: number;
@@ -467,57 +425,26 @@ function safeRunId(value: string): boolean {
 }
 
 function parseEventArgs(args: string[]): ParsedEventArgs {
-  const input = args[0] === 'events' ? args.slice(1) : [...args];
-  const parsed: ParsedEventArgs = {
-    help: false,
-    follow: false,
-    json: false,
-    includeMaintenance: false,
-    limit: 100,
-    types: new Set(),
+  const { help, flags, values } = parseCommandArgs('events', args);
+  const runId = values.get('--run');
+  if (runId && !safeRunId(runId)) throw new Error('--run must be a run id, not a path');
+  return {
+    help,
+    follow: flags.has('--follow'),
+    json: flags.has('--json'),
+    limit: Number(values.get('--limit') ?? 100),
+    runId,
+    projectDir: values.has('--project') ? resolve(values.get('--project')!) : undefined,
+    stageId: values.get('--stage'),
+    types: new Set((values.get('--type') ?? '').split(',').map(value => value.trim()).filter(Boolean)),
   };
-  for (let index = 0; index < input.length;) {
-    const argument = input[index];
-    if (argument === '--help' || argument === '-h') {
-      parsed.help = true;
-      index += 1;
-    } else if (argument === '--follow' || argument === '-f') {
-      parsed.follow = true;
-      index += 1;
-    } else if (argument === '--json') {
-      parsed.json = true;
-      index += 1;
-    } else if (argument === '--include-maintenance') {
-      parsed.includeMaintenance = true;
-      index += 1;
-    } else if (['--run', '--project', '--stage', '--type', '--limit'].some((name) => argument === name || argument.startsWith(`${name}=`))) {
-      const name = ['--run', '--project', '--stage', '--type', '--limit']
-        .find((candidate) => argument === candidate || argument.startsWith(`${candidate}=`))!;
-      const found = optionValue(input, index, name);
-      if (name === '--run') parsed.runId = found.value;
-      else if (name === '--project') parsed.projectDir = resolve(found.value);
-      else if (name === '--stage') parsed.stageId = found.value;
-      else if (name === '--type') for (const type of found.value.split(',').map((value) => value.trim()).filter(Boolean)) parsed.types.add(type);
-      else {
-        const limit = Number.parseInt(found.value, 10);
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new Error('--limit must be an integer from 1 to 10000');
-        parsed.limit = limit;
-      }
-      index += found.consumed;
-    } else {
-      throw new Error(`unknown events option: ${argument}`);
-    }
-  }
-  if (parsed.runId && !safeRunId(parsed.runId)) throw new Error('--run must be a run id, not a path');
-  return parsed;
 }
 
 export function eventsUsage(): string {
   return [
-    'Usage: flowcrew events [--run <id> | --project <path>] [--stage <id>] [--type <type[,type]>] [--limit N] [--json] [--follow]',
+    commandUsage('events'),
     'Reads the canonical run event feed. Detail and stage context are retained.',
     'Without --run, only operational runs for the selected/current project are followed.',
-    'Maintenance bookkeeping is hidden by default; pass --include-maintenance to include it.',
   ].join('\n');
 }
 
@@ -534,10 +461,10 @@ function canonicalPath(path: string): string {
   try { return resolve(path); } catch { return path; }
 }
 
-function selectedRunIds(parsed: ParsedEventArgs, deps: Required<Pick<CliEventsDependencies, 'runsRoot' | 'listOperationalRunIds'>>): string[] {
+function selectedRunIds(parsed: ParsedEventArgs, deps: Required<Pick<CliEventsDependencies, 'runsRoot'>>): string[] {
   if (parsed.runId) return [parsed.runId];
   const projectDir = parsed.projectDir ?? resolve(process.cwd());
-  const indexed = deps.listOperationalRunIds(projectDir);
+  const indexed = listOperationalRunIdsFromIndex(projectDir);
   const candidates = indexed ?? (() => {
     try { return readdirSync(deps.runsRoot); } catch { return []; }
   })();
@@ -550,7 +477,6 @@ function selectedRunIds(parsed: ParsedEventArgs, deps: Required<Pick<CliEventsDe
 
 function matchesEvent(event: EventLike, parsed: ParsedEventArgs): boolean {
   const type = eventType(event);
-  if (!parsed.includeMaintenance && MAINTENANCE_EVENT_TYPES.has(type)) return false;
   if (parsed.types.size > 0 && !parsed.types.has(type)) return false;
   if (parsed.stageId && eventStage(event) !== parsed.stageId) return false;
   return true;
@@ -608,7 +534,8 @@ export async function cmdEventsWithDeps(args: string[], overrides: CliEventsDepe
   try {
     parsed = parseEventArgs(args);
   } catch (error) {
-    stderr.write(`events: ${error instanceof Error ? error.message : String(error)}\n${eventsUsage()}\n`);
+    stderr.write(`events: ${error instanceof Error ? error.message : String(error)}\n`);
+    if (!(error instanceof CliUsageError)) stderr.write(`${eventsUsage()}\n`);
     return 1;
   }
   if (parsed.help) {
@@ -619,7 +546,6 @@ export async function cmdEventsWithDeps(args: string[], overrides: CliEventsDepe
   const runRoot = resolve(overrides.runsRoot ?? defaultRunsRoot());
   const deps = {
     runsRoot: runRoot,
-    listOperationalRunIds: overrides.listOperationalRunIds ?? ((projectDir: string) => listOperationalRunIdsFromIndex(projectDir)),
   };
   if (parsed.runId && !existsSync(join(runRoot, parsed.runId, 'run.json'))) {
     stderr.write(`events: run ${parsed.runId} was not found or has no readable run.json\n`);

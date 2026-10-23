@@ -6,6 +6,7 @@
  * Maintenance contract: this is a permanent user-surface regression suite,
  * not a run-specific gate artifact. Keep it active in the default Vitest set.
  */
+import './test-support/policy-runtime.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   appendFileSync,
@@ -215,13 +216,14 @@ describe('supervision CLI surface invariants', () => {
 });
 
 function createFixture(): Fixture {
-  const root = mkdtempSync(join(tmpdir(), 'fc-supervision-cli-'));
+  // macOS limits socket paths to 104 bytes and its tmpdir is long; keep FC_HOME/daemon.sock short.
+  const root = mkdtempSync(join(tmpdir(), 'fcs-'));
   roots.push(root);
   const home = join(root, 'home');
-  const fcHome = join(root, 'state');
+  const fcHome = join(root, 's');
   const project = join(root, 'project');
   const bin = join(root, 'bin');
-  const socketPath = join(root, 'q.sock');
+  const socketPath = join(fcHome, 'daemon.sock');
   for (const directory of [home, fcHome, project, bin]) mkdirSync(directory, { recursive: true });
   mkdirSync(join(project, 'config', 'agents'), { recursive: true });
   writeFileSync(join(project, 'config', 'defaults.yaml'), 'adapter: auto\n', 'utf-8');
@@ -248,7 +250,7 @@ function spawnRealCli(fixture: Fixture, args: string[]): CliCapture {
   let stderr = '';
   const child = spawn(
     process.execPath,
-    [distCli, ...args, '--socket', fixture.socketPath],
+    [distCli, ...args],
     {
       cwd: repositoryRoot,
       env: {

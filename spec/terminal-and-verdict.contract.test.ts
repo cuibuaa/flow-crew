@@ -11,7 +11,7 @@ describe('isSuccessfulRunStatus — research ceiling/ship are successes (exit 0)
     expect(isSuccessfulRunStatus('failed')).toBe(false);
     expect(isSuccessfulRunStatus('reality_gate_failed')).toBe(false);
     expect(isSuccessfulRunStatus('escalated')).toBe(false);
-    expect(isSuccessfulRunStatus('stopped')).toBe(false);
+    expect(isSuccessfulRunStatus('cancelled')).toBe(false);
     expect(isSuccessfulRunStatus('running')).toBe(false);
   });
 });

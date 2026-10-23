@@ -4,9 +4,7 @@ For a task author: how do I express the outcome, evidence and limits the run mus
 
 Write a self-contained outcome, explicit input paths, real constraints and numbered acceptance
 criteria. Name the report and the evidence it must show. Separate a required property from
-an illustrative implementation. The preflight wording lint warns about mandatory
-implementation verbs attached to code-shaped targets; warnings do not prove a criterion is
-wrong or waive a compatibility requirement.
+an illustrative implementation.
 
 ## Engineering and workflow selection
 
@@ -33,7 +31,7 @@ selects a fixed author/gate/repair plan, also used when the choice is omitted fo
 ordinary task. `workflow: planner` requests dynamic planning; `--workflow <name>`
 preserves an explicit CLI choice, including `--workflow default` for the planner.
 Numeric research selects the research workflow unless an explicit CLI workflow overrides it.
-Program briefs retain the planner default. Direct research and program loops are refused.
+Direct research loops are refused.
 Input/output count does not choose the workflow. The fixed plan uses the same admission,
 isolated author writes, independent review, repair and re-review, and brief/report duties.
 
@@ -48,10 +46,13 @@ Sources: [frontmatter](../src/scheduler/sched_admission/brief-contract.ts),
 ## Inputs, outputs and validation
 
 Declare inputs in leading YAML frontmatter. Project-relative directory names are accepted
-without a trailing slash there; unsafe declarations are reported unresolved. Code also has
-conservative prose path discovery, but explicit declarations avoid depending on it.
-Mechanically bound row-count, date-span, recursive file-count and SHA-256 assertions can be
-confirmed, refuted or not checkable. Setup refuses unproven required input assertions.
+without a trailing slash there; unsafe declarations are reported unresolved. Paths mentioned
+in prose are references and do not declare inputs or authorize reuse of existing outputs.
+To freeze a file or tree, use a structured input such as `{path: notes.md, frozen: true}`.
+Inputs are not frozen by default; `frozen: false` also leaves them mutable. Only the boolean
+frontmatter field grants this protection: notes, roles, headings and prose are not enforced.
+Nonboolean `frozen` values are unresolved input declarations, not coercions to true.
+Settlement rejects and restores changed frozen bytes, and accepts identical bytes.
 
 Outputs accept path strings or structured entries with `path`, optional `type: file|directory`
 and `on_existing: update|append|replace`. They are create-only by default. Declaring an existing
@@ -62,9 +63,9 @@ Absolute external outputs require an explicit directory declaration: protected/r
 overlaps and aliases are refused.
 Their contents are not recursively inventoried by preflight. Rehearsal substitutes temporary
 locations. A declaration is authority for its named location, not permission for siblings.
-Project outputs may lie inside declared input directories: input preservation excludes the
-declared output file or directory tree, while other input paths stay protected. Stage write
-scope and existing-content rules still apply.
+Project outputs may lie inside declared frozen input directories: freezing excludes the
+declared output file or directory tree, while other frozen input paths stay protected. Existing-content rules
+still apply.
 
 `validation.commands` is a nonempty mapping of `build`, `test` and/or `lint` to
 `{command: string, args: string[]}`. These declarations supply shell-free argv; unknown roles,
@@ -83,7 +84,7 @@ example. The metric block accepts these fields:
 | Field | Meaning |
 |---|---|
 | `baseline` | Numeric reference activating the native loop |
-| `policy` | `greedy_stack` (default), `best_of_n`, `replace_if_better`; invalid names are diagnosed |
+| `policy` | `greedy_stack` (default); invalid names are diagnosed |
 | `higher_is_better` | Direction; defaults higher; boolean strings are also recognized |
 | `result_file`, `report_dir` | Mutable round slot and report directory; [resolver](../src/research-paths.ts) supplies omitted paths |
 | `result_schema` | JSON schema for each measured round |
@@ -175,6 +176,14 @@ before outcomes are seen. An operator numeric expectation requires exact result 
 `within_expected_range` and `method_was_not_adjusted_to_match_expectation`. These are injected
 planning instructions, not an automatic statistic calculator or guarantee of model obedience.
 
+Declare supplied numeric expectations in leading frontmatter as `supplied_numbers: [0, -112.89]`.
+The value must be an array of finite YAML numbers; `[]` declares none, and any other shape
+is refused. A nonempty array requires both exact anti-anchoring fields above as positive
+result requirements; missing either makes preflight and rehearse fail.
+This declaration works without operator wording in the body. Prose-only expectations produce
+warnings; `research.baseline`, ordinary counts, and the planning-policy selection do not
+by themselves declare supplied numbers.
+
 For other evidence, state the user-visible consequence, boundaries, counter-examples and
 unacceptable outcomes. Preserve an authoritative exact mechanism when it is required; label
 illustrative mechanisms as examples. For a known defect, require the unfixed reproducer and
@@ -184,7 +193,7 @@ it remains binding. Explain concentrated contributions with per-item, largest-sh
 leave-one-out evidence when those properties are part of the task.
 
 Sources: [selected planning policy](../src/planner-policies.ts),
-[criterion wording lint](../src/brief-preflight.ts), [gate contract](../src/scheduler/sched_settlement/gate-contract.ts).
+[gate contract](../src/scheduler/sched_settlement/gate-contract.ts).
 
 ## Authoring and verification principles
 
@@ -235,11 +244,11 @@ promises that a model will obey. Keep the detailed contract above authoritative.
 - Require preflight, rehearsal and setup to agree on declared output inventory and intended
   existing-content authority before launch.
   Reason: an occupied path does not become safe merely because it is the requested output name.
-- Prose paths can become input candidates even without frontmatter declarations; distinguish
-  outputs and explicitly excluded paths, or keep hypothetical paths in fenced examples.
-  Reason: an out-of-scope heading alone does not make a path mention an explicit exclusion.
+- Declare intended inputs in frontmatter `inputs:`; prose paths are references only.
+  Use structured entries with `frozen: true` for evidence that must remain unchanged.
+  Reason: prose references neither declare inputs nor enforce freezing.
 - Declare only intended task inputs and inspect target content/type collisions rather than
-  adding unrelated declarations to silence discovery; setup's target-copy rules remain authoritative.
+  adding unrelated declarations to satisfy setup; setup's target-copy rules remain authoritative.
   Reason: excess inputs can import unrelated work or ask for incompatible materialization.
 - Use guidance for missing facts or correction of an operator error, not delayed scope or
   replacing a required property with a preferred result; preserve better brief-conforming results.
@@ -325,7 +334,7 @@ promises that a model will obey. Keep the detailed contract above authoritative.
 - If FlowCrew is unavailable, stop live work and provide the [public installation recipe](getting-started.md#install-in-a-development-checkout).
   Reason: an unavailable executable cannot establish launch or verification evidence.
 
-## Terminal artifacts and programs
+## Terminal artifacts
 
 `terminal_states` maps a known terminal run status to a path string, path list or object with
 `paths` (or `path`). Declare only whole-run terminal products. Nonterminal keys are ignored
@@ -350,13 +359,7 @@ boundary, with a default 300-second timeout and `FC_PHASE`, `FC_VERDICT_FILE`, `
 recorded without turning the already committed terminal into a live run. Treat it as real
 execution authority and review it before launch.
 
-An optional `program` with string `name` and `phase` can specify `roadmap`, `ledger` and
-`safeguards`: `max_phases`, `max_wall_hours`, `stop_file`,
-`halt_after_consecutive_no_improvement`. Safeguards consume ledger phases and wall totals;
-malformed ledger content does not prove prior work. Program and campaign are different:
-one supplies phase safeguards, the other groups run history.
-
-Sources: [frontmatter/floors/programs](../src/scheduler/sched_admission/brief-contract.ts),
+Sources: [frontmatter/floors](../src/scheduler/sched_admission/brief-contract.ts),
 [terminal admission](../src/scheduler/sched_admission/dispatch.ts),
 [terminal settlement](../src/scheduler/sched_policy/terminal.ts).
 
@@ -374,10 +377,11 @@ discover every dynamic read.
 | `file-exists-nonempty` | `paths` list or `{from_manifest, field}` |
 | `json-schema-match` | `file`, `schema` object or schema-file reference |
 
-A script runs via Bash from the project directory. Exit 127 with command-not-found diagnostics and narrowly
-recognized unbound versioned-JSON shape failures become advisory with the failed execution
-retained. This limits what a passing Reality Gate proves. Rejected terminal candidates
-are quarantined; prose reports do not create executable checks.
+A script runs via Bash from the project directory. Exit 127 with command-not-found diagnostics
+becomes advisory with the failed execution retained. Versioned-JSON shape failures remain
+failures unless the check explicitly declares `advisory: true`. This limits what a passing
+Reality Gate proves. Rejected terminal candidates are quarantined; prose reports do not create
+executable checks.
 
 Sources: [parser/execution](../src/reality-gate/index.ts), [registry](../src/reality-gate/registry.ts),
 [shell handler](../src/reality-gate/checks/exec-script-exit-zero.ts).

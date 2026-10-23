@@ -1,11 +1,13 @@
 import './test-support/policy-runtime.js';
+import { providerFailureFromDiagnostic } from '../src/provider-result.js';
+import { appendGateConstraintAuditContext } from '../src/scheduler/sched_policy/prompt-contracts.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
-import { atomicWrite } from '../src/store.js';
+import { atomicWrite } from '../src/engine-fs.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { drainDueTimers } from './test-support/engine-fixtures.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -20,8 +22,8 @@ import {
   WorkflowConfigSchema,
   type WorkflowConfig,
 } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   readRunState,
   readStageStatus,
@@ -38,15 +40,6 @@ import {
   type AttemptDeadlineClock,
   type TechnicalRetryTerminalDecision,
 } from '../src/attempt-deadline.js';
-import { waitForPathEvent } from './test-support/wait-for-path-event.js';
-import {
-  constraintDecisionPath,
-  negotiationIdentity,
-  negotiationRequestDigest,
-  parseScopeRevisionRequest,
-  scopePathDigest,
-  publishConstraintDecision,
-} from '../src/runtime-negotiation.js';
 import { resolveRequest } from '../src/inbox.js';
 
 let projectDir: string;
@@ -60,7 +53,7 @@ const role: AgentConfig = {
 // Pin the engine input; historical retries keep their old clocks, new slices do not grow.
 const OWNED_STAGE_TIMEOUT_MS = 3_600_000;
 function seedEngineDefaults(): void {
-  setEngineDefaults({ timeout_ms: OWNED_STAGE_TIMEOUT_MS });
+  setEngineDefaults({ default_timeout_ms: OWNED_STAGE_TIMEOUT_MS });
 }
 
 beforeEach(() => {
@@ -128,107 +121,7 @@ function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
 }
 
-function findArtifact(directory: string, prefix: string): string {
-  const name = readdirSync(directory).find((file) => file.startsWith(prefix) && file.endsWith('.json'));
-  if (!name) throw new Error(`Missing ${prefix} artifact in ${directory}`);
-  return join(directory, name);
-}
-
-async function waitForDecision(directory: string, prefix: string): Promise<Record<string, unknown>> {
-  return waitForPathEvent(directory, () => {
-    const name = readdirSync(directory).find((file) => file.startsWith(prefix) && file.endsWith('.json'));
-    if (name) return readJson(join(directory, name));
-    return undefined;
-  });
-}
-
-describe('shared immutable negotiation protocol', () => {
-  it('is attempt-scoped, idempotent for the same body, and audits a body mismatch', () => {
-    const stagePath = join(projectDir, 'audit');
-    const parsed = parseScopeRevisionRequest({
-      version: 1, kind: 'scope_revision', requestId: 'same/id', runId: 'fixture-run', stageId: 'work', attemptIndex: 1,
-      requestedPaths: ['./src/shared.ts', 'src/shared.ts'], pathDigest: 'stale', reason: ' shared type is required ',
-    });
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(parsed.request.requestedPaths).toEqual(['src/shared.ts']);
-    expect(parsed.request.pathDigest).toBe(scopePathDigest(['src/shared.ts']));
-    for (const mutation of [{ requestedPaths: 'src/shared.ts' }, { requestedPaths: [7] },
-      { attemptIndex: 0 }, { attemptIndex: 1.5 }, { stageId: '' }, { runId: '' }]) {
-      expect(parseScopeRevisionRequest({ ...parsed.request, ...mutation })).toMatchObject({ ok: false });
-    }
-    const decision = {
-      accepted: true, decision: 'accepted' as const, decidedAt: new Date().toISOString(),
-      policyBasis: 'fixture policy', requestedPaths: parsed.request.requestedPaths,
-      priorScope: ['src/work.ts'], effectiveScope: ['src/work.ts', 'src/shared.ts'],
-    };
-    const first = publishConstraintDecision({ stagePath, request: parsed.request, decidedBy: 'scheduler-policy', decision });
-    const replay = publishConstraintDecision({ stagePath, request: parsed.request, decidedBy: 'scheduler-policy', decision });
-    expect(first.kind).toBe('published');
-    expect(replay.kind).toBe('replayed');
-    expect(constraintDecisionPath(stagePath, parsed.request)).toContain(negotiationIdentity(parsed.request));
-
-    const changed = parseScopeRevisionRequest({
-      ...parsed.request, reason: 'changed rationale', requestedBy: undefined,
-    });
-    expect(changed.ok).toBe(true);
-    if (!changed.ok) return;
-    const mismatch = publishConstraintDecision({ stagePath, request: changed.request, decidedBy: 'scheduler-policy', decision });
-    expect(mismatch.kind).toBe('mismatch');
-    expect(readdirSync(stagePath).filter((file) => file.startsWith('constraint_request_mismatch_'))).toHaveLength(1);
-
-    const nextAttempt = parseScopeRevisionRequest({ ...parsed.request, attemptIndex: 2, requestedBy: undefined });
-    expect(nextAttempt.ok).toBe(true);
-    if (!nextAttempt.ok) return;
-    expect(constraintDecisionPath(stagePath, nextAttempt.request)).not.toBe(constraintDecisionPath(stagePath, parsed.request));
-  });
-
-  it('does not let a requester preclaim an accepted lookalike over policy rejection', () => {
-    const stagePath = join(projectDir, 'preclaim');
-    mkdirSync(stagePath, { recursive: true });
-    const parsed = parseScopeRevisionRequest({
-      version: 1, kind: 'scope_revision', requestId: 'preclaim', runId: 'fixture-run', stageId: 'work', attemptIndex: 1,
-      requestedPaths: ['src/escape.ts'], reason: 'claimed by requester',
-    });
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    const target = constraintDecisionPath(stagePath, parsed.request);
-    writeFileSync(target, JSON.stringify({
-      version: 1,
-      requestId: parsed.request.requestId,
-      kind: parsed.request.kind,
-      stageId: parsed.request.stageId,
-      attemptIndex: parsed.request.attemptIndex,
-      identityDigest: negotiationIdentity(parsed.request),
-      requestDigest: negotiationRequestDigest(parsed.request),
-      requestedBy: 'stage',
-      reason: parsed.request.reason,
-      decision: 'accepted',
-      accepted: true,
-      decidedBy: 'scheduler-policy',
-      decidedAt: new Date().toISOString(),
-      policyBasis: 'requester-created lookalike',
-      requestedPaths: parsed.request.requestedPaths,
-      priorScope: ['src/declared.ts'],
-      effectiveScope: ['src/declared.ts', 'src/escape.ts'],
-    }));
-    const publication = publishConstraintDecision({
-      stagePath,
-      request: parsed.request,
-      decidedBy: 'scheduler-policy',
-      decision: {
-        decision: 'rejected', accepted: false, decidedAt: new Date().toISOString(),
-        policyBasis: 'authoritative policy rejects the request', rejectionReason: 'conflicts with active peer',
-      },
-    });
-    expect(publication.kind).toBe('mismatch');
-    if (publication.kind === 'mismatch') {
-      expect(publication.mismatch.mismatchReason).toBe('decision_policy_mismatch');
-    }
-  });
-});
-
-describe('ordinary-stage scope negotiation and reconciliation', () => {
+describe('ordinary-stage content reconciliation', () => {
   function scopeWorkflow(maxRetries = 0, maxIterations = 1): { yaml: string; config: WorkflowConfig } {
     const yaml = [
       'name: e9-scope', 'defaults:', `  max_iterations: ${maxIterations}`, `  max_retries: ${maxRetries}`,
@@ -246,65 +139,7 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
     };
   }
 
-  it('[B1] suspends an exit-0 attempt with a just-accepted scope revision and re-dispatches the same stage', { timeout: 10_000 }, async () => {
-    mkdirSync(join(projectDir, 'src'), { recursive: true });
-    writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
-    const yaml = [
-      'name: e9-scope-gate', 'defaults:', '  max_iterations: 1', '  max_retries: 0', 'stages:',
-      '  - id: ordinary', '    role: coder', '    scope: [src/declared.ts]', '    prompt_template: scope fixture',
-      '  - id: audit_gate', '    role: qa', '    scope: []', '    depends_on: [ordinary]',
-      '    dependency_reasons: {ordinary: "audit the implementation"}', '    is_gate: true', '    prompt_template: gate fixture',
-      '  - id: repair_audit', '    role: coder', '    scope: [src/declared.ts]', '    depends_on: [audit_gate]',
-      '    retry_to: [audit_gate]', '    prompt_template: repair the rejected implementation',
-    ].join('\n');
-    const config: WorkflowConfig = {description: '', 
-      name: 'e9-scope-gate', defaults: { max_iterations: 1, max_retries: 0 }, stages: [
-        { artifact_contract: fixtureArtifactContract('ordinary', false),criterion_refs: [],  id: 'ordinary', role: 'coder', depends_on: [], scope: ['src/declared.ts'], prompt_template: 'scope fixture', skills: [], dynamic_dispatch: false, is_gate: false },
-        { artifact_contract: fixtureArtifactContract('audit_gate', true),criterion_refs: [],  id: 'audit_gate', role: 'qa', depends_on: ['ordinary'], dependency_reasons: { ordinary: 'audit the implementation' }, scope: [], prompt_template: 'gate fixture', skills: [], dynamic_dispatch: false, is_gate: true },
-        { artifact_contract: fixtureArtifactContract('repair_audit'), criterion_refs: [], id: 'repair_audit', role: 'coder', depends_on: ['audit_gate'], retry_to: ['audit_gate'], scope: ['src/declared.ts'], prompt_template: 'repair the rejected implementation', skills: [], dynamic_dispatch: false, is_gate: false },
-      ],
-    };
-    const created = prepareRun(config, yaml);
-    let gateSawAudit = false;
-    let ordinaryCalls = 0;
-    const adapter: Adapter = { async run(prompt, _agent, opts) {
-      const summary = summaryResult(opts);
-      if (summary) return fixtureResult(summary, opts);
-      if (opts.stageId === 'ordinary') {
-        ordinaryCalls++;
-        expect(prompt).toContain('immutable');
-        expect(prompt).toContain('Retries, backoff and fallback consume that same budget');
-        expect(prompt).not.toContain('timeout_extension_request.json');
-        if (ordinaryCalls === 1) {
-          const directory = join(opts.runDir, 'stages', opts.stageId);
-          writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
-            version: 1, kind: 'scope_revision', requestId: 'ordinary-shared', stageId: opts.stageId,
-            attemptIndex: 1, requestedPaths: ['src/shared.ts'], reason: 'the implementation needs the authoritative shared type',
-          }));
-          const decision = await waitForDecision(directory, 'scope_revision_decision_');
-          expect(decision).toMatchObject({ accepted: true, requestedBy: 'stage', decidedBy: 'scheduler-policy' });
-          return fixtureResult({ output: 'scope accepted; stop at the control boundary', exitCode: 0, duration_ms: 20, writes: [], writeAttribution: 'structured' }, opts);
-        }
-        expect(prompt).toContain('# Accepted scope revision');
-        expect(prompt).toContain('Continue the stage work in execution 2');
-        expect(prompt).not.toContain('Scope revision ordinary-shared was accepted. This attempt stops');
-        writeFileSync(join(projectDir, 'src', 'shared.ts'), 'shared\n');
-        return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 20, writes: ['src/shared.ts'], writeAttribution: 'structured' }, opts);
-      }
-      gateSawAudit = prompt.includes('constraint_audit_attempt_1.json') && prompt.includes('accepted=1');
-      writeFileSync(join(opts.runDir, 'fixture_verdict_audit_gate.json'), JSON.stringify({ pass: gateSawAudit, reason: 'audit visible' }));
-      return fixtureResult({ output: 'gate', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
-    } };
-    const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder', 'qa'), created.runId, 'scope gate', true);
-    expect(final.status).toBe('complete');
-    expect(ordinaryCalls).toBe(2);
-    expect(gateSawAudit).toBe(true);
-    const status = readStageStatus(projectDir, created.runId, 'ordinary');
-    expect(status.attempts?.map((attempt) => attempt.status)).toEqual(['suspended', 'complete']);
-    expect(status.attempts?.[0].constraintAudit).toMatchObject({ acceptedRevisionCount: 1, violationCount: 0, effectiveScope: ['src/declared.ts', 'src/shared.ts'] });
-  });
-
-  it('attributes an unstructured out-of-scope write through the admitted scheduler scope and corrects it in the same attempt', { timeout: 10_000 }, async () => {
+  it('accepts an unstructured legitimate write outside its planner estimate in one invocation', { timeout: 10_000 }, async () => {
     mkdirSync(join(projectDir, 'src'), { recursive: true });
     writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
     const { config, yaml } = scopeWorkflow();
@@ -315,127 +150,15 @@ describe('ordinary-stage scope negotiation and reconciliation', () => {
       if (summary) return fixtureResult(summary, opts);
       invocationCount++;
       if (invocationCount === 1) writeFileSync(join(projectDir, 'src', 'observed.ts'), 'snapshot only\n');
-      else expect(prompt).toContain('# Live constraint correction');
       return fixtureResult({ output: invocationCount === 1 ? 'snapshot' : 'corrected', exitCode: 0, duration_ms: 2 }, opts);
     } };
     const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'scope snapshot', true);
     expect(final.status).toBe('complete');
-    expect(invocationCount).toBe(2);
+    expect(invocationCount).toBe(1);
     const status = readStageStatus(projectDir, created.runId, 'ordinary');
     expect(status.attempts).toHaveLength(1);
-    expect(status.constraintAudit).toMatchObject({
-      acceptedRevisionCount: 0,
-      violationCount: 1,
-      liveViolationCount: 1,
-      liveRestoredCount: 1,
-      unresolvedViolationCount: 0,
-      unverifiedCount: 0,
-    });
-    const audit = readJson(join(created.runDirPath, status.constraintAudit!.path));
-    expect(audit.violations).toEqual(expect.arrayContaining([expect.objectContaining({
-      path: 'src/observed.ts', certainty: 'definite', resolution: 'live_reverted',
-    })]));
-    expect(audit.rolledBackWrites).toEqual(['src/observed.ts']);
-    expect(existsSync(join(projectDir, 'src', 'observed.ts'))).toBe(false);
-  });
-
-  // These names are stable workload IDs. Their former local-scope assertions
-  // are obsolete; the bodies now enforce inherited, revalidated capability.
-  it('does not carry an accepted scope revision into a timeout retry attempt', { timeout: 10_000 }, async () => {
-    mkdirSync(join(projectDir, 'src'), { recursive: true });
-    writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
-    const { config, yaml } = scopeWorkflow(1, 2);
-    const created = prepareRun(config, yaml);
-    let calls = 0;
-    const adapter: Adapter = { async run(_prompt, _agent, opts) {
-      const summary = summaryResult(opts);
-      if (summary) return fixtureResult(summary, opts);
-      calls++;
-      if (calls === 1) {
-        const directory = join(opts.runDir, 'stages', opts.stageId);
-        writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
-          version: 1, kind: 'scope_revision', requestId: 'attempt-local', stageId: opts.stageId,
-          attemptIndex: 1, requestedPaths: ['src/local.ts'], reason: 'needed in the first attempt',
-        }));
-        await waitForDecision(directory, 'scope_revision_decision_');
-        writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt one\n');
-        return fixtureResult({ output: 'timeout', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true, writes: ['src/local.ts'], writeAttribution: 'structured' }, opts);
-      }
-      writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt two\n');
-      return fixtureResult({ output: 'no new request', exitCode: 0, duration_ms: 1, writes: ['src/local.ts'], writeAttribution: 'structured' }, opts);
-    } };
-    const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'scope attempts', true);
-    expect(calls).toBe(2);
-    expect(final.status).toBe('complete');
-    const status = readStageStatus(projectDir, created.runId, 'ordinary');
-    expect(status.attempts?.[0].constraintAudit?.effectiveScope).toContain('src/local.ts');
-    expect(status.attempts?.[1].constraintAudit).toMatchObject({
-      effectiveScope: ['src/declared.ts', 'src/local.ts'], acceptedRevisionCount: 1, violationCount: 0,
-    });
-  });
-
-  it('reconciles every repair-chain attempt and keeps each effective scope local', { timeout: 10_000 }, async () => {
-    mkdirSync(join(projectDir, 'src'), { recursive: true });
-    writeFileSync(join(projectDir, 'src', 'declared.ts'), 'declared\n');
-    const yaml = [
-      'name: repair-scope-attempts', 'defaults:', '  max_iterations: 2', '  max_retries: 0',
-      'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true',
-    ].join('\n');
-    const config: WorkflowConfig = {description: '',  name: 'repair-scope-attempts', defaults: { max_iterations: 2, max_retries: 0 }, stages: [{ artifact_contract: fixtureArtifactContract('plan', false),criterion_refs: [],
-      id: 'plan', role: 'planner', depends_on: [], prompt_template: '', skills: [], dynamic_dispatch: true, is_gate: false,
-    }] };
-    const created = prepareRun(config, yaml);
-    let gateCalls = 0;
-    let repairCalls = 0;
-    const adapter: Adapter = { async run(_prompt, _agent, opts) {
-      const summary = summaryResult(opts);
-      if (summary) return fixtureResult(summary, opts);
-      if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
-          'stages:',
-          '  - id: review_gate', '    role: qa', '    scope: []', '    depends_on: [plan]',
-          '    dependency_reasons: {plan: "review the planned repair"}', '    is_gate: true', '    task: review',
-          '  - id: repair', '    role: repair', '    scope: [src/declared.ts]', '    depends_on: [review_gate]',
-          '    dependency_reasons: {review_gate: "repair only after an explicit rejection"}', '    retry_to: [review_gate]',
-          '    max_retries: 1', '    task: repair',
-        ].join('\n')));
-        return fixtureResult({ output: 'plan', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
-      }
-      if (opts.stageId === 'review_gate') {
-        gateCalls++;
-        writeFileSync(join(opts.runDir, 'fixture_verdict_review_gate.json'), JSON.stringify({
-          pass: gateCalls > 1, reason: gateCalls > 1 ? 'fixed' : 'rejected',
-        }));
-        return fixtureResult({ output: 'gate', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
-      }
-      repairCalls++;
-      if (repairCalls === 1) {
-        const directory = join(opts.runDir, 'stages', opts.stageId);
-        writeFileSync(join(directory, 'scope_revision_request.json'), JSON.stringify({
-          version: 1, kind: 'scope_revision', requestId: 'repair-attempt-one', stageId: opts.stageId,
-          attemptIndex: 1, requestedPaths: ['src/local.ts'], reason: 'attempt one requires the shared repair path',
-        }));
-        await waitForDecision(directory, 'scope_revision_decision_');
-        writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt one\n');
-        return fixtureResult({ output: 'timeout', exitCode: 124, duration_ms: opts.timeout_ms, timedOut: true, writes: ['src/local.ts'], writeAttribution: 'structured' }, opts);
-      }
-      writeFileSync(join(projectDir, 'src', 'local.ts'), 'attempt two without request\n');
-      return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes: ['src/local.ts'], writeAttribution: 'structured' }, opts);
-    } };
-    const final = await runWorkflow(
-      config, yaml, projectDir, adapter, new Map(), undefined,
-      writeRoles('planner', 'qa', 'repair'), created.runId, 'repair scope attempts', true,
-      undefined, true,
-    );
-    expect(repairCalls).toBe(2);
-    expect(final.status).toBe('complete');
-    const status = readStageStatus(projectDir, created.runId, 'repair');
-    expect(status.attempts?.[0].constraintAudit).toMatchObject({
-      effectiveScope: ['src/declared.ts', 'src/local.ts'], acceptedRevisionCount: 1, violationCount: 0,
-    });
-    expect(status.attempts?.[1].constraintAudit).toMatchObject({
-      effectiveScope: ['src/declared.ts', 'src/local.ts'], acceptedRevisionCount: 1, violationCount: 0,
-    });
+    expect(status.constraintAudit).toMatchObject({ violationCount: 0, rolledBackWriteCount: 0 });
+    expect(readFileSync(join(projectDir, 'src/observed.ts'), 'utf8')).toBe('snapshot only\n');
   });
 });
 
@@ -656,7 +379,7 @@ describe('bounded timeout negotiation', () => {
         expect(prompt).toContain(beforeAttempt);
         atomicWrite(join(opts.runDir, 'user_input.md'), 'switch to the isolated retry reproduction');
         return fixtureResult({ output: '503 Service Unavailable', exitCode: 1, duration_ms: 1,
-          adapterError: true, adapterFailureKind: 'service_unavailable' }, opts);
+          providerFailure: providerFailureFromDiagnostic({ provider: 'codex', eventType: 'error', code: 503, message: 'service_unavailable' }) }, opts);
       }
       return fixtureResult({ output: 'recovered', exitCode: 0, duration_ms: 1 }, opts);
     } };
@@ -777,7 +500,7 @@ describe('bounded timeout negotiation', () => {
     recordSchedulerTechnicalAttemptResult(retry, {
       effectiveTimeoutMs: first.budgetMs,
       timedOut: true,
-      timeoutTerminationCause: 'attempt_timeout',
+      terminationCause: 'attempt_timeout',
     }, first.budgetMs);
     const second = transitionTechnicalRetryBudget(retry, { type: 'prepare_attempt' });
     if (second.type !== 'attempt_prepared') throw new Error('retry budget was not prepared');
@@ -785,7 +508,7 @@ describe('bounded timeout negotiation', () => {
     recordSchedulerTechnicalAttemptResult(retry, {
       effectiveTimeoutMs: second.budgetMs,
       timedOut: true,
-      timeoutTerminationCause: 'attempt_timeout',
+      terminationCause: 'attempt_timeout',
     }, second.budgetMs);
     const terminal = transitionTechnicalRetryBudget(retry, { type: 'retry_exhausted' });
     if (terminal.type !== 'terminal') throw new Error('retry exhaustion was not terminal');
@@ -837,11 +560,11 @@ describe('bounded timeout negotiation', () => {
     expect(budgets).toEqual([3_600_000, 3_600_000]);
     const attempts = readStageStatus(projectDir, created.runId, 'work').attempts ?? [];
     expect(attempts.map((attempt) => attempt.timeout?.budgetMs)).toEqual(budgets);
-    expect(attempts.map((attempt) => attempt.timeout?.terminationCause)).toEqual(['budget_forced_stop', 'complete']);
+    expect(attempts.map((attempt) => attempt.terminationCause)).toEqual(['exit', 'exit']);
   });
 
   it('does not let planner-authored max_retries suppress bounded budget continuation', { timeout: 10_000 }, async () => {
-    setEngineDefaults({ timeout_ms: OWNED_STAGE_TIMEOUT_MS, stage_technical_retries: 1 });
+    setEngineDefaults({ default_timeout_ms: OWNED_STAGE_TIMEOUT_MS, stage_technical_retries: 1 });
     const yaml = [
       'name: planner-retry-suppression',
       'defaults:',
@@ -989,7 +712,7 @@ describe('bounded timeout negotiation', () => {
     const status = readStageStatus(projectDir, runId, stageId);
     const decisions = status.timeout?.decisionPaths?.map((path) => readJson(join(runDirPath, path))) ?? [];
     expect(result).toMatchObject({ exitCode: 0, continuation: { reason: 'stage_budget', forced: true } });
-    expect(status.timeout?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('budget_forced_stop');
+    expect(status.attempts?.at(-1)?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('exit');
     expect(status.timeout?.deadlineReachedAt).toBeTruthy();
     expect(status.timeout?.budgetMs).toBe(initialBudgetMs);
     expect(Date.parse(status.timeout!.deadlineAt) - Date.parse(status.timeout!.attemptStartedAt)).toBe(initialBudgetMs);
@@ -1000,4 +723,18 @@ describe('bounded timeout negotiation', () => {
     expect(status.timeout?.deadlineOverrunMs).toBe(0);
   });
 
+});
+
+
+describe('gate constraint audit evidence', () => {
+  it('includes dependency violations and unverified counts in the gate prompt', () => {
+    const writer = StageConfigSchema.parse({ id: 'writer', role: 'coder' });
+    const gate = StageConfigSchema.parse({ id: 'review', role: 'qa', is_gate: true, depends_on: ['writer'] });
+    const created = createRun(projectDir, 'audit-context', '', ['writer', 'review']);
+    const state = readRunState(projectDir, created.runId);
+    state.stages.writer.attempts = [{ index: 1, startedAt: '2026-01-01T00:00:00Z', status: 'complete',
+      constraintAudit: { path: 'stages/writer/constraint_audit_attempt_1.json', declaredScope: [], effectiveScope: [], violationCount: 2, unverifiedCount: 1 } }];
+    const prompt = appendGateConstraintAuditContext('Review the work.', gate, [writer, gate], state, created.runDirPath);
+    expect(prompt).toContain(`- writer attempt 1: ${join(created.runDirPath, 'stages/writer/constraint_audit_attempt_1.json')} (violations=2, unverified=1)`);
+  });
 });

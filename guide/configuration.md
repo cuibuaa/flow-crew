@@ -15,14 +15,12 @@ Parser field names are listed exactly.
 | Key | Shipped value | Effect |
 |---|---:|---|
 | `default_timeout_ms` | 10800000 | Normal execution budget including wrap-up; see [timing](agent-protocol.md#stage-budgets-and-retained-continuation) |
-| `default_stage_idle_timeout_ms` | 600000 | Minimum observed silence before watchdog abort |
-| `default_validation_timeout_ms` | 2700000 | Bound for one configured validation command |
-| `default_max_iterations` | 5 | Workflow iteration limit, including each retained budget slice |
-| `default_gate_retry_loops` | 3 | Gate repair-loop bound |
-| `default_stage_technical_retries` | 1 | Technical execution retry bound; fallback ordinary retry default |
-| `default_plan_stage_retries` | 2 | Re-prompts for an empty or invalid injected plan |
-| `live_constraint_fallback_scan_ms` | 30000 | Portable reconciliation scan cadence |
-| `live_constraint_monitor_deadline_ms` | 600000 | Maximum gap without a completed constraint scan |
+| `stage_idle_timeout_ms` | 600000 | Minimum observed silence before watchdog abort |
+| `validation_timeout_ms` | 2700000 | Bound for one configured validation command |
+| `max_iterations` | 5 | Workflow iteration limit, including each retained budget slice |
+| `gate_retry_loops` | 3 | Gate repair-loop bound |
+| `stage_technical_retries` | 1 | Technical execution retry bound; fallback ordinary retry default |
+| `plan_stage_retries` | 2 | Re-prompts for an empty or invalid injected plan |
 | `scheduler_heartbeat_interval_ms` | 2000 | Scheduler progress publication cadence |
 | `scheduler_stall_threshold_ms` | 120000 | Nonadvancing scheduler warning threshold |
 | `scheduler_stall_observer_poll_ms` | 5000 | Independent observer polling cadence |
@@ -31,14 +29,10 @@ Parser field names are listed exactly.
 | `model` | `default` | Inherit adapter configuration unless pinned |
 | `reasoning_effort` | `default` | Inherit adapter effort unless pinned |
 | `session_reuse` | `false` | Opt into compatible cross-stage Codex UUID continuation |
-| `live_constraint_exempt_patterns` | See below | Recognized generated paths exempt only while untracked |
 
-The shipped exemptions are `**/__pycache__/**`, `**/*.pyc`, `**/.pytest_cache/**`,
-`**/.mypy_cache/**`, `**/.ruff_cache/**`, `node_modules/.vite/vitest/**`, and
-`**/*.tsbuildinfo`. A tracked matching path is still guarded. Unsafe or unrecognized cache
-patterns refuse parsing. Idle, scan, heartbeat, observer and worktree bounds are validated
-as positive finite numbers and floored to integers; do not assume every numeric setting
-has that same validation.
+Git ignore rules own ordinary disposable-output inventory. Tracked files and task-frozen
+evidence retain content protection regardless of spelling. Idle, heartbeat, observer and
+worktree bounds are validated as positive finite numbers and floored to integers.
 
 `supervisor.*` has no effective runtime setting. Stage/workflow timeout and resource metadata is ignored; set the engine deadline
 and provision capacity outside the engine.
@@ -60,13 +54,16 @@ writing that runtime resolution back. `mock` is a registered test adapter; `scri
 
 Role `model` and `reasoning_effort` pins win over engine defaults; missing or `default` role
 values resolve to engine defaults. For Codex, remaining `default` values inherit its global
-configuration, then its CLI defaults. Claude reads `$CLAUDE_CONFIG_DIR/settings.json`
-(or `~/.claude/settings.json`) at every invocation: `model` supplies the model, and
+configuration, then its CLI defaults. Claude reads the machine-local
+`~/.config/flowcrew/claude.json` (for example, `{"model":"<id>"}`) and
+`$CLAUDE_CONFIG_DIR/settings.json` (or `~/.claude/settings.json`) at every invocation.
+The local model wins over settings `model`, below an explicit role/engine model pin;
+missing, invalid or `default` local values fall through to settings.
 `modelSettings[model].effortLevel` takes precedence over `effortLevel` for the selected
 model key. Model aliases are passed unchanged. Explicit model and effort pins each win
-over settings; missing or invalid settings leave the corresponding CLI flag unset.
+over inherited settings; absent valid inherited values leave the corresponding CLI flag unset.
 Claude keeps other user settings isolated. Its invocation transport records each passed
-value and source (`role`, `user-settings`, or `cli-default`), with `null` for an omitted flag.
+value and source (`role`, `local-default`, `user-settings`, or `cli-default`), with `null` for an omitted flag.
 Both adapters keep model choice an operator policy: they do not force a cheaper model or
 translate another provider's model name. Rejected model/effort parameters can be removed by
 bounded native-error repair; that does not verify the suitability of the resulting model.
@@ -126,31 +123,31 @@ through the same boundary. Static stages use the fields in the stage schema, inc
 optional ordinary `max_retries`; stage wins over workflow, then the engine technical retry
 default. Dynamic dispatch does not control retry policy: recorded `max_retries` is stripped.
 
-Static parsing preserves absent scope for compatibility. Settlement distinguishes a declared
-empty scope from an unnegotiated missing declaration: the latter has an audit-only legacy
-case without a live scope guard. Negotiation grants only named paths. Declare explicit scopes
-in new static workflows rather than relying on that compatibility gap.
+Static parsing preserves absent scope for compatibility. Scope entries are planning and
+reporting estimates; neither missing nor empty estimates prohibit project writes. Authors
+sharing a mutable project tree wait for the active author to settle. Settlement protects
+task-declared immutable evidence, with exact task outputs taking precedence.
 See [scope reconciliation](../src/scheduler/sched_scope/reconciliation.ts).
 
 The shipped `default` and `research` workflows begin with a dynamic planner. `direct` supplies
 a fixed author, independent read-only gate and conditional repair plan, and is selected for
-ordinary tasks without an explicit workflow choice. Research and program briefs retain their
+ordinary tasks without an explicit workflow choice. Research briefs retain their
 planner loops; `workflow: planner` or `--workflow default` requests dynamic planning. Direct has broad author
 scope; a dedicated workspace and the brief's constraints still matter. Brief `workflow`
-selection and refusal of direct research/program loops belong to [brief contract](brief-contract.md).
+selection and refusal of direct research loops belong to [brief contract](brief-contract.md).
 
 Sources: [schemas](../src/scheduler/sched_admission/configuration.ts),
-[workflows](../config/workflows/default.yaml), [direct](../config/workflows/direct.yaml),
+[workflows](../config/workflows/planner.yaml), [direct](../config/workflows/direct.yaml),
 [worker context](../src/worker.ts).
 
 ## Runtime environment
 
 | Variable | Consumer and purpose |
 |---|---|
-| `FC_HOME` | State root; default is the user's `.fc` directory |
+| `FC_HOME` | State root; default is the user's `.fc` directory. Daemon socket defaults to `<FC_HOME>/daemon.sock`; `--socket` selects an explicit endpoint |
 | `PROJECT_DIR` | Default project selection in core CLI/dashboard startup |
 | `PORT` | Dashboard port, default 3000 |
-| `FLOWCREW_DAEMON_SOCKET` | Explicit daemon socket routing; task/daemon socket options can override |
+| `FLOWCREW_DAEMON_SOCKET` | Ignored; select a private state root with `FC_HOME` or an explicit endpoint with `--socket` |
 | `FC_SESSION_REUSE` | Literal 0/1 session-reuse override |
 | `FC_TASKS_ROOT`, `CODEX_THREAD_ID` | Optional ledger selection; see [ledger](fc_tasks.md) |
 | `MOCK_FIXTURE_DIR` | Mock fixture input directory |

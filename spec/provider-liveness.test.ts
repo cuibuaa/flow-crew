@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CommandActivityTracker } from '../src/command-activity.js';
-import { beginStageAttempt, createRun, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
 import { inspectStageExecutionFacts, StageWatchdog } from '../src/stage-watchdog.js';
 
 // The setup loads the store before this module's mocks. Reload its graph and
@@ -113,7 +114,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 function facts(previousProcessWork?: string) {
   return inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status,
-    sinceMs: Date.now() + 1, previousProcessWork });
+    previousProcessWork });
 }
 
 function monitor() { return new StageWatchdog(project, run.runId, config); }
@@ -137,7 +138,7 @@ describe.skipIf(process.platform !== 'linux')('provider inbound stream progress'
         expect(progress).toMatchObject({
           lastProgressAt: Date.now(), idleThresholdMs: config.idleThresholdMs,
           protectedFromIdleAbort: true, activeCommandCount: 0,
-          liveProgressThisTick: false, artifactProgressThisTick: false,
+          liveProgressThisTick: false,
         });
         expect(existsSync(signalPath())).toBe(false);
         expect(progress.processDescription).toContain('socket receive progress observed');

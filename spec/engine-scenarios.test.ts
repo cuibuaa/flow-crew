@@ -1,3 +1,4 @@
+import { atomicWrite } from '../src/engine-fs.js';
 import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 /**
  * Engine wind-tunnel scenarios — the REAL scheduler run end-to-end against a
@@ -137,7 +138,7 @@ function strictResearchDispatch(
 const dispatchOf = (id: string, terminalPaths = ['research/val/ship_report.md', 'research/val/ceiling_report.md'], checkConfirmation = false) => ({
   runFiles: {
     'dispatch.yaml': strictResearchDispatch([{ id }], terminalPaths, checkConfirmation ? {
-      [id]: { version: 1, produces: [{ id: 'confirm', root: 'project', path: 'research/val/confirm_flag' }], reads: [], replays: [] },
+      [id]: { version: 1, produces: [{ id: 'confirm', root: 'project', path: 'research/val/confirm_flag' }], reads: [] },
     } : {}),
     ...(checkConfirmation ? {'reality_checks.md':['## Reality checks','```yaml','checks:',
       ' - name: confirmation_input_present','   type: exec-script-exit-zero',
@@ -158,7 +159,7 @@ terminal_states:
       min_attempted_stages: 4
 research:
   baseline: 0.0
-  policy: best_of_n
+  policy: greedy_stack
   higher_is_better: true
   result_file: research/val/round_result.json
   report_dir: research/val
@@ -243,7 +244,7 @@ terminal_states:
       min_attempted_stages: 3
 research:
   baseline: 0.0
-  policy: best_of_n
+  policy: greedy_stack
   higher_is_better: true
   result_file: research/val/round_result.json
   report_dir: research/val
@@ -295,7 +296,7 @@ terminal_states:
     paths: [research/val/ship_report.md]
 research:
   baseline: 0.0
-  policy: best_of_n
+  policy: greedy_stack
   higher_is_better: true
   result_file: research/val/round_result.json
   report_dir: research/val
@@ -390,7 +391,7 @@ terminal_states:
     paths: [research/val/ship_report.md]
 research:
   baseline: 0.0
-  policy: best_of_n
+  policy: greedy_stack
   higher_is_better: true
   result_file: research/val/round_result.json
   report_dir: research/val
@@ -450,7 +451,7 @@ describe('Scenario E: iteration-two park resumes the exact DAG (C1/L3)', () => {
     const adapter = new ScriptedAdapter(script);
     const scriptedRun = adapter.run.bind(adapter);
     adapter.run = async (prompt, role, opts) => {
-      if (opts.stageId === 'plan' && adapter.calls.length === 0) store.atomicWrite(join(opts.runDir, 'supervisor_guidance.md'), '[*]: iteration-one-guidance\n');
+      if (opts.stageId === 'plan' && adapter.calls.length === 0) atomicWrite(join(opts.runDir, 'supervisor_guidance.md'), '[*]: iteration-one-guidance\n');
       return scriptedRun(prompt, role, opts);
     };
     const parked = await runScenario(BRIEF_E, script, 4, undefined, adapter);
@@ -643,24 +644,6 @@ describe('Scenario F: daemon reconciles the same bound run after approval (C2)',
         projectDir,
         status: 'complete',
       }, null, 2), 'utf-8');
-      writeFileSync(join(runPath, 'task_summary.md'), [
-        '# Task Summary',
-        '',
-        '**Verdict**: PASS',
-        '',
-        '## What was achieved',
-        'The approved bound run completed exactly once.',
-        '',
-        '## Key numbers',
-        '- 0 daemon relaunches',
-        '',
-        '## Files produced',
-        '- task_summary.md',
-        '',
-        '## What operator should do next',
-        'No action required.',
-        '',
-      ].join('\n'), 'utf-8');
       nowMs += 1_000;
 
       const launchesBefore = systemd.runs.length;
@@ -670,7 +653,6 @@ describe('Scenario F: daemon reconciles the same bound run after approval (C2)',
       expect(registry.get(task.id)).toMatchObject({
         status: 'done',
         completing_commit: 'scenariof123',
-        summary_source: join(runPath, 'task_summary.md'),
       });
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
@@ -679,7 +661,7 @@ describe('Scenario F: daemon reconciles the same bound run after approval (C2)',
 });
 
 describe('Approval request ingestion: isolated slots and failed batches (M3/L2)', () => {
-  it('records every valid parallel request even when a peer fails and rejects unsafe ids', async () => {
+  it('records the admitted failing author request without starting its deferred peers', async () => {
     const inbox = await import('../src/inbox.js');
     const dispatch = strictResearchDispatch([
       { id: 'req_a', maxRetries: 0, scope: ['research/val/request-a.json'] },
@@ -714,9 +696,10 @@ describe('Approval request ingestion: isolated slots and failed batches (M3/L2)'
 
     expect(result.state.status).toBe('parked');
     const items = inbox.foldItems(result.state.runId!);
-    expect([...items.keys()].sort()).toEqual(['batch-a', 'batch-b']);
+    expect([...items.keys()].sort()).toEqual(['batch-a']);
     expect(existsSync(join(result.runDirPath, 'approvals', 'batch-a.request.json'))).toBe(true);
-    expect(existsSync(join(result.runDirPath, 'approvals', 'batch-b.request.json'))).toBe(true);
+    expect(existsSync(join(result.runDirPath, 'approvals', 'batch-b.request.json'))).toBe(false);
+    expect(result.adapter.calls.some(call => call.stageId === 'req_b')).toBe(false);
     expect(existsSync(join(result.runDirPath, 'approvals', 'unsafe'))).toBe(false);
     expect(result.adapter.calls.find((call) => call.stageId === 'req_a')?.prompt)
       .toContain(join(result.runDirPath, 'stages', 'req_a', 'approval_request.json'));

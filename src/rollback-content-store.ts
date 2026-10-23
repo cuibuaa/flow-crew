@@ -1,5 +1,5 @@
 import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync } from './engine-fs.js';
-import { createReadStream, existsSync, fstatSync, lstatSync, readSync } from 'node:fs';
+import { existsSync, fstatSync, lstatSync, readSync } from 'node:fs';
 import { constants as fsConstants } from 'node:fs';
 import { createHash, type Hash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -103,30 +103,6 @@ export function hashRollbackFileSync(path: string): RollbackHashResult {
   const hash = createHash('sha256');
   const result = updateFileHashSync(path, hash);
   return { ...result, sha256: hash.digest('hex') };
-}
-
-/**
- * Stream a nominated changed file. Each hash update is bounded to one chunk,
- * leaving timers and filesystem callbacks runnable between reads.
- */
-export async function hashRollbackFileCooperatively(path: string): Promise<RollbackHashResult> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const before = rollbackStatIdentity(path);
-    if (!before || before.type !== 'file') throw new Error(`${path} is not a stable regular file`);
-    const hash = createHash('sha256');
-    let byteLength = 0;
-    const stream = createReadStream(path, { highWaterMark: 256 * 1024 });
-    for await (const chunk of stream) {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      hash.update(bytes);
-      byteLength += bytes.byteLength;
-    }
-    const after = rollbackStatIdentity(path);
-    if (rollbackStatIdentitiesEqual(before, after) && byteLength === Number(after?.size)) {
-      return { sha256: hash.digest('hex'), byteLength, statIdentity: after! };
-    }
-  }
-  throw new Error(`${path} changed repeatedly while its content was hashed`);
 }
 
 export class RollbackContentStore {

@@ -1,23 +1,15 @@
-import { publishRunCompletion } from '../sched_policy/run-completion.js';
+import { concludeRun } from '../sched_policy/run-completion.js';
 /** Planner artifact retry decisions; run/campaign/guidance effects enter through typed callbacks. */
 import { renderPlanInterface } from '../../plan-interface.js';
-import { type StoreState, runDir, RUN_STATUS } from '../../store.js';
+import { type StageStatus, type StoreState, runDir, RUN_STATUS } from '../../store.js';
 import { join, posix } from 'node:path';
 import { writeFileSync, unlinkSync, mkdirSync, copyFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { buildMonotonePlanRetryContext, type PlanRetryRequirement, planRetryRequirement, readMonotonePlanRetryState } from '../../plan-retry-monotone.js';
 import { readDispatchDocument } from '../../dispatch-document.js';
-import { type RealityCheckPreflightReport } from '../../reality-check-preflight.js';
-import { publishJsonCreateOnly } from '../../runtime-negotiation.js';
+import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { type DispatchAdmissionReport } from './dispatch.js';
-
-// Error-string prefix written into a plan stage's status.json when it exited 0
-// but produced zero valid injected stages (empty/invalid dispatch.yaml). The
-// retry preamble keys off this prefix to render a dispatch-specific re-prompt.
-const INVALID_DISPATCH_ERROR_PREFIX = 'invalid dispatch.yaml';
-
-const REALITY_CHECK_PREFLIGHT_ARTIFACT = 'reality_check_preflight.json';
 
 export function restoreAdmittedRealityChecks(runDirPath: string, state: StoreState): void {
   const checksPath = join(runDirPath, 'reality_checks.md');
@@ -52,9 +44,12 @@ export function buildRetryPreamble(
 ): string {
   const partialPath = `${runDirPath}/stages/${stageId}/output.md`;
   let prevError: string | undefined;
+  let admissionFailed = false;
   try {
     const statusRaw = readFileSync(join(runDirPath, 'stages', stageId, 'status.json'), 'utf-8');
-    const status = JSON.parse(statusRaw) as { error?: string; attempts?: Array<{ status: string; error?: string }> };
+    const status = JSON.parse(statusRaw) as Pick<StageStatus, 'error' | 'admissionFailure' | 'attempts'>;
+    admissionFailed = status.admissionFailure?.code === 'dispatch_refused'
+      && status.admissionFailure.attemptIndex === (status.attempts?.at(-1)?.index ?? 0);
     // A nested adapter runs after the worker clears the live outcome. Its
     // settled ledger still explains the execution that is being retried.
     prevError = status.error ?? status.attempts?.filter(attempt => attempt.status !== RUN_STATUS.RUNNING).at(-1)?.error;
@@ -63,24 +58,17 @@ export function buildRetryPreamble(
   const withMonotoneContext = (message: string): string => monotoneContext
     ? `${message}\n\n${monotoneContext}`
     : message;
-  // Empty/invalid dispatch.yaml — re-plan, do NOT "continue from partial". The
-  // detail (parse error / unknown roles) is carried in the error string itself.
-  if (prevError && prevError.startsWith(INVALID_DISPATCH_ERROR_PREFIX)) {
-    const detail = prevError.slice(INVALID_DISPATCH_ERROR_PREFIX.length).replace(/^[:\s]+/, '').trim();
-    const admissionRefusal = detail.startsWith('dispatch admission rejected the complete proposal');
+  const retryState = readMonotonePlanRetryState(runDirPath, stageId);
+  if (admissionFailed && retryState && !retryState.terminal) {
     return withMonotoneContext([
-      admissionRefusal
-        ? `RE-PLAN (attempt ${retries + 1}): your previous dispatch.yaml was schema-valid but admission rejected its topology or coverage before any proposed work stage ran.`
-        : `RE-PLAN (attempt ${retries + 1}): your previous attempt exited cleanly but you failed to emit a valid dispatch.yaml — it produced ZERO usable stages.`,
-      detail ? `Specific problem: ${detail}` : 'The file was missing, empty, unparseable, or contained no schema-valid stages.',
+      `RE-PLAN (attempt ${retryState.attempts.length + 1}): dispatch admission rejected the previous complete proposal before any proposed work stage ran.`,
+      prevError ?? retryState.unsatisfied.map(requirement => `${requirement.id}: ${requirement.detail}`).join('\n'),
       DISPATCH_SCHEMA_REMINDER,
-      admissionRefusal
-        ? `Address the observed requirements in a complete replacement at ${runDirPath}/dispatch.yaml. The archived proposal/report remain read-only evidence.`
-        : `Replace the structurally invalid dispatch.yaml at ${runDirPath}/dispatch.yaml with at least one schema-valid stage that uses a known role.`,
+      `Address the observed requirements in a complete replacement at ${runDirPath}/dispatch.yaml. The archived proposal/report remain read-only evidence.`,
     ].join('\n\n'));
   }
   let cause: string;
-  if (prevError && (prevError.startsWith('aborted by engine') || prevError.startsWith('aborted by supervisor'))) {
+  if (prevError && prevError.startsWith('aborted by engine')) {
     cause = `Previous execution was ${prevError}. The engine stopped the execution. Inspect its recorded reason and produce the required result within the current deadline.`;
   } else if (timeoutContext) {
     cause = `Previous attempt timed out with an effective budget of ${timeoutContext.previousBudgetMs}ms. `
@@ -163,25 +151,11 @@ export function concludePlanRetryFailure(input: {
   stageId: string;
   reason: string;
 }): StoreState {
-  const retryState = readMonotonePlanRetryState(
-    runDir(input.projectDir, input.runId),
-    input.stageId,
-    input.state.currentIteration ?? 1,
-  );
-  const causalRequirements = retryState?.attempts.at(-1)?.unsatisfied ?? [];
-  const reason = causalRequirements.length > 0 && input.reason.includes('Unsatisfied requirement(s):')
-    ? `${input.reason.slice(0, input.reason.indexOf('Unsatisfied requirement(s):'))}`
-      + `Unsatisfied requirement(s): ${causalRequirements.map((requirement) => `${requirement.id} — ${requirement.detail}`).join('; ')}`
-    : input.reason;
-  input.state.status = RUN_STATUS.FAILED;
-  input.state.failureReason = reason;
-  input.state.completedAt = new Date().toISOString();
-  publishRunCompletion(input.state, input.projectDir, input.runId, () => ({
+  return concludeRun(input.state, { status: RUN_STATUS.FAILED, reasonCode: 'dispatch_refused', detail: input.reason, eventFields: () => ({
     iteration: input.state.currentIteration ?? 1,
     stageId: input.stageId,
-    detail: `failed: ${reason}`,
-  }));
-  return input.state;
+    detail: `failed: ${input.reason}`,
+  }) });
 }
 
 export function archiveDispatchAdmissionRefusal(input: {
@@ -225,20 +199,15 @@ export function archiveDispatchAdmissionRefusal(input: {
 /** Action the engine takes when a plan stage emits zero valid injected stages and
  * there is no static follow-up. Pure + exported for unit testing. */
 export type EmptyDispatchAction =
-  | { action: 'retry'; nextRetry: number; error: string; detail: string }
+  | { action: 'retry'; detail: string }
   | { action: 'escalate'; status: 'escalated' | 'failed'; reason: string; unknownRoles: string[] };
 
 export function decideEmptyDispatchAction(
   diagnosis: { detail: string; unknownRoles: string[]; transient: boolean },
-  retriesUsed: number,
-  maxRetries: number,
 ): EmptyDispatchAction {
-  const canRetry = diagnosis.transient && retriesUsed < maxRetries;
-  if (canRetry) {
+  if (diagnosis.transient) {
     return {
       action: 'retry',
-      nextRetry: retriesUsed + 1,
-      error: `${INVALID_DISPATCH_ERROR_PREFIX}: ${diagnosis.detail}`,
       detail: diagnosis.detail,
     };
   }
@@ -254,34 +223,5 @@ export function decideEmptyDispatchAction(
       unknownRoles: diagnosis.unknownRoles,
     };
   }
-  return {
-    action: 'escalate',
-    status: 'failed',
-    reason: `Planner failed to emit a valid dispatch.yaml after ${maxRetries} bounded retr${maxRetries === 1 ? 'y' : 'ies'}. Last problem: ${diagnosis.detail}`,
-    unknownRoles: [],
-  };
+  return { action: 'escalate', status: 'failed', reason: diagnosis.detail, unknownRoles: [] };
 }
-
-export function writeRealityCheckPreflightArtifact(
-  runDirPath: string,
-  plannerStageId: string,
-  report: RealityCheckPreflightReport,
-  disposition: 'admitted' | 'admitted_with_advisories',
-  demotedCheckIndexes: readonly number[] = [],
-): void {
-  writeFileSync(join(runDirPath, REALITY_CHECK_PREFLIGHT_ARTIFACT), JSON.stringify({
-    version: 1,
-    writtenAt: new Date().toISOString(),
-    plannerStageId,
-    checksInspected: report.checksInspected,
-    disposition,
-    advisoryFindings: report.advisoryFindings,
-    demotedCheckIndexes,
-    delivery: {
-      runtime: 'advisory findings are applied to reality_checks.md before dispatch and cannot reject terminal success',
-      operator: 'a reality_gate_advisory entry is appended to events.jsonl when advisory findings are present',
-      planner: `the planner prompt requires reading ${REALITY_CHECK_PREFLIGHT_ARTIFACT} on a later planning attempt`,
-    },
-  }, null, 2) + '\n', 'utf-8');
-}
-

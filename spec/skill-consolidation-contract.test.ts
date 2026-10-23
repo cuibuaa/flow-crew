@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'yaml';
@@ -33,18 +34,18 @@ describe('skill-consolidation release contract', () => {
     expect(plannerPrompt()).not.toContain('Hard rules (gate will reject otherwise)');
     const stage = (id: string, extra = {}) => StageConfigSchema.parse({
       id,role:'coder',scope:['docs/**'],depends_on:[],dependency_reasons:{},prompt_template:'Declared work.',
-      artifact_contract:{version:1,produces:[],reads:[],replays:[]},...extra,
+      artifact_contract:{version:1,produces:[],reads:[]},...extra,
     });
     const admit = (stages: ReturnType<typeof stage>[], extra = {}) => inspectDispatchAdmission({dispatched:stages,baseStages:[],dispatchStageId:'plan',...extra});
     const terminalStates = {complete:{paths:['docs/final.md']}};
-    expect(admit([stage('first'),stage('second')],{terminalStates}).errors.join(';')).toContain('expected exactly one final producer, found 2');
+    expect(admit([stage('first'),stage('second')],{terminalStates}).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('expected exactly one final producer, found 2');
     const criteria = extractBriefCriteria('# Task\n## Acceptance Criteria\n1. The report must preserve independently verified evidence.\n');
     expect(criteria.criteria.length).toBeGreaterThan(0);
     const work = stage('work',{criterion_refs:criteria.criteria.map((criterion)=>criterion.id)});
     const uncovered = admit([work],{criteria});
     expect(uncovered.pass).toBe(false);
-    expect(uncovered.errors.join(';')).toContain('not assigned to a gate');
-    expect(admit([stage('owner',{condition:'research.decision == continue'})],{terminalStates}).errors.join(';')).toContain('non-research run');
+    expect(uncovered.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('not assigned to a gate');
+    expect(admit([stage('owner',{condition:'research.decision == continue'})],{terminalStates}).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('non-research run');
   });
 
   it('retires terminal-path prose inference for level-two sections and declarations', () => {
@@ -68,7 +69,7 @@ describe('skill-consolidation release contract', () => {
     }
   });
 
-  it('preserves terminal-floor guards after retiring the ownership heuristic', () => {
+  it('preserves structured terminal wall-floor limits', () => {
     const wallFloor = inspectBrief([
       '---',
       'terminal_states:',
@@ -80,23 +81,8 @@ describe('skill-consolidation release contract', () => {
       '# Goal',
       'Ship the result.',
     ].join('\n'));
-    const uncountableFloor = inspectBrief([
-      '---',
-      'terminal_states:',
-      '  complete:',
-      '    paths: [docs/final.md]',
-      '    stage_glob: docs/stages/stage_*_verdict.md',
-      '    floor:',
-      '      min_attempted_stages: 1',
-      '---',
-      '# Verification',
-      'Inspect the existing `docs/stages/stage_1_verdict.md`.',
-    ].join('\n'));
-
     expect(wallFloor.findings.map(({ code }) => code))
       .toContain('terminal_wall_floor_too_high_complete');
-    expect(uncountableFloor.findings.map(({ code }) => code))
-      .toContain('terminal_floor_uncountable_complete');
   });
 
   it('replaces all dormant probes with a collected machine-independent contract', () => {

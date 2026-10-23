@@ -1,11 +1,12 @@
+import { atomicWrite } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendTextRecord } from './append-boundary.js';
-import { readJsonlFile, type JsonlReadCursor } from './jsonl.js';
+import { readJsonlFile, readOptionalJsonlFile, type JsonlReadCursor } from './jsonl.js';
 import type { AttemptDisposition, StageAttempt, StageStatus, StoreState } from './store.js';
 import type { AdapterFailureKind } from './adapters/base.js';
 import type { ProviderFailure } from './provider-result.js';
-import { atomicWrite, isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
+import { isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
   | 'execution_notice'
@@ -13,12 +14,6 @@ export type RunEventType =
   | 'stage_wrap_up_delivered'
   | 'stage_wrap_up_completed'
   | 'stage_wrap_up_forced'
-  | 'stage_environment_wait_started'
-  | 'stage_environment_wait_finished'
-  | 'resource_lease_decided'
-  | 'resource_lease_retained'
-  | 'resource_lease_wait_started'
-  | 'resource_lease_wait_finished'
   | 'plan_revision_decided'
   | 'recovery_reconciled'
   | 'attempt_started'
@@ -27,49 +22,30 @@ export type RunEventType =
   | 'attempt_suspended'
   | 'guidance_written'
   | 'guidance_delivery_checked'
-  | 'stage_command_started'
-  | 'stage_command_completed'
   | 'command_timeout_projection'
   | 'stage_command_interrupt_requested'
   | 'stage_command_interrupted'
   | 'interrupted_command_repeated'
-  | 'criterion_check_conflict'
-  | 'scope_revision_requested'
-  | 'scope_revision_decided'
-  | 'live_constraint_violation'
-  | 'live_constraint_comparison_unavailable'
-  | 'live_constraint_exemptions'
-  | 'live_constraint_monitor_failure'
   | 'scheduler_loop_stalled'
   | 'scheduler_loop_recovered'
   | 'terminal_candidate_quarantined'
   | 'admission_rejected'
   | 'run_status_changed'
   | 'operator_wrap_up_required'
-  | 'supervisor_assessment'
-  | 'supervisor_reject_requested'
-  | 'supervisor_reject_discarded'
   | 'stage_complete'
   | 'stage_failed'
   | 'stage_skipped'
-  | 'verdict_written'
   | 'attempt_results_updated'
   | 'iteration_completed'
   | 'run_completed'
   | 'campaign_alert'
   | 'research_injected'
-  | 'supervisor_replan'
-  | 'supervisor_reject'
   | 'plan_dispatch_retry'
-  | 'research_mode_degraded'
   | 'research_gate_exhausted'
   | 'research_round_contract_repaired'
   | 'research_gate_candidate_settled'
-  | 'stage_artifact_contract_violation'
   | 'reality_gate_advisory'
   | 'parallel_scope_serialized'
-  | 'parallel_write_conflict'
-  | 'attempt_summary_refresh_requested'
   // Approval inbox: the run suspended on a consequential action, and the
   // resolution that released it. Part of the run's audit narrative — the only
   // place an operator sees WHY a run stopped without a verdict. Deliberately
@@ -101,16 +77,11 @@ export interface RunEvent {
   adapterFailure?: boolean;
   adapterFailureKind?: AdapterFailureKind;
   requestId?: string;
-  ruleId?: string;
   requestingStageId?: string;
-  waitStartedAt?: string;
   requestedAt?: string;
   detectedAt?: string;
   boundary?: 'attempt_start' | 'adapter_invocation' | 'tool_call_start' | 'tool_call_completion' | 'operator_interrupt';
   invocationIndex?: number;
-  exemptedCount?: number;
-  lastScanDurationMs?: number;
-  lastScanFileCount?: number;
   round?: number;
   criteria?: string[];
   guidanceIds?: string[];
@@ -127,17 +98,10 @@ export interface RunEvent {
   handoff?: string;
   shortfallMs?: number;
   originalRequestId?: string;
-  criterionId?: string;
-  checkPath?: string;
-  authorStageId?: string;
   decision?: 'accepted' | 'rejected' | 'discarded';
-  evidenceGeneration?: string;
-  assessmentId?: string;
-  supersedesAssessmentId?: string;
-  supervisorVerdict?: string;
-  evidenceIds?: string[];
   source?: 'worker' | 'scheduler' | 'supervisor' | 'operator';
   runStatus?: StoreState['status'];
+  gate?: StageStatus['gate'];
   /** Stable identity for retrying one cursor transition without duplicate events. */
   observationId?: string;
 }
@@ -183,46 +147,10 @@ export function readRunEvents(projectDir: string, runId: string, cursor?: JsonlR
   }
 }
 
-function buildArtifactEvents(runId: string, event: RunEvent): RunEvent[] {
-  const artifactEvents: RunEvent[] = [];
-  const artifacts = event.artifacts ?? [];
-  const verdictArtifacts = artifacts.filter((artifact) => /(^|\/)verdict(_|\.|\/)/i.test(artifact));
-  if (verdictArtifacts.length > 0) {
-    artifactEvents.push({
-      type: 'verdict_written',
-      runId,
-      timestamp: event.timestamp,
-      iteration: event.iteration,
-      stageId: event.stageId,
-      artifacts: verdictArtifacts,
-    });
-  }
-  const resultArtifacts = artifacts.filter((artifact) =>
-    /(^|\/)(attempt|attempts|result|results|metrics|score|table)/i.test(artifact),
-  );
-  if (resultArtifacts.length > 0) {
-    artifactEvents.push({
-      type: 'attempt_results_updated',
-      runId,
-      timestamp: event.timestamp,
-      iteration: event.iteration,
-      stageId: event.stageId,
-      artifacts: resultArtifacts,
-      attemptIndex: event.attemptIndex,
-      attemptStartedAt: event.attemptStartedAt,
-      role: event.role,
-      disposition: event.disposition,
-    });
-  }
-  return artifactEvents;
-}
-
-function observeRunStatusChange(projectDir: string, runId: string): RunEvent[] {
-  const directory = runDir(projectDir, runId);
+export function observeRunStatusChange(directory: string, runId: string, status: StoreState['status']): RunEvent[] {
   const cursorPath = join(directory, 'run_event_status.json');
   let committing = false;
   try {
-    const status = (JSON.parse(readFileSync(join(directory, 'run.json'), 'utf-8')) as StoreState).status;
     const cursor = existsSync(cursorPath)
       ? JSON.parse(readFileSync(cursorPath, 'utf-8')) as {
         status?: StoreState['status'];
@@ -232,7 +160,7 @@ function observeRunStatusChange(projectDir: string, runId: string): RunEvent[] {
     const prior = cursor?.status;
     if (prior === status) return [];
     const observationId = `${cursor?.observedAt ?? 'initial'}:${String(prior ?? 'unobserved')}->${String(status)}`;
-    const recorded = readRunEvents(projectDir, runId);
+    const recorded = readOptionalJsonlFile<RunEvent>(join(directory, 'events.jsonl'));
     const timestamp = recorded.find((event) => event.observationId === observationId)?.timestamp
       ?? new Date().toISOString();
     const events: RunEvent[] = [{
@@ -258,7 +186,7 @@ function observeRunStatusChange(projectDir: string, runId: string): RunEvent[] {
       .map((event) => event.type));
     committing = true;
     for (const event of events) {
-      if (!recordedTypes.has(event.type)) appendRunEvent(projectDir, runId, event);
+      if (!recordedTypes.has(event.type)) appendRunEventAtRunDir(directory, event);
     }
     // The cursor is a commit record for the complete event set. It advances
     // only after every obligation it represents is durably appended.
@@ -276,8 +204,6 @@ export function recordStageOutcome(
   stageId: string,
   iteration: number | undefined,
   status: StageStatus,
-  /** @deprecated Events append synchronously; no refresh is scheduled. */
-  _options?: { debounceMs?: number },
 ): void {
   if (!isSettledStageStatus(status.status) && status.status !== STAGE_STATUS.SKIPPED) {
     return;
@@ -296,26 +222,17 @@ export function recordStageOutcome(
     iteration,
     stageId,
     status: status.status,
-    artifacts: status.artifacts,
+    ...(status.gate ? { gate: status.gate } : {}),
     ...(settledAttempt ? attemptEventFields(settledAttempt) : {}),
   };
 
-  const events = [stageEvent, ...buildArtifactEvents(runId, stageEvent)];
-  for (const event of events) appendRunEvent(projectDir, runId, event);
-  observeRunStatusChange(projectDir, runId);
+  appendRunEvent(projectDir, runId, stageEvent);
 }
 
 export function recordRunEvent(
   projectDir: string,
   runId: string,
   event: RunEvent,
-  /** @deprecated Events append synchronously; no refresh is scheduled. */
-  _options?: { debounceMs?: number },
 ): void {
   appendRunEvent(projectDir, runId, event);
-  if (event.type !== 'run_status_changed') observeRunStatusChange(projectDir, runId);
 }
-
-// Compatibility for validation cleanup hooks. There are no deferred event
-// writes to cancel; historical maintenance events remain readable.
-export function clearAttemptSummaryRefreshDebounce(): void {}

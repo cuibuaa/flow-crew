@@ -9,7 +9,8 @@ import {
   startSchedulerHeartbeat,
   SCHEDULER_LOOP_STALL_FILE,
 } from '../src/scheduler-heartbeat.js';
-import { createRun } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+
 import { removeSchedulerProcessIdentity, writeSchedulerProcessIdentity } from '../src/run-lock.js';
 
 async function waitFor(path: string, timeoutMs: number, ready: (text: string) => boolean = () => true): Promise<void> {

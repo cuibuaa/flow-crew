@@ -1,3 +1,7 @@
+/** Built-in check type names. Kept dependency-free so schema modules can list them without loading handlers. */
+export const REALITY_CHECK_TYPES = ['exec-script-exit-zero', 'file-exists-nonempty', 'json-schema-match'] as const;
+export type RealityCheckType = typeof REALITY_CHECK_TYPES[number];
+
 export interface CheckContext {
   taskDir: string;
   projectDir: string;

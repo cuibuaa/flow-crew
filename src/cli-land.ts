@@ -1,8 +1,9 @@
 import { hashRollbackFileSync } from './rollback-content-store.js';
-import { errorMessage, within, optionValue } from './source_services/cli-inputs.js';
+import { errorMessage, within } from './source_services/cli-inputs.js';
+import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   createEngineTaskRunResolver,
   defaultFcTasksRoot,
@@ -20,7 +21,8 @@ import {
   recordedTerminalArtifactSnapshotNames,
   type StoreState,
 } from './store.js';
-import { isPathSafelyArchived } from './declared-output-archive.js';
+import { createArchivedPathVerifier } from './declared-output-archive.js';
+import { archiveLandOutputs, DEFAULT_LAND_ARCHIVE_ROOT, verifyLandArchive, type LandArchiveReport } from './land-archive.js';
 
 type Writer = { write(chunk: string): unknown };
 
@@ -86,6 +88,7 @@ export interface ParsedLandArgs {
   help: boolean;
   json: boolean;
   remove: boolean;
+  archiveRoot?: string;
   acknowledgeRegenerable?: number;
   run?: string;
   completeFcTask?: string;
@@ -150,7 +153,7 @@ export interface LandRemovalAcknowledgement {
 }
 
 export interface LandInspectionIssue {
-  operation: LandGitRequest['operation'] | 'state' | 'project' | 'artifact' | 'path';
+  operation: LandGitRequest['operation'] | 'state' | 'project' | 'artifact' | 'path' | 'archive';
   reason: string;
 }
 
@@ -204,6 +207,7 @@ export interface LandReport {
   primaryWorktree?: string;
   removalSteps?: LandRemovalStep[];
   fcTaskCompletion?: LandFcTaskCompletion;
+  archive?: LandArchiveReport;
 }
 
 const nodeLandFileSystem: LandFileSystem = {
@@ -307,85 +311,24 @@ function resolveDependencies(overrides: LandDependencies): ResolvedLandDependenc
 }
 
 export function parseLandArgs(args: string[]): ParsedLandArgs {
-  const parsed: ParsedLandArgs = { help: false, json: false, remove: false };
-  let runSeen = false;
-  let acknowledgementSeen = false;
-  let completeFcTaskSeen = false;
-  let fcTaskSessionSeen = false;
-  let fcTasksRootSeen = false;
-  const start = args[0] === 'land' ? 1 : 0;
-  for (let index = start; index < args.length;) {
-    const argument = args[index];
-    if (argument === '--help' || argument === '-h') {
-      parsed.help = true;
-      index += 1;
-      continue;
-    }
-    if (argument === '--json') {
-      parsed.json = true;
-      index += 1;
-      continue;
-    }
-    if (argument === '--remove') {
-      parsed.remove = true;
-      index += 1;
-      continue;
-    }
-    if (argument === '--run' || argument.startsWith('--run=')) {
-      if (runSeen) throw new Error('--run may be specified only once');
-      const value = optionValue(args, index, '--run');
-      parsed.run = value.value;
-      runSeen = true;
-      index += value.consumed;
-      continue;
-    }
-    if (argument === '--acknowledge-regenerable' || argument.startsWith('--acknowledge-regenerable=')) {
-      if (acknowledgementSeen) throw new Error('--acknowledge-regenerable may be specified only once');
-      const value = optionValue(args, index, '--acknowledge-regenerable');
-      if (!/^(?:0|[1-9]\d*)$/.test(value.value)) {
-        throw new Error('--acknowledge-regenerable requires a non-negative integer');
-      }
-      const count = Number(value.value);
-      if (!Number.isSafeInteger(count)) {
-        throw new Error('--acknowledge-regenerable exceeds the largest safe integer');
-      }
-      parsed.acknowledgeRegenerable = count;
-      acknowledgementSeen = true;
-      index += value.consumed;
-      continue;
-    }
-    if (argument === '--complete-fc-task' || argument.startsWith('--complete-fc-task=')) {
-      if (completeFcTaskSeen) throw new Error('--complete-fc-task may be specified only once');
-      const value = optionValue(args, index, '--complete-fc-task');
-      parsed.completeFcTask = value.value;
-      completeFcTaskSeen = true;
-      index += value.consumed;
-      continue;
-    }
-    if (argument === '--fc-task-session' || argument.startsWith('--fc-task-session=')) {
-      if (fcTaskSessionSeen) throw new Error('--fc-task-session may be specified only once');
-      const value = optionValue(args, index, '--fc-task-session');
-      parsed.fcTaskSession = value.value;
-      fcTaskSessionSeen = true;
-      index += value.consumed;
-      continue;
-    }
-    if (argument === '--fc-tasks-root' || argument.startsWith('--fc-tasks-root=')) {
-      if (fcTasksRootSeen) throw new Error('--fc-tasks-root may be specified only once');
-      const value = optionValue(args, index, '--fc-tasks-root');
-      parsed.fcTasksRoot = value.value;
-      fcTasksRootSeen = true;
-      index += value.consumed;
-      continue;
-    }
-    throw new Error(`unknown land option: ${argument}`);
-  }
-  if (!parsed.help && !parsed.run) throw new Error('--run is required');
-  const closureOptionPresent = completeFcTaskSeen || fcTaskSessionSeen || fcTasksRootSeen;
-  if (!parsed.help && closureOptionPresent && !parsed.remove) {
+  const { help, flags, values } = parseCommandArgs('land', args);
+  const parsed: ParsedLandArgs = {
+    help,
+    json: flags.has('--json'),
+    remove: flags.has('--remove'),
+    run: values.get('--run'),
+    archiveRoot: values.get('--archive') ?? (flags.has('--archive') ? DEFAULT_LAND_ARCHIVE_ROOT : undefined),
+    acknowledgeRegenerable: values.has('--acknowledge-regenerable')
+      ? Number(values.get('--acknowledge-regenerable')) : undefined,
+    completeFcTask: values.get('--complete-fc-task'),
+    fcTaskSession: values.get('--fc-task-session'),
+    fcTasksRoot: values.get('--fc-tasks-root'),
+  };
+  const closureOptionPresent = parsed.completeFcTask || parsed.fcTaskSession || parsed.fcTasksRoot;
+  if (!help && closureOptionPresent && !parsed.remove) {
     throw new Error('fc_tasks completion options require --remove');
   }
-  if (!parsed.help && closureOptionPresent && (!parsed.completeFcTask || !parsed.fcTaskSession)) {
+  if (!help && closureOptionPresent && (!parsed.completeFcTask || !parsed.fcTaskSession)) {
     throw new Error('--complete-fc-task and --fc-task-session must be supplied together');
   }
   return parsed;
@@ -393,8 +336,9 @@ export function parseLandArgs(args: string[]): ParsedLandArgs {
 
 export function landUsage(): string {
   return [
-    'Usage: flowcrew land --run <run-id> [--remove] [--json] [--acknowledge-regenerable=<count>] [--complete-fc-task <entry-id> --fc-task-session <session-id> [--fc-tasks-root <dir>]]',
+    commandUsage('land'),
     'Audits terminal artifacts and all unique worktree state; proven-regenerable paths are counted, everything else is named.',
+    `--archive preserves inventoried outputs and the terminal run store with sha256 manifests under ${DEFAULT_LAND_ARCHIVE_ROOT}, or an existing explicit root.`,
     '--remove requires the exact audited regenerable count and stays fail-closed while any ungraded item remains.',
     'fc_tasks completion is optional explicit intent; it is preflighted before removal and applied only after every removal step succeeds.',
   ].join('\n');
@@ -813,11 +757,15 @@ async function inspectInventory(
   runDirectory: string,
   git: LandGitRunner,
   fs: LandFileSystem,
+  archiveProofDir?: string,
 ): Promise<{ inventory: LandInventory; issues: LandInspectionIssue[]; branch?: string }> {
   const inventory = emptyInventory();
   const issues: LandInspectionIssue[] = [];
   let untrackedPaths: string[] = [];
   let ignoredPaths: string[] = [];
+  const proofs = [runDirectory, ...(archiveProofDir ? [archiveProofDir] : [])]
+    .map((directory) => createArchivedPathVerifier(projectDir, directory, fs));
+  const archived = (path: string) => proofs.some((proof) => proof(path));
   const statusRequest: LandGitRequest = {
     command: 'git',
     args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
@@ -828,8 +776,8 @@ async function inspectInventory(
   if (status.ok) {
     try {
       const parsed = parseGitStatusPorcelain(status.stdout);
-      inventory.tracked = parsed.tracked.filter((entry) => !isPathSafelyArchived(projectDir, runDirectory, entry.path, fs));
-      untrackedPaths = parsed.untracked.filter((path) => !isPathSafelyArchived(projectDir, runDirectory, path, fs));
+      inventory.tracked = parsed.tracked.filter((entry) => !archived(entry.path));
+      untrackedPaths = parsed.untracked.filter((path) => !archived(path));
     } catch (error) {
       issues.push({ operation: 'status', reason: errorMessage(error) });
     }
@@ -843,7 +791,7 @@ async function inspectInventory(
   };
   const ignored = await checkedGit(ignoredRequest, git);
   if (ignored.ok) ignoredPaths = nulPaths(ignored.stdout)
-    .filter((path) => !isPathSafelyArchived(projectDir, runDirectory, path, fs));
+    .filter((path) => !archived(path));
   else issues.push(ignored.issue);
 
   const branchRequest: LandGitRequest = {
@@ -1002,9 +950,6 @@ function repairsForRefusals(
     }
     if (reason.includes('primary worktree could not be proven') || reason.includes('worktree')) {
       return 'Repair or refresh Git worktree metadata, confirm the recorded task and primary worktrees, then rerun the audit.';
-    }
-    if (reason.includes('Git reports worktree root')) {
-      return 'Use the run whose canonical project directory matches the Git worktree root, then rerun the audit.';
     }
     return `Resolve the named refusal (${reason}) and rerun the read-only land audit before removal.`;
   });
@@ -1214,10 +1159,24 @@ export async function runLand(
   const artifactIssues: LandInspectionIssue[] = artifacts
     .filter((artifact) => artifact.reason)
     .map((artifact) => ({ operation: 'artifact', reason: `${artifact.path}: ${artifact.reason}` }));
-  const inspected = await inspectInventory(state, projectDir, runDir, deps.git, deps.fs);
-  const inspectionIssues = [...artifactIssues, ...inspected.issues];
   const statusResolution = resolveRunStatus(state.status);
   const terminal = statusResolution.kind === 'known' && isTerminalRunStatus(statusResolution.status);
+  let inspected = await inspectInventory(state, projectDir, runDir, deps.git, deps.fs);
+  const inspectionIssues = [...artifactIssues, ...inspected.issues];
+  let archive: LandArchiveReport | undefined;
+  if (parsed.archiveRoot && terminal && inspectionIssues.length === 0) {
+    try {
+      archive = archiveLandOutputs(projectDir, runDir, parsed.archiveRoot, [
+        ...inspected.inventory.tracked.map((item) => item.path),
+        ...inspected.inventory.enumerated.map((item) => item.path),
+        ...artifacts.filter((artifact) => artifact.projectPresent).map((artifact) => artifact.path),
+      ]);
+      inspected = await inspectInventory(state, projectDir, runDir, deps.git, deps.fs, archive.worktreeProofDir);
+      inspectionIssues.push(...inspected.issues);
+    } catch (error) {
+      inspectionIssues.push({ operation: 'archive', reason: errorMessage(error) });
+    }
+  }
   const expectedRegenerableCount = inspected.inventory.regenerable.buildOutputs.count
     + inspected.inventory.regenerable.installedDependencies.count;
   const removalAcknowledgement: LandRemovalAcknowledgement = {
@@ -1254,6 +1213,7 @@ export async function runLand(
     readyForRemoval: reasons.length === 0,
     refusalReasons: reasons,
     refusalRepairs: repairsForRefusals(reasons, removalAcknowledgement),
+    ...(archive ? { archive } : {}),
     ...(inspected.branch ? { branch: inspected.branch } : {}),
     ...(closureIntent
       ? {
@@ -1265,7 +1225,7 @@ export async function runLand(
         }
       : {}),
   };
-  if (!parsed.remove) return baseReport;
+  if (!parsed.remove) return parsed.archiveRoot && !terminal ? { ...baseReport, state: 'refused' } : baseReport;
   if (reasons.length > 0) return { ...baseReport, state: 'refused' };
 
   const context = await removalContext(projectDir, inspected.branch, deps);
@@ -1319,6 +1279,29 @@ export async function runLand(
         'exact terminal run and target worktree verified; ledger remains unchanged until removal succeeds',
       )
     : undefined;
+
+  if (archive) {
+    try {
+      const final = await inspectInventory(state, projectDir, runDir, deps.git, deps.fs, archive.worktreeProofDir);
+      const finalCount = final.inventory.regenerable.buildOutputs.count + final.inventory.regenerable.installedDependencies.count;
+      const finalReasons = refusalReasons(terminal, final.inventory, final.issues, true, {
+        ...removalAcknowledgement,
+        expectedRegenerableCount: finalCount,
+        matches: parsed.acknowledgeRegenerable === finalCount,
+      });
+      if (finalReasons.length) {
+        return { ...contextual, state: 'refused', readyForRemoval: false, inventory: final.inventory,
+          inspectionIssues: [...inspectionIssues, ...final.issues], refusalReasons: finalReasons,
+          refusalRepairs: repairsForRefusals(finalReasons, { ...removalAcknowledgement, expectedRegenerableCount: finalCount }) };
+      }
+      verifyLandArchive(projectDir, runDir, archive);
+    } catch (error) {
+      return { ...contextual, state: 'refused', readyForRemoval: false,
+        inspectionIssues: [...inspectionIssues, { operation: 'archive', reason: errorMessage(error) }],
+        refusalReasons: ['archive proof no longer matches the source and destination'],
+        refusalRepairs: ['Review the changed files and rerun land with --archive; no removal was attempted.'] };
+    }
+  }
 
   const removalSteps: LandRemovalStep[] = [];
   const remove = await destructiveStep({
@@ -1422,6 +1405,10 @@ function renderLandHuman(report: LandReport, writer: Writer): void {
   writer.write(`Land: ${report.state.toUpperCase()}\n`);
   writer.write(`Run: ${report.runId}\nStatus: ${report.status} (${report.terminal ? 'terminal' : 'not terminal'})\n`);
   writer.write(`Worktree: ${report.projectDir}\n`);
+  if (report.archive) {
+    writer.write(`Archive: ${report.archive.directory} (${report.archive.files} files, ${report.archive.bytes} bytes)\n`);
+    for (const manifest of report.archive.manifests) writer.write(`  SHA256 MANIFEST ${displayPath(manifest)}\n`);
+  }
   if (report.artifacts.length === 0) writer.write('Declared artifacts for this status: none\n');
   for (const artifact of report.artifacts) {
     writer.write(`  ${artifact.present ? 'PRESENT' : 'ABSENT'} ${displayPath(artifact.path)} `
@@ -1477,8 +1464,9 @@ function renderLandHuman(report: LandReport, writer: Writer): void {
     if (completion.repairCommand) writer.write(`    REPAIR: ${completion.repairCommand}\n`);
   }
   if (!report.removalRequested) {
+    const archiveOption = report.archive ? ` --archive=${shellArgument(dirname(report.archive.directory))}` : '';
     writer.write(report.readyForRemoval
-      ? `Audit complete: after independently judging the result, rerun with --remove --acknowledge-regenerable=${report.removalAcknowledgement.expectedRegenerableCount}.\n`
+      ? `Audit complete: after independently judging the result, rerun with${archiveOption} --remove --acknowledge-regenerable=${report.removalAcknowledgement.expectedRegenerableCount}.\n`
       : 'Audit complete: account for every listed item before requesting removal.\n');
   }
 }
@@ -1506,7 +1494,7 @@ export async function cmdLandWithDeps(
     return report.inspectionIssues.length === 0 ? 0 : 1;
   } catch (error) {
     deps.stderr.write(`land: ${errorMessage(error)}\n`);
-    deps.stderr.write(`${landUsage()}\n`);
+    if (!(error instanceof CliUsageError)) deps.stderr.write(`${landUsage()}\n`);
     return 1;
   }
 }

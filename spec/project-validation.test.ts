@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,9 +13,9 @@ import {
   type ValidationFileSystem,
 } from '../src/project-validation.js';
 import { validationEnvironment } from '../src/validation-environment.js';
-import { sendRpc, startRpcServer } from '../src/orchestrator-rpc.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
-import { createRun, writeStageStatus } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { writeStageStatus } from '../src/store.js';
 import { bindReviewedGateValidation, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 
 function memoryFs(files: Record<string, string>): ValidationFileSystem {
@@ -79,7 +80,7 @@ describe('project command environment and observer authority', () => {
       expect(ambient.env.HOME).toBe(join(scratch, 'home'));
       expect(ambient.env.CODEX_HOME).toBe(join(scratch, 'codex'));
       expect(ambient.env.FC_HOME).toBe(join(scratch, 'home', '.fc'));
-      expect(ambient.env.FLOWCREW_DAEMON_SOCKET).toBe(join(scratch, 's'));
+      expect(ambient.env.FLOWCREW_DAEMON_SOCKET).toBeUndefined();
       expect(ambient.removed).toEqual(['CODEX_HOME', 'DBUS_SESSION_BUS_ADDRESS', 'FC_SESSION_REUSE',
         'FLOWCREW_LAUNCH_RESULT_PATH', 'NODE_OPTIONS', 'OPENAI_API_KEY', 'XDG_RUNTIME_DIR']);
       for (const name of ['FLOWCREW_LAUNCH_RESULT_PATH', 'FC_SESSION_REUSE', 'OPENAI_API_KEY', 'NODE_OPTIONS', 'DBUS_SESSION_BUS_ADDRESS']) {
@@ -94,12 +95,12 @@ describe('project command environment and observer authority', () => {
       if (process.platform !== 'win32') {
         const longRoot = join(scratch, 'x'.repeat(108));
         expect(validationEnvironment(longRoot, {}).env.FLOWCREW_DAEMON_SOCKET)
-          .toBe(join(longRoot, 's'));
+          .toBeUndefined();
       }
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   });
 
-  it.skipIf(process.platform === 'win32')('keeps validation control private and usable beneath a long scratch alias', async () => {
+  it.skipIf(process.platform === 'win32')('keeps validation storage private beneath a long scratch alias', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'validation-path-'));
     try {
       const limit = process.platform === 'linux' ? 107 : 103;
@@ -112,16 +113,12 @@ describe('project command environment and observer authority', () => {
         CODEX_HOME: '/ambient-agent', OPENAI_API_KEY: 'fake',
         TMPDIR: alias, TMP: alias, TEMP: alias,
       });
-      const socket = environment.env.FLOWCREW_DAEMON_SOCKET!;
-      expect(realpathSync(environment.env.FC_HOME!)).toBe(join(realpathSync(target), 'home', '.fc'));
-      expect(socket.startsWith(alias + '/')).toBe(true);
-      expect(existsSync(socket)).toBe(false);
+      expect(environment.env.FC_HOME).toBe(join(alias, 'home', '.fc'));
+      expect(existsSync(environment.env.FC_HOME!)).toBe(false);
+      expect(environment.env.FLOWCREW_DAEMON_SOCKET).toBeUndefined();
       expect(environment.env.OPENAI_API_KEY).toBeUndefined();
       for (const name of ['TMPDIR', 'TMP', 'TEMP']) expect(environment.env[name]).toBe(realpathSync(target));
       expect(environment.removed).toEqual(['CODEX_HOME', 'FC_HOME', 'FLOWCREW_DAEMON_SOCKET', 'OPENAI_API_KEY']);
-      const server = await startRpcServer(socket, () => ({ ok: true }));
-      try { expect(await sendRpc(socket, { cmd: 'status' })).toMatchObject({ ok: true }); }
-      finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   });
 
@@ -668,6 +665,20 @@ describe('configuration-driven project validation baseline', () => {
     expect(regressed).toContainEqual(expect.objectContaining({
       role: 'test', state: 'regression', newFailureIdentifiers: ['spec/new.test.ts'],
     }));
+  });
+
+  it('keeps pytest red-to-red comparison sensitive to new ids with the same failure count', async () => {
+    const fs = memoryFs({ [`${root}/pyproject.toml`]: '[tool.pytest.ini_options]\ntestpaths = ["tests"]' });
+    const measure = (id: string) => runProjectValidationBaseline(root, { fs, runCommand: () => ({
+      exitCode: 1, stdout: `FAILED tests/test_check.py::${id} - AssertionError\n================ 1 failed in 0.1s ================`,
+    }) });
+    const baseline = await measure('test_existing');
+    const unchanged = await measure('test_existing');
+    const changed = await measure('test_new');
+    expect(evaluateValidationDelta(baseline, unchanged.results).find(entry => entry.role === 'test'))
+      .toMatchObject({ state: 'pass' });
+    expect(evaluateValidationDelta(baseline, changed.results).find(entry => entry.role === 'test'))
+      .toMatchObject({ state: 'regression', newFailureIdentifiers: ['tests/test_check.py::test_new - AssertionError'] });
   });
 
   it('keeps an unparseable red baseline unresolved rather than treating it as zero failures', async () => {

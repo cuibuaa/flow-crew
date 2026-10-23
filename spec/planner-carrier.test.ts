@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { parse, stringify } from 'yaml';
 import { execWithStdin, type Adapter, type AgentConfig } from '../src/adapters/base.js';
-import { resetConfigCache } from '../src/config.js';
+
 import { readRunEvents } from '../src/run-events.js';
 import { loadWorkflow } from '../src/scheduler.js';
 import { runWorkflow } from '../src/scheduler.js';
@@ -25,9 +25,8 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'planner-carrier-'));
   project = join(root, 'project'); store = join(root, 'store');
   mkdirSync(project);
-  previousStore = fcGlobalDir(); setFcGlobalDir(store); resetConfigCache();
-});
-afterEach(() => { setFcGlobalDir(previousStore); resetConfigCache(); rmSync(root, { recursive: true, force: true }); });
+  previousStore = fcGlobalDir(); setFcGlobalDir(store); });
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
 async function launch(tamper = false) {
   const roles = new Map<string, AgentConfig>();

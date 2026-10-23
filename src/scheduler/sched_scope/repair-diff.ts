@@ -1,3 +1,4 @@
+import { scopeContainsPath } from './path-capabilities.js';
 import { writeFileSync, mkdirSync } from '../../engine-fs.js';
 
 // Boundary: Attribute and serialize scoped repair evidence without changing content truth; gate archive naming comes from a typed service.
@@ -7,10 +8,9 @@ import { join } from "node:path";
 import { latestAttemptWrites } from "../sched_admission/frontier.js";
 
 import { normalizedProjectPath } from "../sched_admission/scope-services.js";
-import { type RepairFileImage, repairFileMaterializedBytes, compareRepairFileContents } from './file-images.js';
+import { type RepairFileImage, compareRepairFileContents } from './file-images.js';
 import { type RepairRoundSnapshot, changedProjectPathsSinceSnapshot } from './snapshots.js';
 import { baselineImage, readRollbackCurrentImage } from './rollback-baseline.js';
-import { readScopeRevisionDecisions } from './scope-revisions.js';
 import { type GateArchiveServices } from '../sched_settlement/gate-archives.js';
 
 function serializableRepairFileMode(mode: number): string {
@@ -20,7 +20,8 @@ function serializableRepairFileMode(mode: number): string {
 function serializableRepairFileImage(image: RepairFileImage): Record<string, unknown> {
   if (!image.exists) return {
     exists: false,
-    ...(image.inspectionFailure ? { contentAvailable: false, inspectionFailure: image.inspectionFailure } : {}),
+    provenance: image.provenance ?? 'unknown',
+    ...(image.inspectionFailure ? { inspectionFailure: image.inspectionFailure } : {}),
   };
   return {
     exists: true,
@@ -30,23 +31,10 @@ function serializableRepairFileImage(image: RepairFileImage): Record<string, unk
     type: image.type,
     mode: image.mode === undefined ? undefined : serializableRepairFileMode(image.mode),
     ...(image.gitObjectId ? { gitObjectId: image.gitObjectId } : {}),
-    ...(image.materializationFailure ? {
-      contentAvailable: false,
-      materializationFailure: image.materializationFailure,
-    } : { contentAvailable: true }),
+    ...(image.materializationFailure ? { materializationFailure: image.materializationFailure } : {}),
     ...(image.symlink ? { symlink: true } : {}),
-    ...(image.text === undefined ? {} : { text: image.text }),
   };
 }
-
-function repairFilePreimageAvailable(image: RepairFileImage): boolean {
-  if (image.inspectionFailure) return false;
-  if (!image.exists) return true;
-  return image.backingPath !== undefined || repairFileMaterializedBytes(image) !== undefined
-    || (image.type === 'file' && image.gitObjectId !== undefined && !image.materializationFailure);
-}
-
-
 
 export function createRepairDiffWriter(services: Pick<GateArchiveServices, 'gateArchiveCoordinate' | 'canonicalGateRoundArtifactDir'>) {
   const { gateArchiveCoordinate, canonicalGateRoundArtifactDir } = services;
@@ -96,37 +84,19 @@ export function createRepairDiffWriter(services: Pick<GateArchiveServices, 'gate
       if (same && authoritativeOwners.length === 0) continue;
   
       let status: string;
-      if (!beforeExisted && after.exists) status = 'added';
+      if (comparison === 'unavailable') status = 'content-unavailable';
+      else if (!beforeExisted && after.exists) status = 'added';
       else if (beforeExisted && !after.exists) status = 'deleted';
       else if (same) status = 'reported-touched';
-      else if (comparison === 'unavailable') status = 'content-unavailable';
       else status = 'modified';
-      const declaredScopeMatch = before !== undefined;
-      // This public field means the declared-scope capture owns full preimage
-      // bytes. A run baseline may privately retain more for safe rollback, but
-      // the repair-diff artifact must not claim that as stage-captured content.
-      const preimageAvailable = before !== undefined && repairFilePreimageAvailable(before);
+      const declaredScopeMatch = Object.values(snapshot.declaredScopes).some(scope => scopeContainsPath(scope ?? [], path));
       files.push({
         path,
         status,
-        preimageAvailable,
         declaredScopeMatch,
         authoritativeWriteStageIds: authoritativeOwners,
-        before: before
-          ? serializableRepairFileImage(before)
-          : beforeExisted
-            ? {
-                exists: true,
-                sha256: baselineBefore.sha256,
-                byteLength: baselineBefore.byteLength,
-                type: baselineBefore.type,
-                mode: baselineBefore.mode === undefined ? undefined : serializableRepairFileMode(baselineBefore.mode),
-                ...(baselineBefore.gitObjectId ? { gitObjectId: baselineBefore.gitObjectId } : {}),
-                contentCaptured: false,
-              }
-            : { exists: false, contentCaptured: false },
+        before: serializableRepairFileImage(baselineBefore),
         after: serializableRepairFileImage(after),
-        ...(!preimageAvailable ? { note: 'Preimage identity is retained separately from restoration bytes. No unavailable preimage is treated as a known-absent path.' } : {}),
       });
     }
   
@@ -134,17 +104,6 @@ export function createRepairDiffWriter(services: Pick<GateArchiveServices, 'gate
     const artifactDir = canonicalGateRoundArtifactDir(runDirPath, coordinate);
     mkdirSync(artifactDir, { recursive: true });
     const artifactPath = join(artifactDir, 'repair_diff.json');
-    const scopeRevisions = readScopeRevisionDecisions(
-      runDirPath,
-      repairStages.map((stage) => stage.id),
-    );
-    const effectiveRepairScopes = Object.fromEntries(repairStages.map((stage) => {
-      const accepted = scopeRevisions
-        .filter((decision) => decision.stageId === stage.id && decision.accepted === true && Array.isArray(decision.effectiveScope))
-        .sort((left, right) => left.attemptIndex - right.attemptIndex)
-        .at(-1);
-      return [stage.id, accepted?.effectiveScope ?? stage.scope ?? []];
-    }));
     writeFileSync(artifactPath, JSON.stringify({
       version: 1,
       iteration,
@@ -154,8 +113,7 @@ export function createRepairDiffWriter(services: Pick<GateArchiveServices, 'gate
       completedAt: new Date().toISOString(),
       repairStageIds: repairStages.map((stage) => stage.id),
       declaredScopes: snapshot.declaredScopes,
-      effectiveScopes: effectiveRepairScopes,
-      scopeRevisions,
+      effectiveScopes: Object.fromEntries(repairStages.map((stage) => [stage.id, stage.scope ?? []])),
       authoritativeWrites: [...writeOwners.entries()].map(([path, owners]) => ({ path, stageIds: [...owners].sort() })),
       files,
     }, null, 2) + '\n', 'utf-8');

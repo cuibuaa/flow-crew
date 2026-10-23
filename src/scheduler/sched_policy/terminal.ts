@@ -1,15 +1,16 @@
-import { publishRunCompletion } from './run-completion.js';
+import { freshTerminalArtifact, terminalArtifactIdentity } from '../../terminal-artifact-status.js';
+import { concludeRun } from './run-completion.js';
 /** Terminal selection, floor/owner/freshness/reality enforcement and quiescent conclusion; receives validation, campaign and escalation services. */
 import { type Adapter } from '../../adapters/base.js';
 import { type ProjectValidationDependencies } from '../../project-validation.js';
-import { type StoreState, isContinuingStage, type PostTerminateHook, RUN_STATUS, STAGE_STATUS, enforceRealityGateBeforeTerminal, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName, isSuccessfulRunStatus } from '../../store.js';
+import { type StoreState, isContinuingStage, RUN_STATUS, STAGE_STATUS, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName, isSuccessfulRunStatus } from '../../store.js';
 import { createHash } from 'node:crypto';
 import { hashRollbackFileSync, updateFileHashSync } from '../../rollback-content-store.js';
 import { renameSync, copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
-import { appendProgramLedger, evaluateTerminalFloor, markLeftoverStagesSkipped } from '../sched_admission/brief-contract.js';
+import { evaluateTerminalFloor } from '../sched_admission/brief-contract.js';
 import { archiveDeclaredOutputs } from '../../declared-output-archive.js';
 import { evaluateResearchCeilingFloor } from '../../research-policy.js';
 import { log } from '../sched_admission/shared.js';
@@ -23,13 +24,12 @@ import { reconcileUnresolvedStageObligations } from '../sched_settlement/complet
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { runPostTerminateHook } from './research.js';
 
-type GateValidationDeltaArtifact = NonNullable<Awaited<ReturnType<typeof import('../../scheduler.js').recordGateValidationDelta>>>;
+import type { GateValidationDeltaArtifact } from '../sched_settlement/gate-validation.js';
 
 export interface TerminalEvaluationServices {
   validationDeltaMatchesExecution: typeof import('../sched_settlement/gate-validation.js').validationDeltaMatchesExecution;
   settledGateValidationExecution: typeof import('../sched_settlement/gate-validation.js').settledGateValidationExecution;
   validationExecutionId: typeof import('../sched_settlement/gate-validation.js').validationExecutionId;
-  recordGateValidationDelta: typeof import('../../scheduler.js').recordGateValidationDelta;
   writeCampaignEntry(projectDir: string, state: StoreState): void;
   concludeRepeatedBlockage(state: StoreState, ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number }): StoreState | null;
 }
@@ -117,7 +117,7 @@ function terminalDagHasNoRemainingTransition(
 export const RUN_VALIDATION_BASELINE_FILE = 'validation_baseline.json';
 
 export function createTerminalEvaluator(services: TerminalEvaluationServices) {
-  const { validationDeltaMatchesExecution, settledGateValidationExecution, validationExecutionId, recordGateValidationDelta, writeCampaignEntry, concludeRepeatedBlockage } = services;
+  const { validationDeltaMatchesExecution, settledGateValidationExecution, validationExecutionId, writeCampaignEntry, concludeRepeatedBlockage } = services;
 
   async function ensureTerminalArtifactValidation(input: {
     projectDir: string;
@@ -186,42 +186,8 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           };
     }
 
-    try {
-      const delta = await recordGateValidationDelta(
-        input.projectDir,
-        input.runId,
-        validationStageId,
-        input.dependencies,
-      );
-      if (!delta) {
-        return {
-          required: true,
-          pass: false,
-          disposition: 'rejected',
-          writeAt,
-          validationStageId,
-          reason: 'the run validation baseline disappeared before terminal revalidation',
-        };
-      }
-      return {
-        required: true,
-        pass: delta.pass,
-        disposition: delta.pass ? 'revalidated' : 'rejected',
-        writeAt,
-        validationStageId,
-        checkedAt: delta.checkedAt,
-        ...(delta.pass ? {} : { reason: 'terminal revalidation regressed from the setup baseline' }),
-      };
-    } catch (error) {
-      return {
-        required: true,
-        pass: false,
-        disposition: 'rejected',
-        writeAt,
-        validationStageId,
-        reason: `terminal revalidation could not run: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
+    return { required: true, pass: false, disposition: 'rejected', writeAt,
+      validationStageId, reason: 'no settled gate validation receipt covers the terminal write' };
   }
 
   async function tryTerminateOnTerminalState(
@@ -234,30 +200,27 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     if (Object.values(state.stages).some(isContinuingStage)) {
       return { decision: 'deferred', reasons: ['retained stage budget work must continue before terminal settlement'] };
     }
+    const freshCandidate = (path: string, candidate: string): boolean => {
+      const projectPath = join(ctx.projectDir, path);
+      if (freshTerminalArtifact(state, path, candidate, candidate === projectPath ? ctx.projectDir : ctx.runDirPath)) return true;
+      // An eligible owner can publish identical bytes; attribution proves the publication.
+      const owner = admittedTerminalOwner(ctx.runDirPath, path);
+      if (candidate !== projectPath || !owner) return false;
+      const identity = terminalArtifactIdentity(candidate, ctx.projectDir);
+      return identity.state === 'present' && identity.type === 'file'
+        && stageAttemptWroteProjectPath(ctx.projectDir, state, owner, path);
+    };
     const notMatchedReasons: string[] = [];
     const deferredReasons: string[] = [];
     const researchSelection = state.research
       ? readResearchTerminalSelection(ctx.runDirPath)
       : undefined;
     if (!researchSelection) {
-      const startedAtMs = Date.parse(state.startedAt);
       const freshLogicalCandidates = Object.entries(state.terminalStates).flatMap(([terminalStatus, entry]) => (
         entry.paths.flatMap((path) => {
           const projectPath = join(ctx.projectDir, path);
           const snapshotPath = join(ctx.runDirPath, terminalArtifactSnapshotName(path));
-          const admittedOwner = admittedTerminalOwner(ctx.runDirPath, path);
-          const attributedToCurrentRun = Boolean(
-            admittedOwner
-            && stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path),
-          );
-          const sources = [projectPath, snapshotPath].filter((candidate) => {
-            try {
-              return existsSync(candidate)
-                && Number.isFinite(startedAtMs)
-                && (statSync(candidate).mtimeMs >= startedAtMs
-                  || (candidate === projectPath && attributedToCurrentRun));
-            } catch { return false; }
-          });
+          const sources = [projectPath, snapshotPath].filter(candidate => freshCandidate(path, candidate));
           return sources.length > 0 ? [{ terminalStatus, path, sources }] : [];
         })
       ));
@@ -277,7 +240,6 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           stageId: ownerIds.length === 1 ? ownerIds[0] : undefined,
           detail,
           evidenceDigest: evidence.digest('hex'),
-          threshold: state.campaignTriggers?.repeatedFailureAfter,
         });
         if (blockage?.escalatedNow) {
           const escalated = concludeRepeatedBlockage(state, ctx);
@@ -309,12 +271,11 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
       }
     }
     for (const [terminalStatus, entry] of Object.entries(state.terminalStates)) {
-      const accepting = isSuccessfulRunStatus(terminalStatus) || terminalStatus === RUN_STATUS.PHASE_COMPLETE;
+      const accepting = isSuccessfulRunStatus(terminalStatus);
       for (const path of entry.paths) {
         
         const projPath = join(ctx.projectDir, path);
         const snapPath = join(ctx.runDirPath, terminalArtifactSnapshotName(path));
-        const startedAtMs = Date.parse(state.startedAt);
         const candidates = [projPath, snapPath].flatMap((candidate) => {
           if (!existsSync(candidate)) return [];
           try { return [{ path: candidate, mtimeMs: statSync(candidate).mtimeMs }]; } catch { return []; }
@@ -324,22 +285,10 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           continue;
         }
         const admittedOwner = admittedTerminalOwner(ctx.runDirPath, path);
-        const attributedToCurrentRun = Boolean(
-          admittedOwner
-          && stageAttemptWroteProjectPath(ctx.projectDir, state, admittedOwner, path),
-        );
-        const source = Number.isFinite(startedAtMs)
-          ? candidates.find((candidate) => candidate.mtimeMs >= startedAtMs)
-            ?? (attributedToCurrentRun
-              ? candidates.find((candidate) => candidate.path === projPath)
-              : undefined)
-          : undefined;
+        const source = candidates.find(candidate => freshCandidate(path, candidate.path));
         if (!source) {
           const hintMarker = `[scheduler-hint:${terminalStatus}:${path}:freshness]`;
-          const newestMtime = candidates.reduce((latest, candidate) => Math.max(latest, candidate.mtimeMs), Number.NEGATIVE_INFINITY);
-          const reason = Number.isFinite(startedAtMs)
-            ? `${path} exists but predates this run start: newest mtime ${new Date(newestMtime).toISOString()} < startedAt ${state.startedAt}`
-            : `${path} exists, but run startedAt '${state.startedAt}' is invalid; freshness cannot be proven`;
+          const reason = `${path} exists but its content is unchanged from this run's initial content`;
           appendSchedulerGuidanceOnce(
             ctx.runDirPath,
             RUN_WIDE_GUIDANCE_TARGET,
@@ -554,10 +503,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
             continue;
           }
         }
-        state.status = terminalStatus as StoreState['status'];
         state.terminalArtifact = path;
-        state.completedAt = new Date().toISOString();
-        markLeftoverStagesSkipped(state, `terminal state '${terminalStatus}' reached before this stage ran`);
         
         try {
           if (sourcePath !== snapPath) {
@@ -565,8 +511,13 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
             copyFileSync(sourcePath, snapPath);
           }
         } catch { /* non-critical */ }
-        const gate = await enforceRealityGateBeforeTerminal(ctx.projectDir, ctx.runId, state, state.status);
-        if (!gate.allowed) {
+        state = await concludeRun(state, {
+          status: terminalStatus as StoreState['status'], reasonCode: 'terminal_artifact',
+          pendingStageNote: `terminal state '${terminalStatus}' reached before this stage ran`,
+          eventFields: () => ({ iteration: ctx.iteration, detail: `Terminal state '${terminalStatus}' reached via ${path}` }),
+          writeCampaignEntry,
+        });
+        if (state.status === RUN_STATUS.REALITY_GATE_FAILED) {
           if (sourcePath === projPath && admittedOwner) {
             quarantineTerminalCandidate(
               ctx.runDirPath,
@@ -574,39 +525,11 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
               `reality_rejected_${terminalStatus}_${path.split('/').pop() ?? 'terminal_candidate'}`,
             );
           }
-          return { decision: 'matched', state: gate.state, reasons: [] };
+          return { decision: 'matched', state, reasons: [] };
         }
-        publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
-          iteration: ctx.iteration,
-          detail: `Terminal state '${terminalStatus}' reached via ${path}`,
-        }), writeCampaignEntry);
         log.info({ runId: ctx.runId, iteration: ctx.iteration, terminalStatus, path }, 'Terminal-state file detected; ending iteration loop');
-        // Auto-append ledger row only on phase_complete (other terminal states
-        // are program-level, not phase-level).
-        if (state.program && terminalStatus === RUN_STATUS.PHASE_COMPLETE) {
-          const startedMs = state.startedAt ? new Date(state.startedAt).getTime() : Date.now();
-          const wallHours = (Date.now() - startedMs) / 3600000;
-          appendProgramLedger(ctx.projectDir, state.program, {
-            phase: state.program.phase,
-            run_id: ctx.runId,
-            started_utc: state.startedAt,
-            completed_utc: state.completedAt,
-            wall_hours: Number(wallHours.toFixed(3)),
-            terminal_artifact: path,
-          });
-        }
         if (entry.postTerminateHook) {
-          const extraEnv: Record<string, string> = state.program ? {
-            FC_PROGRAM_NAME: state.program.name,
-            FC_PROGRAM_PHASE: state.program.phase,
-            ...(state.program.roadmap ? { FC_PROGRAM_ROADMAP: join(ctx.projectDir, state.program.roadmap) } : {}),
-            ...(state.program.ledger ? { FC_PROGRAM_LEDGER: join(ctx.projectDir, state.program.ledger) } : {}),
-          } : {};
-          const hookWithEnv: PostTerminateHook = {
-            ...entry.postTerminateHook,
-            env: { ...(entry.postTerminateHook.env ?? {}), ...extraEnv },
-          };
-          await runPostTerminateHook(hookWithEnv, {
+          await runPostTerminateHook(entry.postTerminateHook, {
             projectDir: ctx.projectDir,
             runDir: ctx.runDirPath,
             runId: ctx.runId,
@@ -645,14 +568,10 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     const conclusion = evaluation.decision === 'not_matched'
       ? `All stages settled, but no declared terminal state matched (${completionPath}): ${reasonDetail}`
       : `All stages settled, but declared terminal evaluation could not decide (${completionPath}): ${reasonDetail}`;
-    state.status = RUN_STATUS.INCOMPLETE;
-    state.failureReason = conclusion;
-    state.completedAt = new Date().toISOString();
-    markLeftoverStagesSkipped(state, conclusion);
-    publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
+    state = concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'terminal_unmatched', detail: conclusion, pendingStageNote: conclusion, eventFields: () => ({
       iteration: ctx.iteration,
       detail: `terminal evaluation ${evaluation.decision}: ${conclusion}`,
-    }), writeCampaignEntry);
+    }), writeCampaignEntry });
     log.warn({
       runId: ctx.runId,
       iteration: ctx.iteration,

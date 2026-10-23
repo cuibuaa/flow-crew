@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { hashRollbackFileSync } from '../src/rollback-content-store.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
@@ -19,62 +20,33 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Adapter } from '../src/adapters/base.js';
-import { createBuildManifest, publishBuildGeneration } from '../src/build-manifest.js';
+import { createBuildManifest, publishBuildOutputs } from '../src/build-manifest.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { cancelRunThroughControlPlane } from '../src/cancellation-client.js';
 import { collectShipPreflight } from '../src/cli-ship-preflight.js';
-import { runShipSetup, type GitWorktreeCreator } from '../src/cli-ship-setup.js';
 import { loadEngineDefaults } from '../src/config.js';
-import {
-  isPathSafelyArchived,
-} from '../src/declared-output-archive.js';
-import {
-  GENERATED_PATH_POLICIES,
-  ROLLBACK_INVENTORY_EXCLUDED_DIRECTORIES,
-  isRecognizedGeneratedCachePath,
-} from '../src/generated-path-policy.js';
+import { createArchivedPathVerifier } from '../src/declared-output-archive.js';
 import { buildStagePrompt } from '../src/handoff.js';
 import { routePendingOperatorGuidanceToStage } from '../src/guidance.js';
-import {
-  matchesLiveConstraintExemptPattern,
-  scopeRevisionInstruction,
-  scopeRevisionPathsForViolations,
-} from '../src/live-constraint-guard.js';
 import { CANCELLATION_RPC_TIMEOUT_MS, RpcOutcomeUnknownError } from '../src/orchestrator-rpc.js';
-import { rehearseBriefIsolated } from '../src/rehearse.js';
+import { rehearseBriefIsolated } from './test-support/rehearse.js';
+
 import type {
   ProjectValidationBaseline,
   ValidationCommandResult,
 } from '../src/project-validation.js';
 import { beginResearchInputGeneration, readResearchGateCandidate } from '../src/research-candidate.js';
-import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
-import {
-  assessResearchIterationBudget,
-  appendIterationLog,
-  decideScopeRevision,
-  findGateRecoveryStages,
-  inspectDispatchAdmission,
-  loadWorkflow,
-  parseBriefFrontmatter,
-  parseDispatchedStageConfig,
-  readGateVerdict,
-  recordGateValidationDelta,
-  restoreProjectPath,
-  runWorkflow,
-  tryTerminateOnTerminalState,
-  type StageConfig,
-  type WorkflowConfig,
-} from '../src/scheduler.js';
+import { assessResearchIterationBudget, appendIterationLog, findGateRecoveryStages, inspectDispatchAdmission, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, restoreProjectPath, runWorkflow, tryTerminateOnTerminalState, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import {
   inspectShipSetupRecord,
   shipSetupBriefDigest,
   shipSetupReadyRecordPath,
 } from '../src/ship-setup-record.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   initializeReservedRun,
   readRunState,
@@ -209,14 +181,14 @@ describe('engine behaviour contracts', () => {
     const unchanged = await recordGateValidationDelta(projectDir, created.runId, 'qa', {
       runCommand: () => ({ exitCode: 1, stdout: 'FAIL spec/existing.test.ts\nTests 1 failed' }),
     });
-    const unchangedVerdict = readGateVerdict(projectDir, 'qa', created.runId);
+    const unchangedVerdict = readGateEvaluation(projectDir, 'qa', created.runId);
     const regressed = await recordGateValidationDelta(projectDir, created.runId, 'qa', {
       runCommand: () => ({ exitCode: 1, stdout: 'FAIL spec/existing.test.ts\nFAIL spec/new.test.ts\nTests 2 failed' }),
     });
-    const regressedVerdict = readGateVerdict(projectDir, 'qa', created.runId);
+    const regressedVerdict = readGateEvaluation(projectDir, 'qa', created.runId);
     const control = createRun(projectDir, 'fixture', 'name: fixture', ['qa']);
     write(join(control.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true }));
-    const noBaselineVerdict = readGateVerdict(projectDir, 'qa', control.runId);
+    const noBaselineVerdict = readGateEvaluation(projectDir, 'qa', control.runId);
     expect(prompt).not.toContain('Engine-enforced validation baseline');
     expect(unchanged?.pass).toBe(true);
     expect(unchangedVerdict?.pass).toBe(true);
@@ -255,7 +227,7 @@ describe('engine behaviour contracts', () => {
     const ready = inspectShipSetupRecord(projectDir, brief, stateRoot);
     expect(missing.state).toBe('missing');
     expect(refused).toMatchObject({ state: 'refused', reason: 'target collision' });
-    expect(launch.status).toBe(2);
+    expect(launch.status).toBe(1);
     expect(launch.stderr).toContain('ship-setup refused');
     expect(ready.state).toBe('ready');
   });
@@ -302,13 +274,13 @@ describe('engine behaviour contracts', () => {
     });
     const archivedPath = join(created.runDirPath, 'declared_outputs', outputPath);
     const manifest = JSON.parse(readFileSync(join(created.runDirPath, 'declared_outputs_manifest.json'), 'utf-8')) as { outputs: unknown[] };
-    const safe = isPathSafelyArchived(projectDir, created.runDirPath, outputPath, {
+    const safe = createArchivedPathVerifier(projectDir, created.runDirPath, {
       hashFile: hashRollbackFileSync,
-    });
+    })(outputPath);
     write(join(projectDir, outputPath), 'changed after archive\n');
-    const changedSafe = isPathSafelyArchived(projectDir, created.runDirPath, outputPath, {
+    const changedSafe = createArchivedPathVerifier(projectDir, created.runDirPath, {
       hashFile: hashRollbackFileSync,
-    });
+    })(outputPath);
     expect(result.decision).toBe('matched');
     expect(readFileSync(archivedPath, 'utf-8')).toBe('archived report\n');
     expect(manifest.outputs).toHaveLength(1);
@@ -332,7 +304,7 @@ describe('engine behaviour contracts', () => {
     expect(requests).toContain('"quarantined":true');
     routePendingOperatorGuidanceToStage(directory, 'valid_stage');
     const ledger = readFileSync(join(directory, 'supervisor_guidance.md'), 'utf-8');
-    expect(quarantined.status).toBe(2);
+    expect(quarantined.status).toBe(1);
     expect(quarantined.stderr).toContain('quarantined');
     expect(quarantined.stderr).toContain('not queued');
     expect(queued.status).toBe(0);
@@ -341,35 +313,17 @@ describe('engine behaviour contracts', () => {
     expect(ledger).toContain('"quarantined":true');
   });
 
-  it('re-queries cancellation convergence after an ambiguous response', async () => {
+  it('keeps cancellation outcome unknown after delivery without another control request', async () => {
     const requests: string[] = [];
     const result = await cancelRunThroughControlPlane('cancel-after', undefined, {
-      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
-      sendRequest: async (request) => {
+      sendRequest: async request => {
         requests.push(request.cmd);
-        if (request.cmd === 'cancel-run') throw new RpcOutcomeUnknownError('response lost after delivery.');
-        return {
-          ok: true, status: 'cancelled', runId: 'cancel-after', message: 'Cancellation confirmed.',
-          observation: {
-            unit: 'fixture.service', unitState: { kind: 'terminal', exitCode: 0 }, runReadable: true,
-            schedulerPid: null, schedulerAlive: false, launchInFlight: false,
-          },
-        };
-      },
-    });
-    const unresolvedCalls: string[] = [];
-    const unresolved = await cancelRunThroughControlPlane('cancel-control', undefined, {
-      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
-      sendRequest: async (request) => {
-        unresolvedCalls.push(request.cmd);
-        throw new RpcOutcomeUnknownError('both responses lost.');
+        throw new RpcOutcomeUnknownError('response lost after delivery.');
       },
     }).catch((error: unknown) => error);
     expect(CANCELLATION_RPC_TIMEOUT_MS).toBeGreaterThan(1_500);
-    expect(requests).toEqual(['cancel-run', 'cancel-status']);
-    expect(result).toMatchObject({ ok: true, status: 'cancelled' });
-    expect(unresolved).toBeInstanceOf(RpcOutcomeUnknownError);
-    expect(unresolvedCalls).toEqual(['cancel-run', 'cancel-status']);
+    expect(requests).toEqual(['cancel']);
+    expect(result).toBeInstanceOf(RpcOutcomeUnknownError);
   });
 
   it('refuses vacuous criteria while preserving substantive negation text', async () => {
@@ -397,9 +351,9 @@ describe('engine behaviour contracts', () => {
     expect(rehearsal.exitCode).toBe(1);
     expect(rehearsal.simulated).toBe(false);
     expect(admission.pass).toBe(false);
-    expect(admission.errors).toContain('brief_criteria.json contains zero criteria; dispatch cannot prove coverage');
-    expect(launch.status).toBe(2);
-    expect(launch.stderr).toContain('no structurally extractable criterion');
+    expect(admission.errors).toContainEqual({ code: 'criteria_missing', field: 'criteria', message: 'brief_criteria.json contains zero criteria; dispatch cannot prove coverage' });
+    expect(launch.status).toBe(1);
+    expect(launch.stderr).toContain('structurally extractable criterion');
   });
 
   it('preserves uncaptured dependency preimages and still removes proven-absent paths', { timeout: 30_000 }, async () => {
@@ -409,7 +363,7 @@ describe('engine behaviour contracts', () => {
     setFcGlobalDir(join(root, 'fc-home'));
     const dependencyPath = ['.venv', 'fixture-package', 'pre-existing.js'].join('/');
     write(join(projectDir, dependencyPath), 'operator preimage\n');
-    const escapedStage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
+    const escapedStage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], []),
       id: 'writer', role: 'writer', scope: [], depends_on: [], prompt_template: 'write fixture',
       skills: [], dynamic_dispatch: false, is_gate: false,
     };
@@ -425,7 +379,8 @@ describe('engine behaviour contracts', () => {
     );
     const escapedEvents = readRunEvents(projectDir, escaped.runId).filter((event) => event.type === 'live_constraint_violation');
     expect(existsSync(join(projectDir, dependencyPath))).toBe(true);
-    expect(escapedEvents[0]?.detail).toContain('could not restore');
+    expect(escapedEvents).toEqual([]);
+    expect(escaped.status).toBe('complete');
 
     const absentPath = 'docs/proven-absent.md';
     write(join(projectDir, absentPath), 'new file\n');
@@ -435,13 +390,13 @@ describe('engine behaviour contracts', () => {
   });
 
   it('rejects condition literals outside runtime domains', () => {
-    const impossible: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
+    const impossible: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], []),
       id: 'conditional', role: 'worker', depends_on: ['producer'],
       condition: 'producer.status == status_that_does_not_exist', prompt_template: 'never',
       skills: [], dynamic_dispatch: false, is_gate: false,
     };
     const possible: StageConfig = { ...impossible, condition: 'producer.status == complete' };
-    const producer: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
+    const producer: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], []),
       id: 'producer', role: 'worker', depends_on: [], prompt_template: 'produce', skills: [], dynamic_dispatch: false, is_gate: false,
     };
     const rejected = inspectDispatchAdmission({ dispatched: [producer, impossible], baseStages: [], dispatchStageId: 'plan' });
@@ -457,7 +412,7 @@ describe('engine behaviour contracts', () => {
       staticError = error instanceof Error ? error.message : String(error);
     }
     expect(rejected.pass).toBe(false);
-    expect(rejected.errors.join('\n')).toContain('cannot occur');
+    expect(rejected.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('cannot occur');
     expect(accepted.pass).toBe(true);
     expect(staticError).toContain('status literal "status_that_does_not_exist" cannot occur');
   });
@@ -501,8 +456,17 @@ describe('engine behaviour contracts', () => {
     )).toThrow('RUN_IDENTITY_INVALID');
     const traversalWriteBlocked = !existsSync(join(escapedDirectory, 'events.jsonl'));
     expect(traversalWriteBlocked).toBe(true);
+    const unprovenReservation = reserveRun(projectDir);
+    initializeReservedRun(projectDir, unprovenReservation.runId, 'fixture', 'name: fixture', ['work']);
+    const unproven = readRunState(projectDir, unprovenReservation.runId);
+    unproven.status = 'complete';
+    writeRunState(projectDir, unprovenReservation.runId, unproven);
     const completed = readRunState(projectDir, initializedReservation.runId);
     completed.status = 'complete';
+    // A terminal label alone does not establish that scheduler-owned commands
+    // retired. Model a settled controller and an empty owned-command set.
+    completed.engineCheckpoint = { version: 2, runId: completed.runId, projectDir,
+      pid: 2147483647, processes: [], at: new Date().toISOString() };
     writeRunState(projectDir, initializedReservation.runId, completed);
     const opaque = join(stateRoot, 'runs', 'campaign-loop-propose-legacy');
     mkdirSync(opaque, { recursive: true });
@@ -510,37 +474,8 @@ describe('engine behaviour contracts', () => {
     expect(cleaned.status).toBe(0);
     expect(existsSync(initializedReservation.runDirPath)).toBe(false);
     expect(existsSync(activeReservation.runDirPath)).toBe(true);
+    expect(existsSync(unprovenReservation.runDirPath)).toBe(true);
     expect(existsSync(opaque)).toBe(true);
-  });
-
-  it('projects one generated-path catalog into all three consumers', () => {
-    const root = temporaryRoot();
-    const member = '.gradle/caches/.hidden/tool/file.bin';
-    const catalogRows = GENERATED_PATH_POLICIES.filter((entry) => entry.directoryName === '.gradle');
-    expect(ROLLBACK_INVENTORY_EXCLUDED_DIRECTORIES.has('.gradle')).toBe(true);
-    expect(isRecognizedGeneratedCachePath(member.split('/'))).toBe(true);
-    expect(matchesLiveConstraintExemptPattern(member, '.gradle/**')).toBe(true);
-    expect(matchesLiveConstraintExemptPattern('other/.hidden/file.bin', '.gradle/**')).toBe(false);
-    expect(scopeRevisionPathsForViolations([member])).toEqual([member]);
-    const vitestCache = ['node_modules', '.vite', 'vitest'].join('/');
-    const sourceMember = `src/generated/${'a'.repeat(40)}/result.json`;
-    for (const [paths, scopes] of [
-      [[`${vitestCache}/${'a'.repeat(40)}/results.json`, `.cache/build-generations/${'b'.repeat(64)}/index.js`],
-        ['.cache/build-generations/**', `${vitestCache}/**`]],
-      [[sourceMember], [sourceMember]],
-    ]) {
-      expect(scopeRevisionPathsForViolations(paths)).toEqual(scopes);
-      const instruction = scopeRevisionInstruction({ runDir: root, runId: 'fixture', stageId: 'work',
-        attemptIndex: 1, scope: [], scopePresence: 'present', gate: false, violatingPaths: paths });
-      expect(instruction).toContain(`"requestedPaths":${JSON.stringify(scopes)}`);
-      expect(instruction).not.toContain('src/generated/**');
-    }
-    expect(catalogRows).toHaveLength(1);
-    const ordinary = 'src/cache.ts';
-    expect(isRecognizedGeneratedCachePath(ordinary.split('/'))).toBe(false);
-    const uncataloguedRoot = temporaryRoot();
-    write(join(uncataloguedRoot, 'config', 'defaults.yaml'), 'live_constraint_exempt_patterns:\n  - .unlisted_cache/**\n');
-    expect(loadEngineDefaults().live_constraint_exempt_patterns).not.toContain('.unlisted_cache/**');
   });
 
   it('uses build-generation hashes rather than source mtimes in ship preflight', async () => {
@@ -551,18 +486,18 @@ describe('engine behaviour contracts', () => {
     write(join(projectDir, 'package.json'), '{}\n');
     write(join(staged, 'probe.js'), 'export const probe = 1;\n');
     write(join(staged, 'probe.d.ts'), 'export declare const probe = 1;\n');
-    publishBuildGeneration({ projectRoot: projectDir, stagedDistDir: staged, manifest: createBuildManifest(projectDir, staged) });
+    publishBuildOutputs({ projectRoot: projectDir, stagedDistDir: staged, manifest: createBuildManifest(projectDir, staged) });
     const outputMtime = statSync(join(projectDir, 'dist', 'probe.js')).mtimeMs;
     const future = new Date(Date.now() + 60_000);
     utimesSync(join(projectDir, 'src', 'probe.ts'), future, future);
     const runs = join(projectDir, 'isolated-runs');
     mkdirSync(runs);
-    const current = await collectShipPreflight(['ship-preflight', '--no-baseline'], {
+    const current = await collectShipPreflight(['ship-preflight'], {
       projectDir, packageRoot: projectDir, runsRoot: () => runs,
       probeDaemon: async () => ({ state: 'fresh', loadedBuild: 'same', diskBuild: 'same' }),
     });
     write(join(projectDir, 'src', 'probe.ts'), 'export const probe = 2;\n');
-    const stale = await collectShipPreflight(['ship-preflight', '--no-baseline'], {
+    const stale = await collectShipPreflight(['ship-preflight'], {
       projectDir, packageRoot: projectDir, runsRoot: () => runs,
       probeDaemon: async () => ({ state: 'fresh', loadedBuild: 'same', diskBuild: 'same' }),
     });
@@ -585,7 +520,7 @@ describe('engine behaviour contracts', () => {
     const admission = createBriefAdmission(inspectBrief(brief), {
       kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString(),
     });
-    const stage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
+    const stage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], []),
       id: 'worker', role: 'worker', depends_on: [], prompt_template: 'work', skills: [], dynamic_dispatch: false, is_gate: false,
     };
     let calls = 0;
@@ -658,120 +593,22 @@ describe('engine behaviour contracts', () => {
   });
 
   it('redispatches the owning producer only for missing-outcome rejection', () => {
-    const producer: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
+    const producer: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], []),
       id: 'measure', role: 'worker', scope: ['docs/result.json'], depends_on: [], prompt_template: 'measure',
       skills: [], dynamic_dispatch: false, is_gate: false,
     };
-    const gate: StageConfig = { criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []),
+    const gate: StageConfig = { criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []),
       id: 'qa', role: 'qa', depends_on: ['measure'], prompt_template: 'audit', skills: [], dynamic_dispatch: false, is_gate: true,
     };
-    const repair: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], [], []),
+    const repair: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], []),
       id: 'repair_report', role: 'worker', depends_on: ['qa'], retry_to: ['qa'], prompt_template: 'repair',
       skills: [], dynamic_dispatch: false, is_gate: false,
     };
     const research = { baseline: 0, policy: 'greedy_stack' as const, resultFile: 'docs/result.json', stop: {} };
-    const omitted = findGateRecoveryStages([producer, gate, repair], ['qa'], { qa: 'no measurement exists' }, research);
-    const quality = findGateRecoveryStages([producer, gate, repair], ['qa'], { qa: 'report rationale is unclear' }, research);
-    const negated = findGateRecoveryStages(
-      [producer, gate, repair], ['qa'],
-      { qa: 'The report needs prose edits; no missing measurement remains.' }, research,
-    );
+    const omitted = findGateRecoveryStages([producer, gate, repair], ['qa'], research, { qa: { gateId: 'qa', authoredVerdict: { pass: true }, effectiveVerdict: { pass: false, refusal: { kind: 'research_outcome_absent' } }, rejectionKind: 'omitted_research_outcome' } });
+    const quality = findGateRecoveryStages([producer, gate, repair], ['qa'], research);
     expect(omitted.map((stage) => stage.id)).toEqual(['measure']);
     expect(quality.map((stage) => stage.id)).toEqual(['repair_report']);
-    expect(negated.map((stage) => stage.id)).toEqual(['repair_report']);
-  });
-
-  it('rejects a scope revision that changes the admitted final producer', () => {
-    const root = temporaryRoot(), projectDir = join(root, 'project');
-    mkdirSync(projectDir);
-    setFcGlobalDir(join(root, 'state'));
-    const terminalPath = 'docs/final.md';
-    const base: StageConfig = { criterion_refs: [], artifact_contract: artifacts(), role: 'worker',
-      id: 'plan', scope: [], depends_on: [], prompt_template: 'fixture', skills: [], dynamic_dispatch: false, is_gate: false };
-    const planner = { ...base, dynamic_dispatch: true };
-    const work = { ...base, id: 'work', depends_on: ['plan'], dependency_reasons: { plan: 'Consume the plan.' }, scope: ['src/**'] };
-    const gate = { ...base, id: 'qa', depends_on: ['work'], dependency_reasons: { work: 'Verify the work.' }, is_gate: true,
-      artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: 'verdict_qa.json' }]) };
-    const repair = { ...base, id: 'repair', depends_on: ['qa'], dependency_reasons: { qa: 'Correct rejected work.' }, retry_to: ['qa'], scope: ['src/**'] };
-    const finalizer = { ...base, id: 'finalizer', depends_on: ['qa'], dependency_reasons: { qa: 'Publish verified results.' }, scope: [terminalPath] };
-    const later = { ...base, id: 'later', depends_on: ['finalizer'], dependency_reasons: { finalizer: 'Consume the final report.' },
-      condition: 'finalizer.status == complete' };
-    const dispatched = [work, gate, repair, finalizer, later];
-    const terminalStates = { complete: { paths: [terminalPath] } };
-    const admissionInput = { dispatched, baseStages: [planner], dispatchStageId: planner.id, terminalStates };
-    const admission = inspectDispatchAdmission(admissionInput);
-    expect(admission.pass, admission.errors.join('; ')).toBe(true);
-    expect(admission.terminalOwners).toEqual({ [terminalPath]: finalizer.id });
-    const transferred = inspectDispatchAdmission({ ...admissionInput,
-      dispatched: dispatched.map(candidate => candidate.id === later.id ? { ...candidate, scope: [terminalPath] } : candidate) });
-    expect(transferred.pass, transferred.errors.join('; ')).toBe(true);
-    expect(transferred.terminalOwners).toEqual({ [terminalPath]: later.id });
-    const created = createRun(projectDir, 'terminal-owner', 'name: fixture', [planner, ...dispatched].map(candidate => candidate.id));
-    const state = readRunState(projectDir, created.runId);
-    state.dispatchedStages = dispatched;
-    state.terminalStates = terminalStates;
-    recordAdmittedPlan(state, [planner, ...dispatched], created.runDirPath, 'initial dispatch', true, admission);
-    writeRunState(projectDir, created.runId, state);
-    write(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify(admission));
-    const requestedPaths = [terminalPath];
-    const decide = (author: StageConfig) => decideScopeRevision({
-      request: { version: 1, kind: 'scope_revision', requestId: `terminal-${author.id}`, runId: created.runId,
-        stageId: author.id, attemptIndex: 1, requestedBy: 'stage', requestedPaths,
-        pathDigest: scopePathDigest(requestedPaths), reason: 'Write the terminal report.' },
-      stage: author, priorScope: author.scope ?? [], activePeers: [], projectDir, runId: created.runId, attemptIndex: 1,
-    });
-    const decision = decide(later), control = decide(work);
-    expect(decision).toMatchObject({ accepted: false, decision: 'rejected' });
-    expect(String(decision.rejectionReason)).toContain(`cannot transfer terminal ownership of ${terminalPath} from finalizer to later`);
-    expect(control).toMatchObject({ accepted: true, authorizedPaths: requestedPaths });
-  });
-
-  it('unwraps a Make target through dry-run into an exact existing collector', { timeout: 30_000 }, async () => {
-    const root = temporaryRoot();
-    const sourceDir = join(root, 'source');
-    const targetDir = join(root, 'target');
-    const stateDir = join(root, 'state');
-    const briefPath = join(sourceDir, 'brief.md');
-    write(join(sourceDir, 'Makefile'), 'test:\n\t@node --test spec/example.test.js\n');
-    write(join(sourceDir, 'spec', 'example.test.js'), 'export {};\n');
-    write(briefPath, '# Goal\n## What the report must show\n1. Preserve the test population.\n');
-    const calls: string[] = [];
-    const createWorktree: GitWorktreeCreator = (request) => {
-      mkdirSync(request.targetDir, { recursive: true });
-      write(join(request.targetDir, 'Makefile'), readFileSync(join(sourceDir, 'Makefile'), 'utf-8'));
-      write(join(request.targetDir, 'spec', 'example.test.js'), 'export {};\n');
-      return { exitCode: 0 };
-    };
-    const report = await runShipSetup([
-      'ship-setup', '--brief', briefPath, '--project', sourceDir, '--target', targetDir,
-      '--base', 'fixture-base', '--branch', 'fixture-branch',
-    ], {
-      createWorktree,
-      runValidationCommand: (request) => {
-        calls.push(`${request.cwd}:${request.display}`);
-        return request.display.includes('make -n')
-          ? { exitCode: 0, stdout: 'node --test spec/example.test.js\n', durationMs: 1 }
-          : { exitCode: 0, stdout: '1 passed\n', durationMs: 1 };
-      },
-      globalDir: () => stateDir,
-    });
-    expect(report.state).toBe('ready');
-    expect(report.testPopulation).toMatchObject({ state: 'matched' });
-    expect(report.testPopulation?.source?.identities).toEqual(['spec/example.test.js']);
-    expect(calls.filter((call) => call.includes('make -n'))).toHaveLength(2);
-
-    const opaqueTarget = join(root, 'opaque-target');
-    const opaque = await runShipSetup([
-      'ship-setup', '--brief', briefPath, '--project', sourceDir, '--target', opaqueTarget,
-      '--base', 'fixture-base', '--branch', 'opaque-branch',
-    ], {
-      createWorktree,
-      runValidationCommand: (request) => request.display.includes('make -n')
-        ? { exitCode: 0, stdout: 'prepare fixtures\nnode --test spec/example.test.js\n', durationMs: 1 }
-        : { exitCode: 0, stdout: '1 passed\n', durationMs: 1 },
-      globalDir: () => stateDir,
-    });
-    expect(opaque.testPopulation?.state).toBe('unverified');
   });
 
   it('installs follow interrupt handlers before emitting the first event', () => {

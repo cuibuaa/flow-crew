@@ -1,17 +1,7 @@
+import './test-support/policy-runtime.js';
 import { describe, expect, it } from 'vitest';
 import { inspectBrief } from '../src/brief-preflight.js';
 import { evaluateResearchFeasibility } from '../src/research-feasibility.js';
-
-function structuredBrief(body: string): string {
-  return [
-    '---',
-    'terminal_states:',
-    '  complete:',
-    '    paths: [docs/result.md]',
-    '---',
-    body,
-  ].join('\n');
-}
 
 function researchBrief(feasibility: string): string {
   return [
@@ -27,37 +17,12 @@ function researchBrief(feasibility: string): string {
     '---',
     '# Measurement',
     'Pre-register and freeze the selection rule before measuring any outcomes.',
+    '## Acceptance criteria',
+    '1. Report the qualifying sample count or explain why it cannot be computed.',
   ].join('\n');
 }
 
 describe('constraint-form final verification', () => {
-  it('does not infer an ignored input from the exact subject-position prohibition', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Constraints',
-      'Nothing under `tests/` may be added to version control.',
-    ].join('\n')), { gitignoredPathPrefixes: ['tests/'] });
-
-    expect(report.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
-  });
-
-  it('does not suppress positive requirements or a different path on a mixed line', () => {
-    const positive = inspectBrief(structuredBrief([
-      '# Inputs',
-      'Nothing prevents this task from reading `tests/` as an input.',
-    ].join('\n')), { gitignoredPathPrefixes: ['tests/'] });
-    const mixed = inspectBrief(structuredBrief([
-      '# Inputs',
-      'Read `private-data/source.csv` as an input. **Nothing under `tests/` may be added to version control.**',
-    ].join('\n')), { gitignoredPathPrefixes: ['private-data/', 'tests/'] });
-
-    expect(positive.findings).toContainEqual(expect.objectContaining({
-      code: 'gitignored_input_undeclared',
-      path: 'tests',
-    }));
-    expect(mixed.findings.filter((finding) => finding.code === 'gitignored_input_undeclared'))
-      .toEqual([expect.objectContaining({ path: 'private-data/source.csv' })]);
-  });
-
   it('fails the historical repeated conjunction using independently derived arithmetic', () => {
     const independentlyDerived = Math.exp(Math.log(500) + 103 * Math.log(0.456));
     const [evaluation] = evaluateResearchFeasibility({

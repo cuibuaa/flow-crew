@@ -1,3 +1,4 @@
+import { atomicWrite } from '../src/engine-fs.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -5,11 +6,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
 import { deriveRunTokenCost } from '../src/campaign-page.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  atomicWrite,
   beginStageAttempt,
   completeStageAttempt,
-  createRun,
   fcGlobalDir,
   readRunState,
   readStageStatus,
@@ -54,7 +54,6 @@ describe('attempt token evidence', () => {
     });
     const state = readRunState(projectDir, created.runId);
     state.stages.work = readStageStatus(projectDir, created.runId, 'work');
-    state.supervise = false;
     expect(state.stages.work.attempts?.[0]).toMatchObject({ tokenUsage: 'partial', tokens_cached: 10 });
     expect(deriveRunTokenCost(state)).toMatchObject({tokens:23,complete:false,attemptEvidence:{known:0,recordedUnknown:1}});
   });
@@ -86,7 +85,6 @@ describe('attempt token evidence', () => {
     });
     const state = readRunState(projectDir, created.runId);
     state.status = 'failed';
-    state.supervise = false;
     state.stages.legacy = {
       status: 'failed',
       retries: 0,
@@ -102,13 +100,12 @@ describe('attempt token evidence', () => {
 
     expect(deriveRunTokenCost(state)).toEqual({
       tokens: 9,
-      supervisorTokens: 0,
       complete: false,
       attemptEvidence: { known: 0, recordedUnknown: 1, unrecorded: 1 },
     });
   });
 
-  it('retains telemetry returned while a supervisor abort is closing the adapter', async () => {
+  it('retains telemetry returned while a watchdog abort is closing the adapter', async () => {
     vi.useFakeTimers();
     const stageId = 'abort_with_telemetry';
     const created = createRun(projectDir, 'abort-cost', 'name: abort-cost', [stageId]);
@@ -122,7 +119,7 @@ describe('attempt token evidence', () => {
           attemptIndex: 1,
           reason: 'verified wrong direction',
           timestamp: new Date().toISOString(),
-          source: 'supervisor',
+          source: 'watchdog',
         }));
         if (!opts.abortSignal?.aborted) {
           await new Promise<void>((resolve) => opts.abortSignal?.addEventListener('abort', () => resolve(), { once: true }));

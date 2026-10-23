@@ -1,3 +1,4 @@
+import { parseCommandArgs, commandUsage } from '../cli-args.js';
 import { writeFileSync } from '../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -17,20 +18,28 @@ interface AuditRow {
 
 export async function cmdAuditReality(args: string[], opts: { stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {}): Promise<number> {
   const stdout = opts.stdout ?? process.stdout;
-  const output = valueAfter(args, '--output');
-  const rows = await auditRows(args);
-  const markdown = renderRows(rows);
-  if (output) writeFileSync(output, markdown, 'utf-8');
-  stdout.write(markdown);
-  return 0;
+  const stderr = opts.stderr ?? process.stderr;
+  try {
+    const parsed = parseCommandArgs('audit-reality', args);
+    if (parsed.help) { stdout.write(`${commandUsage('audit-reality')}\n`); return 0; }
+    const output = parsed.values.get('--output');
+    const rows = await auditRows(parsed.values);
+    const markdown = renderRows(rows);
+    if (output) writeFileSync(output, markdown, 'utf-8');
+    stdout.write(markdown);
+    return 0;
+  } catch (error) {
+    stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
 }
 
-async function auditRows(args: string[]): Promise<AuditRow[]> {
-  const taskId = valueAfter(args, '--task');
+async function auditRows(values: Map<string, string>): Promise<AuditRow[]> {
+  const taskId = values.get('--task');
   const registry = new TaskRegistry();
-  const tasks = taskId ? [registry.get(Number.parseInt(taskId, 10))].filter((item): item is TaskEntry => Boolean(item)) : registry.list({ status: 'all' });
-  if (taskId && tasks.length === 0) return auditRunMatches(Number.parseInt(taskId, 10));
-  const filtered = args.includes('--range') && valueAfter(args, '--range') === 'last-21-days'
+  const tasks = taskId ? [registry.get(Number(taskId))].filter((item): item is TaskEntry => Boolean(item)) : registry.list({ status: 'all' });
+  if (taskId && tasks.length === 0) return auditRunMatches(Number(taskId));
+  const filtered = values.get('--range') === 'last-21-days'
     ? tasks.filter((task) => Date.now() - new Date(task.created_at).getTime() <= 21 * 86400000)
     : tasks;
   return Promise.all(filtered.map(auditTask));
@@ -96,7 +105,7 @@ function baseRow(task: TaskEntry, projectDir: string, checksRun: string, realSta
   return {
     task: `#${task.id} ${escapeCell(task.name)}`,
     project: escapeCell(projectDir.split(/[\\/]/).filter(Boolean).pop() ?? projectDir),
-    claimedStatus: escapeCell(task.summary_verdict ?? task.status),
+    claimedStatus: escapeCell(task.status),
     checksRun: escapeCell(checksRun),
     realStatus,
     mismatch,
@@ -123,11 +132,6 @@ function renderRows(rows: AuditRow[]): string {
   ];
   const body = rows.map((row) => `| ${row.task} | ${row.project} | ${row.claimedStatus} | ${row.checksRun} | ${row.realStatus} | ${row.mismatch} |`);
   return [...header, ...body, ''].join('\n');
-}
-
-function valueAfter(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  return idx >= 0 ? args[idx + 1] : undefined;
 }
 
 function escapeCell(value: string): string {

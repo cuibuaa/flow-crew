@@ -6,6 +6,7 @@
  * Maintenance contract: this is a permanent schema/routing regression suite,
  * not a run-specific gate artifact. Keep it active in the default Vitest set.
  */
+import './test-support/policy-runtime.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -112,7 +113,6 @@ describe('closed supervisor state contract', () => {
     };
 
     const result = await cancelRunThroughControlPlane(remote.runId!, undefined, {
-      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
       sendRequest: vi.fn(async () => remote),
       localControl: local,
     });
@@ -138,7 +138,6 @@ describe('closed supervisor state contract', () => {
     };
 
     const result = await cancelRunThroughControlPlane('unobservable-run', undefined, {
-      socketPath: process.env.FLOWCREW_DAEMON_SOCKET,
       sendRequest: vi.fn(async () => remote),
       localControl: local,
     });

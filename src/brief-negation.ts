@@ -5,11 +5,6 @@
  */
 const AUXILIARY_NEGATED_REQUIREMENT = /\b(?:do\s+not|does\s+not|don't|must\s+not|shall\s+not|should\s+not|may\s+not|cannot|can't|never|forbid(?:s|den)?|prohibit(?:s|ed)?|exclude(?:s|d)?|omit(?:s|ted)?|without)\b/i;
 
-// Preserve the path extractor's established high-confidence auxiliary forms.
-// The broader decision-lint vocabulary above is unsafe as a whole-line path
-// filter: “cannot”, “without”, or “don't” often modifies a different clause.
-const PATH_MENTION_AUXILIARY_NEGATION = /\b(?:do not|does not|must not|should not|shall not|never)\b/i;
-
 const REQUIREMENT_CONTRAST_BOUNDARY = /(?:[.!?;；]+|\b(?:but|however|whereas)\b)/gi;
 const NEGATED_POSITIVE_REQUIREMENT_ACTION = /\b(?:(?:do|does|did|must|shall|should|may|can|could|will|need)\s+not\s+(?:be\s+)?(?:include[ds]?|contain(?:s|ed)?|carry|carries|carried|report(?:s|ed)?|record(?:s|ed)?|emit(?:s|ted)?|output(?:s|ted)?|return(?:s|ed)?|provide[ds]?|write[sn]?|written|show[sn]?|state[ds]?|present(?:s|ed)?)|never\s+(?:include|contain|carry|report|record|emit|output|return|provide|write|show|state|present)|without(?:\s+(?:including|containing|carrying|reporting|recording|emitting|outputting|returning|providing|writing|showing|stating|presenting))?)\b/i;
 const NEGATED_OMISSION_ACTION = /\b(?:do|does|did|must|shall|should|may|can|could|will|need)\s+not\s+(?:omit|exclude|forbid|prohibit|suppress|remove)\b/i;
@@ -50,20 +45,4 @@ export function isNegatedRequirementMention(line: string, start: number, end: nu
   if (OMISSION_ACTION.test(prefix)) return true;
   if (/\b(?:no|without)\s+(?:the\s+)?$/i.test(prefix)) return true;
   return NEGATED_REQUIREMENT_AFTER_MENTION.test(suffix);
-}
-
-/** True only when this exact path token is governed by the subject-position prohibition. */
-export function isSubjectNegatedPathMention(line: string, start: number, end: number): boolean {
-  const match = SUBJECT_PATH_MUTATION_PROHIBITION.exec(line);
-  if (!match || match.index === undefined) return false;
-  const relativeStart = match[0].indexOf(match[1]);
-  const pathStart = match.index + relativeStart;
-  const pathEnd = pathStart + match[1].length;
-  return start < pathEnd && end > pathStart;
-}
-
-/** Decide whether one extracted path token is negated, without hiding sibling tokens. */
-export function isNegatedPathMention(line: string, start: number, end: number): boolean {
-  return PATH_MENTION_AUXILIARY_NEGATION.test(line)
-    || isSubjectNegatedPathMention(line, start, end);
 }

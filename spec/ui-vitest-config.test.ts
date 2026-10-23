@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
@@ -80,7 +81,8 @@ describe("H-M7-ui-cwd-discovery", () => {
       const fromUi = listUiTests(UI_ROOT, [], sandbox);
 
       expect(fromRepository).toEqual(fromUi);
-      expect(fromUi.cases).toBe(58);
+      // Retired legacy cases stay removed; includes the typed HTTP status regression.
+      expect(fromUi.cases).toBe(53);
       expect(relativeFiles(fromUi, PROJECT_ROOT)).toEqual(EXPECTED_UI_TESTS);
       expect(fromUi.files.every((file) => file.startsWith(`${PUBLIC_UI_TEST_ROOT.replaceAll("\\", "/")}/`)))
         .toBe(true);
@@ -98,6 +100,9 @@ describe("H-M7-ui-cwd-discovery", () => {
       cpSync(join(PROJECT_ROOT, "spec", "ui"), join(archiveRoot, "spec", "ui"), {
         recursive: true,
       });
+      mkdirSync(join(archiveRoot, "spec", "test-support"), { recursive: true });
+      copyFileSync(join(PROJECT_ROOT, "spec", "test-support", "policy-runtime.ts"),
+        join(archiveRoot, "spec", "test-support", "policy-runtime.ts"));
       cpSync(join(UI_ROOT, "src"), join(archiveUiRoot, "src"), { recursive: true });
       symlinkSync(
         ROOT_DEPENDENCIES,

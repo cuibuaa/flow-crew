@@ -1,7 +1,11 @@
+import { atomicWrite } from '../src/engine-fs.js';
+import { readInvocationInput } from '../src/run-state-view.js';
+import { gateArchiveArtifactPath } from '../src/scheduler/sched_settlement/gate-archives.js';
+import { createHash } from 'node:crypto';
 import { buildGateReevaluationPreamble } from './test-support/gate-reevaluation.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +22,7 @@ import {
   runWorkflow,
   type WorkflowConfig,
 } from '../src/scheduler.js';
-import { atomicWrite, fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
+import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
 const GATE_ID = 'release_gate';
@@ -101,17 +105,7 @@ function writeSession(runDirPath: string, stageId: string, sessionId: string, ow
   }, null, 2) + '\n');
 }
 
-async function waitForScopeDecision(stagePath: string): Promise<void> {
-  await waitForPathEvent(stagePath, () => {
-    const decision = readdirSync(stagePath).find((name) => name.startsWith('scope_revision_decision_'));
-    if (decision) {
-      const value = JSON.parse(readFileSync(join(stagePath, decision), 'utf-8')) as { accepted?: boolean };
-      if (!value.accepted) throw new Error('E7 fixture scope revision was rejected');
-      return true;
-    }
-    return undefined;
-  });
-}
+
 
 interface ScenarioOptions {
   firstGatePass?: boolean;
@@ -178,19 +172,6 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
       }
       if (opts.stageId === FIX_ID) {
         fixPrompts.push(prompt);
-        if (options.writeOutsideScope) {
-          const stagePath = join(opts.runDir, 'stages', opts.stageId);
-          writeFileSync(join(stagePath, 'scope_revision_request.json'), JSON.stringify({
-            version: 1,
-            kind: 'scope_revision',
-            requestId: 'e7-round-diff-fixture',
-            stageId: opts.stageId,
-            attemptIndex: 1,
-            requestedPaths: ['src/outside.ts', 'src/outside.bin'],
-            reason: 'the repair-round diff fixture must exercise added and modified files outside the original snapshot',
-          }));
-          await waitForScopeDecision(stagePath);
-        }
         writeFileSync(join(projectDir, 'src', 'checked.ts'), 'export const state = "FIXED";\n');
         if (options.writeOutsideScope) {
           writeFileSync(join(projectDir, 'src', 'outside.ts'), 'export const outside = "CHANGED";\n');
@@ -315,16 +296,17 @@ describe('compressed acceptance loop', () => {
         expect(match?.[1]).toBeTruthy();
         const artifact = JSON.parse(readFileSync(match![1], 'utf-8')) as {
           truncated: boolean;
-          files: Array<{ path: string; status: string; before: { text?: string }; after: { text?: string; binary?: boolean; sha256?: string } }>;
+          files: Array<{ path: string; status: string; before: { sha256?: string }; after: { text?: string; binary?: boolean; sha256?: string } }>;
         };
         expect(artifact.truncated).toBe(false);
         const touched = artifact.files.find((file) => file.path === 'src/checked.ts');
         expect(touched).toMatchObject({ status: 'modified' });
-        expect(touched?.before.text).toContain('BROKEN');
-        expect(touched?.after.text).toContain('FIXED');
-        const scopeEscape = artifact.files.find((file) => file.path === 'src/outside.ts') as (typeof artifact.files)[number] & { preimageAvailable?: boolean };
-        expect(scopeEscape).toMatchObject({ status: 'modified', preimageAvailable: true });
-        expect(scopeEscape.after.text).toContain('CHANGED');
+        expect(touched?.before.sha256).toBe(createHash('sha256').update('export const state = "BROKEN";\n').digest('hex'));
+        expect(touched?.after.sha256).toBe(createHash('sha256').update('export const state = "FIXED";\n').digest('hex'));
+        const scopeEscape = artifact.files.find((file) => file.path === 'src/outside.ts');
+        expect(scopeEscape).toMatchObject({ status: 'modified' });
+        expect(scopeEscape?.after.sha256).toBe(createHash('sha256').update('export const outside = "CHANGED";\n').digest('hex'));
+        expect(JSON.stringify(artifact)).not.toContain('\"text\":');
         const binary = artifact.files.find((file) => file.path === 'src/outside.bin');
         expect(binary).toMatchObject({ status: 'added', after: { binary: true } });
         expect(binary?.after.sha256).toMatch(/^[0-9a-f]{64}$/);
@@ -348,8 +330,8 @@ describe('compressed acceptance loop', () => {
     const roundDirs = [1, 2].map((iteration) => join(archiveRoot, `iteration_${iteration}`, 'round_1'));
     const artifactMatrix = roundDirs.flatMap((roundDir) => [
       join(roundDir, `rejected_verdict_${GATE_ID}.json`),
-      join(roundDir, `previous_output_${GATE_ID}.md`),
-      join(roundDir, `evaluated_input_${GATE_ID}.md`),
+      gateArchiveArtifactPath(result.runDirPath, { iteration: roundDirs.indexOf(roundDir) + 1, round: 1 }, GATE_ID, 'output'),
+      gateArchiveArtifactPath(result.runDirPath, { iteration: roundDirs.indexOf(roundDir) + 1, round: 1 }, GATE_ID, 'input'),
     ]);
     expect(new Set(artifactMatrix).size).toBe(6);
     for (const path of artifactMatrix) expect(existsSync(path)).toBe(true);
@@ -357,9 +339,12 @@ describe('compressed acceptance loop', () => {
     for (const iteration of [1, 2]) {
       const roundDir = roundDirs[iteration - 1];
       const verdict = readFileSync(join(roundDir, `rejected_verdict_${GATE_ID}.json`), 'utf-8');
-      const output = readFileSync(join(roundDir, `previous_output_${GATE_ID}.md`), 'utf-8');
-      const evaluatedInputPath = join(roundDir, `evaluated_input_${GATE_ID}.md`);
-      const evaluatedInput = readFileSync(evaluatedInputPath, 'utf-8');
+      const outputPath = gateArchiveArtifactPath(result.runDirPath, { iteration, round: 1 }, GATE_ID, 'output');
+      const output = readFileSync(outputPath, 'utf-8');
+      const evaluatedInputPath = gateArchiveArtifactPath(result.runDirPath, { iteration, round: 1 }, GATE_ID, 'input');
+      const evaluatedInput = readInvocationInput(evaluatedInputPath).userPrompt;
+      expect(existsSync(join(roundDir, `previous_output_${GATE_ID}.md`))).toBe(false);
+      expect(existsSync(join(roundDir, `evaluated_input_${GATE_ID}.md`))).toBe(false);
       expect(verdict).toContain(`iteration-${iteration}-round-1-verdict`);
       expect(JSON.parse(output)).toMatchObject({ pass: false, marker: `iteration-${iteration}-round-1-verdict` });
       expect(verdict).not.toContain(`iteration-${iteration === 1 ? 2 : 1}-round-1-verdict`);
@@ -376,7 +361,7 @@ describe('compressed acceptance loop', () => {
       const fixPrompt = result.fixPrompts[iteration - 1];
       for (const prompt of [reevaluationPrompt, fixPrompt]) {
         expect(prompt).toContain(join(roundDir, `rejected_verdict_${GATE_ID}.json`));
-        expect(prompt).toContain(join(roundDir, `previous_output_${GATE_ID}.md`));
+        expect(prompt).toContain(join(result.runDirPath, 'stages', GATE_ID, 'output_attempt_1.md'));
         expect(prompt).toContain(evaluatedInputPath);
         expect(prompt).not.toContain(join(archiveRoot, 'round_1'));
       }
@@ -384,7 +369,7 @@ describe('compressed acceptance loop', () => {
       if (iteration === 1) {
         expect(reevaluationPrompt).not.toContain(join(archiveRoot, 'iteration_2'));
       } else {
-        expect(reevaluationPrompt).toContain(join(roundDirs[0], `previous_output_${GATE_ID}.md`));
+        expect(reevaluationPrompt).toContain(gateArchiveArtifactPath(result.runDirPath, { iteration: 1, round: 1 }, GATE_ID, 'output'));
       }
     }
 
@@ -398,7 +383,8 @@ describe('compressed acceptance loop', () => {
       const runDirPath = join(root, 'interrupted-gate');
       const roundDir = join(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
       mkdirSync(roundDir, { recursive: true });
-      const inputPath = join(roundDir, 'evaluated_input_review.md');
+      const inputPath = join(runDirPath, 'retained-invocation.json.gz');
+      writeFileSync(join(roundDir, 'engine_verdict_review.json'), JSON.stringify({ inputPath }));
       writeFileSync(inputPath, 'first exact gate prompt\n', 'utf8');
       const present = buildGateReevaluationPreamble({
         evaluationRound: 2,
@@ -426,68 +412,6 @@ describe('compressed acceptance loop', () => {
       expect(legacy).toContain('Exact input seen by the interrupted gate: unavailable');
     });
 
-  it('reads a pure round-only archive without mutating it', () => {
-    const legacyRunDir = join(root, 'legacy-run');
-    const legacyRoundDir = join(legacyRunDir, 'gate_reevaluation', 'round_1');
-    mkdirSync(legacyRoundDir, { recursive: true });
-    const legacyVerdict = join(legacyRoundDir, `rejected_verdict_${GATE_ID}.json`);
-    const legacyOutput = join(legacyRoundDir, `previous_output_${GATE_ID}.md`);
-    const verdictContents = '{"marker":"legacy-round-one-verdict"}\n';
-    const outputContents = 'legacy-round-one-output\n';
-    writeFileSync(legacyVerdict, verdictContents);
-    writeFileSync(legacyOutput, outputContents);
-    const legacyPreamble = buildGateReevaluationPreamble({
-      evaluationRound: 2,
-      iteration: 7,
-      repairRound: 1,
-      runDirPath: legacyRunDir,
-      gateId: GATE_ID,
-      fixStageIds: [],
-      roundDiffPath: join(legacyRoundDir, 'repair_diff.json'),
-    });
-
-    expect(legacyPreamble).toContain(`Rejected verdict: ${legacyVerdict}`);
-    expect(legacyPreamble).toContain(`Original first-pass gate output: ${legacyOutput}`);
-    expect(legacyPreamble).toContain('Exact input evaluated by the rejected gate: unavailable');
-    expect(legacyPreamble).not.toContain(`evaluated_input_${GATE_ID}.md`);
-    expect(readFileSync(legacyVerdict, 'utf-8')).toBe(verdictContents);
-    expect(readFileSync(legacyOutput, 'utf-8')).toBe(outputContents);
-    expect(readdirSync(join(legacyRunDir, 'gate_reevaluation'))).toEqual(['round_1']);
-  });
-
-  it('retains a same-gate legacy rejection when another gate created a canonical namespace', () => {
-    const mixedRunDir = join(root, 'mixed-run');
-    const mixedLegacyRound = join(mixedRunDir, 'gate_reevaluation', 'round_1');
-    const otherIterationRound = join(mixedRunDir, 'gate_reevaluation', 'iteration_1', 'round_9');
-    const requestedCanonicalRound = join(mixedRunDir, 'gate_reevaluation', 'iteration_2', 'round_1');
-    mkdirSync(mixedLegacyRound, { recursive: true });
-    mkdirSync(otherIterationRound, { recursive: true });
-    const staleLegacyVerdict = join(mixedLegacyRound, `rejected_verdict_${GATE_ID}.json`);
-    const staleLegacyOutput = join(mixedLegacyRound, `previous_output_${GATE_ID}.md`);
-    const canonicalVerdict = join(requestedCanonicalRound, `rejected_verdict_${GATE_ID}.json`);
-    const canonicalOutput = join(requestedCanonicalRound, `previous_output_${GATE_ID}.md`);
-    writeFileSync(staleLegacyVerdict, '{"marker":"stale-legacy-verdict"}\n');
-    writeFileSync(staleLegacyOutput, 'stale-legacy-output\n');
-    writeFileSync(join(otherIterationRound, 'namespace-marker.txt'), 'iteration-one-namespace\n');
-    const mixedPreamble = buildGateReevaluationPreamble({
-      evaluationRound: 2,
-      iteration: 2,
-      repairRound: 1,
-      runDirPath: mixedRunDir,
-      gateId: GATE_ID,
-      fixStageIds: [],
-      roundDiffPath: join(requestedCanonicalRound, 'repair_diff.json'),
-    });
-
-    expect(mixedPreamble).toContain('RE-EVALUATION (round 2)');
-    expect(mixedPreamble).toContain(`Rejected verdict: ${staleLegacyVerdict}`);
-    expect(mixedPreamble).toContain(`Original first-pass gate output: ${staleLegacyOutput}`);
-    expect(mixedPreamble).not.toContain(canonicalVerdict);
-    expect(mixedPreamble).not.toContain(canonicalOutput);
-    expect(mixedPreamble).not.toContain(otherIterationRound);
-    expect(existsSync(join(mixedRunDir, 'gate_reevaluation', 'iteration_2'))).toBe(false);
-  });
-
   it('prefers canonical evidence over stale legacy artifacts when both layouts exist', () => {
     const runDirPath = join(root, 'canonical-precedence-run');
     const legacyRoundDir = join(runDirPath, 'gate_reevaluation', 'round_1');
@@ -497,7 +421,9 @@ describe('compressed acceptance loop', () => {
     const legacyVerdict = join(legacyRoundDir, `rejected_verdict_${GATE_ID}.json`);
     const legacyOutput = join(legacyRoundDir, `previous_output_${GATE_ID}.md`);
     const canonicalVerdict = join(canonicalRoundDir, `rejected_verdict_${GATE_ID}.json`);
-    const canonicalOutput = join(canonicalRoundDir, `previous_output_${GATE_ID}.md`);
+    const canonicalOutput = join(runDirPath, 'output_attempt_1.md');
+    writeFileSync(join(runDirPath, 'run.json'), JSON.stringify({ runId: 'canonical-precedence-run', status: 'running', stages: {} }));
+    writeFileSync(join(canonicalRoundDir, `engine_verdict_${GATE_ID}.json`), JSON.stringify({ outputPath: canonicalOutput }));
     writeFileSync(legacyVerdict, '{"marker":"stale-legacy-verdict"}\n');
     writeFileSync(legacyOutput, 'stale-legacy-output\n');
     writeFileSync(canonicalVerdict, '{"marker":"iteration-three-verdict"}\n');

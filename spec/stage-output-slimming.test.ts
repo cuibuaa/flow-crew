@@ -8,7 +8,8 @@ import { renderPlanInterface } from '../src/plan-interface.js';
 import { generationCompatibleSchema } from '../src/reality-gate/checks/json-schema-match.js';
 import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
 import { applyBasePrompt } from '../src/scheduler/sched_admission/dispatch.js';
-import { createRun, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 
 const agents = resolve(import.meta.dirname, '..', 'config', 'agents');
@@ -54,20 +55,18 @@ describe('a passing verdict is the record', () => {
     expect(base.replace(/\s+/g, ' ')).toContain('any supporting documents at admitted evidence paths');
   });
 
-  it('no longer nudges planners toward evidence or handoff documents and tells them gates receive the receipt', () => {
+  it('no longer nudges planners toward evidence or handoff documents', () => {
     const plan = renderPlanInterface();
     expect(plan).not.toContain('necessary evidence');
     expect(plan).not.toContain('handoff notes');
     expect(plan).not.toContain('authors report their direct check results');
-    expect(plan).toContain('The engine settles configured validation before each gate review, gives the gate its receipt and sends measured regressions to repair. Gates judge the work independently.');
-    expect(plan).toContain('create declared terminal documents within admitted write capabilities');
   });
 });
 
 describe('engine-held facts and boundaries', () => {
   it('keeps reviewer write isolation without asking for a proof of it', () => {
     const qa = loaded('qa');
-    expect(qa).toContain('must not durably modify the reviewed target or authoritative inputs (the engine guards reviewer writes, so this needs no reviewer proof)');
+    expect(qa).toContain('must not durably modify the reviewed target or authoritative inputs');
     expect(qa).toContain('Target repairs belong to an author');
   });
 
@@ -96,7 +95,7 @@ describe('stage result contract', () => {
     } }, {
       stageId: 'work', projectDir: project, runDir: directory, runId,
       role: { name: 'coder', description: '', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Deliver.' },
-      dependsOn: [], promptTemplate: 'Deliver.', timeout_ms: 10000, retries: 0, projectWriteScope: [], outputSchema: HANDOFF_SCHEMA,
+      dependsOn: [], promptTemplate: 'Deliver.', timeout_ms: 10000, retries: 0,  outputSchema: HANDOFF_SCHEMA,
       artifactContract: { version: 1, produces: [], reads: [], groups: [] },
     });
     expect(seen).toContain('Write declared human deliverables within admitted capabilities. Evidence references name reproducible files or commands.');

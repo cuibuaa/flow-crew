@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderGuidanceEnvelope, type GuidanceEnvelope } from '../src/guidance.js';
-import { recordedResourceRegistry, appendRecordedResourceLease } from './test-support/recorded-resource-registry.js';
 import { inspectStageArtifactContract, writeStageArtifactContractAudit } from '../src/stage-artifact-contract.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { summarizeRunStateView } from '../src/run-state-access.js';
-import { invocationInputPath, projectRunStageHistory, readInvocationInput, readRunStateView, recordInvocationInput, type InvocationInput, type QueryableStoreState } from '../src/run-state-view.js';
-import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState, writeStageInput, writeStageStatus, type StageAttempt } from '../src/store.js';
+import { budgetView, invocationInputPath, projectRunStageHistory, readInvocationInput, readRunStateView, recordInvocationInput, type InvocationInput, type QueryableStoreState } from '../src/run-state-view.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState, readStageInput, writeStageStatus, type StageAttempt } from '../src/store.js';
 
 let root: string, project: string, directory: string, runId: string, previousStore: string;
 const startedAt = '2026-10-03T00:00:00.000Z';
@@ -58,15 +58,69 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(projectRunStageHistory(JSON.parse('{"retiredStageUsage":[null]}'), diagnostic => diagnostics.push(diagnostic))).toEqual([]);
     expect(diagnostics).toEqual([expect.objectContaining({ code: 'RUN_STAGE_HISTORY_INVALID', path: 'retiredStageUsage[0]' })]);
   });
-  it('reproduces the latest-alias overwrite, then preserves final bytes of multiple invocations', () => {
-    writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [attempt(1), attempt(2, observedAt)] });
-    writeStageInput(project, runId, 'writer', 'initial prompt before late guidance');
-    writeStageInput(project, runId, 'writer', 'second execution latest alias');
-    const before = view(true);
-    expect(before.prompts.legacyInputs[0]).toMatchObject({ exact: false, text: 'second execution latest alias' });
-    expect(before.prompts.missingAttemptInputs).toHaveLength(2);
-    expect(before.prompts.invocations).toEqual([]);
+  it('unifies costs and tokens across active, retired, evidence and auxiliary attempts', () => {
+    const active = attempt(1, startedAt, { tokens_in: 10, tokens_out: 4, cost_usd: 0.1 });
+    const retired = { status: 'complete' as const, retries: 0, attempts: [attempt(1, observedAt, { tokens_in: 20, tokens_out: 6, cost_usd: 0.2 })] };
+    writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [active] });
+    updateRunState(project, runId, (state) => {
+      state.retiredStageUsage = [
+        { stageId: 'retired', iteration: 1, status: { ...retired, attempts: [attempt(1, observedAt, { tokens_in: 99, tokens_out: 99, cost_usd: 9 })] } },
+        { stageId: 'legacy', iteration: 0, status: { status: 'complete', retries: 0, tokens_in: 3, tokens_out: 2, cost_usd: 0.05 } },
+      ];
+      state.stageEvidence = [{ stageId: 'retired', iteration: 1, status: retired, statusPath: 'unused.json', attemptOutputPaths: [] }];
+      state.auxiliaryAttempts = { writer: [active], _summary: [attempt(1, startedAt, { tokenUsage: 'partial', tokens_in: 1, tokens_out: 0, cost_usd: 0.01 })] };
+    });
+    const budget = view().budget;
+    // The first carrier of a duplicate attempt retains its recorded values.
+    expect(budget.tokens).toMatchObject({ knownInputTokens: 113, knownOutputTokens: 105, unknownTokenAttempts: 1, unknownLegacyStages: 0, complete: false,
+      attemptEvidence: { known: 3, recordedUnknown: 1, unrecorded: 0 } });
+    expect(budget.cost.knownUsd).toBeCloseTo(9.16);
+    expect(budget.cost).toMatchObject({ unknownAttempts: 0, complete: true });
+  });
 
+  it.each(['legacy', 'attempt'] as const)('retains unknown retired %s usage when same-iteration evidence has known counts', (kind) => {
+    const unknown = { status: 'complete' as const, retries: 0, ...(kind === 'attempt' ? { attempts: [attempt(1, startedAt, { tokenUsage: 'unknown' })] } : {}) };
+    const known = { status: 'complete' as const, retries: 0, tokens_in: 10, tokens_out: 4,
+      ...(kind === 'attempt' ? { attempts: [attempt(1, startedAt, { tokens_in: 10, tokens_out: 4, tokenUsage: 'known' })] } : {}) };
+    updateRunState(project, runId, (state) => {
+      state.retiredStageUsage = [{ stageId: 'retired', iteration: 1, status: unknown }];
+      state.stageEvidence = [{ stageId: 'retired', iteration: 1, status: known, statusPath: 'unused.json', attemptOutputPaths: [] }];
+    });
+    expect(view().budget.tokens).toMatchObject({ complete: false, remaining: null,
+      unknownTokenAttempts: kind === 'attempt' ? 1 : 0, unknownLegacyStages: kind === 'legacy' ? 1 : 0 });
+  });
+
+  it('retains missing usage even when retired row identity metadata is malformed', () => {
+    const state = readRunState(project, runId);
+    state.retiredStageUsage = JSON.parse('[{"stageId":"retired","iteration":"invalid","status":{"status":"complete","retries":0}}]');
+    expect(projectRunStageHistory(state, () => {})).toEqual([]);
+    expect(budgetView(state, observedAt).tokens).toMatchObject({ complete: false, unknownLegacyStages: 1 });
+  });
+
+  it('accounts for skipped stages with no attempts as missing legacy telemetry', () => {
+    writeStageStatus(project, runId, 'writer', { status: 'skipped', retries: 0 });
+    const budget = view().budget;
+    expect(budget.tokens).toMatchObject({ knownInputTokens: 0, knownOutputTokens: 0, unknownTokenAttempts: 0,
+      unknownLegacyStages: 1, complete: false, attemptEvidence: { known: 0, recordedUnknown: 0, unrecorded: 1 } });
+    expect(budget.time).toMatchObject({ knownAttemptDurationMs: 0, unknownDurationAttempts: 1 });
+  });
+
+  it('retains one-sided historical lower bounds without changing the legacy pair counters', () => {
+    writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, tokens_out: 24_055 });
+    expect(view().budget.tokens).toMatchObject({ knownInputTokens: 0, knownOutputTokens: 0, knownTotalTokens: 24_055, unknownLegacyStages: 1, complete: false });
+  });
+
+  it('keeps cost lower bounds unknown independently of complete token counters', () => {
+    writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [
+      attempt(1, startedAt, { tokenUsage: 'known', tokens_in: 10, tokens_out: 4 }),
+      attempt(2, observedAt, { tokenUsage: 'known', tokens_in: 20, tokens_out: 6, cost_usd: 0.2, costUsage: 'partial' }),
+    ] });
+    expect(view().budget.tokens).toMatchObject({ knownInputTokens: 30, knownOutputTokens: 10, complete: true });
+    expect(view().budget.cost).toEqual({ knownUsd: 0.2, unknownAttempts: 2, complete: false });
+  });
+
+  it('reads latest stage input and preserves final bytes of multiple invocations', () => {
+    writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [attempt(1), attempt(2, observedAt)] });
     const first = recordInvocationInput(directory, input());
     recordInvocationInput(directory, input({ invocationIndex: 2, systemPrompt: 'fallback system', userPrompt: 'same attempt, different guidance' }));
     recordInvocationInput(directory, input({ attemptIndex: 2, attemptStartedAt: observedAt, userPrompt: 'second attempt final input' }));
@@ -78,7 +132,11 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(after.prompts.invocations.every((entry) => entry.integrity === 'verified' && entry.attemptBinding === 'matched')).toBe(true);
     expect(after.prompts.invocations[0].record).toMatchObject({ userPrompt: input().userPrompt, systemPrompt: input().systemPrompt, userSha256: hash(input().userPrompt), systemSha256: hash(input().systemPrompt), guidanceIds: ['late_guidance'] });
     expect(readInvocationInput(first.path).guidanceIds).toContain('late_guidance');
-    expect(after.prompts.legacyInputs[0].exact).toBe(false);
+    expect(after.prompts.legacyInputs).toEqual([]);
+    expect(readStageInput(project, runId, 'writer')).toBe('second attempt final input');
+    writeFileSync(first.path, 'malformed earlier gzip');
+    expect(readStageInput(project, runId, 'writer')).toBe('second attempt final input');
+    expect(existsSync(join(directory, 'stages', 'writer', 'input.md'))).toBe(false);
   });
 
   it('is idempotent for identical inputs and refuses mutation of an invocation identity', () => {
@@ -101,22 +159,6 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(view(true).prompts.invocations[0].record).toMatchObject({ systemPrompt, userPrompt, transport: { payload } });
   });
 
-  it('reads legacy and compressed inputs together and does not duplicate a historical identity', () => {
-    const compressedPath = invocationInputPath(directory, input());
-    mkdirSync(join(compressedPath, '..'), { recursive: true });
-    const legacyPath = compressedPath.slice(0, -3);
-    const legacy = { ...input(), version: 1, systemSha256: hash(input().systemPrompt), userSha256: hash(input().userPrompt) };
-    const original = JSON.stringify(legacy) + '\n';
-    writeFileSync(legacyPath, original);
-    expect(recordInvocationInput(directory, input()).path).toBe(legacyPath);
-    expect(existsSync(compressedPath)).toBe(false);
-    expect(readFileSync(legacyPath, 'utf8')).toBe(original);
-    expect(() => recordInvocationInput(directory, input({ userPrompt: 'changed' }))).toThrow('INVOCATION_INPUT_CONFLICT');
-    recordInvocationInput(directory, input({ invocationIndex: 2, userPrompt: 'fallback input' }));
-    expect(view(true).prompts.invocations).toHaveLength(2);
-    expect(view(true).prompts.invocations.every(entry => entry.integrity === 'verified')).toBe(true);
-  });
-
   it('publishes and reads one invocation namespace through a run-root alias', () => {
     writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [attempt()] });
     const alias = join(root, 'run-alias');
@@ -129,6 +171,29 @@ describe('versioned run state and immutable invocation inputs', () => {
     setFcGlobalDir(storeAlias);
     expect(view(true).prompts.invocations).toHaveLength(1);
     expect(view(true).prompts.invocations[0].integrity).toBe('verified');
+  });
+
+  it('ignores retired scope decisions and live constraint incidents in the state projection', () => {
+    writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [attempt()] });
+    const before = view(true);
+    const stageDirectory = join(directory, 'stages', 'writer');
+    const decision = {
+      version: 1, kind: 'scope_revision', requestId: 'retired_request', runId, stageId: 'writer', attemptIndex: 1,
+      identityDigest: hash('retired identity'), requestDigest: hash('retired request'), pathDigest: hash('retired path'),
+      requestedBy: 'stage', reason: 'Retired scope request', decision: 'rejected', accepted: false,
+      decidedBy: 'scheduler-policy', decidedAt: observedAt, policyBasis: 'Scope is fixed.',
+    };
+    const incident = {
+      version: 1, kind: 'live_constraint_incident', incidentId: 'retired_incident', stageId: 'writer',
+      attemptIndex: 1, invocationIndex: 1, trigger: 'phase_boundary', path: 'retired/output.md',
+      reason: 'Outside retired scope', entryKind: 'untracked', comparisonOutcome: 'different',
+      changeObserved: true, rollbackAttempted: true, restored: true, writeObservedAt: startedAt,
+      detectedAt: observedAt, detectionLatencyMs: 60_000, effectiveScope: ['docs/**'],
+    };
+    writeFileSync(join(stageDirectory, 'scope_revision_decision_attempt_1.json'), JSON.stringify(decision));
+    writeFileSync(join(stageDirectory, 'live_constraint_incidents_attempt_1.jsonl'), `${JSON.stringify(incident)}\n`);
+    expect(view(true)).toEqual(before);
+    expect(summarizeRunStateView(view(true))).toEqual(summarizeRunStateView(before));
   });
 
   it('reports truncated compressed records as invalid input evidence', () => {
@@ -168,26 +233,20 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(snapshot.snapshot.sources.some((entry) => entry.prefix !== undefined && entry.path.endsWith('run-history.jsonl'))).toBe(true);
   });
 
-  it('captures configured supervisor inputs and distinguishes unbound capture from execution evidence', () => {
-    expect(() => recordInvocationInput(directory, input({ stageId: '_supervisor' }))).toThrow('INVOCATION_RUN_BINDING');
-    updateRunState(project, runId, (state) => {
-      state.supervise = true;
-      state.supervisor = { status: 'running', calls: 0, tokens_in: 0, tokens_out: 0, duration_ms: 0, startedAt, attempts: [] };
-    });
-    recordInvocationInput(directory, input({ stageId: '_supervisor' }));
+  it('captures initialized summary inputs and distinguishes unbound capture from execution evidence', () => {
+    expect(() => recordInvocationInput(directory, input({ stageId: '_summary' }))).toThrow('INVOCATION_RUN_BINDING');
+    updateRunState(project, runId, (state) => { state.auxiliaryAttempts = { _summary: [] }; });
+    recordInvocationInput(directory, input({ stageId: '_summary' }));
     expect(view().prompts.invocations[0]).toMatchObject({ integrity: 'verified', attemptBinding: 'unmatched' });
     expect(view().prompts.coverage).toBe('partial');
-    updateRunState(project, runId, (state) => { state.supervisor!.attempts.push({ index: 1, startedAt, completedAt: observedAt, status: 'complete', duration_ms: 1, exitCode: 0 }); state.supervisor!.calls = 1; });
-    expect(view(true).prompts.invocations[0]).toMatchObject({ integrity: 'verified', attemptBinding: 'matched', record: { stageId: '_supervisor', userPrompt: input().userPrompt } });
+    updateRunState(project, runId, (state) => { state.auxiliaryAttempts!._summary.push({ index: 1, startedAt, completedAt: observedAt, status: 'complete', duration_ms: 1, exitCode: 0 }); });
+    expect(view(true).prompts.invocations[0]).toMatchObject({ integrity: 'verified', attemptBinding: 'matched', record: { stageId: '_summary', userPrompt: input().userPrompt } });
   });
 
-  it('exposes one stable admitted revision, conditional declarations, findings, guidance and resource leases', () => {
+  it('exposes one stable admitted revision, conditional declarations, findings and guidance', () => {
     mkdirSync(join(project, 'docs'));
     writeFileSync(join(project, 'docs', 'present.md'), 'produced');
     writeFileSync(join(project, 'missing.md'), 'wrong-root decoy');
-    const registryPath = join(root, 'leases.sqlite');
-    recordedResourceRegistry(registryPath);
-    appendRecordedResourceLease(registryPath, runId, 'writer', startedAt);
     updateRunState(project, runId, (state) => {
       state.dispatchedStages = [{ id: 'writer', scope: ['docs/**'], artifacts: 'declared elsewhere' }];
       (state as QueryableStoreState).queryState = {
@@ -202,7 +261,6 @@ describe('versioned run state and immutable invocation inputs', () => {
           { id: 'traversal', root: 'run', path: '../foreign.md' },
         ],
         findings: [{ id: 'finding_1', status: 'open', paths: ['docs/present.md'], gateId: 'audit', reason: 'attribution line needs repair', invalidatesPlan: false }],
-        resourceRegistryPath: registryPath,
       };
     });
     const envelope: GuidanceEnvelope = { version: 1, id: 'guide_1', target: 'writer', source: 'supervisor', createdAt: observedAt, body: 'Repair the declared line.' };
@@ -221,8 +279,6 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(snapshot.audits.openFindings[0].paths).toEqual(['docs/present.md']);
     expect(snapshot.audits.verdicts[0].record).toMatchObject({ verdict: 'reject' });
     expect(snapshot.guidance[0].deliveryState).toBe('delivered');
-    expect(snapshot.resources.status).toBe('available');
-    if (snapshot.resources.status === 'available') expect(snapshot.resources.snapshot.leases[0].owner.runId).toBe(runId);
   });
 
   it('exposes archived settlement bytes and directory members without confusing them with later metadata', () => {
@@ -231,7 +287,7 @@ describe('versioned run state and immutable invocation inputs', () => {
     writeFileSync(join(project, 'large/payload'), Buffer.alloc(32768, 65));
     const audit = inspectStageArtifactContract({ stageId: 'writer', projectDir: project, runDir: directory,
       writes: ['small.md', 'large/payload'], artifactContract: ArtifactContractSchema.parse({ version: 1,
-        produces: [{ id: 'small', root: 'project', path: 'small.md' }, { id: 'large', root: 'project', path: 'large', kind: 'directory' }], reads: [], replays: [] }) });
+        produces: [{ id: 'small', root: 'project', path: 'small.md' }, { id: 'large', root: 'project', path: 'large', kind: 'directory' }], reads: [] }) });
     expect(audit.violations).toEqual([]);
     // A historical receipt remains readable; new intermediate observations
     // no longer establish freshness obligations or recursively hash directories.
@@ -255,7 +311,7 @@ describe('versioned run state and immutable invocation inputs', () => {
     updateRunState(project, runId, (state) => {
       state.budget = { totalTokens: 100, usedTokens: 0, totalTimeMs: 300000 };
       state.retiredStageUsage = [{ stageId: 'writer', iteration: 1, status: { status: 'complete', retries: 0, attempts: [known] } }];
-      state.supervisor = { status: 'complete', calls: 1, tokens_in: 2, tokens_out: 1, duration_ms: 5, startedAt, completedAt: observedAt, attempts: [{ ...attempt(1), status: 'complete', exitCode: 0, completedAt: observedAt, tokens_in: 2, tokens_out: 1, duration_ms: 5 }] };
+      state.auxiliaryAttempts = { _summary: [{ ...attempt(1), status: 'complete', exitCode: 0, completedAt: observedAt, tokens_in: 2, tokens_out: 1, duration_ms: 5 }] };
     });
     expect(view().budget.tokens).toMatchObject({ knownInputTokens: 12, knownOutputTokens: 5, unknownTokenAttempts: 1, unknownLegacyStages: 1, complete: false, remaining: null });
     expect(view().budget.time).toMatchObject({ knownAttemptDurationMs: 25, unknownDurationAttempts: 2, wallElapsedMs: 60000 });

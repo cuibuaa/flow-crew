@@ -1,13 +1,12 @@
-import { splitBriefFrontmatter } from '../../brief-frontmatter.js';
-/** Brief frontmatter, duration/floor contracts and program lifecycle evidence; no dispatch admission or execution. */
-import { type ResearchConfirmConfig, type TerminalStatesConfig, type ProgramConfig, type ResearchConfig, type ResearchIntegrityConfig, isTerminalRunStatus, TERMINAL_STATUSES, type TerminalStateEntry, type PostTerminateHook, type StoreState, isPendingStageStatus, STAGE_STATUS } from '../../store.js';
+import { type BriefFrontmatterDocument, parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
+/** Brief frontmatter, duration/floor contracts; no dispatch admission or execution. */
+import { type ResearchConfirmConfig, type TerminalStatesConfig, type ResearchConfig, type ResearchIntegrityConfig, isTerminalRunStatus, TERMINAL_STATUSES, type TerminalStateEntry, type PostTerminateHook, type StoreState } from '../../store.js';
 import { join } from 'node:path';
-import { writeFileSync, mkdirSync } from '../../engine-fs.js';
+import { writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { type ResearchFeasibilityConfig, parseResearchFeasibility } from '../../research-feasibility.js';
 import { type BriefOutputDeclaration, extractBriefOutputDeclarations } from '../../ship-inputs.js';
 import { nextTechnicalRetryBudget } from '../../attempt-deadline.js';
-import { parse as parseYaml } from 'yaml';
 import { ResearchPolicySchema, RESEARCH_POLICY_IDS } from '../../research-policy.js';
 import { ArtifactReadSchema } from '../../artifact-declarations.js';
 import { log } from './shared.js';
@@ -33,7 +32,6 @@ export interface ParsedBriefFrontmatter {
   workflow?: 'direct' | 'planner';
   workflowError?: string;
   terminalStates?: TerminalStatesConfig;
-  program?: ProgramConfig;
   /** Metric-loop config. A numeric baseline is the sole activator. */
   research?: ResearchConfig;
   /** Static preflight contract, independently reachable without activating a metric loop. */
@@ -44,6 +42,7 @@ export interface ParsedBriefFrontmatter {
   outputs?: BriefOutputDeclaration[];
   stripped: string;
   frontmatterError?: string;
+  frontmatterErrorKind?: BriefFrontmatterDocument['errorKind'];
 }
 
 export interface ResearchIterationBudgetAssessment {
@@ -124,33 +123,32 @@ export function assessResearchIterationBudget(
 }
 
 /** Resolve an authored choice or use the fixed author/review/repair plan.
- * Research and program loops still require their planner workflows. */
+ * Research loops still require their planner workflows. */
 export function autoSelectedWorkflow(
   parsed: ParsedBriefFrontmatter,
   override?: string,
 ): { workflow: string; reason: string; error?: string } {
-  const workflow = override ?? (parsed.workflow === 'direct' ? 'direct'
+  const workflow = (override === 'default' ? 'planner' : override) ?? (parsed.workflow === 'direct' ? 'direct'
     : parsed.research ? 'research'
-      : parsed.workflow === 'planner' || parsed.program || parsed.frontmatterError ? 'default' : 'direct');
+      : parsed.workflow === 'planner' || parsed.frontmatterError ? 'planner' : 'direct');
   const reason = override ? `explicit --workflow ${override}`
-    : `${parsed.workflow ? `brief declares workflow: ${parsed.workflow}` : `no workflow choice; ${workflow === 'direct' ? 'fixed author/review/repair' : 'planner'} default`}${parsed.research ? '; research requires the research loop' : parsed.program ? '; program requires the program loop' : ''}`;
-  const loop = parsed.research ? 'research' : parsed.program ? 'program' : undefined;
-  const error = parsed.workflowError ?? (workflow === 'direct' && loop
+    : `${parsed.workflow ? `brief declares workflow: ${parsed.workflow}` : `no workflow choice; ${workflow === 'direct' ? 'fixed author/review/repair' : 'planner'} default`}${parsed.research ? '; research requires the research loop' : ''}`;
+  const loop = parsed.research ? 'research' : undefined;
+  const error = (parsed.frontmatterErrorKind === 'yaml' ? parsed.frontmatterError : undefined) ?? parsed.workflowError ?? (workflow === 'direct' && loop
     ? `direct cannot run the ${loop} loop; choose workflow: planner` : undefined);
   return { workflow, reason, ...(error ? { error } : {}) };
 }
 
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
-  const frontmatter = splitBriefFrontmatter(brief);
+  const frontmatter = parseBriefFrontmatterDocument(brief);
+  // Retain the public parser's legacy diagnostic; entry-point admission uses
+  // the shared document boundary, where an unclosed opener is body prose.
   if (!frontmatter) return /^(?:\uFEFF)?---\r?\n/.test(brief)
     ? { stripped: brief, frontmatterError: 'frontmatter fence opened with `---` but never closed (no closing `---` line)' }
     : { stripped: brief };
-  const fm = frontmatter.yaml;
+  if (frontmatter.error) return { stripped: brief, frontmatterError: frontmatter.error, frontmatterErrorKind: frontmatter.errorKind };
+  const parsed = frontmatter.value;
   const stripped = frontmatter.body;
-  let parsed: unknown;
-  // GAP-3: RETURN the YAML parse error instead of swallowing it — the caller can
-  // then fail loud / record an event rather than silently falling back to plain dispatch.
-  try { parsed = parseYaml(fm); } catch (err) { return { stripped: brief, frontmatterError: `frontmatter YAML parse error: ${err instanceof Error ? err.message : String(err)}` }; }
   if (!parsed || typeof parsed !== 'object') return { stripped, frontmatterError: 'frontmatter parsed but is not a YAML mapping/object' };
   const out: ParsedBriefFrontmatter = { stripped };
   try { out.plannerPolicies = parsePlannerPolicySelection((parsed as Record<string, unknown>).planner_policies); }
@@ -265,30 +263,6 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
         if (typeof s.improvement_se_multiple === 'number') research.stop.improvementSEMultiple = s.improvement_se_multiple;
       }
       out.research = research;
-    }
-  }
-
-  // Parse the optional `program:` block first — used for multi-phase research
-  // programs that need safeguards + auto-ledger. Schema is permissive: missing
-  // fields fall back to defaults.
-  const progRaw = (parsed as Record<string, unknown>).program;
-  if (progRaw && typeof progRaw === 'object') {
-    const p = progRaw as Record<string, unknown>;
-    if (typeof p.name === 'string' && typeof p.phase === 'string') {
-      const program: ProgramConfig = { name: p.name, phase: p.phase };
-      if (typeof p.roadmap === 'string') program.roadmap = p.roadmap;
-      if (typeof p.ledger === 'string') program.ledger = p.ledger;
-      if (p.safeguards && typeof p.safeguards === 'object') {
-        const s = p.safeguards as Record<string, unknown>;
-        program.safeguards = {};
-        if (typeof s.max_phases === 'number') program.safeguards.maxPhases = s.max_phases;
-        if (typeof s.max_wall_hours === 'number') program.safeguards.maxWallHours = s.max_wall_hours;
-        if (typeof s.stop_file === 'string') program.safeguards.stopFile = s.stop_file;
-        if (typeof s.halt_after_consecutive_no_improvement === 'number') {
-          program.safeguards.haltAfterConsecutiveNoImprovement = s.halt_after_consecutive_no_improvement;
-        }
-      }
-      out.program = program;
     }
   }
 
@@ -410,84 +384,6 @@ export function evaluateTerminalFloor(
     return { passed: false, reason: `wall time ${elapsedMin.toFixed(1)} min < required ${floor.minWallMinutes} min (no min_attempted_stages set)` };
   }
   return { passed: true };
-}
-
-/**
- * Mark all still-pending stages as skipped when a run commits a terminal
- * status mid-iteration (research loop termination, terminal-state file), so
- * run.json never shows stages silently frozen at 'pending' forever
- * (event-drift audit, engine bug #3: verify_r4_pead/fix_r4_pead left pending).
- */
-export function markLeftoverStagesSkipped(state: StoreState, note: string): void {
-  for (const st of Object.values(state.stages ?? {})) {
-    if (isPendingStageStatus(st.status)) {
-      st.status = STAGE_STATUS.SKIPPED;
-      st.error = note;
-    }
-  }
-}
-
-export function checkProgramSafeguards(projectDir: string, program: ProgramConfig): string | null {
-  const sg = program.safeguards;
-  if (!sg) return null;
-  if (sg.stopFile) {
-    const p = join(projectDir, sg.stopFile);
-    if (existsSync(p)) return `stop_file present: ${sg.stopFile}`;
-  }
-  let phases: Array<Record<string, unknown>> = [];
-  if (program.ledger) {
-    const ledgerPath = join(projectDir, program.ledger);
-    if (existsSync(ledgerPath)) {
-      try {
-        const data = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as { phases?: unknown };
-        if (Array.isArray(data.phases)) {
-          phases = data.phases.filter((x): x is Record<string, unknown> => x !== null && typeof x === 'object');
-        }
-      } catch { /* malformed ledger; treat as empty */ }
-    }
-  }
-  if (typeof sg.maxPhases === 'number' && phases.length >= sg.maxPhases) {
-    return `max_phases reached (${phases.length} >= ${sg.maxPhases})`;
-  }
-  if (typeof sg.maxWallHours === 'number') {
-    const sum = phases.reduce((acc, p) => acc + (typeof p.wall_hours === 'number' ? p.wall_hours : 0), 0);
-    if (sum >= sg.maxWallHours) {
-      return `max_wall_hours reached (${sum.toFixed(2)} >= ${sg.maxWallHours})`;
-    }
-  }
-  if (typeof sg.haltAfterConsecutiveNoImprovement === 'number' && sg.haltAfterConsecutiveNoImprovement > 0) {
-    const tail = phases.slice(-sg.haltAfterConsecutiveNoImprovement);
-    if (tail.length >= sg.haltAfterConsecutiveNoImprovement && tail.every((p) => p.verdict !== 'breakthrough')) {
-      return `${sg.haltAfterConsecutiveNoImprovement} consecutive phases without breakthrough`;
-    }
-  }
-  return null;
-}
-
-export function appendProgramLedger(
-  projectDir: string,
-  program: ProgramConfig,
-  row: Record<string, unknown>,
-): void {
-  if (!program.ledger) return;
-  const ledgerPath = join(projectDir, program.ledger);
-  let data: { phases: Array<Record<string, unknown>> } = { phases: [] };
-  if (existsSync(ledgerPath)) {
-    try {
-      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf-8'));
-      if (parsed && Array.isArray(parsed.phases)) {
-        data.phases = parsed.phases.filter((x: unknown): x is Record<string, unknown> => x !== null && typeof x === 'object');
-      }
-    } catch { /* malformed; reset */ }
-  }
-  data.phases.push(row);
-  try {
-    const dir = ledgerPath.substring(0, ledgerPath.lastIndexOf('/')) || '.';
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(ledgerPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
-  } catch (err) {
-    log.warn({ ledgerPath, err: String(err) }, 'failed to write program ledger row');
-  }
 }
 
 function countGlobMatches(projectDir: string, glob: string, startedAtMs: number): { fresh: number; stale: number } {

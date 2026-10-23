@@ -69,14 +69,14 @@ export function validateVerdictAgainstContract(
   metric: Record<string, unknown> | null,
   contract: GateContract,
   stageId: string,
-): string | null {
+): { kind: 'numeric_evidence' | 'score_contract'; reason: string } | null {
   if (verdict.pass !== true || contract.appliesToGates && !contract.appliesToGates.includes(stageId)) return null;
   const candidateValues: unknown[] = [verdict.value, verdict.score, metric?.value, metric?.score];
   const value = candidateValues.find(
     (candidate): candidate is number => typeof candidate === 'number' && Number.isFinite(candidate),
   );
   if (typeof value !== 'number') {
-    return `missing required numeric gate value for metric="${contract.metric}"; only finite numeric evidence is accepted, no finite numeric value was found in the current verdict or metric.json, and contract threshold=${contract.threshold} must be checked mechanically.`;
+    return { kind: 'numeric_evidence', reason: `missing required numeric gate value for metric="${contract.metric}"; only finite numeric evidence is accepted, no finite numeric value was found in the current verdict or metric.json, and contract threshold=${contract.threshold} must be checked mechanically.` };
   }
   const expectedMetric = contract.metric.toLowerCase();
   const synonyms = (contract.metricSynonyms ?? []).map(s => s.toLowerCase());
@@ -85,7 +85,7 @@ export function validateVerdictAgainstContract(
   const metricFileName = metric && typeof metric.metric === 'string' ? metric.metric.toLowerCase() : '';
   const metricNameMatches = acceptableNames.has(verdictMetricName) || acceptableNames.has(metricFileName);
   if (!metricNameMatches) {
-    return `verdict.metric="${verdict.metric ?? ''}" / metric.json.metric="${metric?.metric ?? ''}" does not match contract.metric="${contract.metric}" (synonyms=${JSON.stringify(contract.metricSynonyms ?? [])}). Gate metric was redefined — verdict invalid.`;
+    return { kind: 'score_contract', reason: `verdict.metric="${verdict.metric ?? ''}" / metric.json.metric="${metric?.metric ?? ''}" does not match contract.metric="${contract.metric}" (synonyms=${JSON.stringify(contract.metricSynonyms ?? [])}). Gate metric was redefined — verdict invalid.` };
   }
   const higherIsBetter = contract.higherIsBetter !== false;
   const terminalOutcome = typeof metric?.outcome === 'string'
@@ -98,7 +98,7 @@ export function validateVerdictAgainstContract(
     && metricFileIndicatesFailure(metric);
   const mechanicalPass = higherIsBetter ? value >= contract.threshold : value <= contract.threshold;
   if (!mechanicalPass && !verifiedCampaignCeiling) {
-    return `verdict.pass=true but value=${value} does not satisfy contract (${higherIsBetter ? '>=' : '<='} ${contract.threshold}). Pass set independently of mechanical check — verdict invalid.`;
+    return { kind: 'score_contract', reason: `verdict.pass=true but value=${value} does not satisfy contract (${higherIsBetter ? '>=' : '<='} ${contract.threshold}). Pass set independently of mechanical check — verdict invalid.` };
   }
   return null;
 }

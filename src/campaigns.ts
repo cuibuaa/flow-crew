@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { parseJsonl, readJsonlFile } from './jsonl.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -50,12 +52,6 @@ export interface CampaignSummaryRecord {
   latestTimestamp?: string;
 }
 
-export interface CampaignSelectionInput {
-  campaignId?: string;
-  campaignStorageKey?: string;
-  campaignName?: string;
-}
-
 export interface CampaignSelection {
   id: string;
   name: string;
@@ -92,14 +88,17 @@ export function cleanCampaignName(value?: string): string | undefined {
   return trimmed || undefined;
 }
 
-export function canonicalCampaignStorageKey(value?: string): string | undefined {
+export function canonicalCampaignStorageKey(value?: string, projectDir?: string): string | undefined {
   const cleaned = cleanCampaignName(value);
   if (!cleaned) return undefined;
   const slug = cleaned
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return slug || 'campaign';
+  if (slug || !projectDir) return slug || undefined;
+  // Global ledgers need a project-bound key even when the name has no ASCII slug.
+  return `campaign-${createHash('sha256')
+    .update(JSON.stringify([projectPersistenceIdentity(projectDir), cleaned])).digest('hex')}`;
 }
 
 export const canonicalCampaignId = canonicalCampaignStorageKey;
@@ -108,9 +107,10 @@ export function resolveCampaignStorageKey(input: {
   campaignId?: string;
   campaignStorageKey?: string;
   campaignName?: string;
+  projectDir?: string;
 }): string | undefined {
   return canonicalCampaignStorageKey(
-    input.campaignStorageKey ?? input.campaignId ?? input.campaignName,
+    input.campaignStorageKey ?? input.campaignId ?? input.campaignName, input.projectDir,
   );
 }
 
@@ -138,13 +138,9 @@ function readRunStates(projectDir: string): StoreState[] {
 }
 
 function normalizeRunCampaign(state: StoreState): CampaignSelection | undefined {
-  const storageKey = resolveCampaignStorageKey({
-    campaignId: state.campaignId,
-    campaignStorageKey: state.campaignStorageKey,
-    campaignName: state.campaignName,
-  });
+  const storageKey = resolveCampaignStorageKey(state);
   if (!storageKey) return undefined;
-  const id = canonicalCampaignId(state.campaignId ?? state.campaignName ?? storageKey) ?? storageKey;
+  const id = canonicalCampaignId(state.campaignId ?? state.campaignName ?? storageKey, state.projectDir) ?? storageKey;
   return {
     id,
     name: cleanCampaignName(state.campaignName ?? state.campaignId) ?? id,
@@ -152,14 +148,15 @@ function normalizeRunCampaign(state: StoreState): CampaignSelection | undefined 
   };
 }
 
-function normalizeEntryCampaign(fileStem: string, entry: Partial<CampaignHistoryEntry>): CampaignSelection | undefined {
+function normalizeEntryCampaign(projectDir: string, fileStem: string, entry: Partial<CampaignHistoryEntry>): CampaignSelection | undefined {
   const storageKey = resolveCampaignStorageKey({
     campaignId: entry.campaignId,
     campaignStorageKey: entry.campaignStorageKey,
     campaignName: entry.campaignName ?? fileStem,
+    projectDir,
   });
   if (!storageKey) return undefined;
-  const id = canonicalCampaignId(entry.campaignId ?? entry.campaignName ?? fileStem ?? storageKey) ?? storageKey;
+  const id = canonicalCampaignId(entry.campaignId ?? entry.campaignName ?? fileStem ?? storageKey, projectDir) ?? storageKey;
   return {
     id,
     name: cleanCampaignName(entry.campaignName ?? fileStem ?? entry.campaignId) ?? id,
@@ -195,15 +192,15 @@ function projectHistoryStorageKeys(projectDir: string): Set<string> {
   }
   for (const file of files) {
     const fileStem = file.replace(/\.jsonl$/, '');
-    let lines: string[];
+    let rows: Partial<CampaignHistoryEntry>[];
     try {
-      lines = readFileSync(join(campaignsRoot(projectDir), file), 'utf-8').split('\n').filter(Boolean);
+      rows = readJsonlFile<Partial<CampaignHistoryEntry>>(join(campaignsRoot(projectDir), file));
     } catch { /* non-critical */
       continue;
     }
-    for (const line of lines) {
+    for (const row of rows) {
       try {
-        const ref = normalizeEntryCampaign(fileStem, JSON.parse(line) as Partial<CampaignHistoryEntry>);
+        const ref = normalizeEntryCampaign(projectDir, fileStem, row);
         if (ref) keys.add(ref.storageKey);
       } catch { /* ignore malformed */ }
     }
@@ -248,8 +245,10 @@ export function readAllCampaignEntries(projectDir: string): Map<string, Campaign
       for (let index = 0; index < rawLines.length; index += 1) {
         const line = rawLines[index];
         try {
-          const parsed = JSON.parse(line) as Partial<CampaignHistoryEntry> & { ts?: unknown };
-          const ref = normalizeEntryCampaign(fileStem, parsed);
+          // Legacy fallback sequence counts nonempty physical rows, including malformed ones.
+          const [parsed] = parseJsonl<Partial<CampaignHistoryEntry> & { ts?: unknown }>(line);
+          if (parsed === undefined) continue;
+          const ref = normalizeEntryCampaign(projectDir, fileStem, parsed);
           if (!ref) continue;
           if (typeof parsed.runId !== 'string') continue;
           if (root === globalRoot) {
@@ -350,7 +349,7 @@ export function readAllCampaignEntries(projectDir: string): Map<string, Campaign
 }
 
 export function readCampaignEntries(projectDir: string, campaignId: string): CampaignHistoryEntry[] {
-  const targetStorageKey = resolveCampaignStorageKey({ campaignId });
+  const targetStorageKey = resolveCampaignStorageKey({ campaignId, projectDir });
   if (!targetStorageKey) return [];
   return readAllCampaignEntries(projectDir).get(targetStorageKey) ?? [];
 }
@@ -389,7 +388,7 @@ export function listCampaigns(projectDir: string): CampaignSummaryRecord[] {
 
   for (const [storageKey, entries] of readAllCampaignEntries(projectDir)) {
     for (const entry of entries) {
-      const campaign = normalizeEntryCampaign(storageKey, entry);
+      const campaign = normalizeEntryCampaign(projectDir, storageKey, entry);
       if (!campaign) continue;
       upsert(campaign, entry.runId, entry.timestamp, entry.score);
     }
@@ -398,41 +397,6 @@ export function listCampaigns(projectDir: string): CampaignSummaryRecord[] {
   return [...summaries.values()]
     .map(({ runIds, ...summary }) => summary)
     .sort((a, b) => (b.latestTimestamp ?? '').localeCompare(a.latestTimestamp ?? ''));
-}
-
-export function resolveCampaignSelection(projectDir: string, input: CampaignSelectionInput): CampaignSelection | undefined {
-  const requestedStorageKey = resolveCampaignStorageKey(input);
-  const requestedId = canonicalCampaignId(input.campaignId ?? input.campaignName ?? requestedStorageKey);
-  const requestedName = cleanCampaignName(input.campaignName);
-  const existing = requestedStorageKey
-    ? listCampaigns(projectDir).find((campaign) => campaign.storageKey === requestedStorageKey)
-    : undefined;
-  const storageKey = requestedStorageKey ?? existing?.storageKey;
-  const id = requestedId ?? existing?.id ?? canonicalCampaignId(requestedName);
-  if (!storageKey || !id) return undefined;
-  return {
-    id,
-    name: requestedName ?? existing?.name ?? cleanCampaignName(input.campaignId) ?? id,
-    storageKey,
-  };
-}
-
-export function nextCampaignSeq(projectDir: string, campaignId: string): number {
-  const targetStorageKey = resolveCampaignStorageKey({ campaignId });
-  if (!targetStorageKey) return 1;
-  let maxSeq = 0;
-
-  for (const state of readRunStates(projectDir)) {
-    const campaign = normalizeRunCampaign(state);
-    if (!campaign || campaign.storageKey !== targetStorageKey) continue;
-    if (typeof state.campaignSeq === 'number') maxSeq = Math.max(maxSeq, state.campaignSeq);
-  }
-
-  for (const entry of readCampaignEntries(projectDir, targetStorageKey)) {
-    maxSeq = Math.max(maxSeq, entry.seq);
-  }
-
-  return maxSeq + 1;
 }
 
 export interface CampaignPhaseProgress {

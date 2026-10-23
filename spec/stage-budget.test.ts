@@ -1,4 +1,6 @@
 import './test-support/policy-runtime.js';
+import { providerFailureFromDiagnostic } from '../src/provider-result.js';
+import { atomicWrite } from '../src/engine-fs.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,9 +12,10 @@ import { CodexAdapter } from '../src/adapters/codex.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
 import { ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS, stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
-import { atomicWrite, beginStageAttempt, completeStageAttempt, attachStageConstraintAudit, isContinuingStage, createRun, readRunState, readStageStatus, updateRunState, writeStageStatus } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, completeStageAttempt, attachStageConstraintAudit, isContinuingStage, readRunState, readStageStatus, updateRunState, writeStageStatus } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
-import { WorkflowConfigSchema, normalizeStageContracts, findAllReady, readGateVerdict, tryTerminateOnTerminalState, runWorkflow } from '../src/scheduler.js';
+import { WorkflowConfigSchema, normalizeStageContracts, findAllReady, readGateEvaluation, tryTerminateOnTerminalState, runWorkflow } from '../src/scheduler.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
 import { recordGateValidationDelta, settledGateValidationExecution } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { RUN_VALIDATION_BASELINE_FILE } from '../src/scheduler/sched_policy/terminal.js';
@@ -23,7 +26,6 @@ import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-setup.js';
 import { prepareWorkflowLaunch, workflowContinuation } from '../src/scheduler/sched_loop/launch.js';
 import { runStage } from '../src/worker.js';
-import { LiveConstraintGuard } from '../src/live-constraint-guard.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 const role: AgentConfig = { name: 'coder', description: '', model: 'fixture', reasoning_effort: 'default', tools: ['default'], prompt: 'Complete the declared duties.' };
@@ -52,7 +54,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'fc-stage-budget-'));
   project = join(root, 'project');
   mkdirSync(project);
-  setEngineDefaults({ timeout_ms: budget, stage_technical_retries: 1 });
+  setEngineDefaults({ default_timeout_ms: budget, stage_technical_retries: 1 });
 });
 afterEach(() => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 function options(created: {
@@ -62,7 +64,7 @@ function options(created: {
   return { stageId: 'work', role, dependsOn: [], promptTemplate: 'Complete two units and retain unit 1 for continuation.',
     artifactContract: fixtureArtifactContract('work'), outputSchema: HANDOFF_SCHEMA,
     timeout_ms: budget, deadlineClock: time.clock, projectDir: project, runId: created.runId, runDir: created.runDirPath,
-    retries: 0, projectWriteScope: ['work.txt', 'handoff.txt'] };
+    retries: 0, };
 }
 const completed = (opts: RunOpts, summary = 'Done: unit 1. Remaining: unit 2.'): RunResult => {
   const refs = opts.outputSchema?.anyOf?.[0].properties?.criteria.required ?? [];
@@ -139,7 +141,8 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(result, result.output).toMatchObject({ exitCode: 0, timedOut: false, continuation: { reason: 'stage_budget', forced: false } });
     expect(status.status).toBe('complete');
     expect(status.attempts).toHaveLength(1);
-    expect(status.timeout).toMatchObject({ terminationCause: 'budget_wrap_up', finishingMs: 2000 });
+    expect(status.attempts?.at(-1)?.terminationCause).toBe('exit');
+    expect(status.timeout).toMatchObject({ finishingMs: 2000 });
     expect(Date.parse(status.timeout!.wrapUpDeliveredAt!)).toBeLessThan(Date.parse(status.timeout!.budgetDeadlineAt!));
     expect(fixture.deliveredRemaining[0]).toBeGreaterThanOrEqual(stageWrapUpTiming(budget).finishingMs);
     const calls = fixture.calls();
@@ -195,7 +198,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     const result = await runStage(fixture.adapter, options(created, time));
     expect(result).toMatchObject({ exitCode: 0, timedOut: false, continuation: { forced: true } });
     const status = readStageStatus(project, created.runId, 'work');
-    expect(status.timeout?.terminationCause).toBe('budget_forced_stop');
+    expect(status.attempts?.at(-1)?.terminationCause).toBe('exit');
     expect(status.timeout?.childClosedAt).toBeTruthy();
     expect(status.attempts).toHaveLength(1);
     expect(fixture.calls()).toHaveLength(2);
@@ -221,7 +224,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(calls).toBe(1);
     expect(JSON.parse(readFileSync(join(created.runDirPath, 'verdict_work.json'), 'utf8'))).toMatchObject({ pass: false, reason: 'Actual defect' });
   });
-  it.each(['supervisor', 'parent'] as const)('B05 keeps %s cancellation authoritative over a budget boundary', async (source) => {
+  it.each(['watchdog', 'parent'] as const)('B05 keeps %s cancellation authoritative over a budget boundary', async (source) => {
     const time = manualClock();
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
     const parent = new AbortController();
@@ -231,7 +234,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
           parent.abort('cancelled');
         else {
           mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
-          atomicWrite(join(opts.runDir, 'signals', 'abort_work.json'), JSON.stringify({ version: 1, stageId: 'work', attemptIndex: 1, reason: 'Actual abort', timestamp: new Date().toISOString(), source: 'supervisor' }));
+          atomicWrite(join(opts.runDir, 'signals', 'abort_work.json'), JSON.stringify({ version: 1, stageId: 'work', attemptIndex: 1, reason: 'Actual abort', timestamp: new Date().toISOString(), source: 'watchdog' }));
         }
         return { exitCode: 0, duration_ms: budget + 1, output: 'cancelled' };
       } };
@@ -243,34 +246,10 @@ describe('stage budget delivery through the shared guidance boundary', () => {
   it('B06 never promotes a guard refusal into retained success at the hard stop', async () => {
     const time = manualClock();
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
-    const adapter: Adapter = { async run() { time.advanceTo(stageWrapUpTiming(budget).hardLimitMs); return { exitCode: 125, duration_ms: budget, output: 'ENGINE_STATE_REFUSED: fixture', friendlyError: 'ENGINE_STATE_REFUSED: fixture' }; } };
+    const adapter: Adapter = { async run() { time.advanceTo(stageWrapUpTiming(budget).hardLimitMs); return { engineVoid: true, terminationCause: 'engine_void', exitCode: 125, duration_ms: budget, output: 'ENGINE_STATE_REFUSED: fixture', friendlyError: 'ENGINE_STATE_REFUSED: fixture' }; } };
     const result = await runStage(adapter, options(created, time));
     expect(result.exitCode).not.toBe(0);
     expect(result.continuation).toBeUndefined();
-  });
-  it.each(['rollback', 'monitor'] as const)('B34 %s refusal at the warning boundary prevents another child and retained success', async mode => {
-    const time = manualClock(); const created = createRun(project, 'fixture', 'name: fixture', ['work']);
-    let dirty = false, calls = 0;
-    const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (++calls > 1) return completed(opts);
-      return new Promise(resolve => {
-        opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'closed', duration_ms: 1 }), { once: true });
-        dirty = true; time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
-      });
-    } };
-    const result = await runStage(adapter, { ...options(created, time), liveConstraintGuardFactory: ({ attemptIndex }) => new LiveConstraintGuard({
-      projectDir: project, runDir: created.runDirPath, stageId: 'work', attemptIndex, effectiveScope: () => [],
-      watchProject: () => undefined, fallbackScanMs: 5, monitorDeadlineMs: 30,
-      scopeRevisionInstruction: () => 'Unrestored path requires refusal.',
-      scanAndRestore: () => {
-        if (!dirty) return { scannedPaths: 0, violations: [] };
-        dirty = false;
-        if (mode === 'monitor') return new Promise(() => {});
-        return { scannedPaths: 1, violations: [{ path: 'unrestored.txt', reason: 'outside scope', restored: false }] };
-      },
-    }) });
-    expect(calls).toBe(1); expect(result.exitCode).toBe(1); expect(result.continuation).toBeUndefined();
-    expect(readStageStatus(project, created.runId, 'work').status).toBe('failed');
   });
   it('B07 retains technical backoff under the same hard stop and disposes every timer', async () => {
     const time = manualClock();
@@ -278,7 +257,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     let calls = 0;
     const adapter: Adapter = { async run(_prompt, _role, opts) { calls++; if (calls === 1) {
         time.advanceTo(stageWrapUpTiming(budget).hardLimitMs);
-        return { exitCode: 1, duration_ms: budget, output: 'capacity', adapterError: true, adapterFailureKind: 'capacity' };
+        return { exitCode: 1, duration_ms: budget, output: 'capacity', providerFailure: providerFailureFromDiagnostic({ provider: 'codex', eventType: 'error', code: 429, message: 'capacity' }) };
       } return completed(opts); } };
     const result = await runStage(adapter, { ...options(created, time), technicalRetry: { delaysMs: [1, 1] } });
     expect(calls).toBe(1);
@@ -291,7 +270,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     const calls: Array<{ prompt: string; remainingMs: number }> = [];
     const adapter: Adapter = { async run(prompt, _role, opts) {
       calls.push({ prompt, remainingMs: opts.timeout_ms });
-      if (calls.length < 3) return { exitCode: 1, duration_ms: 1, output: 'capacity', adapterError: true, adapterFailureKind: 'capacity' };
+      if (calls.length < 3) return { exitCode: 1, duration_ms: 1, output: 'capacity', providerFailure: providerFailureFromDiagnostic({ provider: 'codex', eventType: 'error', code: 429, message: 'capacity' }) };
       return completed(opts);
     } };
     const execution = runStage(adapter, { ...options(created, time), technicalRetry: { delaysMs: [30000, 30000] } });
@@ -354,7 +333,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     const result = await runStage(adapter, options(created, time));
     expect(result.exitCode).toBe(137);
     expect(result.continuation).toBeUndefined();
-    expect(readStageStatus(project, created.runId, 'work').timeout?.terminationCause).toBe('stage_abort');
+    expect(readStageStatus(project, created.runId, 'work').attempts?.at(-1)?.terminationCause).toBe('stage_abort');
     expect(readRunEvents(project, created.runId).some(event => event.type === 'stage_wrap_up_delivered')).toBe(false);
   });
   it('B18 reserves the whole finishing interval after worst-case bounded child retirement', async () => {
@@ -461,7 +440,8 @@ describe('authored completion at the budget boundary', () => {
     expect(result.stages.work.attempts).toHaveLength(1);
     expect(result.stages.work.attempts?.[0].continuation).toBeUndefined();
     expect(result.stages.work.continuation).toBeUndefined();
-    expect(result.stages.work.timeout).toMatchObject({ terminationCause: 'complete', wrapUpRequestedAt: expect.any(String) });
+    expect(result.stages.work.attempts?.at(-1)?.terminationCause).toBe('exit');
+    expect(result.stages.work.timeout).toMatchObject({ wrapUpRequestedAt: expect.any(String) });
   });
   it.each([false, true])('B41 a gate passing at wrap-up publishes its verdict in the same iteration (finishing turn: %s)', async duringWrap => {
     const { result, calls } = await finishWorkflowAtWrap('review', duringWrap);
@@ -470,8 +450,9 @@ describe('authored completion at the budget boundary', () => {
     expect(calls).toEqual(['done:1', 'work:1', 'review:1', ...(duringWrap ? ['review:1'] : [])]);
     expect(result.stages.review.attempts).toHaveLength(1);
     expect(result.stages.review.attempts?.[0].continuation).toBeUndefined();
-    expect(readGateVerdict(project, 'review', result.runId)).toMatchObject({ pass: true });
-    expect(result.stages.review.timeout).toMatchObject({ terminationCause: 'complete', wrapUpRequestedAt: expect.any(String) });
+    expect(readGateEvaluation(project, 'review', result.runId)).toMatchObject({ pass: true });
+    expect(result.stages.review.attempts?.at(-1)?.terminationCause).toBe('exit');
+    expect(result.stages.review.timeout).toMatchObject({ wrapUpRequestedAt: expect.any(String) });
   });
   it('B42 an author reporting remaining work retains its authored handoff and spends the next iteration', async () => {
     const { roles, workflow } = workflowFixture();
@@ -631,7 +612,7 @@ describe('durable bounded continuation', () => {
   it.each(['complete', 'pending'] as const)('B11 cancel/resume spends the next iteration for a settled budget handoff and refuses a reset beyond the ceiling (%s)', status => {
     const { workflow } = workflowFixture(2);
     const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id));
-    updateRunState(project, created.runId, state => { state.status = 'stopped'; state.currentIteration = 1; state.maxIterations = 2; state.stages.work = { status, retries: 0, continuation: { reason: 'stage_budget', forced: false, handoff: 'stages/work/output_attempt_1.md' } }; });
+    updateRunState(project, created.runId, state => { state.status = 'cancelled'; state.currentIteration = 1; state.maxIterations = 2; state.stages.work = { status, retries: 0, continuation: { reason: 'stage_budget', forced: false, handoff: 'stages/work/output_attempt_1.md' } }; });
     const state = readRunState(project, created.runId);
     expect(workflowContinuation(state, project, created.runId, workflow).iteration).toBe(2);
     state.currentIteration = 2;
@@ -749,10 +730,8 @@ describe('durable bounded continuation', () => {
     updateRunState(project, created.runId, state => { state.stages.done = { status: 'complete', retries: 0 }; state.stages.work = { status: 'complete', retries: 0, continuation }; });
     const state = readRunState(project, created.runId);
     expect(findAllReady(workflow.stages, state)).toEqual([]);
-    const review = workflow.stages.find(stage => stage.id === 'review')!;
     writeStageStatus(project, created.runId, 'review', { status: 'complete', retries: 0, continuation, acceptedFrom: { runId: 'old-child', verdict: { pass: true, reason: 'Old acceptance' } } });
-    expect(readGateVerdict(project, 'review', created.runId)).toBeNull();
-    expect(readGateEvaluation(project, review, readRunState(project, created.runId), created.runId)).toEqual({ authoredVerdict: null, effectiveVerdict: null });
+    expect(readGateEvaluation(project, 'review', created.runId)).toBeNull();
   });
   it('B23 a persisted budget boundary stops independent pending authors in the same iteration', async () => {
     const workflow = WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'work', role: 'coder', scope: [] }, { id: 'other', role: 'coder', scope: [] }] });
@@ -826,19 +805,6 @@ describe('durable bounded continuation', () => {
     expect(existsSync(join(created.runDirPath, 'validation_delta_work.json'))).toBe(false);
   });
 
-  it('B28 an accepted scope boundary after wrap-up keeps authority and spends the next bounded iteration', async () => {
-    const time = manualClock(); const created = createRun(project, 'fixture', 'name: fixture', ['work']); let calls = 0;
-    const adapter: Adapter = { async run(_prompt, _role, opts) {
-      if (calls++) return completed(opts);
-      return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'retained', duration_ms: 1 }), { once: true }); time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); });
-    } };
-    const result = await runStage(adapter, { ...options(created, time), settlementBoundary: async phase => phase === 'child_closed' });
-    expect(result.suspended).toBe(true); expect(result.suspensionReason).toBe('scope_revision'); expect(result.continuation?.reason).toBe('stage_budget');
-    const status = readStageStatus(project, created.runId, 'work'); expect(status.status).toBe('pending'); expect(status.attempts?.at(-1)?.status).toBe('suspended'); expect(isContinuingStage(status)).toBe(true);
-    const state = readRunState(project, created.runId); state.status = 'stopped'; state.currentIteration = 1; state.maxIterations = 2;
-    expect(workflowContinuation(state, project, created.runId, WorkflowConfigSchema.parse({ name: 'fixture', stages: [{ id: 'work', role: 'coder' }] })).iteration).toBe(2);
-  });
-
   it('B29 a final settlement refusal cannot leave a retained-success marker', async () => {
     const time = manualClock(); const created = createRun(project, 'fixture', 'name: fixture', ['work']);
     const adapter: Adapter = { async run(_prompt, _role, opts) { time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); return completed(opts); } };
@@ -849,8 +815,7 @@ describe('durable bounded continuation', () => {
   it('B30 a scope audit refusal removes the budget marker from both history and projection', () => {
     const created = createRun(project, 'fixture', 'name: fixture', ['work']); beginStageAttempt(project, created.runId, 'work', 0);
     completeStageAttempt(project, created.runId, 'work', 0, { exitCode: 0, duration_ms: 1, continuation: { reason: 'stage_budget', forced: false, handoff: 'stages/work/output_attempt_1.md' } });
-    const status = attachStageConstraintAudit(project, created.runId, 'work', 1, { path: 'stages/work/audit.json', declaredScope: [], effectiveScope: [], acceptedRevisionCount: 0,
-      rejectedRevisionCount: 0, mismatchCount: 0, violationCount: 1, unverifiedCount: 0 }, 'Actual scope refusal');
+    const status = attachStageConstraintAudit(project, created.runId, 'work', 1, { path: 'stages/work/audit.json', declaredScope: [], effectiveScope: [], violationCount: 1, unverifiedCount: 0 }, 'Actual scope refusal');
     expect(status.status).toBe('failed'); expect(status.continuation).toBeUndefined(); expect(status.attempts?.at(-1)?.continuation).toBeUndefined();
   });
 
@@ -859,36 +824,11 @@ describe('durable bounded continuation', () => {
     const adapter: Adapter = { async run(_prompt, _role, opts) { time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); return completed(opts); } };
     const result = await runStage(adapter, { ...options(created, time), settlementBoundary: async phase => {
       if (phase === 'attempt_closed') attachStageConstraintAudit(project, created.runId, 'work', 1,
-        { path: 'stages/work/audit.json', declaredScope: [], effectiveScope: [], acceptedRevisionCount: 0,
-          rejectedRevisionCount: 0, mismatchCount: 0, violationCount: 1, unverifiedCount: 0 }, 'Actual settlement refusal');
+        { path: 'stages/work/audit.json', declaredScope: [], effectiveScope: [], violationCount: 1, unverifiedCount: 0 }, 'Actual settlement refusal');
       return false;
     } });
     expect(result.exitCode).toBe(1); expect(result.continuation).toBeUndefined();
     expect(readStageStatus(project, created.runId, 'work').status).toBe('failed');
-  });
-
-  it.each(['work', 'repair'] as const)('B31 %s scope admission after warning keeps the grant but cannot reset the spent iteration', async owner => {
-    const { roles, workflow } = workflowFixture(2); let time = manualClock(); let reviews = 0;
-    const adapter: Adapter = { async run(prompt, _role, opts) {
-      if (opts.stageId === 'review' && owner === 'repair' && ++reviews === 1) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: 'Repair required', criteria: {}, audit_findings: { version: 1, findings: [] }, repairability: { version: 1, disposition: 'repairable', evidence: 'fixture defect' } }) };
-      if (opts.stageId === owner && opts.attemptIndex === 1) {
-        if (!prompt.includes('# Stage budget wrap-up')) {
-          writeFileSync(join(project, 'work.txt'), 'retained scoped work');
-          return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'retained', duration_ms: 1 }), { once: true }); time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); });
-        }
-        writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'scope_revision_request.json'), JSON.stringify({ version: 1, kind: 'scope_revision', requestId: 'finishing-scope',
-          runId: opts.runDir.split('/').at(-1), stageId: opts.stageId, attemptIndex: opts.attemptIndex, requestedPaths: ['extra.txt'], reason: 'Finish retained work in the additional path.' }));
-      }
-      if (opts.stageId === owner && opts.attemptIndex === 2) {
-        expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('retained scoped work'); writeFileSync(join(project, 'extra.txt'), 'finished after re-admission');
-      }
-      return completed(opts, 'Complete.');
-    } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
-    expect(result.status, result.failureReason).toBe('complete'); expect(result.currentIteration).toBe(2);
-    expect(result.stages[owner].attempts?.map(attempt => attempt.status)).toEqual(['suspended', 'complete']);
-    expect(result.stages[owner].attempts?.[0].continuation).toBeTruthy(); expect(result.stages[owner].constraintAudit?.acceptedRevisionCount).toBeGreaterThanOrEqual(1);
-    expect(readFileSync(join(project, 'extra.txt'), 'utf8')).toBe('finished after re-admission');
   });
 
 });

@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -72,7 +73,7 @@ describe('ship skill semantic contract', () => {
 
   it('states what each command proves, how it exits, and what remains outside its coverage', () => {
     const normalized = compact(ship);
-    for (const bar of ['facts were gathered, not that they are favorable', 'collection failure exits nonzero', 'cannot decide what prior state means', 'Setup cannot choose the target identity', 'exit zero and `Ship setup: READY`', 'nonzero is a refusal', 'Exit zero ending in `✅ Contract ready`', 'not implementation or research quality', 'Nonzero means correct the brief/environment', 'zero background exit means registration succeeded', 'not that the run passed', 'nonzero launch/run exit needs diagnosis', 'neither proves the deliverable', '`--once` exits 0, invalid options exit 1', 'does not write run or task status']) expect(normalized, bar).toContain(bar);
+    for (const bar of ['facts were gathered, not that they are favorable', 'collection failure exits nonzero', 'cannot decide what prior state means', 'Setup cannot choose the target identity', 'exit zero and `Ship setup: READY`', 'nonzero is a refusal', 'Exit zero ending in `✅ Contract ready`', 'not implementation or research quality', 'Nonzero means correct the brief/environment', 'zero background exit means registration succeeded', 'not that the run passed', 'Exit 1 means a known refusal or failure', 'Exit 2 means the outcome is unknown', 'Neither exit alone proves the deliverable', '`--once` exits 0, invalid options exit 1', 'does not write run or task status']) expect(normalized, bar).toContain(bar);
   });
 
   it('keeps launch confirmation after rehearsal and before an exact-stdin launch', () => {
@@ -86,7 +87,8 @@ describe('ship skill semantic contract', () => {
     expect(draft).toContain('A path in prose or a table is only a reference, not a declaration');
     expect(draft).toContain('Declare gitignored inputs');
     const quick = compact(section(ship, '### Register or run', '### Observe'));
-    expectInOrder(quick, ['record this wrap-up obligation', 'FlowCrew task <id> is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.', 'After cancellation, update or remove that entry.', 'After re-shipping, replace its id with the new one.']);
+    expect(quick).not.toContain('record this wrap-up obligation');
+    expectInOrder(quick, ['Report the returned task/run and ledger entry identities.', 'After cancellation, update or remove that entry.', 'After re-shipping, replace its id with the new one.']);
   });
 
   it('keeps the moving ownership boundary explicit', () => {
@@ -111,7 +113,7 @@ describe('ship skill semantic contract', () => {
 
   it('carries retained closure identity through accepted wrap-up without terminal auto-close', () => {
     const wrapUp = compact(section(ship, '## Human wrap-up'));
-    expectInOrder(wrapUp, ['independent verification/archival are complete', 'flowcrew land --run <run-id>', '--complete-fc-task <entry-id> --fc-task-session <session-id>', 'Closure occurs only after worktree removal, prune and non-force branch deletion all succeed']);
+    expectInOrder(wrapUp, ['Once the result is accepted and independently verified', 'flowcrew land --run <run-id>', 'verifies both copies before its existing removal gate', '--complete-fc-task <entry-id> --fc-task-session <session-id>', 'Closure occurs only after worktree removal, prune and non-force branch deletion all succeed']);
     expect(wrapUp).toContain('omit the closure identity and leave the entry open');
     expect(wrapUp).toContain('not an automatic reaction to terminal status');
   });
@@ -133,7 +135,7 @@ describe('ship skill semantic contract', () => {
     expect(stamp).toBeDefined();
     const body = ship.slice(ship.indexOf('-->') + 3);
     const digest = createHash('sha256').update(body).digest('hex').slice(0, 12);
-    expect({ revision: stamp, digest }).toEqual({ revision: '29', digest: '3a953a50d501' });
+    expect({ revision: stamp, digest }).toEqual({ revision: '37', digest: '2d7e81734e6b' });
   });
 
   it('contains no private measured case studies', () => {

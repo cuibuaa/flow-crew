@@ -217,7 +217,7 @@ describe('campaign context production path', () => {
       runId: oldRunId,
       projectDir,
       workflowName: 'old-workflow',
-      status: RUN_STATUS.PHASE_COMPLETE,
+      status: RUN_STATUS.INCOMPLETE,
       stages: {},
       startedAt: '2000-01-01T00:00:00.000Z',
       completedAt: '2000-01-01T00:00:01.000Z',
@@ -237,7 +237,7 @@ describe('campaign context production path', () => {
         runId: oldRunId,
         score: 99,
         metric: 'OLD_METRIC',
-        status: RUN_STATUS.PHASE_COMPLETE,
+        status: RUN_STATUS.INCOMPLETE,
         timestamp: '2000-01-01T00:00:01.000Z',
         phase: 'old-finished-phase',
         phaseComplete: true,
@@ -275,7 +275,7 @@ describe('campaign context production path', () => {
       '  - id: plan',
       '    role: planner',
       '    dynamic_dispatch: true',
-      '    artifact_contract: {version: 1, produces: [{id: dispatch, root: run, path: dispatch.yaml}], reads: [], replays: []}',
+      '    artifact_contract: {version: 1, produces: [{id: dispatch, root: run, path: dispatch.yaml}], reads: []}',
     ].join('\n') + '\n', 'utf-8');
 
     const adapter = new PromptCaptureAdapter();

@@ -1,3 +1,5 @@
+import { EXIT_CODE } from './exit-code.js';
+import { commandUsage, parseCommandArgs } from './cli-args.js';
 import { errorMessage } from './source_services/cli-inputs.js';
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import {
@@ -21,13 +23,11 @@ import {
 } from './campaigns.js';
 import {
   computeBuildFingerprint,
-  findDeployedDistConsumers,
   findUnixSocketOwnerPid,
   readDaemonIdentity,
-  type DeployedDistConsumer,
 } from './daemon-identity.js';
 import {
-  defaultSocketPath,
+  commandSocketPath,
   sendRpc,
   type DaemonStatusRpcResponse,
   type RpcResponse,
@@ -39,16 +39,12 @@ import {
 } from './project-validation.js';
 import { inspectRunScheduler } from './run-lock.js';
 import {
-  extractBriefPathMentions,
-  extractDeclaredBriefInputPaths,
   verifyDeclaredBriefInputs,
   inspectBriefOutputs,
   type BriefOutputInventory,
-  type BriefInputAssertionResult,
   type ShipInputStat,
   type UnresolvedBriefInputDeclaration,
   type VerifiedBriefInput,
-  type BriefPathMention,
 } from './ship-inputs.js';
 import {
   resolveRunStatus,
@@ -60,11 +56,11 @@ import {
   recordedTerminalArtifactSnapshotNames,
 } from './store.js';
 import { assertDistFresh } from './build-manifest.js';
+import { briefDeclarationFailures, type BriefPreflightFinding } from './brief-preflight.js';
 import { extractBriefCriteria, type BriefCriteriaArtifact } from './brief-criteria.js';
 import { assessCampaignHygiene } from './campaign-hygiene.js';
 import { autoSelectedWorkflow, parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
 
-export { extractBriefInputPaths } from './ship-inputs.js';
 
 type Writer = { write(chunk: string): unknown };
 
@@ -94,13 +90,11 @@ export interface ShipPreflightDependencies {
   readable?: (path: string) => boolean;
   realpath?: (path: string) => string;
   lstat?: (path: string) => ShipInputStat;
-  readlink?: (path: string) => string;
   readGitCommonDir?: (projectDir: string) => string;
   readCampaignEntries?: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon?: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
   runValidationCommand?: ValidationCommandRunner;
   inspectLiveRun?: (runId: string, runPath: string) => boolean;
-  findDistConsumers?: (distDir: string) => DeployedDistConsumer[];
 }
 
 interface ResolvedDependencies {
@@ -118,12 +112,10 @@ interface ResolvedDependencies {
   readable: (path: string) => boolean;
   realpath: (path: string) => string;
   lstat: (path: string) => ShipInputStat;
-  readlink: (path: string) => string;
   readGitCommonDir: (projectDir: string) => string;
   readCampaignEntries: (projectDir: string, campaignId: string) => CampaignHistoryEntry[];
   probeDaemon: (distDir: string) => Promise<DaemonLoadedBuildProbe>;
   inspectLiveRun: (runId: string, runPath: string) => boolean;
-  findDistConsumers: (distDir: string) => DeployedDistConsumer[];
 }
 
 export interface PreviousRunEvidence {
@@ -194,20 +186,18 @@ export interface ShipPreflightReport {
     sourceToDist: SourceDistFreshnessReport;
     caveat: string;
   };
-  liveDistConsumers: DeployedDistConsumer[];
   briefInputs: {
     state: 'checked' | 'not_requested';
     briefPath?: string;
     inputs: BriefInputReport[];
     unresolvedInputs: UnresolvedBriefInputDeclaration[];
-    unboundAssertions: BriefInputAssertionResult[];
-    proseWarnings: BriefPathMention[];
   };
   outputInventory: {
     state: 'checked' | 'not_requested';
     briefPath?: string;
     inventory: BriefOutputInventory;
   };
+  briefErrors?: BriefPreflightFinding[];
   briefCriteria: {
     state: 'checked' | 'missing' | 'not_requested';
     briefPath?: string;
@@ -219,7 +209,6 @@ export interface ShipPreflightReport {
 interface ParsedArgs {
   json: boolean;
   help: boolean;
-  noBaseline: boolean;
   project?: string;
   target?: string;
   campaign?: string;
@@ -235,13 +224,11 @@ const PRIOR_RUN_EVIDENCE_ACTIONS = {
   [RUN_STATUS.PARKED]: 'inspect',
   [RUN_STATUS.COMPLETE]: 'clean',
   [RUN_STATUS.FAILED]: 'inspect',
-  [RUN_STATUS.AWAITING_APPROVAL]: 'inspect',
   [RUN_STATUS.SHIPPED]: 'clean',
   [RUN_STATUS.CEILING_HIT]: 'inspect',
   [RUN_STATUS.ESCALATED]: 'inspect',
   [RUN_STATUS.REALITY_GATE_FAILED]: 'inspect',
-  [RUN_STATUS.PHASE_COMPLETE]: 'inspect',
-  [RUN_STATUS.STOPPED]: 'inspect',
+  [RUN_STATUS.CANCELLED]: 'inspect',
   [RUN_STATUS.INCOMPLETE]: 'inspect',
 } as const satisfies Record<RunStatus, PriorRunEvidenceAction>;
 
@@ -274,7 +261,6 @@ function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDepe
     }),
     realpath: overrides.realpath ?? ((path) => realpathSync.native(path)),
     lstat: overrides.lstat ?? ((path) => lstatSync(path)),
-    readlink: overrides.readlink ?? ((path) => readlinkSync(path)),
     readGitCommonDir: overrides.readGitCommonDir ?? ((projectDir) => execFileSync(
       'git',
       ['rev-parse', '--git-common-dir'],
@@ -284,73 +270,19 @@ function resolveDependencies(overrides: ShipPreflightDependencies): ResolvedDepe
     probeDaemon: overrides.probeDaemon ?? probeRunningDaemon,
     inspectLiveRun: overrides.inspectLiveRun
       ?? ((runId, runPath) => inspectRunScheduler(runId, runPath).kind === 'live'),
-    findDistConsumers: overrides.findDistConsumers
-      ?? ((distDir) => findDeployedDistConsumers(distDir, {
-        fcHome: dirname((overrides.runsRoot ?? runsRoot)()),
-      })),
   };
 }
 
-function optionValue(args: string[], index: number, name: string): { value: string; consumed: number } {
-  const arg = args[index];
-  const prefix = `${name}=`;
-  if (arg.startsWith(prefix)) {
-    const value = arg.slice(prefix.length);
-    if (!value) throw new Error(`${name} requires a value`);
-    return { value, consumed: 1 };
-  }
-  const value = args[index + 1];
-  if (!value || value.startsWith('--')) throw new Error(`${name} requires a value`);
-  return { value, consumed: 2 };
-}
-
 function parseArgs(args: string[]): ParsedArgs {
-  const input = args[0] === 'ship-preflight' ? args.slice(1) : [...args];
-  const parsed: ParsedArgs = { json: false, help: false, noBaseline: false };
-  for (let index = 0; index < input.length;) {
-    const arg = input[index];
-    if (arg === '--json') {
-      parsed.json = true;
-      index += 1;
-      continue;
-    }
-    if (arg === '--help' || arg === '-h') {
-      parsed.help = true;
-      index += 1;
-      continue;
-    }
-    if (arg === '--no-baseline') {
-      parsed.noBaseline = true;
-      index += 1;
-      continue;
-    }
-    if (arg === '--project' || arg.startsWith('--project=')) {
-      const found = optionValue(input, index, '--project');
-      parsed.project = found.value;
-      index += found.consumed;
-      continue;
-    }
-    if (arg === '--target' || arg.startsWith('--target=')) {
-      const found = optionValue(input, index, '--target');
-      parsed.target = found.value;
-      index += found.consumed;
-      continue;
-    }
-    if (arg === '--campaign' || arg.startsWith('--campaign=')) {
-      const found = optionValue(input, index, '--campaign');
-      parsed.campaign = found.value;
-      index += found.consumed;
-      continue;
-    }
-    if (arg === '--brief' || arg.startsWith('--brief=')) {
-      const found = optionValue(input, index, '--brief');
-      parsed.brief = found.value;
-      index += found.consumed;
-      continue;
-    }
-    throw new Error(`Unknown ship-preflight option: ${arg}`);
-  }
-  return parsed;
+  const { help, flags, values } = parseCommandArgs('ship-preflight', args);
+  return {
+    help,
+    json: flags.has('--json'),
+    project: values.get('--project'),
+    target: values.get('--target'),
+    campaign: values.get('--campaign'),
+    brief: values.get('--brief'),
+  };
 }
 
 function canonicalize(path: string, deps: ResolvedDependencies): { path: string; fallback: boolean } {
@@ -542,7 +474,7 @@ function resolveCampaign(
     ({ name, source } = repository);
   }
 
-  const storageKey = canonicalCampaignStorageKey(name);
+  const storageKey = canonicalCampaignStorageKey(name, project);
   if (!storageKey) return { state: 'unknown', reason: `Campaign name could not be canonicalized: ${JSON.stringify(name)}` };
   return { state: 'resolved', name, storageKey, source };
 }
@@ -586,7 +518,7 @@ function daemonStatus(response: RpcResponse): DaemonStatusRpcResponse | undefine
 }
 
 async function probeRunningDaemon(distDir: string): Promise<DaemonLoadedBuildProbe> {
-  const socketPath = defaultSocketPath();
+  const socketPath = commandSocketPath();
   let diskBuild: string | undefined;
   try {
     diskBuild = computeBuildFingerprint(distDir).hash;
@@ -695,7 +627,7 @@ function inspectBriefInputs(
   deps: ResolvedDependencies,
 ): ShipPreflightReport['briefInputs'] {
   if (!briefArgument) return {
-    state: 'not_requested', inputs: [], unresolvedInputs: [], unboundAssertions: [], proseWarnings: [],
+    state: 'not_requested', inputs: [], unresolvedInputs: [],
   };
   const requested = isAbsolute(briefArgument) ? briefArgument : join(project, briefArgument);
   const briefPath = resolve(requested);
@@ -714,13 +646,10 @@ function inspectBriefInputs(
     readDirectory: deps.readDirectory,
     stat: deps.stat,
     lstat: deps.lstat,
-    readlink: deps.readlink,
+    readlink: readlinkSync,
     realpath: deps.realpath,
   });
-  const declared = new Set(extractDeclaredBriefInputPaths(brief));
-  const proseWarnings = extractBriefPathMentions(brief)
-    .filter((mention) => !declared.has(mention.path));
-  return { state: 'checked', briefPath, ...verification, proseWarnings };
+  return { state: 'checked', briefPath, ...verification };
 }
 
 function inspectOutputInventory(
@@ -747,7 +676,7 @@ function inspectOutputInventory(
       readDirectory: deps.readDirectory,
       stat: deps.stat,
       lstat: deps.lstat,
-      readlink: deps.readlink,
+      readlink: readlinkSync,
       realpath: deps.realpath,
     }, { engineRoot: deps.packageRoot, stateRoot: dirname(deps.runsRoot()), launchProject }),
   };
@@ -765,11 +694,6 @@ export async function collectShipPreflight(
   const previousRun = scanPreviousRun(canonicalProject.path, deps);
   const campaign = campaignHygiene(canonicalProject.path, parsed.campaign, deps);
   const distDir = join(deps.packageRoot, 'dist');
-  const liveDistConsumers = deps.findDistConsumers(distDir)
-    .filter((consumer) => consumer.pid !== process.pid)
-    .filter((consumer) => consumer.kind !== 'run'
-      || (typeof consumer.runId === 'string'
-        && deps.inspectLiveRun(consumer.runId, join(deps.runsRoot(), consumer.runId))));
   const [daemonToDist] = await Promise.all([deps.probeDaemon(distDir)]);
   const sourceToDist = sourceDistFreshness(deps.packageRoot, deps);
   const briefInputs = inspectBriefInputs(canonicalProject.path, parsed.brief, deps);
@@ -789,12 +713,6 @@ export async function collectShipPreflight(
   if ((previousRun.liveMatchingRunIds?.length ?? 0) > 0) {
     deps.stderr.write(`WARNING: ${canonicalProject.path} is shared by live FlowCrew run(s): ${previousRun.liveMatchingRunIds!.join(', ')}. No project command was launched.\n`);
   }
-  if (liveDistConsumers.length > 0) {
-    deps.stderr.write(`WARNING: live process(es) ${liveDistConsumers.map(({ label }) => label).join(', ')} execute from ${distDir}. No project command was launched.\n`);
-  }
-  // Source discovery cannot establish the prepared target's baseline. The
-  // admitted setup record supplies it after target-only validation.
-  if (parsed.noBaseline) deps.stderr.write('Validation baseline: SKIPPED; preflight discovers commands only. Run ship-setup to measure the prepared target.\n');
   const validationBaseline = await runProjectValidationBaseline(canonicalProject.path, {
     fs: { exists: deps.exists, readText: deps.readText },
     skipExecution: true,
@@ -816,11 +734,10 @@ export async function collectShipPreflight(
       previousRun,
       campaign,
       daemonFreshness: { daemonToDist, sourceToDist, caveat: DAEMON_CAVEAT },
-      liveDistConsumers,
       briefInputs,
       outputInventory,
       briefCriteria,
-      ...(briefCriteria.briefPath ? { workflow: autoSelectedWorkflow(parseBriefFrontmatter(deps.readText(briefCriteria.briefPath))) } : {}),
+      ...(briefCriteria.briefPath ? { briefErrors: briefDeclarationFailures(deps.readText(briefCriteria.briefPath)), workflow: autoSelectedWorkflow(parseBriefFrontmatter(deps.readText(briefCriteria.briefPath))) } : {}),
       validationBaseline,
     },
   };
@@ -834,10 +751,11 @@ function renderEvidence(writer: Writer, label: string, evidence: unknown): void 
 function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   writer.write(`Ship preflight: ${report.project.canonicalPath}\n`);
   if (report.workflow) writer.write(`Workflow without --workflow: ${report.workflow.workflow} (${report.workflow.reason})${report.workflow.error ? `; refused: ${report.workflow.error}` : ''}\n`);
+  for (const finding of report.briefErrors ?? []) {
+    if (finding.level === 'fail') writer.write(`[${finding.code}] ${finding.message}\n`);
+  }
   if (report.briefCriteria.state === 'checked') {
     writer.write(`Brief criteria: ${report.briefCriteria.artifact?.criteria.length ?? 0} extracted from ${report.briefCriteria.briefPath}\n`);
-  } else if (report.briefCriteria.state === 'missing') {
-    writer.write(`Brief criteria: MISSING — zero structurally extractable criteria in ${report.briefCriteria.briefPath}\n`);
   }
   if (report.project.usedCanonicalFallback) {
     writer.write(`  Path warning: realpath failed; comparison used resolved path ${report.project.requestedPath}\n`);
@@ -878,10 +796,6 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   if (source.reason) writer.write(` — ${source.reason}`);
   writer.write('\n');
   writer.write(`Freshness caveat: ${report.daemonFreshness.caveat}\n`);
-  if (report.liveDistConsumers.length > 0) {
-    writer.write(`Live engine-dist consumers: ${report.liveDistConsumers.map(({ label }) => label).join(', ')}\n`);
-  }
-
   if (report.briefInputs.state === 'not_requested') {
     writer.write('Brief inputs: not checked (pass --brief <path>)\n');
   } else if (report.briefInputs.inputs.length === 0 && report.briefInputs.unresolvedInputs.length === 0) {
@@ -891,20 +805,10 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
     for (const input of report.briefInputs.inputs) {
       const state = input.exists ? (input.readable ? 'READABLE' : 'UNREADABLE') : 'MISSING';
       writer.write(`  ${state} ${input.path} -> ${input.resolvedPath}\n`);
-      for (const assertion of input.assertions) {
-        const observed = assertion.observed === undefined ? '' : ` observed=${JSON.stringify(assertion.observed)}`;
-        writer.write(`    ${assertion.state.toUpperCase()} ${assertion.kind} expected=${JSON.stringify(assertion.expected)}${observed} — ${assertion.reason}\n`);
-      }
     }
   }
   for (const input of report.briefInputs.unresolvedInputs) {
     writer.write(`  UNRESOLVED DECLARED ${JSON.stringify(input.value)} at line ${input.line} — ${input.reason}\n`);
-  }
-  for (const assertion of report.briefInputs.unboundAssertions) {
-    writer.write(`  NOT_CHECKABLE ${assertion.kind} at line ${assertion.line} — ${assertion.reason}\n`);
-  }
-  for (const warning of report.briefInputs.proseWarnings) {
-    writer.write(`  WARNING prose path ${warning.path} at line ${warning.line} is not a declared input\n`);
   }
 
   if (report.outputInventory.state === 'not_requested') {
@@ -932,10 +836,10 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
 
 export function shipPreflightUsage(): string {
   return [
-    'Usage: flowcrew ship-preflight [--json] [--no-baseline] [--project <path>] [--target <path>] [--campaign <name>] [--brief <path>]',
+    commandUsage('ship-preflight'),
     '--target checks external outputs against the launch project; --project alone checks an in-place launch. Without either, source checkout overlap is reported pending setup.',
     'Gathers prior-run evidence, campaign hygiene, freshness, declared inputs/outputs, and validation command declarations.',
-    'Runs no project build/test/lint commands. ship-setup measures the prepared target; --no-baseline is accepted for compatibility.',
+    'Runs no project build/test/lint commands. ship-setup measures the prepared target.',
   ].join('\n');
 }
 
@@ -948,15 +852,15 @@ export async function cmdShipPreflightWithDeps(
     const parsed = parseArgs(args);
     if (parsed.help) {
       deps.stdout.write(`${shipPreflightUsage()}\n`);
-      return 0;
+      return EXIT_CODE.completed;
     }
     const { report, json } = await collectShipPreflight(args, overrides);
     if (json) deps.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     else renderHuman(report, deps.stdout);
-    return report.briefCriteria.state === 'missing' || report.workflow?.error ? 2 : 0;
+    return (report.briefErrors?.length ?? 0) > 0 || report.workflow?.error ? EXIT_CODE.failed : EXIT_CODE.completed;
   } catch (error) {
     deps.stderr.write(`ship-preflight: ${errorMessage(error)}\n`);
-    return 1;
+    return EXIT_CODE.failed;
   }
 }
 

@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -23,9 +24,11 @@ function fixture() {
 }
 
 describe('published declaration inputs', () => {
-  it.each(['default', 'research'])('loads the built-in %s workflow with a complete contract', (name) => {
+  it.each(['planner', 'research'])('loads the built-in %s workflow with a complete contract', (name) => {
     const { config } = loadWorkflow(join(projectRoot, 'config', 'workflows', `${name}.yaml`));
-    for (const stage of config.stages) expect(ArtifactContractSchema.parse(stage.artifact_contract).replays).toEqual([]);
+    for (const stage of config.stages) expect(ArtifactContractSchema.parse(stage.artifact_contract)).toEqual({
+      version: 1, produces: [{ id: 'dispatch', root: 'run', path: 'dispatch.yaml', kind: 'file', nonempty: true }], reads: [], groups: [],
+    });
   });
 
   it('loads every role through the shared base prompt after consolidating its safety boundary', () => {
@@ -81,7 +84,7 @@ describe('published declaration inputs', () => {
     expect(inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId: 'plan' }).pass).toBe(true);
     const { artifact_contract: removed, ...legacy } = raw[0];
     expect(removed).toBeDefined();
-    expect(parseDispatchedStageConfig(legacy).artifact_contract).toMatchObject({produces:[],reads:[],replays:[]});
+    expect(parseDispatchedStageConfig(legacy).artifact_contract).toMatchObject({produces:[],reads:[]});
   });
 
   it('parses the full brief through the brief loader and every published stage/check fragment through its native parser', () => {

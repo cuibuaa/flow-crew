@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -7,7 +8,8 @@ import { readRunEvents } from '../src/run-events.js';
 import { runWorkflow } from '../src/scheduler.js';
 import { advanceSettledResearch } from '../src/scheduler/sched_loop/research-progress.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
-import { createRun, fcGlobalDir, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
 
 const repository = resolve(import.meta.dirname, '..');
 const resultFile = 'artifacts/round.json';
@@ -29,7 +31,7 @@ beforeEach(() => {
   state.startedAt = new Date(0).toISOString();
   state.currentIteration = 2;
   state.research = {
-    baseline: 0, policy: 'best_of_n', resultFile, reportDir: 'artifacts', stop: { maxRounds: 8 },
+    baseline: 0, policy: 'greedy_stack', resultFile, reportDir: 'artifacts', stop: { maxRounds: 8 },
     resultSchema: { type: 'object', required: ['label', 'result', 'admissible'], properties: { admissible: { const: true } } },
     integrity: { maxStdRatio: 0.5 },
   };
@@ -50,7 +52,7 @@ function capture(value: object) {
 }
 async function advance() {
   return advanceSettledResearch(readRunState(project, runId), [gate], [], 2, [gate.id], 0, 1, 8,
-    new Set(), new Map(), project, runId, directory, workflow, new ScriptedAdapter({}), new Map(),
+    new Set(), project, runId, directory, workflow, new ScriptedAdapter({}), new Map(),
     join(repository, 'config/agents'), new Map());
 }
 
@@ -163,12 +165,11 @@ describe('captured research evidence is the ingestion source', () => {
     state.stages[gate.id] = { status: 'pending', retries: 0 };
     state.maxIterations = 1;
     writeRunState(project, runId, state);
-    writeFileSync(join(project, 'STOP'), 'Synthetic stop requested');
-    const brief = '---\nprogram:\n  name: fixture\n  phase: first\n  ledger: artifacts/ledger.json\n  safeguards:\n    stop_file: STOP\n---\n# Synthetic goal';
-    const settled = await runWorkflow(workflow, 'name: captured-research\nstages: []\n', project, new ScriptedAdapter({}),
+    const brief = '---\nworkflow: direct\nresearch:\n  baseline: 0\n---\n# Synthetic goal';
+    const settled = await runWorkflow({ ...workflow, name: 'direct' }, 'name: captured-research\nstages: []\n', project, new ScriptedAdapter({}),
       new Map(), undefined, join(repository, 'config/agents'), runId, brief);
     expect(settled.status).toBe('failed');
-    expect(settled.failureReason).toContain('STOP');
+    expect(settled.failureReason).toContain('direct cannot run the research loop');
     expect(readResearchGateCandidate(directory, gate.id)?.settlement).toMatchObject({
       disposition: 'rejected', reason: expect.stringContaining('Run ended failed'),
     });

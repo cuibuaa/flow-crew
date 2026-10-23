@@ -17,8 +17,8 @@ export function buildGateReevaluationPreamble(input: {
     priorAttemptCount: Math.max(1, input.evaluationRound - 1),
     fixStageIds: input.fixStageIds,
     roundDiffPath: input.roundDiffPath,
-    interruptedInputPath: gateArchiveArtifactPath(input.runDirPath, coordinate, input.gateId, 'input', 'read'),
-    interruptedOutputPath: gateArchiveArtifactPath(input.runDirPath, coordinate, input.gateId, 'output', 'read'),
+    interruptedInputPath: gateArchiveArtifactPath(input.runDirPath, coordinate, input.gateId, 'input'),
+    interruptedOutputPath: gateArchiveArtifactPath(input.runDirPath, coordinate, input.gateId, 'output'),
   });
 }
 

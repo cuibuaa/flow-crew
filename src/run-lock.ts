@@ -1,7 +1,7 @@
 import { writeFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
 
-import { processIsAlive } from './process-liveness.js';
-export { processIsAlive } from './process-liveness.js';
+import { processIsAlive, processLiveness, validProcessStartToken, processStartToken, processStartTokensMatch, POSIX_PS_COMMAND, type ProcessStartToken } from './process-liveness.js';
+export { processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './process-liveness.js';
 /**
  * Project-level run liveness — the single-in-flight probe, extracted so the
  * DAEMON can ask "is this project busy?" before launching a unit, without
@@ -34,11 +34,6 @@ import { fcGlobalDir, isPausedRunStatus, runsRoot, updateRunState } from './stor
 import { listOperationalRunIdsFromIndex, setRunSchedulerActive } from './run-index.js';
 import { canonicalRunDirectory, canonicalRunId, resolveRunIdentity } from './cancellation-policy.js';
 export const LAUNCH_INTENT_TTL_MS = 60_000;
-
-// Process identity is a control-plane primitive and must not disappear when a
-// caller intentionally removes service-manager tools from PATH. macOS/BSD has
-// no procfs fallback, so resolve the standard system ps independently of PATH.
-const POSIX_PS_COMMAND = ['/bin/ps', '/usr/bin/ps'].find((path) => existsSync(path)) ?? 'ps';
 
 export interface LaunchIntent {
   version: 1;
@@ -194,10 +189,6 @@ export function parseSchedulerPidMarker(raw: string): number | null {
 
 const SCHEDULER_IDENTITY_FILE = 'scheduler.identity.json';
 
-export type ProcessStartToken =
-  | { kind: 'linux'; value: string }
-  | { kind: 'posix-lstart'; value: string };
-
 interface SchedulerProcessIdentityV1 {
   version: 1;
   pid: number;
@@ -214,68 +205,6 @@ interface SchedulerProcessIdentityV2 {
 }
 
 type SchedulerProcessIdentity = SchedulerProcessIdentityV1 | SchedulerProcessIdentityV2;
-
-function linuxProcessStartTimeTicks(pid: number): string | undefined {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
-    const commEnd = stat.lastIndexOf(')');
-    if (commEnd < 0) return undefined;
-    const fieldsFromState = stat.slice(commEnd + 1).trim().split(/\s+/);
-    const startTime = fieldsFromState[19];
-    return startTime && /^\d+$/.test(startTime) ? startTime : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function posixProcessStartToken(pid: number): ProcessStartToken | undefined {
-  try {
-    const rendered = execFileSync(
-      POSIX_PS_COMMAND,
-      ['-ww', '-o', 'lstart=', '-p', String(pid)],
-      {
-        encoding: 'utf-8',
-        timeout: 2_000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-        env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
-      },
-    ).trim().replace(/\s+/g, ' ');
-    return rendered ? { kind: 'posix-lstart', value: rendered } : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * A PID-reuse-resistant identity token on every supported POSIX platform.
- * Linux keeps the precise /proc field-22 token. A procfs-less Linux host and
- * Darwin/BSD use a locale- and timezone-stable `ps lstart` value instead.
- */
-export function processStartToken(pid: number): ProcessStartToken | undefined {
-  if (!Number.isInteger(pid) || pid <= 0) return undefined;
-  if (process.platform === 'linux') {
-    const ticks = linuxProcessStartTimeTicks(pid);
-    if (ticks !== undefined) return { kind: 'linux', value: ticks };
-  }
-  if (process.platform !== 'win32') return posixProcessStartToken(pid);
-  return undefined;
-}
-
-/** Backward-compatible Linux-only view for callers that have not migrated yet. */
-export function processStartTimeTicks(pid: number): string | undefined {
-  const token = processStartToken(pid);
-  return token?.kind === 'linux' ? token.value : undefined;
-}
-
-export function processStartTokensMatch(
-  recorded: ProcessStartToken | undefined,
-  current: ProcessStartToken | undefined,
-): boolean {
-  return recorded !== undefined
-    && current !== undefined
-    && recorded.kind === current.kind
-    && recorded.value === current.value;
-}
 
 function canonicalPath(path: string): string {
   try { return realpathSync(path); } catch { return resolve(path); }
@@ -360,10 +289,6 @@ export function processCommandBinding(pid: number, recordedCommand: string): Pro
   return matches ? 'bound' : 'unbound';
 }
 
-export function processCommandMatches(pid: number, recordedCommand: string): boolean {
-  return processCommandBinding(pid, recordedCommand) === 'bound';
-}
-
 function processCommandSnapshot(pid: number): string | undefined {
   return processArguments(pid)?.join('\0');
 }
@@ -408,44 +333,6 @@ function commandLooksLikeFlowcrewScheduler(pid: number, expectedRunId?: string):
     (argument === '--existing-run-id' && args[index + 1] === expectedRunId)
     || argument === `--existing-run-id=${expectedRunId}`
   ));
-}
-
-function legacyDirectCommandBindsRun(pid: number, runPath: string): boolean {
-  const args = processArguments(pid);
-  if (args === null) return false;
-  const cliIndex = schedulerCommandIndex(pid, args);
-  if (cliIndex < 0 || args[cliIndex + 1] !== 'quick') return false;
-  if (args.some((argument) => argument === '--existing-run-id' || argument.startsWith('--existing-run-id='))) {
-    return false; // an explicit but different binding must never fall back to project metadata
-  }
-  try {
-    const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as {
-      projectDir?: unknown;
-      startedAt?: unknown;
-      taskDescription?: unknown;
-    };
-    if (typeof state.projectDir !== 'string' || typeof state.startedAt !== 'string') return false;
-    const cwd = realpathSync(`/proc/${pid}/cwd`);
-    const projectIndex = args.lastIndexOf('--project');
-    const commandProject = projectIndex >= 0 && args[projectIndex + 1]
-      ? resolve(cwd, args[projectIndex + 1])
-      : cwd;
-    if (canonicalPath(commandProject) !== canonicalPath(state.projectDir)) return false;
-    const taskIndex = args.lastIndexOf('--task');
-    if (
-      taskIndex >= 0
-      && typeof state.taskDescription === 'string'
-      && args[taskIndex + 1] !== state.taskDescription
-    ) return false;
-    const runStartedAt = Date.parse(state.startedAt);
-    const processStartedAt = statSync(`/proc/${pid}`).ctimeMs;
-    const initializationDelay = runStartedAt - processStartedAt;
-    return Number.isFinite(runStartedAt)
-      && initializationDelay >= -5_000
-      && initializationDelay <= 10 * 60_000;
-  } catch {
-    return false;
-  }
 }
 
 function schedulerIdentityPath(runPath: string): string {
@@ -514,14 +401,15 @@ function identityBindsSchedulerToRun(
       startToken?: unknown;
       command?: unknown;
     };
-    if (identity.pid !== pid || identity.runId !== runId) return 'corrupt';
+    // A parsed identity naming another owner proves this marker is recycled.
+    if (identity.pid !== pid || identity.runId !== runId) return 'reused';
     const currentToken = processStartToken(pid);
     if (identity.version === 1) {
       const recorded = typeof identity.linuxStartTimeTicks === 'string'
         ? { kind: 'linux' as const, value: identity.linuxStartTimeTicks }
         : undefined;
-      if (!recorded) return 'corrupt';
-      if (!currentToken) return 'unverifiable';
+      if (!recorded || !validProcessStartToken(recorded)) return 'corrupt';
+      if (!currentToken || currentToken.kind !== recorded.kind) return 'unverifiable';
       return processStartTokensMatch(recorded, currentToken) ? 'bound' : 'reused';
     }
     if (identity.version !== 2) return 'corrupt';
@@ -531,7 +419,8 @@ function identityBindsSchedulerToRun(
     if (!recorded || (recorded.kind !== 'linux' && recorded.kind !== 'posix-lstart')) return 'corrupt';
     if (typeof recorded.value !== 'string') return 'corrupt';
     const validatedRecorded: ProcessStartToken = { kind: recorded.kind, value: recorded.value };
-    if (!currentToken) return 'unverifiable';
+    if (!validProcessStartToken(validatedRecorded)) return 'corrupt';
+    if (!currentToken || currentToken.kind !== validatedRecorded.kind) return 'unverifiable';
     if (!processStartTokensMatch(validatedRecorded, currentToken)) return 'reused';
     // BSD lstart has only second precision, so the persisted command is a
     // required second factor. A missing/unreadable command is unbound, never a
@@ -579,7 +468,14 @@ export function inspectRunScheduler(runId: string, runPath: string): RunSchedule
   }
   const pid = parseSchedulerPidMarker(marker);
   if (pid === null) return { kind: 'corrupt', detail: 'scheduler.pid is not a positive integer' };
-  if (!processIsAlive(pid)) return { kind: 'dead', pid };
+  return inspectSchedulerProcess(pid, runId, runPath);
+}
+
+/** Shared PID observation; cancellation must not reread a disappearing marker. */
+function inspectSchedulerProcess(pid: number, runId: string, runPath: string): RunSchedulerObservation {
+  const liveness = processLiveness(pid);
+  if (liveness === 'dead') return { kind: 'dead', pid };
+  if (liveness === 'unknown') return { kind: 'unverifiable', pid, detail: 'scheduler process liveness is unreadable' };
 
   const identity = identityBindsSchedulerToRun(pid, runId, runPath);
   if (identity === 'bound') return { kind: 'live', pid };
@@ -593,15 +489,14 @@ export function inspectRunScheduler(runId: string, runPath: string): RunSchedule
 
   const args = processArguments(pid);
   if (args === null) return { kind: 'unverifiable', pid, detail: 'legacy scheduler arguments are unreadable' };
-  return commandLooksLikeFlowcrewScheduler(pid, runId) || legacyDirectCommandBindsRun(pid, runPath)
+  return commandLooksLikeFlowcrewScheduler(pid, runId)
     ? { kind: 'live', pid }
     : { kind: 'reused', pid };
 }
 
 /**
  * Process- and run-authoritative ownership. New schedulers carry a start-time
- * identity beside scheduler.pid. Exact legacy CLI bindings remain accepted;
- * an older direct launch is additionally tied to its project and start window.
+ * identity beside scheduler.pid. Exact CLI run bindings remain accepted.
  */
 export function isLiveFlowcrewSchedulerForRun(pid: number, runId: string, runPath: string): boolean {
   try {
@@ -610,14 +505,7 @@ export function isLiveFlowcrewSchedulerForRun(pid: number, runId: string, runPat
     runPath = identity.directory;
     runId = identity.runId;
   } catch { return false; }
-  if (!processIsAlive(pid)) return false;
-  const identity = identityBindsSchedulerToRun(pid, runId, runPath);
-  // Once an identity file exists it is authoritative. In particular, a v2
-  // token-kind mismatch must not be bypassed by the scheduler-shaped argv
-  // compatibility path; that path is only for runs predating identity files.
-  if (identity !== 'absent') return identity === 'bound';
-  return commandLooksLikeFlowcrewScheduler(pid, runId)
-    || legacyDirectCommandBindsRun(pid, runPath);
+  return inspectSchedulerProcess(pid, runId, runPath).kind === 'live';
 }
 
 /**
@@ -631,9 +519,12 @@ export function schedulerProcessIsAliveForCancellation(
   runId: string,
   runPath: string,
 ): boolean {
-  if (!processIsAlive(pid)) return false;
-  if (processStartToken(pid) === undefined || processArguments(pid) === null) return true;
-  return isLiveFlowcrewSchedulerForRun(pid, runId, runPath);
+  try {
+    const identity = resolveRunIdentity(runPath);
+    if (runId !== identity.runId && runId !== basename(resolve(runPath))) return processLiveness(pid) !== 'dead';
+    const owner = inspectSchedulerProcess(pid, identity.runId, identity.directory);
+    return owner.kind !== 'dead' && owner.kind !== 'reused';
+  } catch { return processLiveness(pid) !== 'dead'; }
 }
 
 export interface LiveRunOwner {
@@ -656,15 +547,15 @@ function scanLiveRunOwners(): LiveRunOwner[] {
       const runPath = join(runsRoot(), dir);
       const rs = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as { projectDir?: string };
       if (typeof rs.projectDir !== 'string') continue;
-      const pid = parseSchedulerPidMarker(
-        readFileSync(join(runPath, 'scheduler.pid'), 'utf-8'),
-      );
-      if (pid === null) continue;
-      if (!isLiveFlowcrewSchedulerForRun(pid, dir, runPath)) {
+      const observation = inspectRunScheduler(dir, runPath);
+      if (['missing', 'dead', 'reused'].includes(observation.kind)) {
         try { setRunSchedulerActive('', dir, false); } catch { /* index is best effort */ }
         continue;
       }
-      owners.push({ runId: dir, pid, projectDir: normalizedProjectDir(rs.projectDir) });
+      // A rejected marker supplies no PID to observe; it is not a live owner.
+      if (!('pid' in observation) || observation.pid === undefined) continue;
+      // Unknown ownership blocks admission just as it blocks recovery/retention.
+      owners.push({ runId: dir, pid: observation.pid, projectDir: normalizedProjectDir(rs.projectDir) });
     } catch { /* missing or unreadable run metadata / pid -> skip */ }
   }
   return owners;
@@ -672,7 +563,7 @@ function scanLiveRunOwners(): LiveRunOwner[] {
 
 /**
  * Process-authoritative project owner scan. The run status is intentionally
- * ignored; only a validated live scheduler PID owns the worktree.
+ * ignored; live or unverifiable scheduler ownership keeps the project busy.
  */
 export function findLiveRunOwnerForProject(projectDir: string, selfRunId?: string): LiveRunOwner | null {
   if (selfRunId) selfRunId = canonicalRunId(runsRoot(), selfRunId);

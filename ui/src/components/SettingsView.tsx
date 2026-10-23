@@ -44,9 +44,9 @@ export default function SettingsView({ initialSettings }: { initialSettings?: Se
       </div></div>
       <div className="section"><h2>Defaults</h2><div className="kpi settings-panel">
         <div className="sd-meta-row"><span className="k">timeout</span><span className="mono">{fmtMs(settings?.default_timeout_ms)}</span></div>
-        <div className="sd-meta-row"><span className="k">max iter</span><span className="mono">{settings?.default_max_iterations ?? "—"}</span></div>
-        <div className="sd-meta-row"><span className="k">gate retry</span><span className="mono">{settings?.default_gate_retry_loops ?? "—"}</span></div>
-        <div className="sd-meta-row"><span className="k">stage retry</span><span className="mono">{settings?.default_stage_technical_retries ?? "—"}</span></div>
+        <div className="sd-meta-row"><span className="k">max iter</span><span className="mono">{settings?.max_iterations ?? "—"}</span></div>
+        <div className="sd-meta-row"><span className="k">gate retry</span><span className="mono">{settings?.gate_retry_loops ?? "—"}</span></div>
+        <div className="sd-meta-row"><span className="k">stage retry</span><span className="mono">{settings?.stage_technical_retries ?? "—"}</span></div>
       </div></div>
       <div className="section"><h2>Workflows and skills</h2><div className="kpi settings-panel">
         <div className="sd-meta-row"><span className="k">workflows</span><span>{settings?.workflows?.join(", ") || "—"}</span></div>

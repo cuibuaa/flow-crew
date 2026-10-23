@@ -15,5 +15,4 @@ flowcrew status
 Show the output as produced. Do not summarize or launch more commands for the normal skill.
 The command selects the latest run for that project. For an explicitly cross-project request,
 use the `--all` or `--project` selectors in the bundled
-[CLI reference](../guide/cli.md#read-and-steer). The procedure is an instruction to the agent;
-selection behavior is implemented in `src/cli.ts`.
+[CLI reference](../guide/cli.md#read-and-steer).

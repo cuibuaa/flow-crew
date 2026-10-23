@@ -196,6 +196,3 @@ export function shouldPreserveSession(stage: StageConfig, allStages: StageConfig
   // provisionally, then the eligibility check still requires exactly one child.
   return stage.dynamic_dispatch || reusableDirectSuccessors(stage, allStages).length === 1;
 }
-
-// Compatibility for callers of the original Codex admission API.
-export const canReuseCodexSession = canReuseSession;

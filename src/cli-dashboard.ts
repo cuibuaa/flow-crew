@@ -1,4 +1,4 @@
-import { valueAfter } from './source_services/cli-inputs.js';
+import { parseCommandArgs, commandUsage } from './cli-args.js';
 import type { DashboardStatusResponse } from './dashboard.js';
 
 interface TextWriter {
@@ -9,13 +9,11 @@ export interface DashboardCommandOptions {
   stdout?: TextWriter;
   stderr?: TextWriter;
   fetch?: typeof globalThis.fetch;
-  /** Test seam for an already-resolved dashboard origin. */
-  baseUrl?: string;
   timeoutMs?: number;
 }
 
 function usage(writer: TextWriter): void {
-  writer.write('Usage: flowcrew dashboard status [--port N]\n');
+  writer.write(`${commandUsage('dashboard status')}\n`);
 }
 
 function isStatusResponse(value: unknown): value is DashboardStatusResponse {
@@ -33,8 +31,11 @@ function hash(build: DashboardStatusResponse['loadedBuild']): string {
 export async function cmdDashboard(args: string[], options: DashboardCommandOptions = {}): Promise<number> {
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
-  const subcommand = args[1];
-  if (args.includes('--help') || args.includes('-h')) {
+  const subcommand = args[1]?.startsWith('-') ? undefined : args[1];
+  let parsed;
+  try { parsed = parseCommandArgs(`dashboard${subcommand ? ` ${subcommand}` : ''}`, args); }
+  catch (error) { stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); return 1; }
+  if (parsed.help) {
     usage(stdout);
     return 0;
   }
@@ -43,13 +44,13 @@ export async function cmdDashboard(args: string[], options: DashboardCommandOpti
     return 1;
   }
 
-  const portValue = valueAfter(args, '--port') ?? process.env.PORT ?? '3000';
+  const portValue = parsed.values.get('--port') ?? process.env.PORT ?? '3000';
   const port = Number(portValue);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     stderr.write(`Invalid dashboard port: ${portValue}\n`);
     return 1;
   }
-  const baseUrl = options.baseUrl ?? `http://127.0.0.1:${port}`;
+  const baseUrl = `http://127.0.0.1:${port}`;
   const fetchImpl = options.fetch ?? globalThis.fetch;
 
   let response: Response;

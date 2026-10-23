@@ -51,8 +51,7 @@ describe('settled terminal decisions', () => {
             { id: 'blocker', root: 'project', path: 'docs/escalation_note.md' },
           ] : [],
           reads: [],
-          replays: [],
-          groups: declaresOutcome ? [{ id: 'outcome', mode: 'exactly_one', members: ['final', 'blocker'] }] : [],
+                groups: declaresOutcome ? [{ id: 'outcome', mode: 'exactly_one', members: ['final', 'blocker'] }] : [],
         },
       }],
     });

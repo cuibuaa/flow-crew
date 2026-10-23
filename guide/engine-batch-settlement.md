@@ -26,7 +26,7 @@ acceptance must rerun the retained specs against the final source.
 | E11 | fixed | Declared ignored outputs are distinguished from ignored inputs, with exact file and directory coverage; see [batch regressions](../spec/engine-batch-regressions.test.ts). |
 | E12 | already fixed | The reported watchdog carrier-deletion failure did not reproduce on the base: deletion controls returned 125 and restored the carrier. See [carrier integrity](../spec/engine-integrity-settlement.test.ts). No carrier-deletion repair or historical-flake cause is claimed. |
 | E13 | already fixed | Later attempts preserve earlier native provider streams; see [per-attempt log specs](../spec/livelog-per-attempt.test.ts). |
-| E14 | already fixed | Admitted writers returning to the batch preimage already resettle the baseline; see [baseline specs](../spec/baseline-follows-admitted-writes.test.ts). |
+| E14 | already fixed | Admitted writers returning to the batch preimage already resettle the baseline; see [baseline specs](../spec/write-scope-subtraction.test.ts). |
 | E15 | fixed | Settlement retains admitted restoration bytes and the first batch preimage; later unauthorized overwrites restore them. See [rollback storage](../src/scheduler/sched_scope/rollback-baseline.ts) and [batch regressions](../spec/engine-batch-regressions.test.ts). |
 | E16 | declined | Independent setup copies preserve source isolation; hardlinks permit source mutation and copy failure already refuses READY. See [project validation](../spec/project-validation.test.ts). |
 | E17 | declined | Older build members may be declared products or required evidence; directory names do not grant disposal authority. Disposable copies use [invocation scratch](../spec/validation-scratch.test.ts). |
@@ -55,6 +55,6 @@ without accepting unrelated equal-content copies. See [research candidate source
 protections still apply.
 
 
-Subsequent run retention implements workspace compaction with declared product/input,
-citation and ownership guards. The E17/E18 dispositions above record the original review;
-current behavior is documented under [storage ownership](operations.md#storage-ownership).
+Current run retention retires invocation scratch while preserving historical stage workspaces.
+The E17/E18 dispositions above record the original review; current behavior is documented
+under [storage ownership](operations.md#storage-ownership).

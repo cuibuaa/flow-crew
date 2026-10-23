@@ -1,4 +1,5 @@
-import { valueAfter } from './source_services/cli-inputs.js';
+import { EXIT_CODE } from './exit-code.js';
+import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { closeSync, openSync } from './engine-fs.js';
 import { existsSync, readFileSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,6 +30,7 @@ import { runsRoot } from './store.js';
 import { findExecutableOnPath } from './adapters/availability.js';
 import { formatHumanDuration, formatOperationalReason } from './cli-events.js';
 import { formatRunDriftProjection } from './run-drift.js';
+import { isTerminalRunStatus, taskDisplayStatus as projectTaskDisplayStatus } from './lifecycle-status.js';
 
 export interface TaskFollowControls {
   findCommand: (command: string) => string | undefined;
@@ -54,31 +56,32 @@ export async function cmdTask(
 ): Promise<number> {
   const stdout = opts.stdout ?? process.stdout;
   const stderr = opts.stderr ?? process.stderr;
-  const sub = args[1];
-  if (args.includes('--help') || args.includes('-h')) {
-    stdout.write(`${taskUsage(sub)}\n`);
-    return 0;
-  }
+  const sub = args[1]?.startsWith('-') ? undefined : args[1];
   try {
-  const socketPath = commandSocketPath(opts.socketPath ?? valueAfter(args, '--port') ?? valueAfter(args, '--socket'));
-  const rpc = <T extends RpcResponse = RpcResponse>(request: RpcRequest) => (
-    sendRpc<T>(socketPath, request, opts.rpcTimeoutMs)
-  );
+    const parsed = parseCommandArgs(`task${sub ? ` ${sub}` : ''}`, args);
+    if (parsed.help) {
+      stdout.write(`${taskUsage(sub)}\n`);
+      return 0;
+    }
+    const socketPath = commandSocketPath(opts.socketPath ?? parsed.values.get('--socket'));
+    const rpc = <T extends RpcResponse = RpcResponse>(request: RpcRequest) => (
+      sendRpc<T>(socketPath, request, opts.rpcTimeoutMs)
+    );
     if (sub === 'list') {
-      const status = valueAfter(args, '--status') as TaskListStatus | undefined;
-      const limitRaw = valueAfter(args, '--limit');
+      const status = parsed.values.get('--status') as TaskListStatus | undefined;
+      const limitRaw = parsed.values.get('--limit');
       const res = await rpc<TaskListRpcResponse>({ cmd: 'list', filter: { status: status ?? TASK_LIST_STATUS.ACTIVE, limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined } });
-      printTaskList(res.tasks, stdout, args.includes('--with-summary'));
+      printTaskList(res.tasks, stdout, parsed.flags.has('--with-summary'));
       if ((res.registry_unreadable_records ?? 0) > 0) {
         stderr.write(`WARNING: registry has ${res.registry_unreadable_records} unreadable records; displayed task state may be incomplete.\n`);
       }
       return 0;
     }
     if (sub === 'show') {
-      const id = parseId(args[2]);
-      const includeRaw = args.includes('--raw');
+      const id = parseId(parsed.positionals[0]);
+      const includeRaw = parsed.flags.has('--raw');
       const res = await rpc<TaskShowRpcResponse>({ cmd: 'show', id, raw: includeRaw });
-      if (args.includes('--summary-only')) {
+      if (parsed.flags.has('--summary-only')) {
         if (!res.task.summary_full) {
           stderr.write(`Task #${id} has no parsed summary\n`);
           return 1;
@@ -90,7 +93,7 @@ export async function cmdTask(
       return 0;
     }
     if (sub === 'cancel') {
-      const id = parseId(args[2]);
+      const id = parseId(parsed.positionals[0]);
       const cancellation = await cancelTaskThroughControlPlane(id, {
         ...opts.cancellationClient,
         socketPath,
@@ -102,21 +105,21 @@ export async function cmdTask(
         } else {
           stderr.write(`Cancellation still in progress: ${cancellation.message}. Check progress with: flowcrew task show ${id}\n`);
         }
-        return 1;
+        return cancellation.status === 'outcome-unknown' ? EXIT_CODE.outcomeUnknown : EXIT_CODE.failed;
       }
       stdout.write(`Task #${id} cancelled\n`);
       return 0;
     }
     if (sub === 'retry' || sub === 'resume') {
-      const id = parseId(args[2]);
+      const id = parseId(parsed.positionals[0]);
       const res = await rpc<{ new_attempt: number; unit: string }>({ cmd: sub, id });
-      stdout.write(`Task #${id} ${sub} queued after launch ${res.new_attempt}. Current unit: ${res.unit}\n`);
+      stdout.write(`Task #${id} ${sub} queued (budget attempt ${res.new_attempt}). Current unit: ${res.unit}\n`);
       return 0;
     }
     if (sub === 'tail') {
-      const id = parseId(args[2]);
-      const follow = args.includes('--follow') || args.includes('-f');
-      const lines = Number.parseInt(valueAfter(args, '--tail') ?? '100', 10);
+      const id = parseId(parsed.positionals[0]);
+      const follow = parsed.flags.has('--follow') || parsed.flags.has('-f');
+      const lines = Number.parseInt(parsed.values.get('--tail') ?? '100', 10);
       if (follow) {
         const res = await rpc<TaskTailRpcResponse>({ cmd: 'tail', id, lines, follow: true });
         stdout.write(res.output);
@@ -139,24 +142,15 @@ export async function cmdTask(
 }
 
 export function taskUsage(subcommand?: string): string {
-  if (subcommand === 'show') {
-    return [
-      'Usage: flowcrew task show <id> [--summary-only | --raw]',
-      'Shows the bounded operational projection. --raw also prints the tick-log path and recent tick JSON.',
-    ].join('\n');
-  }
-  if (subcommand === 'list') {
-    return 'Usage: flowcrew task list [--status active|all|<status>] [--limit N] [--with-summary]';
-  }
-  return [
-    'Usage: flowcrew task <command> [options]',
-    '  list                Run, stage execution, elapsed time, and latest reason',
-    '  show <id> [--raw]   Bounded detail; raw tick JSON is opt-in',
-    '  cancel <id>         Stop an active task',
-    '  resume <id>         Explicitly continue compatible stopped, failed or incomplete work after settlement',
-    '  retry <id>          Request another launch; terminal runs start fresh',
-    '  tail <id> [-f]      Read or follow supervisor output',
-  ].join('\n');
+  return commandUsage(`task${subcommand ? ` ${subcommand}` : ''}`);
+}
+
+function taskDisplayStatus(task: TaskShowEntry): string {
+  // A terminal bound run supersedes a stale running registry entry in CLI output.
+  const status = task.status === TASK_STATUS.RUNNING && task.run && isTerminalRunStatus(task.run.status)
+    ? task.run.status
+    : task.status;
+  return projectTaskDisplayStatus(status, task.run?.status);
 }
 
 function printTaskList(tasks: TaskShowEntry[], stdout: NodeJS.WriteStream, withSummary = false): void {
@@ -168,23 +162,24 @@ function printTaskList(tasks: TaskShowEntry[], stdout: NodeJS.WriteStream, withS
     ? 'ID  Status  Launch  Run  Current stage  Elapsed  Unit  Name  Latest reason  Summary\n'
     : 'ID  Status  Launch  Run  Current stage  Elapsed  Unit  Name  Latest reason\n');
   for (const task of tasks) {
-    const lifecycle = task.status === TASK_STATUS.REALITY_GATE_FAILED ? '✗ reality_gate_failed' : task.status;
+    const displayStatus = taskDisplayStatus(task);
+    const lifecycle = displayStatus === TASK_STATUS.REALITY_GATE_FAILED ? '✗ reality_gate_failed' : displayStatus;
     const status = task.terminal_status_mismatch
       ? `${lifecycle} [terminal artifact says ${task.terminal_status_mismatch.terminal_status}]`
       : lifecycle;
     const active = task.operational?.activeStages[0];
     const currentStage = active
-      ? `${active.id} (execution ${active.execution})`
+      ? `${active.id} (attempt ${active.execution})`
       : '—';
     const elapsed = formatHumanDuration(active?.elapsedMs ?? task.operational?.runElapsedMs);
     const operationalReason = task.operational?.lastRejection ?? task.operational?.latestReason;
     const reason = operationalReason
       ? formatOperationalReason(operationalReason)
-      : task.failure_reason ?? '—';
+      : task.defer_reason ?? task.run?.failureReason ?? '—';
     const fields = [
       String(task.id),
       truncate(status, 44),
-      String(task.attempt),
+      String(task.launch),
       task.run_id ?? '—',
       truncate(currentStage, 42),
       elapsed,
@@ -206,14 +201,15 @@ function printTask(
   includeRaw = false,
 ): void {
   stdout.write(`Task #${task.id}: ${task.name}\n`);
-  const verdict = task.summary_verdict ?? task.run_verdict;
+  const verdict = task.run_verdict;
   if (verdict) stdout.write(`Verdict: ${verdict}\n`);
   if (task.summary_one_liner) stdout.write(`Summary: ${task.summary_one_liner}\n`);
-  const projectedStatus = isActiveTaskStatus(task.status) && unitStatus?.kind === 'terminal' && !task.scheduler_live
+  const displayStatus = taskDisplayStatus(task);
+  const projectedStatus = isActiveTaskStatus(displayStatus) && unitStatus?.kind === 'terminal' && !task.scheduler_live
     ? 'terminal'
-    : isActiveTaskStatus(task.status) && unitStatus?.kind === 'terminal-unknown' && !task.scheduler_live
+    : isActiveTaskStatus(displayStatus) && unitStatus?.kind === 'terminal-unknown' && !task.scheduler_live
       ? 'terminal-unknown'
-      : task.status;
+      : displayStatus;
   stdout.write(`Status: ${projectedStatus}\n`);
   if (task.terminal_status_mismatch) {
     stdout.write(`Status mismatch: lifecycle status ${task.terminal_status_mismatch.lifecycle_status}; `
@@ -222,7 +218,7 @@ function printTask(
   }
   if (Number.isSafeInteger(exitCode)) stdout.write(`Exit code: ${exitCode}\n`);
   if (unitStatus?.kind === 'terminal' && unitStatus.signal) stdout.write(`Signal: ${unitStatus.signal}\n`);
-  stdout.write(`Launch: ${task.attempt}/${task.max_retries}\n`);
+  stdout.write(`Launch: ${task.launch}; budget used: ${task.attempt}/${task.max_attempts}\n`);
   stdout.write(`Run: ${task.run_id ?? 'not started'}\n`);
   for (const entry of task.engine_history ?? []) stdout.write(`Engine ${entry.kind}: ${entry.generation ?? 'UNVERIFIED'} at ${entry.at} (scheduler pid=${entry.pid})\n`);
   if (task.continuation_failure) stdout.write(`Continuation refused: ${task.continuation_failure.reason}\n`);
@@ -247,8 +243,9 @@ function printTask(
   stdout.write(`Project: ${task.projectDir}\n`);
   if (task.brief_path) stdout.write(`Brief: ${task.brief_path}\n`);
   if (task.config_path) stdout.write(`Config: ${task.config_path}\n`);
-  if (task.completed_at) stdout.write(`Completed: ${task.completed_at}\n`);
-  if (task.failure_reason) stdout.write(`Failure reason: ${task.failure_reason}\n`);
+  const completedAt = task.run?.completedAt ?? task.completed_at;
+  if (completedAt) stdout.write(`Completed: ${completedAt}\n`);
+  if (task.run?.failureReason) stdout.write(`Failure reason: ${task.run.failureReason}\n`);
   if (task.notes) stdout.write(`Notes: ${task.notes}\n`);
   const failurePath = task.run_id ? join(runsRoot(), task.run_id, '.reality-gate.failures.md') : undefined;
   if (failurePath && existsSync(failurePath)) {

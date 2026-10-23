@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { ArtifactReadSchema, RecordedArtifactContractSchema } from '../src/artifact-declarations.js';
-import { createRun, runDir } from '../src/store.js';
+import { ArtifactReadSchema, ArtifactContractSchema } from '../src/artifact-declarations.js';
+import { createRun } from './test-support/create-run.js';
+import { runDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import type { AgentConfig } from '../src/adapters/base.js';
 
@@ -23,14 +24,14 @@ describe('planner artifact contract matches admission', () => {
       } }, {
         stageId: 'plan', role, dependsOn: [], promptTemplate: 'Plan.', timeout_ms: 10_000,
         projectDir: project, runId, runDir: runDir(project, runId), retries: 0,
-        artifactContract: RecordedArtifactContractSchema.parse({ version: 1, produces: [], reads: [] }),
+        artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [], reads: [] }),
       });
       expect(result.exitCode).toBe(0);
       expect(received).not.toContain('{artifact_contract_schema}');
       const description = received.match(/Optional artifact_contract must match this input JSON schema[^\n]*\n([^\n]+)/)?.[1];
       expect(description, 'planner must receive the generated artifact_contract input schema').toBeDefined();
       const schema = JSON.parse(description!);
-      expect(schema).toEqual(z.toJSONSchema(RecordedArtifactContractSchema, { io: 'input' }));
+      expect(schema).toEqual(z.toJSONSchema(ArtifactContractSchema, { io: 'input' }));
       const { $schema, ...readSchema } = z.toJSONSchema(ArtifactReadSchema, { io: 'input' });
       expect(schema.properties.reads.items).toEqual(readSchema);
       expect(schema.required).toEqual(['version', 'produces', 'reads']);

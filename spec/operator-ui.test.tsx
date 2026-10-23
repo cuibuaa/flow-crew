@@ -1,25 +1,21 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '../ui/test-support/react-testing';
+import { cleanup, fireEvent, render, screen } from '../ui/test-support/react-testing';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import CampaignPage from '../ui/src/components/campaign/CampaignPage';
-import Inbox from '../ui/src/components/Inbox';
 import type {
   CampaignOperatorView,
   CampaignRunReference,
   SourceIssue,
   SourceResult,
 } from '../ui/src/components/campaign/types';
-import type { InboxOverview } from '../ui/src/types';
 
 vi.mock('../ui/src/api', () => ({
   cancelTask: vi.fn(),
-  fetchCampaignBriefDiff: vi.fn(),
   fetchInboxOverview: vi.fn(),
   resolveInboxItem: vi.fn(),
-  reviewCampaignPatch: vi.fn(),
 }));
 
 function complete<T>(value: T): SourceResult<T> {
@@ -65,7 +61,6 @@ function operatorView(): CampaignOperatorView {
       value: {
         wallMs: 420_000,
         tokens: 12_000,
-        supervisorTokens: 800,
         runCoverage: { succeeded: 0, failed: 6, total: 6 },
         wallCoverage: { succeeded: 4, failed: 2, total: 6 },
         tokenCoverage: { succeeded: 1, failed: 5, total: 6 },
@@ -78,14 +73,12 @@ function operatorView(): CampaignOperatorView {
     },
     attention: complete({
       items: [{
-        id: 'patch:1',
-        kind: 'brief_review',
-        title: 'Brief revision needs a decision',
-        reason: 'Review a simulated suggestion',
+        id: 'approval:1',
+        kind: 'approval',
+        title: 'Deploy production',
+        reason: 'Review deployment evidence',
         href: '/inbox',
-        priority: 'medium',
-        source: 'llm:mock',
-        simulated: true,
+        priority: 'high',
       }],
       total: 1,
       shown: 1,
@@ -135,32 +128,6 @@ function operatorView(): CampaignOperatorView {
       coverage: { succeeded: 0, failed: 6, total: 6 },
       issues: [workflowIssue()],
     },
-  };
-}
-
-function patchOverview(): InboxOverview {
-  const patches = [
-    { reason: 'Mock patch', source: 'llm:mock' },
-    { reason: 'Operator patch', source: 'operator' },
-    { reason: 'Unknown-source patch', source: undefined },
-  ].map((item, index) => ({
-    index,
-    ts: '2026-08-03T10:00:00.000Z',
-    campaignId: 'search-relevance-v2',
-    campaignName: 'Search relevance v2',
-    reason: item.reason,
-    severity: 'medium' as const,
-    patch: { type: 'brief_patch' as const, section: 'Goal', op: 'append' as const, value: 'Suggestion' },
-    patchSummary: 'Append a suggestion',
-    briefVersion: 'v1',
-    ...(item.source ? { source: item.source } : {}),
-  }));
-  return {
-    approvals: { status: 'complete', items: [] },
-    deferred: { status: 'complete', items: [] },
-    stale: { status: 'complete', items: [] },
-    patches: { status: 'complete', items: patches },
-    campaignCount: 1,
   };
 }
 
@@ -226,22 +193,5 @@ describe('campaign read-through presentation', () => {
     expect(metadata).toHaveTextContent('research measurements are not required');
     expect(rendered.container).not.toHaveTextContent('Evidence type');
     expect(rendered.container).not.toHaveTextContent('no accepted measurement point is proven');
-    expect(rendered.container).toHaveTextContent('Simulation/test source');
-    expect(rendered.container).toHaveTextContent('Source: llm:mock');
-  });
-});
-
-describe('inbox provenance decision', () => {
-  it('retains every review item while making mock, real, and absent sources distinguishable', async () => {
-    const rendered = render(<MemoryRouter><Inbox loadOverview={async () => patchOverview()} /></MemoryRouter>);
-    await waitFor(() => expect(rendered.container.querySelectorAll('.patch-card')).toHaveLength(3));
-
-    expect(rendered.container).toHaveTextContent('Source: llm:mock');
-    expect(rendered.container).toHaveTextContent('Source: operator');
-    expect(rendered.container).toHaveTextContent('Source: not recorded');
-    const badges = rendered.container.querySelectorAll('.simulation-source');
-    expect(badges).toHaveLength(1);
-    expect(badges[0].closest('.patch-card')).toHaveTextContent('Mock patch');
-    expect(screen.getByText('Brief patches awaiting review')).toBeInTheDocument();
   });
 });

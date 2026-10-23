@@ -1,10 +1,10 @@
-import { stageLiveLogPath } from '../src/stage-live-log.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
-import { beginStageAttempt, createRun, readRunState, readStageStatus, writeRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, readRunState, readStageStatus, writeRunState } from '../src/store.js';
 import { recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { inspectStageExecutionFacts, StageWatchdog } from '../src/stage-watchdog.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
@@ -12,6 +12,7 @@ import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
+import { beginAttemptEvidenceGeneration } from '../src/worker.js';
 import { writeEngineFile } from '../src/engine-integrity.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 
@@ -46,13 +47,7 @@ function startAttempt() {
   state.status = 'running';
   state.stages[stageId] = status;
   writeRunState(project, run.runId, state);
-  const path = join(run.runDirPath, 'stages', stageId);
-  const logPath = stageLiveLogPath(run.runDirPath, stageId, attempt.index, attempt.startedAt);
-  appendFileSync(logPath, `\n<!-- flowcrew-attempt ${JSON.stringify(attempt)} -->\n`);
-  const segmentStart = Buffer.byteLength(readFileSync(logPath));
-  writeFileSync(join(path, 'attempt_generation.json'), JSON.stringify({
-    version: 1, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, segmentStart,
-  }));
+  beginAttemptEvidenceGeneration(run.runDirPath, stageId, attempt.index, attempt.startedAt);
   return status;
 }
 
@@ -79,11 +74,11 @@ function savedProgress() {
 }
 
 describe.skipIf(process.platform !== 'linux')('one progress record for engine work and idle cancellation', () => {
-  it('does not count the attempt marker or engine bookkeeping as live/artifact work', () => {
+  it('does not count the attempt marker or engine bookkeeping as live work', () => {
     const status = startAttempt();
-    const facts = inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status, sinceMs: 0 });
+    const facts = inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status });
     expect(facts.liveProgressThisTick).toBe(false);
-    expect(facts.artifactProgressThisTick).toBe(false);
+    expect(facts.protectedFromIdleAbort).toBe(false);
   });
 
   it('uses the configured silence bound for a sleeping local command', async () => {
@@ -105,7 +100,7 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
     vi.spyOn(Date, 'now').mockReturnValue(lastProgressAt + config.idleThresholdMs);
     await supervisor.tick();
     expect(existsSync(signal)).toBe(true);
-    expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status, sinceMs: Date.now() }).activeCommandCount).toBe(1);
+    expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status }).activeCommandCount).toBe(1);
     expect(JSON.parse(readFileSync(signal, 'utf8'))).toMatchObject({ source: 'watchdog', attemptIndex: 1 });
 
   });
@@ -123,10 +118,10 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
       expect(savedProgress().stageProgress[stageId].lastProgressAt).toBe(Date.now());
     }
     expect(existsSync(join(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(false);
-    expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status, sinceMs: Date.now() }).activeCommandCount).toBe(1);
+    expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status }).activeCommandCount).toBe(1);
     cancel.abort();
     await validation;
-    expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status, sinceMs: Date.now() }).activeCommandCount).toBe(0);
+    expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status }).activeCommandCount).toBe(0);
   });
 
   it('retains attempt-bound work observations across a watchdog restart', async () => {
@@ -179,7 +174,7 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
   it('does not make an unchanged terminal artifact immune to idle detection', () => {
     const status = startAttempt();
     writeFileSync(join(run.runDirPath, 'stages', stageId, 'output.md'), 'result');
-    const facts = inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status, sinceMs: Date.now() + 1 });
+    const facts = inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status });
     expect(facts.outputObserved).toBe(true);
     expect(facts.protectedFromIdleAbort).toBe(false);
   });
@@ -196,7 +191,7 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
       calls++;
       if (calls > 1) return fixtureResult({ output: 'unexpected repeat', exitCode: 0, duration_ms: 0 }, opts);
       mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
-      writeFileSync(join(opts.runDir, 'signals', `abort_${stageId}.json`), JSON.stringify({
+      writeEngineFile(join(opts.runDir, 'signals', `abort_${stageId}.json`), JSON.stringify({
         version: 1, stageId, attemptIndex: opts.attemptIndex, source: 'watchdog',
         timestamp: new Date().toISOString(), reason: 'Verified idle local command',
       }));

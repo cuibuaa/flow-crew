@@ -1,9 +1,68 @@
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { terminalArtifactStatusMismatch } from '../src/terminal-artifact-status.js';
+import { terminalArtifactIdentity, terminalArtifactStatusMismatch } from '../src/terminal-artifact-status.js';
+import { type ContentIdentity } from '../src/content-identity.js';
 import { terminalArtifactSnapshotName } from '../src/store.js';
 
+const content = (sha256: string): ContentIdentity => ({ state: 'present', type: 'file', byteLength: 1, sha256 });
+
 describe('terminal artifact status diagnostics', () => {
+  it('reads an old on-disk run without baselines using its original run-start freshness boundary', () => {
+    const root = mkdtempSync(join(tmpdir(), 'legacy-terminal-status-'));
+    try {
+      const artifact = join(root, 'result.md');
+      const runPath = join(root, 'run.json');
+      writeFileSync(runPath, JSON.stringify({
+        status: 'running', projectDir: root, startedAt: '2026-01-01T00:00:00.000Z',
+        stages: { owner: { status: 'complete' } }, terminalStates: { complete: { paths: ['result.md'] } },
+      }));
+      const legacyState = JSON.parse(readFileSync(runPath, 'utf8'));
+      expect(legacyState).not.toHaveProperty('terminalArtifactBaselines');
+      writeFileSync(artifact, 'same result bytes\n');
+      const old = new Date('2000-01-01T00:00:00.000Z');
+      utimesSync(artifact, old, old);
+      expect(terminalArtifactStatusMismatch(legacyState)).toBeUndefined();
+      const fresh = new Date('2026-01-01T00:00:01.000Z');
+      utimesSync(artifact, fresh, fresh);
+      expect(terminalArtifactStatusMismatch(legacyState)).toEqual({
+        lifecycleStatus: 'running', terminalStatus: 'complete', terminalArtifact: 'result.md',
+      });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('does not invent a missing legacy baseline or treat an unreadable alias as absence', () => {
+    const state = { status: 'running', stages: { owner: { status: 'complete' } },
+      terminalStates: { complete: { paths: ['result.md'] } } };
+    expect(terminalArtifactStatusMismatch(state, { projectDir: '/workspace', artifactIdentity: () => content('old') })).toBeUndefined();
+    const root = mkdtempSync(join(tmpdir(), 'terminal-identity-'));
+    try {
+      writeFileSync(join(root, 'old.md'), 'old content');
+      mkdirSync(join(root, 'docs'));
+      symlinkSync('../old.md', join(root, 'docs/result.md'));
+      const baseline = terminalArtifactIdentity(join(root, 'docs/result.md'), root);
+      expect(baseline).toEqual(terminalArtifactIdentity(join(root, 'old.md'), root));
+      expect(terminalArtifactStatusMismatch({ ...state, terminalArtifactBaselines: { 'result.md': baseline } },
+        { projectDir: root, artifactIdentity: () => baseline })).toBeUndefined();
+      symlinkSync('loop.md', join(root, 'loop.md'));
+      expect(terminalArtifactIdentity(join(root, 'loop.md'), root).state).toBe('unavailable');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('retains the legacy mtime evidence override without requiring a local content identity', () => {
+    const state = {
+      status: 'running', startedAt: new Date(1_000).toISOString(),
+      stages: { owner: { status: 'complete' } }, terminalStates: { complete: { paths: ['result.md'] } },
+    };
+    const evidence = { projectDir: '/workspace', artifactMtimeMs: () => 1_000 };
+    expect(terminalArtifactStatusMismatch(state, evidence)).toMatchObject({
+      lifecycleStatus: 'running', terminalStatus: 'complete', terminalArtifact: 'result.md',
+    });
+    expect(terminalArtifactStatusMismatch(state, { ...evidence, artifactMtimeMs: () => 999 })).toBeUndefined();
+    expect(terminalArtifactStatusMismatch(state, { ...evidence, artifactMtimeMs: () => undefined })).toBeUndefined();
+  });
+
   it('returns only an unambiguous disagreement and never rewrites lifecycle status', () => {
     const state = {
       status: 'complete',
@@ -53,14 +112,14 @@ describe('terminal artifact status diagnostics', () => {
     expect(completeSnapshot.length).toBeLessThan(255);
     expect(escalatedSnapshot).not.toBe(completeSnapshot);
     const state = {
-      status: 'running', startedAt: new Date(1_000).toISOString(),
+      status: 'running', terminalArtifactBaselines: {}, startedAt: new Date(1_000).toISOString(),
       stages: { finalize: { status: 'complete' } },
       terminalStates: { complete: { paths: [complete] }, escalated: { paths: [escalated] } },
     };
-    const mtimes = new Map([[join(runDir, escalatedSnapshot), 2_000]]);
-    const evidence = { runDir, artifactMtimeMs: (path: string) => mtimes.get(path) };
+    const identities = new Map([[join(runDir, escalatedSnapshot), content('new')]]);
+    const evidence = { runDir, artifactIdentity: (path: string): ContentIdentity => identities.get(path) ?? { state: 'absent' } };
     expect(terminalArtifactStatusMismatch(state, evidence)).toMatchObject({ terminalStatus: 'escalated', terminalArtifact: escalated });
-    mtimes.set(join(runDir, completeSnapshot), 2_000);
+    identities.set(join(runDir, completeSnapshot), content('new'));
     expect(terminalArtifactStatusMismatch(state, evidence)).toBeUndefined();
     expect(terminalArtifactStatusMismatch({ ...state, status: 'complete', terminalArtifact: escalated })).toMatchObject({ terminalStatus: 'escalated' });
   });
@@ -69,11 +128,12 @@ describe('terminal artifact status diagnostics', () => {
     const projectDir = join('/workspace', 'project');
     const completePath = join(projectDir, 'docs', 'final_verification.md');
     const escalatedPath = join(projectDir, 'docs', 'escalation_note.md');
-    const mtimes = new Map([[completePath, 2_000]]);
+    const identities = new Map([[completePath, content('new')]]);
     const state = {
       status: 'running',
       startedAt: new Date(1_000).toISOString(),
       projectDir,
+      terminalArtifactBaselines: { 'docs/final_verification.md': content('old') },
       stages: {
         implement: { status: 'complete' },
         verify: { status: 'failed' },
@@ -85,7 +145,7 @@ describe('terminal artifact status diagnostics', () => {
     };
     const evidence = {
       projectDir,
-      artifactMtimeMs: (path: string) => mtimes.get(path),
+      artifactIdentity: (path: string): ContentIdentity => identities.get(path) ?? { state: 'absent' },
     };
 
     expect(terminalArtifactStatusMismatch(state, evidence)).toEqual({
@@ -98,10 +158,10 @@ describe('terminal artifact status diagnostics', () => {
     state.stages.verify.status = 'running';
     expect(terminalArtifactStatusMismatch(state, evidence)).toBeUndefined();
     state.stages.verify.status = 'complete';
-    mtimes.set(completePath, 999);
+    identities.set(completePath, content('old'));
     expect(terminalArtifactStatusMismatch(state, evidence)).toBeUndefined();
-    mtimes.set(completePath, 2_000);
-    mtimes.set(escalatedPath, 2_000);
+    identities.set(completePath, content('new'));
+    identities.set(escalatedPath, content('new'));
     expect(terminalArtifactStatusMismatch(state, evidence)).toBeUndefined();
 
     const unsafePath = ['..', 'outside.md'].join('/');
@@ -111,7 +171,7 @@ describe('terminal artifact status diagnostics', () => {
     }, {
       projectDir,
       runDir: join('/workspace', 'run'),
-      artifactMtimeMs: () => 2_000,
+      artifactIdentity: () => content('new'),
     })).toBeUndefined();
   });
 });

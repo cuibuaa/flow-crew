@@ -3,12 +3,12 @@ import { createHash } from 'node:crypto';
 import { resolveResearchPaths } from '../../research-paths.js';
 import { stageScopeOwnsPath } from '../sched_admission/dispatch.js';
 import { gateReviewedAuthorIds } from '../sched_settlement/gate-recovery.js';
-import { readGateVerdictDocument } from '../sched_settlement/gate-evidence.js';
+import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
 import { readResearchGateCandidate } from '../../research-candidate.js';
 import { Adapter } from '../../adapters/base.js';
 import { readCampaignEntries, resolveCampaignStorageKey } from '../../campaigns.js';
 import { recordRunEvent } from '../../run-events.js';
-import { StageConfig } from '../sched_admission/configuration.js';
+import { type StageConfig, normalizeStageContracts } from '../sched_admission/configuration.js';
 import { restoreAdmittedRealityChecks } from '../sched_admission/dispatch-retry.js';
 import { log } from '../sched_admission/shared.js';
 import { checkCampaignHealth } from '../sched_policy/campaign.js';
@@ -26,7 +26,7 @@ export async function prepareWorkflowIteration(
   baseStages: StageConfig[], workflowYaml: string,
 ): Promise<{kind: 'settled'; state: StoreState} | {
   kind: 'ready'; state: StoreState; sorted: StageConfig[];
-  injectedDispatchStages: Set<string>; planStageRetries: Map<string, number>;
+  injectedDispatchStages: Set<string>;
 }> {
     const isResumedIteration = resumingExistingRun && iteration === resumeAtIteration;
     let state = readRunState(projectDir, runId);
@@ -75,11 +75,7 @@ export async function prepareWorkflowIteration(
     }
 
     state.currentIteration = iteration;
-    const campaignStorageKey = resolveCampaignStorageKey({
-      campaignId: state.campaignId,
-      campaignStorageKey: state.campaignStorageKey,
-      campaignName: state.campaignName,
-    });
+    const campaignStorageKey = resolveCampaignStorageKey(state);
     if (campaignStorageKey) {
       state.campaignStorageKey = campaignStorageKey;
       state.campaignIteration = iteration;
@@ -93,11 +89,10 @@ export async function prepareWorkflowIteration(
     // works. Only an active dispatch (or a complete static plan) is executable.
     const retainedPlan = state.planControl && (!state.planControl.stages.some(stage => stage.dynamic_dispatch)
       || Array.isArray(state.dispatchedStages)) ? state.planControl.stages : baseStages;
-    const sorted: StageConfig[] = (isResumedIteration || continuingBudget ? retainedPlan : baseStages).map(s => ({ ...s }));
+    const sorted: StageConfig[] = normalizeStageContracts((isResumedIteration || continuingBudget ? retainedPlan : baseStages).map(s => ({ ...s })));
     const injectedDispatchStages = new Set<string>();
     if ((isResumedIteration || continuingBudget) && state.planControl) for (const stage of sorted) if (stage.dynamic_dispatch && state.stages[stage.id]?.status === STAGE_STATUS.COMPLETE) injectedDispatchStages.add(stage.id);
     // Planner retry counters are bounded within this iteration.
-    const planStageRetries = new Map<string, number>();
 
     // Delete dispatch.yaml before plan stage runs only on re-plan (iteration > 1)
     const dispatchPathPre = join(runDirPath, 'dispatch.yaml');
@@ -155,17 +150,11 @@ export async function prepareWorkflowIteration(
         state.stages[sid],
       ));
       state.stageEvidence ??= [];
-      state.retiredStageUsage ??= [];
       for (const evidence of capturedEvidence) {
         if (!state.stageEvidence.some((entry) =>
           entry.iteration === evidence.iteration && entry.stageId === evidence.stageId)) {
           state.stageEvidence.push(evidence);
         }
-        state.retiredStageUsage.push({
-          stageId: evidence.stageId,
-          iteration: evidence.iteration,
-          status: evidence.status,
-        });
       }
       const newlyDischarged = deriveCriterionDischarges({
         projectDir,
@@ -183,12 +172,6 @@ export async function prepareWorkflowIteration(
           && existing.criterionId === discharge.criterionId)) {
           state.criterionDischarges.push(discharge);
         }
-      }
-      if (state.criterionDischarges.length > 0) {
-        writeFileSync(join(runDirPath, 'criterion_discharges.json'), `${JSON.stringify({
-          version: 1,
-          records: state.criterionDischarges,
-        }, null, 2)}\n`, 'utf-8');
       }
       for (const sid of retiringStageIds) {
         delete state.stages[sid];
@@ -221,8 +204,7 @@ export async function prepareWorkflowIteration(
     // Campaign health check: inject researcher if regression/plateau detected
     if (campaignStorageKey && iteration > 1) {
       const entries = readCampaignEntries(projectDir, campaignStorageKey);
-      const triggers = state.campaignTriggers;
-      const alert = checkCampaignHealth(entries, triggers);
+      const alert = checkCampaignHealth(entries);
       if (alert) {
         const triggeredAt = new Date().toISOString();
         state.campaignAlert = {
@@ -259,7 +241,7 @@ export async function prepareWorkflowIteration(
         writeRunState(projectDir, runId, state);
       }
     }
-  return {kind: 'ready', state, sorted, injectedDispatchStages, planStageRetries};
+  return {kind: 'ready', state, sorted, injectedDispatchStages};
 }
 
 /** Only a consumed outcome producer and its reviewing gate survive reset.
@@ -290,7 +272,7 @@ function consumedResearchStages(state: StoreState, stages: StageConfig[], direct
   for (const gate of stages.filter(stage => stage.is_gate && complete(stage))) {
     const candidate = readResearchGateCandidate(directory, gate.id);
     if (candidate?.settlement?.disposition !== 'ingested'
-        || readGateVerdictDocument(directory, gate.id, false)?.project().pass !== true) continue;
+        || readGateEvaluation(state.projectDir, gate.id, state.runId)?.pass !== true) continue;
     if (!((candidate.label && journalLabels.has(candidate.label))
         || (candidate.sha256 && consumedDigests.has(candidate.sha256)))) continue;
     // Stop at preceding gates: their producers represent separate rounds.

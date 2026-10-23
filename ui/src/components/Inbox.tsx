@@ -3,10 +3,8 @@ import { Link } from "react-router-dom";
 import {
   BriefAdmissionRequestError,
   cancelTask,
-  fetchCampaignBriefDiff,
   fetchInboxOverview,
   resolveInboxItem,
-  reviewCampaignPatch,
 } from "../api";
 import type {
   BriefAdmissionSubmission,
@@ -15,26 +13,18 @@ import type {
   InboxDecision,
   InboxItem,
   InboxOverview,
-  InboxPatchItem,
   InboxSource,
   InboxSourceCoverage,
   InboxStaleItem,
 } from "../types";
 import { BriefPreflightPanel } from "./NewRunModal";
 import { showToast } from "./Toast";
-import { simulationSource } from "../lib/simulation-source";
 import { isRecord, isNonNegativeInteger } from "../lib/source-validation";
 
 const POLL_MS = 15_000;
-const SOURCE_KEYS = ["approvals", "deferred", "stale", "patches"] as const;
+const SOURCE_KEYS = ["approvals", "deferred", "stale"] as const;
 
 type InboxSourceKey = typeof SOURCE_KEYS[number];
-
-interface DiffView {
-  loading?: boolean;
-  text?: string;
-  error?: string;
-}
 
 interface ResolutionNotice {
   key: string;
@@ -51,7 +41,6 @@ const SOURCE_LABELS: Record<InboxSourceKey, string> = {
   approvals: "Pending approvals",
   deferred: "Deferred tasks",
   stale: "Stale run alerts",
-  patches: "Brief patches",
 };
 
 function waitingTime(createdAt: string): string {
@@ -74,27 +63,6 @@ function retryLabel(notBefore?: string | null): string {
   if (!notBefore) return "The daemon will retry when the blocking condition clears";
   const value = Date.parse(notBefore);
   return Number.isFinite(value) ? new Date(value).toLocaleString() : notBefore;
-}
-
-function patchKey(item: Pick<InboxPatchItem, "campaignId" | "index">): string {
-  return `${item.campaignId}:${item.index}`;
-}
-
-function patchPreview(item: InboxPatchItem): string {
-  const value = item.patch.value.split("\n").map((line) => `+ ${line}`).join("\n");
-  return [
-    `--- ${item.briefVersion ?? "current brief"}`,
-    "+++ proposed patch",
-    `@@ ${item.patch.section} · ${item.patch.op} @@`,
-    value,
-  ].join("\n");
-}
-
-function diffVersions(item: InboxPatchItem): { from: string; to: string } | null {
-  const from = item.fromVersion ?? item.from_version ?? item.briefVersion;
-  const explicitTo = item.toVersion ?? item.to_version;
-  const to = explicitTo ?? (item.latestVersion && item.latestVersion !== from ? item.latestVersion : undefined);
-  return from && to && from !== to ? { from, to } : null;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -174,30 +142,6 @@ function isStaleItem(value: unknown): value is InboxStaleItem {
     && isOptionalString(value.staleRunId);
 }
 
-function isPatchItem(value: unknown): value is InboxPatchItem {
-  if (!isRecord(value) || !isRecord(value.patch)) return false;
-  const patch = value.patch;
-  return isNonNegativeInteger(value.index)
-    && isNonEmptyString(value.ts)
-    && isNonEmptyString(value.campaignId)
-    && isNonEmptyString(value.campaignName)
-    && isNonEmptyString(value.reason)
-    && (value.severity === undefined || isEnumString(value.severity, ["low", "medium", "high"] as const))
-    && patch.type === "brief_patch"
-    && isNonEmptyString(patch.section)
-    && isEnumString(patch.op, ["append", "replace_value", "edit"] as const)
-    && typeof patch.value === "string"
-    && isNonEmptyString(value.patchSummary)
-    && isOptionalString(value.source)
-    && isOptionalString(value.briefVersion)
-    && isOptionalString(value.fromVersion)
-    && isOptionalString(value.toVersion)
-    && isOptionalString(value.from_version)
-    && isOptionalString(value.to_version)
-    && isOptionalString(value.latestVersion)
-    && isOptionalString(value.runId);
-}
-
 function isInboxSource<T>(value: unknown, isItem: (item: unknown) => item is T): value is InboxSource<T> {
   if (!isRecord(value) || !Array.isArray(value.items) || !value.items.every(isItem)) return false;
   const coverage = value.coverage;
@@ -224,7 +168,6 @@ function isInboxOverview(value: unknown): value is InboxOverview {
   return isInboxSource(value.approvals, isInboxItem)
     && isInboxSource(value.deferred, isDeferredItem)
     && isInboxSource(value.stale, isStaleItem)
-    && isInboxSource(value.patches, isPatchItem)
     && (value.campaignCount === null || isNonNegativeInteger(value.campaignCount));
 }
 
@@ -242,15 +185,11 @@ function focusAfterMutation(): void {
 
 export default function Inbox({
   loadOverview = fetchInboxOverview,
-  loadBriefDiff = fetchCampaignBriefDiff,
   resolveItem = resolveInboxItem,
-  reviewPatch = reviewCampaignPatch,
   markRunFailed = cancelTask,
 }: {
   loadOverview?: typeof fetchInboxOverview;
-  loadBriefDiff?: typeof fetchCampaignBriefDiff;
   resolveItem?: typeof resolveInboxItem;
-  reviewPatch?: typeof reviewCampaignPatch;
   markRunFailed?: typeof cancelTask;
 }) {
   const [overview, setOverview] = useState<InboxOverview | null>(null);
@@ -262,7 +201,6 @@ export default function Inbox({
   const [briefAdmissionReviews, setBriefAdmissionReviews] = useState<Record<string, BriefAdmissionReview>>({});
   const [resolutionNotices, setResolutionNotices] = useState<ResolutionNotice[]>([]);
   const [resolving, setResolving] = useState<string | null>(null);
-  const [diffs, setDiffs] = useState<Record<string, DiffView>>({});
   const mounted = useRef(false);
   const trustedOverview = useRef<InboxOverview | null>(null);
   const refreshSequence = useRef(0);
@@ -391,54 +329,6 @@ export default function Inbox({
       showToast(`Marking the run failed did not take effect: ${message}`);
     } finally {
       if (mounted.current) setResolving(null);
-    }
-  };
-
-  const decidePatch = async (item: InboxPatchItem, decision: "accept" | "reject") => {
-    const itemKey = `patch:${patchKey(item)}`;
-    if (resolving) return;
-    setResolving(itemKey);
-    setItemError(itemKey);
-    try {
-      await reviewPatch(item.campaignId, item.index, decision);
-      showToast(decision === "accept" ? "Brief patch accepted" : "Brief patch rejected", "success");
-      setDiffs((current) => {
-        const next = { ...current };
-        delete next[patchKey(item)];
-        return next;
-      });
-      if (await refresh()) focusAfterMutation();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setItemError(itemKey, `Patch review failed: ${message}`);
-      showToast(`Patch review failed: ${message}`);
-      await refresh();
-    } finally {
-      if (mounted.current) setResolving(null);
-    }
-  };
-
-  const toggleDiff = async (item: InboxPatchItem) => {
-    const key = patchKey(item);
-    if (diffs[key]) {
-      setDiffs((current) => {
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      return;
-    }
-    setDiffs((current) => ({ ...current, [key]: { loading: true } }));
-    try {
-      const versions = diffVersions(item);
-      const text = versions
-        ? await loadBriefDiff(item.campaignId, versions.from, versions.to)
-        : patchPreview(item);
-      if (mounted.current) setDiffs((current) => ({ ...current, [key]: { text } }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (mounted.current) setDiffs((current) => ({ ...current, [key]: { error: message } }));
-      showToast(`Diff failed to load: ${message}`);
     }
   };
 
@@ -653,51 +543,7 @@ export default function Inbox({
                 </section>
               ) : null}
 
-              {overview.patches.items.length ? (
-                <section className="inbox-group" data-testid="inbox-patches">
-                  <h2>Brief patches awaiting review <span>{overview.patches.items.length}</span></h2>
-                  <div className="inbox-list">
-                    {overview.patches.items.map((item) => {
-                      const key = patchKey(item);
-                      const itemKey = `patch:${key}`;
-                      const diff = diffs[key];
-                      const busy = resolving === itemKey;
-                      const diffId = `patch-diff-${key}`;
-                      return (
-                        <article className="inbox-card patch-card" data-inbox-item key={key} aria-busy={busy}>
-                          <div className="inbox-card-head"><div><div className="inbox-action"><strong>{item.patch.op}</strong><span>→</span><code>{item.patch.section}</code></div><h3>{item.reason}</h3></div><span className={`badge risk-${item.severity ?? "unknown"}`}>{item.severity ?? "review"}</span></div>
-                          <p className="inbox-body">{item.patchSummary}</p>
-                          <div className="inbox-meta">
-                            <span>campaign {item.campaignName}</span>
-                            {item.briefVersion ? <span>Based on {item.briefVersion}</span> : null}
-                            <span>Source: <code>{item.source ?? "not recorded"}</code></span>
-                            {simulationSource(item.source) ? <span className="badge simulation-source">Simulation/test source</span> : null}
-                            {item.runId ? <span>run <Link className="mono" to={`/run/${encodeURIComponent(item.runId)}`}>{item.runId}</Link></span> : null}
-                          </div>
-                          {diff ? (
-                            <pre
-                              aria-label={`${item.campaignName} brief patch diff`}
-                              className={`brief-patch-diff${diff.error ? " error" : ""}`}
-                              data-testid={diffId}
-                              id={diffId}
-                              role={diff.error ? "alert" : undefined}
-                              tabIndex={0}
-                            >
-                              {diff.loading ? "Loading diff…" : diff.error ? `Diff unavailable: ${diff.error}` : diff.text}
-                            </pre>
-                          ) : null}
-                          {itemErrors[itemKey] ? <div className="inbox-item-error" role="alert">{itemErrors[itemKey]}</div> : null}
-                          <div className="inbox-actions">
-                            <button className="btn ghost" type="button" aria-controls={diffId} aria-expanded={Boolean(diff)} onClick={() => void toggleDiff(item)}>{diff ? "Hide diff" : "View diff"}</button>
-                            <button className="btn" type="button" disabled={busy} onClick={() => void decidePatch(item, "accept")}>Accept patch</button>
-                            <button className="btn ghost" type="button" disabled={busy} onClick={() => void decidePatch(item, "reject")}>Reject patch</button>
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                </section>
-              ) : null}
+
             </div>
           ) : null}
         </>

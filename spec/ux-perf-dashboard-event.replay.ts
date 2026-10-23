@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startDashboard } from '../src/dashboard.js';
-import { createRun, fcGlobalDir, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
 
 let originalFcRoot: string;
 let root: string;
@@ -48,12 +49,12 @@ describe('reality-gate run-detail evidence replay', () => {
     };
     writeRunState(projectDir, created.runId, state);
     writeFileSync(join(fcGlobalDir(), 'runs', created.runId, 'events.jsonl'), `${JSON.stringify({
-      type: 'scope_revision_decided',
+      type: 'admission_rejected',
       runId: created.runId,
       timestamp: '2026-09-03T10:01:30.000Z',
       stageId: 'implement',
       attemptIndex: 2,
-      requestId: 'scope-17',
+      requestId: 'proposal-17',
       decision: 'rejected',
       detail: 'request path digest did not match the active execution',
     })}\n`, 'utf-8');
@@ -63,10 +64,10 @@ describe('reality-gate run-detail evidence replay', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       events: [{
-        type: 'scope_revision_decided',
+        type: 'admission_rejected',
         stageId: 'implement',
         attemptIndex: 2,
-        requestId: 'scope-17',
+        requestId: 'proposal-17',
         decision: 'rejected',
         detail: 'request path digest did not match the active execution',
       }],
@@ -74,7 +75,7 @@ describe('reality-gate run-detail evidence replay', () => {
         runStatus: 'running',
         activeStages: [expect.objectContaining({ id: 'implement', execution: 2 })],
         latestReason: {
-          type: 'scope_revision_decided',
+          type: 'admission_rejected',
           detail: 'request path digest did not match the active execution',
         },
         sourceCoverage: { runState: 'read', events: 'read', stageCount: 1 },

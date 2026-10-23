@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { describe, expect, it } from 'vitest';
 import { inspectBrief } from '../src/brief-preflight.js';
 import {
@@ -26,6 +27,8 @@ function researchBrief(feasibilityYaml: string, body = PREREGISTRATION): string 
     '    paths: [docs/ceiling.md]',
     '---',
     body,
+    '## Acceptance criteria',
+    '1. Report the qualifying sample count or explain why it cannot be computed.',
   ].join('\n');
 }
 

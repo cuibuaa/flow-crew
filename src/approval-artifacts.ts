@@ -38,15 +38,15 @@ export function approvalArtifactPath(
 }
 
 /** Existing-run approval resumes are registered with the daemon, with the same run identity. */
-export function approvalResumeArgs(state: {
+export function approvalResumeLaunch(state: {
   workflowName?: string; maxIterations?: number;
   campaignId?: string; campaignStorageKey?: string; adapter?: unknown;
-}): string[] {
-  const args = ['--workflow', state.workflowName || 'default'];
-  if (state.maxIterations !== undefined) args.push('--max-iterations', String(state.maxIterations));
-  if (typeof state.adapter === 'string') args.push('--adapter', state.adapter);
+}): import('./task-registry.js').TaskLaunchOptions {
+  const workflow = state.workflowName === 'default' ? 'planner' : state.workflowName;
   const campaign = state.campaignId ?? state.campaignStorageKey;
-  if (campaign) args.push('--campaign', campaign);
-  else args.push('--no-campaign');
-  return args;
+  return {
+    workflow: workflow || 'planner', maxIterations: state.maxIterations,
+    ...(typeof state.adapter === 'string' ? { adapter: state.adapter } : {}),
+    ...(campaign ? { campaign } : { noCampaign: true }),
+  };
 }

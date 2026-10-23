@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -420,70 +421,17 @@ describe('systemd confirmation truth', () => {
         },
       });
       expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLED);
-      expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.STOPPED);
+      expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.CANCELLED);
     } finally {
       if (priorPath === undefined) delete process.env.PATH;
       else process.env.PATH = priorPath;
     }
   });
 
-  it('does not let a stale inactive fallback record confirm an unobserved unit stop', async () => {
-    const runId = 'stale-systemd-fallback-state';
-    const unit = 'flowcrew-e13-stale-fallback.service';
-    writeRun(runId, RUN_STATUS.RUNNING);
-    const task = registry.create({
-      brief_text: 'stale systemd fallback fixture',
-      projectDir,
-      run_id: runId,
-      status: TASK_STATUS.RUNNING,
-      systemd_unit: unit,
-    });
-    const fakeBin = join(fixtureRoot, 'bin');
-    mkdirSync(fakeBin, { recursive: true });
-    const fakeSystemctl = join(fakeBin, 'systemctl');
-    writeFileSync(fakeSystemctl, '#!/bin/sh\nexit 1\n', 'utf-8');
-    chmodSync(fakeSystemctl, 0o755);
-    const priorPath = process.env.PATH;
-    process.env.PATH = `${fakeBin}:${priorPath ?? ''}`;
-    try {
-      const systemd = new NodeSystemd(registry.baseDir);
-      writeFileSync(
-        join(registry.baseDir, 'systemd-fallback', `${unit}.json`),
-        JSON.stringify({ state: 'inactive' }),
-        'utf-8',
-      );
-      await expect(systemd.isActive(unit)).resolves.toEqual({
-        kind: 'unobservable',
-        reason: 'systemctl probe failed',
-      });
-      const coordinator = new RunCancellationCoordinator({
-        registry,
-        units: systemd,
-        timeoutMs: 0,
-        signalGraceMs: 0,
-      });
-
-      const result = await coordinator.cancelTask(task.id);
-
-      expect(result).toMatchObject({
-        ok: true,
-        status: 'cancelled',
-        observation: {
-          unitState: { kind: 'unobservable', reason: 'systemctl probe failed' },
-          schedulerAlive: false, runReadable: true, launchInFlight: false,
-        },
-      });
-      expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLED);
-      expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.STOPPED);
-    } finally {
-      if (priorPath === undefined) delete process.env.PATH;
-      else process.env.PATH = priorPath;
-    }
-  });
 });
 
 describe('cancel-and-confirm coordinator', () => {
-  it.each([RUN_STATUS.STOPPED, RUN_STATUS.FAILED, RUN_STATUS.INCOMPLETE])('stops an owned continuation before preserving its archived %s verdict', async status => {
+  it.each([RUN_STATUS.CANCELLED, RUN_STATUS.FAILED, RUN_STATUS.INCOMPLETE])('stops an owned continuation before preserving its archived %s verdict', async status => {
     const runId = 'continuation-admission';
     const directory = writeRun(runId, status, LIVE_FIXTURE_PID);
     const archived = readFileSync(join(directory, 'run.json'), 'utf8');
@@ -494,11 +442,6 @@ describe('cancel-and-confirm coordinator', () => {
       isSchedulerPidAlive: () => alive, canSignalScheduler: () => true,
       signalScheduler: (_pid, signal) => { signals.push(signal); alive = false; },
     });
-    expect(await coordinator.statusRun(runId)).toMatchObject({
-      ok: status === RUN_STATUS.STOPPED, status: status === RUN_STATUS.STOPPED ? 'cancelled' : 'cancelling',
-      observation: { schedulerAlive: true },
-    });
-    expect(signals).toEqual([]);
     expect(await coordinator.cancelRun(runId)).toMatchObject({ ok: true, preservedRunStatus: status, observation: { schedulerAlive: false } });
     expect(signals).toEqual(['SIGTERM']);
     expect(alive).toBe(false);
@@ -580,7 +523,7 @@ describe('cancel-and-confirm coordinator', () => {
       unit: systemd.state,
       registry: registry.get(task.id)?.status,
       run: readRunState(projectDir, runId).status,
-    }).toEqual({ process: true, unit: { kind: 'deactivating' }, registry: 'cancelling', run: 'stopped' });
+    }).toEqual({ process: true, unit: { kind: 'deactivating' }, registry: 'cancelling', run: 'cancelled' });
 
     releaseStop();
     const result = await byTask;
@@ -598,7 +541,7 @@ describe('cancel-and-confirm coordinator', () => {
       process: false,
       unit: { kind: 'terminal', exitCode: 0 },
       registry: 'cancelled',
-      run: 'stopped',
+      run: 'cancelled',
       reason: 'Cancelled by user',
     });
     expect(state.stages.work.status).toBe(STAGE_STATUS.FAILED);
@@ -640,7 +583,7 @@ describe('cancel-and-confirm coordinator', () => {
     expect(result.message).toContain('unit=deactivating');
     expect(result.message).toContain(`scheduler pid=${LIVE_FIXTURE_PID} alive=true`);
     expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLED });
-    expect(readRunState(projectDir, runId)).toMatchObject({ status: RUN_STATUS.STOPPED });
+    expect(readRunState(projectDir, runId)).toMatchObject({ status: RUN_STATUS.CANCELLED });
     expect(registry.readRecentTicks(task.id).at(-1)).toContain('status=cancelled');
     expect(systemd.stopCalls).toBe(1);
     expect(signalScheduler).not.toHaveBeenCalled();
@@ -673,7 +616,7 @@ describe('cancel-and-confirm coordinator', () => {
     expect(systemd.stopCalls).toBe(1);
     expect(sentSignals).toEqual([`${LIVE_FIXTURE_PID}:SIGTERM`]);
     expect(readRunState(projectDir, runId)).toMatchObject({
-      status: RUN_STATUS.STOPPED,
+      status: RUN_STATUS.CANCELLED,
       failureReason: 'Cancelled by user',
     });
   });
@@ -725,7 +668,7 @@ describe('cancel-and-confirm coordinator', () => {
     });
     expect(systemd.stopCalls).toBe(2);
     expect(systemd.state).toEqual({ kind: 'terminal', exitCode: 0 });
-    expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.STOPPED);
+    expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.CANCELLED);
   });
 
   it('lets the daemon sweep finish a cancellation interrupted after the durable transition', async () => {
@@ -753,7 +696,7 @@ describe('cancel-and-confirm coordinator', () => {
 
     expect(systemd.stopCalls).toBe(1);
     expect(registry.get(task.id)?.status).toBe(TASK_STATUS.CANCELLED);
-    expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.STOPPED);
+    expect(readRunState(projectDir, runId).status).toBe(RUN_STATUS.CANCELLED);
   });
 
   it('does not let a stale queued-task probe relaunch after cancellation completes', async () => {
@@ -801,7 +744,7 @@ describe('daemon cancellation convergence', () => {
 
     await expect(handleDaemonCancellationRequest(control, { cmd: 'cancel', id: 7 }))
       .resolves.toMatchObject({ ok: true, taskId: 7 });
-    await expect(handleDaemonCancellationRequest(control, { cmd: 'cancel-run', runId: 'dashboard-run' }))
+    await expect(handleDaemonCancellationRequest(control, { cmd: 'cancel', runId: 'dashboard-run' }))
       .resolves.toMatchObject({ ok: true, runId: 'dashboard-run' });
 
     expect(cancel).toHaveBeenCalledTimes(1);
@@ -822,6 +765,6 @@ describe('daemon cancellation convergence', () => {
     };
 
     await expect(handleDaemonCancellationRequest(control, { cmd: 'cancel', id: 9 }))
-      .rejects.toThrow('Cancellation still in progress');
+      .resolves.toMatchObject({ ok: false, status: 'cancelling', message: 'unit still deactivating' });
   });
 });

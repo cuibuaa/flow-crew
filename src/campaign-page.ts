@@ -1,8 +1,7 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
-  canonicalCampaignId,
   canonicalCampaignStorageKey,
   listCampaigns,
   readCampaignEntries,
@@ -11,8 +10,6 @@ import {
   type CampaignSummaryRecord,
 } from './campaigns.js';
 import {
-  campaignsRoot,
-  isAwaitingApprovalRunStatus,
   isPausedRunStatus,
   isPendingRunStatus,
   isRunningRunStatus,
@@ -31,7 +28,7 @@ import {
   readRunIndexRecordsByCampaign,
   type RunIndexRecord,
 } from './run-index.js';
-import type { PendingReviewEntry } from './campaign-review.js';
+import { budgetView } from './run-state-view.js';
 import type { InboxItem } from './inbox.js';
 import type { TaskShowEntry } from './orchestrator-rpc.js';
 
@@ -103,13 +100,12 @@ export interface CampaignIdentity {
   storageKey: string;
   runCount: number;
   startedAt: string | null;
-  startedAtSource: 'runs' | 'legacy' | 'unknown';
+  startedAtSource: 'runs' | 'unknown';
   classification: CampaignClassification;
 }
 
 export type CampaignAttentionKind =
   | 'approval'
-  | 'brief_review'
   | 'deferred'
   | 'parked'
   | 'worker_missing'
@@ -156,7 +152,6 @@ export interface CampaignActivity {
 export interface CampaignCost {
   wallMs: number;
   tokens: number;
-  supervisorTokens: number;
   runCoverage: CampaignSourceCoverage;
   wallCoverage: CampaignSourceCoverage;
   tokenCoverage: CampaignSourceCoverage;
@@ -170,7 +165,7 @@ export interface AcceptedMeasurementPoint {
   value: number;
   timestamp: string | null;
   direction: 'higher' | 'lower' | 'unknown';
-  evidence: 'research_journal' | 'campaign_ledger' | 'outer_campaign';
+  evidence: 'research_journal' | 'campaign_ledger';
 }
 
 export interface ResearchMetricGroup {
@@ -288,11 +283,7 @@ export interface CampaignInboxOverviewLike {
     deferReason: string;
   }>;
   stale: InboxEnvelope<{ id: string; name: string; staleRunId?: string }>;
-  patches: InboxEnvelope<PendingReviewEntry & {
-    index: number;
-    campaignName?: string;
-    patchSummary?: string;
-  }>;
+
 }
 
 export interface CampaignPageSources {
@@ -365,10 +356,6 @@ interface LoadedCampaign {
   taskIssue?: CampaignIssueSeed;
   inbox: CampaignInboxOverviewLike | null;
   inboxIssue?: CampaignIssueSeed;
-  legacyStartedAt: string | null;
-  legacyState: Record<string, unknown> | null;
-  outerIterations: Record<string, unknown>[];
-  outerIssues: CampaignIssueSeed[];
 }
 
 interface CampaignRunDiscovery {
@@ -388,32 +375,12 @@ const RESEARCH_CONFIRM_STATUS = {
   FAILED: 'failed',
   NOT_RUN: 'not_run',
 } as const;
-interface CampaignMeasurementAdmission {
-  /** Whether this lifecycle outcome independently admits a measured campaign point. */
-  accepted: boolean;
-}
-
-const CAMPAIGN_MEASUREMENT_ADMISSION = {
-  [RUN_STATUS.PENDING]: { accepted: false },
-  [RUN_STATUS.RUNNING]: { accepted: false },
-  [RUN_STATUS.PARKED]: { accepted: false },
-  [RUN_STATUS.COMPLETE]: { accepted: false },
-  [RUN_STATUS.FAILED]: { accepted: false },
-  [RUN_STATUS.AWAITING_APPROVAL]: { accepted: false },
-  [RUN_STATUS.SHIPPED]: { accepted: true },
-  [RUN_STATUS.CEILING_HIT]: { accepted: true },
-  [RUN_STATUS.ESCALATED]: { accepted: false },
-  [RUN_STATUS.REALITY_GATE_FAILED]: { accepted: false },
-  [RUN_STATUS.PHASE_COMPLETE]: { accepted: false },
-  [RUN_STATUS.STOPPED]: { accepted: false },
-  [RUN_STATUS.INCOMPLETE]: { accepted: false },
-} as const satisfies Record<RunStatus, CampaignMeasurementAdmission>;
 const EXECUTED_STAGE_STATUSES = new Set<string>([
   STAGE_STATUS.RUNNING,
   STAGE_STATUS.COMPLETE,
   STAGE_STATUS.FAILED,
 ]);
-const NON_EXECUTION_ROLES = new Set(['planner', 'supervisor']);
+const NON_EXECUTION_ROLES = new Set(['planner']);
 const DEFAULT_PAGE_SIZE = 12;
 const INITIAL_VISIBLE_ITEMS = 3;
 
@@ -570,63 +537,10 @@ function readOptionalJson(path: string): { value: Record<string, unknown> | null
   }
 }
 
-function readOptionalJsonl(path: string): { value: Record<string, unknown>[]; error?: string } {
-  const text = readOptionalText(path);
-  if (text.error || text.value === null) return { value: [], error: text.error };
-  const values: Record<string, unknown>[] = [];
-  const errors: string[] = [];
-  for (const [index, line] of text.value.split(/\r?\n/).entries()) {
-    if (!line.trim()) continue;
-    try {
-      const parsed = asRecord(JSON.parse(line));
-      if (parsed) values.push(parsed);
-      else errors.push(`line ${index + 1} is not an object`);
-    } catch (error) {
-      errors.push(`line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return { value: values, ...(errors.length ? { error: `${path}: ${errors.join(', ')}` } : {}) };
-}
-
-function safeCampaignDirectory(id: string): string | null {
-  if (!id || id.includes('..') || id.includes('/') || id.includes('\\')) return null;
-  const path = join(campaignsRoot(), id);
-  try {
-    return statSync(path).isDirectory() ? path : null;
-  } catch {
-    return null;
-  }
-}
-
-function storedCampaignDirectories(): CampaignSummaryRecord[] {
-  let entries: Array<{ isDirectory(): boolean; name: string }>;
-  try {
-    entries = readdirSync(campaignsRoot(), { withFileTypes: true, encoding: 'utf8' });
-  } catch {
-    return [];
-  }
-  const rows: CampaignSummaryRecord[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const state = readOptionalJson(join(campaignsRoot(), entry.name, 'state.json')).value;
-    const id = canonicalCampaignId(nonEmptyString(state?.id) ?? entry.name) ?? entry.name;
-    const storageKey = canonicalCampaignStorageKey(entry.name) ?? entry.name;
-    rows.push({
-      id,
-      name: nonEmptyString(state?.name) ?? id,
-      storageKey,
-      runCount: 0,
-      bestScore: null,
-      latestTimestamp: validIso(state?.updatedAt) ?? validIso(state?.startedAt) ?? undefined,
-    });
-  }
-  return rows;
-}
-
 function allCampaignSummaries(projectDir: string, readers: CampaignPageSources): CampaignSummaryRecord[] {
   const byKey = new Map<string, CampaignSummaryRecord>();
-  for (const item of [...readers.listCampaigns(projectDir), ...storedCampaignDirectories()]) {
-    const key = canonicalCampaignStorageKey(item.storageKey ?? item.id) ?? item.storageKey ?? item.id;
+  for (const item of readers.listCampaigns(projectDir)) {
+    const key = canonicalCampaignStorageKey(item.storageKey ?? item.id, projectDir) ?? item.storageKey ?? item.id;
     const previous = byKey.get(key);
     if (!previous) {
       byKey.set(key, { ...item, storageKey: key });
@@ -648,27 +562,24 @@ function allCampaignSummaries(projectDir: string, readers: CampaignPageSources):
 }
 
 function findCampaign(projectDir: string, id: string, readers: CampaignPageSources): CampaignSummaryRecord | null {
-  const wanted = canonicalCampaignStorageKey(id);
+  const wanted = canonicalCampaignStorageKey(id, projectDir);
   return allCampaignSummaries(projectDir, readers).find((item) =>
-    item.id === id || item.storageKey === id || canonicalCampaignStorageKey(item.id) === wanted,
+    item.id === id || item.storageKey === id || canonicalCampaignStorageKey(item.id, projectDir) === wanted,
   ) ?? null;
 }
 
-function recordBelongsToCampaign(record: RunIndexRecord, campaign: CampaignSummaryRecord): boolean {
+function recordBelongsToCampaign(projectDir: string, record: RunIndexRecord, campaign: CampaignSummaryRecord): boolean {
   const key = resolveCampaignStorageKey({
     campaignId: record.campaignId,
     campaignStorageKey: record.campaignStorageKey,
     campaignName: record.campaignName,
+    projectDir,
   });
   return key === campaign.storageKey;
 }
 
 function stateBelongsToCampaign(state: StoreState, campaign: CampaignSummaryRecord): boolean {
-  const key = resolveCampaignStorageKey({
-    campaignId: state.campaignId,
-    campaignStorageKey: state.campaignStorageKey,
-    campaignName: state.campaignName,
-  });
+  const key = resolveCampaignStorageKey(state);
   return key === campaign.storageKey;
 }
 
@@ -725,7 +636,7 @@ function campaignRunIds(
       indexComplete = true;
     }
     for (const record of records ?? []) {
-      if (recordBelongsToCampaign(record, campaign)) ids.add(record.runId);
+      if (recordBelongsToCampaign(projectDir, record, campaign)) ids.add(record.runId);
     }
   } catch (error) {
     indexIssues.push(issue(
@@ -888,22 +799,6 @@ function structuredCommits(history: CampaignHistoryEntry[], tasks: TaskShowEntry
   return [...commits];
 }
 
-function outerStructuredCommits(rows: Record<string, unknown>[], runId: string): string[] {
-  const commits = new Set<string>();
-  for (const row of rows) {
-    if ((nonEmptyString(row.runId) ?? nonEmptyString(row.run_id)) !== runId) continue;
-    const commit = nonEmptyString(row.completing_commit);
-    if (commit) commits.add(commit);
-    if (Array.isArray(row.commit_chain)) {
-      for (const value of row.commit_chain) {
-        const item = nonEmptyString(value);
-        if (item) commits.add(item);
-      }
-    }
-  }
-  return [...commits];
-}
-
 function createRunEvidence(
   projectDir: string,
   state: StoreState,
@@ -935,28 +830,6 @@ function createRunEvidence(
     history: runHistory,
     commits: structuredCommits(runHistory, runTasks),
   };
-}
-
-function legacyCampaignData(campaign: CampaignSummaryRecord): {
-  startedAt: string | null;
-  state: Record<string, unknown> | null;
-  iterations: Record<string, unknown>[];
-  issues: CampaignIssueSeed[];
-} {
-  const dir = safeCampaignDirectory(campaign.storageKey) ?? safeCampaignDirectory(campaign.id);
-  if (!dir) return { startedAt: null, state: null, iterations: [], issues: [] };
-  const state = readOptionalJson(join(dir, 'state.json'));
-  const iterations = readOptionalJsonl(join(dir, 'iteration_log.jsonl'));
-  const issues = [
-    state.error ? issue('campaign-state-unreadable', 'Campaign metadata could not be read', { detail: state.error }) : undefined,
-    iterations.error ? issue('campaign-iterations-unreadable', 'Campaign iteration history could not be read', { detail: iterations.error }) : undefined,
-  ].filter((value): value is CampaignIssueSeed => Boolean(value));
-  const startedAt = validIso(state.value?.startedAt)
-    ?? validIso(state.value?.started_at)
-    ?? (() => {
-      try { return statSync(dir).birthtime.toISOString(); } catch { return null; }
-    })();
-  return { startedAt, state: state.value, iterations: iterations.value, issues };
 }
 
 async function loadCampaign(
@@ -1038,10 +911,6 @@ async function loadCampaign(
       ));
     }
   }
-  const legacy = legacyCampaignData(summary);
-  for (const run of runs) {
-    run.commits = [...new Set([...run.commits, ...outerStructuredCommits(legacy.iterations, run.state.runId)])];
-  }
   return {
     summary,
     runIds,
@@ -1054,10 +923,6 @@ async function loadCampaign(
     taskIssue,
     inbox,
     inboxIssue,
-    legacyStartedAt: legacy.startedAt,
-    legacyState: legacy.state,
-    outerIterations: legacy.iterations,
-    outerIssues: legacy.issues,
   };
 }
 
@@ -1083,7 +948,7 @@ function acceptsCampaignMeasurement(statusValue: unknown): boolean {
   if (statusValue === VALID_SHIP) return true;
   const resolution = resolveRunStatus(statusValue);
   return resolution.kind === 'known'
-    && CAMPAIGN_MEASUREMENT_ADMISSION[resolution.status].accepted;
+    && (resolution.status === RUN_STATUS.SHIPPED || resolution.status === RUN_STATUS.CEILING_HIT);
 }
 
 function runDirection(run: RunEvidence, metric: string): 'higher' | 'lower' | 'unknown' {
@@ -1109,8 +974,6 @@ function acceptedLedgerEntry(entry: CampaignHistoryEntry): boolean {
 function acceptedPointsFromRuns(
   runs: RunEvidence[],
   issues: CampaignIssueSeed[],
-  campaignMetric?: string,
-  campaignDirection: 'higher' | 'lower' | 'unknown' = 'unknown',
 ): AcceptedMeasurementPoint[] {
   const points: AcceptedMeasurementPoint[] = [];
   for (const run of runs) {
@@ -1119,7 +982,6 @@ function acceptedPointsFromRuns(
       const metric = nonEmptyString(entry.metric);
       if (metric) metricCandidates.set(metricKey(metric), metric);
     }
-    if (campaignMetric) metricCandidates.set(metricKey(campaignMetric), campaignMetric);
     for (const artifact of run.metricArtifacts) {
       if (run.workflow.roles?.get(artifact.stageId)?.isGate) {
         metricCandidates.set(metricKey(artifact.metric), artifact.metric);
@@ -1142,7 +1004,7 @@ function acceptedPointsFromRuns(
             metricKey: key,
             value,
             timestamp: validIso(run.history.at(index)?.timestamp) ?? validIso(run.state.startedAt),
-            direction: runMetricDirection === 'unknown' ? campaignDirection : runMetricDirection,
+            direction: runMetricDirection,
             evidence: 'research_journal',
           });
         }
@@ -1173,9 +1035,7 @@ function acceptedPointsFromRuns(
         metricKey: metricKey(metric),
         value,
         timestamp: validIso(entry.timestamp),
-        direction: runMetricDirection === 'unknown' && campaignMetric && metricKey(campaignMetric) === metricKey(metric)
-          ? campaignDirection
-          : runMetricDirection,
+        direction: runMetricDirection,
         evidence: 'campaign_ledger',
       });
     }
@@ -1183,7 +1043,6 @@ function acceptedPointsFromRuns(
   const unique = new Map<string, AcceptedMeasurementPoint>();
   const rank: Record<AcceptedMeasurementPoint['evidence'], number> = {
     research_journal: 3,
-    outer_campaign: 2,
     campaign_ledger: 1,
   };
   for (const point of points) {
@@ -1192,43 +1051,6 @@ function acceptedPointsFromRuns(
     if (!previous || rank[point.evidence] > rank[previous.evidence]) unique.set(key, point);
   }
   return [...unique.values()];
-}
-
-function outerAcceptedPoints(loaded: LoadedCampaign, runs: RunEvidence[]): AcceptedMeasurementPoint[] {
-  if (!loaded.outerIterations.length) return [];
-  const state = loaded.legacyState;
-  const goal = asRecord(state?.goal) ?? asRecord(asRecord(state?.config)?.goal);
-  const metric = nonEmptyString(goal?.metric);
-  if (!metric) return [];
-  const higher = typeof goal?.higherIsBetter === 'boolean'
-    ? goal.higherIsBetter
-    : typeof goal?.higher_is_better === 'boolean'
-      ? goal.higher_is_better
-      : undefined;
-  const journalValues = new Set(runs.flatMap((run) => run.journal.rounds.map((round) => finiteNumber(round.result))).filter((value): value is number => value !== undefined));
-  const points: AcceptedMeasurementPoint[] = [];
-  for (const [index, row] of loaded.outerIterations.entries()) {
-    const outcome = asRecord(row.outcome);
-    const value = finiteNumber(outcome?.result) ?? finiteNumber(row.score) ?? finiteNumber(row.value);
-    const round = finiteNumber(row.iter) ?? finiteNumber(row.iteration) ?? index + 1;
-    const runId = nonEmptyString(row.runId) ?? nonEmptyString(row.run_id);
-    const accepted = row.pass === true
-      || acceptsCampaignMeasurement(row.outcome)
-      || acceptsCampaignMeasurement(outcome?.status)
-      || (value !== undefined && journalValues.has(value));
-    if (value === undefined || !runId || !accepted) continue;
-    points.push({
-      runId,
-      round: String(round),
-      metric,
-      metricKey: metricKey(metric),
-      value,
-      timestamp: validIso(row.timestamp) ?? validIso(row.ts),
-      direction: higher === true ? 'higher' : higher === false ? 'lower' : 'unknown',
-      evidence: 'outer_campaign',
-    });
-  }
-  return points;
 }
 
 function groupResearchPoints(points: AcceptedMeasurementPoint[]): ResearchMetricGroup[] {
@@ -1263,7 +1085,6 @@ function stageWasCompleted(stage: StageStatus): boolean {
 }
 
 function isExecutionStage(run: RunEvidence, stageId: string): boolean {
-  if (stageId === '_supervisor') return false;
   const metadata = run.workflow.roles?.get(stageId);
   if (metadata) return metadata.isGate || !NON_EXECUTION_ROLES.has(metadata.role);
   if (run.workflow.roles) return stageId !== 'plan';
@@ -1377,15 +1198,13 @@ export const RUN_STATUS_EXPLANATIONS = {
   [RUN_STATUS.PENDING]: 'Queued and waiting to execute',
   [RUN_STATUS.RUNNING]: 'Executing',
   [RUN_STATUS.PARKED]: 'No worker; waiting for an operator decision',
-  [RUN_STATUS.AWAITING_APPROVAL]: 'Waiting for legacy plan approval',
   [RUN_STATUS.COMPLETE]: 'Engineering DAG completed',
   [RUN_STATUS.FAILED]: 'Execution failed',
   [RUN_STATUS.SHIPPED]: 'Research or declared gate confirmed delivery',
   [RUN_STATUS.CEILING_HIT]: 'Honest ceiling reached without a better result',
   [RUN_STATUS.ESCALATED]: 'Escalated and needs intervention',
   [RUN_STATUS.REALITY_GATE_FAILED]: 'Reality gate failed',
-  [RUN_STATUS.PHASE_COMPLETE]: 'Stage complete; campaign can continue',
-  [RUN_STATUS.STOPPED]: 'Stopped by the operator or system',
+  [RUN_STATUS.CANCELLED]: 'Cancelled by the operator',
   [RUN_STATUS.INCOMPLETE]: 'Budget exhausted while work was in progress',
 } as const satisfies Record<RunStatus, string>;
 
@@ -1398,8 +1217,7 @@ export function statusExplanation(status: unknown): string {
 
 function stageDurationLowerBound(state: StoreState): number {
   let total = 0;
-  for (const [id, stage] of Object.entries(state.stages)) {
-    if (id === '_supervisor') continue;
+  for (const stage of Object.values(state.stages)) {
     if (finiteNumber(stage.duration_ms) !== undefined) total += Math.max(0, stage.duration_ms ?? 0);
     else for (const attempt of stage.attempts ?? []) total += Math.max(0, attempt.duration_ms ?? 0);
   }
@@ -1426,13 +1244,10 @@ export function deriveRunWallClock(state: StoreState, nowMs: number): { millisec
       : { milliseconds: stageDurationLowerBound(state), partial: true };
   }
   if (isPendingRunStatus(state.status)) {
-    const attempted = Object.values(state.stages).some(stageWasExecuted) || Boolean(state.supervisor?.calls);
+    const attempted = Object.values(state.stages).some(stageWasExecuted);
     return attempted
       ? { milliseconds: stageDurationLowerBound(state), partial: true }
       : { milliseconds: 0, partial: false };
-  }
-  if (isAwaitingApprovalRunStatus(state.status)) {
-    return { milliseconds: stageDurationLowerBound(state), partial: true };
   }
   return { milliseconds: stageDurationLowerBound(state), partial: true };
 }
@@ -1445,96 +1260,17 @@ export interface AttemptTokenEvidenceSummary {
 
 export interface RunTokenCost {
   tokens: number;
-  supervisorTokens: number;
   complete: boolean;
   attemptEvidence: AttemptTokenEvidenceSummary;
-}
-
-interface StageTokenCost {
-  tokens: number;
-  complete: boolean;
-  attemptEvidence: AttemptTokenEvidenceSummary;
-}
-
-const EMPTY_ATTEMPT_TOKEN_EVIDENCE: AttemptTokenEvidenceSummary = {
-  known: 0,
-  recordedUnknown: 0,
-  unrecorded: 0,
-};
-
-function attemptTokens(stage: StageStatus): StageTokenCost {
-  const attempts = stage.attempts ?? [];
-  if (attempts.length > 0) {
-    const attemptEvidence = attempts.reduce<AttemptTokenEvidenceSummary>((summary, attempt) => {
-      const hasBothCounters = finiteNumber(attempt.tokens_in) !== undefined
-        && finiteNumber(attempt.tokens_out) !== undefined;
-      if (hasBothCounters && attempt.tokenUsage !== 'partial' && attempt.tokenUsage !== 'unknown') summary.known++;
-      else if (attempt.tokenUsage === 'unknown' || attempt.tokenUsage === 'partial') summary.recordedUnknown++;
-      else summary.unrecorded++;
-      return summary;
-    }, { ...EMPTY_ATTEMPT_TOKEN_EVIDENCE });
-    return {
-      tokens: attempts.reduce((total, attempt) => (
-        total
-        + (finiteNumber(attempt.tokens_in) ?? 0)
-        + (finiteNumber(attempt.tokens_out) ?? 0)
-      ), 0),
-      complete: attempts.every((attempt) => (
-        attempt.tokenUsage !== 'unknown' && attempt.tokenUsage !== 'partial'
-        &&
-        finiteNumber(attempt.tokens_in) !== undefined
-        && finiteNumber(attempt.tokens_out) !== undefined
-      )),
-      attemptEvidence,
-    };
-  }
-  if (!stageWasExecuted(stage)) {
-    return { tokens: 0, complete: true, attemptEvidence: { ...EMPTY_ATTEMPT_TOKEN_EVIDENCE } };
-  }
-  const complete = finiteNumber(stage.tokens_in) !== undefined && finiteNumber(stage.tokens_out) !== undefined;
-  return {
-    // Historical adapters sometimes recorded only one side of token telemetry.
-    // Preserve that known lower bound while keeping the completeness flag false.
-    tokens: (finiteNumber(stage.tokens_in) ?? 0) + (finiteNumber(stage.tokens_out) ?? 0),
-    complete,
-    attemptEvidence: complete
-      ? { known: 1, recordedUnknown: 0, unrecorded: 0 }
-      : { known: 0, recordedUnknown: 0, unrecorded: 1 },
-  };
 }
 
 export function deriveRunTokenCost(state: StoreState): RunTokenCost {
-  let tokens = 0;
-  let complete = true;
-  const attemptEvidence = { ...EMPTY_ATTEMPT_TOKEN_EVIDENCE };
-  // New runs expose retired dynamic work through the complete evidence ledger.
-  // `retiredStageUsage` remains a compatibility fallback, but contains the same
-  // statuses and must not be added a second time when evidence records exist.
-  const historicalStages: Array<[string, StageStatus]> = state.stageEvidence?.length
-    ? state.stageEvidence.map((entry): [string, StageStatus] => [entry.stageId, entry.status])
-    : (state.retiredStageUsage ?? []).map((entry): [string, StageStatus] => [entry.stageId, entry.status]);
-  const stageLedgers: Array<[string, StageStatus]> = [
-    ...Object.entries(state.stages),
-    ...historicalStages,
-  ];
-  for (const [stageId, stage] of stageLedgers) {
-    if (stageId === '_supervisor') continue;
-    const value = attemptTokens(stage);
-    tokens += value.tokens;
-    if (!value.complete) complete = false;
-    attemptEvidence.known += value.attemptEvidence.known;
-    attemptEvidence.recordedUnknown += value.attemptEvidence.recordedUnknown;
-    attemptEvidence.unrecorded += value.attemptEvidence.unrecorded;
-  }
-  let supervisorTokens = 0;
-  if (state.supervisor) {
-    supervisorTokens = state.supervisor.tokens_in + state.supervisor.tokens_out;
-    if (state.supervisor.attempts?.some(attempt => attempt.tokenUsage === 'partial' || attempt.tokenUsage === 'unknown'
-      || finiteNumber(attempt.tokens_in) === undefined || finiteNumber(attempt.tokens_out) === undefined)) complete = false;
-  } else if (state.supervise === true) {
-    complete = false;
-  }
-  return { tokens: tokens + supervisorTokens, supervisorTokens, complete, attemptEvidence };
+  const { tokens } = budgetView(state, state.completedAt ?? state.startedAt);
+  return {
+    tokens: tokens.knownTotalTokens,
+    complete: tokens.complete,
+    attemptEvidence: tokens.attemptEvidence,
+  };
 }
 
 export function isZeroWorkRun(run: Pick<RunEvidence, 'state' | 'workflow' | 'commits'>): boolean {
@@ -1647,7 +1383,6 @@ function pageRuns(loaded: LoadedCampaign, nowMs: number, cursor = 0, limit = DEF
   const deliverySourceIssues = [
     loaded.entriesIssue,
     loaded.taskIssue,
-    ...loaded.outerIssues,
   ].filter((value): value is CampaignIssueSeed => Boolean(value));
   const items = ordered
     .slice(safeCursor, safeCursor + safeLimit)
@@ -1671,7 +1406,6 @@ function pageRuns(loaded: LoadedCampaign, nowMs: number, cursor = 0, limit = DEF
 function campaignCost(loaded: LoadedCampaign, nowMs: number): CampaignSource<CampaignCost> {
   let wallMs = 0;
   let tokens = 0;
-  let supervisorTokens = 0;
   let succeeded = 0;
   let wallSucceeded = 0;
   let tokenSucceeded = 0;
@@ -1681,7 +1415,6 @@ function campaignCost(loaded: LoadedCampaign, nowMs: number): CampaignSource<Cam
     const token = deriveRunTokenCost(run.state);
     if (wall.milliseconds !== null) wallMs += wall.milliseconds;
     tokens += token.tokens;
-    supervisorTokens += token.supervisorTokens;
     if (!wall.partial) wallSucceeded += 1;
     else issues.push(issue(
       'cost-timing-incomplete',
@@ -1697,9 +1430,6 @@ function campaignCost(loaded: LoadedCampaign, nowMs: number): CampaignSource<Cam
         token.attemptEvidence.unrecorded
           ? `${token.attemptEvidence.unrecorded} executed attempt${token.attemptEvidence.unrecorded === 1 ? '' : 's'} did not record complete token counts`
           : '',
-        !run.state.supervisor && run.state.supervise === true
-          ? 'supervisor token counts were not recorded'
-          : '',
       ].filter(Boolean);
       issues.push(issue(
         'cost-token-telemetry-incomplete',
@@ -1713,7 +1443,7 @@ function campaignCost(loaded: LoadedCampaign, nowMs: number): CampaignSource<Cam
   const runCoverage = coverage(succeeded, Math.max(0, total - succeeded), total);
   const wallCoverage = coverage(wallSucceeded, Math.max(0, total - wallSucceeded), total);
   const tokenCoverage = coverage(tokenSucceeded, Math.max(0, total - tokenSucceeded), total);
-  const value = { wallMs, tokens, supervisorTokens, runCoverage, wallCoverage, tokenCoverage };
+  const value = { wallMs, tokens, runCoverage, wallCoverage, tokenCoverage };
   const status = issues.length === 0
     ? CAMPAIGN_SOURCE_STATUS.COMPLETE
     : loaded.runs.length > 0
@@ -1731,10 +1461,6 @@ function runTitleById(runs: RunEvidence[]): Map<string, { fullTitle: string; sho
   return new Map(runs.map((run) => [run.state.runId, deriveCampaignRunTitle(run.state.taskDescription, run.workflow.name ?? run.state.workflowName)]));
 }
 
-function isSimulatedSource(source: string | undefined): boolean {
-  return Boolean(source && /(?:^|[:/_.-])(?:mock|test|fixture|simulation|simulated)(?:$|[:/_.-])/iu.test(source));
-}
-
 function attentionForCampaign(
   loaded: LoadedCampaign,
   readers: CampaignPageSources,
@@ -1743,7 +1469,7 @@ function attentionForCampaign(
   const runIssues = campaignRunIssues(loaded);
   const issues: CampaignIssueSeed[] = [...runIssues];
   let succeeded = runIssues.length ? 0 : 1;
-  let totalSources = 5;
+  let totalSources = 4;
   const runIds = new Set(loaded.runIds);
   const titles = runTitleById(loaded.runs);
   const approvalsByRun = new Set<string>();
@@ -1751,7 +1477,7 @@ function attentionForCampaign(
     issues.push(loaded.inboxIssue ?? issue('campaign-inbox-unavailable', 'Campaign inbox items could not be read'));
     totalSources = 2;
   } else {
-    const envelopes = [loaded.inbox.approvals, loaded.inbox.deferred, loaded.inbox.stale, loaded.inbox.patches];
+    const envelopes = [loaded.inbox.approvals, loaded.inbox.deferred, loaded.inbox.stale];
     for (const envelope of envelopes) {
       if (envelope.status === CAMPAIGN_SOURCE_STATUS.COMPLETE) succeeded += 1;
       else issues.push(issue(
@@ -1771,20 +1497,6 @@ function attentionForCampaign(
         runId: approval.runId,
         href: '/inbox',
         priority: 'high',
-      });
-    }
-    for (const patch of loaded.inbox.patches.items) {
-      if (patch.campaignId !== loaded.summary.id && patch.campaignId !== loaded.summary.storageKey) continue;
-      items.push({
-        id: `patch:${patch.campaignId}:${patch.index}`,
-        kind: 'brief_review',
-        title: 'Brief revision needs a decision',
-        reason: patch.reason,
-        runId: patch.runId,
-        href: '/inbox',
-        priority: patch.severity === 'high' ? 'high' : patch.severity === 'low' ? 'low' : 'medium',
-        source: patch.source,
-        simulated: isSimulatedSource(patch.source),
       });
     }
     for (const deferred of loaded.inbox.deferred.items) {
@@ -1991,7 +1703,6 @@ function campaignStartedAt(loaded: LoadedCampaign): { value: string | null; sour
   if (campaignRunIssues(loaded).length) return { value: null, source: 'unknown' };
   const starts = loaded.runs.map((run) => validIso(run.state.startedAt)).filter((value): value is string => Boolean(value));
   if (starts.length) return { value: starts.sort((a, b) => Date.parse(a) - Date.parse(b))[0], source: 'runs' };
-  if (loaded.legacyStartedAt) return { value: loaded.legacyStartedAt, source: 'legacy' };
   return { value: null, source: 'unknown' };
 }
 
@@ -2007,25 +1718,14 @@ export async function readCampaignOperatorView(
   const researchIssues = [
     ...runIssues,
     loaded.entriesIssue,
-    ...loaded.outerIssues,
     ...loaded.runs.flatMap((run) => [run.workflow.issue, run.confirmIssue].filter((value): value is CampaignIssueSeed => Boolean(value))),
   ].filter((value): value is CampaignIssueSeed => Boolean(value));
   const engineeringSourceIssues = [
     ...runIssues,
     loaded.entriesIssue,
     loaded.taskIssue,
-    ...loaded.outerIssues,
   ].filter((value): value is CampaignIssueSeed => Boolean(value));
-  const goal = asRecord(loaded.legacyState?.goal) ?? asRecord(asRecord(loaded.legacyState?.config)?.goal);
-  const campaignDirection = goal?.higherIsBetter === true || goal?.higher_is_better === true
-    ? 'higher'
-    : goal?.higherIsBetter === false || goal?.higher_is_better === false
-      ? 'lower'
-      : 'unknown';
-  const points = acceptedPointsFromRuns(loaded.runs, researchIssues, nonEmptyString(goal?.metric), campaignDirection);
-  for (const point of outerAcceptedPoints(loaded, loaded.runs)) {
-    if (!points.some((candidate) => candidate.runId === point.runId && candidate.round === point.round && candidate.metricKey === point.metricKey && candidate.value === point.value)) points.push(point);
-  }
+  const points = acceptedPointsFromRuns(loaded.runs, researchIssues);
   const groups = groupResearchPoints(points);
   const uniqueResearchIssues = uniqueIssueSeeds(researchIssues);
   const classificationResult = classify(
@@ -2088,7 +1788,7 @@ function indexAttention(
       count: localRunAttention.size || null,
     };
   }
-  const envelopes: InboxEnvelope<unknown>[] = [inbox.approvals, inbox.deferred, inbox.stale, inbox.patches];
+  const envelopes: InboxEnvelope<unknown>[] = [inbox.approvals, inbox.deferred, inbox.stale];
   const keys = new Set(localRunAttention);
   for (const item of inbox.approvals.items) {
     if (item.campaignId === campaign.id || item.campaignId === campaign.storageKey || runIds.has(item.runId)) keys.add(`run:${item.runId}`);
@@ -2098,9 +1798,6 @@ function indexAttention(
   }
   for (const item of inbox.stale.items) {
     if (item.id === campaign.id || item.id === campaign.storageKey) keys.add(`stale:${item.id}`);
-  }
-  for (const item of inbox.patches.items) {
-    if (item.campaignId === campaign.id || item.campaignId === campaign.storageKey) keys.add(`patch:${item.index}`);
   }
   const envelopeStatus = inboxStatus(envelopes);
   return {
@@ -2132,7 +1829,7 @@ function partialState(record: RunIndexRecord, projectDir: string): StoreState {
 
 function activitySummary(states: StoreState[], readers: CampaignPageSources, incomplete = false): CampaignIndexRow['activity'] {
   const running = states.filter((state) => isRunningRunStatus(state.status));
-  const waiting = states.filter((state) => isPendingRunStatus(state.status) || isPausedRunStatus(state.status) || isAwaitingApprovalRunStatus(state.status));
+  const waiting = states.filter((state) => isPendingRunStatus(state.status) || isPausedRunStatus(state.status));
   let needsIntervention = states.some((state) => isPausedRunStatus(state.status));
   let status: CampaignSourceStatus = incomplete ? CAMPAIGN_SOURCE_STATUS.PARTIAL : CAMPAIGN_SOURCE_STATUS.COMPLETE;
   for (const state of running) {
@@ -2202,6 +1899,7 @@ export async function readCampaignOperatorIndex(
       campaignId: record.campaignId,
       campaignStorageKey: record.campaignStorageKey,
       campaignName: record.campaignName,
+      projectDir,
     });
     if (key) recordsByCampaign.set(key, [...(recordsByCampaign.get(key) ?? []), record]);
   }
@@ -2221,7 +1919,7 @@ export async function readCampaignOperatorIndex(
     const runIds = new Set(records.map((record) => record.runId));
     const activeRecords = records.filter((record) => {
       const status = record.status ?? '';
-      return isRunningRunStatus(status) || isPendingRunStatus(status) || isPausedRunStatus(status) || isAwaitingApprovalRunStatus(status);
+      return isRunningRunStatus(status) || isPendingRunStatus(status) || isPausedRunStatus(status);
     });
     const latestRecord = [...records].sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? '') || b.runId.localeCompare(a.runId))[0];
     const wantedIds = new Set([...activeRecords.map((record) => record.runId), ...(latestRecord ? [latestRecord.runId] : []), ...tasks.filter((task) => task.run_id && runIds.has(task.run_id)).map((task) => task.run_id!)]);

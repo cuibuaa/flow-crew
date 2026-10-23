@@ -1,7 +1,9 @@
 /** Public live-plan interface. Historical readers deliberately keep their own tolerant schemas. */
+import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { type Schema } from './reality-gate/checks/json-schema-match.js';
+import { REALITY_CHECK_TYPES } from './reality-gate/types.js';
 
 const strings: Schema = { type: 'array', items: { type: 'string' } };
 export const PLAN_STAGE_SCHEMA: Schema = {
@@ -18,7 +20,11 @@ export const PLAN_STAGE_SCHEMA: Schema = {
 };
 export const PLAN_SCHEMA: Schema = { type: 'object', required: ['stages'], additionalProperties: false, properties: {
   stages: { type: 'array', minItems: 1, items: PLAN_STAGE_SCHEMA },
-  scope_negotiation: { type: 'object', additionalProperties: false, properties: { defer: strings } },
+  reality_checks: { type: 'array', items: { type: 'object', required: ['name', 'type', 'reads'], properties: {
+    name: { type: 'string' }, type: { type: 'string', enum: [...REALITY_CHECK_TYPES] },
+    reads: { type: 'array', items: { type: 'object' } },
+    params: { type: 'object' }, advisory: { type: 'boolean' },
+  } } },
 } };
 
 // Recorded readers retain historical metadata; generation describes consumed fields.
@@ -34,17 +40,11 @@ export const RECORDED_PLAN_SCHEMA: Schema = { ...PLAN_SCHEMA, additionalProperti
 
 export function renderPlanInterface(): string {
   return '# dispatch.yaml interface\n'
-    + 'Write the complete plan to dispatch.yaml in this run directory as a JSON object {stages: [...]} or equivalent YAML. The planner owns this declared output; the engine admits it after the stage completes.\n'
+    + 'Write the complete plan to dispatch.yaml in this run directory as a JSON object {stages: [...], reality_checks?: [...]} or equivalent YAML. The planner owns this declared output; the engine admits it after the stage completes.\n'
     + JSON.stringify(PLAN_SCHEMA) + '\n'
-    + 'Supply id, configured role, and the project-relative scope needed for writes. Missing scope is closed. '
-    + 'Omitted depends_on means a root. Use edges only for real data dependencies; stage instructions supplement the full brief and cannot narrow or replace its permitted outcomes or stopping conditions. '
-    + 'Empty/omitted criterion_refs conservatively assign all brief criteria; nonempty subsets use exact brief_criteria.json IDs. '
-    + 'Ordinary authored work needs a downstream independent gate. Every gate needs a separate ordinary repair stage with retry_to and depends_on naming that gate, and scope for the permitted repairs; default_gate_retry_loops bounds repair rounds without re-planning. Existing-work audits may consist of gates with empty project scope, plus separate retry_to repairs. Scope amendments must preserve admission. '
-    + 'The engine settles configured validation before each gate review, gives the gate its receipt and sends measured regressions to repair. Gates judge the work independently. '
-    + 'The engine supplies empty artifact duties and each gate verdict when artifact_contract is omitted. '
-    + 'Artifact contracts describe output/input locations for capabilities and ownership. A delivered result must supply its active declared outputs with the declared kind, nonempty policy and exactly-one groups; no proof, replay or intermediate freshness duties are inferred. '
-    + 'Put downstream analysis in stage instructions; create declared terminal documents within admitted write capabilities. The engine publishes run records and summary.md. Write reality_checks.md only for useful independent hard properties; baseline validation is already enforced. '
-    + 'A sibling reality_checks.md is checked when present.';
+    + 'Use PLAN_SCHEMA above for the plan shape and plan-check below for admission errors. '
+    + 'Declare optional deterministic checks in reality_checks; omission inherits admitted checks, while [] clears them. '
+    + 'A sibling fenced-YAML reality_checks.md remains a read alias for one release.';
 }
 
 /** Point the planner at the installed engine and the exact current admission context. */
@@ -54,7 +54,7 @@ export function renderPlannerAdmissionCheck(projectDir: string, runDir: string):
   return '# Check draft admission before finishing\n'
     + 'Write your complete candidate to dispatch.yaml in this run directory. Before finishing, run:\n'
     + `${quote(process.execPath)} ${quote(cli)} plan-check --project ${quote(projectDir)} --run ${quote(runDir)} ${quote(join(runDir, 'dispatch.yaml'))}\n`
-    + 'This read-only command runs the same admission code as the scheduler, using this run’s workflow, brief, criteria, prior discharges, inputs and reality_checks.md. '
+    + 'This read-only command runs the same admission code as the scheduler, using this run’s workflow, brief, criteria, prior discharges, inputs and reality_checks (or the historical reality_checks.md alias). '
     + 'It prints every diagnosable error together. Repair the candidate and check again within this planner attempt until pass is true (exit 0), then return your ordinary stage report. '
     + 'Do not write project deliverables while planning.';
 }
@@ -64,31 +64,24 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
   const { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, copyFileSync } = await import('./engine-fs.js');
   const { resolve, dirname, join } = await import('node:path');
   const { tmpdir } = await import('node:os');
-  const { buildRoleRegistry, createDispatchAdmission, loadWorkflow } = await import('./scheduler/sched_admission/dispatch.js');
-  const { firstDeclaredInputScopeConflict, resolveDeclaredInputWriteBindings } = await import('./scheduler/sched_scope/path-capabilities.js');
+  const { admissionError, buildRoleRegistry, createDispatchAdmission, loadWorkflow } = await import('./scheduler/sched_admission/dispatch.js');
   const { parseBriefFrontmatter } = await import('./scheduler/sched_admission/brief-contract.js');
   const { extractBriefCriteria } = await import('./brief-criteria.js');
   const { inspectDispatchProposal } = await import('./scheduler/sched_policy/dispatch-injection.js');
   const { engineConfigDir } = await import('./config.js');
   let scratch: string | undefined;
   try {
-    const options = new Map<string, string>();
-    const files: string[] = [];
-    for (let i = 1; i < args.length; i++) {
-      const arg = args[i];
-      if (['--project', '--brief', '--run'].includes(arg)) {
-        if (!args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`${arg} requires a value`);
-        options.set(arg, args[++i]);
-      } else if (arg.startsWith('-')) throw new Error(`unknown option ${arg}`);
-      else files.push(arg);
-    }
-    if (options.has('--brief') === options.has('--run') || files.length !== 1) throw new Error('Usage: flowcrew plan-check --project <project> (--brief <brief-file> | --run <run-dir>) <dispatch-file>');
+    const parsed = parseCommandArgs('plan-check', args);
+    if (parsed.help) { process.stdout.write(`${commandUsage('plan-check')}\n`); return 0; }
+    const options = parsed.values;
+    const files = parsed.positionals;
+    if (options.has('--brief') === options.has('--run') || files.length !== 1) throw new Error(commandUsage('plan-check'));
     const projectDir = resolve(options.get('--project') ?? process.cwd());
     const roles = buildRoleRegistry(join(engineConfigDir, 'agents'));
     let runDirPath: string;
     let state: import('./store.js').StoreState;
     let baseStages: import('./scheduler/sched_admission/configuration.js').StageConfig[];
-    const errors: string[] = [];
+    const errors: import('./scheduler/sched_admission/dispatch.js').DispatchAdmissionError[] = [];
     if (options.has('--run')) {
       runDirPath = resolve(options.get('--run')!);
       const { readArchivedRunStateFromDirectory } = await import('./store.js');
@@ -97,7 +90,7 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
     } else {
       const brief = readFileSync(resolve(options.get('--brief')!), 'utf8');
       const parsedBrief = parseBriefFrontmatter(brief);
-      const workflowName = parsedBrief.research ? 'research' : 'default';
+      const workflowName = parsedBrief.research ? 'research' : 'planner';
       baseStages = loadWorkflow(join(engineConfigDir, 'workflows', `${workflowName}.yaml`)).config.stages;
       scratch = mkdtempSync(resolve(tmpdir(), 'fc-plan-check-'));
       runDirPath = scratch;
@@ -106,10 +99,10 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
       const checksPath = resolve(dirname(resolve(files[0])), 'reality_checks.md');
       if (existsSync(checksPath)) copyFileSync(checksPath, join(scratch, 'reality_checks.md'));
       state = { stages: {}, terminalStates: parsedBrief.terminalStates, research: parsedBrief.research } as import('./store.js').StoreState;
-      for (const error of [parsedBrief.frontmatterError, parsedBrief.researchPolicyError, parsedBrief.researchFeasibilityError]) if (error) errors.push(error);
+      for (const error of [parsedBrief.frontmatterError, parsedBrief.researchPolicyError, parsedBrief.researchFeasibilityError]) if (error) errors.push(admissionError('brief_contract_invalid', error, 'frontmatter'));
     }
     const { report } = inspectDispatchProposal({
-      inspectDispatchAdmission: createDispatchAdmission(firstDeclaredInputScopeConflict), resolveDeclaredInputWriteBindings,
+      inspectDispatchAdmission: createDispatchAdmission(),
     }, {
       rawDispatchText: readFileSync(resolve(files[0]), 'utf8'),
       dispatchStageId: baseStages.find(stage => stage.dynamic_dispatch)?.id ?? 'plan',
@@ -119,7 +112,7 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
     process.stdout.write(`${JSON.stringify({ ...report, errors, pass: errors.length === 0 }, null, 2)}\n`);
     return errors.length ? 1 : 0;
   } catch (error) {
-    process.stdout.write(`${JSON.stringify({ pass: false, errors: [error instanceof Error ? error.message : String(error)] })}\n`);
+    process.stdout.write(`${JSON.stringify({ pass: false, errors: [{ code: 'plan_check_failed', message: error instanceof Error ? error.message : String(error), field: 'dispatch.yaml' }] })}\n`);
     return 1;
   } finally { if (scratch) rmSync(scratch, { recursive: true, force: true }); }
 }

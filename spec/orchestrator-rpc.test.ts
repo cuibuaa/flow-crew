@@ -1,5 +1,6 @@
+import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, linkSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import net, { type Server, type Socket } from 'node:net';
@@ -12,6 +13,7 @@ import {
   DEFAULT_RPC_TIMEOUT_MS,
   DaemonUnavailableError,
   RpcOutcomeUnknownError,
+  RpcRemoteError,
   formatDaemonRegistration,
   rpcErrorExitCode,
   sendRpc,
@@ -20,6 +22,8 @@ import {
 } from '../src/orchestrator-rpc.js';
 import type { CancellationResult } from '../src/run-control.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
+// The daemon loads stage integrity, whose publication observer sees the socket removal.
+import '../src/engine-integrity.js';
 
 let tempDir: string;
 let socketPath: string;
@@ -81,10 +85,45 @@ describe('sendRpc delivery truth', () => {
 
     const error = await rejectionOf(sendRpc(socketPath, { cmd: 'status' }, 100));
 
-    expect(error.constructor).toBe(Error);
-    expect(error.name).toBe('Error');
+    expect(error).toBeInstanceOf(RpcRemoteError);
+    expect((error as RpcRemoteError).code).toBe('RPC_REFUSED');
     expect(error.message).toBe('daemon-declared-error');
     expect(rpcErrorExitCode(error)).toBe(1);
+  });
+
+  it('preserves typed error codes and wraps success on the wire', async () => {
+    server = await startRpcServer(socketPath, (request) => {
+      if (request.cmd === 'status') return { ok: true };
+      throw Object.assign(new Error('held by operator'), { code: 'DEPLOYMENT_HELD' });
+    });
+    expect(await sendRpc(socketPath, { cmd: 'status' })).toEqual({ ok: true });
+    const failure = await rejectionOf(sendRpc(socketPath, { cmd: 'retry', id: 3 }));
+    expect(failure).toMatchObject({ code: 'DEPLOYMENT_HELD', message: 'held by operator' });
+    const wire = await new Promise<string>((resolve, reject) => {
+      const peer = net.createConnection(socketPath);
+      let data = '';
+      peer.on('error', reject);
+      peer.on('connect', () => peer.write(JSON.stringify({ cmd: 'status' })));
+      peer.on('data', chunk => { data += chunk; });
+      peer.on('end', () => resolve(data));
+    });
+    expect(JSON.parse(wire)).toEqual({ ok: true, result: { ok: true } });
+  });
+
+  it('keeps an existing UPPER_SNAKE error code through the boundary', async () => {
+    server = await startRpcServer(socketPath, () => { throw new Error('BRIEF_NOT_ADMITTED: review required'); });
+    const error = await rejectionOf(sendRpc(socketPath, { cmd: 'status' }));
+    expect(error).toMatchObject({ code: 'BRIEF_NOT_ADMITTED', message: 'BRIEF_NOT_ADMITTED: review required' });
+  });
+
+  it.each([
+    [], {}, { ok: true, result: null }, { ok: false, message: 'refused' },
+    { ok: false, code: 'REFUSED' }, { ok: 'bad', result: {} },
+  ])('keeps an invalid response outcome unknown: %j', async payload => {
+    await listen(socket => { socket.once('data', () => socket.end(JSON.stringify(payload))); });
+    const error = await rejectionOf(sendRpc(socketPath, { cmd: 'register', task: { projectDir: tempDir } }));
+    expect(error).toBeInstanceOf(RpcOutcomeUnknownError);
+    expect(rpcErrorExitCode(error)).toBe(2);
   });
 
   it('treats a peer close after reading the request as outcome unknown', async () => {
@@ -139,7 +178,7 @@ describe('sendRpc delivery truth', () => {
   it('maps task CLI connection failure to 1 and post-write timeout to 2', async () => {
     const missing = new Capture();
     const missingCode = await cmdTask(
-      ['task', 'list', '--port', socketPath],
+      ['task', 'list', '--socket', socketPath],
       { stdout: missing.stdout as any, stderr: missing.stderr as any, rpcTimeoutMs: 100 },
     );
 
@@ -151,7 +190,7 @@ describe('sendRpc delivery truth', () => {
     });
     const silent = new Capture();
     const silentCode = await cmdTask(
-      ['task', 'cancel', '7', '--port', socketPath],
+      ['task', 'cancel', '7', '--socket', socketPath],
       { stdout: silent.stdout as any, stderr: silent.stderr as any, rpcTimeoutMs: 100 },
     );
 
@@ -185,7 +224,7 @@ describe('sendRpc delivery truth', () => {
 
   it('round-trips run-id cancellation and its observable pending state', async () => {
     server = await startRpcServer(socketPath, (request) => {
-      expect(request).toEqual({ cmd: 'cancel-run', runId: 'run-e13', unit: 'campaign-e13.service' });
+      expect(request).toEqual({ cmd: 'cancel', runId: 'run-e13', unit: 'campaign-e13.service' });
       return {
         ok: false,
         status: 'cancelling',
@@ -203,7 +242,7 @@ describe('sendRpc delivery truth', () => {
     });
 
     const response = await sendRpc<CancellationResult>(socketPath, {
-      cmd: 'cancel-run',
+      cmd: 'cancel',
       runId: 'run-e13',
       unit: 'campaign-e13.service',
     });
@@ -295,3 +334,17 @@ class Capture {
     return Buffer.concat(this.stderrChunks).toString('utf-8');
   }
 }
+
+describe('startRpcServer after an unclean daemon exit', () => {
+  it('replaces the socket a killed daemon left behind', async () => {
+    // A second name for a listening socket survives the listener's close, like a socket left by SIGKILL.
+    const previous = net.createServer();
+    const previousPath = join(tempDir, 'previous.sock');
+    await new Promise<void>(resolve => previous.listen(previousPath, resolve));
+    linkSync(previousPath, socketPath);
+    await new Promise<void>(resolve => previous.close(() => resolve()));
+    expect(existsSync(socketPath)).toBe(true);
+    server = await startRpcServer(socketPath, () => ({ ok: true, data: 'pong' }) as never);
+    expect(server.listening).toBe(true);
+  });
+});

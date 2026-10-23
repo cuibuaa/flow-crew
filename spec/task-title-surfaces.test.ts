@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import type { Server } from 'node:net';

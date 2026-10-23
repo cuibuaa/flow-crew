@@ -1,5 +1,5 @@
 import { afterAll, expect } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validationEnvironment } from "./src/validation-environment.js";
@@ -85,7 +85,6 @@ installLoopbackListenFence(() => expect.getState().testPath);
 // The process already has its test-runner preload; it must not pass that ambient
 // executable injection or a supervised launch channel to project children.
 const testEnvironment = validationEnvironment(isolation.root, process.env);
-const isolatedDaemonSocket = testEnvironment.env.FLOWCREW_DAEMON_SOCKET!;
 for (const name of Object.keys(process.env)) delete process.env[name];
 Object.assign(process.env, testEnvironment.env);
 
@@ -95,7 +94,11 @@ process.env.HOME = isolation.home;
 process.env.USERPROFILE = isolation.home;
 delete process.env.FC_HOME;
 process.env.FLOWCREW_VITEST_ROOT = isolation.root;
-process.env.FLOWCREW_DAEMON_SOCKET = isolatedDaemonSocket;
+// Capacity is a fixture input, never the developer's live root-disk policy.
+const fixtureBin = join(isolation.home, 'bin');
+mkdirSync(fixtureBin);
+writeFileSync(join(fixtureBin, 'disk-guard'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+process.env.PATH = `${fixtureBin}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}`;
 
 // Capture the setup-owned inputs at the import boundary. Tests examine this
 // construction, rather than requiring any variable from the invoking shell.
@@ -107,7 +110,6 @@ getIsolationRegistry().environments.set(isolation.root, {
 });
 
 const store = await import("./src/store.js");
-const runEvents = await import("./src/run-events.js");
 store.setFcGlobalDir(isolation.fcHome);
 
 // Only browser-environment files pay to install DOM matchers. Test-file
@@ -123,8 +125,6 @@ afterAll(() => {
   // sleeping in every spec file. The process registry remains the final
   // fallback for unrelated callbacks that outlive teardown.
   store.setFcGlobalDir(isolation.fcHome);
-  process.env.FLOWCREW_DAEMON_SOCKET = isolatedDaemonSocket;
-  runEvents.clearAttemptSummaryRefreshDebounce();
   isolation.cleanup();
   restoreEnv("HOME", previousHome);
   restoreEnv("USERPROFILE", previousUserProfile);

@@ -2,7 +2,7 @@
 import { loadEngineDefaults as loadDefaults } from '../../config.js';
 import { z } from 'zod';
 import { type AgentConfig } from '../../adapters/base.js';
-import { RecordedArtifactContractSchema, artifactActivation } from '../../artifact-declarations.js';
+import { ArtifactContractSchema, RecordedArtifactContractSchema, artifactActivation } from '../../artifact-declarations.js';
 import { type StoreState, RUN_STATUS } from '../../store.js';
 import { parseCondition } from '../../condition.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
@@ -55,24 +55,13 @@ const StageFields = z.object({
   /** Canonical IDs from the run-local brief_criteria.json artifact. */
   criterion_refs: z.array(z.string()).optional().default([]),
   /** Versioned exact outputs and reads; an explicit empty contract is meaningful. */
-  artifact_contract: RecordedArtifactContractSchema.optional(),
+  artifact_contract: ArtifactContractSchema.optional(),
 });
 
-/** Reject retired execution requests before Zod strips unknown metadata. */
-export function refuseCompetition(value: unknown): void {
-  if (!value || typeof value !== 'object') return;
-  if (Object.hasOwn(value, 'race')) throw new Error('race is no longer supported: every authoring stage runs one author; remove the competition request');
-  for (const child of Object.values(value)) refuseCompetition(child);
-}
-
-export const StageConfigSchema = z.preprocess((value, context) => {
-  try { refuseCompetition(value); }
-  catch (error) { context.addIssue({ code: 'custom', path: ['race'], message: (error as Error).message }); }
-  return value;
-}, StageFields);
+export const StageConfigSchema = StageFields;
 
 /** Read-only history retains the ownership marker; it never enables execution. */
-export const RecordedStageConfigSchema = StageFields.extend({ race: z.boolean().optional() });
+export const RecordedStageConfigSchema = StageFields.extend({ race: z.boolean().optional(), artifact_contract: RecordedArtifactContractSchema.optional() });
 export type StageConfig = z.infer<typeof StageFields>;
 export type RecordedStageConfig = z.infer<typeof RecordedStageConfigSchema>;
 
@@ -89,11 +78,7 @@ const WorkflowFields = z.object({
 }).refine((workflow) => !workflow.dispatch || workflow.stages.some((stage) => stage.dynamic_dispatch), {
   path: ['dispatch'], message: 'a fixed dispatch is the answer of a dynamic_dispatch stage; declare that stage',
 });
-export const WorkflowConfigSchema = z.preprocess((value, context) => {
-  try { refuseCompetition(value); }
-  catch (error) { context.addIssue({ code: 'custom', path: ['race'], message: (error as Error).message }); }
-  return value;
-}, WorkflowFields);
+export const WorkflowConfigSchema = WorkflowFields;
 export const RecordedWorkflowConfigSchema = WorkflowFields.safeExtend({ stages: z.array(RecordedStageConfigSchema).min(1) });
 export type WorkflowConfig = z.infer<typeof WorkflowFields>;
 
@@ -180,7 +165,7 @@ export function normalizeStageContracts(stages: StageConfig[]): StageConfig[] {
   for (const stage of stages) {
     const contract = stage.artifact_contract = RecordedArtifactContractSchema.parse(stage.artifact_contract === undefined ? {
       version: 1, produces: [],
-      reads: [], groups: [], replays: [],
+      reads: [], groups: [],
     } : stage.artifact_contract);
     const path = stage.dynamic_dispatch ? 'dispatch.yaml' : stage.is_gate ? `verdict_${stage.id}.json` : undefined;
     if (!path) continue;

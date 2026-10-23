@@ -1,29 +1,39 @@
-// Boundary: Intersect write capabilities with preserved input identities, excluding declared outputs; reuse admission scope parsing and matching.
-import { ROLLBACK_INVENTORY_EXCLUDED_DIRECTORIES } from "../../generated-path-policy.js";
+// Bind task-frozen identities once; inventory ordinary output through Git and retain planner matching for reporting.
+import { spawnSync } from "node:child_process";
 import { basename, dirname, join, isAbsolute, relative, resolve } from "node:path";
 import { lstatSync, readdirSync, statSync, realpathSync } from "node:fs";
-import { normalizedProjectPath, normalizedProjectContentPath, literalTreeCapabilityRoot, scopeMatchesProjectPath, scopeLanguagesMayOverlap } from "../sched_admission/scope-services.js";
-import { type ParsedScope, parseDeclaredScope } from "../sched_admission/frontier.js";
-import { extractBriefOutputDeclarations, verifyDeclaredBriefInputs } from "../../ship-inputs.js";
+import { normalizedProjectPath, normalizedProjectContentPath, scopeMatchesProjectPath } from "../sched_admission/scope-services.js";
+import { parseDeclaredScope } from "../sched_admission/frontier.js";
+import { extractBriefOutputDeclarations, parseBriefInputs } from "../../ship-inputs.js";
 
-export const REPAIR_DIFF_SKIP_DIRS = ROLLBACK_INVENTORY_EXCLUDED_DIRECTORIES;
 
 export function listProjectFiles(
   projectDir: string,
   options: { skipDirectory?: (relativePath: string) => boolean; complete?: boolean } = {},
 ): string[] {
+  if (!options.complete) {
+    const inventory = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.'], {
+      cwd: projectDir, encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    });
+    if (inventory.status === 0) return [...new Set(inventory.stdout.split('\0'))]
+      .filter(path => normalizedProjectContentPath(path) !== undefined
+        && !path.split('/').slice(0, -1).some((_, i, parts) => options.skipDirectory?.(parts.slice(0, i + 1).join('/'))))
+      .sort();
+  }
   const files: string[] = [];
   const walk = (dir: string, prefix: string): void => {
     let names: string[];
     try { names = readdirSync(dir); } catch (error) { if (options.complete) throw error; return; }
     for (const name of names) {
-      if (!options.complete && REPAIR_DIFF_SKIP_DIRS.has(name)) continue;
       const absolute = join(dir, name);
       const relative = prefix ? `${prefix}/${name}` : name;
+      if (!normalizedProjectContentPath(relative)) continue;
       try {
         const stat = lstatSync(absolute);
         if (stat.isSymbolicLink()) files.push(relative);
         else if (stat.isDirectory()) {
+          if (options.complete) files.push(relative);
           if (!options.skipDirectory?.(relative)) walk(absolute, relative);
         }
         else if (stat.isFile()) files.push(relative);
@@ -50,38 +60,14 @@ export function listProjectFilesAt(projectDir: string, rawRoot: string, followRo
     if (stat.isFile()) return [root];
     if (!stat.isDirectory()) return [];
   } catch (error) {
-    if (options.complete && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (options.complete && code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
     return [];
   }
   return listProjectFiles(absoluteRoot, options).map((path) => `${root}/${path}`);
 }
 
-/** A request already contained by an admitted tree is a no-op and needs no new preimage. */
-export function scopeRequestAlreadyAuthorized(
-  requested: ParsedScope,
-  priorScopes: readonly ParsedScope[],
-): boolean {
-  if (requested.kind === 'unknown') return false;
-  const requestedAnchor = requested.kind === 'glob'
-    ? requested.directoryPrefix
-    : requested.value;
-  if (!requestedAnchor) return false;
-  return priorScopes.some((prior) => {
-    if (prior.kind === 'unknown') return false;
-    const requestedPattern = requested.kind === 'glob'
-      ? normalizedProjectPath(requested.raw)
-      : undefined;
-    const priorPattern = prior.kind === 'glob'
-      ? normalizedProjectPath(prior.raw)
-      : undefined;
-    if (requestedPattern && requestedPattern === priorPattern) return true;
-    const priorRoot = literalTreeCapabilityRoot(prior);
-    return Boolean(priorRoot
-      && (requestedAnchor === priorRoot || requestedAnchor.startsWith(`${priorRoot}/`)));
-  });
-}
-
-export interface DeclaredInputWriteBinding {
+export interface ImmutableEvidenceBinding {
   /** Project-relative spelling from the admitted brief. */
   path: string;
   /** Canonical filesystem identity when the input exists. */
@@ -95,27 +81,21 @@ export interface DeclaredInputWriteBinding {
   }[];
 }
 
-/** Resolve the exact launch-blocking input declaration. Missing inputs remain
- * protected lexically; setup owns the separate existence/readability refusal. */
-export function resolveDeclaredInputWriteBindings(
-  projectDir: string,
-  brief: string,
-): DeclaredInputWriteBinding[] {
-  const outputs = extractBriefOutputDeclarations(brief).flatMap((output) => {
+/** Freeze structured input identities before authors start. Explicit output
+ * declarations retain precedence; planner estimates cannot amend evidence. */
+export function resolveImmutableEvidenceBindings(projectDir: string, brief: string): ImmutableEvidenceBinding[] {
+  const frozen = parseBriefInputs(brief).references.filter(input => input.frozen === true).map(input => input.path);
+  const outputs = extractBriefOutputDeclarations(brief).flatMap(output => {
     const path = normalizedProjectPath(output.path);
     return path ? [{ path, resolvedPaths: [canonicalPotentialProjectPath(projectDir, path),
-      // Replacing an output symlink authorizes its entry as well as its target.
       join(canonicalPotentialProjectPath(projectDir, dirname(path)), basename(path))],
       kind: output.expectedType === 'directory' ? 'tree' as const : 'file' as const }] : [];
   });
-  return verifyDeclaredBriefInputs(brief, projectDir).inputs.flatMap((input) => {
-    const path = normalizedProjectPath(input.path);
-    if (!path) return [];
-    let kind: DeclaredInputWriteBinding['kind'] = 'file';
-    try {
-      if (statSync(input.resolvedPath).isDirectory()) kind = 'tree';
-    } catch { /* setup reports a missing input; retain the lexical file reservation */ }
-    return [{ path, resolvedPath: input.resolvedPath, kind, outputs }];
+  return frozen.map(path => {
+    const resolvedPath = canonicalPotentialProjectPath(projectDir, path);
+    let kind: ImmutableEvidenceBinding['kind'] = 'file';
+    try { if (statSync(join(projectDir, path)).isDirectory()) kind = 'tree'; } catch { /* preserve observed absence */ }
+    return { path, resolvedPath, kind, outputs };
   });
 }
 
@@ -139,94 +119,48 @@ export function canonicalPotentialProjectPath(projectDir: string, rawPath: strin
   return resolve(projectDir, normalized);
 }
 
-function parsedScopeIntersectsInputPath(
-  scope: ParsedScope,
-  inputPath: string,
-  inputKind: DeclaredInputWriteBinding['kind'],
-): boolean {
-  return inputKind === 'file'
-    ? scopeMatchesProjectPath(scope, inputPath)
-    : scopeLanguagesMayOverlap(scope, { kind: 'tree', raw: inputPath, value: inputPath });
-}
-
-export interface DeclaredInputScopeConflict {
+export interface ImmutableEvidenceConflict {
   scope: string;
   inputPath: string;
-  inputKind: DeclaredInputWriteBinding['kind'];
+  inputKind: ImmutableEvidenceBinding['kind'];
   comparison: 'declared_path' | 'resolved_identity';
 }
 
-/** Intersect one write capability with one frozen input in both the authored
- * path namespace and the resolved filesystem namespace. */
-export function declaredInputScopeConflict(
-  rawScope: string,
-  input: DeclaredInputWriteBinding,
-  projectDir?: string,
-): DeclaredInputScopeConflict | undefined {
-  const scope = parseDeclaredScope(rawScope);
-  const anchor = scope.kind === 'glob' ? scope.directoryPrefix : scope.kind === 'unknown' ? undefined : scope.value;
-  // A declaration authorizes its file, or its directory tree, rather than the
-  // enclosing input. Check the whole requested capability so broad revisions
-  // cannot use one output to release protected siblings.
-  if (anchor && input.outputs?.some(output => {
-    const contains = (root: string, candidate: string): boolean => output.kind === 'tree'
-      ? absolutePathContains(root, candidate)
-      : scope.kind === 'exact' && root === candidate;
-    return projectDir === undefined ? contains(output.path, anchor)
-      : output.resolvedPaths.some(root => contains(root, canonicalPotentialProjectPath(projectDir, anchor)));
-  })) return undefined;
-  if (parsedScopeIntersectsInputPath(scope, input.path, input.kind)) {
-    return { scope: rawScope, inputPath: input.path, inputKind: input.kind, comparison: 'declared_path' };
+/** Compare a concrete member with the already-bound task identities. Exact
+ * task outputs override preservation only inside their canonical location. */
+export function immutableEvidenceConflict(path: string, input: ImmutableEvidenceBinding, projectDir?: string): ImmutableEvidenceConflict | undefined {
+  const normalized = normalizedProjectContentPath(path);
+  if (!normalized) return undefined;
+  const canonical = projectDir ? canonicalPotentialProjectPath(projectDir, normalized) : normalized;
+  if (input.outputs?.some(output => (projectDir ? output.resolvedPaths : [output.path]).some(root =>
+    output.kind === 'tree' ? absolutePathContains(root, canonical) : root === canonical))) return undefined;
+  if (normalized === input.path || input.kind === 'tree' && normalized.startsWith(`${input.path}/`)) {
+    return { scope: path, inputPath: input.path, inputKind: input.kind, comparison: 'declared_path' };
   }
-  if (!projectDir || scope.kind === 'unknown') return undefined;
-
-  // A root-level glob has no alternative symlink identity to resolve; its
-  // authored language was evaluated exactly above.
-  if (scope.kind === 'glob' && !anchor) return undefined;
-  const canonicalAnchor = canonicalPotentialProjectPath(projectDir, anchor ?? '');
-  const canonicalInput = resolve(input.resolvedPath);
-
-  if (scope.kind !== 'glob') {
-    const overlaps = input.kind === 'tree'
-      ? absolutePathContains(canonicalInput, canonicalAnchor)
-        || absolutePathContains(canonicalAnchor, canonicalInput)
-      : absolutePathContains(canonicalAnchor, canonicalInput);
-    return overlaps
-      ? { scope: rawScope, inputPath: input.path, inputKind: input.kind, comparison: 'resolved_identity' }
-      : undefined;
+  if (projectDir && (input.kind === 'tree' ? absolutePathContains(input.resolvedPath, canonical) : input.resolvedPath === canonical)) {
+    return { scope: path, inputPath: input.path, inputKind: input.kind, comparison: 'resolved_identity' };
   }
-
-  if (input.kind === 'tree' && absolutePathContains(canonicalInput, canonicalAnchor)) {
-    return { scope: rawScope, inputPath: input.path, inputKind: input.kind, comparison: 'resolved_identity' };
-  }
-  if (!absolutePathContains(canonicalAnchor, canonicalInput)) return undefined;
-  const suffix = relative(canonicalAnchor, canonicalInput).replace(/\\/g, '/');
-  const syntheticInput = [anchor, suffix].filter(Boolean).join('/');
-  if (!parsedScopeIntersectsInputPath(scope, syntheticInput, input.kind)) return undefined;
-  return { scope: rawScope, inputPath: input.path, inputKind: input.kind, comparison: 'resolved_identity' };
+  return undefined;
 }
 
-export function firstDeclaredInputScopeConflict(
+export function firstImmutableEvidenceConflict(
   scopes: readonly string[],
-  inputs: readonly DeclaredInputWriteBinding[],
+  inputs: readonly ImmutableEvidenceBinding[],
   projectDir?: string,
-): DeclaredInputScopeConflict | undefined {
+): ImmutableEvidenceConflict | undefined {
   for (const scope of scopes) {
     for (const input of inputs) {
-      const conflict = declaredInputScopeConflict(scope, input, projectDir);
+      const conflict = immutableEvidenceConflict(scope, input, projectDir);
       if (conflict) return conflict;
     }
   }
   return undefined;
 }
 
-/** Admission, live enforcement, settlement and revisions share the same input
- * preservation rule, including the brief's explicit output authorizations. */
-export function scopeContainsPath(scope: string[], rawPath: string, projectDir?: string, inputs: readonly DeclaredInputWriteBinding[] = []): boolean {
+/** Planner membership is reporting metadata, never write authority. */
+export function scopeContainsPath(scope: string[], rawPath: string): boolean {
   const normalized = normalizedProjectPath(rawPath);
-  if (!normalized) return false;
-  return !firstDeclaredInputScopeConflict([normalized], inputs, projectDir)
-    && scope.some((entry) => scopeMatchesProjectPath(parseDeclaredScope(entry), normalized));
+  return Boolean(normalized && scope.some(entry => scopeMatchesProjectPath(parseDeclaredScope(entry), normalized)));
 }
 
 export function canonicalProjectWriteUnion(...collections: string[][]): string[] {

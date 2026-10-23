@@ -90,7 +90,7 @@ describe('direct workflow', () => {
       } else {
         expect(call.user).toContain('Canonical brief criteria assigned to this stage');
       }
-      expect(call.user).toContain('scope_revision_request');
+      expect(call.user).toContain('Planner project-path estimate');
       expect(call.user).toContain('Stage budget:');
       expect(call.user).toContain('# Execution clock');
       expect(call.user).toContain('Engine state query');
@@ -100,7 +100,6 @@ describe('direct workflow', () => {
         expect(call.system).toContain('independent evidence across the allowed input families and complete observable');
         expect(call.system).toContain('unchanged baseline is the oracle wherever preservation is required');
         expect(call.system).toContain('supplied references and constraints');
-        expect(call.user).toContain('Quantified-remedy feasibility contract');
       } else {
         expect(call.system).toContain('After the last change, supply relevant evidence');
       }
@@ -195,7 +194,6 @@ describe('direct workflow', () => {
   it('refuses at admission a brief its fixed plan cannot satisfy, before any stage runs', async () => {
     const refusals: Array<[string, string]> = [
       ['workflow: direct\nresearch:\n  baseline: 0.5', 'direct cannot run the research loop'],
-      ['workflow: direct\nprogram:\n  name: study\n  phase: first', 'direct cannot run the program loop'],
     ];
     for (const [frontmatter, reason] of refusals) {
       const calls: string[] = [];
@@ -213,27 +211,27 @@ describe('direct workflow', () => {
     writeFileSync(join(projectDir, 'evidence', 'source.md'), 'frozen evidence\n');
     writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
     const calls: string[] = [];
-    const final = await runDirect(brief('workflow: direct\ninputs: [notes.md, evidence]\noutputs: [docs/report.md]'), calls, true);
+    const final = await runDirect(brief('workflow: direct\ninputs:\n  - {path: notes.md, frozen: true}\n  - {path: evidence, frozen: true}\noutputs: [docs/report.md]') + '\nKeep all declared inputs frozen.\n', calls, true);
     expect(final.status, final.failureReason).toBe('complete');
     expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
     expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('frozen notes\n');
     expect(readFileSync(join(projectDir, 'evidence', 'source.md'), 'utf8')).toBe('frozen evidence\n');
   });
 
-  it('keeps an unrestored input violation blocking completion across repairs', async () => {
+  it('rejects frozen input corruption across repairs while restoring exact bytes', async () => {
     writeFileSync(join(projectDir, 'notes.md'), 'frozen notes\n');
-    const final = await runDirect(brief('workflow: direct\ninputs: [notes.md]\noutputs: [docs/report.md]'), [], false, (_prompt, _role, opts) => {
+    const final = await runDirect(brief('workflow: direct\ninputs: [{path: notes.md, frozen: true}]\noutputs: [docs/report.md]') + '\nKeep all declared inputs frozen.\n', [], false, (_prompt, _role, opts) => {
       if (opts.stageId === 'implement' || opts.stageId === 'repair') {
         writeFileSync(join(projectDir, 'notes.md'), 'unauthorized\n');
       }
     });
     expect(final.status).not.toBe('complete');
-    expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('unauthorized\n');
+    expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('frozen notes\n');
     const audits = Object.values(final.stages).flatMap(stage => stage.attempts ?? [])
       .flatMap(attempt => attempt.constraintAudit
         ? [JSON.parse(readFileSync(join(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
-    expect(audits.flatMap(audit => audit.rollbackFailures)).toContain('notes.md');
-    expect(audits.flatMap(audit => audit.rolledBackWrites)).not.toContain('notes.md');
+    expect(audits.flatMap(audit => audit.rollbackFailures)).toEqual([]);
+    expect(audits.flatMap(audit => audit.rolledBackWrites)).toContain('notes.md');
   });
 
   it.each(['notes.md', 'evidence/source.md', 'evidence/new.md', 'alias/source.md'])('restores an input write to %s despite broad scope', async (path) => {
@@ -249,7 +247,7 @@ describe('direct workflow', () => {
         ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline'],
       ]) execFileSync('git', args);
     `], { cwd: projectDir, env: { ...process.env, HOME: fixtureRoot, FC_HOME: join(fixtureRoot, 'private-store') } });
-    const final = await runDirect(brief('workflow: direct\ninputs: [notes.md, evidence]\noutputs: [docs/report.md]'), [], false, (_prompt, _role, opts) => {
+    const final = await runDirect(brief('workflow: direct\ninputs:\n  - {path: notes.md, frozen: true}\n  - {path: evidence, frozen: true}\noutputs: [docs/report.md]') + '\nKeep all declared inputs frozen.\n', [], false, (_prompt, _role, opts) => {
       if (opts.stageId === 'implement' || opts.stageId === 'repair') writeFileSync(join(projectDir, path), 'unauthorized\n');
     });
     expect(final.status).not.toBe('complete');

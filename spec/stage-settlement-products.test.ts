@@ -1,12 +1,14 @@
+import type { ArtifactContractInput } from './test-support/fixture-types.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
-import { ArtifactContractSchema, type ArtifactContractInput } from '../src/artifact-declarations.js';
-import { createRun, fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { ArtifactContractSchema } from '../src/artifact-declarations.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { runStage } from '../src/worker.js';
-import { clearAttemptSummaryRefreshDebounce } from '../src/run-events.js';
+
 
 // The external-output boundary needs a fixture installation separate from the
 // project and its output; worker settlement has no context parameter of its own.
@@ -27,7 +29,7 @@ beforeEach(() => {
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   ({ runId, runDirPath: directory } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']));
 });
-afterEach(() => { clearAttemptSummaryRefreshDebounce(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 const role = { name: 'coder', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Deliver the declared result.' };
 const contract = (produces: ArtifactContractInput['produces'], extra: Partial<ArtifactContractInput> = {}) =>
   ArtifactContractSchema.parse({ version: 1, produces, reads: [], ...extra });
@@ -35,7 +37,7 @@ const product = { id: 'product', root: 'project' as const, path: 'report.md', ki
 async function settle(declaration: ReturnType<typeof contract>, work: () => void = () => {}, exitCode = 0, statuses = {}) {
   return runStage({ async run() { work(); return { output: 'Delivered', exitCode, duration_ms: 1 }; } }, {
     stageId: 'work', role, dependsOn: [], promptTemplate: 'Deliver the result', projectDir: project,
-    runId, runDir: directory, retries: 0, timeout_ms: 10000, projectWriteScope: ['report.md', 'reports', 'other.md'],
+    runId, runDir: directory, retries: 0, timeout_ms: 10000,
     artifactContract: declaration, artifactStatuses: statuses,
   });
 }
@@ -128,7 +130,7 @@ describe('direct author product settlement', () => {
       output: JSON.stringify({ status, summary: 'Result', files_modified: [], checks: [], caveats: [] }), exitCode: 0, duration_ms: 1,
     }; } }, {
       stageId: 'work', role, dependsOn: [], promptTemplate: 'Deliver the entire brief', projectDir: project,
-      runId, runDir: directory, retries: 0, timeout_ms: 10000, projectWriteScope: ['report.md'],
+      runId, runDir: directory, retries: 0, timeout_ms: 10000,
       artifactContract: contract([]), gateReviewed: true,
       outputSchema: HANDOFF_SCHEMA,
     });

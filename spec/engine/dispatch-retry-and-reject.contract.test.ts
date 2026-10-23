@@ -1,4 +1,6 @@
+import '../test-support/policy-runtime.js';
 import { parse as parseYaml } from 'yaml';
+import { planRetryRequirement, preparePlanRetryCandidate, recordPlanRetryRefusal } from '../../src/plan-retry-monotone.js';
 import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 import { artifacts } from '../spec_contracts/declared-fixtures.js';
 /**
@@ -26,7 +28,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runWorkflow, diagnoseEmptyDispatch, decideEmptyDispatchAction, buildRetryPreamble, type WorkflowConfig } from '../../src/scheduler.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
-import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, writeRunState } from '../../src/store.js';
+import { createRun } from '../test-support/create-run.js';
+import { fcGlobalDir, readRunState, runDir, setFcGlobalDir, writeRunState } from '../../src/store.js';
 
 let fixtureRoot: string, projectDir: string, previousStore: string;
 beforeEach(() => {
@@ -38,7 +41,7 @@ afterEach(() => { setFcGlobalDir(previousStore); rmSync(fixtureRoot, { recursive
 
 const planWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: plan-only', 'defaults:', '  max_iterations: 4', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: {description: '',  name: 'plan-only', defaults: { max_iterations: 4 }, stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  config: {description: '',  name: 'plan-only', defaults: { max_iterations: 4 }, stages: [{ artifact_contract: artifacts([], [], []),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
 };
 
 function writeRoles(roles: string[]): string {
@@ -70,7 +73,7 @@ function setupResearchAdmissionRun(): string {
   state.terminalStates = { shipped: { paths: ['docs/final.md'] } };
   state.research = {
     baseline: 0,
-    policy: 'best_of_n',
+    policy: 'greedy_stack',
     resultFile: 'docs/round.json',
     reportDir: 'docs',
     stop: { beat: 0.5, maxRounds: 2 },
@@ -83,7 +86,7 @@ function setupResearchAdmissionRun(): string {
     '    paths: [docs/final.md]',
     'research:',
     '  baseline: 0',
-    '  policy: best_of_n',
+    '  policy: greedy_stack',
     '  result_file: docs/round.json',
     '  report_dir: docs',
     '  stop: {beat: 0.5, max_rounds: 2}',
@@ -161,24 +164,14 @@ describe('FIX 1 (pure) — decideEmptyDispatchAction retries under budget, escal
   const genuine = { detail: 'every stage referenced an unknown role: "wizard"', unknownRoles: ['"wizard"'], transient: false };
 
   it('transient flake under budget → RETRY (not fatal)', () => {
-    const a = decideEmptyDispatchAction(transient, 0, 2);
+    const a = decideEmptyDispatchAction(transient);
     expect(a.action).toBe('retry');
     if (a.action === 'retry') {
-      expect(a.nextRetry).toBe(1);
-      expect(a.error).toMatch(/^invalid dispatch\.yaml/);
-    }
-  });
-  it('transient flake at budget → ESCALATE as failed WITH the specific detail (not the generic punt)', () => {
-    const a = decideEmptyDispatchAction(transient, 2, 2);
-    expect(a.action).toBe('escalate');
-    if (a.action === 'escalate') {
-      expect(a.status).toBe('failed');
-      expect(a.reason).toContain('could not be parsed');
-      expect(a.reason).not.toMatch(/Refine the task brief and try again\.?$/);
+      expect(a.detail).toContain('could not be parsed');
     }
   });
   it('genuine unknown-role failure → ESCALATE IMMEDIATELY (fail faster), prefer escalated, name the roles', () => {
-    const a = decideEmptyDispatchAction(genuine, 0, 2); // budget remaining, but genuine → no retry
+    const a = decideEmptyDispatchAction(genuine); // budget remaining, but genuine → no retry
     expect(a.action).toBe('escalate');
     if (a.action === 'escalate') {
       expect(a.status).toBe('escalated');
@@ -201,12 +194,15 @@ describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-p
   it('emits the dispatch failure, detail, schema, and incumbent-replacement instruction', () => {
     const rd = join(projectDir, 'rd'); mkdirSync(join(rd, 'stages', 'plan'), { recursive: true });
     writeFileSync(join(rd, 'stages', 'plan', 'status.json'),
-      JSON.stringify({ status: 'pending', retries: 1, error: 'invalid dispatch.yaml: some stages referenced unknown role(s): "wizard". Available roles: planner.' }));
+      JSON.stringify({ status: 'pending', retries: 1, admissionFailure: { code: 'dispatch_refused', attemptIndex: 0 }, error: 'invalid dispatch.yaml: some stages referenced unknown role(s): "wizard". Available roles: planner.' }));
+    writeFileSync(join(rd, 'dispatch.yaml'), 'stages: []');
+    recordPlanRetryRefusal({ runDirPath: rd, prepared: preparePlanRetryCandidate({ runDirPath: rd, stageId: 'plan', iteration: 1, attemptIndex: 1 }), maxAttempts: 3,
+      unsatisfied: [planRetryRequirement({ code: 'role_unknown', field: 'role', stageId: 'cast', message: 'Unknown role wizard; available roles: planner.' })] });
     const p = buildRetryPreamble(1, 1000, rd, 'plan');
-    expect(p).toMatch(/failed to emit a valid dispatch\.yaml/i);
+    expect(p).toContain('dispatch admission rejected');
     expect(p).toContain('wizard');
     expect(p).toMatch(/dispatch\.yaml interface/);
-    expect(p).toMatch(/Replace the structurally invalid dispatch\.yaml/);
+    expect(p).toContain('complete replacement');
     expect(p).not.toMatch(/continue from where you left off/);
   });
 });
@@ -312,8 +308,8 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'));
     expect(parseYaml(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8')))
       .toEqual(parseYaml(declaredDispatch(measuringOwnerDispatch)));
-    const archived = JSON.parse(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'), 'utf-8')) as { errors: string[] };
-    expect(archived.errors.join('\n')).toContain('separate measurement from terminalization');
+    const archived = JSON.parse(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'), 'utf-8')) as { errors: Array<{message: string}> };
+    expect(archived.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('separate measurement from terminalization');
   }, 60_000);
 
   it('refuses terminal settlement for a finalizer product delta with no independent review', async () => {

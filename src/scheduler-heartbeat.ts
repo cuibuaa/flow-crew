@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { renameSync, unlinkSync, writeFileSync } from './engine-fs.js';
+import { atomicWrite, unlinkSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads';
@@ -48,14 +48,8 @@ function parseJson<T>(path: string): T | undefined {
 }
 
 function atomicJson(path: string, value: unknown): void {
-  const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf-8', flag: 'wx' });
-  try {
-    renameSync(temporary, path);
-  } catch (error) {
-    try { unlinkSync(temporary); } catch { /* best effort */ }
-    throw error;
-  }
+  // Heartbeat and stall warnings describe a live PID/generation, not recovery state.
+  atomicWrite(path, `${JSON.stringify(value, null, 2)}\n`, { durability: 'replace-only' });
 }
 
 function heartbeatPath(runPath: string): string {

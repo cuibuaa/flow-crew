@@ -1,3 +1,4 @@
+import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
 /** Campaign phase readers, review health and iteration/campaign output; receives gate and scope-planning readers. */
 import { type CampaignTriggerType, type StoreState, isPausedRunStatus, requireRunArtifactDirectory, runDir, campaignsRoot as storeCampaignsRoot } from '../../store.js';
 import { writeFileSync, appendFileSync, mkdirSync } from '../../engine-fs.js';
@@ -8,12 +9,10 @@ import { projectPersistenceIdentity } from '../../project-identity.js';
 import { type CampaignPhaseMetadata, isTerminalStudyCompletionArtifact } from '../sched_admission/configuration.js';
 
 export interface CampaignWriterServices {
-  readGateVerdict: typeof import('../../scheduler.js').readGateVerdict;
+  readGateEvaluation: typeof import('../../scheduler.js').readGateEvaluation;
   readTerminalStudyCompletionEvidence(projectDir: string, runId: string, stageId: string): Record<string, unknown> | null;
   pendingScopePlanningInputs(runDirPath: string): readonly { digest: string; stageKind: string; requestedPaths: string[]; rejectionReason: string }[];
 }
-
-export const CAMPAIGN_PHASE_COMPLETE_SENTINEL = 'complete';
 
 function phaseMetadataFromArtifact(artifact: unknown, gateId: string): CampaignPhaseMetadata | null {
   if (!artifact || typeof artifact !== 'object') return null;
@@ -57,7 +56,8 @@ function phaseMetadataFromArtifact(artifact: unknown, gateId: string): CampaignP
 function parseGatePhaseMetadata(projectDir: string, state: StoreState, gateId: string): CampaignPhaseMetadata | null {
   try {
     const parsed = JSON.parse(readFileSync(join(runDir(projectDir, state.runId), `verdict_${gateId}.json`), 'utf-8'));
-    return phaseMetadataFromArtifact(parsed, gateId);
+    const metadata = phaseMetadataFromArtifact(parsed, gateId);
+    return metadata ? { ...metadata, pass: readGateEvaluation(projectDir, gateId, state.runId)?.pass === true } : null;
   } catch { return null; } // Missing/malformed verdicts cannot establish a phase.
 }
 
@@ -98,8 +98,7 @@ export interface CampaignAlert {
 export type CampaignEntry = CampaignHistoryEntry;
 
 /** Campaign health observes failed reviews, never invents a principal metric. */
-export function checkCampaignHealth(entries: CampaignEntry[], triggers?: { enabled?: boolean; repeatedFailureAfter?: number }): CampaignAlert | null {
-  if (triggers?.enabled === false) return null;
+export function checkCampaignHealth(entries: CampaignEntry[]): CampaignAlert | null {
   if (entries.at(-1)?.terminalStudyComplete === true || entries.at(-1)?.workflowSatisfied === true) return null;
   const bySeq = new Map<number, CampaignEntry>();
   for (const entry of entries.filter(entry => entry.gate)) {
@@ -107,7 +106,7 @@ export function checkCampaignHealth(entries: CampaignEntry[], triggers?: { enabl
     if (!prior || (entry.iteration ?? 0) > (prior.iteration ?? 0)
         || (entry.iteration ?? 0) === (prior.iteration ?? 0) && entry.timestamp > prior.timestamp) bySeq.set(entry.seq, entry);
   }
-  const threshold = triggers?.repeatedFailureAfter ?? 3;
+  const threshold = 3;
   const recent = [...bySeq.values()].sort((a, b) => a.seq - b.seq).slice(-threshold);
   return recent.length >= threshold && recent.every(e => !e.pass && e.gate === recent[0].gate)
     ? { type: 'repeated_failure', action: 'inject_researcher', message: `${threshold} consecutive failures on gate ${recent[0].gate}` }
@@ -115,7 +114,7 @@ export function checkCampaignHealth(entries: CampaignEntry[], triggers?: { enabl
 }
 
 export function createCampaignWriters(services: CampaignWriterServices) {
-  const { readGateVerdict, readTerminalStudyCompletionEvidence, pendingScopePlanningInputs } = services;
+  const { readGateEvaluation, readTerminalStudyCompletionEvidence, pendingScopePlanningInputs } = services;
 
   function appendIterationLog(
     projectDir: string,
@@ -147,7 +146,7 @@ export function createCampaignWriters(services: CampaignWriterServices) {
       if (ss.error) lines.push(`Error: ${ss.error}`);
       if (ss.duration_ms !== undefined) lines.push(`Duration: ${Math.round(ss.duration_ms / 1000)}s`);
       // Include actual gate verdict if available
-      const verdict = readGateVerdict(projectDir, sid, runId);
+      const verdict = readGateEvaluation(projectDir, sid, runId);
       if (verdict) {
         lines.push(`Gate verdict: ${verdict.pass ? 'PASS' : 'FAIL'}${verdict.reason ? ' — ' + verdict.reason : ''}`);
       }
@@ -171,11 +170,7 @@ export function createCampaignWriters(services: CampaignWriterServices) {
   }
 
   function writeCampaignEntry(projectDir: string, state: StoreState): void {
-    const campaignStorageKey = resolveCampaignStorageKey({
-      campaignId: state.campaignId,
-      campaignStorageKey: state.campaignStorageKey,
-      campaignName: state.campaignName,
-    });
+    const campaignStorageKey = resolveCampaignStorageKey(state);
     if (!campaignStorageKey) return;
     const campaignsDir = storeCampaignsRoot();
     mkdirSync(campaignsDir, { recursive: true });
@@ -189,8 +184,8 @@ export function createCampaignWriters(services: CampaignWriterServices) {
       const files = readdirSync(runPath).filter(f => f.startsWith('verdict_') && f.endsWith('.json'));
       for (const f of files) {
         try {
-          const v = JSON.parse(readFileSync(join(runPath, f), 'utf-8'));
-          if (typeof v.pass === 'boolean') { gatesTotal++; if (v.pass) gatesPassed++; }
+          const v = readGateEvaluation(projectDir, f.slice('verdict_'.length, -'.json'.length), state.runId);
+          if (v && typeof v.pass === 'boolean') { gatesTotal++; if (v.pass) gatesPassed++; }
         } catch { /* skip */ }
       }
     } catch { /* no verdicts */ }
@@ -203,16 +198,15 @@ export function createCampaignWriters(services: CampaignWriterServices) {
       gates: `${gatesPassed}/${gatesTotal}`,
       status: state.status,
       timestamp: new Date().toISOString(),
-      campaignId: canonicalCampaignId(state.campaignId ?? state.campaignName ?? campaignStorageKey)
+      campaignId: canonicalCampaignId(state.campaignId ?? state.campaignName ?? campaignStorageKey, projectDir)
         ?? campaignStorageKey,
       campaignStorageKey,
       campaignName: state.campaignName,
       projectIdentity: projectPersistenceIdentity(projectDir),
     };
     const terminalStudyComplete = readTerminalStudyCompletionEvidence(projectDir, state.runId, phase.gate);
-    if (terminalStudyComplete) {
+    if (terminalStudyComplete && phase.pass) {
       entry.pass = true;
-      entry.status = 'complete';
       entry.gates = '1/1';
       entry.workflowSatisfied = true;
       entry.terminalStudyComplete = true;

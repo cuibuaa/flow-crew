@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { cancelTask, fetchRunDetail, fetchRunStageOutput, fetchRunSummary, resumeTask, type StageOutputResponse } from "../api";
+import { ApiError, cancelTask, fetchRunDetail, fetchRunStageOutput, fetchRunSummary, resumeTask, type StageOutputResponse } from "../api";
 import type { RealityGateCheckDiagnostic, RealityGateOutputTail, RunDetailData, RunStage } from "../types";
 import ActivityFeed from "./ActivityFeed";
 import {
@@ -319,7 +319,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
         .catch((error: unknown) => {
           if (cancelled) return;
           const message = error instanceof Error ? error.message : String(error);
-          const absent = /(?:404|not found)/i.test(message);
+          const absent = error instanceof ApiError && error.status === 404;
           setLog({
             text: absent
               ? "(This terminal stage produced no output.md.)"
@@ -505,7 +505,7 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
         </div>
         <div className="header-actions" aria-label="Run controls">
           <button className="btn danger" type="button" disabled={controlBusy || terminalRun} onClick={() => void controlRun("cancel")}>Cancel</button>
-          <button className="btn" type="button" disabled={controlBusy || resumeQueued || !["stopped", "failed", "incomplete"].includes(run.status)} onClick={() => void controlRun("resume")}>Resume</button>
+          <button className="btn" type="button" disabled={controlBusy || resumeQueued || !["cancelled", "failed", "incomplete"].includes(run.status)} onClick={() => void controlRun("resume")}>Resume</button>
         </div>
         {failures.failedStageIds.length > 0 ? (
           <div className="header-actions" aria-label="Failure inspection actions">
@@ -571,13 +571,6 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
           <strong>Awaiting approval</strong>
           <span>No worker is active for this run. Review the pending decision before work can continue.</span>
           <Link className="btn" to="/inbox">Open approval in Inbox</Link>
-        </div>
-      ) : null}
-
-      {!terminalRun && run.status === "awaiting_approval" ? (
-        <div className="approval-waiting" role="status" data-testid="legacy-approval-banner" data-answers="Q2 Q5">
-          <strong>Legacy plan approval pending</strong>
-          <span>No stage is executing. This legacy plan-review state is separate from the consequential-action inbox.</span>
         </div>
       ) : null}
 

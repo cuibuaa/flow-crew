@@ -1,21 +1,24 @@
+import './test-support/policy-runtime.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   createBriefAdmission,
   inspectBrief,
   verifyBriefAdmission,
-  type BriefAdmissionRecord,
 } from '../src/brief-preflight.js';
 import { parseBriefFrontmatter } from '../src/scheduler.js';
 
-function structuredBrief(body = '# Goal\nShip an observable result.\n'): string {
+function structuredBrief(body = '# Goal\nShip an observable result.\n', metadata: string[] = []): string {
   return [
     '---',
+    ...metadata,
     'terminal_states:',
     '  complete:',
     '    paths: [docs/result.md]',
     '---',
     body,
+    '## Requirements',
+    '1. Produce the declared deliverable.',
   ].join('\n');
 }
 
@@ -32,7 +35,7 @@ describe('shared brief preflight', () => {
   });
 
   it('reports absent, valid, and invalid frontmatter while keeping findings overridable', () => {
-    const absent = inspectBrief('# Goal\nDo the work.');
+    const absent = inspectBrief('# Goal\nDo the work.\n## Requirements\n1. Produce the declared deliverable.');
     expect(absent.frontmatter.status).toBe('absent');
     expect(absent.contractReady).toBe(true);
     expect(absent.findings.map((finding) => finding.code)).toContain('terminal_states_missing');
@@ -85,361 +88,23 @@ describe('shared brief preflight', () => {
     });
   });
 
-  it('keeps Chinese criterion support while all generated guidance remains English', () => {
-    const criterion = '源码里必须出现 `new JSDOM(...)`。';
-    const report = inspectBrief(`${structuredBrief()}\n${criterion}\n`);
-    const finding = report.findings.find((item) => item.code === 'criterion_instrument_wording');
-    expect(finding).toMatchObject({
-      level: 'warn',
-      consequential: true,
-      excerpt: criterion,
-    });
-    expect(finding?.risk).toMatch(/^This wording makes/);
-    expect(finding?.suggestion).toMatch(/^State the observable property/);
-    expect(`${finding?.message}\n${finding?.risk}\n${finding?.suggestion}`.replace(criterion, ''))
-      .not.toMatch(/[\u3400-\u9fff]/u);
-  });
-
-  it('admits advisory findings while binding exact bytes and recorded findings', () => {
+  it('admits advisory findings while binding exact bytes', () => {
     const text = 'Fix the race';
     const report = inspectBrief(text);
     const record = createBriefAdmission(report, { kind: 'not_required' });
     expect(verifyBriefAdmission(text, record).status).toBe('valid');
     expect(verifyBriefAdmission(`${text}\n`, record).status).toBe('digest_mismatch');
     expect(verifyBriefAdmission(text, undefined).status).toBe('missing');
-    expect(verifyBriefAdmission(text, { ...record, findingFingerprints: [] }).status).toBe('findings_mismatch');
-    const cleanText = structuredBrief();
-    const clean = createBriefAdmission(inspectBrief(cleanText), { kind: 'not_required' });
-    for (const findingFingerprints of [undefined, 'invalid', [1]]) {
-      expect(verifyBriefAdmission(cleanText, { ...clean, findingFingerprints } as unknown as BriefAdmissionRecord).status)
-        .toBe('findings_mismatch');
-    }
   });
-
 
 });
 
 describe('decision-grade brief requirements', () => {
-  it('fails a requested headline statistic that omits its distribution', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Result',
-      'Report the headline statistic as the quoted result in basis points.',
-    ].join('\n')));
-
-    expect(report.findings).toContainEqual(expect.objectContaining({
-      code: 'headline_distribution_missing',
-      level: 'fail',
-      message: expect.stringContaining('mean, median'),
-      suggestion: expect.stringContaining('percentile'),
-    }));
-    expect(report.contractReady).toBe(false);
-  });
-
-  it('accepts a headline statistic that requires center and distribution location', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Result',
-      'Report the headline statistic as the quoted result in basis points.',
-      'Also report the mean, median, and percentile where that value sits in its own distribution.',
-    ].join('\n')));
-
-    expect(report.findings.some((finding) => finding.code === 'headline_distribution_missing')).toBe(false);
-    expect(report.contractReady).toBe(true);
-  });
-
-  it('is invariant at every ordinary soft-wrap position in the headline distribution requirement', () => {
-    const sentence = 'Also report the mean, median, and where the quoted value sits in its own distribution.';
-    const variants = [sentence, ...[...sentence.matchAll(/\s+/g)].map((match) =>
-      `${sentence.slice(0, match.index)}\n${sentence.slice((match.index ?? 0) + match[0].length)}`)];
-    const observations = variants.map((variant) => inspectBrief(structuredBrief([
-      '# Result',
-      'Report the headline statistic as the quoted result in basis points.',
-      variant,
-    ].join('\n'))).findings.some(({ code }) => code === 'headline_distribution_missing'));
-
-    expect(observations).toEqual(Array(variants.length).fill(false));
-  });
-
-  it('does not join distribution fragments across distinct paragraphs or list items', () => {
-    for (const separated of [
-      'Report the mean, median, and where the\n\nquoted value sits in its own distribution.',
-      '- Report the mean, median, and where the\n- quoted value sits in its own distribution.',
-    ]) {
-      const report = inspectBrief(structuredBrief([
-        '# Result',
-        'Report the headline statistic as the quoted result in basis points.',
-        separated,
-      ].join('\n')));
-      expect(report.findings.map(({ code }) => code)).toContain('headline_distribution_missing');
-    }
-  });
-
-  it('does not treat a prohibition as the required headline distribution', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Result',
-      'Report the headline statistic as the quoted result in basis points.',
-      'Do not report its mean, median, percentile, quantile, rank, or distribution location.',
-    ].join('\n')));
-
-    expect(report.findings.map((finding) => finding.code)).toContain('headline_distribution_missing');
-  });
-
-  it('fails a frozen pre-registration that omits structural feasibility', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Measurement',
-      'Pre-register and freeze the selection rule before measuring any outcomes.',
-    ].join('\n')));
-
-    expect(report.findings).toContainEqual(expect.objectContaining({
-      code: 'preregistration_feasibility_missing',
-      level: 'fail',
-      message: expect.stringContaining('expected qualifying-member count'),
-      suggestion: expect.stringContaining('numeric minimum'),
-    }));
-    expect(report.contractReady).toBe(false);
-  });
-
-  it('does not mistake a prose promise of future arithmetic for a feasibility calculation', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Measurement',
-      'Pre-register and freeze the selection rule before measuring any outcomes.',
-      'Compute the expected qualifying-member count from structural quantities: universe size times eligibility rates.',
-      'Set the feasibility floor: 10. Below that floor, revise the rule before any outcome is seen.',
-    ].join('\n')));
-
-    expect(report.findings).toContainEqual(expect.objectContaining({
-      code: 'preregistration_feasibility_missing',
-      level: 'fail',
-      message: expect.stringContaining('machine-readable research.feasibility'),
-    }));
-    expect(report.contractReady).toBe(false);
-  });
-
-  it('does not treat prohibited feasibility work as a pre-registration feasibility figure', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Measurement',
-      'Pre-register and freeze the selection rule before measuring any outcomes.',
-      'Do not compute the expected qualifying-member count from structural quantities.',
-      'The feasibility floor is 10, but never revise the rule below it before any outcome is seen.',
-    ].join('\n')));
-
-    expect(report.findings.map((finding) => finding.code)).toContain('preregistration_feasibility_missing');
-  });
-
-  it('catches the minimal base-form pre-register commitment with its directive as evidence', () => {
-    const report = inspectBrief(structuredBrief([
-      '# D1 — Pre-register the matching rule, before computing any return',
-      'It must establish: that the pre-registration preceded any performance computation; the matched',
-      'percentile and trial counts.',
-    ].join('\n')));
-
-    expect(report.findings.find((finding) => finding.code === 'preregistration_feasibility_missing'))
-      .toMatchObject({
-        code: 'preregistration_feasibility_missing',
-        level: 'fail',
-        consequential: true,
-        excerpt: 'D1 — Pre-register the matching rule, before computing any return',
-      });
-  });
-
-  it('recognizes compact action/object paraphrases independent of headings and surrounding text', () => {
-    const variants = [
-      '# Protocol\nPreregister the eligibility threshold before observing results.',
-      '# Selection\nPre-register one screening criterion before loading prices.',
-      '# Selection\nPre-register the final auditable matched-control-rule before loading prices.',
-      [
-        '# Context',
-        'Use only structural inputs during setup.',
-        'Before opening outcomes, this phase must preregister the final cutoff.',
-        'Record the decision in the ordinary run log.',
-      ].join('\n'),
-      [
-        '# Measurement',
-        'The analyst must pre-register the chosen',
-        'filter before evaluation begins.',
-      ].join('\n'),
-    ];
-
-    for (const body of variants) {
-      const finding = inspectBrief(structuredBrief(body)).findings
-        .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
-      expect({ body, finding }).toEqual({
-        body,
-        finding: expect.objectContaining({ level: 'fail', consequential: true }),
-      });
-    }
-  });
-
-  it('does not connect a seed-list action to an unrelated CI rule in the same unit', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Engineering work',
-      'Pre-register the reproducibility seed list and leave the CI evaluation rule unchanged.',
-    ].join('\n')));
-
-    expect(report.findings.map((finding) => finding.code))
-      .not.toContain('preregistration_feasibility_missing');
-  });
-
-  it('scans the complete direct-object phrase without making modifier count a bypass', () => {
-    const body = [
-      '# Measurement',
-      'Pre-register the final auditable point-in-time matched-control selection rule before computing returns.',
-    ].join('\n');
-    const finding = inspectBrief(structuredBrief(body)).findings
-      .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
-
-    expect({ condition: 'complete direct-object phrase', body, observed: finding }).toEqual({
-      condition: 'complete direct-object phrase',
-      body,
-      observed: expect.objectContaining({ level: 'fail', consequential: true }),
-    });
-  });
-
-  it('requires the selection-procedure noun to be the object head, not its modifier', () => {
-    const descriptions = [
-      'Pre-register the selection rule documentation before computing returns.',
-      "Pre-register the selection rule's documentation before computing returns.",
-      'Pre-register the threshold review notes before observing results.',
-      'Pre-register and document the selection rule before computing returns.',
-    ];
-
-    for (const description of descriptions) {
-      const observed = inspectBrief(structuredBrief(`# Engineering work\n${description}`)).findings
-        .some((finding) => finding.code === 'preregistration_feasibility_missing');
-      expect({ condition: 'procedure noun is only a modifier', description, expected: false, observed })
-        .toEqual({ condition: 'procedure noun is only a modifier', description, expected: false, observed: false });
-    }
-  });
-
-  it('treats neither-nor as negation without suppressing a later positive action', () => {
-    const disclaimer = 'Pre-register neither rule nor threshold before computing returns.';
-    const disclaimers = [
-      disclaimer,
-      'This task must pre-register neither rule nor threshold before computing returns.',
-      'Pre-register neither rule nor threshold and do not freeze any selection before computing returns.',
-    ];
-    for (const body of disclaimers) {
-      const observed = inspectBrief(structuredBrief(`# Measurement\n${body}`)).findings
-        .some((finding) => finding.code === 'preregistration_feasibility_missing');
-      expect({ condition: 'neither-nor disclaimer', body, expected: false, observed })
-        .toEqual({ condition: 'neither-nor disclaimer', body, expected: false, observed: false });
-    }
-
-    const finding = inspectBrief(structuredBrief([
-      '# Measurement',
-      disclaimer,
-      'Pre-register the final threshold before opening outcomes.',
-    ].join('\n'))).findings.find((candidate) => candidate.code === 'preregistration_feasibility_missing');
-    expect({ condition: 'later positive action survives disclaimer', observed: finding }).toEqual({
-      condition: 'later positive action survives disclaimer',
-      observed: expect.objectContaining({
-        level: 'fail',
-        consequential: true,
-        excerpt: 'Pre-register the final threshold before opening outcomes.',
-      }),
-    });
-  });
-
-  it('recognizes positive task-owned commitments through directives, owners, and assigned artifacts', () => {
-    const commitments = [
-      'Create the pre-registration artifact for the selection rule before measuring any outcomes.',
-      'Freeze the threshold before evaluating the gold outcomes.',
-      'This stage must lock the cutoff before opening results.',
-      'We will create the pre-registration for the selection signal protocol before computing returns.',
-      'The researcher must freeze the selection rule before opening outcomes.',
-      'Before measuring outcomes, freeze the selection rule.',
-      'The selection threshold must be frozen before outcomes are measured.',
-      'Please freeze the selection rule before evaluation.',
-      [
-        'The stage must write its pre-registration artifact before loading prices.',
-        'The selection rule is recorded in that artifact.',
-      ].join(' '),
-    ];
-
-    for (const commitment of commitments) {
-      const report = inspectBrief(structuredBrief(`# Measurement\n${commitment}`));
-      expect(report.findings).toContainEqual(expect.objectContaining({
-        code: 'preregistration_feasibility_missing',
-        level: 'fail',
-        consequential: true,
-      }));
-      expect(report.findings.find((finding) => finding.code === 'preregistration_feasibility_missing'))
-        .not.toHaveProperty('attributedQuote');
-    }
-  });
-
-  it('stays silent for detector, guide, post-mortem, and plain-language disclaimer descriptions', () => {
-    const descriptions = [
-      'This task performs no pre-registration and adopts no selection rule.',
-      'Update the detector so it recognizes when a brief says “Pre-register the selection rule before measuring outcomes.”',
-      'Explain in the guide that a brief which freezes a threshold before evaluation requires research.feasibility.',
-      'The prior round pre-registered its selection rule before outcomes and selected no names.',
-      'This stage must write a guide explaining pre-registration selection rules before testing the detector.',
-      'This task must explain why the prior round froze its threshold before measuring outcomes.',
-      'Update the guide to explain why you must freeze a selection rule before opening outcomes.',
-      'Frozen thresholds are discussed in this guide before evaluation.',
-    ];
-
-    for (const description of descriptions) {
-      const report = inspectBrief(structuredBrief(`# Engineering work\n${description}`));
-      expect(report.findings.map((finding) => finding.code))
-        .not.toContain('preregistration_feasibility_missing');
-    }
-  });
-
-  it('treats a structurally attributed quotation as description, not as a task directive', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Engineering work',
-      'The following quoted legacy instruction is documentation, not an instruction for this task:',
-      '',
-      '> Pre-register and freeze the selection rule before outcomes.',
-    ].join('\n')));
-
-    expect(report.findings.map((finding) => finding.code))
-      .not.toContain('preregistration_feasibility_missing');
-  });
-
-  it('does not let a disclaimer suppress a qualifying directive before, after, or beside it', () => {
-    const disclaimer = 'This task does not pre-register anything and adopts no selection rule.';
-    const directive = 'Pre-register and freeze the selection rule before measuring outcomes.';
-    const adversarialBriefs = [
-      `${disclaimer}\n${directive}`,
-      `${directive}\n${disclaimer}`,
-      `${disclaimer}; ${directive}`,
-      `This task does not pre-register anything, but freeze the selection rule before measuring outcomes.`,
-      `${disclaimer}\nThe researcher must freeze the selection rule before opening outcomes.`,
-      `${disclaimer}\nPre-register the eligibility threshold before opening outcomes.`,
-      `> ${directive}`,
-      ['```text', directive, '```'].join('\n'),
-      [
-        'The following quoted legacy instruction is documentation:',
-        '',
-        `> ${directive}`,
-        directive,
-      ].join('\n'),
-      [
-        'The following quoted instruction is not for this task:',
-        '',
-        `> ${directive}`,
-      ].join('\n'),
-    ];
-
-    for (const body of adversarialBriefs) {
-      const finding = inspectBrief(structuredBrief(`# Measurement\n${body}`)).findings
-        .find((candidate) => candidate.code === 'preregistration_feasibility_missing');
-      expect(finding).toMatchObject({
-        level: 'fail',
-        consequential: true,
-        excerpt: expect.stringMatching(/(?:Pre-register|freeze the selection rule)/i),
-      });
-      expect(finding?.excerpt).not.toMatch(/does not pre-register/i);
-    }
-  });
-
-  it('fails an operator-supplied figure without both anti-anchoring fields', () => {
+  it('fails a frontmatter-declared supplied figure without both anti-anchoring fields', () => {
     const report = inspectBrief(structuredBrief([
       '# Context',
       'The operator supplied an expected result of -112.89 bps.',
-    ].join('\n')));
+    ].join('\n'), ['supplied_numbers: [-112.89]']));
 
     expect(report.findings).toContainEqual(expect.objectContaining({
       code: 'operator_figure_anti_anchoring_missing',
@@ -450,12 +115,12 @@ describe('decision-grade brief requirements', () => {
     expect(report.contractReady).toBe(false);
   });
 
-  it('accepts an operator-supplied figure with both exact anti-anchoring fields', () => {
+  it('accepts a frontmatter-declared supplied figure with both exact anti-anchoring fields', () => {
     const report = inspectBrief(structuredBrief([
       '# Context',
       'The operator supplied an expected result of -112.89 bps.',
       'The result must include `within_expected_range` and `method_was_not_adjusted_to_match_expectation`.',
-    ].join('\n')));
+    ].join('\n'), ['supplied_numbers: [-112.89]']));
 
     expect(report.findings.some((finding) => finding.code === 'operator_figure_anti_anchoring_missing')).toBe(false);
     expect(report.contractReady).toBe(true);
@@ -466,9 +131,27 @@ describe('decision-grade brief requirements', () => {
       '# Context',
       'The operator supplied an expected result of -112.89 bps.',
       'Do not include `within_expected_range` or `method_was_not_adjusted_to_match_expectation`.',
-    ].join('\n')));
+    ].join('\n'), ['supplied_numbers: [-112.89]']));
 
     expect(report.findings.map((finding) => finding.code)).toContain('operator_figure_anti_anchoring_missing');
+  });
+
+  it.each(['', 'supplied_numbers: []', 'research: {baseline: 42}', 'planner_policies: [evidence_statistics]'])(
+    'only warns for prose expectations without declared supplied numbers: %s', metadata => {
+      const report = inspectBrief(structuredBrief('The operator supplied an expected value of 42.', [metadata]));
+      expect(report.findings).toContainEqual(expect.objectContaining({
+        code: 'operator_figure_anti_anchoring_missing', level: 'warn',
+      }));
+      expect(report.contractReady).toBe(true);
+    },
+  );
+
+  it.each([0, -112.89, 42])('checks a declared number independently of prose: %s', value => {
+    const report = inspectBrief(structuredBrief('# Goal\nMeasure independently.', [`supplied_numbers: [${value}]`]));
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      code: 'operator_figure_anti_anchoring_missing', level: 'fail',
+    }));
+    expect(report.contractReady).toBe(false);
   });
 
   it('does not promote illustrative examples, implementation counts, or unanchored numbers into these requirements', () => {
@@ -490,97 +173,13 @@ describe('decision-grade brief requirements', () => {
   });
 });
 
-describe('logical prose soft-wrap boundaries', () => {
-  function softWraps(sentence: string): string[] {
-    return [sentence, ...[...sentence.matchAll(/\s+/g)].map((match) =>
-      `${sentence.slice(0, match.index)}\n${sentence.slice((match.index ?? 0) + match[0].length)}`)];
-  }
-
-  it('keeps an exact-method criterion exception invariant at every soft wrap', () => {
-    const sentence = 'The implementation must call `legacyProbe()`, because the exact method is the criterion.';
-    for (const variant of softWraps(sentence)) {
-      const report = inspectBrief(structuredBrief(`# Goal\n${variant}`));
-      expect(report.findings.map(({ code }) => code), variant).not.toContain('criterion_instrument_wording');
-    }
-
-    const splitBullets = inspectBrief(structuredBrief([
-      '# Goal',
-      '- The implementation must call `legacyProbe()`.',
-      '- The exact method itself is the criterion.',
-    ].join('\n')));
-    expect(splitBullets.findings.map(({ code }) => code)).toContain('criterion_instrument_wording');
-  });
-
-  it('keeps an assigned floor-artifact writer invariant at every soft wrap', () => {
-    const frontmatter = [
-      'terminal_states:',
-      '  complete:',
-      '    paths: [docs/result.md]',
-      '    stage_glob: docs/stages/stage_*_verdict.md',
-      '    floor:',
-      '      min_attempted_stages: 1',
-    ].join('\n');
-    const sentence = 'The QA stage must write `docs/stages/stage_*_verdict.md` after verification.';
-    for (const variant of softWraps(sentence)) {
-      const report = inspectBrief(`---\n${frontmatter}\n---\n# Workflow\n${variant}`);
-      expect(report.findings.some(({ code }) => code === 'terminal_floor_uncountable_complete'), variant)
-        .toBe(false);
-    }
-
-    const splitBullets = inspectBrief(`---\n${frontmatter}\n---\n# Workflow\n- The QA stage must write evidence.\n- \`docs/stages/stage_*_verdict.md\` is inspected.`);
-    expect(splitBullets.findings.map(({ code }) => code)).toContain('terminal_floor_uncountable_complete');
-  });
-
-  it('keeps a per-stage writable-path mapping invariant at every soft wrap', () => {
-    const sentence = 'Use this per-stage writable paths mapping: Stage 1 may write `src/**` and `spec/**`.';
-    for (const variant of softWraps(sentence)) {
-      const report = inspectBrief(structuredBrief(`# Stage 1 — implementation\n${variant}`));
-      expect(report.findings.some(({ code }) => code === 'stage_writable_paths_missing'), variant)
-        .toBe(false);
-    }
-
-    const splitBullets = inspectBrief(structuredBrief([
-      '# Stage 1 — implementation',
-      '- The implementation stage has a per-stage writable declaration.',
-      '- Paths: `src/**` and `spec/**`.',
-    ].join('\n')));
-    expect(splitBullets.findings.map(({ code }) => code)).toContain('stage_writable_paths_missing');
-  });
-
-  it.each([
-    {
-      label: 'a tilde run inside a longer backtick fence',
-      body: [
-        '````text',
-        '~~~',
-        'The implementation must call `fencedProbe()`.',
-        '~~~',
-        '````',
-      ].join('\n'),
-    },
-    {
-      label: 'a shorter backtick run inside a longer backtick fence',
-      body: [
-        '````text',
-        '```',
-        'The implementation must call `fencedProbe()`.',
-        '```',
-        '````',
-      ].join('\n'),
-    },
-  ])('does not expose criterion prose after $label', ({ body }) => {
-    const report = inspectBrief(structuredBrief(`# Goal\n${body}`));
-    expect(report.findings.map(({ code }) => code)).not.toContain('criterion_instrument_wording');
-  });
-});
-
 describe('brief finding actionability', () => {
   it('attaches a concrete next action to every previously non-actionable finding family', () => {
     const activeResearch = [
       '---',
       'research:',
       '  baseline: 0',
-      '  policy: best_of_n',
+      '  policy: greedy_stack',
       'terminal_states:',
       '  complete:',
       '    paths: [docs/result.md]',
@@ -592,7 +191,7 @@ describe('brief finding actionability', () => {
       '---',
       'research:',
       '  baseline: 0',
-      '  policy: best_of_n',
+      '  policy: greedy_stack',
       '  stop:',
       '    max_rounds: 1',
       'terminal_states:',
@@ -645,6 +244,8 @@ describe('feasibility-only brief declarations', () => {
     '    paths: [docs/result.md]',
     '---',
     preregistration,
+    '## Requirements',
+    '1. Produce the declared deliverable.',
   ].join('\n');
 
   it('evaluates the real diagnostic shape without creating a metric loop', () => {
@@ -781,7 +382,7 @@ describe('feasibility-only brief declarations', () => {
       '---',
       'research:',
       '  baseline: 12.5',
-      '  policy: best_of_n',
+      '  policy: greedy_stack',
       '  higher_is_better: false',
       '  result_file: docs/round.json',
       '  report_dir: docs/reports',
@@ -828,7 +429,7 @@ describe('feasibility-only brief declarations', () => {
     };
     const expectedResearch = {
       baseline: 12.5,
-      policy: 'best_of_n',
+      policy: 'greedy_stack',
       higherIsBetter: false,
       resultFile: 'docs/round.json',
       reportDir: 'docs/reports',
@@ -908,106 +509,6 @@ describe('feasibility-only brief declarations', () => {
   });
 });
 
-describe('gitignored input declaration convention', () => {
-  const ignoredReferenceBrief = (declare: boolean): string => [
-    '---',
-    ...(declare ? ['inputs:', '  - private-data/prices.parquet'] : []),
-    'terminal_states:',
-    '  complete:',
-    '    paths: [docs/result.md]',
-    '---',
-    '# Constraints',
-    '| path | property |',
-    '| --- | --- |',
-    '| `private-data/prices.parquet` | frozen evidence |',
-  ].join('\n');
-
-  it('warns when a neutral table reference under an injected ignored directory is not declared', () => {
-    const report = inspectBrief(ignoredReferenceBrief(false), {
-      gitignoredPathPrefixes: ['private-data/'],
-    });
-
-    expect(report.findings).toContainEqual(expect.objectContaining({
-      code: 'gitignored_input_undeclared',
-      level: 'warn',
-      message: expect.stringContaining('leading frontmatter `inputs:`'),
-      excerpt: '| `private-data/prices.parquet` | frozen evidence |',
-    }));
-  });
-
-  it('accepts the same ignored reference when leading frontmatter declares it', () => {
-    const report = inspectBrief(ignoredReferenceBrief(true), {
-      gitignoredPathPrefixes: ['private-data/'],
-    });
-
-    expect(report.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
-  });
-
-  it('does not report the exact subject-position prohibition as an undeclared input', () => {
-    const brief = [
-      '---',
-      'terminal_states:',
-      '  complete:',
-      '    paths: [docs/result.md]',
-      '---',
-      '# Constraints',
-      'Nothing under `tests/` may be added to version control.',
-    ].join('\n');
-
-    const report = inspectBrief(brief, { gitignoredPathPrefixes: ['tests/'] });
-
-    expect(brief.endsWith('Nothing under `tests/` may be added to version control.')).toBe(true);
-    expect(report.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
-
-    const variant = inspectBrief(structuredBrief(
-      '# Constraints\n**Nothing within `tests/` shall be published at any time**.',
-    ), { gitignoredPathPrefixes: ['tests/'] });
-    expect(variant.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
-  });
-
-  it('retains auxiliary prohibitions while keeping positive nothing-lines visible', () => {
-    const prohibited = [
-      'Do not read `tests/` as an input.',
-      'Never commit anything under `tests/`.',
-    ];
-    for (const line of prohibited) {
-      const report = inspectBrief(structuredBrief(`# Constraints\n${line}`), {
-        gitignoredPathPrefixes: ['tests/'],
-      });
-      expect(report.findings.some((finding) => finding.code === 'gitignored_input_undeclared')).toBe(false);
-    }
-
-    const genuineRequirements = [
-      'Nothing prevents this task from reading `tests/` as an input.',
-      'Nothing under `tests/` is optional; use the directory as an input.',
-      'Nothing under `tests/` may prevent this task from reading the directory as an input.',
-      'Nothing under `tests/` may be added to version control — audit that directory as an input.',
-      'Read everything under `tests/` as a required input.',
-    ];
-    for (const line of genuineRequirements) {
-      const report = inspectBrief(structuredBrief(`# Inputs\n${line}`), {
-        gitignoredPathPrefixes: ['tests/'],
-      });
-      expect(report.findings).toContainEqual(expect.objectContaining({
-        code: 'gitignored_input_undeclared',
-        excerpt: line,
-      }));
-    }
-  });
-
-  it('suppresses only the governed path token when a line names another real input', () => {
-    const line = 'Read `private-data/source.csv` as an input. **Nothing under `tests/` may be added to version control.**';
-    const report = inspectBrief(structuredBrief(`# Inputs\n${line}`), {
-      gitignoredPathPrefixes: ['private-data/', 'tests/'],
-    });
-    const findings = report.findings.filter((finding) => finding.code === 'gitignored_input_undeclared');
-
-    expect(findings).toHaveLength(1);
-    expect(findings[0].message).toContain('private-data/source.csv');
-    expect(findings[0].message).not.toContain('`tests`');
-  });
-});
-
 describe('terminal wall-floor structure', () => {
   it('warns above ten wall minutes with actionable risk and stays quiet at ten', () => {
     const above = inspectBrief([
@@ -1042,129 +543,5 @@ describe('terminal wall-floor structure', () => {
       'Ship the result.',
     ].join('\n'));
     expect(boundary.findings.some((entry) => entry.code.startsWith('terminal_wall_floor_too_high'))).toBe(false);
-  });
-});
-
-describe('per-stage writable-path structure', () => {
-  it('warns for named stages with only a generic permission to write files', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Stage 1 — implementation',
-      'Implement the change. Stages may write files when needed.',
-      '# Stage 2 — QA gate',
-      'Verify the result.',
-    ].join('\n')));
-
-    expect(report.findings).toContainEqual(expect.objectContaining({
-      code: 'stage_writable_paths_missing',
-      level: 'warn',
-      message: expect.stringContaining('per-stage writable-path mapping'),
-    }));
-  });
-
-  it('accepts an explicit Writable paths, by stage mapping', () => {
-    const report = inspectBrief(structuredBrief([
-      '# Stage 1 — implementation',
-      'Implement the change.',
-      '# Stage 2 — QA gate',
-      'Verify the result.',
-      '## Writable paths, by stage',
-      '- Stage 1: `src/**`, `spec/**`',
-      '- Stage 2: read-only',
-    ].join('\n')));
-
-    expect(report.findings.some((entry) => entry.code === 'stage_writable_paths_missing')).toBe(false);
-  });
-});
-
-describe('unsatisfiable stage-count floor', () => {
-  const withFloor = (frontmatter: string, body: string): string =>
-    `---\n${frontmatter}---\n${body}`;
-
-  it('fails an inferred stage_glob floor no stage is asked to satisfy', () => {
-    const report = inspectBrief(withFloor(
-      'terminal_states:\n  complete:\n    paths: [docs/task_summary.md]\n    floor:\n      min_attempted_stages: 3\n',
-      '# Goal\nProduce a summary.\n',
-    ));
-    const finding = report.findings.find((entry) => entry.code === 'terminal_floor_uncountable_complete');
-    expect(finding?.level).toBe('fail');
-    // The message has to say what is counted, why it will not appear, and both ways out.
-    expect(finding?.message).toContain('docs/stage_*_verdict.md');
-    expect(finding?.message).toContain('stage_glob');
-    expect(finding?.risk).toContain('implicit counting pattern');
-    expect(finding?.suggestion).toContain('Set stage_glob explicitly');
-  });
-
-  it('only warns when the author configured stage_glob explicitly', () => {
-    const report = inspectBrief(withFloor(
-      'terminal_states:\n  ceiling_hit:\n    paths: [docs/v8/ceiling_report.md]\n    stage_glob: docs/v8/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 3\n',
-      '# Goal\nExplore.\n',
-    ));
-    // A `stage_glob:` line matches its own pattern, so searching the whole brief would
-    // leave this branch dead. The check reads the instructions only.
-    expect(report.findings.find((entry) => entry.code === 'terminal_floor_uncountable_ceiling_hit')).toMatchObject({
-      level: 'warn',
-      risk: expect.stringContaining('count remains zero'),
-      suggestion: expect.stringContaining('matching evidence files'),
-    });
-  });
-
-  it('does not mistake a passive write check for an assigned stage writer', () => {
-    const report = inspectBrief(withFloor(
-      'terminal_states:\n  complete:\n    paths: [docs/result.md]\n    stage_glob: docs/stages/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 1\n',
-      '# QA\nCheck whether `docs/stages/stage_1_verdict.md` was written; no stage owns that file.\n',
-    ));
-
-    expect(report.findings).toContainEqual(expect.objectContaining({
-      code: 'terminal_floor_uncountable_complete',
-      level: 'warn',
-    }));
-  });
-
-  it('does not mistake an existing output noun for a writer assignment', () => {
-    const report = inspectBrief(withFloor(
-      'terminal_states:\n  complete:\n    paths: [docs/result.md]\n    stage_glob: docs/stages/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 1\n',
-      '# QA\nInspect the existing output `docs/stages/stage_1_verdict.md` for correctness.\n',
-    ));
-
-    expect(report.findings).toContainEqual(expect.objectContaining({
-      code: 'terminal_floor_uncountable_complete',
-      level: 'warn',
-    }));
-  });
-
-  it('still rejects an inferred glob when the instructions happen to mention matching files', () => {
-    const report = inspectBrief(withFloor(
-      'terminal_states:\n  complete:\n    paths: [docs/run/summary.md]\n    floor:\n      min_attempted_stages: 2\n',
-      '# Goal\nEach stage writes `docs/run/stage_1_verdict.md` when it settles.\n',
-    ));
-    expect(report.findings.find((entry) => entry.code === 'terminal_floor_uncountable_complete')).toMatchObject({
-      level: 'fail',
-      message: expect.stringContaining('brief mentions a matching write'),
-    });
-  });
-
-  it('stays silent only when stage_glob is explicit and a stage must write matching files', () => {
-    const report = inspectBrief(withFloor(
-      'terminal_states:\n  complete:\n    paths: [docs/run/summary.md]\n    stage_glob: docs/run/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 2\n',
-      '# Stage 1\nOutputs:\n\n- `docs/run/stage_1_verdict.md`\n',
-    ));
-    expect(report.findings.some((entry) => entry.code.startsWith('terminal_floor_uncountable'))).toBe(false);
-  });
-
-  it('recognizes an inline stage output assignment as a writer contract', () => {
-    const report = inspectBrief(withFloor(
-      'terminal_states:\n  complete:\n    paths: [docs/run/summary.md]\n    stage_glob: docs/run/stage_*_verdict.md\n    floor:\n      min_attempted_stages: 1\n',
-      '# Workflow\n- Stage 1 output: `docs/run/stage_1_verdict.md`\n',
-    ));
-
-    expect(report.findings.some((entry) => entry.code.startsWith('terminal_floor_uncountable'))).toBe(false);
-  });
-
-  it('stays silent for a wall-time-only floor, which is a hard gate on its own', () => {
-    const report = inspectBrief(withFloor(
-      'terminal_states:\n  complete:\n    paths: [docs/task_summary.md]\n    floor:\n      min_wall_minutes: 30\n',
-      '# Goal\nProduce a summary.\n',
-    ));
-    expect(report.findings.some((entry) => entry.code.startsWith('terminal_floor_uncountable'))).toBe(false);
   });
 });

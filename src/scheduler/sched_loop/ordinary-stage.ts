@@ -16,13 +16,11 @@ import { sessionResumeForStage, shouldPreserveSession } from '../sched_admission
 import { log } from '../sched_admission/shared.js';
 import { checkCampaignHealth } from '../sched_policy/campaign.js';
 import { appendAttemptDeadlineContract } from '../sched_policy/prompt-contracts.js';
-import { createScopeBatchContext } from '../sched_scope/scope-batch.js';
 import { gateReviewedAuthorIds, isGateReviewed, isResearchOutcomeGate } from '../sched_settlement/gate-recovery.js';
 import { appendStageExecutionContracts, createSchedulerTechnicalRetryState, prepareSchedulerTechnicalAttempt, recordSchedulerTechnicalAttemptResult, stageInitialTimeout } from '../sched_settlement/stage-execution.js';
 import { StoreState, runDir } from '../../store.js';
 import { runStage } from '../../worker.js';
 import { stageRecordSchema } from '../../handoff.js';
-import { createSchedulerLiveConstraintGuardFactory } from './services.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -33,10 +31,9 @@ export async function executeOrdinaryStage(
   agents: Map<string, AgentConfig>, resolvedAgentsDir: string,
   roleRegistry: Map<string, {name: string; description: string}>,
   technicalRetries: Map<string, TechnicalRetryBudgetState>,
-  ordinaryScopeContext: ReturnType<typeof createScopeBatchContext>,
   skills?: string, taskDescription?: string, availableSkills?: string,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
-  settlementBoundary?: (phase: 'child_closed' | 'attempt_closed') => Promise<boolean>,
+  settlementBoundary?: (phase: 'attempt_closed') => Promise<void>,
 ): Promise<{stage: StageConfig; result: RunResult; currentRetries: number}> {
       if (!agents.has(stage.role)) {
         const agentPath = join(resolvedAgentsDir, `${stage.role}.yaml`);
@@ -94,11 +91,7 @@ export async function executeOrdinaryStage(
         // Campaign context: prepend only fresh, non-terminal, active-phase history.
         // --campaign-context=skip (and its legacy alias) suppresses this verbose block;
         // campaign ownership, telemetry and the compact tried-direction ledger remain intact.
-        const campaignStorageKey = resolveCampaignStorageKey({
-          campaignId: state.campaignId,
-          campaignStorageKey: state.campaignStorageKey,
-          campaignName: state.campaignName,
-        });
+        const campaignStorageKey = resolveCampaignStorageKey(state);
         if (campaignStorageKey && state.inheritCampaignContext !== false) {
           const entries = readCampaignEntries(projectDir, campaignStorageKey);
           if (entries.length > 0) {
@@ -109,8 +102,7 @@ export async function executeOrdinaryStage(
               const iterLog = join(prevRunDir, 'iteration_log.md');
               if (existsSync(iterLog) && !summaryPaths.includes(iterLog)) summaryPaths.push(iterLog);
             }
-            const triggers = state.campaignTriggers;
-            const alert = checkCampaignHealth(selection.entries, triggers);
+            const alert = checkCampaignHealth(selection.entries);
             const context = formatCampaignContextBlock({
               campaignLabel: state.campaignName ?? state.campaignId ?? campaignStorageKey,
               selection,
@@ -184,14 +176,7 @@ export async function executeOrdinaryStage(
         resumeSessionId: resumeSession?.sessionId,
         sessionOwnerStageId: resumeSession?.ownerStageId,
         preserveSession: shouldPreserveSession(stage, sorted, sessionReuseEnabled),
-        projectWriteScope: stage.scope ?? [],
         settlementBoundary,
-        liveConstraintGuardFactory: createSchedulerLiveConstraintGuardFactory({
-          stage,
-          projectDir,
-          runId,
-          context: ordinaryScopeContext,
-        }),
       });
       recordSchedulerTechnicalAttemptResult(technicalRetry, result, prepared.budgetMs);
       return { stage, result, currentRetries };

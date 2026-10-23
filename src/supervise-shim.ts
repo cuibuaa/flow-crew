@@ -3,7 +3,7 @@ import { closeSync, openSync } from './engine-fs.js';
 import { constants } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { processStartToken } from './run-lock.js';
+import { processGroupIsAlive, processLiveness, processStartToken } from './process-liveness.js';
 import {
   SUPERVISION_PROTOCOL_VERSION,
   FLOWCREW_LAUNCH_RESULT_PATH_ENV,
@@ -62,21 +62,9 @@ function signalAgent(signal: NodeJS.Signals): void {
 function agentGroupIsAlive(): boolean {
   const pid = agent?.pid;
   if (!pid) return false;
-  const target = process.platform !== 'win32' ? -pid : pid;
-  try {
-    process.kill(target, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
-}
-
-function updateLegacyRecord(record: Record<string, unknown>): void {
-  const launch = readSupervisionLaunch(launchPath);
-  if (!launch?.legacyRecordPath) return;
-  try {
-    atomicWriteJson(launch.legacyRecordPath, record, { createParent: false });
-  } catch { /* compatibility mirror is non-authoritative */ }
+  // Unobservable descendants cannot authorize publishing a settled exit.
+  if (process.platform === 'win32') return processLiveness(pid) !== 'dead';
+  try { return processGroupIsAlive(pid); } catch { return true; }
 }
 
 function finalize(
@@ -91,7 +79,7 @@ function finalize(
   if (settleTimer) clearTimeout(settleTimer);
   const normalized = normalizedOverride ?? normalizedExit(code, signal);
   const endedAt = new Date().toISOString();
-  const launchRefusal = normalized === 2 ? readLaunchRefusal(launchResultPath) : undefined;
+  const launchRefusal = readLaunchRefusal(launchResultPath);
   const exit: SupervisionExitRecord = {
     version: SUPERVISION_PROTOCOL_VERSION,
     exitCode: code,
@@ -101,25 +89,12 @@ function finalize(
     ...(reason ? { reason } : {}),
     ...(launchRefusal ? { launchRefusal } : {}),
   };
-  updateLegacyRecord({
-    ...(running ? {
-      pid: running.agentPid,
-      ...(running.agentToken ? {
-        startTimeTicks: running.agentToken.value,
-        startTokenKind: running.agentToken.kind,
-      } : {}),
-    } : {}),
-    state: normalized === 0 ? 'inactive' : 'failed',
-    command: readSupervisionLaunch(launchPath)?.command,
-    reason: reason ?? (signal ? `fallback process terminated by ${signal}` : `fallback process exited with code ${normalized}`),
-    completedAt: endedAt,
-  });
   if (logFd !== undefined) {
     try { closeSync(logFd); } catch { /* already closed */ }
     logFd = undefined;
   }
   // This is deliberately the final filesystem mutation. Readers that observe
-  // exit.json may safely clean up later without racing a compatibility write.
+  // exit.json may safely clean up later without racing another write.
   try {
     atomicWriteJson(exitPath, exit, { createParent: false });
   } catch { /* there is no safer recovery channel */ }
@@ -152,15 +127,6 @@ function beginStop(): void {
     try {
       atomicWriteJson(runningPath, running, { createParent: false });
     } catch { /* exit.json will remain authoritative */ }
-    updateLegacyRecord({
-      pid: running.agentPid,
-      state: 'deactivating',
-      command: running.command,
-      ...(running.agentToken ? {
-        startTimeTicks: running.agentToken.value,
-        startTokenKind: running.agentToken.kind,
-      } : {}),
-    });
   }
   if (!agent?.pid || stopForwarded) return;
   stopForwarded = true;
@@ -175,12 +141,6 @@ function beginStop(): void {
 }
 
 function failBeforeAgent(reason: string, normalized = 127): never {
-  updateLegacyRecord({
-    state: 'failed',
-    command: readSupervisionLaunch(launchPath)?.command,
-    reason,
-    completedAt: new Date().toISOString(),
-  });
   finalize(null, null, reason, normalized);
   throw new Error(reason);
 }
@@ -269,15 +229,6 @@ function main(): void {
     ...(stopRequested ? { stoppingAt: new Date().toISOString() } : {}),
   };
   atomicWriteJson(runningPath, running, { createParent: false });
-  updateLegacyRecord({
-    pid: agentPid,
-    state: stopRequested ? 'deactivating' : 'active',
-    command: launch.command,
-    ...(agentToken ? {
-      startTimeTicks: agentToken.value,
-      startTokenKind: agentToken.kind,
-    } : {}),
-  });
   if (!shimToken || !agentToken) backfillStartTokens();
   if (stopRequested) beginStop();
 }

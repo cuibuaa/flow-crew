@@ -1,11 +1,12 @@
 import { createRequire } from 'node:module';
-import { mkdirSync, unlinkSync } from './engine-fs.js';
+import { mkdirSync } from './engine-fs.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fcGlobalDir, runsRoot, type StoreState } from './store.js';
 import { TERMINAL_STATUSES } from './lifecycle-status.js';
 import { registerEngineOwnedSqlitePath, RUN_INDEX_FILENAME } from './engine-owned-carriers.js';
 import { inspectRunScheduler } from './run-lock.js';
+import { resolveCampaignStorageKey } from './campaigns.js';
 
 const require = createRequire(import.meta.url);
 
@@ -35,26 +36,19 @@ export interface RunIndexRecord {
   schedulerActive?: boolean;
 }
 
-const rebuildAttempted = new Set<string>();
 // Persistent per-DB connection cache. Opening a fresh node:sqlite handle (plus
 // re-running the CREATE TABLE/INDEX DDL) on every query was a major source of
 // per-request overhead; the index is read/written hundreds of times per
 // dashboard refresh. We keep one handle per db path for the process lifetime.
 const dbHandles = new Map<string, DatabaseSync>();
-// Memoize the seed-freshness check so readers don't re-run it on every call.
-const seedCheckedAt = new Map<string, number>();
-const SEED_CHECK_TTL_MS = 5_000;
-// Directory count at the last rebuild, so we can cheaply detect when run dirs
-// were added/removed OUTSIDE the upsert path (e.g. the operator manually deletes
-// run dirs) and reconcile, without re-counting on every call.
-const rebuiltAtDirCount = new Map<string, number>();
-
-/** Cheap count of run directories on disk (one readdir, no per-entry stat). */
-function countRunDirs(projectDir: string): number {
+// Directory membership changes invalidate the persisted generation, including
+// restores made while the daemon was stopped. No periodic directory walk.
+function storageGeneration(projectDir: string): string {
   try {
-    return readdirSync(runsRoot(projectDir), { withFileTypes: true }).filter((e) => e.isDirectory()).length;
-  } catch { /* non-critical */
-    return 0;
+    const stat = statSync(runsRoot(projectDir), { bigint: true });
+    return `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  } catch {
+    return 'missing';
   }
 }
 
@@ -100,6 +94,10 @@ function openDb(projectDir: string): DatabaseSync | null {
     CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
     CREATE INDEX IF NOT EXISTS idx_runs_campaign ON runs(campaign_storage_key, campaign_seq);
     CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+    CREATE TABLE IF NOT EXISTS storage_generation (
+      root TEXT PRIMARY KEY,
+      generation TEXT NOT NULL
+    );
   `);
   // Existing indexes predate scheduler ownership. Schema extension is
   // additive; duplicate-column is the expected path after first migration.
@@ -117,28 +115,11 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function canonicalStorageKey(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const slug = value
-    .trim()
-    .toLowerCase()
-    .replace(/^new:/i, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return slug || undefined;
-}
-
-function campaignStorageKeyForState(state: StoreState): string | undefined {
-  return state.campaignStorageKey
-    ?? canonicalStorageKey(state.campaignId)
-    ?? canonicalStorageKey(state.campaignName);
-}
-
 function rowToRecord(row: Record<string, unknown>): RunIndexRecord {
   return {
     runId: String(row.run_id),
     status: asString(row.status),
-    workflowName: asString(row.workflow_name),
+    workflowName: row.workflow_name === 'default' ? 'planner' : asString(row.workflow_name),
     taskDescription: asString(row.task_description),
     startedAt: asString(row.started_at),
     completedAt: asString(row.completed_at),
@@ -176,7 +157,7 @@ export function upsertRunIndex(projectDir: string, state: StoreState): void {
   {
     const runJson = join(runsRoot(projectDir), state.runId, 'run.json');
     const jsonMtime = existsSync(runJson) ? statSync(runJson).mtimeMs : Date.now();
-    const campaignStorageKey = campaignStorageKeyForState(state);
+    const campaignStorageKey = resolveCampaignStorageKey(state);
     const schedulerActive = schedulerCandidate(projectDir, state.runId);
     db.prepare(`
       INSERT INTO runs (
@@ -216,12 +197,6 @@ export function upsertRunIndex(projectDir: string, state: StoreState): void {
   }
 }
 
-export function deleteRunIndex(projectDir: string, runId: string): void {
-  const db = openDb(projectDir);
-  if (!db) return;
-  db.prepare('DELETE FROM runs WHERE run_id = ?').run(runId);
-}
-
 /** Derive candidates from the existing ownership observation, never marker
  * existence. Unknown fate stays visible; this read does not take a run lock or
  * update the index. Explicit claim/removal updates still own conflict rows. */
@@ -233,6 +208,7 @@ function schedulerCandidate(projectDir: string, runId: string): number {
 export function rebuildRunIndex(projectDir: string): number {
   const db = openDb(projectDir);
   if (!db) return 0;
+  const generation = storageGeneration(projectDir);
   let count = 0;
   try {
     db.exec('BEGIN');
@@ -243,7 +219,7 @@ export function rebuildRunIndex(projectDir: string): number {
           const raw = readFileSync(join(runsRoot(projectDir), runId, 'run.json'), 'utf-8');
           const state = JSON.parse(raw) as StoreState;
           const jsonMtime = statSync(join(runsRoot(projectDir), runId, 'run.json')).mtimeMs;
-          const campaignStorageKey = campaignStorageKeyForState(state);
+          const campaignStorageKey = resolveCampaignStorageKey(state);
           db.prepare(`
             INSERT OR REPLACE INTO runs (
               run_id, status, workflow_name, task_description, started_at, completed_at,
@@ -274,6 +250,8 @@ export function rebuildRunIndex(projectDir: string): number {
     } catch { /* non-critical */
       // No runs directory yet.
     }
+    db.prepare('INSERT OR REPLACE INTO storage_generation (root, generation) VALUES (?, ?)')
+      .run(runsRoot(projectDir), generation);
     db.exec('COMMIT');
     return count;
   } catch (err) {
@@ -282,35 +260,14 @@ export function rebuildRunIndex(projectDir: string): number {
   }
 }
 
-function ensureIndexSeeded(projectDir: string, forceFreshnessCheck = false): void {
-  const last = seedCheckedAt.get(projectDir);
-  if (!forceFreshnessCheck && last !== undefined && Date.now() - last < SEED_CHECK_TTL_MS) return;
+function ensureIndexSeeded(projectDir: string): void {
   const db = openDb(projectDir);
   if (!db) return;
-  // Every createRun/writeRunState upserts into the index, so under normal operation
-  // indexedCount tracks the on-disk dir count. They diverge only when run dirs are
-  // added/removed OUTSIDE the upsert path (operator rm/cp, restore). Detect that
-  // cheaply via a dir count and reconcile with a full rebuild — but only when the
-  // dir set actually CHANGED since the last rebuild, so a persistent benign gap
-  // (e.g. a half-created dir without run.json) doesn't trigger a rebuild every tick.
-  const row = db.prepare('SELECT COUNT(*) AS count FROM runs').get();
-  const indexedCount = Number(row?.count ?? 0);
-  const dirCount = countRunDirs(projectDir);
-  const lastRebuildDirCount = rebuiltAtDirCount.get(projectDir);
-  const needsRebuild =
-    (indexedCount === 0 && !rebuildAttempted.has(projectDir)) ||
-    (dirCount !== indexedCount && dirCount !== lastRebuildDirCount);
-  if (needsRebuild) {
-    rebuildAttempted.add(projectDir);
-    try {
-      rebuildRunIndex(projectDir);
-      rebuiltAtDirCount.set(projectDir, dirCount);
-    } catch { /* another process may be mid-rebuild (SQLITE_BUSY) or a transient
-      error — the rebuild transaction rolled back so the index is unchanged (not
-      partial). Don't propagate (would crash a reader); leave rebuiltAtDirCount
-      unset so the next tick retries once the contention clears. */ }
-  }
-  seedCheckedAt.set(projectDir, Date.now());
+  const previous = db.prepare('SELECT generation FROM storage_generation WHERE root = ?').get(runsRoot(projectDir));
+  if (previous?.generation === storageGeneration(projectDir)) return;
+  try {
+    rebuildRunIndex(projectDir);
+  } catch { /* A failed transaction leaves the index intact; retry on the next read. */ }
 }
 
 export function listRunIdsFromIndex(projectDir: string): string[] | null {
@@ -343,9 +300,7 @@ export function countStandaloneRunsFromIndex(projectDir: string): number | null 
 
 /** Run ids whose status is 'running' (for orphan reconciliation), newest first. */
 export function listRunningRunIdsFromIndex(projectDir: string): string[] | null {
-  // Daemon recovery must discover a newly restored run inside the seed TTL.
-  // As with operational queries, only a changed directory count hydrates history.
-  ensureIndexSeeded(projectDir, true);
+  ensureIndexSeeded(projectDir);
   const db = openDb(projectDir);
   if (!db) return null;
   return db.prepare("SELECT run_id FROM runs WHERE status = 'running' ORDER BY run_id DESC")
@@ -359,10 +314,7 @@ export function listRunningRunIdsFromIndex(projectDir: string): string[] | null 
  * visible until process identity proves that its owner is gone.
  */
 export function listOperationalRunIdsFromIndex(projectDir: string): string[] | null {
-  // Liveness may change between two calls inside the ordinary seed TTL. A
-  // single directory enumeration is cheap and prevents a newly created run
-  // from being omitted; only a count mismatch triggers per-run hydration.
-  ensureIndexSeeded(projectDir, true);
+  ensureIndexSeeded(projectDir);
   const db = openDb(projectDir);
   if (!db) return null;
   const placeholders = TERMINAL_STATUSES.map(() => '?').join(', ');
@@ -375,6 +327,7 @@ export function listOperationalRunIdsFromIndex(projectDir: string): string[] | n
 
 /** Maintain the process-ownership bit without touching run.json. */
 export function setRunSchedulerActive(projectDir: string, runId: string, active: boolean): void {
+  ensureIndexSeeded(projectDir);
   const db = openDb(projectDir);
   if (!db) return;
   const now = Date.now();
@@ -414,21 +367,4 @@ export function readRunIndexRecordsByCampaign(projectDir: string, campaignStorag
   return db.prepare('SELECT * FROM runs WHERE campaign_storage_key = ? ORDER BY run_id ASC')
     .all(campaignStorageKey)
     .map(rowToRecord);
-}
-
-export function removeRunIndexFiles(projectDir: string): void {
-  // Drop the cached handle first so deleting the files doesn't race an open connection.
-  const path = dbPath(projectDir);
-  const handle = dbHandles.get(path);
-  if (handle) {
-    try { handle.close(); } catch { /* already closed */ }
-    dbHandles.delete(path);
-  }
-  for (const suffix of ['', '-shm', '-wal']) {
-    const p = `${path}${suffix}`;
-    if (existsSync(p)) unlinkSync(p);
-  }
-  rebuildAttempted.delete(projectDir);
-  seedCheckedAt.delete(projectDir);
-  rebuiltAtDirCount.delete(projectDir);
 }

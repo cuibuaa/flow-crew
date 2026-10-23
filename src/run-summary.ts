@@ -2,32 +2,19 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
-import type { Adapter } from './adapters/base.js';
 import { projectRunStageHistory } from './run-state-view.js';
 import { RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from './handoff.js';
 import { RECORDED_PLAN_SCHEMA } from './plan-interface.js';
 import type { ValidationCommandResult } from './project-validation.js';
 import {
-  readRunState,
   STAGE_STATUS,
-  runDir,
-  atomicWrite,
 } from './store.js';
-import type { RunStatus, StageStatus, StoreState } from './store.js';
+import type { StageStatus, StoreState } from './store.js';
 import type { ResearchEvaluation, ResearchRound } from './research-policy.js';
 import { readOptionalJsonlFile } from './jsonl.js';
 import type { RunEvent } from './run-events.js';
 import { RUN_STATUS, resolveRunStatus, TERMINAL_STATUSES as STORE_TERMINAL_STATUSES } from './lifecycle-status.js';
 import { archivedGateRejections } from './scheduler/sched_settlement/gate-archives.js';
-// Re-exported for back-compat + the unit test. The codex adapter now applies this
-// at the source (output.md/handoff/summary all get clean text); re-applying it
-// here is idempotent.
-import { extractFinalMessage } from './adapters/transcript.js';
-export { extractFinalMessage };
-import { createLogger } from './logging.js';
-
-const log = createLogger({ name: 'run-summary' });
-
 // Statuses for which a human-readable summary is worth generating. Note this
 // now includes the research terminal states (`shipped`, `ceiling_hit`) — those
 // runs previously produced no summary at all.
@@ -35,23 +22,6 @@ const log = createLogger({ name: 'run-summary' });
 // and had already drifted (missing phase_complete / stopped / incomplete).
 // A paused ('parked') run is deliberately absent: it has no verdict to narrate.
 const TERMINAL_STATUSES = new Set<string>(STORE_TERMINAL_STATUSES);
-
-/** Research-summary spelling is a separate operator consequence, so it is total here. */
-export const RESEARCH_SUMMARY_DECISION_LABELS = {
-  [RUN_STATUS.PENDING]: RUN_STATUS.PENDING,
-  [RUN_STATUS.RUNNING]: RUN_STATUS.RUNNING,
-  [RUN_STATUS.PARKED]: RUN_STATUS.PARKED,
-  [RUN_STATUS.COMPLETE]: RUN_STATUS.COMPLETE,
-  [RUN_STATUS.FAILED]: RUN_STATUS.FAILED,
-  [RUN_STATUS.AWAITING_APPROVAL]: RUN_STATUS.AWAITING_APPROVAL,
-  [RUN_STATUS.SHIPPED]: 'ship',
-  [RUN_STATUS.CEILING_HIT]: 'stop_ceiling',
-  [RUN_STATUS.ESCALATED]: RUN_STATUS.ESCALATED,
-  [RUN_STATUS.REALITY_GATE_FAILED]: RUN_STATUS.REALITY_GATE_FAILED,
-  [RUN_STATUS.PHASE_COMPLETE]: RUN_STATUS.PHASE_COMPLETE,
-  [RUN_STATUS.STOPPED]: RUN_STATUS.STOPPED,
-  [RUN_STATUS.INCOMPLETE]: RUN_STATUS.INCOMPLETE,
-} as const satisfies Record<RunStatus, string>;
 
 // ---------------------------------------------------------------------------
 // Git: compute the REAL set of changed files since the run started.
@@ -159,7 +129,7 @@ function renderStagesSection(state: StoreState): string {
   const historical = projectRunStageHistory(state, diagnostic => diagnostics.push(
     `- ${diagnostic.code}: ${diagnostic.path}: ${diagnostic.detail}`,
   ));
-  if (ids.length === 0 && historical.length === 0 && !state.supervisor && diagnostics.length === 0) return '';
+  if (ids.length === 0 && historical.length === 0 && diagnostics.length === 0) return '';
   const lines = ids.map((id) => {
     const st = state.stages[id];
     const attempts = st?.attempts?.length ?? 0;
@@ -167,7 +137,7 @@ function renderStagesSection(state: StoreState): string {
     const history = attempts > 0
       ? ` — ran ${attempts} ${attempts === 1 ? 'time' : 'times'}, ${dur}s cumulative`
       : (st?.duration_ms ? ` (${dur}s)` : '');
-    return `- ${id}: ${st?.status ?? 'unknown'}${history}`;
+    return `- ${id}: ${st?.status ?? 'unknown'}${history}${st?.gate ? `; gate: ${st.gate.pass ? 'PASS' : 'FAIL'} (${st.gate.kind})` : ''}`;
   });
   for (const evidence of historical) {
     const attempts = evidence.status.attempts?.length ?? 0;
@@ -177,21 +147,16 @@ function renderStagesSection(state: StoreState): string {
       : (evidence.status.duration_ms ? ` (${dur}s)` : '');
     lines.push(`- ${evidence.stageId} [iteration ${evidence.iteration}, archived]: ${evidence.status.status}${history}`);
   }
-  if (state.supervisor) {
-    const tokensTotal = state.supervisor.tokens_in + state.supervisor.tokens_out;
-    lines.push(`- _supervisor: ${state.supervisor.calls} calls, ${Math.round(state.supervisor.duration_ms / 1000)}s cumulative, ${tokensTotal} tokens total (${state.supervisor.tokens_in} in + ${state.supervisor.tokens_out} out)`);
-  }
   return `## Stages\n${[...lines, ...diagnostics].join('\n')}`;
 }
 
 function renderOrchestrationEvents(runDirectory: string): string {
   const events = readOptionalJsonlFile<RunEvent>(join(runDirectory, 'events.jsonl')).filter((event) =>
-    event.type === 'parallel_scope_serialized' || event.type === 'parallel_write_conflict',
+    event.type === 'parallel_scope_serialized',
   );
   if (events.length === 0) return '';
   const lines = events.map((event) => {
-    const label = event.type === 'parallel_write_conflict' ? 'WARNING write conflict' : 'scope serialization';
-    return `- ${label}: ${event.detail ?? event.stageIds?.join(' ↔ ') ?? 'no detail'}`;
+    return `- scope serialization: ${event.detail ?? event.stageIds?.join(' ↔ ') ?? 'no detail'}`;
   });
   return `## Orchestration notes\n${lines.join('\n')}`;
 }
@@ -256,7 +221,8 @@ function renderResearchOutcome(state: StoreState, data: ResearchData): string {
     && TERMINAL_STATUSES.has(statusResolution.status);
   // Map the terminal status to the policy-decision vocabulary used in the summary.
   const terminalDecisionLabel = statusResolution.kind === 'known'
-    ? RESEARCH_SUMMARY_DECISION_LABELS[statusResolution.status]
+    ? statusResolution.status === RUN_STATUS.SHIPPED ? 'ship'
+      : statusResolution.status === RUN_STATUS.CEILING_HIT ? 'stop_ceiling' : statusResolution.status
     : `unrecognized ${statusResolution.display}`;
   // The snapshot is "consistent" with the terminal only when it agrees (e.g. a real ship snapshot
   // on a shipped run, or a stop_ceiling snapshot on a ceiling_hit run). A `continue` snapshot on a
@@ -387,7 +353,7 @@ function renderEngineGateConclusions(runDir: string, state: StoreState): string 
     ...(state.retiredStageUsage ?? []).map(entry => entry.stageId)]);
   for (const id of ids) {
     for (const archive of archivedGateRejections(runDir, id)) {
-      const lines = [`### ${id} [${archive.iteration ? `iteration ${archive.iteration}` : 'legacy iteration unknown'}, round ${archive.round}]`,
+      const lines = [`### ${id} [iteration ${archive.iteration}, round ${archive.round}]`,
         `Engine record: \`${relative(runDir, archive.effectiveVerdictPath)}\`; authored verdict: \`${relative(runDir, archive.verdictPath)}\`.`];
       const record = readJson<{ gateId: string; written_verdict_pass: boolean | null;
         engine_effective_pass: boolean; engine_rejection_reason: string | null }>(archive.effectiveVerdictPath);
@@ -452,8 +418,7 @@ function renderRunOutcome(state: StoreState): string {
   }
   if (state.failureReason) lines.push(`Failure / open work: ${state.failureReason}`);
   const counts = state.stateFormat?.history?.counts;
-  if (counts && (counts.supervisorAttempts > (state.supervisor?.attempts.length ?? 0)
-      || counts.retiredStageUsage > (state.retiredStageUsage?.length ?? 0) || counts.stageEvidence > (state.stageEvidence?.length ?? 0))) {
+  if (counts && (counts.retiredStageUsage > (state.retiredStageUsage?.length ?? 0) || counts.stageEvidence > (state.stageEvidence?.length ?? 0))) {
     lines.push('Historical evidence was not loaded for this operational summary; its acknowledged reference remains in run.json.');
   }
   if (state.startedAt && state.completedAt) {
@@ -517,24 +482,4 @@ export function renderRunSummary(projectDir: string, runDir: string, state: Stor
     ]);
   }
   return summary;
-}
-
-/** Compatibility refresh for callers reading an already published terminal run. */
-export async function generateRunSummary(
-  projectDir: string,
-  runId: string,
-  _adapter?: Adapter,
-): Promise<string | null> {
-  const directory = runDir(projectDir, runId);
-  if (!existsSync(join(directory, 'run.json'))) return null;
-  try {
-    const state = readRunState(projectDir, runId);
-    if (!TERMINAL_STATUSES.has(state.status)) return null;
-    const summary = renderRunSummary(projectDir, directory, state);
-    atomicWrite(join(directory, 'summary.md'), summary);
-    return summary;
-  } catch (err) {
-    log.warn({ runId, err }, 'Failed to generate run summary');
-    return null;
-  }
 }

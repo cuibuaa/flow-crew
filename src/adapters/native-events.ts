@@ -1,5 +1,6 @@
-import { isAbsolute, relative } from 'node:path';
+import { normalizedProjectPath } from '../scheduler/sched_admission/scope-services.js';
 import { isSessionUuid } from '../adapter-session.js';
+import { nativeDiagnostic, providerFailureFromEvent, type ProviderFailure } from '../provider-result.js';
 
 type RecordValue = Record<string, any>; // Native CLI envelopes are untrusted, heterogeneous JSON.
 export interface NativeEvent {
@@ -9,30 +10,16 @@ export interface NativeEvent {
   delta?: string;
   terminal?: boolean;
   diagnostic?: string;
+  providerFailure?: ProviderFailure;
   commands: Array<{ phase: 'started' | 'completed'; id: string; command?: string }>;
   tools: Array<{ id: string; name: string; path?: string }>;
   results: Array<{ id: string; success: boolean }>;
   writes: string[];
 }
 
-export function nativeDiagnostic(event: RecordValue): string | undefined {
-  const primary = [event.message, typeof event.error === 'string' ? event.error : event.error?.message, event.item?.message]
-    .find(value => typeof value === 'string');
-  if (primary !== undefined) return primary.trim() || undefined;
-  const errors = Array.isArray(event.errors) ? event.errors.map((error: any) => typeof error === 'string' ? error : error?.message) : [];
-  const diagnostic = errors.filter((value): value is string => typeof value === 'string' && !!value.trim()).join('\n');
-  return diagnostic || (event.type === 'result' && typeof event.result === 'string' ? event.result.trim() || undefined : undefined);
-}
 
 export function normalizeReportedWrite(path: string, workDir?: string): string | undefined {
-  let candidate = path.replace(/\\/g, '/');
-  if (isAbsolute(candidate)) {
-    if (!workDir) return undefined;
-    candidate = relative(workDir, candidate).replace(/\\/g, '/');
-  }
-  candidate = candidate.replace(/^\.\//, '').replace(/\/{2,}/g, '/');
-  if (!candidate || candidate === '..' || candidate.startsWith('../') || candidate.includes('/../')) return undefined;
-  return candidate;
+  return normalizedProjectPath(path, workDir);
 }
 
 function filePaths(value: unknown, out: string[]): void {
@@ -44,7 +31,7 @@ function filePaths(value: unknown, out: string[]): void {
 }
 
 /** Translate native envelopes once, before settlement, lifecycle and presentation. */
-export function normalizeNativeEvent(event: RecordValue): NativeEvent {
+export function normalizeNativeEvent(event: RecordValue, provider?: ProviderFailure['provider']): NativeEvent {
   const result: NativeEvent = { commands: [], tools: [], results: [], writes: [] };
   const nativeId = event.type === 'thread.started' ? event.thread_id
     : event.type === 'result' || (event.type === 'system' && event.subtype === 'init') ? event.session_id : undefined;
@@ -85,8 +72,9 @@ export function normalizeNativeEvent(event: RecordValue): NativeEvent {
     }
   }
   if (event.type === 'turn.completed') result.terminal = true;
-  if (event.type === 'error' || event.type === 'turn.failed' || item?.type === 'error') result.terminal = false;
-  if (result.terminal === false) result.diagnostic = nativeDiagnostic(event) ?? (event.type === 'result' && typeof event.subtype === 'string' ? event.subtype : undefined);
+  if (event.type === 'error' || event.type === 'turn.failed') result.terminal = false;
+  if (result.terminal === false) result.diagnostic = nativeDiagnostic(event) ?? String(event.subtype ?? event.type);
+  if (provider && result.terminal === false) result.providerFailure = providerFailureFromEvent(provider, event);
   if (item?.type === 'file_change' || event.type === 'file_change') filePaths(item ?? event, result.writes);
   return result;
 }
@@ -96,6 +84,7 @@ export class NativeEventSummary {
   message = '';
   diagnostic?: string;
   terminal?: boolean;
+  providerFailure?: ProviderFailure;
   get completed(): boolean { return this.terminal === true; }
   private deltas = '';
   private readonly pendingWrites = new Map<string, string>();
@@ -108,6 +97,8 @@ export class NativeEventSummary {
     if (event.message) { this.message = event.message; this.deltas = ''; }
     if (event.terminal !== undefined) {
       this.terminal = event.terminal;
+      // Latest classified root failure wins; unclassified failures retain it. Success clears it.
+      if (event.terminal || event.providerFailure) this.providerFailure = event.providerFailure;
       if (event.terminal) this.diagnostic = undefined;
       else if (event.diagnostic) this.diagnostic = event.diagnostic;
     }

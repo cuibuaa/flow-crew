@@ -1,14 +1,24 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import {
+  existsSync, lstatSync, readFileSync, readSync, readlinkSync, readdirSync, realpathSync, statSync,
+} from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { dirname, join, relative, resolve } from 'node:path';
 import type {
   ProjectValidationBaseline,
   ValidationCommand,
   ValidationCommandResult,
   ValidationGateCriterion,
   ValidationRole,
+  ValidationDiscovery,
 } from './project-validation.js';
+import { dependencyPreparation, unmeasured } from './project-validation.js';
+import { hashRollbackFileSync, rollbackStatIdentity, rollbackStatIdentitiesEqual } from './rollback-content-store.js';
+import { atomicWrite, closeSync, mkdirSync, openSync } from './engine-fs.js';
+import { validationEnvironment } from './validation-environment.js';
+import { loadEngineDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
+import { findExecutableOnPath } from './adapters/availability.js';
 
 const VALIDATION_ROLES = new Set<ValidationRole>(['build', 'test', 'lint']);
 const RESULT_STATES = new Set<ValidationCommandResult['state']>([
@@ -197,4 +207,108 @@ export function inspectShipSetupRecord(
     return { state: 'invalid', recordPath: expectedPath, reason: 'record is neither a valid ready record nor a valid refused record' };
   }
   return { state: 'ready', recordPath: expectedPath, validationBaseline: parsed.validationBaseline, record: parsed };
+}
+
+/** One replaceable entry per project. Unresolved identities/results always measure. */
+export async function reuseShipSetupBaseline(
+  projectDir: string, targetDir: string, base: string, discovery: ValidationDiscovery,
+  declaredInputs: readonly string[], globalRoot: string, measure: () => Promise<ProjectValidationBaseline>,
+): Promise<{
+  validationBaseline: ProjectValidationBaseline; baselineReuse: { state: 'executed' | 'reused'; id?: string };
+}> {
+  let id: string | undefined, path: string | undefined;
+  let unchanged = () => false;
+  const measured = (baseline: ProjectValidationBaseline) => baseline.execution === 'executed'
+    && discovery.commands.every(command => baseline.results.some(result =>
+      result.role === command.role && result.display === command.display
+      && (result.state === 'passed' || result.state === 'failed') && Number.isInteger(result.exitCode)))
+    && baseline.results.every(result => !unmeasured(result) && baseline.gateCriteria.some(criterion =>
+      criterion.role === result.role && criterion.display === result.display));
+  try {
+    if (!discovery.commands.length || discovery.state === 'unknown') throw new Error('unknown commands');
+    const git = (args: string[], cwd = targetDir): string => {
+      const result = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+      if (result.status !== 0) throw new Error('unknown git inputs');
+      return result.stdout;
+    };
+    const commit = git(['rev-parse', '--verify', '--end-of-options', `${base}^{commit}`], projectDir).trim();
+    if (!/^[a-f0-9]{40,64}$/.test(commit)) throw new Error('unknown base');
+    const inventory = () => git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
+    const files = inventory(), preparation = dependencyPreparation(targetDir), inputs: unknown[] = [];
+    const hashes = new Map<string, string>();
+    const stamps = new Map<string, ReturnType<typeof rollbackStatIdentity>>();
+    const remember = (path: string) => stamps.set(path, rollbackStatIdentity(path));
+    const walk = (path: string, name: string, parents = new Set<string>()): void => {
+      remember(path);
+      if (lstatSync(path).isSymbolicLink()) inputs.push([name, 'symlink', readlinkSync(path)]);
+      const physical = realpathSync.native(path), stat = statSync(path);
+      remember(physical);
+      if (stat.isDirectory()) {
+        if (parents.has(physical)) throw new Error('cyclic input');
+        inputs.push([name, stat.mode]);
+        for (const entry of readdirSync(path).sort()) {
+          walk(join(path, entry), `${name}/${entry}`, new Set([...parents, physical]));
+        }
+      } else if (stat.isFile()) {
+        if (!hashes.has(physical)) hashes.set(physical, hashRollbackFileSync(path).sha256);
+        inputs.push([name, stat.mode, hashes.get(physical)]);
+      } else throw new Error('unhashable input');
+    };
+    inputs.push(['declared', ...[...declaredInputs].sort()]);
+    for (const path of [...new Set([
+      ...files.split('\0').filter(Boolean).map(name => resolve(targetDir, name)),
+      ...preparation.flatMap(item => item.inputs), ...(discovery.configPaths ?? []),
+      ...declaredInputs.map(input => resolve(targetDir, input)),
+    ])].sort()) walk(path, relative(targetDir, path));
+    const seen = new Set<string>();
+    const { env } = validationEnvironment(join(globalRoot, 'baseline-environment'), process.env);
+    const binary = (command: string): void => {
+      const path = findExecutableOnPath(command, env.PATH, targetDir);
+      if (!path) throw new Error('unresolved executable');
+      const physical = realpathSync.native(path);
+      if (seen.has(physical)) return;
+      seen.add(physical);
+      walk(path, physical);
+      const descriptor = openSync(physical, 'r'), bytes = Buffer.alloc(256);
+      try { readSync(descriptor, bytes, 0, bytes.length, 0); } finally { closeSync(descriptor); }
+      if (bytes.toString('utf8').startsWith('#!')) {
+        for (let directory = dirname(physical); dirname(directory) !== directory; directory = dirname(directory)) {
+          if (existsSync(join(directory, 'package.json'))) { walk(directory, directory); break; }
+        }
+        const [interpreter, ...args] = bytes.toString('utf8').split(/\r?\n/, 1)[0].slice(2).trim().split(/\s+/);
+        binary(interpreter);
+        if (interpreter.endsWith('/env')) {
+          if (args.length !== 1 || args[0].startsWith('-')) throw new Error('unresolved interpreter');
+          binary(args[0]);
+        }
+      }
+    };
+    for (const command of [process.execPath, '/bin/sh',
+      ...discovery.commands.map(item => item.command), ...preparation.map(item => item.runner)]) binary(command);
+    const project = realpathSync.native(projectDir);
+    id = createHash('sha256').update(JSON.stringify({
+      base: [project, commit], inputs,
+      commands: discovery.commands.map(({ role, command, args }) => [role, command, args]),
+      environment: Object.entries(env).sort(([a], [b]) => a.localeCompare(b)),
+      timeout: loadEngineDefaults().validation_timeout_ms,
+    })).digest('hex');
+    path = join(globalRoot, 'ship-setups', 'baselines', `${shipSetupBriefDigest(project)}.json`);
+    unchanged = () => inventory() === files
+      && [...stamps].every(([path, stamp]) => rollbackStatIdentitiesEqual(stamp, rollbackStatIdentity(path)));
+
+    const cached = JSON.parse(readFileSync(path, 'utf8'));
+    if (cached.id === id && validBaseline(cached.validationBaseline, cached.validationBaseline?.projectDir)
+        && measured(cached.validationBaseline)) {
+      return { validationBaseline: { ...cached.validationBaseline, projectDir: targetDir, discovery },
+        baselineReuse: { state: 'reused', id } };
+    }
+  } catch { /* Unknown identities and missing/corrupt entries are measured normally. */ }
+  const validationBaseline = await measure();
+  if (path && measured(validationBaseline)) try {
+    if (unchanged()) {
+      mkdirSync(dirname(path), { recursive: true });
+      atomicWrite(path, JSON.stringify({ id, validationBaseline }), { durability: 'durable' });
+    }
+  } catch { /* Optional cache publication cannot refuse a measured setup. */ }
+  return { validationBaseline, baselineReuse: { state: 'executed', ...(id ? { id } : {}) } };
 }

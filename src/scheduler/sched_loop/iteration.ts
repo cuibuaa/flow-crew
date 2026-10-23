@@ -2,7 +2,7 @@
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState } from '../../attempt-deadline.js';
 import { StageConfig, WorkflowConfig } from '../sched_admission/configuration.js';
-import { RUN_STATUS, StoreState, isContinuingStage, isAwaitingApprovalRunStatus, isPausedRunStatus, isTerminalRunStatus, readRunState } from '../../store.js';
+import { RUN_STATUS, StoreState, isContinuingStage, isPausedRunStatus, isTerminalRunStatus, readRunState } from '../../store.js';
 import { admitPlannerDispatches } from './planner-dispatch.js';
 import { consumePlanRevisions } from './services.js';
 import { executeReadyBatch } from './stage-batch.js';
@@ -19,7 +19,7 @@ export async function executeIteration(
   resolvedAgentsDir: string,
   roleRegistry: Map<string, { name: string; description: string }>,
   injectedDispatchStages: Set<string>,
-  planStageRetries: Map<string, number>,
+
   skills?: string,
   taskDescription?: string,
   availableSkills?: string,
@@ -39,7 +39,7 @@ export async function executeIteration(
 
     // Suspended runs return and release execution ownership, including archived
     // legacy plan-review states that no current admission path creates.
-    if (isPausedRunStatus(state.status) || isAwaitingApprovalRunStatus(state.status)) {
+    if (isPausedRunStatus(state.status)) {
       return state;
     }
 
@@ -47,7 +47,7 @@ export async function executeIteration(
     // this iteration. The outer loop owns the finite continuation budget.
     if (Object.values(state.stages).some(isContinuingStage)) return state;
 
-    const admitted = admitPlannerDispatches(sorted, state, projectDir, runId, runDirPath, roleRegistry, injectedDispatchStages, planStageRetries, taskDescription);
+    const admitted = admitPlannerDispatches(sorted, state, projectDir, runId, runDirPath, roleRegistry, injectedDispatchStages);
     if (admitted.kind === 'settled') return admitted.state;
     state = admitted.state;
     const batch = await executeReadyBatch(sorted, state, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, technicalRetries, skills, taskDescription, availableSkills, attemptDeadlineClockFactory);

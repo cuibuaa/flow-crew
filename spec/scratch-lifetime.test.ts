@@ -8,8 +8,10 @@ import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
 import { execWithStdin } from '../src/adapters/base.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
-import { createInvocationScratch, retireRunScratch, sweepRunScratch } from '../src/invocation-scratch.js';
-import { createRun, fcGlobalDir, setFcGlobalDir, updateRunState, readRunState } from '../src/store.js';
+import * as engineFs from '../src/engine-fs.js';
+import { createInvocationScratch, retireRunScratch } from '../src/invocation-scratch.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir, updateRunState, readRunState } from '../src/store.js';
 import { RUN_STATUS, TERMINAL_STATUSES } from '../src/lifecycle-status.js';
 import { processStartToken } from '../src/run-lock.js';
 
@@ -79,11 +81,12 @@ function retire(citation: string): void {
   expect(existsSync(citation)).toBe(false);
   expect(existsSync(join(runDir, 'scratch'))).toBe(false);
   expect(readRunState(project, basename(runDir)).status).toBe(RUN_STATUS.COMPLETE);
-  for (const name of ['run.json', 'summary.md', 'progress.md']) expect(existsSync(join(runDir, name))).toBe(true);
+  for (const name of ['run.json', 'summary.md']) expect(existsSync(join(runDir, name))).toBe(true);
+  expect(existsSync(join(runDir, 'progress.md'))).toBe(false);
 }
 
-function clean(): string {
-  const result = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, 'clean', '--keep', '0'], {
+function clean(keep = 0): string {
+  const result = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), new URL('../src/cli.ts', import.meta.url).pathname, 'clean', '--keep', String(keep)], {
     cwd: project, encoding: 'utf8', timeout: 15_000,
     env: { ...process.env, HOME: join(root, 'home'), FC_HOME: join(root, 'control'), PROJECT_DIR: project },
   });
@@ -171,7 +174,8 @@ describe('invocation scratch lifetime without provider calls', () => {
     recovered.cleanup();
     expect(existsSync(citation)).toBe(true);
     const recoveredPayload = realpathSync(recovered.path);
-    writeFileSync(join(runDir, 'run.json'), JSON.stringify({ runId: basename(runDir), status: 'failed' }));
+    writeFileSync(join(runDir, 'run.json'), JSON.stringify({ ...readRunState(project, basename(runDir)), status: 'failed',
+      engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, processes: [], at: new Date().toISOString() } }));
     expect(clean()).toContain('Cleaned 1');
     for (const path of [payload, recovered.path, recoveredPayload]) expect(existsSync(path)).toBe(false);
   });
@@ -211,8 +215,9 @@ describe('invocation scratch lifetime without provider calls', () => {
     const exited = once(child, 'exit');
     try {
       writeFileSync(join(runDir, 'run.json'), JSON.stringify({
-        runId: basename(runDir), status: 'failed',
-        engineCheckpoint: { version: 2, processes: [{ pid: child.pid, processStart: processStartToken(child.pid!) }] },
+        ...readRunState(project, basename(runDir)), status: 'failed',
+        engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, at: new Date().toISOString(),
+          processes: [{ pid: child.pid, processStart: processStartToken(child.pid!) }] },
       }));
       expect(clean()).toContain('Skipped 1 live run(s)');
       expect(readFileSync(citation, 'utf8')).toBe('tests passed\n');
@@ -235,7 +240,7 @@ describe('invocation scratch lifetime without provider calls', () => {
     expect(existsSync(join(runDir, 'summary.md'))).toBe(true);
   });
 
-  it.each([RUN_STATUS.PARKED, RUN_STATUS.AWAITING_APPROVAL])('keeps scratch across %s and resume', status => {
+  it.each([RUN_STATUS.PARKED])('keeps scratch across %s and resume', status => {
     const scratch = createInvocationScratch(runDir);
     const citation = join(scratch.path, 'test.log');
     writeFileSync(citation, 'tests passed\n');
@@ -246,31 +251,65 @@ describe('invocation scratch lifetime without provider calls', () => {
     retire(citation);
   });
 
-  it('startup sweeps terminal and missing owners, preserving resumable and uncertain owners', () => {
+  it('clean repairs missing records while preserving retained, malformed and uncertain owners', () => {
     const runRoot = dirname(runDir);
-    const warn = vi.fn();
-    const fixtures = [...TERMINAL_STATUSES, RUN_STATUS.PARKED, RUN_STATUS.AWAITING_APPROVAL, 'future-status', 'malformed', 'missing-status', 'missing-record', 'missing-owner'].map((status, index) => {
-      const owner = join(runRoot, `sweep-${index}`);
+    const fixtures = [...TERMINAL_STATUSES, RUN_STATUS.PARKED, 'future-status', 'malformed', 'missing-status', 'missing-record'].map((status, index) => {
+      const owner = join(runRoot, `repair-${index}`);
       const scratch = createInvocationScratch(owner);
       const payload = realpathSync(scratch.path);
       const alias = dirname(scratch.path);
       writeFileSync(join(payload, 'test.log'), 'tests passed\n');
-      if (status === 'missing-owner') rmSync(owner, { recursive: true });
-      else if (status !== 'missing-record') writeFileSync(join(owner, 'run.json'), status === 'malformed' ? '{' : JSON.stringify(status === 'missing-status' ? {} : { status }));
+      writeFileSync(join(owner, 'evidence.txt'), 'retained evidence');
+      if (status !== 'missing-record') writeFileSync(join(owner, 'run.json'), status === 'malformed' ? '{' : JSON.stringify(status === 'missing-status' ? {} : { runId: basename(owner), status }));
       return { status, owner, payload, alias };
     });
     try {
-      sweepRunScratch(runRoot, warn);
-      for (const { status, owner, payload, alias } of fixtures) {
-        const retained = [RUN_STATUS.PARKED, RUN_STATUS.AWAITING_APPROVAL, 'future-status', 'malformed', 'missing-status'].includes(status);
-        expect(existsSync(alias), status).toBe(retained);
-        if (!retained) expect(() => lstatSync(alias)).toThrow(/ENOENT/);
-        expect(existsSync(payload), status).toBe(retained);
-        if (status !== 'missing-owner') expect(existsSync(owner), status).toBe(true);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        clean(100); // Keep every recorded run: only the missing-record repair applies.
+        for (const { status, owner, payload, alias } of fixtures) {
+          const retained = status !== 'missing-record';
+          expect(existsSync(alias), status).toBe(retained);
+          if (!retained) expect(() => lstatSync(alias)).toThrow(/ENOENT/);
+          expect(existsSync(payload), status).toBe(retained);
+          expect(readFileSync(join(owner, 'evidence.txt'), 'utf8')).toBe('retained evidence');
+        }
       }
-      expect(warn).toHaveBeenCalledTimes(1); // malformed run is reported, never treated as missing
-      sweepRunScratch(runRoot, vi.fn()); // retirement is idempotent
     } finally { for (const { owner } of fixtures) retireRunScratch(owner); }
+  });
+
+  it('clean retires a terminal run whose temporary alias disappeared after a reboot', () => {
+    const scratch = createInvocationScratch(runDir);
+    const payload = realpathSync(scratch.path);
+    const alias = dirname(scratch.path);
+    writeFileSync(join(payload, 'build-cache.bin'), 'disposable');
+    // Simulate interrupted terminal retirement followed by a wiped TMPDIR.
+    writeFileSync(join(runDir, 'run.json'), JSON.stringify({ ...readRunState(project, basename(runDir)), status: RUN_STATUS.COMPLETE,
+      engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, processes: [], at: new Date().toISOString() } }));
+    rmSync(alias);
+    expect(existsSync(join(payload, 'build-cache.bin'))).toBe(true);
+    expect(clean()).toContain('Cleaned 1');
+    for (const path of [payload, join(runDir, 'scratch'), runDir]) expect(existsSync(path)).toBe(false);
+    expect(() => lstatSync(alias)).toThrow(/ENOENT/);
+  });
+
+  it('can retry interrupted physical scratch retirement without losing its alias', () => {
+    const scratch = createInvocationScratch(runDir);
+    const alias = dirname(scratch.path);
+    const physicalRoot = join(runDir, 'scratch');
+    writeFileSync(join(scratch.path, 'build-cache.bin'), 'disposable');
+    const originalRemove = engineFs.rmSync;
+    const failure = vi.spyOn(engineFs, 'rmSync').mockImplementation((path, options) => {
+      if (String(path) === physicalRoot) throw new Error('Interrupted scratch removal');
+      return originalRemove(path, options);
+    });
+    try {
+      expect(() => retireRunScratch(runDir)).toThrow('Interrupted scratch removal');
+      expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(scratch.path, 'build-cache.bin'), 'utf8')).toBe('disposable');
+    } finally { failure.mockRestore(); }
+    retireRunScratch(runDir);
+    expect(existsSync(physicalRoot)).toBe(false);
+    expect(() => lstatSync(alias)).toThrow(/ENOENT/);
   });
 
   it('gives post-terminal commands their command lifetime without recreating run scratch', async () => {

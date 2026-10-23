@@ -6,10 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { generateRunSummary } from '../src/run-summary.js';
+import { generateRunSummary } from './test-support/run-summary.js';
+
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   readRunState,
   runDir,
   writeRunState,
@@ -52,7 +53,7 @@ function dynamicWorkflow(): { config: WorkflowConfig; yaml: string } {
     '  - id: plan',
     '    role: planner',
     '    dynamic_dispatch: true',
-    '    artifact_contract: {version: 1, produces: [{id: dispatch, root: run, path: dispatch.yaml}], reads: [], replays: []}',
+    '    artifact_contract: {version: 1, produces: [{id: dispatch, root: run, path: dispatch.yaml}], reads: []}',
   ].join('\n');
   return {
     yaml,
@@ -138,29 +139,5 @@ describe('repair-stage retry ledger reevaluation', () => {
       status: 'complete', retries: 0, reruns: 1,
       duration_ms: 500, tokens_in: 50, tokens_out: 5,
     });
-  });
-});
-
-describe('supervisor total-token summary reevaluation', () => {
-  it('does not hide input usage when output usage is zero', async () => {
-    const created = createRun(projectDir, 'supervisor-zero-output', 'name: supervisor-zero-output', ['work']);
-    const state = readRunState(projectDir, created.runId);
-    state.status = 'complete';
-    state.completedAt = '2026-07-31T00:00:02.000Z';
-    state.stages.work = { status: 'complete', retries: 0, duration_ms: 1_000 };
-    state.supervisor = {
-      status: 'complete', calls: 1, tokens_in: 999, tokens_out: 0,
-      duration_ms: 1_500, startedAt: '2026-07-31T00:00:00.000Z',
-      completedAt: '2026-07-31T00:00:01.500Z', attempts: [],
-    };
-    writeRunState(projectDir, created.runId, state);
-    const adapter: Adapter = {
-      run: async () => ({ output: '## What was done\n- summarized usage', exitCode: 0, duration_ms: 1 }),
-    };
-
-    await generateRunSummary(projectDir, created.runId, adapter);
-    const summary = readFileSync(join(runDir(projectDir, created.runId), 'summary.md'), 'utf-8');
-
-    expect(summary).toContain('_supervisor: 1 calls, 2s cumulative, 999 tokens total (999 in + 0 out)');
   });
 });

@@ -1,5 +1,5 @@
 node_modules
-dist/
+dist
 .fc/
 *.log
 
@@ -24,19 +24,6 @@ Thumbs.db
 *.tsbuildinfo
 ui/*.d.ts.map
 docs/*
-!docs/continue-legacy-cancel/
-docs/continue-legacy-cancel/*
-!docs/continue-legacy-cancel/report.md
-!docs/cancel-ledger-guard/
-docs/cancel-ledger-guard/*
-!docs/cancel-ledger-guard/report.md
-!docs/no-race-soft-deadline/
-docs/no-race-soft-deadline/*
-!docs/no-race-soft-deadline/review.md
-!docs/no-race-soft-deadline/report.md
-!docs/hold-real-store/
-docs/hold-real-store/*
-!docs/hold-real-store/report.md
 tests/
 ui/tests/
 design/*

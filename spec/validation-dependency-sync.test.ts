@@ -7,7 +7,8 @@ import {
   recordGateValidationDelta,
   settleGateValidationEvidence,
 } from '../src/scheduler/sched_settlement/gate-validation.js';
-import { createRun, fcGlobalDir, setFcGlobalDir, writeStageStatus } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir, writeStageStatus } from '../src/store.js';
 
 const repository = resolve(import.meta.dirname, '..');
 const temporary: string[] = [];

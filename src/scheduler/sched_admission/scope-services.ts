@@ -1,6 +1,5 @@
 /** Shared lexical path/scope predicates and typed boundary to the declared-input write policy; no parallel policy implementation. */
-import { posix, isAbsolute } from 'node:path';
-import type { DeclaredInputWriteBinding } from '../../scheduler.js';
+import { posix, isAbsolute, relative } from 'node:path';
 
 export type ParsedScope =
   | { kind: 'exact'; raw: string; value: string }
@@ -33,7 +32,7 @@ export function parseDeclaredScope(rawValue: string): ParsedScope {
   const segments = slashNormalized.split('/');
   if (segments.includes('..')) return { kind: 'unknown', raw, reason: 'scope may not traverse outside the project' };
   const explicitDirectory = slashNormalized.endsWith('/') || slashNormalized.endsWith('/.');
-  const normalized = segments.filter(segment => segment && segment !== '.').join('/');
+  const normalized = normalizedProjectPath(slashNormalized)?.replace(/\/$/, '');
   if (!normalized) return { kind: 'unknown', raw, reason: 'empty scope entry' };
   const globAt = normalized.search(globSyntax);
   if (globAt >= 0) {
@@ -109,31 +108,10 @@ function languagesIntersect(left: ScopeSegment[], right: ScopeSegment[]): boolea
   return visit(0, 0);
 }
 
-/** Admission and input-tree protection ask the same scope-language owner.
- * Complex Node glob constructs can span path separators; retain a conflict
- * when their intersection cannot be proved rather than grant concurrency. */
-export function scopeLanguagesMayOverlap(left: ParsedScope, right: ParsedScope): boolean {
-  if (left.kind === 'unknown' || right.kind === 'unknown') return true;
-  const crossesSegments = (scope: ParsedScope): boolean => scope.kind === 'glob'
-    && scope.segments.some(segment => {
-      let depth = 0;
-      for (const character of segment.value) {
-        if ('{[('.includes(character)) depth++;
-        if ('}])'.includes(character)) depth--;
-      }
-      return depth !== 0;
-    });
-  if (crossesSegments(left) || crossesSegments(right)) return true;
-  return languagesIntersect(languageSegments(left), languageSegments(right));
-}
-
-export interface DeclaredInputScopeServices {
-  resolveDeclaredInputWriteBindings(projectDir: string, brief: string): DeclaredInputWriteBinding[];
-  firstDeclaredInputScopeConflict(scopes: readonly string[], inputs: readonly DeclaredInputWriteBinding[], projectDir?: string): { scope: string; inputPath: string; inputKind: 'file' | 'tree'; comparison: 'declared_path' | 'resolved_identity' } | undefined;
-}
-
-export function normalizedProjectPath(value: string): string | undefined {
-  const normalized = posix.normalize(value.trim().replace(/\\/g, '/').replace(/^\.\//, ''));
+export function normalizedProjectPath(value: string, projectDir?: string): string | undefined {
+  let path = value.trim().replace(/\\/g, '/');
+  if (projectDir && isAbsolute(path)) path = relative(projectDir, path).replace(/\\/g, '/');
+  const normalized = posix.normalize(path);
   if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../') || isAbsolute(normalized) || /^[A-Za-z]:\//.test(normalized)) return undefined;
   return normalized;
 }

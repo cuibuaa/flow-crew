@@ -1,15 +1,9 @@
-// Boundary: Capture declared-scope preimages and find changes from the baseline journal; synchronous and cooperative readers share candidate selection.
-import { type ParsedScope, parseDeclaredScope } from "../sched_admission/frontier.js";
+import { listProjectFiles } from './path-capabilities.js';
+import { ignoredProjectPaths } from '../../project-identity.js';
+// Boundary: Capture current project preimages and find changes from the baseline journal; candidate selection stays with the production reader.
 import { type StageConfig } from "../sched_admission/configuration.js";
-import { scopeMatchesProjectPath } from "../sched_admission/scope-services.js";
-import { type RunRollbackBaseline, baselineImage, readRollbackCurrentImage, trackedGitlinkAncestor, readRollbackCurrentImageCooperatively, captureRollbackCurrentImage, ensureRollbackBaseline } from './rollback-baseline.js';
+import { type RunRollbackBaseline, baselineImage, readRollbackCurrentImage, trackedGitlinkAncestor, captureRollbackCurrentImage, ensureRollbackBaseline } from './rollback-baseline.js';
 import { type RepairFileImage, compareRepairFileContents, repairFileImageBytes } from './file-images.js';
-import { firstDeclaredInputScopeConflict, resolveDeclaredInputWriteBindings, listProjectFiles, listProjectFilesAt } from './path-capabilities.js';
-import { ignoredGeneratedPaths } from '../../generated-path-policy.js';
-import { isLiveConstraintExemptPath } from '../../live-constraint-guard.js';
-import { loadEngineDefaults } from '../../config.js';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 export interface RepairSnapshotMeasurement {
   baselineInitialized: boolean;
@@ -37,8 +31,6 @@ export interface RepairSnapshotMeasurement {
 export interface RepairRoundSnapshot {
   startedAt: string;
   declaredScopes: Record<string, string[] | null>;
-  /** Identities detect forbidden writes; admitted writable paths have preimages. */
-  allFileImages: Map<string, RepairFileImage>;
   files: Map<string, RepairFileImage>;
   /** Run-scoped baseline + change-journal cursor avoid repeated project walks. */
   rollbackBaseline: RunRollbackBaseline;
@@ -53,24 +45,11 @@ export function changedProjectPathsSinceSnapshot(
 ): string[] {
   const baseline = snapshot.rollbackBaseline;
   return [...new Set([...snapshotCandidatePaths(snapshot, projectDir), ...additionalPaths])].filter((path) => {
-    const before = snapshot.files.get(path) ?? baselineImage(baseline, path);
+    const before = baseline.frozenImages.get(path) ?? snapshot.files.get(path) ?? baselineImage(baseline, path);
     const after = readRollbackCurrentImage(baseline, projectDir, path, before);
-    return compareRepairFileContents(before, after) === 'different';
+    return !(after.exists && after.type === 'directory' && !before.exists)
+      && compareRepairFileContents(before, after) === 'different';
   });
-}
-
-export async function changedProjectPathsSinceSnapshotCooperatively(
-  snapshot: RepairRoundSnapshot,
-  projectDir: string,
-): Promise<string[]> {
-  const baseline = snapshot.rollbackBaseline;
-  const changed: string[] = [];
-  for (const path of snapshotCandidatePaths(snapshot, projectDir)) {
-    const before = snapshot.files.get(path) ?? baselineImage(baseline, path);
-    const after = await readRollbackCurrentImageCooperatively(baseline, projectDir, path, before);
-    if (compareRepairFileContents(before, after) === 'different') changed.push(path);
-  }
-  return changed;
 }
 
 export function captureRepairRoundSnapshot(
@@ -80,67 +59,12 @@ export function captureRepairRoundSnapshot(
 ): RepairRoundSnapshot {
   const ensured = ensureRollbackBaseline(projectDir, options?.runDirPath);
   const baseline = ensured.baseline;
-  const declaredScopes: Record<string, string[] | null> = {};
-  const parsedScopes: ParsedScope[] = [];
-  let captureAll = false;
-  for (const stage of repairStages) {
-    declaredScopes[stage.id] = stage.scope ?? null;
-    if (stage.scope === undefined) {
-      captureAll = true;
-      continue;
-    }
-    for (const raw of stage.scope) {
-      const parsed = parseDeclaredScope(raw);
-      parsedScopes.push(parsed);
-      if (parsed.kind === 'unknown') captureAll = true;
-    }
-  }
-
-  const scopedPaths = new Set<string>();
-  const addScopedTree = (root: string): void => {
-    const gitlink = trackedGitlinkAncestor(baseline, root);
-    if (gitlink) {
-      scopedPaths.add(gitlink);
-      return;
-    }
-    for (const path of listProjectFilesAt(projectDir, root, true)) scopedPaths.add(path);
-  };
-  if (captureAll) {
-    for (const path of listProjectFiles(projectDir, {
-      skipDirectory: (directory) => trackedGitlinkAncestor(baseline, directory) !== undefined,
-    })) scopedPaths.add(path);
-  } else {
-    for (const scope of parsedScopes) {
-      if (scope.kind === 'exact' || scope.kind === 'tree') {
-        addScopedTree(scope.value);
-        if (scope.kind === 'exact') scopedPaths.add(scope.value);
-      } else if (scope.kind === 'glob') {
-        if (!scope.directoryPrefix) {
-          for (const path of listProjectFiles(projectDir, {
-            skipDirectory: (directory) => trackedGitlinkAncestor(baseline, directory) !== undefined,
-          })) scopedPaths.add(path);
-        } else {
-          addScopedTree(scope.directoryPrefix);
-        }
-      }
-    }
-  }
-  // Tracked content remains writable/protected inside otherwise skipped caches.
-  for (const path of baseline.trackedPaths) {
-    if (captureAll || parsedScopes.some(scope => scopeMatchesProjectPath(scope, path))) scopedPaths.add(path);
-  }
-  const briefPath = options?.runDirPath && join(options.runDirPath, 'task_brief.md');
-  const inputs = briefPath && existsSync(briefPath)
-    ? resolveDeclaredInputWriteBindings(projectDir, readFileSync(briefPath, 'utf8')) : [];
-  const ignored = ignoredGeneratedPaths(projectDir, [...scopedPaths]);
-  const exemptPatterns = loadEngineDefaults().live_constraint_exempt_patterns;
-  for (const path of scopedPaths) {
-    if (isLiveConstraintExemptPath(path, exemptPatterns, baseline.trackedPaths)
-        || ignored.has(path) || firstDeclaredInputScopeConflict([path], inputs, projectDir)
-        || (!captureAll && !parsedScopes.some(scope => scopeMatchesProjectPath(scope, path)))) {
-      scopedPaths.delete(path);
-    }
-  }
+  const declaredScopes = Object.fromEntries(repairStages.map(stage => [stage.id, stage.scope ?? null]));
+  const scopedPaths = new Set(listProjectFiles(projectDir, {
+    skipDirectory: directory => trackedGitlinkAncestor(baseline, directory) !== undefined,
+  }));
+  const ignored = ignoredProjectPaths(projectDir, [...scopedPaths]);
+  for (const path of ignored) scopedPaths.delete(path);
   const files = new Map<string, RepairFileImage>();
   let scopedFilesRead = 0;
   let scopedFilesHashed = 0;
@@ -166,7 +90,6 @@ export function captureRepairRoundSnapshot(
   return {
     startedAt: new Date().toISOString(),
     declaredScopes,
-    allFileImages: baseline.images,
     files,
     rollbackBaseline: baseline,
     journalCursor: baseline.journalSequence,

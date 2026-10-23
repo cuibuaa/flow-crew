@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
-import { fcGlobalDir, setFcGlobalDir, runDir, type StoreState } from '../src/store.js';
+import { fcGlobalDir, setFcGlobalDir, runDir, writeRunState, type StoreState } from '../src/store.js';
 import { parseDispatchedStageConfig } from '../src/scheduler.js';
 
 const carrier = vi.hoisted(() => ({ path: '', reads: 0, first: '', later: '' }));
@@ -36,6 +36,7 @@ function fixture(first: Record<string, unknown>, later: Record<string, unknown>)
     artifact_contract: { ...emptyArtifactContract(), produces: [{ id: 'verdict', root: 'run', path: 'verdict_gate.json', kind: 'file' }] } });
   const state: StoreState = { runId, projectDir, workflowName: 'fixture', status: 'running', startedAt: '2026-01-01T00:00:00Z',
     stages: { gate: { status: 'complete', retries: 0, attempts: [{ index: 1, status: 'complete', startedAt: '2026-01-01T00:00:01Z', completedAt: '2026-01-01T00:00:02Z' }] } } };
+  writeRunState(projectDir, runId, state);
   Object.assign(carrier, { path: join(base, 'verdict_gate.json'), reads: 0, first: JSON.stringify(first), later: JSON.stringify(later) });
   return { projectDir, stage, state, runId, base };
 }
@@ -43,9 +44,8 @@ function fixture(first: Record<string, unknown>, later: Record<string, unknown>)
 describe('gate settlement binds one authored fact', () => {
   it('does not mix a rejected authored review with a subsequently replaced passing carrier', () => {
     const f = fixture({ pass: false, reason: 'repair this finding' }, { pass: true, reason: 'replacement' });
-    expect(readGateEvaluation(f.projectDir, f.stage, f.state, f.runId)).toEqual({
-      authoredVerdict: { pass: false, reason: 'repair this finding' },
-      effectiveVerdict: { pass: false, reason: 'repair this finding' },
+    expect(readGateEvaluation(f.projectDir, f.stage.id, f.runId)).toEqual({
+      pass: false, reason: 'repair this finding',
     });
     expect(carrier.reads).toBe(1);
   });
@@ -63,13 +63,12 @@ describe('gate settlement binds one authored fact', () => {
       production: { runId: f.runId, runDir: f.base, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt },
       observations: [{ path: carrier.path, fresh, sha256: createHash('sha256').update(replacement ? carrier.later : carrier.first).digest('hex') }],
     }));
-    const evaluation = readGateEvaluation(f.projectDir, f.stage, f.state, f.runId);
-    expect(evaluation.authoredVerdict?.repairability?.disposition).toBe('irreparable');
+    const evaluation = readGateEvaluation(f.projectDir, f.stage.id, f.runId);
     if (fresh && !replacement) {
-      expect(evaluation.effectiveVerdict).toMatchObject({ pass: false, repairability: { disposition: 'irreparable' } });
+      expect(evaluation).toMatchObject({ pass: false, repairability: { disposition: 'irreparable' } });
     } else {
-      expect(evaluation.effectiveVerdict).toMatchObject({ pass: false, contractViolation: 'repairability' });
-      expect(evaluation.effectiveVerdict?.repairability).toBeUndefined();
+      expect(evaluation).toMatchObject({ pass: false, refusal: { kind: 'repairability' } });
+      expect(evaluation?.repairability).toBeUndefined();
     }
   });
 
@@ -93,10 +92,9 @@ describe('gate settlement binds one authored fact', () => {
         observations: [{ path: join(location === 'foreign-observation' ? foreign : physical, 'verdict_gate.json'),
           fresh: true, sha256: createHash('sha256').update(carrier.first).digest('hex') }],
       }));
-      const evaluation = readGateEvaluation(f.projectDir, f.stage, f.state, f.runId);
-      expect(evaluation.authoredVerdict).toMatchObject({ pass: false, repairability: { disposition: 'repairable' } });
-      if (location === 'same') expect(evaluation.effectiveVerdict).toMatchObject({ pass: false, repairability: { disposition: 'repairable' } });
-      else expect(evaluation.effectiveVerdict).toMatchObject({ pass: false, contractViolation: 'repairability' });
+      const evaluation = readGateEvaluation(f.projectDir, f.stage.id, f.runId);
+      if (location === 'same') expect(evaluation).toMatchObject({ pass: false, repairability: { disposition: 'repairable' } });
+      else expect(evaluation).toMatchObject({ pass: false, refusal: { kind: 'repairability' } });
     },
   );
 });

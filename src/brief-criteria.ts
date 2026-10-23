@@ -39,14 +39,13 @@ function slug(value: string): string {
  * Extract only structurally numbered/named criteria under an explicit contract
  * heading. Ordinary numbered narrative and parenthetical examples stay prose.
  */
-function scanBriefCriteria(brief: string) {
+export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
   const lines = brief.split(/\r?\n/);
   const firstBodyLine = (splitBriefFrontmatter(brief)?.bodyLineOffset ?? 0) + 1;
   const criteria: BriefCriterion[] = [];
-  const ranges: Array<{ id: string; first: number; last: number }> = [];
   const excluded: NonNullable<BriefCriteriaArtifact['excluded']> = [];
   let section: { title: string; level: number } | undefined;
-  let current: { ordinal: string; line: number; last: number; text: string; section: string } | undefined;
+  let current: { ordinal: string; line: number; text: string; section: string } | undefined;
   let inFence = false;
   const flush = (): void => {
     if (!current) return;
@@ -60,7 +59,6 @@ function scanBriefCriteria(brief: string) {
         section: current.section,
       };
       criteria.push(criterion);
-      ranges.push({ id: criterion.id, first: current.line, last: current.last });
     } else if (text) excluded.push({ line: current.line, text, reason: 'explicitly_illustrative' });
     current = undefined;
   };
@@ -69,12 +67,10 @@ function scanBriefCriteria(brief: string) {
     const raw = lines[index];
     const trimmed = raw.trim();
     if (/^(?:```|~~~)/.test(trimmed)) {
-      if (current) current.last = index + 1;
       inFence = !inFence;
       continue;
     }
     if (inFence) {
-      if (current) current.last = index + 1;
       continue;
     }
     const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed);
@@ -98,14 +94,12 @@ function scanBriefCriteria(brief: string) {
       current = {
         ordinal: numbered ? numbered[1] : named![1],
         line: index + 1,
-        last: index + 1,
         text: numbered ? numbered[2] : `${named![1]}: ${named![2]}`,
         section: section.title,
       };
       continue;
     }
     if (current && trimmed) {
-      current.last = index + 1;
       if (!/^[-*+]\s+|^\d+[.)]\s+/.test(trimmed)) current.text += ` ${trimmed}`;
     } else if (!trimmed) {
       flush();
@@ -113,23 +107,7 @@ function scanBriefCriteria(brief: string) {
   }
   flush();
   const artifact: BriefCriteriaArtifact = { version: 1, briefDigest: digest(brief), criteria, ...(excluded.length ? { excluded } : {}) };
-  return { artifact, ranges };
-}
-
-export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
-  return scanBriefCriteria(brief).artifact;
-}
-
-/** Project the contract without rewriting its criteria or surrounding context.
- * Original headings, ordinals and text keep the selected canonical IDs stable. */
-export function scopeBriefCriteria(brief: string, criterionRefs: readonly string[]): string {
-  const refs = new Set(criterionRefs);
-  const removed = new Set<number>();
-  for (const range of scanBriefCriteria(brief).ranges) {
-    if (refs.has(range.id)) continue;
-    for (let line = range.first; line <= range.last; line++) removed.add(line);
-  }
-  return brief.split('\n').filter((_line, index) => !removed.has(index + 1)).join('\n');
+  return artifact;
 }
 
 export function writeBriefCriteriaArtifact(runDir: string, brief: string): BriefCriteriaArtifact {

@@ -20,8 +20,10 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { runWorkflow, type WorkflowConfig } from '../../src/scheduler.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
-import { createRun, fcGlobalDir, readRunState, runDir, runsRoot, setFcGlobalDir, writeRunState } from '../../src/store.js';
-import { generateRunSummary } from '../../src/run-summary.js';
+import { createRun } from '../test-support/create-run.js';
+import { fcGlobalDir, readRunState, runDir, runsRoot, setFcGlobalDir, writeRunState } from '../../src/store.js';
+import { generateRunSummary } from '../test-support/run-summary.js';
+
 
 let fixtureRoot: string, projectDir: string, previousStore: string;
 beforeEach(() => {
@@ -33,7 +35,7 @@ afterEach(() => { setFcGlobalDir(previousStore); rmSync(fixtureRoot, { recursive
 
 const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
   yaml: ['name: research', 'defaults:', '  max_iterations: 6', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true'].join('\n'),
-  config: {description: '',  name: 'research', defaults: { max_iterations: 6 }, stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
+  config: {description: '',  name: 'research', defaults: { max_iterations: 6 }, stages: [{ artifact_contract: artifacts([], [], []),criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [] }] },
 };
 
 function writeRoles(): string {
@@ -50,7 +52,7 @@ function setupRun(stop: Record<string, unknown>, opts?: { confirmCommand?: strin
   const rd = runDir(projectDir, created.runId);
   writeFileSync(join(rd, 'scheduler.pid'), String(process.pid));
   const brief = [
-    '---', 'research:', `  baseline: ${opts?.baseline ?? 0}`, '  policy: best_of_n', '  higher_is_better: true',
+    '---', 'research:', `  baseline: ${opts?.baseline ?? 0}`, '  policy: greedy_stack', '  higher_is_better: true',
     '  result_file: docs/research_round_result.json',
     ...(opts?.resultMinimum === undefined ? [] : [
       '  result_schema:',
@@ -119,7 +121,7 @@ const emptyNarrativeAdapter = {
 
 describe('FIX A — budget-exhaustion: incomplete (insufficient rounds) vs ceiling_hit (genuine ceiling)', () => {
   it('SUFFICIENT banked rounds → `ceiling_hit` (policy stayed `continue`, budget ran out, enough measured)', async () => {
-    // Strictly-improving rounds keep best_of_n at `continue` (streak never reaches halt 3), no
+    // Strictly-improving rounds keep greedy_stack at `continue` (streak never reaches halt 3), no
     // max_rounds → policy never self-ceilings; budget (4 iters) exhausts with >=3 banked rounds.
     // required = halt 3; banked >= 3 → ceiling_hit (a real exhaustive plateau, not a starved run).
     const runId = setupRun({ beat: 999, halt_after_no_improvement: 3 }, { baseline: 0, maxIterations: 4 });
@@ -240,7 +242,7 @@ describe('FIX C — summary.md Decision derives from the TERMINAL run.json statu
     const state = {
       runId, projectDir, workflow: 'research', status: 'ceiling_hit',
       stages: {}, currentIteration: 4, maxIterations: 4,
-      research: { baseline: 0, policy: 'best_of_n', higherIsBetter: true, stop: { beat: 99 } },
+      research: { baseline: 0, policy: 'greedy_stack', higherIsBetter: true, stop: { beat: 99 } },
       taskDescription: 'test', completedAt: new Date().toISOString(),
     };
     writeFileSync(join(rd, 'run.json'), JSON.stringify(state));
@@ -270,7 +272,7 @@ describe('FIX C — summary.md Decision derives from the TERMINAL run.json statu
     const state = {
       runId, projectDir, workflow: 'research', status: 'ceiling_hit',
       stages: {}, currentIteration: 4, maxIterations: 4,
-      research: { baseline: 0, policy: 'best_of_n', higherIsBetter: true, stop: { beat: 99 } },
+      research: { baseline: 0, policy: 'greedy_stack', higherIsBetter: true, stop: { beat: 99 } },
       taskDescription: 'test', completedAt: new Date().toISOString(),
     };
     writeFileSync(join(rd, 'run.json'), JSON.stringify(state));

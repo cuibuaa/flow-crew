@@ -9,14 +9,12 @@ import {
   type CodexSessionMetadata,
 } from '../src/adapters/codex.js';
 import {
-  canReuseCodexSession,
   StageConfigSchema,
   type StageConfig,
 } from '../src/scheduler.js';
 import type { StageStatus, StoreState } from '../src/store.js';
-import { clearGateContinuationsForStages, sessionResumeForStage, shouldPreserveSession } from '../src/scheduler/sched_admission/sessions.js';
+import { canReuseSession, clearGateContinuationsForStages, sessionResumeForStage, shouldPreserveSession } from '../src/scheduler/sched_admission/sessions.js';
 import { isSessionReuseEnabled } from '../src/config.js';
-import { classifyAdapterFailure } from '../src/worker.js';
 
 const UUID = '123e4567-e89b-42d3-a456-426614174000';
 
@@ -39,9 +37,9 @@ describe('native invocation cost evidence', () => {
     } finally { rmSync(home,{recursive:true,force:true}); }
   });
   it('does not turn missing retry usage into a complete aggregate', () => {
-    expect(sumInvocationUsage([{}, {tokens_in:20,tokens_out:2,tokenUsage:'known'}])).toEqual({tokens_in:20,tokens_out:2,tokenUsage:'partial'});
-    expect(sumInvocationUsage([{},{}])).toEqual({tokenUsage:'unknown'});
-    expect(sumInvocationUsage([{tokens_in:Number.MAX_SAFE_INTEGER,tokens_out:1},{tokens_in:1,tokens_out:1}])).toEqual({tokens_out:2,tokenUsage:'partial'});
+    expect(sumInvocationUsage([{}, {tokens_in:20,tokens_out:2,tokenUsage:'known'}])).toEqual({tokens_in:20,tokens_out:2,tokenUsage:'partial',costUsage:'unknown'});
+    expect(sumInvocationUsage([{},{}])).toEqual({tokenUsage:'unknown',costUsage:'unknown'});
+    expect(sumInvocationUsage([{tokens_in:Number.MAX_SAFE_INTEGER,tokens_out:1},{tokens_in:1,tokens_out:1}])).toEqual({tokens_out:2,tokenUsage:'partial',costUsage:'unknown'});
   });
 });
 
@@ -113,18 +111,10 @@ describe('UUID-only Codex sessions', () => {
   });
 
   it.each([
-    ['403 Forbidden', 'forbidden'],
-    ['connection refused', 'connection_refused'],
-    ['ECONNREFUSED', 'connection_refused'],
-    ['ECONNRESET', 'connection_reset'],
-    ['429 Too Many Requests', 'rate_limited'],
-    ['rate limit', 'rate_limited'],
-    ['ETIMEDOUT', 'transport_timeout'],
-    ['502 Bad Gateway', 'bad_gateway'],
-    ['503 Service Unavailable', 'service_unavailable'],
-    ['service overloaded', 'overloaded'],
-    ['Selected model is at capacity. Please try a different model.', 'capacity'],
-  ] as const)('retains terminal adapter error %s after a mid-work agent message', (message, kind) => {
+    '403 Forbidden',
+    'Selected model is at capacity. Please try a different model.',
+    'workspace routing discovery failed',
+  ])('retains a transient terminal failure after progress: %s', message => {
     const parsed = parseCodexJsonl([
       JSON.stringify({ type: 'thread.started', thread_id: UUID }),
       JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage was already mid-work' } }),
@@ -133,8 +123,7 @@ describe('UUID-only Codex sessions', () => {
     ].join('\n'));
 
     expect(parsed.output).toContain('stage was already mid-work');
-    expect(classifyAdapterFailure(parsed.output)).toBe(kind);
-    expect(parsed.adapterFailureKind).toBe(kind);
+    expect(parsed.providerFailure).toMatchObject({ kind: 'transient', reason: message });
   });
 
   it('does not preserve a recovered error past a completed turn', () => {
@@ -145,14 +134,13 @@ describe('UUID-only Codex sessions', () => {
     ].join('\n'));
 
     expect(parsed.output).toBe('recovered result');
-    expect(classifyAdapterFailure(parsed.output)).toBeUndefined();
-    expect(parsed.adapterFailureKind).toBeUndefined();
+    expect(parsed.providerFailure).toBeUndefined();
   });
 
   it('resumes only one successful non-validation dependency edge', () => {
     const build = stage('build');
     const continueStage = stage('continue', { depends_on: ['build'] });
-    expect(canReuseCodexSession({
+    expect(canReuseSession({
       stage: continueStage,
       predecessor: build,
       allStages: [build, continueStage],
@@ -165,7 +153,7 @@ describe('UUID-only Codex sessions', () => {
   it('forces cold start for validation roles and failed/retried predecessors', () => {
     const build = stage('build');
     const qa = stage('verify_release', { role: 'qa', is_gate: true, depends_on: ['build'] });
-    expect(canReuseCodexSession({
+    expect(canReuseSession({
       stage: qa,
       predecessor: build,
       allStages: [build, qa],
@@ -175,7 +163,7 @@ describe('UUID-only Codex sessions', () => {
     })).toBe(false);
 
     const next = stage('next', { depends_on: ['build'] });
-    expect(canReuseCodexSession({
+    expect(canReuseSession({
       stage: next,
       predecessor: build,
       allStages: [build, next],
@@ -183,7 +171,7 @@ describe('UUID-only Codex sessions', () => {
       destinationStatus: { status: 'pending', retries: 0 },
       session,
     })).toBe(false);
-    expect(canReuseCodexSession({
+    expect(canReuseSession({
       stage: next,
       predecessor: build,
       allStages: [build, next],
@@ -204,9 +192,9 @@ describe('UUID-only Codex sessions', () => {
       destinationStatus: { status: 'pending', retries: 0 } as StageStatus,
       session,
     };
-    expect(canReuseCodexSession({ ...base, stage: next, allStages: [build, next, sibling] })).toBe(false);
-    expect(canReuseCodexSession({ ...base, stage: multi, allStages: [build, sibling, multi] })).toBe(false);
-    expect(canReuseCodexSession({
+    expect(canReuseSession({ ...base, stage: next, allStages: [build, next, sibling] })).toBe(false);
+    expect(canReuseSession({ ...base, stage: multi, allStages: [build, sibling, multi] })).toBe(false);
+    expect(canReuseSession({
       ...base,
       stage: next,
       allStages: [build, next],

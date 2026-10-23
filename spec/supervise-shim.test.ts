@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync } from 'node:fs';
+import './test-support/policy-runtime.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -16,7 +17,7 @@ import { constants, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { NodeSystemd } from '../src/orchestrator.js';
+import { NodeSystemd, Orchestrator } from '../src/orchestrator.js';
 import { isCancellationResult } from '../src/cancellation-client.js';
 import { processIsAlive, processStartToken, processStartTokensMatch } from '../src/run-lock.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
@@ -112,16 +113,18 @@ describe('durable portable supervision shim', () => {
     await expect(backend.isActive(unit)).resolves.toEqual({ kind: 'terminal', exitCode: 3 });
   });
 
-  it('carries an exact pre-launch refusal through the shim exit record', async () => {
-    const unit = 'launch-refusal.service';
-    const refusal = 'Launch refused: research.stop.max_rounds (8 rounds) exceeds the engine limit (5 iterations).';
+  it('ends a refused quick launch without retrying it, regardless of exit code or message wording (#2209)', async () => {
+    const registry = new TaskRegistry({ baseDir: join(root, 'registry') });
+    const task = registry.create({ brief_text: 'fixture', projectDir: root, status: TASK_STATUS.RUNNING, max_retries: 2 });
+    const unit = task.systemd_unit;
+    const refusal = 'research.stop.max_rounds (8 rounds) exceeds the engine limit (5 iterations).';
     const supervisionModule = pathToFileURL(join(repositoryRoot, 'dist', 'supervision.js')).href;
     const leaked = join(root, 'grandchild-env.txt');
     const source = [
       `import(${JSON.stringify(supervisionModule)}).then(({ recordLaunchRefusal }) => {`,
       `  require('node:child_process').spawnSync(process.execPath, ['-e', ${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(leaked)}, String(process.env.FLOWCREW_LAUNCH_RESULT_PATH))`)}]);`,
       `  recordLaunchRefusal(${JSON.stringify(refusal)});`,
-      '  process.exit(2);',
+      '  process.exit(1);',
       '});',
     ].join('\n');
     const backend = new NodeSystemd(root, { shellPath: '/bin/sh' });
@@ -136,15 +139,31 @@ describe('durable portable supervision shim', () => {
 
     expect(terminal).toMatchObject({
       kind: 'terminal',
-      exitCode: 2,
+      exitCode: 1,
       launchRefusal: { version: 1, kind: 'launch_refused', message: refusal },
     });
     expect(exit).toMatchObject({
-      normalized: 2,
+      normalized: 1,
       launchRefusal: { version: 1, kind: 'launch_refused', message: refusal },
     });
     // The private launch-result channel is consumed by the direct child and never inherited further.
     expect(readFileSync(leaked, 'utf8')).toBe('undefined');
+
+    const launch = vi.spyOn(backend, 'runUnit');
+    const orchestrator = new Orchestrator({
+      registry,
+      systemd: backend,
+      git: {
+        async findCommitByPrefix() { return undefined; },
+        async hasUncommittedChanges() { return false; },
+        async findCommitSince() { return undefined; },
+      },
+      isProjectBusy: () => null,
+    });
+    await orchestrator.tickOnce();
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.FAILED, attempt: 1, notes: refusal });
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it('lets a live systemd unit veto stale running evidence when exit.json is absent', async () => {
@@ -313,7 +332,7 @@ describe('durable portable supervision shim', () => {
     expect(result.message).toContain('may still be running');
     expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLED, completed_at: expect.any(String) });
     expect(JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf8'))).toMatchObject({
-      status: 'stopped', stages: { work: { status: 'failed' } },
+      status: 'cancelled', stages: { work: { status: 'failed' } },
     });
     expect(signals.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([]);
     expect(processIsAlive(running.agentPid)).toBe(true);
@@ -330,12 +349,10 @@ describe('durable portable supervision shim', () => {
 
     await backend.runUnit({ unit, workingDirectory: root, command: shellJoin([process.execPath, '-e', '']) });
     const terminal = await waitForStatus(backend, unit, (status) => status.kind === 'terminal');
-    const legacy = JSON.parse(
-      readFileSync(join(root, 'systemd-fallback', `${unit}.json`), 'utf-8'),
-    ) as { reason?: string };
+    const exit = readSupervisionExit(supervisionPaths(root, unit).exit);
 
     expect(terminal).toEqual({ kind: 'terminal', exitCode: 127 });
-    expect(legacy.reason).toMatch(/shim launcher spawn failed:.*ENOENT/);
+    expect(exit?.reason).toMatch(/shim launcher spawn failed:.*ENOENT/);
   });
 
   it('keeps an early shim exit without running evidence outcome-unknown', async () => {

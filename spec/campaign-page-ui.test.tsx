@@ -15,8 +15,8 @@ import type {
 } from '../ui/src/components/campaign/types';
 
 const RUN_STATUSES: RunStatus[] = [
-  'pending', 'running', 'parked', 'complete', 'failed', 'awaiting_approval', 'shipped',
-  'ceiling_hit', 'escalated', 'reality_gate_failed', 'phase_complete', 'stopped', 'incomplete',
+  'pending', 'running', 'parked', 'complete', 'failed', 'shipped',
+  'ceiling_hit', 'escalated', 'reality_gate_failed', 'cancelled', 'incomplete',
 ];
 
 function complete<T>(value: T): SourceResult<T> {
@@ -67,7 +67,6 @@ function engineeringView(rows: CampaignRunRow[] = [runRow('complete')]): Campaig
     cost: complete({
       wallMs: 3_600_000,
       tokens: 12_345,
-      supervisorTokens: 3_000,
       runCoverage: { succeeded: rows.length, failed: 0, total: rows.length },
       wallCoverage: { succeeded: rows.length, failed: 0, total: rows.length },
       tokenCoverage: { succeeded: rows.length, failed: 0, total: rows.length },
@@ -136,7 +135,7 @@ describe('decision-first campaign UI', () => {
     expect(regions).toHaveLength(5);
     expect(regions.map((region) => region.dataset.answers)).toEqual(['Q4', 'Q1 Q5', 'Q2 Q5', 'Q3', 'Q2 Q3 Q5']);
     expect(regions[0]).toHaveTextContent('Total run wall-clock time 1 hr');
-    expect(regions[0]).toHaveTextContent('Total tokens 12.3K (including supervisor)');
+    expect(regions[0]).toHaveTextContent('Total tokens 12.3K');
     expect(regions[1]).toHaveTextContent('Nothing needs your attention');
     expect(regions[1].querySelector('table')).toBeNull();
     expect(regions[4].textContent?.toLowerCase()).not.toContain('token');
@@ -249,25 +248,6 @@ describe('decision-first campaign UI', () => {
     },
   );
 
-  it('loads brief revisions and their diff only after the operator opens the disclosure', async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith('/revisions')) {
-        return { ok: true, status: 200, json: async () => [{ from: 'v1', to: 'v2', reason: 'clarified the acceptance gate' }] } as Response;
-      }
-      return { ok: true, status: 200, text: async () => '--- v1\n+++ v2\n-old\n+new' } as Response;
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    renderCampaign(engineeringView());
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByText('Brief revisions'));
-    expect(await screen.findByText('clarified the acceptance gate')).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole('button', { name: 'View diff' }));
-    expect(await screen.findByLabelText('v1 → v2 brief diff')).toHaveTextContent('+new');
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
 
   it('keeps the last trusted detail visible when an explicit refresh fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('refresh offline')));

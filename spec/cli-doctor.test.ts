@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -79,7 +80,7 @@ describe('doctor registry maintenance CLI', () => {
     expect(cmdDoctorMaintenance(
       ['--repair-registry', '--compact-registry'],
       { stdout: ambiguous.stdout as any, stderr: ambiguous.stderr as any },
-    )).toBe(2);
+    )).toBe(1);
     expect(ambiguous.errorText()).toContain('Choose one registry maintenance operation');
   });
 });

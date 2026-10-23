@@ -5,7 +5,7 @@
 default_timeout_ms: 10800000
 # Minimum observed silence before deterministic idle abort, including local commands.
 # Changed output, artifact, CPU/I/O or provider socket receive counters advance progress.
-default_stage_idle_timeout_ms: 600000
+stage_idle_timeout_ms: 600000
 
 # Wall clock a single validation command (build/test/lint) may take before it is
 # killed. ship-setup runs the suite twice -- source baseline and target baseline
@@ -14,22 +14,8 @@ default_stage_idle_timeout_ms: 600000
 # had grown to 366 tests and ~11.5 minutes could not establish a baseline while
 # two other jobs were running, and the refusal named the timeout rather than the
 # load.
-default_validation_timeout_ms: 2700000
+validation_timeout_ms: 2700000
 
-# Untracked tool caches are outside input content and the project-write contract.
-# A matching path present in Git's index is always guarded.
-live_constraint_exempt_patterns:
-  - "**/__pycache__/**"
-  - "**/*.pyc"
-  - "**/.pytest_cache/**"
-  - "**/.mypy_cache/**"
-  - "**/.ruff_cache/**"
-  - "node_modules/.vite/vitest/**"
-  - "**/*.tsbuildinfo"
-# Recursive watching is only an accelerator; these bounds govern the portable
-# reconciliation scan and how long an attempt may go without a completed scan.
-live_constraint_fallback_scan_ms: 30000
-live_constraint_monitor_deadline_ms: 600000
 # Scheduler progress is published on its own loop; an independent process
 # warns when a live, identity-bound scheduler stops advancing it.
 scheduler_heartbeat_interval_ms: 2000
@@ -38,15 +24,15 @@ scheduler_stall_observer_poll_ms: 5000
 # Large worktrees on slow filesystems need a checkout-specific bound. Ordinary
 # Git probes retain their smaller command-local bounds.
 git_worktree_add_timeout_ms: 1800000
-default_max_iterations: 5
-default_gate_retry_loops: 3
-default_stage_technical_retries: 1
+max_iterations: 5
+gate_retry_loops: 3
+stage_technical_retries: 1
 # Bounded re-plan budget for a dynamic_dispatch (plan) stage that exits 0 but
 # emits ZERO valid injected stages (truncated/empty/invalid dispatch.yaml — a
 # transient LLM flake). Each retry deletes the bad dispatch.yaml, re-runs the
 # plan stage with a specific re-prompt, until exhausted (then escalate with the
 # parse/unknown-role specifics). Generic engine mechanism, not task logic.
-default_plan_stage_retries: 2
+plan_stage_retries: 2
 # Runtime resolution is read-only: one installed CLI wins; with both installed,
 # Codex is the recommended execution backend. Use `flowcrew adapter <name>` to pin.
 adapter: auto

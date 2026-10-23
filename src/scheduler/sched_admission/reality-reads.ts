@@ -1,7 +1,7 @@
 /** Reachability of explicit reality-check reads and typed handler parameters; script text is never inferred as a read. */
 import { type TerminalStatesConfig, type ResearchConfig } from '../../store.js';
 import { resolveResearchPaths } from '../../research-paths.js';
-import { parseChecksFromMarkdown } from '../../reality-gate/index.js';
+import { parseChecksFromMarkdown, type CheckDecl } from '../../reality-gate/index.js';
 import { artifactProducerReadError, resolveArtifactLocation } from '../../artifact-declarations.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,7 +13,8 @@ import { normalizedProjectPath } from './scope-services.js';
  * admitted stage or framework output contract can produce it before terminal
  * verification. */
 export function inspectRealityCheckReachability(input: {
-  markdown: string;
+  markdown?: string;
+  checks?: CheckDecl[];
   projectDir: string;
   stages: StageConfig[];
   terminalStates?: TerminalStatesConfig;
@@ -29,7 +30,7 @@ export function inspectRealityCheckReachability(input: {
     : undefined;
   const byId = new Map(input.stages.map((stage) => [stage.id, stage]));
   const errors: string[] = [];
-  for (const check of parseChecksFromMarkdown(input.markdown)) {
+  for (const check of input.checks ?? parseChecksFromMarkdown(input.markdown ?? '')) {
     if (check.kind === 'invalid') { errors.push(check.diagnostic); continue; }
     for (const read of check.reads ?? []) {
       try { resolveArtifactLocation(read, input.projectDir, input.runDir ?? input.projectDir); }

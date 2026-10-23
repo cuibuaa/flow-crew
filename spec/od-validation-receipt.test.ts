@@ -8,7 +8,8 @@ import { parseDispatchedStageConfig, type WorkflowConfig } from '../src/schedule
 import { createScopeSafeStageRunner } from '../src/scheduler/sched_scope/stage-group.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
 import { bindReviewedGateValidation, gateValidationRefusal, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
-import { beginStageAttempt, completeStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState, writeStageStatus } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState, writeStageStatus } from '../src/store.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 
 let root: string, project: string, previousStore: string;
@@ -43,9 +44,8 @@ describe('configured validation has one wave settlement owner', () => {
   it('executes once per unchanged review, including repeated inner-loop reviews', async () => {
     const f = await fixture();
     const runner = createScopeSafeStageRunner({
-      monitorApprovalRequests: async () => null, monitorScopeRevisionRequests: async () => {},
-      createSchedulerLiveConstraintGuardFactory: () => undefined,
-      reconcileCompletedStageAttempts: () => ({ violation: false, acceptedRevisionDuringAttempt: false }),
+      monitorApprovalRequests: async () => null,
+      reconcileCompletedStageAttempts: () => ({ violation: false, }),
     });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       return fixtureResult({ output: JSON.stringify({ pass: true, reason: 'Independent review passed.', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
@@ -76,9 +76,8 @@ describe('configured validation has one wave settlement owner', () => {
       artifact_contract: fixtureArtifactContract('peer') });
     writeStageStatus(project, f.runId, peer.id, { status: 'pending', retries: 0 });
     const runner = createScopeSafeStageRunner({
-      monitorApprovalRequests: async () => null, monitorScopeRevisionRequests: async () => {},
-      createSchedulerLiveConstraintGuardFactory: () => undefined,
-      reconcileCompletedStageAttempts: () => ({ violation: false, acceptedRevisionDuringAttempt: false }),
+      monitorApprovalRequests: async () => null,
+      reconcileCompletedStageAttempts: () => ({ violation: false, }),
     });
     let releasePeer!: () => void;
     const reviewClosed = new Promise<void>(resolve => { releasePeer = resolve; });

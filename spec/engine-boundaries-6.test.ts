@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -41,6 +42,6 @@ describe('engine boundary cases 57 and 59', () => {
     const refused = inspectDispatchAdmission({ dispatched: undefinedFacts, baseStages: [],
       dispatchStageId: 'plan', terminalStates });
     expect(refused.pass).toBe(false);
-    expect(refused.errors.filter((error) => error.includes('framework research facts in a non-research run'))).toHaveLength(2);
+    expect(refused.errors.filter((error) => error.message.includes('framework research facts in a non-research run'))).toHaveLength(2);
   });
 });

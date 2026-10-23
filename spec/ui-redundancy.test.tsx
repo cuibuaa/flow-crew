@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { isRecord, isNonNegativeInteger } from "../ui/src/lib/source-validation";
-import { simulationSource } from "../ui/src/lib/simulation-source";
 import { isRunStatus } from "../ui/src/lib/run-status";
 import {
   isSuccessfulRunStatus,
@@ -20,15 +19,6 @@ describe("shared UI source predicates", () => {
       expect(isNonNegativeInteger(value)).toBe(false);
     }
     for (const value of [0, 1, 1_000]) expect(isNonNegativeInteger(value)).toBe(true);
-  });
-
-  it("recognises bounded simulation labels without marking unrelated source names", () => {
-    for (const source of ["llm:mock", "test/fixture", "provider.simulated", "SIMULATION", "test"]) {
-      expect(simulationSource(source)).toBe(true);
-    }
-    for (const source of [undefined, "", "operator", "latest", "testimony", "mockingbird"]) {
-      expect(simulationSource(source)).toBe(false);
-    }
   });
 
   it("preserves the old model exports and distinguishes terminal from successful outcomes", () => {

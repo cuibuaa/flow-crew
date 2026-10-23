@@ -1,9 +1,11 @@
+import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { inspectDispatchAdmission, parseDispatchedStageConfig, runWorkflow, tryTerminateOnTerminalState, WorkflowConfigSchema } from '../src/scheduler.js';
-import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, runDir, setFcGlobalDir } from '../src/store.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { artifacts, producedRead } from './spec_contracts/declared-fixtures.js';
@@ -31,8 +33,8 @@ describe('criterion ownership follows the result duty', () => {
     const review = stage({ id: 'review', role: 'qa', is_gate: true, depends_on: ['work'], criterion_refs: [product, verification] });
     const repair = stage({ id: 'repair', role: 'coder', scope: work.scope, depends_on: ['review'], retry_to: ['review'] });
     expect(admit([work, review, repair], brief).errors).toEqual([]);
-    expect(admit([work, { ...review, criterion_refs: [verification] }, repair], brief).errors.join(';')).toContain('not assigned to a gate');
-    expect(admit([work, { ...review, criterion_refs: [product] }, repair], brief).errors.join(';')).toContain('not assigned to a work stage or gate');
+    expect(admit([work, { ...review, criterion_refs: [verification] }, repair], brief).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('not assigned to a gate');
+    expect(admit([work, { ...review, criterion_refs: [product] }, repair], brief).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('not assigned to a work stage or gate');
   });
 
   it('still requires a dedicated audit artifact producer when review consumes authored audit work', () => {
@@ -40,7 +42,7 @@ describe('criterion ownership follows the result duty', () => {
     const work = stage({ id: 'audit_work', role: 'coder', scope: ['results/round/audit.json'], artifact_contract: artifacts([{ id: 'audit', root: 'project', path: 'results/round/audit.json' }]) });
     const gate = stage({ id: 'round_audit', role: 'qa', is_gate: true, artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: 'verdict_round_audit.json' }], [producedRead('audit_input', 'results/round/audit.json', 'audit_work', 'audit')]) });
     const repair = stage({ id: 'fix_round', role: 'coder', depends_on: ['round_audit'], retry_to: ['round_audit'], scope: work.scope });
-    expect(admit([gate, repair], brief).errors.join(';')).toContain('ARTIFACT_READ_UNBOUND');
+    expect(admit([gate, repair], brief).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('ARTIFACT_READ_UNBOUND');
     const reviewed = { ...gate, depends_on: ['audit_work'] };
     expect(admit([work, reviewed, repair], brief).errors).toEqual([]);
     for (const producer of ['round_audit', 'fix_round']) {

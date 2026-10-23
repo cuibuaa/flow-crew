@@ -1,4 +1,4 @@
-import { writeFileSync, mkdirSync, renameSync } from './engine-fs.js';
+import { atomicWrite, mkdirSync } from './engine-fs.js';
 
 
 import { dirname, join } from 'node:path';
@@ -71,7 +71,7 @@ export function parseExplicitCommandTimeout(command: string): ExplicitCommandTim
   return { timeoutMs: Math.round(timeoutMs), duration };
 }
 
-/** Durable native command lifecycle parser; flushes trailing events before closure. */
+/** Native command progress parser; flushes trailing events before closure. */
 export class CommandActivityTracker {
   private readonly path: string;
   private readonly active = new Map<string, CommandActivityRecord>();
@@ -172,8 +172,7 @@ export class CommandActivityTracker {
       ...(this.process ? { process: this.process } : {}),
     };
     mkdirSync(dirname(this.path), { recursive: true });
-    const temp = `${this.path}.tmp-${process.pid}`;
-    writeFileSync(temp, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf-8');
-    renameSync(temp, this.path);
+    // Live progress is superseded on the next tool event; it is not recovery authority.
+    atomicWrite(this.path, `${JSON.stringify(snapshot, null, 2)}\n`, { durability: 'replace-only' });
   }
 }

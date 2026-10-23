@@ -7,18 +7,19 @@ import { execWithStdin } from '../src/adapters/base.js';
 import { producesEngineOwnedArtifact } from '../src/artifact-declarations.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 import { registerEngineOwnedSqlitePath } from '../src/engine-owned-carriers.js';
-import { createRun, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 let root: string, project: string, run: string, previous: string;
-const contract = { version: 1 as const, produces: [], reads: [], groups: [], replays: [] };
+const contract = { version: 1 as const, produces: [], reads: [], groups: [] };
 const stage = { id: 'work', depends_on: [] };
 const authorFiles = [
   'run.json.backup', 'events.jsonl.backup', 'workflow.yaml.backup', 'task_brief.md.backup',
   'brief_criteria.json.backup', 'validation_baseline.json.backup', 'validation_delta_notes.md',
   'dispatch_admission.json.backup', 'run_history.jsonl.backup', 'resource_leases_notes.md',
-  'stage_watchdog.json.backup', 'supervisor_state.json.backup', 'supervisor_usage.json.backup',
+  'stage_watchdog.json.backup',
   'verdict_notes.md', 'handoff_notes.txt',
-  ...['status.json.backup', 'input.md.backup', 'output_schema.json.backup', 'invocations.backup/record',
+  ...['status.json.backup', 'output_schema.json.backup', 'invocations.backup/record',
     'attempt_generation.json.backup', 'plan_revision_decision_notes.md', 'scope_revision_decision_notes.md',
     'approval_resolution_notes.md', 'attempt_deadline_notes.md', 'constraint_audit_notes.md',
     'command_activity.json.backup', 'session.json.backup', 'artifact_contract.json.backup',
@@ -83,8 +84,8 @@ describe('run-owned state scope', () => {
 
   it('still rejects changes to exact and generated engine records', async () => {
     for (const local of ['run.json', 'stages/work/status.json', 'validation_delta_review.json',
-      'stages/work/plan_revision_decision_request.json', 'stages/work/scope_revision_decision_attempt_1_request.json',
-      'stages/work/attempt_deadline_1.jsonl', 'stages/work/constraint_audit_attempt_1.json']) {
+      'stages/work/plan_revision_decision_request.json',
+      'stages/work/constraint_audit_attempt_1.json']) {
       const path = join(run, local), original = readFileSync(join(run, 'run.json'), 'utf8');
       write(path, original);
       await expect(withEngineIntegrity(input(), async () => { writeFileSync(path, 'counterfeit'); })).rejects.toThrow('ENGINE_STATE_TAMPERED');

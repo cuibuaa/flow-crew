@@ -1,5 +1,5 @@
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
-import { atomicWrite } from '../src/store.js';
+import { atomicWrite } from '../src/engine-fs.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { randomBytes } from 'node:crypto';
@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { readGateVerdict, runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
+import { readGateEvaluation, runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -52,10 +52,10 @@ function workflow(maxIterations: number): { config: WorkflowConfig; yaml: string
   ].join('\n');
   return {
     yaml,
-    config: {description: '', 
+    config: {description: '',
       name: 'gate-attempt-contract',
       defaults: { max_iterations: maxIterations, max_retries: 0 },
-      stages: [{ artifact_contract: artifacts([], [], [], []),criterion_refs: [], 
+      stages: [{ artifact_contract: artifacts([], [], []),criterion_refs: [],
         id: 'plan', role: 'planner', depends_on: [], scope: [], prompt_template: '',
         dynamic_dispatch: true, is_gate: false, skills: [],
       }],
@@ -106,25 +106,21 @@ describe('explicit gate repairability', () => {
     { version: 1, disposition: 'irreparable', evidence: 'fact', extra: true },
   ])('refuses malformed repairability case %# without inferring a terminal fact', (repairability) => {
     writeGateVerdict({ pass: false, repairability });
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({
-      pass: false, contractViolation: 'repairability', reason: expect.stringContaining('exactly {version:1'),
+    expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({
+      pass: false, refusal: { kind: 'repairability' }, reason: expect.stringContaining('exactly {version:1'),
     });
   });
 
   it('refuses repairability alongside pass=true', () => {
     writeGateVerdict({ pass: true, repairability: { version: 1, disposition: 'irreparable', evidence: 'fact' } });
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({ pass: false, contractViolation: 'repairability' });
+    expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({ pass: false, refusal: { kind: 'repairability' } });
   });
 
   it('refuses rejected repairability alongside terminal study completion success', () => {
     const conflicting = { pass: false, reason: 'study_complete_without_model_success', study_complete: true, model_success: false,
       repairability: { version: 1, disposition: 'irreparable', evidence: 'Unrepairable failed constraint' } };
     writeGateVerdict(conflicting);
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({ pass: false, contractViolation: 'repairability', reason: expect.stringContaining('incompatible outcome declarations') });
-    const directory = runDir(projectDir, UNIT_RUN_ID);
-    rmSync(join(directory, `verdict_${GATE_ID}.json`));
-    writeFileSync(join(directory, `pre_gate_verdict_${GATE_ID}.json`), JSON.stringify(conflicting));
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toBeNull();
+    expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toMatchObject({ pass: false, refusal: { kind: 'repairability' }, reason: expect.stringContaining('incompatible outcome declarations') });
   });
 
   it('escalates an irreparable rejection once without dispatching repair or re-planning', async () => {
@@ -339,15 +335,15 @@ describe('verdict authority and binding score consistency', () => {
     if (kind === 'malformed') writeFileSync(statePath, '{');
     else mkdirSync(statePath);
 
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual(verdict);
+    expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual(verdict);
     rmSync(join(runDir(projectDir, UNIT_RUN_ID), `verdict_${GATE_ID}.json`));
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toBeNull();
+    expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toBeNull();
   });
 
   it('accepts a qualitative verdict when no metric file exists', () => {
     writeGateVerdict({ pass: true, reason: 'qualitative evidence is sufficient' });
 
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual({
+    expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual({
       pass: true,
       reason: 'qualitative evidence is sufficient',
     });
@@ -357,10 +353,11 @@ describe('verdict authority and binding score consistency', () => {
     writeGateVerdict({ pass: true, metric: 'quality', reason: 'unmeasured claim' });
     writeGateMetric(JSON.stringify({ hasMetric: false, source: { kind: 'engine_attempt_default' } }));
 
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID, {
+    expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID, {
       metric: 'quality', threshold: 7, higherIsBetter: true,
     })).toEqual({
       pass: false,
+      refusal: { kind: 'numeric_evidence' },
       reason: expect.stringMatching(/missing required numeric gate value[\s\S]*metric="quality"[\s\S]*threshold=7/),
     });
   });
@@ -374,10 +371,11 @@ describe('verdict authority and binding score consistency', () => {
     );
     writeGateMetric(JSON.stringify({ hasMetric: false, source: { kind: 'engine_attempt_default' } }));
 
-    expect(readGateVerdict(projectDir, GATE_ID, UNIT_RUN_ID, {
+    expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID, {
       metric: 'quality', threshold: 7, higherIsBetter: true,
     })).toEqual({
       pass: false,
+      refusal: { kind: 'numeric_evidence' },
       reason: expect.stringMatching(/finite numeric|missing required numeric/),
     });
   });

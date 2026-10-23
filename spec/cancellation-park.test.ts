@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -22,8 +23,8 @@ import {
 import { invalidateRunLockCache, writeSchedulerProcessIdentity } from '../src/run-lock.js';
 import type { CancellationResult } from '../src/run-control.js';
 import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   readRunState,
   RUN_STATUS,
@@ -156,8 +157,8 @@ describe('cancellation entry convergence', () => {
     server = await startRpcServer(socketPath, (request): RpcResponse => {
       requests.push(request);
       if (request.cmd === 'show') return { task, recent_ticks: [] };
-      if (request.cmd === 'cancel') return { ok: true };
-      if (request.cmd === 'cancel-run') throw new Error('task cancellation must retain its registry binding');
+      if (request.cmd === 'cancel' && 'id' in request) return { ok: true };
+      if (request.cmd === 'cancel') throw new Error('task cancellation must retain its registry binding');
       return { error: 'unexpected command' };
     });
     const io = capture();
@@ -179,7 +180,7 @@ describe('cancellation entry convergence', () => {
     expect(systemd.stopCalls).toBe(1);
     expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLED });
     expect(finalRun).toMatchObject({
-      status: RUN_STATUS.STOPPED,
+      status: RUN_STATUS.CANCELLED,
       failureReason: 'Cancelled by user',
       completedAt: expect.any(String),
     });
@@ -259,7 +260,7 @@ describe('cancellation entry convergence', () => {
     });
 
     expect(result).toMatchObject({ ok: true, runId });
-    expect(requests).toEqual([{ cmd: 'cancel-run', runId }]);
+    expect(requests).toEqual([{ cmd: 'cancel', runId }]);
     expect(local.cancelRun).not.toHaveBeenCalled();
   });
 

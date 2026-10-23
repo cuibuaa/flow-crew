@@ -1,3 +1,4 @@
+import { parseJsonl } from './jsonl.js';
 import { closeSync, openSync } from './engine-fs.js';
 import { existsSync, lstatSync, readFileSync, readSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -7,7 +8,6 @@ import { supervisionPaths } from './supervision.js';
 export const RUN_DRIFT_ROW_IDS = [
   'research_dose',
   'first_plan_admission',
-  'supervisor_rejections',
   'engine_overhead',
   'registry_growth',
   'log_growth',
@@ -551,142 +551,6 @@ function firstPlanAdmissionRow(events: readonly JsonObject[], runDirectory?: str
   );
 }
 
-function stageCompletionTimes(state: unknown, events: readonly JsonObject[]): Map<string, number[]> {
-  const times = new Map<string, number[]>();
-  const add = (stageId: string | undefined, at: number | undefined) => {
-    if (!stageId || at === undefined) return;
-    const entries = times.get(stageId) ?? [];
-    entries.push(at);
-    times.set(stageId, entries);
-  };
-  for (const event of events) {
-    if (text(event.type) === 'stage_complete') add(text(event.stageId), timestampMs(event.timestamp));
-  }
-  const addStages = (rawStages: unknown) => {
-    const stages = object(rawStages);
-    if (!stages) return;
-    for (const [stageId, rawStage] of Object.entries(stages)) {
-      const stage = object(rawStage);
-      add(stageId, timestampMs(stage?.completedAt));
-      if (!Array.isArray(stage?.attempts)) continue;
-      for (const rawAttempt of stage.attempts) add(stageId, timestampMs(object(rawAttempt)?.completedAt));
-    }
-  };
-  addStages(object(state)?.stages);
-  const retired = object(state)?.retiredStageUsage;
-  if (Array.isArray(retired)) {
-    for (const rawUsage of retired) {
-      const usage = object(rawUsage);
-      const stageId = text(usage?.stageId);
-      const stage = object(usage?.status);
-      add(stageId, timestampMs(stage?.completedAt));
-      if (Array.isArray(stage?.attempts)) {
-        for (const rawAttempt of stage.attempts) add(stageId, timestampMs(object(rawAttempt)?.completedAt));
-      }
-    }
-  }
-  return times;
-}
-
-function typedSupervisorRejectBudget(state: unknown): number | undefined {
-  const attempts = object(object(state)?.supervisor)?.attempts;
-  if (!Array.isArray(attempts)) return undefined;
-  for (const rawAttempt of [...attempts].reverse()) {
-    const trigger = object(object(rawAttempt)?.trigger);
-    const quantities = object(trigger?.quantities);
-    const maximum = finite(object(quantities?.supervisorRejectBudget)?.maximum);
-    if (maximum !== undefined && maximum >= 0) return maximum;
-  }
-  return undefined;
-}
-
-function legacySupervisorRejectBudget(events: readonly JsonObject[]): number | undefined {
-  const values = new Set<number>();
-  for (const event of events) {
-    if (text(event.type) !== 'supervisor_reject') continue;
-    const match = /^reject\s+\d+\/(\d+):/i.exec(text(event.detail) ?? '');
-    if (match) values.add(Number(match[1]));
-  }
-  return values.size === 1 ? [...values][0] : undefined;
-}
-
-function supervisorRejectionRow(state: unknown, events: readonly JsonObject[], runDirectory?: string): RunDriftRow {
-  const countsPath = runDirectory ? join(runDirectory, 'signals', 'reject_counts.json') : undefined;
-  const counts = countsPath ? readJsonObject(countsPath) : undefined;
-  const perStage = new Map<string, number>();
-  if (counts?.availability === 'read') {
-    for (const [stageId, rawCount] of Object.entries(counts.value ?? {}).slice(0, 1_000)) {
-      const count = integer(rawCount);
-      if (count !== undefined && count >= 0) perStage.set(stageId, count);
-    }
-  }
-  const rejectionEvents = events.filter((event) => text(event.type) === 'supervisor_reject');
-  if (perStage.size === 0) {
-    for (const event of rejectionEvents) {
-      const stageId = text(event.stageId);
-      if (stageId) perStage.set(stageId, (perStage.get(stageId) ?? 0) + 1);
-    }
-  }
-  const total = [...perStage.values()].reduce((sum, count) => sum + count, 0);
-  const maxPerStage = perStage.size > 0 ? Math.max(...perStage.values()) : undefined;
-  const completions = stageCompletionTimes(state, events);
-  const overturned = rejectionEvents.filter((event) => {
-    const stageId = text(event.stageId);
-    const rejectedAt = timestampMs(event.timestamp);
-    return Boolean(stageId && rejectedAt !== undefined
-      && completions.get(stageId)?.some((completedAt) => completedAt > rejectedAt));
-  }).length;
-  const typedBudget = typedSupervisorRejectBudget(state);
-  const legacyBudget = typedBudget === undefined ? legacySupervisorRejectBudget(events) : undefined;
-  const budget = typedBudget ?? legacyBudget;
-  const threshold: RunDriftThreshold = budget === undefined
-    ? unavailableThreshold('rejections/stage', 'typed supervisor triggering event')
-    : {
-        kind: 'budget',
-        operator: '<=',
-        value: budget,
-        unit: 'rejections/stage',
-        display: `<= ${budget} per stage`,
-        source: typedBudget === undefined
-          ? 'legacy canonical supervisor_reject event detail'
-          : 'supervisor trigger quantities.supervisorRejectBudget.maximum',
-      };
-  if (maxPerStage === undefined) {
-    return unavailableRow(
-      'supervisor_rejections',
-      'Supervisor rejections and overturns',
-      'rejections/stage',
-      threshold,
-      countsPath ? 'signals/reject_counts.json + events.jsonl' : 'events.jsonl',
-      counts?.availability === 'malformed' ? 'malformed' : 'missing',
-      ['no durable rejection count was treated as zero'],
-    );
-  }
-  const coverage = rejectionEvents.length >= total ? 'read' : 'partial';
-  const latestEvent = rejectionEvents.at(-1);
-  return {
-    id: 'supervisor_rejections',
-    label: 'Supervisor rejections and overturns',
-    value: `${total} total; max ${maxPerStage}/stage; ${overturned} overturned`,
-    comparisonValue: maxPerStage,
-    unit: 'rejections/stage',
-    threshold,
-    source: source(
-      typedBudget === undefined && budget !== undefined ? 'legacy' : coverage,
-      countsPath ? 'signals/reject_counts.json + events.jsonl' : 'events.jsonl',
-      counts?.observation,
-      text(latestEvent?.eventId),
-      text(latestEvent?.timestamp),
-    ),
-    crossing: compare(maxPerStage, budget),
-    annotations: [
-      `total_rejections=${total}`,
-      `later_overturned=${overturned}`,
-      `overturn_evidence=${rejectionEvents.length}/${total}`,
-    ],
-  };
-}
-
 interface OverheadSample {
   stageId: string;
   attemptIndex: number;
@@ -818,14 +682,11 @@ function readRegistryTailTaskRefs(path: string, size: number): Map<string, Regis
       const newline = value.indexOf('\n');
       value = newline < 0 ? '' : value.slice(newline + 1);
     }
-    for (const line of value.split(/\r?\n/).slice(-20_000)) {
-      if (!line.trim()) continue;
-      try {
-        const row = object(JSON.parse(line) as unknown);
-        const runId = text(row?.run_id);
-        const unit = text(row?.systemd_unit);
-        if (runId && unit) refs.set(runId, { runId, unit });
-      } catch { /* malformed registry rows do not become routing facts */ }
+    for (const parsed of parseJsonl<unknown>(value.split(/\r?\n/).slice(-20_000))) {
+      const row = object(parsed);
+      const runId = text(row?.run_id);
+      const unit = text(row?.systemd_unit);
+      if (runId && unit) refs.set(runId, { runId, unit });
     }
   } finally {
     closeSync(fd);
@@ -913,17 +774,14 @@ function logGrowthRow(runDirectory: string | undefined, registry: RegistryObserv
   const fcRoot = dirname(dirname(resolve(runDirectory)));
   const unit = runId ? registry?.taskRefs.get(runId)?.unit : undefined;
   const portablePath = unit ? supervisionPaths(fcRoot, unit).log : undefined;
-  const fallbackPath = join(runDirectory, 'supervisor_log.md');
-  const selected = portablePath && regularFile(portablePath)
-    ? regularFile(portablePath)
-    : regularFile(fallbackPath);
+  const selected = portablePath ? regularFile(portablePath) : undefined;
   if (!selected) {
     return unavailableRow(
       'log_growth',
       'Run/service log growth',
       'bytes',
       threshold,
-      portablePath ?? fallbackPath,
+      portablePath ?? 'service log',
       'missing',
       [unit ? 'mapped service log is unavailable' : 'registry tail does not map this run to a service unit'],
     );
@@ -938,7 +796,7 @@ function logGrowthRow(runDirectory: string | undefined, registry: RegistryObserv
     source: source('read', selected.path, selected),
     crossing: compare(selected.size, LOG_WARNING_BYTES),
     distribution: distribution([selected.size], selected.size),
-    annotations: [selected.path === portablePath ? 'source=portable service log' : 'source=run supervisor log'],
+    annotations: ['source=portable service log'],
   };
 }
 
@@ -964,11 +822,9 @@ function readEventTail(runDirectory: string): { events: JsonObject[]; coverage: 
     value = newline < 0 ? '' : value.slice(newline + 1);
   }
   const events: JsonObject[] = [];
-  for (const line of value.split(/\r?\n/).filter(Boolean).slice(-MAX_EVENT_ROWS)) {
-    try {
-      const parsed = object(JSON.parse(line) as unknown);
-      if (parsed) events.push(parsed);
-    } catch { /* malformed tail rows are omitted, never interpreted */ }
+  for (const row of parseJsonl<unknown>(value.split(/\r?\n/).filter(Boolean).slice(-MAX_EVENT_ROWS))) {
+    const parsed = object(row);
+    if (parsed) events.push(parsed);
   }
   return { events, coverage: 'read' };
 }
@@ -992,7 +848,6 @@ export function buildRunDriftProjection(
     rows: [
       researchDoseRow(state),
       firstPlanAdmissionRow(eventObjects),
-      supervisorRejectionRow(state, eventObjects),
       engineOverheadRow(state),
       registryGrowthRow(undefined, 'tasks.jsonl'),
       logGrowthRow(undefined, undefined, text(object(state)?.runId)),
@@ -1018,12 +873,11 @@ export function readRunDriftProjection(
     rows: [
       researchDoseRow(state, runDirectory),
       firstPlanAdmissionRow(events, runDirectory),
-      supervisorRejectionRow(state, events, runDirectory),
       engineOverheadRow(state, stateObservation),
       registryGrowthRow(registry, registryPath),
       logGrowthRow(runDirectory, registry, text(object(state)?.runId)),
     ].map((row) => eventRead.coverage === 'unreadable'
-      && (row.id === 'first_plan_admission' || row.id === 'supervisor_rejections')
+      && row.id === 'first_plan_admission'
       && row.source.availability === 'missing'
       ? { ...row, source: { ...row.source, availability: 'malformed' as const }, annotations: [...row.annotations, 'events.jsonl is unreadable'] }
       : row),

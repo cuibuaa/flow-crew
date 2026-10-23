@@ -13,9 +13,9 @@ export interface SettingsData {
   skills: string[];
   port: number;
   default_timeout_ms?: number;
-  default_max_iterations?: number;
-  default_gate_retry_loops?: number;
-  default_stage_technical_retries?: number;
+  max_iterations?: number;
+  gate_retry_loops?: number;
+  stage_technical_retries?: number;
   model?: string;
   reasoning_effort?: string;
   campaign_triggers?: {
@@ -59,12 +59,6 @@ export interface WorkspacePhase {
   runId?: string | null;
 }
 
-export interface BriefRevision {
-  version: string;
-  reason: string;
-  shipped?: boolean;
-}
-
 export interface WorkspaceRun {
   id: string;
   full_id?: string;
@@ -88,7 +82,6 @@ export interface Campaign {
   metric?: WorkspaceMetric | null;
   iterations?: WorkspaceIteration[] | null;
   phases?: WorkspacePhase[] | null;
-  brief_revisions?: BriefRevision[] | null;
   runs?: WorkspaceRun[];
   runs_total?: number;
   started_at?: string | null;
@@ -196,40 +189,10 @@ export interface InboxStaleItem {
   staleRunId?: string;
 }
 
-interface BriefPatch {
-  type: "brief_patch";
-  section: string;
-  op: "append" | "replace_value" | "edit";
-  value: string;
-}
-
-export interface PendingBriefReview {
-  index: number;
-  ts: string;
-  campaignId: string;
-  reason: string;
-  severity?: "low" | "medium" | "high";
-  patch: BriefPatch;
-  patchSummary: string;
-  source?: string;
-  briefVersion?: string;
-  fromVersion?: string;
-  toVersion?: string;
-  from_version?: string;
-  to_version?: string;
-  runId?: string;
-}
-
-export interface InboxPatchItem extends PendingBriefReview {
-  campaignName: string;
-  latestVersion?: string;
-}
-
 export interface InboxOverview {
   approvals: InboxSource<InboxItem>;
   deferred: InboxSource<DeferredInboxItem>;
   stale: InboxSource<InboxStaleItem>;
-  patches: InboxSource<InboxPatchItem>;
   campaignCount: number | null;
 }
 
@@ -267,30 +230,6 @@ export interface RunStageHistory {
   stageId: string;
   iteration: number;
   status: Pick<RunStage, 'status' | 'duration_ms' | 'retries' | 'reruns' | 'attempts' | 'tokens_in' | 'tokens_out'>;
-}
-
-export interface SupervisorAttempt {
-  index: number;
-  startedAt: string;
-  completedAt: string;
-  status: "complete" | "failed";
-  duration_ms: number;
-  exitCode: number;
-  tokens_in?: number;
-  tokens_out?: number;
-  verdict?: string;
-  error?: string;
-}
-
-export interface SupervisorUsage {
-  status: "running" | "complete";
-  calls: number;
-  tokens_in: number;
-  tokens_out: number;
-  duration_ms: number;
-  startedAt: string;
-  completedAt?: string;
-  attempts: SupervisorAttempt[];
 }
 
 export interface RunEvent {
@@ -349,10 +288,7 @@ export interface RunDetailData {
   campaignId?: string;
   stages: RunStage[];
   stageHistory?: RunStageHistory[];
-  budget?: { tokens: { knownInputTokens: number; knownOutputTokens: number; complete: boolean } };
-  /** Archived runs may have configured a model supervisor. */
-  supervise?: boolean;
-  supervisor?: SupervisorUsage;
+  budget?: { tokens: { knownInputTokens: number; knownOutputTokens: number; knownTotalTokens?: number; complete: boolean } };
   events: RunEvent[];
   operational?: OperationalProjection;
   stage_outputs: Record<string, string>;

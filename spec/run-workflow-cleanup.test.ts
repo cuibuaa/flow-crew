@@ -3,15 +3,24 @@ import type { Adapter } from '../src/adapters/base.js';
 import type { WorkflowConfig } from '../src/scheduler/sched_admission/configuration.js';
 import type { StoreState } from '../src/store.js';
 
+vi.hoisted(() => vi.resetModules());
 const fixture = vi.hoisted(() => ({
   state: undefined as unknown as StoreState,
   calls: [] as string[],
+  events: [] as { type: string; timestamp: string }[],
   admitted: false,
   reject: vi.fn(),
   read: vi.fn(),
   iterations: vi.fn(),
   close: vi.fn(),
   error: vi.fn(),
+}));
+vi.mock('../src/run-events.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/run-events.js')>(), recordRunEvent: (_project: string, _run: string, event: { type: string; timestamp: string }) => { fixture.events.push(event); },
+}));
+vi.mock('../src/jsonl.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/jsonl.js')>(),
+  readOptionalJsonlFile: () => fixture.events,
 }));
 vi.mock('../src/research-candidate.js', () => ({
   rejectPendingResearchGateCandidates: (...args: unknown[]) => { fixture.calls.push('settle'); fixture.reject(...args); },
@@ -35,8 +44,8 @@ vi.mock('../src/store.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/store.js')>(),
   readRunState: (...args: unknown[]) => fixture.read(...args),
   runDir: () => '/workspace/run',
-  updateRunState: (_project: string, _run: string, update: (state: StoreState) => void) => {
-    update(fixture.state); return fixture.state;
+  updateRunState: (_project: string, _run: string, update: (state: StoreState) => void, afterCommit?: (state: StoreState) => void) => {
+    update(fixture.state); afterCommit?.(fixture.state); return fixture.state;
   },
 }));
 vi.mock('../src/stage-watchdog.js', () => ({ StageWatchdog: class { start() {} stop() {} } }));
@@ -48,13 +57,14 @@ vi.mock('../src/scheduler/sched_loop/launch.js', () => ({ prepareWorkflowLaunch:
     launchIntentOwned: true, workflowYaml: '' },
 }));
 vi.mock('../src/scheduler/sched_loop/workflow-loop.js', () => ({ runWorkflowIterations: () => fixture.iterations() }));
-vi.mock('../src/scheduler/sched_loop/iteration-outcome.js', () => ({ publishRunCompletion: vi.fn() }));
+vi.mock('../src/scheduler/sched_loop/services.js', () => ({ writeCampaignEntry: vi.fn() }));
 
 import { runWorkflow } from '../src/scheduler/sched_loop/run-workflow.js';
 const invoke = () => runWorkflow({ name: 'fixture' } as WorkflowConfig, '', '/workspace/project', {} as Adapter, new Map());
 beforeEach(() => {
-  fixture.state = { runId: 'fixture', status: 'running', stages: {}, research: { baseline: 0, policy: 'best_of_n' } } as StoreState;
+  fixture.state = { runId: 'fixture', projectDir: '/workspace/project', status: 'running', stages: {}, research: { baseline: 0, policy: 'greedy_stack' } } as StoreState;
   fixture.calls = [];
+  fixture.events = [];
   fixture.admitted = false;
   fixture.read.mockImplementation(() => { throw new Error('Unexpected terminal state reread'); });
   fixture.iterations.mockImplementation(async () => { fixture.state.status = 'complete'; return fixture.state; });

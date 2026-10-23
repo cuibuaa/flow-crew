@@ -1,12 +1,12 @@
+import './test-support/policy-runtime.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { createBriefAdmission, inspectBrief, verifyBriefAdmission } from '../src/brief-preflight.js';
+import { commandUsage, parseCommandArgs } from '../src/cli-args.js';
 import { landUsage, parseLandArgs } from '../src/cli-land.js';
 import { parseShipSetupArgs, shipSetupUsage } from '../src/cli-ship-setup.js';
 import { parseWatchArgs, watchUsage } from '../src/cli-watch.js';
-import { projectBriefPreflightContext } from '../src/rehearse.js';
 
 const repositoryRoot = join(import.meta.dirname, '..');
 const cliSource = readFileSync(join(repositoryRoot, 'src', 'cli.ts'), 'utf-8');
@@ -20,9 +20,10 @@ interface LazyDispatchContract {
   propagatesExitCode: boolean;
 }
 
-function lazyDispatchContracts(source: string): LazyDispatchContract[] {
+function lazyDispatchContracts(source: string): { contracts: LazyDispatchContract[]; unrecognized: string[] } {
   const cliFile = ts.createSourceFile('cli.ts', source, ts.ScriptTarget.Latest, true);
   const contracts: LazyDispatchContract[] = [];
+  const unrecognized: string[] = [];
 
   function functionReturnsExitCode(moduleSpecifier: string, handler: string): boolean {
     const modulePath = join(
@@ -56,130 +57,70 @@ function lazyDispatchContracts(source: string): LazyDispatchContract[] {
     if (ts.isCaseClause(node) && ts.isStringLiteral(node.expression)) {
       const command = node.expression.text;
       let importCall: ts.CallExpression | undefined;
+      let importCount = 0;
       function findImport(part: ts.Node): void {
         if (
-          importCall === undefined
-          && ts.isCallExpression(part)
+          ts.isCallExpression(part)
           && part.expression.kind === ts.SyntaxKind.ImportKeyword
-          && part.arguments.length === 1
-          && ts.isStringLiteral(part.arguments[0])
         ) {
-          importCall = part;
+          importCount += 1;
+          importCall ??= part;
         }
         ts.forEachChild(part, findImport);
       }
       findImport(node);
 
-      const firstThen = importCall
-        && ts.isPropertyAccessExpression(importCall.parent)
-        && importCall.parent.name.text === 'then'
-        && ts.isCallExpression(importCall.parent.parent)
-        ? importCall.parent.parent
-        : undefined;
-      const importer = firstThen?.arguments[0];
-      if (
-        importCall
-        && firstThen
-        && importer
-        && ts.isArrowFunction(importer)
-        && importer.parameters.length === 1
-        && ts.isObjectBindingPattern(importer.parameters[0].name)
-      ) {
+      if (importCount > 1 || (importCall && (importCall.arguments.length !== 1 || !ts.isStringLiteral(importCall.arguments[0])))) {
+        unrecognized.push(command);
+      } else if (importCall) {
         const moduleSpecifier = (importCall.arguments[0] as ts.StringLiteral).text;
-        const bindings = new Map<string, string>();
-        for (const binding of importer.parameters[0].name.elements) {
-          if (ts.isIdentifier(binding.name)) {
-            bindings.set(
-              binding.name.text,
-              binding.propertyName?.getText(cliFile) ?? binding.name.text,
-            );
-          }
-        }
-        let localHandler = '';
         let handler = '';
         let invokesHandler = false;
         let propagatesExitCode = false;
-        function inspectImporter(part: ts.Node): void {
-          if (ts.isCallExpression(part) && ts.isIdentifier(part.expression) && bindings.has(part.expression.text)) {
-            localHandler = part.expression.text;
-            handler = bindings.get(localHandler)!;
+        function contains(root: ts.Node, target: ts.Node): boolean {
+          if (root === target) return true;
+          return ts.forEachChild(root, child => contains(child, target) ? true : undefined) ?? false;
+        }
+        function inspect(part: ts.Node): void {
+          if (ts.isCallExpression(part) && ts.isPropertyAccessExpression(part.expression)
+            && contains(part.expression.expression, importCall!)) {
+            handler = part.expression.name.text;
             invokesHandler = true;
+            let parent: ts.Node = part.parent;
+            while (ts.isAwaitExpression(parent) || ts.isParenthesizedExpression(parent)) parent = parent.parent;
+            propagatesExitCode = ts.isBinaryExpression(parent)
+              && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+              && parent.left.getText(cliFile) === 'process.exitCode';
           }
-          if (
-            ts.isBinaryExpression(part)
-            && part.operatorToken.kind === ts.SyntaxKind.EqualsToken
-            && ts.isPropertyAccessExpression(part.left)
-            && ts.isIdentifier(part.left.expression)
-            && part.left.expression.text === 'process'
-            && part.left.name.text === 'exitCode'
-            && ts.isCallExpression(part.right)
-            && ts.isIdentifier(part.right.expression)
-            && bindings.has(part.right.expression.text)
-          ) {
-            propagatesExitCode = true;
-          }
-          ts.forEachChild(part, inspectImporter);
+          ts.forEachChild(part, inspect);
         }
-        inspectImporter(importer.body);
-
-        const resultThen = ts.isPropertyAccessExpression(firstThen.parent)
-          && firstThen.parent.name.text === 'then'
-          && ts.isCallExpression(firstThen.parent.parent)
-          ? firstThen.parent.parent
-          : undefined;
-        const resultHandler = resultThen?.arguments[0];
-        if (
-          resultHandler
-          && ts.isArrowFunction(resultHandler)
-          && resultHandler.parameters.length === 1
-          && ts.isIdentifier(resultHandler.parameters[0].name)
-        ) {
-          const resultName = resultHandler.parameters[0].name.text;
-          function inspectResultHandler(part: ts.Node): void {
-            if (
-              ts.isBinaryExpression(part)
-              && part.operatorToken.kind === ts.SyntaxKind.EqualsToken
-              && ts.isPropertyAccessExpression(part.left)
-              && ts.isIdentifier(part.left.expression)
-              && part.left.expression.text === 'process'
-              && part.left.name.text === 'exitCode'
-              && ts.isIdentifier(part.right)
-              && part.right.text === resultName
-            ) {
-              propagatesExitCode = true;
-            }
-            ts.forEachChild(part, inspectResultHandler);
-          }
-          inspectResultHandler(resultHandler.body);
-        }
-        contracts.push({
-          command,
-          module: moduleSpecifier,
-          handler,
-          invokesHandler,
-          returnsExitCode: functionReturnsExitCode(moduleSpecifier, handler || localHandler),
-          propagatesExitCode,
-        });
+        inspect(node);
+        if (!invokesHandler) unrecognized.push(command);
+        else contracts.push({ command, module: moduleSpecifier, handler,
+          invokesHandler, returnsExitCode: functionReturnsExitCode(moduleSpecifier, handler), propagatesExitCode });
       }
     }
     ts.forEachChild(node, visit);
   }
   visit(cliFile);
-  return contracts;
+  return { contracts, unrecognized };
 }
 
 describe('autonomous launch CLI integration', () => {
-  it('advertises setup, wrap-up, audit, and watch commands with pasteable examples', () => {
-    expect(cliSource).toContain('ship-setup  Create a launch worktree, link declared inputs, and baseline validation');
-    expect(cliSource).toContain('land      Audit terminal artifacts and every unique worktree item before safe removal');
-    expect(cliSource).toContain('watch     Report edge-triggered stall judgements for live runs');
-    expect(cliSource).toContain('flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work');
-    expect(cliSource).toContain('flowcrew land --run <run-id>');
-    expect(cliSource).toContain('flowcrew watch --once');
+  it('advertises setup, wrap-up, audit, and watch commands with usable argument syntax', () => {
+    for (const name of ['ship-setup', 'land', 'audit-reality', 'watch']) {
+      expect(commandUsage()).toContain(`Usage: flowcrew ${name}`);
+    }
+    for (const [name, args] of [
+      ['ship-setup', ['--brief', 'docs/task_brief.md', '--target', '../task-worktree', '--base', 'HEAD', '--branch', 'task-work']],
+      ['land', ['--run', 'run-123']],
+      ['watch', ['--once']],
+    ] as const) expect(() => parseCommandArgs(name, [...args])).not.toThrow();
   });
 
   it('dispatches scoped command modules lazily and propagates their returned exit codes', () => {
-    const dispatches = lazyDispatchContracts(cliSource);
+    const { contracts: dispatches, unrecognized } = lazyDispatchContracts(cliSource);
+    expect(unrecognized, `Unrecognized lazy dispatch commands: ${unrecognized.join(', ')}`).toEqual([]);
     expect(dispatches).toEqual(expect.arrayContaining([
       expect.objectContaining({ command: 'ship-setup', module: './cli-ship-setup.js', handler: 'cmdShipSetup', invokesHandler: true }),
       expect.objectContaining({ command: 'land', module: './cli-land.js', handler: 'cmdLand', invokesHandler: true }),
@@ -192,8 +133,26 @@ describe('autonomous launch CLI integration', () => {
     expect(cliSource).not.toMatch(/^import .*cli-(?:ship-setup|land|audit-report|watch)\.js/m);
   });
 
+  it('reports commands whose lazy dispatch shape is not recognized', () => {
+    const source = `switch (command) {
+      case 'changed-shape': {
+        const module = await import('./cli-watch.js');
+        await module.cmdWatch(args);
+      }
+      case 'dynamic-module':
+        await (await import(modulePath)).cmdWatch(args);
+      case 'multiple-imports':
+        await (await import('./cli-watch.js')).cmdWatch(args);
+        await import(modulePath);
+    }`;
+    expect(lazyDispatchContracts(source).unrecognized).toEqual(['changed-shape', 'dynamic-module', 'multiple-imports']);
+  });
+
   it('keeps setup identity explicit and watch polling bounded at their public parsers', () => {
-    expect(shipSetupUsage()).toContain('--brief <path> --target <path> --base <ref> --branch <name>');
+    for (const flag of ['brief', 'target', 'base', 'branch']) {
+      expect(shipSetupUsage()).toContain(` --${flag} <value>`);
+      expect(shipSetupUsage()).not.toContain(`[--${flag}`);
+    }
     expect(() => parseShipSetupArgs(['ship-setup', '--brief', 'brief.md']))
       .toThrow('--target is required');
     expect(parseShipSetupArgs([
@@ -210,7 +169,9 @@ describe('autonomous launch CLI integration', () => {
   });
 
   it('keeps land fail-closed and bound to an explicit run', () => {
-    expect(landUsage()).toContain('--run <run-id> [--remove] [--json]');
+    expect(landUsage()).toContain(' --run <value>');
+    expect(landUsage()).not.toContain('[--run');
+    for (const flag of ['remove', 'json']) expect(landUsage()).toContain(`[--${flag}]`);
     expect(parseLandArgs(['land', '--run', 'run-123', '--remove'])).toMatchObject({
       run: 'run-123', remove: true,
     });
@@ -219,32 +180,4 @@ describe('autonomous launch CLI integration', () => {
 
   });
 
-  it('binds ignored-input acknowledgement to exact project facts without host probes in the spec', () => {
-    const brief = [
-      '# Inputs',
-      'Use `private-data/prices.csv` and `private-data/metadata.json` as source evidence.',
-    ].join('\n');
-    const firstContext = projectBriefPreflightContext('/fixture/project', brief, (project, paths) => {
-      expect(project).toBe('/fixture/project');
-      expect(paths).toEqual(['private-data/metadata.json', 'private-data/prices.csv']);
-      return ['private-data/prices.csv'];
-    });
-    const firstReport = inspectBrief(brief, firstContext);
-    expect(firstReport.findings).toContainEqual(expect.objectContaining({
-      code: 'gitignored_input_undeclared',
-      message: expect.stringContaining('private-data/prices.csv'),
-    }));
-    const record = createBriefAdmission(firstReport, {
-      kind: 'explicit', source: 'cli_current_input_flag', at: '2026-08-10T00:00:00.000Z',
-    });
-
-    expect(verifyBriefAdmission(brief, record, firstContext).status).toBe('valid');
-    expect(verifyBriefAdmission(brief, record).status).toBe('valid');
-
-    const expandedContext = projectBriefPreflightContext(
-      '/fixture/project', brief, (_project, paths) => paths,
-    );
-    expect(verifyBriefAdmission(brief, record, expandedContext).status)
-      .toBe('findings_mismatch');
-  });
 });

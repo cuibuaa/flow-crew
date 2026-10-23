@@ -8,6 +8,24 @@ retained as reported release history, not current guarantees or benchmark eviden
 
 # Changelog
 
+## Unreleased
+
+### Migration
+
+The first deploy across the RPC command/reply change must use separate CLI invocations
+from the deployment checkout, with the same `FC_HOME` and socket throughout:
+
+1. `flowcrew daemon hold` with the **old CLI**; proceed only on exit 0 and `ready: true`.
+2. `flowcrew daemon stop` with the **old CLI**; wait for the old daemon/socket to retire.
+3. `npm run build` in that checkout while the daemon is stopped.
+4. `flowcrew daemon start` with the **new CLI**.
+5. `flowcrew daemon continue` with the **new CLI**; verify the hold was released.
+
+The old CLI's `daemon deploy` cannot read the new daemon's `{ok:true,result}` replies.
+The renamed RPC commands have no compatibility aliases. Cancel requests from a new client
+to a still-running old daemon fail as not-found until the restart. The durable hold survives
+the stop/build/start boundary; see [deployment operations](guide/operations.md#deploy-while-tasks-are-in-flight).
+
 ## [0.10.2] - 2026-10-18
 
 Ordinary tasks run a fixed review workflow, stage races are gone, and in-flight runs survive an

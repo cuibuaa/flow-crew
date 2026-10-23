@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { parseDispatchedStageConfig, runWorkflow, tryTerminateOnTerminalState, WorkflowConfigSchema } from '../src/scheduler.js';
@@ -15,11 +16,17 @@ afterEach(() => {
   for (const directory of temporary.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-async function runReviewedTerminal(reviewAfterFinalizer: boolean, changeProduct = true) {
+async function runReviewedTerminal(reviewAfterFinalizer: boolean, changeProduct = true, ignoredProduct = false) {
   const directory = mkdtempSync(join(tmpdir(), 'terminal-review-'));
   temporary.push(directory);
   const project = join(directory, 'project');
   mkdirSync(project);
+  if (ignoredProduct) {
+    execFileSync(process.execPath, ['-e', "require('node:child_process').execFileSync('git', ['init', '-q', '.'])"], {
+      cwd: project, env: { ...process.env, HOME: directory, FC_HOME: join(directory, 'state') },
+    });
+    writeFileSync(join(project, '.gitignore'), 'value.json\n');
+  }
   setFcGlobalDir(join(directory, 'state'));
   const stage = parseDispatchedStageConfig;
   const work = stage({
@@ -88,6 +95,13 @@ describe('terminal production preserves reviewed product bytes', () => {
     const receipt = JSON.parse(readFileSync(join(runDir(project, final.runId), audit!.path), 'utf8')) as { durableWrites: string[]; rolledBackWrites: string[] };
     expect(receipt.durableWrites).toContain('value.json');
     expect(receipt.rolledBackWrites).toEqual([]);
+  });
+
+  it('allows gitignored product changes after review, preserving the exemption', async () => {
+    const { final, project } = await runReviewedTerminal(false, true, true);
+    const audit = final.stages.finalize.attempts!.at(-1)!.constraintAudit!;
+    expect(JSON.parse(readFileSync(join(runDir(project, final.runId), audit.path), 'utf8')).exemptedWrites).toContain('value.json');
+    expect(final.status, final.failureReason).toBe('complete');
   });
 
   it('retains product changes independently reviewed after terminal production', async () => {

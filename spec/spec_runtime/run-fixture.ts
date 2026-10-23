@@ -1,7 +1,8 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { WorkflowConfig } from '../../src/scheduler.js';
-import { createRun, readRunState, writeRunState } from '../../src/store.js';
+import { createRun } from '../test-support/create-run.js';
+import { readRunState, writeRunState } from '../../src/store.js';
 
 /** Shared run setup only; each consumer owns its adapter and assertions. */
 export function prepareFixtureRun(projectDir: string, config: WorkflowConfig, yaml: string) {

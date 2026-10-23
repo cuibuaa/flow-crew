@@ -1,8 +1,9 @@
-// Boundary: Materialize admitted task metadata and brief configuration, and refuse malformed research/budget/program inputs before agents execute.
+import { concludeRun } from '../sched_policy/run-completion.js';
+// Boundary: Materialize admitted task metadata and brief configuration, and refuse malformed research/budget inputs before agents execute.
 import { BriefAdmissionRecord } from '../../brief-preflight.js';
 import { resolveCampaignStorageKey } from '../../campaigns.js';
 import { recordRunEvent } from '../../run-events.js';
-import { assessResearchIterationBudget, autoSelectedWorkflow, checkProgramSafeguards, parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
+import { assessResearchIterationBudget, autoSelectedWorkflow, parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
 import { WorkflowConfig, loadDefaults } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
 import { StoreState, readRunState, writeRunState } from '../../store.js';
@@ -10,6 +11,7 @@ import { writeCampaignEntry } from './services.js';
 import { writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { terminalArtifactIdentity } from '../../terminal-artifact-status.js';
 import { beginResearchInputGeneration } from '../../research-candidate.js';
 
 export function configureWorkflowBrief(
@@ -35,7 +37,7 @@ export function configureWorkflowBrief(
     if (campaignId) {
       initState.campaignId = campaignId;
       initState.campaignName = campaignId;
-      initState.campaignStorageKey = resolveCampaignStorageKey({ campaignId });
+      initState.campaignStorageKey = resolveCampaignStorageKey({ campaignId, projectDir });
     }
     if (inheritCampaignContext === false) initState.inheritCampaignContext = false;
     writeRunState(projectDir, runId, initState);
@@ -53,31 +55,33 @@ export function configureWorkflowBrief(
       : readFileSync(briefPath, 'utf-8')).trim();
     if (briefContent) {
       const parsed = parseBriefFrontmatter(briefContent);
-      const { terminalStates, program, research, outputs, stripped } = parsed;
-      const route = autoSelectedWorkflow(parsed, workflow.name);
-      const error = route.error ?? (workflow.name === 'research' ? parsed.frontmatterError : undefined);
+      const { terminalStates, research, outputs, stripped } = parsed;
+      // An already selected library workflow retains its recorded metadata
+      // tolerance; the command entrances validate the full brief before launch.
+      const { frontmatterError, ...workflowDeclaration } = parsed;
+      const route = autoSelectedWorkflow(workflowDeclaration, workflow.name);
+      const error = route.error ?? (workflow.name === 'research' ? frontmatterError : undefined);
       if (error) {
         const state = readRunState(projectDir, runId);
-        state.status = 'failed';
-        state.failureReason = `Workflow refused: ${error}`;
-        state.completedAt = new Date().toISOString();
-        writeRunState(projectDir, runId, state);
-        writeCampaignEntry(projectDir, state);
+        concludeRun(state, { status: 'failed', reasonCode: 'workflow_refused', detail: `Workflow refused: ${error}`, writeCampaignEntry });
         log.error({ runId, error }, 'workflow refused before dispatch');
         return { kind: 'settled', state };
       }
       taskDescription = stripped || briefContent;
       if (outputs?.length) taskDescription += `\n\nDeclared outputs (required by the brief):\n${outputs.map(output => `- ${output.path} (${output.expectedType})`).join('\n')}\nGuidance cannot remove these obligations. Report conflicting actual constraints rather than silently overriding either one.`;
-      if (terminalStates || program || research || outputs) {
+      if (terminalStates || research || outputs) {
         const s = readRunState(projectDir, runId);
-        if (terminalStates) s.terminalStates = terminalStates;
-        if (program) s.program = program;
+        if (terminalStates) {
+          s.terminalStates = terminalStates;
+          if (!resumingExistingRun) s.terminalArtifactBaselines = Object.fromEntries(
+            Object.values(terminalStates).flatMap(entry => entry.paths)
+              .map(path => [path, terminalArtifactIdentity(join(projectDir, path), projectDir)]));
+        }
         if (research) s.research = research;
         if (outputs) s.declaredOutputs = outputs;
         beginResearchInputGeneration(projectDir, s);
         writeRunState(projectDir, runId, s);
         if (terminalStates) log.info({ runId, statuses: Object.keys(terminalStates) }, 'Terminal-state config loaded from brief frontmatter');
-        if (program) log.info({ runId, program: program.name, phase: program.phase }, 'Program config loaded from brief frontmatter');
         if (research) log.info({ runId, policy: research.policy, baseline: research.baseline }, 'Research config loaded from brief frontmatter');
       }
       // Consistency check: the `--workflow research` flag and the `research:`
@@ -89,38 +93,22 @@ export function configureWorkflowBrief(
       } else if (research && !isResearchWorkflow) {
         log.warn({ runId, workflow: workflow.name }, 'brief has a `research:` block but workflow is not `research` — research advance gate still active, but consider --workflow research for clarity');
       } else if (parsed.frontmatterError) {
-        log.warn({ runId, frontmatterError: parsed.frontmatterError }, 'brief frontmatter failed to parse — any terminal_states/program/research config in it was ignored');
+        log.warn({ runId, frontmatterError: parsed.frontmatterError }, 'brief frontmatter failed to parse — any terminal_states/research config in it was ignored');
       }
       const budgetDefaults = loadDefaults();
       const budgetAssessment = assessResearchIterationBudget(research, maxIterations, {
-        attemptTimeoutMs: budgetDefaults.timeout_ms,
+        attemptTimeoutMs: budgetDefaults.default_timeout_ms,
         technicalRetries: budgetDefaults.stage_technical_retries,
       });
       if (briefAdmission && !budgetAssessment.pass) {
         const s = readRunState(projectDir, runId);
-        s.status = 'failed';
-        s.failureReason = `Research budget admission refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding before launch.`;
-        s.completedAt = new Date().toISOString();
-        writeRunState(projectDir, runId, s);
+        concludeRun(s, { status: 'failed', reasonCode: 'admission_refused',
+          detail: `Research budget admission refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding before launch.` });
         recordRunEvent(projectDir, runId, {
-          type: 'admission_rejected', runId, timestamp: s.completedAt,
+          type: 'admission_rejected', runId, timestamp: s.completedAt!,
           detail: s.failureReason,
         });
         return { kind: 'settled', state: s };
-      }
-      // Program safeguard pre-check at run start. If violated, refuse to start
-      // and record the failure in run state for the orchestrator and dashboard.
-      if (program) {
-        const violation = checkProgramSafeguards(projectDir, program);
-        if (violation) {
-          const s2 = readRunState(projectDir, runId);
-          s2.status = 'failed';
-          s2.failureReason = `Program safeguard: ${violation}`;
-          s2.completedAt = new Date().toISOString();
-          writeRunState(projectDir, runId, s2);
-          log.error({ runId, violation }, 'Program safeguard violated; refusing to start');
-          return { kind: 'settled', state: s2 };
-        }
       }
     }
   }

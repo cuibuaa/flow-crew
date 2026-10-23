@@ -9,8 +9,9 @@ import { reconcileHostInterruptedRun } from '../src/restart-recovery.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import { readRunIndexRecords } from '../src/run-index.js';
 import { TaskRegistry } from '../src/task-registry.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  beginStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatus, runDir,
+  beginStageAttempt, fcGlobalDir, readRunState, readStageStatus, runDir,
   runsRoot, setFcGlobalDir, updateRunState, writeRunState, writeStageStatus,
 } from '../src/store.js';
 
@@ -28,7 +29,7 @@ afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true,
 function checkpoint() {
   beginStageAttempt(project, runId, 'work', 0, '2026-10-03T00:00:00.000Z');
   updateRunState(project, runId, state => {
-    state.engineCheckpoint = { version: 1, runId, projectDir: project, bootId: 'old-boot', generation: 'fixture-generation', pid: 2147483647, at: '2026-10-03T00:00:00.000Z' };
+    state.engineCheckpoint = { version: 2, runId, projectDir: project, bootId: 'old-boot', generation: 'fixture-generation', pid: 2147483647, at: '2026-10-03T00:00:00.000Z' };
     state.currentIteration = 2; state.maxIterations = 3; state.maxRetries = 4;
   });
 }
@@ -67,7 +68,7 @@ const [runtime,fc,project,id]=process.argv.slice(1);const dir=path.join(fc,'runs
 const store=await load('store');store.setFcGlobalDir(fc);const scheduler=await load('scheduler');const read=fs.readFileSync;let hit=false,executions=0;
 fs.readFileSync=function(file,...args){const bytes=read(file,...args);const stack=new Error().stack;if(!hit&&String(file)===path.join(dir,'run.json')&&stack.includes('readArchivedRunState')&&stack.includes('runWorkflow')){hit=true;const c=spawnSync(process.execPath,['--input-type=module','-e',${JSON.stringify(cancelChild)},runtime,fc,id,id,ack,queued],{encoding:'utf8',timeout:8000});if(c.status!==0)throw new Error(c.stderr)}return bytes};syncBuiltinESMExports();
 try {
- const workflow=scheduler.WorkflowConfigSchema.parse({name:'fixture',defaults:{max_iterations:1},stages:[{id:'work',role:'coder',scope:[],depends_on:[],dependency_reasons:{},prompt_template:'Owned deterministic control.',artifact_contract:{version:1,produces:[],reads:[],replays:[]}}]});
+ const workflow=scheduler.WorkflowConfigSchema.parse({name:'fixture',defaults:{max_iterations:1},stages:[{id:'work',role:'coder',scope:[],depends_on:[],dependency_reasons:{},prompt_template:'Owned deterministic control.',artifact_contract:{version:1,produces:[],reads:[]}}]});
  const result=await scheduler.runWorkflow(workflow,'name: fixture',project,{run:async()=>{executions++;return {exitCode:0,output:'Owned control.',duration_ms:1,writes:[]}}},new Map(),undefined,undefined,id);
  const receipt=JSON.parse(read(ack,'utf8'));console.log(JSON.stringify({hit,executions,status:result.status,rawPreserved:receipt.raw===read(path.join(dir,'run.json'),'utf8'),ledgerPreserved:receipt.ledger===read(path.join(dir,'stages/work/status.json'),'utf8')}));
 } finally {fs.readFileSync=read;syncBuiltinESMExports()}
@@ -100,7 +101,7 @@ describe('canonical cancellation and committed publication fences', () => {
       env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'absent.sock') },
     });
     expect(child.status, child.stderr).toBe(0);
-    expect(JSON.parse(child.stdout.trim().split('\n').at(-1)!)).toMatchObject({ hit: true, early: false, queued: true, result: 'cancelled', status: 'stopped', rawPreserved: true, ledgerPreserved: true });
+    expect(JSON.parse(child.stdout.trim().split('\n').at(-1)!)).toMatchObject({ hit: true, early: false, queued: true, result: 'cancelled', status: 'cancelled', rawPreserved: true, ledgerPreserved: true });
   });
 
   it('rechecks cancellation committed after the initial startup status read', () => {
@@ -110,7 +111,7 @@ describe('canonical cancellation and committed publication fences', () => {
       env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'absent.sock') },
     });
     expect(child.status, child.stderr).toBe(0);
-    expect(JSON.parse(child.stdout.trim().split('\n').at(-1)!)).toEqual({ hit: true, executions: 0, status: 'stopped', rawPreserved: true, ledgerPreserved: true });
+    expect(JSON.parse(child.stdout.trim().split('\n').at(-1)!)).toEqual({ hit: true, executions: 0, status: 'cancelled', rawPreserved: true, ledgerPreserved: true });
   });
 
   it('fences publication when a scheduler claims after the last observation', () => {
@@ -119,7 +120,7 @@ describe('canonical cancellation and committed publication fences', () => {
       env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'absent.sock') },
     });
     expect(child.status, child.stderr).toBe(0);
-    expect(JSON.parse(child.stdout.trim().split('\n').at(-1)!)).toEqual({ hit: true, status: 'cancelled', ok: true, stateStatus: 'stopped', publicationBlocked: true });
+    expect(JSON.parse(child.stdout.trim().split('\n').at(-1)!)).toEqual({ hit: true, status: 'cancelled', ok: true, stateStatus: 'cancelled', publicationBlocked: true });
   });
 
   it('preserves an acknowledged stop against stale writers while allowing lifecycle-neutral ownership claims', async () => {
@@ -140,7 +141,7 @@ describe('canonical cancellation and committed publication fences', () => {
     delete legacy.stateFormat;
     const acknowledged = JSON.stringify(legacy, null, 2) + '\n';
     writeFileSync(join(directory, 'run.json'), acknowledged);
-    expect(updateRunState(project, runId, () => {}).status).toBe('stopped');
+    expect(updateRunState(project, runId, () => {}).status).toBe('cancelled');
     expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(acknowledged);
   });
 
@@ -155,7 +156,7 @@ describe('canonical cancellation and committed publication fences', () => {
     const globalBefore = readFileSync(join(directory, 'run.json'), 'utf8');
     const coordinator = new RunCancellationCoordinator({ registry, units: { isActive: async () => ({ kind: 'absent' }), stopUnit: async () => {} } as never });
     expect((await coordinator.cancelTask(task.id)).status).toBe('cancelled');
-    expect(JSON.parse(readFileSync(join(privateDirectory, 'run.json'), 'utf8')).status).toBe('stopped');
+    expect(JSON.parse(readFileSync(join(privateDirectory, 'run.json'), 'utf8')).status).toBe('cancelled');
     expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(globalBefore);
     expect(readRunIndexRecords(project)).toEqual(indexBefore);
   });
@@ -175,20 +176,54 @@ describe('canonical cancellation and committed publication fences', () => {
 });
 
 describe('recovery authority remains required', () => {
+  it.each(['current', 'legacy'] as const)('recovers after cancel → continue → host restart with a %s cancelled stage', async shape => {
+    checkpoint();
+    const coordinator = new RunCancellationCoordinator({ registry: { list: () => [] } as never,
+      units: { isActive: async () => ({ kind: 'absent' }), stopUnit: async () => {} } as never });
+    expect((await coordinator.cancelRun(runId)).status).toBe('cancelled');
+    expect(readStageStatus(project, runId, 'work').attempts!.at(-1)).toMatchObject({
+      exitCode: 143, terminationCause: 'cancelled', error: expect.stringContaining('CANCELLED_INTERRUPTED'),
+    });
+    if (shape === 'legacy') {
+      for (const path of [join(directory, 'run.json'), join(directory, 'stages/work/status.json')]) {
+        const raw = JSON.parse(readFileSync(path, 'utf8'));
+        delete (raw.stages?.work ?? raw).attempts.at(-1).terminationCause;
+        writeFileSync(path, JSON.stringify(raw));
+      }
+    }
+    // Continue with another admitted stage, retaining the cancelled execution
+    // as failed history; only the new running execution needs restart intent.
+    updateRunState(project, runId, state => {
+      state.status = 'running'; delete state.completedAt;
+      state.stages.next = { status: 'pending', retries: 0 };
+    });
+    writeStageStatus(project, runId, 'next', { status: 'pending', retries: 0 });
+    beginStageAttempt(project, runId, 'next', 0);
+    const cancelled = readStageStatus(project, runId, 'work');
+    const recovered = reconcileHostInterruptedRun(project, runId, { currentBootId: 'new-boot' });
+    expect(recovered).toMatchObject({ status: 'parked', recovery: { kind: 'resumable', interruptedStages: ['next'] },
+      stages: { work: cancelled, next: { status: 'pending', attempts: [{ terminationCause: 'host_restart', exitCode: 143 }] } } });
+    expect(recovered.failureReason).not.toContain('RECOVERY_INTENT_REQUIRED');
+    expect(recovered.recoveryIntent?.stages.map(stage => stage.stageId)).toEqual(['next']);
+    expect(readStageStatus(project, runId, 'work')).toEqual(cancelled);
+  });
+
   it.each([
     ['same-boot', 'RECOVERY_FATE_UNKNOWN'],
     ['unknown-boot', 'RECOVERY_FATE_UNKNOWN'],
     ['unbound-plan', 'RECOVERY_PLAN_UNBOUND'],
     ['unbound-attempt', 'RECOVERY_ATTEMPT_UNBOUND'],
     ['missing-intent', 'RECOVERY_INTENT_REQUIRED'],
+    ['typed-missing-intent', 'RECOVERY_INTENT_REQUIRED'],
   ])('retains %s refusal without changing the execution ledger', (kind, reason) => {
     checkpoint();
     if (kind === 'unknown-boot') updateRunState(project, runId, state => { delete state.engineCheckpoint!.bootId; });
     if (kind === 'unbound-plan') updateRunState(project, runId, state => { state.planControl = { version: 1, stages: [], capabilities: [] }; });
     if (kind === 'unbound-attempt') writeFileSync(join(directory, 'stages/work/status.json'), JSON.stringify({ status: 'pending', retries: 0 }));
-    if (kind === 'missing-intent') {
+    if (kind === 'missing-intent' || kind === 'typed-missing-intent') {
       const ledger = readStageStatus(project, runId, 'work'); ledger.status = 'failed';
       Object.assign(ledger.attempts!.at(-1)!, { status: 'failed', exitCode: 143, error: 'HOST_RESTART_INTERRUPTED: no durable intent' });
+      if (kind === 'typed-missing-intent') Object.assign(ledger.attempts!.at(-1)!, { terminationCause: 'host_restart', error: 'Display text is not interruption authority' });
       writeStageStatus(project, runId, 'work', ledger);
     }
     const ledger = readFileSync(join(directory, 'stages/work/status.json'), 'utf8');

@@ -1,11 +1,15 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, linkSync, mkdirSync, openSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from './engine-fs.js';
-import { constants, existsSync, fstatSync, fsyncSync, lstatSync, opendirSync, readSync } from 'node:fs';
+import { constants, existsSync, fstatSync, fsyncSync, lstatSync, opendirSync, readlinkSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import stringWidth from 'string-width';
+import { TaskRegistry } from './task-registry.js';
 import { readRunRecordFields } from './run-record-fields.js';
+import { agentTaskProgressReader } from './agent-task-progress.js';
+import { lockOwnerIdentity, parseLockOwner, publishLockOwner, recoverStaleLock, type LockObservation } from './lock-publication.js';
+import { estimateProgress, progressLine } from './task-progress.js';
 import {
   isActiveTaskStatus,
   isKnownTaskStatus,
@@ -134,6 +138,9 @@ export interface SessionPayload {
 }
 
 export interface RenderFcTasksOptions {
+  agentTaskRoot?: string;
+  now?: number;
+  taskProgress?: (taskId: number) => string | undefined;
   storeRoot: string;
   explicitSession?: string;
   payload?: SessionPayload;
@@ -289,8 +296,6 @@ const ENGINE_RUN_FIELD_LIMITS = {
 } as const;
 const MAX_ENGINE_STATUS_BYTES = 4 * 1024;
 const MAX_ENGINE_PROJECT_PATH_BYTES = 64 * 1024;
-const MAX_ENGINE_TASK_SNAPSHOT_BYTES = MAX_LEDGER_TOTAL_BYTES;
-const MAX_ENGINE_REGISTRY_SCAN_BYTES = MAX_LEDGER_TOTAL_BYTES;
 const LEDGER_LOCK_WAIT_MS = 5_000;
 const LEDGER_LOCK_POLL_MS = 10;
 const INVALID_SEGMENT_CHARACTERS = /[<>:"/\\|?*]/u;
@@ -453,9 +458,6 @@ interface EngineTaskRecord {
 type EngineTaskSnapshot =
   | { ok: true; tasks: Map<number, unknown> }
   | { ok: false; detail: string };
-
-const ENGINE_REGISTRY_READ_CHUNK = 64 * 1024;
-const MAX_ENGINE_REGISTRY_ROW_BYTES = 4 * 1024 * 1024;
 
 function engineBriefDigest(value: unknown, field: 'brief_admission' | 'briefAdmission'): string | undefined {
   if (!isObject(value)) return undefined;
@@ -690,6 +692,7 @@ function resolveEngineRun(
   if (task.briefDigest !== undefined && runDigest !== undefined && runDigest !== task.briefDigest) {
     return { state: 'stale', taskId: task.id, detail: 'bound run brief digest does not match the task' };
   }
+  const status = resolveRunStatus(rawRun.status);
   return {
     state: 'resolved',
     taskId: task.id,
@@ -697,7 +700,7 @@ function resolveEngineRun(
     projectDir: task.projectDir,
     ...(task.briefDigest === undefined ? {} : { briefDigest: task.briefDigest }),
     runId: expectedRunId,
-    runStatus: rawRun.status,
+    runStatus: status.kind === 'known' ? status.status : rawRun.status,
   };
 }
 
@@ -710,176 +713,32 @@ function readLatestEngineTasks(
   const tasks = new Map<number, unknown>();
   if (requestedIds.size === 0) return { ok: true, tasks };
 
-  let descriptor: number | undefined;
   try {
-    if (!sameDirectory(engineRoot, engineRootIdentity)) {
-      return { ok: false, detail: 'configured engine root changed before its registry was read' };
-    }
     const before = lstatSync(registryPath);
-    if (!before.isFile() || before.isSymbolicLink()) {
-      return { ok: false, detail: 'engine task registry is not a regular non-symbolic file' };
+    if (!before.isFile() || before.isSymbolicLink() || !sameDirectory(engineRoot, engineRootIdentity)) {
+      return { ok: false, detail: 'engine task registry is not a regular file in the configured root' };
     }
-    descriptor = openSync(registryPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const opened = fstatSync(descriptor);
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
-      return { ok: false, detail: 'engine task registry changed between inspection and open' };
-    }
-    let offset = opened.size;
-    let carry = Buffer.alloc(0);
-    let unreadable = 0;
-    let selectedBytes = 0;
-    let scannedBytes = 0;
-    let snapshotOversized = false;
-
-    const inspect = (bytes: Buffer): void => {
-      const line = bytes.toString('utf-8').trim();
-      if (!line) return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line) as unknown;
-      } catch {
-        unreadable += 1;
-        return;
+    const registry = new TaskRegistry({ baseDir: engineRoot });
+    for (const id of requestedIds) {
+      const task = registry.get(id);
+      if (task) tasks.set(id, task);
+      else if (registry.health().unreadableRecords) {
+        return { ok: false, detail: 'unreadable registry records may contain the missing engine task' };
       }
-      if (isObject(parsed)
-          && Number.isSafeInteger(parsed.id)
-          && requestedIds.has(parsed.id as number)
-          && !tasks.has(parsed.id as number)) {
-        selectedBytes += bytes.length;
-        if (selectedBytes > MAX_ENGINE_TASK_SNAPSHOT_BYTES) {
-          snapshotOversized = true;
-          return;
-        }
-        tasks.set(parsed.id as number, parsed);
-      }
-    };
-
-    while (offset > 0
-        && tasks.size < requestedIds.size
-        && unreadable === 0
-        && !snapshotOversized
-        && scannedBytes < MAX_ENGINE_REGISTRY_SCAN_BYTES) {
-      const length = Math.min(
-        ENGINE_REGISTRY_READ_CHUNK,
-        offset,
-        MAX_ENGINE_REGISTRY_SCAN_BYTES - scannedBytes,
-      );
-      offset -= length;
-      const chunk = Buffer.allocUnsafe(length);
-      const bytesRead = readSync(descriptor, chunk, 0, length, offset);
-      if (bytesRead !== length) {
-        return { ok: false, detail: 'engine task registry changed while it was being read' };
-      }
-      scannedBytes += bytesRead;
-      const combined = Buffer.concat([chunk.subarray(0, bytesRead), carry]);
-      let lineEnd = combined.length;
-      for (let index = combined.length - 1; index >= 0; index -= 1) {
-        if (combined[index] !== 0x0a) continue;
-        inspect(combined.subarray(index + 1, lineEnd));
-        lineEnd = index;
-        if (tasks.size === requestedIds.size || unreadable > 0 || snapshotOversized) break;
-      }
-      carry = Buffer.from(combined.subarray(0, lineEnd));
-      if (carry.length > MAX_ENGINE_REGISTRY_ROW_BYTES) {
-        return { ok: false, detail: 'engine task registry contains an oversized record' };
-      }
-    }
-    if (offset > 0
-        && tasks.size < requestedIds.size
-        && unreadable === 0
-        && !snapshotOversized) {
-      // The tail window is only a fast path. A valid task link must not become
-      // globally unavailable merely because unrelated later task history grew
-      // past that window. Scan the stable descriptor forward, retaining only
-      // the latest row for the still-missing ids. Memory remains bounded by one
-      // registry row plus the requested task snapshot.
-      const missing = new Set([...requestedIds].filter((id) => !tasks.has(id)));
-      const exact = new Map<number, { value: unknown; bytes: number }>();
-      let forwardOffset = 0;
-      let forwardCarry = Buffer.alloc(0);
-      const inspectExact = (bytes: Buffer): void => {
-        const line = bytes.toString('utf-8').trim();
-        if (!line) return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(line) as unknown;
-        } catch {
-          unreadable += 1;
-          return;
-        }
-        if (!isObject(parsed) || !Number.isSafeInteger(parsed.id)) return;
-        const id = parsed.id as number;
-        if (!missing.has(id)) return;
-        exact.set(id, { value: parsed, bytes: bytes.length });
-      };
-      while (forwardOffset < opened.size && unreadable === 0) {
-        const length = Math.min(ENGINE_REGISTRY_READ_CHUNK, opened.size - forwardOffset);
-        const chunk = Buffer.allocUnsafe(length);
-        const bytesRead = readSync(descriptor, chunk, 0, length, forwardOffset);
-        if (bytesRead !== length) {
-          return { ok: false, detail: 'engine task registry changed during exact id fallback' };
-        }
-        forwardOffset += bytesRead;
-        const combined = Buffer.concat([forwardCarry, chunk.subarray(0, bytesRead)]);
-        let lineStart = 0;
-        for (let index = 0; index < combined.length; index += 1) {
-          if (combined[index] !== 0x0a) continue;
-          inspectExact(combined.subarray(lineStart, index));
-          lineStart = index + 1;
-          if (unreadable > 0) break;
-        }
-        forwardCarry = Buffer.from(combined.subarray(lineStart));
-        if (forwardCarry.length > MAX_ENGINE_REGISTRY_ROW_BYTES) {
-          return { ok: false, detail: 'engine task registry contains an oversized record during exact id fallback' };
-        }
-      }
-      if (unreadable === 0 && forwardCarry.length > 0) inspectExact(forwardCarry);
-      for (const [id, row] of exact) {
-        selectedBytes += row.bytes;
-        if (selectedBytes > MAX_ENGINE_TASK_SNAPSHOT_BYTES) {
-          snapshotOversized = true;
-          break;
-        }
-        tasks.set(id, row.value);
-      }
-      // Mark the reverse scan consumed so its partial carry is not interpreted
-      // a second time below. Descriptor/inode validation still happens after
-      // the exact pass.
-      offset = 0;
-      carry = Buffer.alloc(0);
-    }
-    if (offset === 0
-        && tasks.size < requestedIds.size
-        && unreadable === 0
-        && !snapshotOversized) inspect(carry);
-    if (snapshotOversized) {
-      return { ok: false, detail: 'engine task snapshot exceeds the bounded read limit' };
-    }
-    if (unreadable > 0) {
-      return {
-        ok: false,
-        detail: `engine task registry has ${unreadable} unreadable record${unreadable === 1 ? '' : 's'} in the required tail`,
-      };
     }
     const after = lstatSync(registryPath);
-    if (!after.isFile() || after.isSymbolicLink()
-        || after.dev !== opened.dev || after.ino !== opened.ino
+    if (!after.isFile() || after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino
         || !sameDirectory(engineRoot, engineRootIdentity)) {
       return { ok: false, detail: 'engine task registry changed while it was being read' };
     }
     return { ok: true, tasks };
   } catch {
     return { ok: false, detail: 'engine task registry cannot be read' };
-  } finally {
-    if (descriptor !== undefined) {
-      try { closeSync(descriptor); } catch { /* best effort */ }
-    }
   }
 }
 
 /**
- * Build a read-only resolver over the authoritative task registry. Its append-only tail is scanned
- * backward only until the latest requested task rows are found, then each run is opened directly by
+ * Build a resolver using the authoritative TaskRegistry reader, then open each run directly by
  * recorded id; no archive walk or pid signal occurs.
  */
 export function createEngineTaskRunResolver(
@@ -1490,7 +1349,7 @@ function reconciliationEngine(
           terminal: status.kind === 'known' && status.semantics.lifecycle === 'terminal',
           taskId: resolution.taskId,
           ...(resolution.runId === undefined ? {} : { runId: resolution.runId }),
-          status: resolution.runStatus,
+          status: status.kind === 'known' ? status.status : resolution.runStatus,
           ...(status.kind === 'unknown' ? { detail: status.reason } : {}),
         };
       }
@@ -1651,13 +1510,18 @@ export function renderFcTasks(options: RenderFcTasksOptions): RenderFcTasksResul
       ? `fc_tasks: degraded[${issueCodes.join(',')}] · ${summary}`
       : `fc_tasks: ${summary}`;
 
-    const detailRows = openWithRunState.map(({ entry, projection }) => {
+    const agentProgress = agentTaskProgressReader(options.agentTaskRoot);
+    const detailRows = openWithRunState.flatMap(({ entry, projection }) => {
       const marker = taskRunMarker(projection);
       const prefix = marker ? `${marker} ` : '';
-      if (entry.status === FC_TASK_STATUS.IN_PROGRESS) {
-        return `▶ ${prefix}[${entry.id}] ${entry.activeForm || entry.subject}`;
-      }
-      return `○ ${prefix}[${entry.id}] ${entry.subject}`;
+      const row = entry.status === FC_TASK_STATUS.IN_PROGRESS
+        ? `▶ ${prefix}[${entry.id}] ${entry.activeForm || entry.subject}`
+        : `○ ${prefix}[${entry.id}] ${entry.subject}`;
+      const agent = projection.engine.taskId === undefined ? agentProgress(entry) : undefined;
+      const progress = agent ? progressLine(`${agent.run.agentTask!.backend === 'codex' ? 'Codex' : 'Claude'} #${entry.id}`,
+        estimateProgress(agent.run, agent.history, options.now))
+        : projection.engine.taskId === undefined ? undefined : options.taskProgress?.(projection.engine.taskId);
+      return progress ? [row, progress] : [row];
     });
     const warnings = [
       ...ledger.issues.map(({ code, detail }) => ({ code, detail })),
@@ -1897,9 +1761,12 @@ function serializeLedgerEntry(value: unknown): { text: string; byteLength: numbe
 
 interface LedgerLock {
   path: string;
+  directory: string;
   ownerPath: string;
   token: string;
   identity: { dev: number | bigint; ino: number | bigint };
+  publicationIdentity: { dev: number | bigint; ino: number | bigint };
+  mtimeMs: number;
 }
 
 function ledgerLockPath(storeRoot: string, session: string): string {
@@ -1924,30 +1791,25 @@ function acquireLedgerLock(
     throw new FcTasksRefusal('ledger lock timing must use finite non-negative wait and positive poll milliseconds');
   }
   const path = ledgerLockPath(storeRoot, session);
-  const ownerPath = join(path, 'owner');
   const token = randomBytes(16).toString('hex');
   const started = process.hrtime.bigint();
   for (;;) {
     try {
-      mkdirSync(path, { mode: 0o700 });
-      try {
-        writeFileSync(ownerPath, `${JSON.stringify({ version: 1, pid: process.pid, token })}\n`, {
-          encoding: 'utf-8',
-          flag: 'wx',
-          mode: 0o600,
-        });
-      } catch (error) {
-        try { rmdirSync(path); } catch { /* fail-safe residue blocks another writer */ }
-        throw new FcTasksRefusal(`ledger lock owner cannot be recorded: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      const stat = lstatSync(path);
-      return { path, ownerPath, token, identity: { dev: stat.dev, ino: stat.ino } };
+      const directory = publishLockOwner(path, { version: 1, ...lockOwnerIdentity(), token }, 'owner');
+      const stat = lstatSync(directory);
+      const publication = lstatSync(path);
+      return {
+        path, directory, ownerPath: join(directory, 'owner'), token,
+        identity: { dev: stat.dev, ino: stat.ino },
+        publicationIdentity: { dev: publication.dev, ino: publication.ino },
+        mtimeMs: stat.mtimeMs,
+      };
     } catch (error) {
       if (error instanceof FcTasksRefusal) throw error;
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw new FcTasksRefusal(`ledger lock cannot be acquired: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (recoverDefinitelyStaleLedgerLock(path, ownerPath)) continue;
+      if (recoverDefinitelyStaleLedgerLock(path)) continue;
       const elapsedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
       if (elapsedMs >= timing.waitMs) {
         throw new FcTasksRefusal('ledger lock is busy; retry after the concurrent writer finishes');
@@ -1957,47 +1819,67 @@ function acquireLedgerLock(
   }
 }
 
-function recoverDefinitelyStaleLedgerLock(path: string, ownerPath: string): boolean {
-  let identity: { dev: number | bigint; ino: number | bigint };
+function inspectLedgerLock(path: string): (Omit<LedgerLock, 'token'> & LockObservation) | undefined {
   try {
-    const stat = lstatSync(path);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
-    identity = { dev: stat.dev, ino: stat.ino };
+    const publication = lstatSync(path);
+    let directory = path;
+    if (publication.isSymbolicLink()) {
+      const target = readlinkSync(path);
+      const prefix = `${basename(path)}.`;
+      if (!target.startsWith(prefix) || !/^[a-f0-9-]{36}\.tmp$/u.test(target.slice(prefix.length))) return undefined;
+      directory = join(dirname(path), target);
+    }
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
+    const ownerPath = join(directory, 'owner');
+    const raw = readBoundedRegularFile(ownerPath, 4_096);
+    const owner = raw.ok ? parseLockOwner(raw.text) : undefined;
+    let mtimeMs = stat.mtimeMs;
+    try { mtimeMs = Math.max(mtimeMs, lstatSync(ownerPath).mtimeMs); } catch { /* empty legacy directory */ }
+    return {
+      path, directory, ownerPath,
+      identity: { dev: stat.dev, ino: stat.ino },
+      publicationIdentity: { dev: publication.dev, ino: publication.ino },
+      owner: owner?.version === 1 && owner.token && /^[a-f0-9]{32}$/u.test(owner.token) ? owner : undefined,
+      mtimeMs,
+      signature: `${publication.dev}:${publication.ino}:${stat.dev}:${stat.ino}:${mtimeMs}:${raw.ok ? raw.text : ''}`,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function sameLedgerLock(lock: Omit<LedgerLock, 'token'>): boolean {
+  try {
+    const publication = lstatSync(lock.path);
+    return publication.dev === lock.publicationIdentity.dev && publication.ino === lock.publicationIdentity.ino
+      && sameDirectory(lock.directory, lock.identity);
   } catch {
     return false;
   }
-  const owner = readBoundedRegularFile(ownerPath, 4_096);
-  if (!owner.ok) return false;
-  let parsed: unknown;
+}
+
+function removeLedgerLock(lock: Omit<LedgerLock, 'token'>): void {
+  // Remove the publication before its owner; observers always see complete
+  // metadata until the lock disappears. Legacy directories retain their format.
+  if (lock.directory !== lock.path) unlinkSync(lock.path);
+  try { unlinkSync(lock.ownerPath); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  rmdirSync(lock.directory);
+}
+
+function recoverDefinitelyStaleLedgerLock(path: string): boolean {
+  const lock = inspectLedgerLock(path);
+  if (!lock) return false;
   try {
-    parsed = JSON.parse(owner.text) as unknown;
-  } catch {
-    return false;
-  }
-  if (!isObject(parsed)
-      || parsed.version !== 1
-      || !Number.isSafeInteger(parsed.pid)
-      || (parsed.pid as number) < 1
-      || typeof parsed.token !== 'string'
-      || !/^[a-f0-9]{32}$/u.test(parsed.token)) return false;
-  try {
-    process.kill(parsed.pid as number, 0);
-    return false;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false;
-  }
-  if (!sameDirectory(path, identity)) return false;
-  try {
-    unlinkSync(ownerPath);
-    rmdirSync(path);
-    return true;
+    return recoverStaleLock(lock, () => inspectLedgerLock(path), removeLedgerLock) !== undefined;
   } catch {
     return false;
   }
 }
 
 function releaseLedgerLock(lock: LedgerLock): void {
-  if (!sameDirectory(lock.path, lock.identity)) {
+  if (!sameLedgerLock(lock)) {
     throw new FcTasksRefusal('ledger lock ownership was lost; reread the ledger before retrying');
   }
   const owner = readBoundedRegularFile(lock.ownerPath, 4_096);
@@ -2011,12 +1893,11 @@ function releaseLedgerLock(lock: LedgerLock): void {
   if (!isObject(parsed) || parsed.pid !== process.pid || parsed.token !== lock.token) {
     throw new FcTasksRefusal('ledger lock ownership changed; reread the ledger before retrying');
   }
-  if (!sameDirectory(lock.path, lock.identity)) {
+  if (!sameLedgerLock(lock)) {
     throw new FcTasksRefusal('ledger lock ownership changed; reread the ledger before retrying');
   }
   try {
-    unlinkSync(lock.ownerPath);
-    rmdirSync(lock.path);
+    removeLedgerLock(lock);
   } catch (error) {
     throw new FcTasksRefusal(
       `ledger lock could not be released; publication outcome may be visible, reread the ledger before retrying: ${error instanceof Error ? error.message : String(error)}`,

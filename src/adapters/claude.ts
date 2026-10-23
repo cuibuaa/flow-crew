@@ -1,14 +1,14 @@
 import { stageLiveLogPath } from '../stage-live-log.js';
-import { writeFileSync, mkdirSync } from '../engine-fs.js';
+import { atomicWrite, writeFileSync, mkdirSync } from '../engine-fs.js';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { isSessionUuid, settleSession } from '../adapter-session.js';
+import { isSessionUuid, settleSession, shouldStartFreshSession } from '../adapter-session.js';
 import type { Adapter, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
-import { classifyAdapterFailure, isRetryableAdapterFailure } from './failure.js';
-import { providerRefusal, type ProviderFailure } from '../provider-result.js';
+import { isRetryableAdapterFailure } from './failure.js';
+import { providerDiagnosticReason, providerFailureFromDiagnostic } from '../provider-result.js';
 import { NativeEventSummary, normalizeNativeEvent } from './native-events.js';
 import { NativeUsageAccumulator, sumInvocationUsage, type NativeInvocationUsage } from '../invocation-usage.js';
 import { generationCompatibleSchema } from '../reality-gate/checks/json-schema-match.js';
@@ -94,6 +94,8 @@ export class ClaudeAdapter implements Adapter {
       throw new Error('Claude session resume requires an explicit UUID');
     }
     let resumeSessionId = opts.resumeSessionId;
+    // A native session can move between stages; its baseline has one UUID owner.
+    const costDir = join(opts.runDir, 'run-history', 'native-session-costs');
     let invocationPrompt = prompt;
     let result: RunResult | undefined;
     const stageDir = join(opts.runDir, 'stages', opts.stageId);
@@ -127,6 +129,12 @@ export class ClaudeAdapter implements Adapter {
 
       const summary = new NativeEventSummary(opts.workDir);
       const usage = new NativeUsageAccumulator();
+      let previousCost: number | undefined = resumeSessionId ? undefined : 0;
+      if (resumeSessionId) try {
+        const value = JSON.parse(readFileSync(join(costDir, `${resumeSessionId}.json`), 'utf8')).cumulativeCostUsd;
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0) previousCost = value;
+      } catch { /* A missing session total is unknown, never zero. */ }
+      let cumulativeCostUsd: number | undefined;
       let sessionId: string | undefined;
       let inputCaptured = false;
       let inputCaptureError: unknown;
@@ -141,7 +149,6 @@ export class ClaudeAdapter implements Adapter {
       };
       let carry = '';
       let eventCount = 0;
-      let providerFailure: ProviderFailure | undefined;
       let rejected: NativeParameterRejection | undefined;
       let childKill: (() => void) | undefined;
       let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -151,22 +158,23 @@ export class ClaudeAdapter implements Adapter {
         try { event = JSON.parse(line); } catch { return; }
         if (!event || typeof event !== 'object') return;
         eventCount++;
-        const normalized = normalizeNativeEvent(event);
+        const normalized = normalizeNativeEvent(event, 'claude');
         summary.observe(normalized);
         if (normalized.sessionId) sessionId = normalized.sessionId;
         if (event.type === 'system' && event.subtype === 'init') captureInput(normalized.model);
         if (event.type === 'assistant') usage.observe({ usage: event.message?.usage, id: event.message?.id });
         if (event.type === 'result') {
-          // usage describes this invocation; resumed model/cost totals include
-          // earlier session calls and cannot be added to the invocation ledger.
+          // Tokens describe this call; cost is a session total. An unknown
+          // baseline cannot become a zero-cost continuation.
+          const total = event.total_cost_usd;
+          if (typeof total === 'number' && Number.isFinite(total) && total >= 0) cumulativeCostUsd = total;
           usage.observe({ usage: event.usage, cumulative: true,
-            costUsd: resumeSessionId ? undefined : event.total_cost_usd,
+            costUsd: cumulativeCostUsd !== undefined && previousCost !== undefined && cumulativeCostUsd >= previousCost
+              && (!resumeSessionId || sessionId === resumeSessionId) ? cumulativeCostUsd - previousCost : undefined,
             models: resumeSessionId ? undefined : event.modelUsage });
           killTimer ??= setTimeout(() => { if (childKill) { cleanupKill = true; childKill(); } }, 5000);
         }
         if (normalized.terminal !== undefined) {
-          providerFailure = normalized.diagnostic && (event.type === 'error' || event.type === 'result')
-            ? providerRefusal({ provider: 'claude', eventType: event.type, message: normalized.diagnostic }) : undefined;
           rejected = normalized.terminal === false
             ? { parameter: event.error?.param ?? event.error?.parameter ?? event.param, message: normalized.diagnostic } : undefined;
         }
@@ -200,34 +208,35 @@ export class ClaudeAdapter implements Adapter {
         && execution.exitCode !== 124 && execution.exitCode !== 137;
       const exitCode = recovered ? 0 : execution.exitCode === 0 && summary.terminal === false ? 1 : execution.exitCode;
       const counters = usage.settle(exitCode === 0 && summary.completed);
+      if (isSessionUuid(sessionId)) {
+        mkdirSync(costDir, { recursive: true });
+        atomicWrite(join(costDir, `${sessionId}.json`), JSON.stringify({ cumulativeCostUsd }));
+      }
       invocations.push({ ...counters, startedAt: invocationStartedAt, completedAt: new Date().toISOString(),
         exitCode, sessionId, source: eventCount ? 'native_stdout' : 'unknown' });
       const evidence = [summary.diagnostic, execution.stderr].filter(Boolean).join('\n');
       const diagnosis = execution.spawnError && ![124, 137].includes(exitCode)
         ? { fix: 'none' as const, friendly: `Could not launch Claude: ${execution.spawnError.message}. Check the executable, its interpreter and working directory ${execution.spawnError.cwd}.`, matched: execution.spawnError.code ?? 'spawn error' }
         : diagnoseAdapterFailure(eventCount ? evidence : execution.output, exitCode, rejected);
-      const kind = exitCode !== 0 && ![124, 137].includes(exitCode) && !execution.spawnError
-        ? classifyAdapterFailure(eventCount ? evidence : execution.output) : undefined;
+      const providerFailure = exitCode !== 0 && ![124, 125, 137].includes(exitCode) && !execution.spawnError
+        ? summary.providerFailure
+          ?? providerFailureFromDiagnostic({ provider: 'claude', eventType: 'cli_diagnostic', message: eventCount ? execution.stderr ?? '' : execution.output }) : undefined;
       let output = execution.spawnError ? execution.output : eventCount ? summary.output : execution.output;
       if (exitCode !== 0 && execution.stderr?.trim() && !output.includes(execution.stderr.trim())) output = [output, execution.stderr.trim()].filter(Boolean).join('\n');
       if (exitCode === 137) output += '\n[stage cancelled by control plane]\n';
-      result = { ...execution, output, exitCode, sessionId, adapterError: kind !== undefined, adapterFailureKind: kind,
-        ...(diagnosis.friendly && exitCode !== 0 ? { friendlyError: diagnosis.friendly } : {}),
-        ...(exitCode !== 0 && ![124, 125, 137].includes(exitCode) && !execution.spawnError && providerFailure ? { providerFailure } : {}),
+      result = { ...execution, output, exitCode, sessionId, providerFailure,
+        friendlyError: exitCode !== 0 ? providerDiagnosticReason(
+          [diagnosis.friendly, summary.diagnostic].filter(Boolean).join(' — ')) || undefined : undefined,
         writes: [...summary.writes].sort(), writeAttribution: summary.writes.size ? 'structured' : 'unknown' };
       delete (result as ExecResult).stdout;
       delete (result as ExecResult).stderr;
       if ([124, 125, 137].includes(exitCode) || Date.now() - started >= opts.timeout_ms) break;
-      if (!isRetryableAdapterFailure(kind)) break;
-      // An unattested failed resume retries fresh once. Retain every call in
-      // the same ledger and budget; attested/control/spawn failures do not replay.
-      if (resumeSessionId && exitCode !== 0 && ![124, 125, 137].includes(exitCode)
-          && !execution.spawnError && !sessionId) {
+      if (!isRetryableAdapterFailure(providerFailure?.kind)) break;
+      if (!repair.apply(diagnosis)) {
+        if (!shouldStartFreshSession(result, resumeSessionId, sessionId)) break;
         resumeSessionId = undefined;
         invocationPrompt = opts.freshSessionPrompt ?? prompt;
-        continue;
       }
-      if (diagnosis.fix === 'fresh_session' || !repair.apply(diagnosis)) break;
     }
     Object.assign(result, sumInvocationUsage(invocations), { invocations, duration_ms: Date.now() - started });
     settleSession(opts.runDir, opts.stageId, result, result.sessionId, resumeSessionId, opts.sessionOwnerStageId,

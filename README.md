@@ -36,10 +36,10 @@ independent reviews and retained evidence. **You probably don't need FlowCrew** 
 - **Distinct, honest outcomes.** `complete` is engineering completion; `shipped` is research or declared-terminal delivery;
   `ceiling_hit` ends research without a metric win; `incomplete` means insufficient completion. `failed` and
   `reality_gate_failed` record execution/check failures; `escalated` is unresolved or irreparable;
-  `phase_complete` ends a phase; `stopped` records a stop.
+  `cancelled` records an explicit stop.
 - **Interruptible work.** `daemon hold` parks in-flight work at settled stage groups for deployment;
   `daemon continue` resumes compatible runs with completed stages, plan, history and remaining budget.
-  `task cancel` stops work. Explicit `task resume` continues compatible stopped, failed or incomplete work after settlement.
+  `task cancel` stops work. Explicit `task resume` continues compatible cancelled, failed or incomplete work after settlement.
   `task retry` requests another launch attempt,
   starting a fresh run after terminal settlement.
 
@@ -127,8 +127,8 @@ flowcrew task show <numeric-id>
 
 `start` runs the dashboard at `http://localhost:3000/` by default; use another terminal for `watch` and `status`.
 Use `daemon hold` and `daemon continue` for the [deployment procedure](guide/operations.md#deploy-while-tasks-are-in-flight).
-`task resume` (and Dashboard Resume) explicitly continues compatible stopped, failed or incomplete work,
-preserving completed work and remaining budget. Cancellation stays stopped until explicit continuation; retry starts fresh after settlement.
+`task resume` (and Dashboard Resume) explicitly continues compatible cancelled, failed or incomplete work,
+preserving completed work and remaining budget. Cancellation stays cancelled until explicit continuation; retry starts fresh after settlement.
 Parked approvals use Inbox decisions. [CLI](guide/cli.md#services-and-tasks) · [Operations](guide/operations.md#inspect-guide-and-stop).
 
 ## What you can run

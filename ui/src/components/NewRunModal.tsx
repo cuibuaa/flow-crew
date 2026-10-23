@@ -1,15 +1,15 @@
 import { useEffect, useState } from "react";
-import { BriefAdmissionRequestError, preflightBrief } from "../api";
-import type { BriefAdmissionSubmission, BriefPreflightResponse, Campaign } from "../types";
+import { BriefAdmissionRequestError, fetchSettings, preflightBrief } from "../api";
+import type { BriefAdmissionSubmission, BriefPreflightResponse, Campaign, SettingsData } from "../types";
 
 const initialDraft = {
   campaign: "standalone",
   campaignName: "",
   campaignId: "",
   projectDir: "",
-  workflow: "default",
+  workflow: "",
   brief: "# Task: example brief\n\n## Goal\nImplement X.\n",
-  maxIter: 8,
+  maxIter: undefined as number | undefined,
 };
 
 export type NewRunDraft = typeof initialDraft;
@@ -57,17 +57,25 @@ export function BriefPreflightPanel({
 
 export default function NewRunModal({ open, isOpen, campaigns, defaultCampaignId, onClose, onShip, onSubmit }: NewRunModalProps) {
   const [draft, setDraft] = useState(initialDraft);
+  const [settings, setSettings] = useState<SettingsData | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<BriefPreflightResponse | null>(null);
   const visible = open ?? isOpen ?? false;
   const ship = onShip ?? onSubmit;
-  const submitUnavailable = !ship;
-  const maxIterInvalid = !Number.isInteger(draft.maxIter) || draft.maxIter < 1;
+  const submitUnavailable = !ship || !settings;
+  const maxIterInvalid = draft.maxIter !== undefined && (!Number.isInteger(draft.maxIter) || draft.maxIter < 1);
   useEffect(() => {
     if (!visible) return;
     setSubmitError(null);
     setPreflight(null);
+    let active = true;
+    fetchSettings().then((value) => {
+      if (!active) return;
+      setSettings(value);
+      setDraft((current) => ({ ...current, maxIter: current.maxIter ?? value.max_iterations }));
+    }).catch((error) => { if (active) setSubmitError(String(error)); });
+    return () => { active = false; };
   }, [visible]);
   useEffect(() => {
     if (!visible) return;
@@ -83,7 +91,7 @@ export default function NewRunModal({ open, isOpen, campaigns, defaultCampaignId
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!ship || submitting || maxIterInvalid) return;
+    if (!ship || !settings || submitting || maxIterInvalid) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
@@ -118,14 +126,14 @@ export default function NewRunModal({ open, isOpen, campaigns, defaultCampaignId
           </div>
         ) : null}
         <div className="form-row"><label htmlFor="new-run-project-dir">Working directory <span>(where agents read/write code · runs storage stays in ~/.fc/)</span></label><input id="new-run-project-dir" value={draft.projectDir} onChange={(event) => setDraft({ ...draft, projectDir: event.target.value })} /></div>
-        <div className="form-row"><label htmlFor="new-run-workflow">Workflow</label><select id="new-run-workflow" value={draft.workflow} onChange={(event) => setDraft({ ...draft, workflow: event.target.value })}><option value="default">default (plan → execute → review)</option><option value="research">research (research workflow)</option></select></div>
+        <div className="form-row"><label htmlFor="new-run-workflow">Workflow</label><select id="new-run-workflow" value={draft.workflow} onChange={(event) => setDraft({ ...draft, workflow: event.target.value })}><option value="">Automatic</option>{settings?.workflows.map((file) => { const name = file.replace(/\.yaml$/, ""); return <option key={name} value={name}>{name}</option>; })}</select></div>
         <div className="form-row"><label htmlFor="new-run-brief">Brief content</label><textarea id="new-run-brief" required value={draft.brief} onChange={(event) => updateBrief(event.target.value)} /></div>
         {preflight ? <BriefPreflightPanel preflight={preflight} /> : null}
         <div className="form-row inline-controls">
-          <label>Max iterations <input type="number" min={1} step={1} aria-invalid={maxIterInvalid} value={draft.maxIter} onChange={(event) => setDraft({ ...draft, maxIter: Math.max(1, Math.trunc(Number(event.target.value) || 1)) })} /></label>
+          <label>Max iterations <input type="number" min={1} step={1} aria-invalid={maxIterInvalid} value={draft.maxIter ?? ""} onChange={(event) => setDraft({ ...draft, maxIter: Math.max(1, Math.trunc(Number(event.target.value) || 1)) })} /></label>
         </div>
         {maxIterInvalid ? <div className="field-error" role="alert">Max iterations must be at least 1.</div> : null}
-        {submitUnavailable ? <div className="form-error" role="status">Run creation is not connected yet.</div> : null}
+        {!ship ? <div className="form-error" role="status">Run creation is not connected yet.</div> : null}
         {submitError ? <div className="form-error" role="alert">Unable to continue: {submitError}</div> : null}
         <div className="footer"><button className="btn ghost" type="button" disabled={submitting} onClick={onClose}>cancel</button><button className="btn" type="submit" disabled={submitUnavailable || maxIterInvalid || submitting}>{submitting ? (preflight ? "Starting…" : "Checking…") : (preflight ? "Start run" : "Check brief")}</button></div>
       </form>

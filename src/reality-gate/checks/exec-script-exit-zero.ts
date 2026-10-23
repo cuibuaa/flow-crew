@@ -4,15 +4,12 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import type { CheckContext, RealityCheck, RealityGateExit } from '../types.js';
-import { classifyVersionedJsonShapeFailure } from '../versioned-json-admission.js';
 import { result } from './_utils.js';
 
 interface Params {
   script?: string;
   args?: string[];
   timeout_seconds?: number;
-  /** Scheduler-authored binding for a preflight-only advisory. */
-  __flowcrew_preflight_artifact_sha256?: string;
 }
 
 interface Execution {
@@ -30,7 +27,7 @@ function commandNotFound(stderr: string): string | undefined {
 }
 
 export default class ExecScriptExitZeroCheck implements RealityCheck {
-  static meta = { description: 'Run a shell command / inline script body (via `bash -c`, from the project dir) and require exit 0. `script` is the command or script TEXT — inline multi-line scripts and heredocs are fine, and relative paths resolve from the project dir; it is NOT restricted to a file path. Exit 127 with a command-not-found diagnostic and narrowly recognized unbound multi-shape checks against versioned JSON are advisory with their failed execution preserved.', params: 'script: string (shell command or inline script body), args?: string[], timeout_seconds?: number' };
+  static meta = { description: 'Run a shell command / inline script body (via `bash -c`, from the project dir) and require exit 0. `script` is the command or script TEXT — inline multi-line scripts and heredocs are fine, and relative paths resolve from the project dir; it is NOT restricted to a file path. Exit 127 with a command-not-found diagnostic is advisory with its failed execution preserved.', params: 'script: string (shell command or inline script body), args?: string[], timeout_seconds?: number' };
   async run(raw: object, context: CheckContext) {
     return withEngineIntegrity(context.commandBoundary ?? {
       projectDir: context.projectDir,
@@ -69,25 +66,6 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
           false,
           `Environment could not run check: command not found: ${missingCommand} (exit 127). Install or replace the named command, then rerun the check.`,
           { ...execution, environmentDefect: 'command_not_found', missingCommand },
-        ),
-        advisory: true,
-      };
-    }
-    const versionedJsonAdmission = classifyVersionedJsonShapeFailure({
-      script: params.script,
-      args,
-      projectDir: context.projectDir,
-      execution,
-      ...(typeof params.__flowcrew_preflight_artifact_sha256 === 'string'
-        ? { preflightArtifactSha256: params.__flowcrew_preflight_artifact_sha256 }
-        : {}),
-    });
-    if (versionedJsonAdmission) {
-      return {
-        ...result(
-          false,
-          versionedJsonAdmission.detail,
-          { ...execution, terminalAdmission: versionedJsonAdmission.evidence },
         ),
         advisory: true,
       };

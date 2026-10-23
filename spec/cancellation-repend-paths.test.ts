@@ -1,5 +1,7 @@
+import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { stringify } from 'yaml';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
@@ -11,11 +13,11 @@ import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-
 import * as iteration from '../src/scheduler/sched_loop/iteration.js';
 import { advanceSettledResearch } from '../src/scheduler/sched_loop/research-progress.js';
 import * as services from '../src/scheduler/sched_loop/services.js';
-import { beginStageAttempt, completeStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import type { SupervisorBackend } from '../src/supervision.js';
 import { TASK_STATUS, TaskRegistry } from '../src/task-registry.js';
 
-const repository = join(import.meta.dirname, '..');
 let root: string, project: string, previousStore: string;
 const units: SupervisorBackend = {
   isActive: async () => ({ kind: 'absent' }), runUnit: async () => {},
@@ -23,7 +25,7 @@ const units: SupervisorBackend = {
 };
 
 beforeEach(() => {
-  root = mkdtempSync(join(repository, 'docs/.cancel-repend-paths-'));
+  root = mkdtempSync(join(tmpdir(), 'cancel-repend-paths-'));
   project = join(root, 'project');
   mkdirSync(project);
   previousStore = fcGlobalDir();
@@ -72,7 +74,7 @@ async function cancelAndContinue(run: ReturnType<typeof fixture>, stageId: strin
   const task = registry.create({ projectDir: project, run_id: run.runId, status: TASK_STATUS.RUNNING });
   expect(await new RunCancellationCoordinator({ registry, units, timeoutMs: 0, signalGraceMs: 0 }).cancelTask(task.id))
     .toMatchObject({ ok: true, status: 'cancelled' });
-  expect(readRunState(project, run.runId)).toMatchObject({ status: 'stopped', failureReason: 'Cancelled by user',
+  expect(readRunState(project, run.runId)).toMatchObject({ status: 'cancelled', failureReason: 'Cancelled by user',
     stages: { [stageId]: projection } });
   expect(() => assertContinuationCompatible(project, run.runId)).not.toThrow();
   expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
@@ -102,7 +104,7 @@ it.each(['repair', 'review'] as const)('continues cancellation at the actual gat
     return dispatch(...args);
   });
   const adapter = new ScriptedAdapter({ repair: { output: 'Repair completed.' } });
-  await expect(settleGateRetries(readRunState(project, run.runId), run.workflow.stages, 1, new Set(), new Map(),
+  await expect(settleGateRetries(readRunState(project, run.runId), run.workflow.stages, 1, new Set(),
     project, run.runId, run.runDirPath, run.workflow, adapter, new Map(), run.roles, new Map())).rejects.toBe(interrupted);
   expect(calls).toEqual(stageId === 'repair' ? [['repair']] : [['repair'], ['review']]);
   expect(adapter.calls.map(call => call.stageId)).toEqual(stageId === 'repair' ? [] : ['repair']);
@@ -141,7 +143,7 @@ it('continues after research progress repends its terminal finalizer and ledger'
   // its durable ready signal asks the admitted finalizer to run again.
   const stages = run.workflow.stages.filter(stage => stage.id === 'repair');
   await expect(advanceSettledResearch(readRunState(project, run.runId), stages, stages, 1, [], 0, 1, 3,
-    new Set(), new Map(), project, run.runId, run.runDirPath, { ...run.workflow, stages }, new ScriptedAdapter({}),
+    new Set(), project, run.runId, run.runDirPath, { ...run.workflow, stages }, new ScriptedAdapter({}),
     new Map(), run.roles, new Map())).rejects.toBe(interrupted);
   expect(dispatch).toHaveBeenCalledOnce();
 });

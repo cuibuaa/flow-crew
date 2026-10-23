@@ -1,7 +1,8 @@
 // Boundary: Replace one project leaf from proven preimage bytes/Git identity and verify restoration; never recursively erase an unexpected directory or infer absence.
 import { basename, dirname, join, relative } from "node:path";
-import { chmodSync, closeSync, copyFileSync, mkdirSync, openSync, renameSync, rmSync, symlinkSync, writeFileSync } from '../../engine-fs.js';
+import { chmodSync, closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, renameSync, rmSync, symlinkSync, writeFileSync } from '../../engine-fs.js';
 import { lstatSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createHash } from "node:crypto";
 import { artifactRootContains } from '../../artifact-location.js';
 import { prospectivePhysicalPath } from '../../engine-owned-carriers.js';
@@ -12,6 +13,7 @@ import { type RepairFileImage, compareRepairFileContents, describeRepairError, g
 interface ProjectPathRestoreResult {
   restored: boolean;
   failure?: string;
+  retainedPath?: string;
 }
 
 let rollbackReplacementSequence = 0;
@@ -20,6 +22,7 @@ export function restoreProjectPath(
   projectDir: string,
   rawPath: string,
   before: RepairFileImage,
+  retentionRoot?: string,
 ): ProjectPathRestoreResult {
   const normalized = normalizedProjectPath(rawPath);
   if (!normalized) return { restored: false, failure: `cannot restore non-project path ${rawPath}` };
@@ -27,6 +30,7 @@ export function restoreProjectPath(
     return { restored: false, failure: `preimage state is unavailable for ${normalized}: ${before.inspectionFailure}` };
   }
   let temporary: string | undefined;
+  let retainedPath: string | undefined;
   try {
     // Resolve the parent, not the leaf: rollback may replace an outward leaf
     // symlink, but must never restore through an outward directory alias.
@@ -35,12 +39,31 @@ export function restoreProjectPath(
     if (!artifactRootContains(root, parent)) {
       return { restored: false, failure: `refused to restore through an ancestor outside the project at ${normalized}` };
     }
+    if (before.restorationParent && before.restorationParent !== parent) {
+      return { restored: false, failure: `admitted parent identity changed at ${normalized}` };
+    }
     const absolute = join(parent, basename(normalized));
     let currentIsDirectory = false;
     try { currentIsDirectory = lstatSync(absolute).isDirectory(); } catch { /* absent */ }
-    // Never recursively erase an unexpected directory as part of rollback.
-    if (currentIsDirectory) {
-      return { restored: false, failure: `refused to replace unexpected directory at ${normalized}` };
+    const retainReplacement = (): void => {
+      const owner = retentionRoot ?? tmpdir();
+      mkdirSync(owner, { recursive: true });
+      const retained = join(mkdtempSync(join(owner, 'replacement-')), 'contents');
+      // Rename without traversing or deleting unknown contents. The run keeps
+      // this displaced entry independently of temporary preimage cleanup.
+      renameSync(absolute, retained);
+      retainedPath = retained;
+    };
+    if (before.type === 'directory') {
+      // The frozen tree's topology was observed. Replace only a leaf alias;
+      // never traverse its replacement target or recursively erase a tree.
+      if (!currentIsDirectory) {
+        try { lstatSync(absolute); retainReplacement(); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
+      mkdirSync(absolute, { recursive: true, mode: before.mode });
+      return { restored: compareRepairFileContents(before, readRepairFileImage(root, normalized)) === 'equal',
+        ...(retainedPath ? { retainedPath } : {}) };
     }
     if (!before.exists) {
       if (before.provenance !== 'observed') {
@@ -49,10 +72,11 @@ export function restoreProjectPath(
           failure: `preimage absence was not observed for ${normalized}; refusing destructive rollback`,
         };
       }
-      rmSync(absolute, { force: true });
+      if (currentIsDirectory) retainReplacement();
+      else rmSync(absolute, { force: true });
       const after = readRepairFileImage(root, normalized);
       return !after.exists && !after.inspectionFailure
-        ? { restored: true }
+        ? { restored: true, ...(retainedPath ? { retainedPath } : {}) }
         : { restored: false, failure: `new path ${normalized} remained after removal` };
     }
     const bytes = repairFileMaterializedBytes(before);
@@ -100,15 +124,17 @@ export function restoreProjectPath(
     if (!stagedMatches) {
       return { restored: false, failure: `staged preimage verification failed for ${normalized}` };
     }
+    if (currentIsDirectory) retainReplacement();
     renameSync(temporary, absolute);
     temporary = undefined;
     return (gitBlob
       ? gitObjectIdForPath(projectDir, absolute) === gitBlob
       : compareRepairFileContents(before, readRepairFileImage(root, normalized)) === 'equal')
-      ? { restored: true }
+      ? { restored: true, ...(retainedPath ? { retainedPath } : {}) }
       : { restored: false, failure: `restored content verification failed for ${normalized}` };
   } catch (error) {
-    return { restored: false, failure: `could not restore ${normalized}: ${describeRepairError(error)}` };
+    return { restored: false, failure: `could not restore ${normalized}: ${describeRepairError(error)}`,
+      ...(retainedPath ? { retainedPath } : {}) };
   } finally {
     if (temporary) {
       try { rmSync(temporary, { force: true }); } catch { /* target was never removed; cleanup is best effort */ }

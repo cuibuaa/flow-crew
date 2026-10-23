@@ -3,10 +3,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runStage } from '../src/worker.js';
-import { atomicWrite, createRun } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { atomicWrite } from '../src/engine-fs.js';
 import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
 
-/** Historical abort signals remain distinct from attempt deadlines. */
+/** Watchdog abort signals remain distinct from attempt deadlines. */
 
 let projectDir: string;
 let runId: string;
@@ -65,7 +66,7 @@ function makeAdapter(behavior: 'abort-on-signal' | 'timeout' | 'clean-exit'): Ad
 }
 
 describe('worker.ts abort attribution (Layer 2 fix)', () => {
-  it('attributes an archived supervisor signal distinctly from wall-clock timeout', async () => {
+  it('attributes an watchdog signal distinctly from wall-clock timeout', async () => {
     const adapter = makeAdapter('abort-on-signal');
     // Replay an archived signal so the owned cancellation poller fires.
     const sigPath = join(runDir, 'signals', `abort_${stageId}.json`);
@@ -75,14 +76,14 @@ describe('worker.ts abort attribution (Layer 2 fix)', () => {
       attemptIndex: 1,
       reason: 'idle past threshold; no implementation progress',
       timestamp: new Date().toISOString(),
-      source: 'supervisor',
+      source: 'watchdog',
     }));
     const result = await runStage(adapter, {
       stageId,
       role,
       dependsOn: [],
       promptTemplate: 'do work',
-      artifactContract: { version: 1, produces: [], reads: [], replays: [] },
+      artifactContract: { version: 1, produces: [], reads: [] },
       timeout_ms: 60_000,
       projectDir,
       runId,
@@ -105,7 +106,7 @@ describe('worker.ts abort attribution (Layer 2 fix)', () => {
       role,
       dependsOn: [],
       promptTemplate: 'do work',
-      artifactContract: { version: 1, produces: [], reads: [], replays: [] },
+      artifactContract: { version: 1, produces: [], reads: [] },
       timeout_ms: 1_000,
       projectDir,
       runId,
@@ -115,7 +116,7 @@ describe('worker.ts abort attribution (Layer 2 fix)', () => {
     const status = JSON.parse(readFileSync(join(runDir, 'stages', stageId, 'status.json'), 'utf-8'));
     expect(status.error).toBeUndefined();
     expect(status.status).toBe('complete');
-    expect(status.timeout.terminationCause).toBe('budget_forced_stop');
+    expect(status.attempts.at(-1).terminationCause).toBe('exit');
     expect(status.continuation).toMatchObject({ reason: 'stage_budget', forced: true });
   });
 });
@@ -133,7 +134,7 @@ describe('worker.ts stale abort-signal cleanup (Layer 3 fix)', () => {
       role,
       dependsOn: [],
       promptTemplate: 'do work',
-      artifactContract: { version: 1, produces: [], reads: [], replays: [] },
+      artifactContract: { version: 1, produces: [], reads: [] },
       timeout_ms: 60_000,
       projectDir,
       runId,

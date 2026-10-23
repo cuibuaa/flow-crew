@@ -3,11 +3,10 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { isRunMutationBlockedStatus } from './test-support/lifecycle-status.js';
 import {
-  isAwaitingApprovalRunStatus,
   isPausedRunStatus,
   isPendingRunStatus,
-  isRunMutationBlockedStatus,
   isRunningRunStatus,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
@@ -145,7 +144,6 @@ describe('central run-status semantics', () => {
       const buckets = [
         isPendingRunStatus(status),
         isRunningRunStatus(status),
-        isAwaitingApprovalRunStatus(status),
         isPausedRunStatus(status),
         isTerminalRunStatus(status),
       ];
@@ -161,7 +159,6 @@ describe('central run-status semantics', () => {
     expect([
       RUN_STATUS.RUNNING,
       RUN_STATUS.PARKED,
-      RUN_STATUS.AWAITING_APPROVAL,
     ].every(isRunMutationBlockedStatus)).toBe(true);
     expect(isRunMutationBlockedStatus(RUN_STATUS.PENDING)).toBe(false);
     expect(isRunMutationBlockedStatus(RUN_STATUS.COMPLETE)).toBe(false);

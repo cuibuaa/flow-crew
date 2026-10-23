@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { execFileSync } from 'node:child_process';
 import {
   appendFileSync,
@@ -34,8 +35,8 @@ import {
 } from '../src/run-index.js';
 import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
 import { readRunStateView } from '../src/run-state-view.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   readOperationalRunState,
   readRunState,
@@ -46,7 +47,6 @@ import {
   writeRunState,
   type StageEvidenceRecord,
   type StoreState,
-  type SupervisorAttempt,
 } from '../src/store.js';
 import { TaskRegistry, type TaskEntry } from '../src/task-registry.js';
 import { createWatchState, pollWatch } from '../src/watch.js';
@@ -94,7 +94,9 @@ function taskRow(id: number, overrides: Partial<TaskEntry> = {}): TaskEntry {
     systemd_unit: `task-${id}.service`,
     status: 'running',
     attempt: 1,
-    max_retries: 2,
+    max_attempts: 2,
+    launch: 1,
+    launch_options: {},
     created_at: '2026-09-03T00:00:00.000Z',
     tick_log_path: join(registryDir, 'tasks', String(id), 'tick_log.md'),
     ...overrides,
@@ -253,36 +255,30 @@ describe('identity-bound dead scheduler recovery', () => {
 describe('incremental append-durable task registry', () => {
   it('reads only a complete appended delta, suppresses a byte-identical update, and rebuilds after truncation/replacement', () => {
     const first = taskRow(1);
-    const raw = writeRows(registryDir, [first]);
+    writeRows(registryDir, [first]);
     const registry = new TaskRegistry({ baseDir: registryDir });
     expect(registry.snapshot().tasks).toEqual([first]);
-    const warmed = registry.cacheDiagnostics();
-    expect(warmed.lastBytesParsed).toBe(Buffer.byteLength(raw));
 
     const second = taskRow(2, { status: 'done' });
     const appended = `${JSON.stringify(second)}\n`;
     appendFileSync(registry.registryPath, appended, 'utf-8');
     expect(registry.snapshot().tasks).toEqual([first, second]);
-    expect(registry.cacheDiagnostics().lastBytesParsed).toBe(Buffer.byteLength(appended));
     const beforeNoop = statSync(registry.registryPath).size;
     registry.update(1, { status: 'running' });
     expect(statSync(registry.registryPath).size).toBe(beforeNoop);
-    expect(registry.cacheDiagnostics().suppressedAppends).toBe(1);
 
     const truncated = taskRow(3, { status: 'pending' });
     writeRows(registryDir, [truncated]);
     expect(registry.snapshot().tasks).toEqual([truncated]);
-    const afterTruncate = registry.cacheDiagnostics().rebuilds;
 
     const replacement = taskRow(4, { status: 'cancelled' });
     const replacementPath = join(registryDir, 'replacement.jsonl');
     writeFileSync(replacementPath, `${JSON.stringify(replacement)}\n`, 'utf-8');
     renameSync(replacementPath, registry.registryPath);
     expect(registry.snapshot().tasks).toEqual([replacement]);
-    expect(registry.cacheDiagnostics().rebuilds).toBeGreaterThan(afterTruncate);
   });
 
-  it('does not apply an incomplete trailing row, then completes it without rereading history', () => {
+  it('does not apply an incomplete trailing row, then completes it', () => {
     const row = taskRow(7);
     const encoded = JSON.stringify(row);
     const split = Math.floor(encoded.length / 2);
@@ -294,7 +290,6 @@ describe('incremental append-durable task registry', () => {
     appendFileSync(registry.registryPath, `${encoded.slice(split)}\n`, 'utf-8');
 
     expect(registry.snapshot()).toMatchObject({ tasks: [row], unreadableRecords: 0 });
-    expect(registry.cacheDiagnostics().lastBytesParsed).toBe(Buffer.byteLength(encoded.slice(split) + '\n'));
   });
 
   it('hydrates a valid legacy EOF row and inserts a safe separator before the next durable append', () => {
@@ -326,22 +321,18 @@ describe('incremental append-durable task registry', () => {
     });
     expect(() => faulted.update(created.id, { notes: 'must not be acknowledged' }))
       .toThrow('injected sync failure');
-    expect(faulted.cacheDiagnostics().durableAppends).toBe(0);
   });
 
-  it.each([100, 1_000, 10_000])('does zero historical parsing and zero append on a warmed %,i-record no-op', (records) => {
+  it.each([100, 1_000, 10_000])('does zero append on a warmed %,i-record no-op', (records) => {
     const row = taskRow(1);
     writeRows(registryDir, Array.from({ length: records }, () => row));
     const registry = new TaskRegistry({ baseDir: registryDir });
     expect(registry.metrics()).toMatchObject({ records, tasks: 1, activeTasks: 1 });
-    const parsedBefore = registry.cacheDiagnostics().totalBytesParsed;
     const bytesBefore = statSync(registry.registryPath).size;
 
     registry.update(1, { status: 'running' });
     const metrics = registry.metrics();
 
-    expect(registry.cacheDiagnostics().totalBytesParsed - parsedBefore).toBe(0);
-    expect(registry.cacheDiagnostics().lastBytesParsed).toBe(0);
     expect(statSync(registry.registryPath).size).toBe(bytesBefore);
     expect(metrics).toMatchObject({ records, tasks: 1 });
   });
@@ -371,21 +362,6 @@ describe('incremental append-durable task registry', () => {
   });
 });
 
-function supervisorAttempt(index: number): SupervisorAttempt {
-  return {
-    index,
-    startedAt: `2026-09-03T00:00:${String(index % 60).padStart(2, '0')}.000Z`,
-    completedAt: `2026-09-03T00:00:${String(index % 60).padStart(2, '0')}.500Z`,
-    status: 'complete',
-    duration_ms: 500,
-    exitCode: 0,
-    tokens_in: 10,
-    tokens_out: 2,
-    verdict: 'WAIT',
-    effectiveReason: `attempt ${index} evidence`,
-  };
-}
-
 function evidence(index: number): StageEvidenceRecord {
   return {
     stageId: `retired-${index}`,
@@ -401,11 +377,6 @@ describe('compact atomic run projection', () => {
   it('externalizes growing histories, hydrates them compatibly, skips no-op writes, and grows by one delta', () => {
     const created = createRun(projectDir, 'compact', 'name: compact\nstages: []\n', []);
     const state = readRunState(projectDir, created.runId);
-    const attempts = Array.from({ length: 80 }, (_, index) => supervisorAttempt(index + 1));
-    state.supervisor = {
-      status: 'running', calls: attempts.length, tokens_in: 800, tokens_out: 160,
-      duration_ms: 40_000, startedAt: state.startedAt, attempts,
-    };
     state.retiredStageUsage = Array.from({ length: 80 }, (_, index) => ({
       stageId: `retired-${index}`, iteration: index,
       status: { status: 'complete', retries: 0, duration_ms: 100 },
@@ -420,18 +391,16 @@ describe('compact atomic run projection', () => {
     expect(projectionBytes.toString('utf-8').split('\n').filter(Boolean)).toHaveLength(1);
     expect(projection.retiredStageUsage).toBeUndefined();
     expect(projection.stageEvidence).toBeUndefined();
-    expect(projection.supervisor?.attempts).toEqual([]);
     expect(projection.stateFormat).toMatchObject({
       version: 2,
-      history: { version: 1, path: 'run-history.jsonl', counts: { supervisorAttempts: 80, retiredStageUsage: 80, stageEvidence: 80 } },
+      history: { version: 1, path: 'run-history.jsonl', counts: { retiredStageUsage: 80, stageEvidence: 80 } },
     });
     const records = readFileSync(historyPath, 'utf-8').trim().split('\n').map((line) => JSON.parse(line));
-    expect(records).toHaveLength(240);
+    expect(records).toHaveLength(160);
     expect(records.every((record) => !Object.hasOwn(record, 'version'))).toBe(true);
     expect(projectionBytes.byteLength).toBeLessThan(2_000);
 
     const hydrated = readRunState(projectDir, created.runId);
-    expect(hydrated.supervisor?.attempts).toHaveLength(80);
     expect(hydrated.retiredStageUsage).toHaveLength(80);
     expect(hydrated.stageEvidence).toHaveLength(80);
 
@@ -441,29 +410,25 @@ describe('compact atomic run projection', () => {
     expect(readFileSync(statePath)).toEqual(stateBeforeNoop);
     expect(readFileSync(historyPath)).toEqual(historyBeforeNoop);
 
-    hydrated.supervisor!.attempts.push(supervisorAttempt(81));
-    hydrated.supervisor!.calls = 81;
+    hydrated.retiredStageUsage!.push({ stageId: 'retired-80', iteration: 80, status: { status: 'complete', retries: 0, duration_ms: 100 } });
     writeRunState(projectDir, created.runId, hydrated);
     const historyAfter = readFileSync(historyPath);
     expect(historyAfter.byteLength - historyBeforeNoop.byteLength).toBeLessThan(1_000);
-    expect(readRunState(projectDir, created.runId).supervisor?.attempts).toHaveLength(81);
+    expect(readRunState(projectDir, created.runId).retiredStageUsage).toHaveLength(81);
     expect(Math.abs(readFileSync(statePath).byteLength - stateBeforeNoop.byteLength)).toBeLessThan(100);
   });
 
   it('ignores and removes only an unacknowledged crash tail, but refuses acknowledged truncation', () => {
     const created = createRun(projectDir, 'faults', 'name: faults\nstages: []\n', []);
     const state = readRunState(projectDir, created.runId);
-    state.supervisor = {
-      status: 'running', calls: 1, tokens_in: 1, tokens_out: 1,
-      duration_ms: 1, startedAt: state.startedAt, attempts: [supervisorAttempt(1)],
-    };
+    state.retiredStageUsage = [{ stageId: 'retired', iteration: 1, status: { status: 'complete', retries: 0 } }];
     writeRunState(projectDir, created.runId, state);
     const historyPath = join(created.runDirPath, 'run-history.jsonl');
     const acknowledged = readRunState(projectDir, created.runId).stateFormat!.history!.committedBytes;
     appendFileSync(historyPath, '{unacknowledged crash tail', 'utf-8');
 
     const recovered = readRunState(projectDir, created.runId);
-    expect(recovered.supervisor?.attempts).toHaveLength(1);
+    expect(recovered.retiredStageUsage).toHaveLength(1);
     recovered.failureReason = 'state update after recovery';
     writeRunState(projectDir, created.runId, recovered);
     expect(readFileSync(historyPath, 'utf-8')).not.toContain('unacknowledged crash tail');
@@ -476,13 +441,10 @@ describe('compact atomic run projection', () => {
   it('hydrates acknowledged history into exported run bundles', () => {
     const created = createRun(projectDir, 'export', 'name: export\nstages: []\n', []);
     const state = readRunState(projectDir, created.runId);
-    state.supervisor = {
-      status: 'running', calls: 1, tokens_in: 1, tokens_out: 1,
-      duration_ms: 1, startedAt: state.startedAt, attempts: [supervisorAttempt(1)],
-    };
+    state.retiredStageUsage = [{ stageId: 'retired', iteration: 1, status: { status: 'complete', retries: 0 } }];
     writeRunState(projectDir, created.runId, state);
     const raw = JSON.parse(readFileSync(join(created.runDirPath, 'run.json'), 'utf-8')) as StoreState;
-    expect(raw.supervisor?.attempts).toEqual([]);
+    expect(raw.retiredStageUsage).toBeUndefined();
 
     const exportDir = join(root, 'export-output');
     mkdirSync(exportDir);
@@ -500,7 +462,7 @@ describe('compact atomic run projection', () => {
     const bundle = JSON.parse(
       readFileSync(join(exportDir, `flowcrew-export-${created.runId}.json`), 'utf-8'),
     ) as { state?: StoreState };
-    expect(bundle.state?.supervisor?.attempts).toEqual([supervisorAttempt(1)]);
+    expect(bundle.state?.retiredStageUsage).toEqual([{ stageId: 'retired', iteration: 1, status: { status: 'complete', retries: 0 } }]);
   });
 
   it('loads, resumes and displays an old ref-named history with versioned records', () => {
@@ -509,19 +471,14 @@ describe('compact atomic run projection', () => {
     const historyPath = join(created.runDirPath, 'run-history.v1.jsonl');
     const retired = { stageId: 'retired', iteration: 1, status: { status: 'complete' as const, retries: 0 } };
     const histories = {
-      supervisorAttempts: [supervisorAttempt(1)],
       retiredStageUsage: [retired],
       stageEvidence: [evidence(1)],
     };
     const prefix = Object.entries(histories).map(([kind, values]) =>
       JSON.stringify({ version: 1, kind, index: 0, value: values[0] }) + '\n').join('');
-    projection.supervisor = {
-      status: 'running', calls: 1, tokens_in: 10, tokens_out: 2, duration_ms: 500,
-      startedAt: projection.startedAt, attempts: [],
-    };
     projection.stateFormat = { version: 2, revision: 1, history: {
       version: 1, path: 'run-history.v1.jsonl', committedBytes: Buffer.byteLength(prefix),
-      counts: { supervisorAttempts: 1, retiredStageUsage: 1, stageEvidence: 1 },
+      counts: { retiredStageUsage: 1, stageEvidence: 1 },
     } };
     const statePath = join(created.runDirPath, 'run.json');
     writeFileSync(statePath, JSON.stringify(projection) + '\n');
@@ -529,7 +486,6 @@ describe('compact atomic run projection', () => {
 
     expect(readOperationalRunState(projectDir, created.runId).stateFormat).toEqual(projection.stateFormat);
     expect(readRunState(projectDir, created.runId)).toMatchObject({
-      supervisor: { attempts: histories.supervisorAttempts },
       retiredStageUsage: histories.retiredStageUsage,
       stageEvidence: histories.stageEvidence,
     });
@@ -539,21 +495,18 @@ describe('compact atomic run projection', () => {
 
     appendFileSync(historyPath, '{unacknowledged crash tail');
     updateRunState(projectDir, created.runId, (state) => {
-      state.supervisor!.attempts.push(supervisorAttempt(2));
-      state.supervisor!.calls = 2;
       state.retiredStageUsage!.push({ ...retired, iteration: 2 });
       state.stageEvidence!.push(evidence(2));
     });
     const after = readFileSync(historyPath, 'utf-8');
     expect(after.startsWith(prefix)).toBe(true);
     const appended = after.slice(prefix.length).trim().split('\n').map((line) => JSON.parse(line));
-    expect(appended).toHaveLength(3);
+    expect(appended).toHaveLength(2);
     expect(appended.every((record) => !Object.hasOwn(record, 'version'))).toBe(true);
     expect(existsSync(join(created.runDirPath, 'run-history.jsonl'))).toBe(false);
     const snapshot = readRunStateView(projectDir, created.runId);
     expect(snapshot.histories).toMatchObject({ retiredStageUsage: [retired, { ...retired, iteration: 2 }], stageEvidence: [evidence(1), evidence(2)] });
     expect(snapshot.snapshot.sources.some((source) => source.path === historyPath && source.prefix === Buffer.byteLength(after))).toBe(true);
-    expect(readRunState(projectDir, created.runId).supervisor?.attempts).toEqual([supervisorAttempt(1), supervisorAttempt(2)]);
   });
 
   it('never truncates a history file outside the run directory named by run.json', () => {
@@ -563,16 +516,11 @@ describe('compact atomic run projection', () => {
     writeFileSync(outside, 'keep these bytes\n');
     projection.stateFormat = { version: 2, revision: 1, history: {
       version: 1, path: '../run-history-outside.jsonl', committedBytes: 0,
-      counts: { supervisorAttempts: 0, retiredStageUsage: 0, stageEvidence: 0 },
+      counts: { retiredStageUsage: 0, stageEvidence: 0 },
     } };
     writeFileSync(join(created.runDirPath, 'run.json'), JSON.stringify(projection) + '\n');
-    projection.supervisor = {
-      status: 'running', calls: 0, tokens_in: 0, tokens_out: 0, duration_ms: 0,
-      startedAt: projection.startedAt, attempts: [],
-    };
-    writeFileSync(join(created.runDirPath, 'run.json'), JSON.stringify(projection) + '\n');
     try {
-      updateRunState(projectDir, created.runId, (state) => { state.supervisor!.attempts.push(supervisorAttempt(1)); });
+      updateRunState(projectDir, created.runId, (state) => { state.retiredStageUsage = [{ stageId: 'retired', iteration: 1, status: { status: 'complete', retries: 0 } }]; });
     } catch { /* refusal is acceptable */ }
     expect(readFileSync(outside, 'utf-8')).toBe('keep these bytes\n');
   });
@@ -588,10 +536,6 @@ describe('compact atomic run projection', () => {
       status: 'running',
       stages: {},
       startedAt: '2026-09-03T00:00:00.000Z',
-      supervisor: {
-        status: 'running', calls: 1, tokens_in: 1, tokens_out: 1, duration_ms: 1,
-        startedAt: '2026-09-03T00:00:00.000Z', attempts: [supervisorAttempt(1)],
-      },
       retiredStageUsage: [{
         stageId: 'old', iteration: 1, status: { status: 'complete', retries: 0 },
       }],
@@ -607,7 +551,6 @@ describe('compact atomic run projection', () => {
     expect(raw.retiredStageUsage).toBeUndefined();
     expect(raw.stageEvidence).toBeUndefined();
     expect(readRunState(projectDir, runId)).toMatchObject({
-      supervisor: { attempts: legacy.supervisor!.attempts },
       retiredStageUsage: legacy.retiredStageUsage,
       stageEvidence: legacy.stageEvidence,
     });

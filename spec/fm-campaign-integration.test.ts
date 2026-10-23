@@ -63,7 +63,7 @@ function declaredPlannerOutput(output: string, phaseOneReport = false): string {
   const yaml = /```yaml\n([\s\S]*?)```/.exec(output)?.[1];
   if (!yaml) throw new Error('fixture has no authored dispatch');
   return declaredDispatch(yaml, phaseOneReport ? {
-    research_report: { version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/phase1_research.md' }], reads: [], replays: [] },
+    research_report: { version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/phase1_research.md' }], reads: [] },
   } : {});
 }
 
@@ -185,7 +185,7 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
         StageConfigSchema.parse({ artifact_contract: fixtureArtifactContract('phase2_gate', true), id: 'phase2_gate', role: 'qa', depends_on: ['benchmark'], is_gate: true }),
       ];
       let phaseAccepted = false;
-      const ready = createReadyFinder({ loadGateContract: () => null, readGateVerdict: () => ({ pass: phaseAccepted }) });
+      const ready = createReadyFinder({ loadGateContract: () => null, readGateEvaluation: () => ({ pass: phaseAccepted }) });
       const state = makeRunState({ projectDir: TEST_DIR, runId: 'phase-order', stages: Object.fromEntries(stages.map(stage => [stage.id, { status: 'pending', retries: 0 }])) });
       expect(ready(stages, state).map(stage => stage.id)).toEqual(['survey']);
       state.stages.survey.status = 'complete';
@@ -317,7 +317,7 @@ Survey foundation models for anomaly detection. Focus on transformer-based and s
       writeCampaignEntry({ runId: 'run-004', seq: 4, gate: 'phase2_gate', pass: false, score: 2, metric: 'categories_beaten', threshold: 3 });
 
       const entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      const alert = checkCampaignHealth(entries as any, { enabled: true, repeatedFailureAfter: 3 });
+      const alert = checkCampaignHealth(entries as any);
 
       expect(alert).not.toBeNull();
       expect(alert!.type).toBe('repeated_failure');
@@ -457,7 +457,7 @@ Injecting research to explore alternative approaches.
 
       // At this point, campaign health should trigger pivot
       let entries = readCampaignEntries(TEST_DIR, CAMPAIGN_ID);
-      let alert = checkCampaignHealth(entries as any, { enabled: true, repeatedFailureAfter: 3 });
+      let alert = checkCampaignHealth(entries as any);
       expect(alert).not.toBeNull();
 
       // Iteration 5: After pivot — researcher finds alternative, new approach succeeds

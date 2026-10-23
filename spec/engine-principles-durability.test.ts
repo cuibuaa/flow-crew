@@ -1,12 +1,14 @@
+import type { PlanRevisionRequest } from './test-support/fixture-types.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { applyPlanRevision, planDigest, recordAdmittedPlan, type PlanRevisionRequest } from '../src/plan-revisions.js';
+import { applyPlanRevision, planDigest, recordAdmittedPlan } from '../src/plan-revisions.js';
 import { parseDispatchedStageConfig, StageConfigSchema } from '../src/scheduler.js';
-import { createRun, fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, runDir, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
 
 let root: string, previousStore: string, project: string, runId: string, directory: string, request: PlanRevisionRequest;
 const children: ChildProcess[] = [];
@@ -15,7 +17,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'flowcrew-revision-durability-'));
   project = join(root, 'project'); mkdirSync(project);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
-  const stage = (id: string) => StageConfigSchema.parse({ id, role: 'coder', scope: ['docs/**'], depends_on: [], dependency_reasons: {}, prompt_template: 'Execute declared work.', artifact_contract: { version: 1, produces: [], reads: [] , replays: [] } });
+  const stage = (id: string) => StageConfigSchema.parse({ id, role: 'coder', scope: ['docs/**'], depends_on: [], dependency_reasons: {}, prompt_template: 'Execute declared work.', artifact_contract: { version: 1, produces: [], reads: []  } });
   const stages = [stage('writer')];
   runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['writer']).runId;
   directory = runDir(project, runId);
@@ -32,7 +34,7 @@ afterEach(() => {
 });
 
 function revise(value: PlanRevisionRequest = request) {
-  return applyPlanRevision({ projectDir: project, runId, request: value, parseStage: parseDispatchedStageConfig, admit: () => ({ pass: true, errors: [] }), scopeContained: (scope, capabilities) => capabilities.includes(scope) });
+  return applyPlanRevision({ projectDir: project, runId, request: value, parseStage: parseDispatchedStageConfig, admit: () => ({ pass: true, errors: [] }),  });
 }
 function decisionPath() { return join(directory, 'stages/writer/plan_revision_decision_recover_projection.json'); }
 
@@ -96,7 +98,7 @@ describe('revision decisions survive interruption and concurrent publication', (
     writeFileSync(decisionPath(),JSON.stringify({version:1,requestId:request.requestId,accepted:true,at:new Date().toISOString(),baseRevision:0,
       requestDigest:createHash('sha256').update(JSON.stringify(canonical(request))).digest('hex'),errors:[],revision:0,digest:request.baseDigest}));
     let called=false;
-    expect(()=>applyPlanRevision({projectDir:project,runId,request,parseStage:parseDispatchedStageConfig,admit:()=>{called=true;return {pass:false,errors:['Must refuse']}},scopeContained:()=>false})).toThrow('PLAN_REVISION_DECISION_UNJOURNALED');
+    expect(()=>applyPlanRevision({projectDir:project,runId,request,parseStage:parseDispatchedStageConfig,admit:()=>{called=true;return {pass:false,errors:['Must refuse']}},})).toThrow('PLAN_REVISION_DECISION_UNJOURNALED');
     expect(called).toBe(false);expect(readRunState(project,runId).queryState?.planHistory).toHaveLength(1);
     expect(readRunState(project,runId).planRevisionDecisions).toBeUndefined();
   });
@@ -113,7 +115,7 @@ describe('revision decisions survive interruption and concurrent publication', (
       const scheduler = await import(pathToFileURL(dist + '/scheduler.js'));
       store.setFcGlobalDir(storeRoot);
       const request = JSON.parse(readFileSync(file, 'utf8'));
-      const result = revisions.applyPlanRevision({projectDir:project,runId:request.runId,request,parseStage:scheduler.parseDispatchedStageConfig,admit:()=>({pass:true,errors:[]}),scopeContained:(scope,capabilities)=>capabilities.includes(scope)});
+      const result = revisions.applyPlanRevision({projectDir:project,runId:request.runId,request,parseStage:scheduler.parseDispatchedStageConfig,admit:()=>({pass:true,errors:[]}),});
       process.stdout.write(JSON.stringify(result.decision));
     `;
     const call = () => new Promise<string>((done, fail) => {

@@ -16,10 +16,10 @@ import { evaluateResearch, evaluateResearchCeilingFloor } from '../src/research-
 import type { ResearchRound } from '../src/research-policy.js';
 import type { ResearchConfig } from '../src/store.js';
 
-/** The event-drift brief's research config, as parsed from its frontmatter. */
+/** The event-drift brief's research thresholds, using the supported keep policy. */
 const EVENT_DRIFT_CONFIG: ResearchConfig = {
   baseline: 0.0,
-  policy: 'best_of_n',
+  policy: 'greedy_stack',
   higherIsBetter: true,
   stop: { beat: 1.0, maxRounds: 8, maxWallHours: 24, haltAfterNoImprovement: 4, improvementSEMultiple: 1 },
 };
@@ -44,7 +44,7 @@ describe('confirm-failed rounds are excluded from kept/running-best', () => {
   it('with the flag, R4 is excluded and the loop CONTINUES (budget remains)', () => {
     const ev = evaluateResearch(EVENT_DRIFT_CONFIG, eventDriftRounds(true));
     expect(ev.decision).toBe('continue');           // 4 < max_rounds 8, streak 3 < halt 4
-    expect(ev.runningBest).toBe(0.339);             // best_of_n falls back to R1
+    expect(ev.runningBest).toBe(0.339);             // only R1 is confirmed and improves the baseline
     expect(ev.keptLabels).toEqual(['R1 upgrade drift']);
     expect(ev.consecutiveNoImprovement).toBe(3);    // R2, R3, R4(confirm-failed)
   });
@@ -53,14 +53,6 @@ describe('confirm-failed rounds are excluded from kept/running-best', () => {
     const cfg: ResearchConfig = { ...EVENT_DRIFT_CONFIG, stop: { ...EVENT_DRIFT_CONFIG.stop, haltAfterNoImprovement: 3 } };
     const ev = evaluateResearch(cfg, eventDriftRounds(true));
     expect(ev.decision).toBe('stop_ceiling');       // streak 3 >= halt 3
-  });
-
-  it('greedy_stack also skips confirm-failed rounds', () => {
-    const cfg: ResearchConfig = { ...EVENT_DRIFT_CONFIG, policy: 'greedy_stack' };
-    const ev = evaluateResearch(cfg, eventDriftRounds(true));
-    expect(ev.runningBest).toBe(0.339);
-    expect(ev.keptLabels).toEqual(['R1 upgrade drift']);
-    expect(ev.decision).toBe('continue');
   });
 });
 

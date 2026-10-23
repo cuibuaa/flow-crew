@@ -1,9 +1,10 @@
+import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { TaskRegistry } from '../src/task-registry.js';
+import { TaskRegistry, sessionTaskIndexPath } from '../src/task-registry.js';
 
 let tempDir: string;
 
@@ -29,6 +30,24 @@ describe('TaskRegistry', () => {
     expect(updated.status).toBe('running');
     expect(registry.get(task.id)?.run_id).toBe('run-1');
     expect(readFileSync(join(tempDir, 'tasks.jsonl'), 'utf-8').trim().split('\n')).toHaveLength(2);
+  });
+
+  it('indexes task ownership by session and updates only affected session indexes', () => {
+    const registry = new TaskRegistry({ baseDir: tempDir });
+    const first = { frontend: 'claude' as const, sessionId: 'first', cwd: tempDir, ledgerRoot: tempDir };
+    const second = { ...first, sessionId: 'second' };
+    const one = registry.create({ brief_text: 'one', projectDir: tempDir, launcher: first });
+    const two = registry.create({ brief_text: 'two', projectDir: tempDir, launcher: first });
+    const ids = (launcher: typeof first) => JSON.parse(readFileSync(sessionTaskIndexPath(tempDir, launcher), 'utf8'));
+    expect(ids(first)).toEqual([one.id, two.id]);
+    rmSync(join(tempDir, 'session-push', 'task-index'), { recursive: true });
+    registry.ensureSessionTaskIndexes();
+    expect(ids(first)).toEqual([one.id, two.id]);
+    registry.update(one.id, { launcher: second });
+    expect(ids(first)).toEqual([two.id]);
+    expect(ids(second)).toEqual([one.id]);
+    registry.update(two.id, { launcher: undefined });
+    expect(ids(first)).toEqual([]);
   });
 
   it('reports corrupt lines and fails closed before appending an update from stale state', () => {

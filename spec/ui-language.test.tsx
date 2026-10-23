@@ -3,7 +3,7 @@
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, waitFor } from '../ui/test-support/react-testing';
+import { cleanup, render, waitFor } from '../ui/test-support/react-testing';
 import CampaignIndex from '../ui/src/components/campaign/CampaignIndex';
 import CampaignPage from '../ui/src/components/campaign/CampaignPage';
 import type {
@@ -17,13 +17,11 @@ import type { InboxOverview, RunDetailData } from '../ui/src/types';
 
 vi.mock('../ui/src/api', () => ({
   cancelTask: vi.fn(),
-  fetchCampaignBriefDiff: vi.fn(),
   fetchInboxOverview: vi.fn(),
   fetchRunDetail: vi.fn(),
   fetchRunStageOutput: vi.fn(),
   fetchRunSummary: vi.fn(async () => null),
   resolveInboxItem: vi.fn(),
-  reviewCampaignPatch: vi.fn(),
 }));
 
 const HAN = /\p{Script=Han}/u;
@@ -87,7 +85,6 @@ function researchCampaignView(): { view: CampaignOperatorView; userText: string[
       value: {
         wallMs: 60_000,
         tokens: 120,
-        supervisorTokens: 20,
         runCoverage: { succeeded: 0, failed: 1, total: 1 },
         wallCoverage: { succeeded: 1, failed: 0, total: 1 },
         tokenCoverage: { succeeded: 0, failed: 1, total: 1 },
@@ -191,7 +188,7 @@ function campaignIndexFixture(): { index: CampaignOperatorIndex; userText: strin
 function inboxFixture(): { overview: InboxOverview; userText: string[] } {
   const userText = [
     '用户审批标题', '用户审批说明', '用户 campaign 名称', '用户 deferred 名称', '用户等待理由',
-    '用户 stale campaign', '用户补丁理由', '用户补丁摘要', '用户补丁正文',
+    '用户 stale campaign',
   ];
   return {
     userText,
@@ -208,11 +205,6 @@ function inboxFixture(): { overview: InboxOverview; userText: string[] } {
       },
       deferred: { status: 'complete', items: [{ id: 3, name: userText[3], projectDir: '/fixture/project', runId: 'deferred-run', status: 'deferred', deferReason: userText[4], notBefore: null }] },
       stale: { status: 'complete', items: [{ id: 'stale-campaign', name: userText[5], status: 'stale', staleRunId: 'stale-run' }] },
-      patches: { status: 'complete', items: [{
-        index: 0, ts: '2026-08-02T10:00:00.000Z', campaignId: 'language-campaign', campaignName: userText[2],
-        reason: userText[6], patch: { type: 'brief_patch', section: 'Goal', op: 'append', value: userText[8] },
-        patchSummary: userText[7], severity: 'medium', briefVersion: 'v1', latestVersion: 'v1', source: 'operator',
-      }] },
       campaignCount: 4,
     },
   };
@@ -237,7 +229,6 @@ function runFixture(status: 'parked' | 'complete'): { run: RunDetailData; userTe
       }],
       events: [
         { ts: '2026-08-02T10:00:00.000Z', event: 'stage_complete', stage: 'implementation' },
-        { ts: '2026-08-02T10:00:01.000Z', event: 'attempt_summary_refresh_requested' },
       ],
       stage_outputs: { implementation: userText[0] },
     },
@@ -278,10 +269,6 @@ describe('inbox language', () => {
     const { overview, userText } = inboxFixture();
     const rendered = render(<MemoryRouter><Inbox loadOverview={async () => overview} /></MemoryRouter>);
     await waitFor(() => expect(rendered.container.querySelector('[data-testid="inbox-view"]')).toHaveTextContent(userText[0]));
-    const diffButton = rendered.container.querySelector<HTMLButtonElement>('.patch-card button[aria-expanded]');
-    expect(diffButton).not.toBeNull();
-    fireEvent.click(diffButton!);
-    await waitFor(() => expect(rendered.container).toHaveTextContent(userText[8]));
     for (const value of userText) expect(rendered.container).toHaveTextContent(value);
     expectEnglishProductChrome(rendered.container, userText);
     expect(rendered.container).toHaveTextContent(/\bInbox\b/);
@@ -298,6 +285,5 @@ describe('run-page language and internal-event boundary', () => {
     for (const value of userText) expect(rendered.container).toHaveTextContent(value);
     expectEnglishProductChrome(rendered.container, userText);
     expect(rendered.container).not.toHaveTextContent('stage_complete');
-    expect(rendered.container).not.toHaveTextContent('attempt_summary_refresh_requested');
   });
 });

@@ -11,7 +11,7 @@ stages:
   - id: plan
     role: planner
     dynamic_dispatch: true
-    artifact_contract: {version: 1, produces: [], reads: [], groups: [], replays: []}
+    artifact_contract: {version: 1, produces: [], reads: [], groups: []}
 dispatch:
   - id: implement
     role: coder

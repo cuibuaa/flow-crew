@@ -5,18 +5,15 @@ For a contributor or advanced operator: what may a stage submit, and how is it a
 ## Dispatch
 
 The planner writes `dispatch.yaml` with nonempty `stages` and returns an ordinary stage report; the engine admits the declared plan file.
-Recorded YAML lists remain readable. An optional root
-`scope_negotiation: {defer: ["<rejected-scope-digest>"]}` explicitly defers a pending scope
-planning input; resolving it instead requires predeclaring its requested paths. The scheduler
-records the bound disposition without granting new authority. The live generation schema
-has required `id` and `role`,
+Recorded YAML lists and historical scope-negotiation artifacts remain readable.
+The live generation schema requires `id` and `role`,
 rejects unknown fields, and offers these optional stage keys:
 
 | Key | Contract |
 |---|---|
 | `id` | Lowercase letter, then lowercase letters/digits/underscores; at most 64 characters |
 | `role` | Configured role name |
-| `scope` | Project write paths; omission becomes closed `[]` |
+| `scope` | Estimated project paths for reporting; omission becomes `[]` |
 | `depends_on` | Ancestor IDs; omission is a root |
 | `prompt_template` | Stage task text; `task` remains an accepted alias |
 | `condition` | Parsed execution predicate; [condition parser](../src/condition.ts) is the grammar |
@@ -27,11 +24,12 @@ rejects unknown fields, and offers these optional stage keys:
 | `dynamic_dispatch` | Runtime plan expansion |
 | `artifact_contract` | Versioned rooted output/read locations |
 
-Whole-plan admission checks roles, graph, scope conflicts, criterion coverage, terminal
+Whole-plan admission checks roles, graph, scope syntax, criterion coverage, terminal
 ownership and read reachability before execution. Ordinary authors need downstream independent
 gates. Existing-work audits can consist of read-only gates with separate repairs. A malformed
 proposal is diagnosed rather than executed partially. `plan-check` uses the same proposal
-inspector; its synthetic brief mode cannot supply earlier run artifacts.
+inspector; its synthetic brief mode cannot supply earlier run artifacts. Scope estimates
+do not grant or forbid writes; stages sharing a mutable project tree execute serially.
 
 The recorded admission boundary still recognizes `dependency_reasons` and `max_retries`;
 dependency prose is optional and dynamic `max_retries` is stripped. Retired `timeout_ms`,
@@ -105,7 +103,7 @@ optional kind/when and `source`:
 - `{kind: stage, stage: <id>, artifact: <output-id>}` for a declared ancestor producer;
 - `{kind: framework, artifact: task_brief|run_state}` for a known engine input.
 
-IDs are unique within the stage. Produced locations are unique. Project writes require admitted scope; declared outputs may request scope before production;
+IDs are unique within the stage. Produced locations are unique. Planner scope is an estimate; declared outputs remain completion obligations;
 run outputs cannot overwrite control records or captured engine evidence. Concurrent run
 outputs sharing a location require dependency ordering. A gate publishes its unconditional
 `run:verdict_<id>.json`. A declared directory is a capability, not a recursive freshness proof.
@@ -126,8 +124,7 @@ artifact_contract:
 
 `groups` can declare `mode: exactly_one` with at least two unconditional output IDs.
 Successful settlement checks active required outputs for presence, kind, nonempty policy
-and exactly-one groups. Suspended/failed attempts have no completion obligation. Historical
-`replays` remain readable but are not executed. The location protocol requires no intermediate
+and exactly-one groups. Suspended/failed attempts have no completion obligation. The location protocol requires no intermediate
 proof package, changed content, age or fresh attribution. Location inspection and identity records do not certify content
 quality. Required products and independent gates still govern task settlement; explicit
 Reality checks and research measured-round rules remain separate.
@@ -179,40 +176,36 @@ A reviewed author's `blocked` answer settles for the gate to confirm or reject; 
 blocked answer fails its stage. A pass still requires every assigned brief criterion, including
 any explicitly permitted negative/blocked report outcome.
 
-When a remedy prescribes a quantity, verdict controls require known-cost evidence and checked
-wall/budget arithmetic, or explicit unknown cost. Operator rulings attached to canonical
-criteria follow later reviews; they cannot lower a threshold or widen authority.
-
 Sources: [result schemas](../src/handoff.ts), [gate evidence](../src/scheduler/sched_settlement/gate-evidence.ts),
 [gate contract](../src/scheduler/sched_settlement/gate-contract.ts),
 [verdict settlement](../src/scheduler/sched_settlement/gate-verdict.ts),
-[verdict controls](../src/verdict-controls.ts), [repair policy](../src/scheduler/sched_settlement/gate-recovery.ts).
+[repair policy](../src/scheduler/sched_settlement/gate-recovery.ts).
 
 ## Scope and plan revisions
 
-Before writing outside admitted scope, a stage submits its injected
-`scope_revision_request.json`: version 1, `kind: scope_revision`, unique `requestId`, exact
-`runId`, `stageId`, `attemptIndex` and `requestedPaths`, with optional `reason` telemetry.
-The scheduler derives SHA-256 `pathDigest` from the canonical path set. Wait without hot
-polling for the bound durable decision using notifications or low-rate inspection. Match the
-run/stage/attempt/request identity and canonical paths. Acceptance closes the current execution after child closure;
-only a later re-admitted execution can use `authorizedPaths`. Partial/denied paths remain
-closed. Peer conflicts are rechecked when inherited grants are admitted again.
+A stage's `scope` is the planner's path estimate for reporting and production ownership.
+It does not authorize or forbid project content changes. Authors sharing a mutable project
+tree execute serially through the scheduling frontier, including stages with disjoint estimates.
+Required scripts, tests, reports and validation temporary files need no scope negotiation.
+Inputs locate material; only evidence the task explicitly declares frozen is immutable.
+The run binds its canonical identities and exact preimages before authors start. Settlement
+rejects changed frozen content and restores proven bytes. Exact task outputs take precedence.
+Unknown preimages never authorize deletion. Use private `$TMPDIR` scratch for isolated probes.
+Historical scope-revision decisions remain readable but do not grant or suspend execution.
 
 A settled stage can submit `plan_revision_request.json` with version 1, request/run/stage/
 attempt identity, `attemptStartedAt`, `baseRevision`, `baseDigest`, `reason` and the complete
 proposed `stages` list. Revisions require all stages idle. Preserve admitted result obligations
-and executed history; unstarted declared tactics may be replaced. New scopes fit the initial capability union. Whole-plan admission
+and executed history; unstarted declared tactics may be replaced. Path estimates may change with the tactics. Whole-plan admission
 runs again. A decision projection without matching journaled history cannot authorize a revision.
 Removing an obligation requires a new initial plan rather than an amendment.
 
 Repair batches use this same idle-boundary admission. Newly appended repair stages
 for the active rejected gates finish in dependency order before those gates run
 again, within the existing repair round and budget. Every round resets its repair
-dependencies before selecting ready work. Each disjoint execution wave captures
-fresh guard preimages, including scopes serialized after earlier writes; the gate
+dependencies before selecting ready work. Each execution wave captures
+fresh content observations after earlier authors settle; the gate
 receives the combined repair diff from the start of the round. Failed work does not
 release its successors or clear the rejection.
 
-Sources: [scope protocol](../src/runtime-negotiation.ts),
-[live guard](../src/live-constraint-guard.ts), [plan revisions](../src/plan-revisions.ts).
+Sources: [content settlement](../src/scheduler/sched_scope/write-enforcement.ts), [plan revisions](../src/plan-revisions.ts).

@@ -10,7 +10,8 @@ import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
-import { createRun, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { declaredDispatch, fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
 
@@ -36,7 +37,7 @@ function fixture(dynamic: boolean, repairs: number, iterations = 3, withRepair =
     ...(withRepair ? [{ id: 'repair', role: 'coder', scope: [], depends_on: ['review'], retry_to: ['review'], prompt_template: 'Inspect the environment.', artifact_contract: fixtureArtifactContract('repair') }] : []),
   ];
   const plan = { id: 'plan', role: 'coder', scope: [], dynamic_dispatch: true, prompt_template: 'Admit the work.', artifact_contract: {
-    version: 1, produces: [{ id: 'dispatch', root: 'run', path: 'dispatch.yaml', kind: 'file' }], reads: [], replays: [],
+    version: 1, produces: [{ id: 'dispatch', root: 'run', path: 'dispatch.yaml', kind: 'file' }], reads: [],
   } };
   const workflow = WorkflowConfigSchema.parse({ name: 'continuation-fixture', defaults: { max_iterations: iterations, max_retries: repairs }, stages: dynamic ? [plan] : stages });
   let ready = false;

@@ -2,11 +2,12 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { extractFinalMessage, generateRunSummary } from '../src/run-summary.js';
+import { generateRunSummary } from './test-support/run-summary.js';
+import { extractFinalMessage } from '../src/adapters/transcript.js';
 import type { Adapter } from '../src/adapters/base.js';
 import { archiveGateRoundEvidence } from '../src/scheduler/sched_settlement/gate-archives.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   readRunState,
   runDir,
@@ -62,7 +63,7 @@ describe('Reality-Gate advisory summary', () => {
       const created = createRun(projectDir, 'test', 'name: test', ['active_work']);
       const path = join(runDir(projectDir, created.runId), 'run.json');
       const state = JSON.parse(readFileSync(path, 'utf8'));
-      state.status = 'complete'; state.supervise = false;
+      state.status = 'complete';
       state.stages.active_work = { status: 'complete', retries: 0 };
       state.retiredStageUsage = [{ stageId: 'work', iteration: 'damaged-optional-iteration', status: { status: 'failed', retries: 0 } }];
       writeFileSync(path, JSON.stringify(state));
@@ -131,7 +132,6 @@ describe('Reality-Gate advisory summary', () => {
       const state = readRunState(projectDir, created.runId);
       state.status = 'complete';
       state.completedAt = new Date().toISOString();
-      state.supervise = false;
       state.stages.active_work = { status: 'complete', retries: 0, duration_ms: 2_000 };
       const evidenceRoot = 'stage_evidence/iteration_1/retired';
       state.stageEvidence = [{
@@ -269,23 +269,6 @@ describe('engine-assembled terminal reports', () => {
       expect(report).toContain('archived rejection remains recorded');
       expect(report).not.toContain('Engine effective verdict:');
       expect(report).toContain('gate_reevaluation/iteration_1/round_2/rejected_verdict_review.json');
-    });
-  });
-
-  it('retains legacy engine rejections for a retired gate with unknown iteration', async () => {
-    await terminalFixture(async (project, id, directory) => {
-      const state = readRunState(project, id);
-      delete state.stages.review;
-      state.retiredStageUsage = [{ stageId: 'review', iteration: 1, status: { status: 'complete', retries: 0 } }];
-      writeRunState(project, id, state);
-      const archive = join(directory, 'gate_reevaluation/round_3'); mkdirSync(archive, { recursive: true });
-      writeFileSync(join(archive, 'rejected_verdict_review.json'), JSON.stringify(gateRecord(true)));
-      writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ gateId: 'review',
-        written_verdict_pass: true, engine_effective_pass: false, engine_rejection_reason: 'Legacy metric conflict.' }));
-      const report = await generateRunSummary(project, id);
-      expect(report).toContain('review [legacy iteration unknown, round 3]');
-      expect(report).toContain('Engine effective verdict: FAIL — Legacy metric conflict.');
-      expect(report).toContain('gate_reevaluation/round_3/engine_verdict_review.json');
     });
   });
 

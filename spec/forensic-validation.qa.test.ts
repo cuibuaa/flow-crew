@@ -1,3 +1,5 @@
+import { classifyAdapterFailure } from '../src/adapters/failure.js';
+import { decideStageRetry } from '../src/scheduler/sched_settlement/stage-execution.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import {
@@ -20,10 +22,11 @@ import {
   inspectRealityCheckReachability,
   recordSchedulerTechnicalAttemptResult,
 } from '../src/scheduler.js';
-import { RUN_STATUS, createRun, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { RUN_STATUS, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import type { SupervisorBackend, UnitStatus } from '../src/supervision.js';
 import { TASK_STATUS, TaskRegistry } from '../src/task-registry.js';
-import { classifyAdapterFailure, runStage } from '../src/worker.js';
+import { runStage } from '../src/worker.js';
 
 const temporaryRoots: string[] = [];
 const role: AgentConfig = {
@@ -88,8 +91,7 @@ describe('scheduler admission and evidence contracts', () => {
       ].join('\n'));
       const adapter: Adapter = { async run() { return {
         output: parsed.output, exitCode: 1, duration_ms: 1,
-        adapterError: parsed.adapterFailureKind !== undefined,
-        adapterFailureKind: parsed.adapterFailureKind,
+        providerFailure: parsed.providerFailure,
       }; } };
       const result = await runStage(adapter, {
       artifactContract: fixtureArtifactContract('work'),
@@ -98,16 +100,17 @@ describe('scheduler admission and evidence contracts', () => {
       });
       const events = readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf8')
         .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-      expect(result).toMatchObject({ exitCode: 1, adapterError: true, adapterFailureKind: 'capacity' });
-      expect(events).toContainEqual(expect.objectContaining({ type: 'attempt_failed', adapterFailure: true, adapterFailureKind: 'capacity' }));
+      expect(result).toMatchObject({ exitCode: 1, providerFailure: { kind: 'transient' } });
+      expect(events).toContainEqual(expect.objectContaining({ type: 'attempt_failed', providerFailure: expect.objectContaining({ kind: 'transient' }) }));
       const quoted = parseCodexJsonl([
         JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'assertion quoted Selected model is at capacity.' } }),
         JSON.stringify({ type: 'turn.failed', error: { message: 'Stage assertion failed' } }),
       ].join('\n'));
-      expect(quoted.adapterFailureKind).toBeUndefined();
+      expect(quoted.providerFailure).toBeUndefined();
+      expect(classifyAdapterFailure('assertion mismatch in stage output')).toBeUndefined();
       const semanticRun = createRun(projectDir, 'quoted-control', 'name: quoted-control', ['work']);
       const semanticAdapter: Adapter = { async run() { return {
-        output: quoted.output, exitCode: 1, duration_ms: 1, adapterError: false,
+        output: quoted.output, exitCode: 1, duration_ms: 1,
       }; } };
       const semantic = await runStage(semanticAdapter, {
       artifactContract: fixtureArtifactContract('work'),
@@ -116,16 +119,16 @@ describe('scheduler admission and evidence contracts', () => {
       });
       const semanticEvents = readFileSync(join(semanticRun.runDirPath, 'events.jsonl'), 'utf8')
         .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-      expect(semantic.adapterError).toBe(false);
-      expect(semanticEvents).toContainEqual(expect.objectContaining({ type: 'attempt_failed', adapterFailure: false }));
-      expect(classifyAdapterFailure('assertion mismatch in stage output')).toBeUndefined();
+      expect(semantic.providerFailure).toBeUndefined();
+      const semanticFailure = semanticEvents.find(event => event.type === 'attempt_failed');
+      expect(semanticFailure).toBeDefined();
+      expect(semanticFailure?.providerFailure).toBeUndefined();
       const technicalRetry = createTechnicalRetryBudgetState({ initialBudgetMs: 1_000 });
       const first = transitionTechnicalRetryBudget(technicalRetry, { type: 'prepare_attempt' });
       expect(first).toMatchObject({ type: 'attempt_prepared', budgetMs: 1_000 });
-      expect(recordSchedulerTechnicalAttemptResult(technicalRetry, {
-        adapterFailureKind: 'capacity',
-        timedOut: false,
-      }, 1_000)).toBe(true);
+      recordSchedulerTechnicalAttemptResult(technicalRetry, result, 1_000);
+      expect(decideStageRetry(result, 0, 1, 1)).toBe('retry');
+      expect(decideStageRetry(semantic, 0, 1, 1)).toBe('retry');
       const second = transitionTechnicalRetryBudget(technicalRetry, { type: 'prepare_attempt' });
       expect(second).toMatchObject({ type: 'attempt_prepared', budgetMs: 1_000 });
     } finally { setFcGlobalDir(previousStateDir); }
@@ -142,7 +145,7 @@ describe('scheduler admission and evidence contracts', () => {
     const refused = inspectRealityCheckReachability({ markdown: check('docs/run_manifest.json'), projectDir, stages: [], research });
     const ordinary = inspectRealityCheckReachability({
       markdown: check('docs/report.json', { kind: 'stage', stage: 'writer', artifact: 'report' }), projectDir, research,
-      stages: [{ artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.json' }], reads: [], replays: [] }), id: 'writer', role: 'researcher', depends_on: [], prompt_template: '', skills: [], criterion_refs: [], scope: ['docs/report.json'], is_gate: false }],
+      stages: [{ artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.json' }], reads: [] }), id: 'writer', role: 'researcher', depends_on: [], prompt_template: '', skills: [], criterion_refs: [], scope: ['docs/report.json'], is_gate: false }],
     });
     const prompt = appendResearchPathContract('confirm the round', research, undefined);
     expect(refused.join('\n')).toContain('writes it only after the current round');

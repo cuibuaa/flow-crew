@@ -75,17 +75,14 @@ describe('LoopPolicy / evaluateResearch — metric-kind contract', () => {
     expect(e.decision).toBe('ship');
   });
 
-  it('greedy_stack keeps every improving round; best_of_n keeps only the single best', () => {
+  it('greedy_stack keeps every improving round', () => {
     const rounds = [R('a', 0.2), R('b', 0.5), R('c', 0.3)];
     const greedy = evaluateResearch(cfg({ policy: 'greedy_stack' }), rounds);
-    const bestOf = evaluateResearch(cfg({ policy: 'best_of_n' }), rounds);
     expect(greedy.keptLabels).toEqual(['a', 'b']); // c (0.3) does not beat running-best 0.5
-    expect(bestOf.keptLabels).toEqual(['b']);       // only the single best label
     expect(greedy.runningBest).toBeCloseTo(0.5);
-    expect(bestOf.runningBest).toBeCloseTo(0.5);
   });
 
   it('policy registry is the single source of allowed ids', () => {
-    expect([...RESEARCH_POLICY_IDS].sort()).toEqual(['best_of_n', 'greedy_stack', 'replace_if_better']);
+    expect([...RESEARCH_POLICY_IDS].sort()).toEqual(['greedy_stack']);
   });
 });

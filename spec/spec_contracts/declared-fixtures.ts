@@ -1,3 +1,4 @@
+import type { ArtifactContractInput } from '../test-support/fixture-types.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { extractBriefCriteria } from '../../src/brief-criteria.js';
@@ -7,7 +8,6 @@ import { fixtureArtifactContract } from '../test-support/declared-dispatch.js';
 import {
   ArtifactContractSchema,
   type ArtifactContract,
-  type ArtifactContractInput,
   type ArtifactRead,
 } from '../../src/artifact-declarations.js';
 
@@ -15,10 +15,9 @@ import {
 export function artifacts(
   produces: ArtifactContractInput['produces'] = [],
   reads: ArtifactContractInput['reads'] = [],
-  replays: ArtifactContractInput['replays'] = [],
   groups: ArtifactContractInput['groups'] = [],
 ): ArtifactContract {
-  return ArtifactContractSchema.parse({ version: 1, produces, reads, replays, groups });
+  return ArtifactContractSchema.parse({ version: 1, produces, reads, groups });
 }
 
 export function inputFile(id: string, path: string, root: 'project' | 'run' = 'project'): ArtifactRead {

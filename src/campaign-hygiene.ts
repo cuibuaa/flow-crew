@@ -10,13 +10,11 @@ const ADVERSE_END_STATUS = {
   [RUN_STATUS.PARKED]: false,
   [RUN_STATUS.COMPLETE]: false,
   [RUN_STATUS.FAILED]: true,
-  [RUN_STATUS.AWAITING_APPROVAL]: false,
   [RUN_STATUS.SHIPPED]: false,
   [RUN_STATUS.CEILING_HIT]: true,
   [RUN_STATUS.ESCALATED]: true,
   [RUN_STATUS.REALITY_GATE_FAILED]: true,
-  [RUN_STATUS.PHASE_COMPLETE]: false,
-  [RUN_STATUS.STOPPED]: true,
+  [RUN_STATUS.CANCELLED]: true,
   [RUN_STATUS.INCOMPLETE]: true,
 } as const satisfies Record<RunStatus, boolean>;
 

@@ -1,6 +1,5 @@
-import { mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from './engine-fs.js';
+import { atomicWrite, mkdirSync, rmSync } from './engine-fs.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import {
   processCommandBinding,
@@ -92,7 +91,6 @@ export interface SupervisionLaunchRecord {
   shellPath: string;
   createdAt: string;
   shutdownGraceMs: number;
-  legacyRecordPath?: string;
   /** Absent only in launch records written before environment inheritance. */
   environment?: Record<string, string>;
 }
@@ -180,13 +178,8 @@ export function atomicWriteJson(
   options: { createParent?: boolean; mode?: number } = {},
 ): void {
   if (options.createParent !== false) mkdirSync(dirname(path), { recursive: true });
-  const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
-  try {
-    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf-8', mode: options.mode });
-    renameSync(temporary, path);
-  } finally {
-    try { unlinkSync(temporary); } catch { /* rename succeeded or cleanup is best-effort */ }
-  }
+  // Launch/exit records must survive the supervising process for recovery.
+  atomicWrite(path, `${JSON.stringify(value, null, 2)}\n`, { durability: 'durable', mode: options.mode });
 }
 
 function readJson(path: string): unknown {
@@ -219,7 +212,6 @@ export function readSupervisionLaunch(path: string): SupervisionLaunchRecord | u
     || typeof value.shellPath !== 'string'
     || typeof value.createdAt !== 'string'
     || !Number.isFinite(value.shutdownGraceMs)
-    || (value.legacyRecordPath !== undefined && typeof value.legacyRecordPath !== 'string')
     || (value.environment !== undefined && (!isRecord(value.environment)
       || Object.values(value.environment).some(entry => typeof entry !== 'string')))) return undefined;
   return value as unknown as SupervisionLaunchRecord;
@@ -261,7 +253,6 @@ function isLaunchRefusalRecord(value: unknown): value is LaunchRefusalRecord {
     && value.version === SUPERVISION_PROTOCOL_VERSION
     && value.kind === 'launch_refused'
     && typeof value.message === 'string'
-    && value.message.startsWith('Launch refused:')
     && typeof value.refusedAt === 'string'
     && Number.isFinite(Date.parse(value.refusedAt));
 }
@@ -274,7 +265,7 @@ export function readLaunchRefusal(path: string): LaunchRefusalRecord | undefined
 /** Called by the supervised CLI before returning from a pre-launch refusal. */
 export function recordLaunchRefusal(message: string): void {
   const path = launchResultPath;
-  if (!path || !message.startsWith('Launch refused:')) return;
+  if (!path) return;
   atomicWriteJson(path, {
     version: SUPERVISION_PROTOCOL_VERSION,
     kind: 'launch_refused',

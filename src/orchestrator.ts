@@ -1,9 +1,10 @@
-import { mkdirSync, writeFileSync } from './engine-fs.js';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync } from './engine-fs.js';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { homedir, userInfo } from 'node:os';
 import { isOperatorStateRoot, resolveControlPath } from './daemon-identity.js';
 import { spawn } from 'node:child_process';
+import { SessionPush, type PushDependencies } from './session-push.js';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import {
@@ -11,24 +12,19 @@ import {
   TASK_LIST_STATUS,
   TASK_STATUS,
   isActiveTaskStatus,
+  hasLiveForegroundOwner,
   type TaskCreateInput,
   type TaskEntry,
-  type TaskRegistryMetrics,
 } from './task-registry.js';
-import { parseTaskSummary } from './task-summary-parser.js';
 import {
   claimLaunchIntent,
   findParkedRunForProject,
   inspectRunScheduler,
   invalidateRunLockCache,
   isProjectBusy,
-  processCommandMatches,
   processIsAlive,
-  processStartToken,
-  processStartTokensMatch,
   readLaunchIntent,
   releaseLaunchIntent,
-  type ProcessStartToken,
 } from './run-lock.js';
 import {
   isPausedRunStatus,
@@ -45,7 +41,7 @@ import {
 } from './store.js';
 import { deploymentHeld, parkAtDeploymentBoundary, readDeploymentHold, requestDeploymentHold, releaseDeploymentHold, type DeploymentHold } from './deployment-hold.js';
 import { assertContinuationCompatible, recordContinuationRefusal } from './engine-continuation.js';
-import { checkpointCommandFateKnown, checkpointConsumers } from './restart-recovery.js';
+import { checkpointConsumers } from './restart-recovery.js';
 import { unitIsStopped } from './run-control.js';
 import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
 import { reconcileHostInterruptedRun } from './restart-recovery.js';
@@ -92,7 +88,8 @@ interface BoundRun {
   failureReason?: string;
   pendingApprovalId?: string;
   resumeAuthorized?: boolean;
-  deploymentContinuation?: boolean;
+  /** Parked runs with released deployment holds or approved actions continue without a crash retry. */
+  retryExemptContinuation?: boolean;
 }
 
 export interface DeploymentStatus {
@@ -111,6 +108,7 @@ export interface GitAdapter {
 }
 
 export interface OrchestratorOptions {
+  sessionPush?: PushDependencies;
   registry?: TaskRegistry;
   systemd?: SupervisorBackend;
   git?: GitAdapter;
@@ -119,8 +117,6 @@ export interface OrchestratorOptions {
   now?: () => Date;
   /** Single-in-flight probe (injectable so tests don't read the real ~/.fc/runs). */
   isProjectBusy?: (projectDir: string, selfRunId?: string, nowMs?: number) => string | null;
-  /** Run-id allocator seam used to prove association failures fail closed. */
-  reserveRun?: typeof reserveRun;
   /** Bounded cancellation seams; production still supplies registry/unit ownership here. */
   cancellation?: Partial<Omit<
     RunCancellationOptions,
@@ -128,18 +124,6 @@ export interface OrchestratorOptions {
   >>;
   /** Supplied only by daemon serve; local cancellation/read constructors never sweep runs. */
   reconcileOrphanRuns?: () => void;
-  /** Durable daemon-log sink for automatic registry maintenance. */
-  onMaintenanceEvent?: (event: RegistryMaintenanceEvent) => void;
-}
-
-export interface RegistryMaintenanceEvent {
-  type: 'registry_compacted' | 'registry_compaction_failed';
-  timestamp: string;
-  before: TaskRegistryMetrics;
-  after?: TaskRegistryMetrics;
-  removedRecords?: number;
-  backupPath?: string;
-  detail?: string;
 }
 
 export class Orchestrator {
@@ -150,29 +134,27 @@ export class Orchestrator {
   private readonly cliPath: string;
   private readonly now: () => Date;
   private readonly probeBusy: (projectDir: string, selfRunId?: string, nowMs?: number) => string | null;
-  private readonly allocateRun: typeof reserveRun;
-  private readonly onMaintenanceEvent: (event: RegistryMaintenanceEvent) => void;
   private readonly cancellations: RunCancellationCoordinator;
   private readonly reconcileOrphanRuns?: () => void;
   /** Tasks currently awaiting runUnit(). A tick must not interpret their unit
    *  as inactive and launch or reconcile them a second time. */
   private launchingTaskIds = new Set<number>();
+  private readonly deferredUntil = new Map<number, number>();
   private timer?: NodeJS.Timeout;
   private activeTick?: Promise<void>;
   private startedAt = Date.now();
-  private lastRegistryCompactionAttempt?: string;
+  private readonly sessionPush: SessionPush;
 
   constructor(opts: OrchestratorOptions = {}) {
     this.reconcileOrphanRuns = opts.reconcileOrphanRuns;
     this.registry = opts.registry ?? new TaskRegistry();
+    this.sessionPush = new SessionPush(this.registry, opts.sessionPush);
     this.systemd = opts.systemd ?? new NodeSystemd(this.registry.baseDir);
     this.git = opts.git ?? new NodeGit();
     this.intervalMs = opts.intervalMs ?? 30000;
     this.cliPath = opts.cliPath ?? resolve(import.meta.dirname ?? '.', 'cli.js');
     this.now = opts.now ?? (() => new Date());
     this.probeBusy = opts.isProjectBusy ?? isProjectBusy;
-    this.allocateRun = opts.reserveRun ?? reserveRun;
-    this.onMaintenanceEvent = opts.onMaintenanceEvent ?? (() => {});
     this.cancellations = new RunCancellationCoordinator({
       ...opts.cancellation,
       registry: this.registry,
@@ -221,7 +203,7 @@ export class Orchestrator {
       return this.failClosed(task, `bound run ${task.run_id} is unreadable and has no valid reservation; refusing to replay brief`);
     }
     try {
-      const reservation = this.allocateRun(task.projectDir, this.now());
+      const reservation = reserveRun(task.projectDir, this.now());
       return this.registry.update(task.id, { run_id: reservation.runId });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -245,8 +227,13 @@ export class Orchestrator {
     // Catch-up sweep BEFORE arming the interval: a daemon restart otherwise
     // leaves every active task unvisited for a full interval, and any task
     // created-but-not-launched when the daemon died would wait forever.
-    void this.tickOnce();
-    this.timer = setInterval(() => void this.tickOnce(), this.intervalMs);
+    this.requestTick();
+    this.timer = setInterval(() => this.requestTick(), this.intervalMs);
+  }
+
+  /** All background producers share one rejection boundary; awaited ticks still reject. */
+  requestTick(): void {
+    void this.tickOnce().catch(error => { console.error('daemon tick failed:', error); });
   }
 
   async stop(): Promise<void> {
@@ -259,6 +246,13 @@ export class Orchestrator {
 
   /** Persist admission before launch work. The daemon queue resumes after a restart. */
   enqueue(input: TaskCreateInput): TaskEntry {
+    return this.createAdmittedTask({ ...input, status: TASK_STATUS.PENDING });
+  }
+
+  private createAdmittedTask(input: TaskCreateInput): TaskEntry {
+    if (input.kind !== undefined && input.kind !== 'quick') {
+      throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
+    }
     if (input.run_id) {
       try {
         const identity = resolveRunIdentity(this.boundRunPath(input.run_id), runsRoot(input.projectDir));
@@ -269,54 +263,25 @@ export class Orchestrator {
         throw new Error(`Invalid existing-run resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     }
-    return this.createAdmittedTask({ ...input, status: TASK_STATUS.PENDING });
-  }
-
-  private createAdmittedTask(input: TaskCreateInput): TaskEntry {
-    if ((input.kind !== undefined && input.kind !== 'quick') || input.config_path !== undefined) {
-      throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
+    if (input.run_id) {
+      const bound = this.registry.list({ status: TASK_LIST_STATUS.ALL }).reverse().find(task =>
+        task.run_id && this.boundRunPath(task.run_id) === this.boundRunPath(input.run_id!)
+        && resolve(task.projectDir) === resolve(input.projectDir));
+      if (bound) return this.queueResume(bound.id);
     }
     const brief = input.brief_text ?? (input.brief_path ? readFileSync(input.brief_path, 'utf-8') : input.name ?? '');
     const verification = verifyBriefAdmission(brief, input.brief_admission);
     if (verification.status !== 'valid') {
-      throw new Error(admissionFailureMessage(verification.status, verification.report.digest));
+      throw new Error(admissionFailureMessage(verification.status, verification.digest));
     }
     return this.registry.create(input);
   }
 
   async register(input: TaskCreateInput): Promise<TaskEntry> {
-    let task = this.createAdmittedTask(input);
+    const task = this.createAdmittedTask(input);
     if (deploymentHeld()) return this.registry.update(task.id, { status: TASK_STATUS.PENDING, notes: 'Deployment hold: launch fenced' });
-    // Admission control (skip-on-overlap): single-in-flight per project used to
-    // be enforced only INSIDE the launched run — the daemon spawned a second
-    // unit anyway, the child killed itself on the conflict, systemd reported
-    // the unit failed, and that counted as a crash worth retrying. A task could
-    // burn its whole retry budget in seconds on a conflict it only had to wait
-    // out (observed in a live run). Defer instead of launching into a busy project.
-    invalidateRunLockCache();
-    const busy = this.busyFor(task.projectDir, task.run_id);
-    if (busy) return this.defer(task, `project busy (run ${busy})`, 'wait');
-    const prepared = this.prepareRunBinding(task);
-    if (!prepared) return this.registry.get(task.id) ?? task;
-    task = prepared;
-    if (!this.claimTaskLaunch(task)) {
-      const blocker = this.busyFor(task.projectDir, task.run_id) ?? 'another launch';
-      return this.defer(task, `project busy (run ${blocker})`, 'wait', task.run_id);
-    }
-    const command = this.prepareLaunchCommand(task);
-    if (!command) return this.registry.get(task.id) ?? task;
-    const now = this.now().toISOString();
-    // Publish launch ownership before awaiting systemd-run. The exact brief and
-    // admission were re-read and bound into `command` above, before this status
-    // mutation, so a mismatch can never leave a task falsely marked running.
-    const running = this.registry.update(task.id, { status: 'running', started_at: now });
-    this.launchingTaskIds.add(task.id);
-    try {
-      await this.launch(running, running.systemd_unit, command);
-      return this.registry.get(task.id) ?? running;
-    } finally {
-      this.launchingTaskIds.delete(task.id);
-    }
+    await this.tryLaunchQueued(task);
+    return this.registry.get(task.id) ?? task;
   }
 
   /**
@@ -325,7 +290,11 @@ export class Orchestrator {
    */
   private defer(task: TaskEntry, reason: string, kind: 'wait' | 'retry', runId?: string): TaskEntry {
     const waitMs = Math.min(DEFER_BASE_MS * 2 ** Math.max(0, task.attempt - 1), DEFER_MAX_MS);
-    const notBefore = new Date(this.now().getTime() + waitMs).toISOString();
+    const next = this.now().getTime() + waitMs;
+    this.deferredUntil.set(task.id, next);
+    if (task.status === TASK_STATUS.DEFERRED && task.defer_reason === reason && task.defer_kind === kind
+        && (!runId || task.run_id === runId)) return task;
+    const notBefore = new Date(next).toISOString();
     const updated = this.registry.update(task.id, {
       status: 'deferred', not_before: notBefore, defer_reason: reason, defer_kind: kind,
       ...(runId ? { run_id: runId } : {}),
@@ -342,12 +311,9 @@ export class Orchestrator {
     return this.cancellations.cancelRun(runId, unit);
   }
 
-  async cancellationStatus(runId: string, unit?: string): Promise<CancellationResult> {
-    return this.cancellations.statusRun(runId, unit);
-  }
-
   async retry(id: number): Promise<TaskEntry> {
     let task = this.mustGet(id);
+    this.sessionPush.capture(task);
     const bound = this.readBoundRun(task);
     if (task.status !== TASK_STATUS.RUNNING
         && bound && isTerminalRunStatus(bound.status)) {
@@ -360,16 +326,22 @@ export class Orchestrator {
   }
 
   async resume(id: number): Promise<TaskEntry> {
+    return this.queueResume(id);
+  }
+
+  private queueResume(id: number): TaskEntry {
     const task = this.mustGet(id);
     if (deploymentHeld()) throw new Error('Deployment hold is active; use flowcrew daemon continue');
     const bound = this.readBoundRun(task);
     if (!bound) throw new Error('Task has no readable bound run to resume');
-    // A cancelled/stopped run can retain historical hold metadata. Only a
+    // A cancelled run can retain historical hold metadata. Only a
     // currently parked run needs that hold's release before explicit launch.
     const heldContinuation = bound.status === RUN_STATUS.PARKED
       ? readRunState(task.projectDir, bound.runId).deploymentHold : undefined;
-    if (![RUN_STATUS.STOPPED, RUN_STATUS.FAILED, RUN_STATUS.INCOMPLETE].some(status => status === bound.status) && !(bound.status === RUN_STATUS.PARKED && heldContinuation)) {
-      throw new Error(`Cannot resume a ${bound.status} run; resume requires stopped, failed or incomplete work`);
+    const status = resolveRunStatus(bound.status);
+    if (status.kind !== 'known' || !status.semantics.resumable
+        || (bound.status === RUN_STATUS.PARKED && !(heldContinuation || bound.retryExemptContinuation))) {
+      throw new Error(`Cannot resume a ${bound.status} run; resume requires cancelled, failed, incomplete or parked work`);
     }
     if (task.status === TASK_STATUS.CANCELLING || this.launchingTaskIds.has(id)
         || !['dead', 'missing', 'reused'].includes(inspectRunScheduler(bound.runId, bound.path).kind)) {
@@ -387,9 +359,9 @@ export class Orchestrator {
     // reconciling the previous terminal outcome before this launch occurs.
     return this.registry.update(id, {
       status: TASK_STATUS.PENDING, started_at: undefined, completed_at: undefined,
-      not_before: undefined, defer_reason: undefined, defer_kind: heldContinuation ? 'wait' : 'retry',
+      not_before: undefined, defer_reason: undefined, defer_kind: bound.status === RUN_STATUS.PARKED && (heldContinuation || bound.retryExemptContinuation) ? 'wait' : 'retry',
       notes: undefined, completing_commit: undefined,
-      summary_verdict: undefined, summary_one_liner: undefined, summary_full: undefined,
+      summary_one_liner: undefined, summary_full: undefined,
       summary_source: undefined, summary_parsed_at: undefined,
     });
   }
@@ -409,7 +381,11 @@ export class Orchestrator {
       errors.push('Registry is corrupt or has unknown statuses; deployment cannot be proved safe');
       controlErrors++;
     }
-    const registered = this.registry.list({ status: TASK_LIST_STATUS.ALL });
+    const registered = this.registry.list({ status: TASK_LIST_STATUS.ALL }).filter(task => {
+      if (isActiveTaskStatus(task.status) || this.launchingTaskIds.has(task.id)) return true;
+      const bound = this.readBoundRun(task);
+      return Boolean(hold && bound && readOperationalRunState(task.projectDir, bound.runId).deploymentHold?.id === hold.id);
+    });
     const units = this.systemd.isActiveMany
       ? await this.systemd.isActiveMany(registered.map(task => task.systemd_unit)) : undefined;
     const observations = await Promise.all(registered.map(async task => {
@@ -427,7 +403,7 @@ export class Orchestrator {
           const state = readOperationalRunState(task.projectDir, bound.runId);
           settled &&= ['dead', 'missing', 'reused'].includes(owner.kind)
             && (isPausedRunStatus(state.status) || isTerminalRunStatus(state.status))
-            && checkpointCommandFateKnown(state) && checkpointConsumers(state.engineCheckpoint).length === 0;
+            && checkpointConsumers(state.engineCheckpoint).length === 0;
           detail = `run=${state.status}, scheduler=${owner.kind}, unit=${unit.kind}`;
           if (state.deploymentHold?.id === hold?.id && state.continuationFailure) {
             errors.push(`Task ${task.id}: ${state.continuationFailure.reason}`);
@@ -438,10 +414,7 @@ export class Orchestrator {
           detail = 'Bound run is unreadable';
         } else if (task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.CANCELLING) settled = false;
         if (!detail) detail = `unit=${unit.kind}${settled ? '; queued launch fenced' : ''}`;
-        // Settled historical tasks need no deployment action. A terminal
-        // cancellation with unresolved owners still vetoes readiness.
-        return !active && settled && !errors.some(error => error.startsWith(`Task ${task.id}:`)) ? undefined
-          : { id: task.id, runId: bound?.runId, status: bound?.status ?? task.status, settled, detail };
+        return { id: task.id, runId: bound?.runId, status: bound?.status ?? task.status, settled, detail };
       } catch (error) {
         controlErrors++;
         detail = error instanceof Error ? error.message : String(error);
@@ -459,29 +432,34 @@ export class Orchestrator {
     if (!hold) throw new Error('No deployment hold exists');
     if (hold.releasedAt || readDeploymentHold()?.releasedAt) return { ...snapshot, released: true };
     if (!snapshot.ready) return { ...snapshot, errors: [...snapshot.errors, 'Deployment hold is not settled; old owners may still be active. Hold remains in effect.'] };
-    const errors: string[] = [...snapshot.errors];
-    // Validate each run before any launch authority is published. Failure of one
-    // run is durable and does not conceal the disposition of its peers.
-    for (const task of this.registry.list({ status: TASK_LIST_STATUS.ACTIVE })) {
+    const errors: string[] = [];
+    const compatible: Array<{ task: TaskEntry; runId: string }> = [];
+    const releaseRun = (task: TaskEntry, runId: string): boolean => {
+      let authorized = false;
+      updateRunState(task.projectDir, runId, current => {
+        if (current.status !== RUN_STATUS.PARKED || current.deploymentHold?.id !== hold.id || current.deploymentHold.releasedAt) return;
+        current.deploymentHold.releasedAt = new Date().toISOString();
+        delete current.continuationFailure;
+        authorized = true;
+      });
+      return authorized;
+    };
+    const queueRun = (task: TaskEntry, runId: string): void => {
+      this.registry.update(task.id, { status: TASK_STATUS.PENDING, started_at: undefined, completed_at: undefined,
+        not_before: undefined, defer_reason: undefined, defer_kind: 'wait', notes: `Continuing deployment-held run ${runId}` });
+    };
+    for (const task of this.registry.list({ status: TASK_LIST_STATUS.ALL })) {
+      if (task.status === TASK_STATUS.CANCELLED || task.status === TASK_STATUS.CANCELLING) continue;
       const bound = this.readBoundRun(task);
       if (!bound) continue;
       const state = readRunState(task.projectDir, bound.runId);
       if (state.deploymentHold?.id !== hold.id || state.deploymentHold.releasedAt || state.status !== RUN_STATUS.PARKED) continue;
+      if (!isActiveTaskStatus(task.status) && !(task.status === TASK_STATUS.STUCK && state.continuationFailure)) continue;
       try {
         buildCommand(task, this.cliPath);
         assertContinuationCompatible(task.projectDir, bound.runId);
         workflowContinuation(state, task.projectDir, bound.runId);
-        let authorized = false;
-        updateRunState(task.projectDir, bound.runId, current => {
-          if (current.status !== RUN_STATUS.PARKED || current.deploymentHold?.id !== hold.id || current.deploymentHold.releasedAt) return;
-          current.deploymentHold.releasedAt = new Date().toISOString();
-          authorized = true;
-        });
-        const latest = this.registry.get(task.id);
-        if (authorized && latest && latest.status !== TASK_STATUS.CANCELLED && latest.status !== TASK_STATUS.CANCELLING) {
-          this.registry.update(task.id, { status: TASK_STATUS.PENDING, started_at: undefined, completed_at: undefined,
-            not_before: undefined, defer_reason: undefined, defer_kind: 'wait', notes: `Continuing deployment-held run ${bound.runId}` });
-        }
+        compatible.push({ task, runId: bound.runId });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         const detail = `Task ${task.id} run ${bound.runId}: ${reason}`;
@@ -490,6 +468,14 @@ export class Orchestrator {
         const latest = this.registry.get(task.id);
         if (latest && latest.status !== TASK_STATUS.CANCELLED && latest.status !== TASK_STATUS.CANCELLING) this.failClosed(latest, detail);
       }
+    }
+    if (errors.length) return { ...snapshot, ready: false, released: false, errors };
+    for (const { task, runId } of compatible) {
+      const latest = this.registry.get(task.id);
+      if (!latest || latest.status === TASK_STATUS.CANCELLED || latest.status === TASK_STATUS.CANCELLING) continue;
+      // Queue under the active latch so interrupted writes remain retryable.
+      queueRun(task, runId);
+      if (!releaseRun(task, runId)) throw new Error(`Held run ${runId} changed during continuation; hold remains active`);
     }
     releaseDeploymentHold(hold);
     return { ...snapshot, ready: errors.length === 0, released: true, errors };
@@ -513,12 +499,6 @@ export class Orchestrator {
       ? await this.systemd.logSource(task.systemd_unit)
       : { kind: 'journal' as const, unit: task.systemd_unit };
     return { output, source };
-  }
-
-  async tailSource(id: number): Promise<SupervisorLogSource> {
-    const task = this.mustGet(id);
-    if (this.systemd.logSource) return this.systemd.logSource(task.systemd_unit);
-    return { kind: 'journal', unit: task.systemd_unit };
   }
 
   /** Minimal Phase 3 projection: durable supervisor outcome, without run.json merging. */
@@ -553,7 +533,6 @@ export class Orchestrator {
     // from injected backends. Concurrent callers join the same owned work.
     this.activeTick = Promise.resolve().then(async () => {
       this.reconcileOrphanRuns?.();
-      this.compactRegistryIfNeeded();
       const tasks = this.registry.list({ status: TASK_LIST_STATUS.ACTIVE });
       // Pass 1 (serial, cheap): drain the launch queue. Serial on purpose —
       // admission control must see each launch before deciding the next, or two
@@ -572,43 +551,11 @@ export class Orchestrator {
           ? this.cancellations.cancelTask(task.id)
           : this.tickTask(task)
       )));
+      // Terminal tasks remain outbox owners until business ACK. This sweep is
+      // independent of front-end hooks and survives daemon restarts.
+      await this.sessionPush.sweep();
     }).finally(() => { this.activeTick = undefined; });
     return this.activeTick;
-  }
-
-  private compactRegistryIfNeeded(): void {
-    const before = this.registry.metrics();
-    if (!before.compactRecommended) {
-      this.lastRegistryCompactionAttempt = undefined;
-      return;
-    }
-    const signature = `${before.bytes}:${before.records}`;
-    if (this.lastRegistryCompactionAttempt === signature) return;
-    this.lastRegistryCompactionAttempt = signature;
-    try {
-      // TaskRegistry.compact owns the same cross-process lock as append/update,
-      // creates and verifies the evidence backup first, and validates latest-row
-      // semantics before releasing the lock. An append therefore lands wholly
-      // before or wholly after this rewrite and cannot be dropped.
-      const report = this.registry.compact({ apply: true });
-      if (!report.applied) return;
-      this.lastRegistryCompactionAttempt = `${report.after.bytes}:${report.after.records}`;
-      this.onMaintenanceEvent({
-        type: 'registry_compacted',
-        timestamp: this.now().toISOString(),
-        before: report.before,
-        after: report.after,
-        removedRecords: report.removedRecords,
-        backupPath: report.backupPath,
-      });
-    } catch (error) {
-      this.onMaintenanceEvent({
-        type: 'registry_compaction_failed',
-        timestamp: this.now().toISOString(),
-        before,
-        detail: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 
   /**
@@ -616,6 +563,7 @@ export class Orchestrator {
    * elapsed and its project is free; otherwise leave it queued.
    */
   private async tryLaunchQueued(task: TaskEntry): Promise<void> {
+    if (hasLiveForegroundOwner(task)) return;
     if (deploymentHeld()) return;
     // The sweep's task snapshot may predate a concurrent register() status
     // write. Re-read before doing any asynchronous admission work.
@@ -636,7 +584,10 @@ export class Orchestrator {
       await this.reconcileTerminalBoundRun(task, bound);
       return;
     }
-    if (task.not_before && this.now().getTime() < Date.parse(task.not_before)) return;
+    const next = (task.status === TASK_STATUS.DEFERRED ? this.deferredUntil.get(task.id) : undefined)
+      ?? Date.parse(task.not_before ?? '');
+    if (this.now().getTime() < next) return;
+    this.deferredUntil.delete(task.id);
 
     if (bound && !isTerminalRunStatus(bound.status)) {
       const resolution = resolveRunStatus(bound.status);
@@ -652,14 +603,14 @@ export class Orchestrator {
       if (this.waitForBoundApproval(task, bound)) return;
       const recovery = this.boundRunRecoveryDecision(task, bound);
       if (recovery.kind === 'stop') return;
-      if (task.defer_kind !== 'retry' && !bound.deploymentContinuation) {
+      if (task.defer_kind !== 'retry' && !bound.retryExemptContinuation) {
         task = this.registry.update(task.id, {
           defer_kind: 'retry',
           defer_reason: recovery.reason,
         });
       }
     }
-    if (!bound && task.kind !== 'campaign' && task.run_id && !readRunReservation(task.projectDir, task.run_id, this.now().getTime())) {
+    if (!bound && task.run_id && !readRunReservation(task.projectDir, task.run_id, this.now().getTime())) {
       this.failClosed(task, `bound run ${task.run_id} is unreadable and has no valid reservation; refusing to replay brief`);
       return;
     }
@@ -741,16 +692,16 @@ export class Orchestrator {
     // reuse a transient unit name, and that refusal degrades to an untracked
     // detached child.
     const consumesAttempt = task.defer_kind === 'retry';
-    const usedBefore = consumesAttempt || Boolean(task.started_at) || (task.launch_seq ?? 0) > 0 || bound?.deploymentContinuation === true;
+    const usedBefore = consumesAttempt || Boolean(task.started_at) || task.launch > 1 || bound?.retryExemptContinuation === true;
     const attempt = consumesAttempt ? task.attempt + 1 : task.attempt;
-    const launchSeq = usedBefore ? (task.launch_seq ?? 0) + 1 : (task.launch_seq ?? 0);
+    const launch = usedBefore ? task.launch + 1 : task.launch;
     const unit = !usedBefore
       ? task.systemd_unit
       : consumesAttempt
         ? `flowcrew-task-${task.id}-attempt-${attempt}.service`
-        : `flowcrew-task-${task.id}-attempt-${attempt}-launch-${launchSeq}.service`;
+        : `flowcrew-task-${task.id}-attempt-${attempt}-launch-${launch}.service`;
     const updated = this.registry.update(task.id, {
-      status: 'running', attempt, launch_seq: launchSeq, systemd_unit: unit,
+      status: 'running', attempt, launch, systemd_unit: unit,
       started_at: this.now().toISOString(), not_before: undefined, defer_reason: undefined, defer_kind: undefined,
     });
     this.launchingTaskIds.add(task.id);
@@ -771,6 +722,7 @@ export class Orchestrator {
   }
 
   private async tickTask(task: TaskEntry): Promise<void> {
+    if (hasLiveForegroundOwner(task)) return;
     if (this.launchingTaskIds.has(task.id)) return;
     const held = this.readBoundRun(task);
     if (held && this.waitForBoundApproval(task, held)) return;
@@ -894,17 +846,19 @@ export class Orchestrator {
         deploymentHold?: { releasedAt?: string };
       };
       if (typeof parsed.status !== 'string' || parsed.runId !== identity.runId || typeof parsed.projectDir !== 'string' || resolve(parsed.projectDir) !== resolve(task.projectDir)) return undefined;
+      const status = resolveRunStatus(parsed.status);
       const requestId = parsed.parked?.requestId;
       const item = requestId && Number.isFinite(Date.parse(parsed.parked?.pausedAt ?? '')) ? getItem(identity.runId, requestId) : undefined;
       const boundApproval = item?.runId === identity.runId && resolve(item.projectDir) === resolve(task.projectDir) ? item : undefined;
       return {
         runId: identity.runId,
         path,
-        status: parsed.status,
+        status: status.kind === 'known' ? status.status : parsed.status,
         ...(typeof parsed.failureReason === 'string' ? { failureReason: parsed.failureReason } : {}),
         ...(boundApproval && isPendingInboxItemState(boundApproval.state) ? { pendingApprovalId: requestId } : {}),
         resumeAuthorized: parsed.recovery?.kind === 'resumable' || Boolean(parsed.deploymentHold?.releasedAt) || Boolean(boundApproval && !isPendingInboxItemState(boundApproval.state)),
-        deploymentContinuation: Boolean(parsed.deploymentHold?.releasedAt),
+        retryExemptContinuation: parsed.status === RUN_STATUS.PARKED
+          && (Boolean(parsed.deploymentHold?.releasedAt) || boundApproval?.state === 'approved'),
       };
     } catch {
       return undefined;
@@ -1018,14 +972,6 @@ export class Orchestrator {
       );
       return { kind: 'stop' };
     }
-    if (task.kind === 'campaign') {
-      this.failClosed(
-        task,
-        `${leading}bound campaign run ${bound.runId} has no live scheduler, but campaign relaunch cannot prove same-run resume; `
-        + `resume explicitly with flowcrew quick --existing-run-id ${bound.runId}`,
-      );
-      return { kind: 'stop' };
-    }
     let recovered = bound.resumeAuthorized === true;
     if (readRunState(task.projectDir, bound.runId).status === RUN_STATUS.RUNNING) {
       let reconciled;
@@ -1060,24 +1006,7 @@ export class Orchestrator {
 
   private async reconcileTerminalBoundRun(task: TaskEntry, bound: BoundRun): Promise<void> {
     releaseLaunchIntent(task.projectDir, bound.runId);
-    if (isSuccessfulRunStatus(bound.status)) {
-      await this.handleInactive(task, bound);
-      return;
-    }
-    const completed = this.now().toISOString();
-    const status = bound.status === RUN_STATUS.REALITY_GATE_FAILED
-      ? TASK_STATUS.REALITY_GATE_FAILED
-      : TASK_STATUS.FAILED;
-    const message = `bound run ${bound.runId} ended ${bound.status}`;
-    this.registry.update(task.id, {
-      status,
-      completed_at: completed,
-      notes: message,
-      not_before: undefined,
-      defer_reason: undefined,
-      defer_kind: undefined,
-    });
-    this.registry.appendTick(task.id, { ts: completed, status, message });
+    await this.handleInactive(task, bound);
   }
 
   /**
@@ -1089,7 +1018,8 @@ export class Orchestrator {
     if (!bound && await this.reconcileBoundRunAfterExit(task, 'unit inactive')) return;
     const completed = this.now().toISOString();
     let commit: string | undefined;
-    if (task.commit_prefix) {
+    const successful = !bound || isSuccessfulRunStatus(bound.status);
+    if (successful && task.commit_prefix) {
       commit = await this.git.findCommitByPrefix(task.projectDir, task.commit_prefix);
       if (!commit && bound) {
         this.failClosed(task, `bound run ${bound.runId} ended ${bound.status}; missing completing commit with prefix ${task.commit_prefix}`);
@@ -1100,7 +1030,7 @@ export class Orchestrator {
     }
 
     if (bound || commit) {
-      const missing = (task.expected_artifacts ?? []).filter((p) => !existsSync(resolve(task.projectDir, p)));
+      const missing = successful ? (task.expected_artifacts ?? []).filter((p) => !existsSync(resolve(task.projectDir, p))) : [];
       if (missing.length > 0) {
         this.registry.update(task.id, {
           status: 'stuck', completed_at: completed, completing_commit: commit,
@@ -1110,27 +1040,20 @@ export class Orchestrator {
         this.registry.appendTick(task.id, { ts: completed, status: 'stuck', message: `missing artifacts: ${missing.join(', ')}` });
         return;
       }
-      const summary = task.commit_prefix || task.expected_summary_path
-        ? this.readCompletionSummary(task, completed, commit) : undefined;
-      if ((task.commit_prefix || task.expected_summary_path) && !summary) return;
       const message = bound ? `bound run ${bound.runId} ended ${bound.status}` : `commit ${commit}`;
+      const status = bound?.status === RUN_STATUS.REALITY_GATE_FAILED
+        ? TASK_STATUS.REALITY_GATE_FAILED
+        : successful ? TASK_STATUS.DONE : TASK_STATUS.FAILED;
       this.registry.update(task.id, {
-        status: 'done',
+        status,
         completed_at: completed,
         completing_commit: commit,
         notes: message,
-        ...(summary ? {
-          summary_verdict: summary.parsed.verdict,
-          summary_one_liner: summary.parsed.oneLiner,
-          summary_full: summary.parsed.full,
-          summary_source: summary.path,
-          summary_parsed_at: completed,
-        } : {}),
         not_before: undefined,
         defer_reason: undefined,
         defer_kind: undefined,
       });
-      this.registry.appendTick(task.id, { ts: completed, status: 'done', message });
+      this.registry.appendTick(task.id, { ts: completed, status, message });
       return;
     }
 
@@ -1147,45 +1070,6 @@ export class Orchestrator {
     await this.retryOrStuck(task, 'unit exited without commit or changes');
   }
 
-  private readCompletionSummary(task: TaskEntry, completed: string, commit?: string): { path: string; parsed: ReturnType<typeof parseTaskSummary> } | undefined {
-    const summaryPaths = this.summaryPaths(task);
-    const summaryPath = summaryPaths.find((p) => existsSync(p) && statSync(p).isFile());
-    if (!summaryPath) {
-      const message = `task_summary.md not found in expected locations: ${summaryPaths.join(', ')}`;
-      this.registry.update(task.id, {
-        status: 'needs_summary', completed_at: completed, completing_commit: commit, notes: message,
-        not_before: undefined, defer_reason: undefined, defer_kind: undefined,
-      });
-      this.registry.appendTick(task.id, { ts: completed, status: 'needs_summary', message });
-      return undefined;
-    }
-
-    const parsed = parseTaskSummary(readFileSync(summaryPath, 'utf-8'));
-    if (!parsed.valid) {
-      const message = `task_summary.md malformed: ${parsed.errors.join('; ')}`;
-      this.registry.update(task.id, {
-        status: 'needs_summary', completed_at: completed, completing_commit: commit, notes: message,
-        not_before: undefined, defer_reason: undefined, defer_kind: undefined,
-      });
-      this.registry.appendTick(task.id, { ts: completed, status: 'needs_summary', message });
-      return undefined;
-    }
-
-    return { path: summaryPath, parsed };
-  }
-
-  private summaryPaths(task: TaskEntry): string[] {
-    const paths: string[] = [];
-    if (task.run_id) paths.push(join(this.boundRunPath(task.run_id), 'task_summary.md'));
-    if (task.expected_summary_path) {
-      const expectedPath = resolve(task.projectDir, task.expected_summary_path);
-      paths.push(expectedPath);
-      if (!expectedPath.endsWith('task_summary.md')) paths.push(join(expectedPath, 'task_summary.md'));
-    }
-    paths.push(join(task.projectDir, 'docs', 'task_summary.md'));
-    return Array.from(new Set(paths));
-  }
-
   private async retryOrStuck(task: TaskEntry, reason: string): Promise<void> {
     // A unit that died because the project was already busy is NOT a crash —
     // retrying it immediately just loses the same race again. Wait it out
@@ -1196,12 +1080,12 @@ export class Orchestrator {
       this.defer(task, `${reason}; project busy (run ${busy})`, 'wait', task.run_id);
       return;
     }
-    if (task.attempt < task.max_retries) {
+    if (task.attempt < task.max_attempts) {
       await this.relaunch(task, reason);
       return;
     }
     const completed = this.now().toISOString();
-    const exhausted = `${reason}; retry budget exhausted (${task.attempt}/${task.max_retries}); `
+    const exhausted = `${reason}; retry budget exhausted (${task.attempt}/${task.max_attempts}); `
       + `inspect with flowcrew task show ${task.id}, then explicitly run flowcrew task retry ${task.id} after resolving the cause`;
     this.registry.update(task.id, { status: 'stuck', completed_at: completed, notes: exhausted });
     this.registry.appendTick(task.id, { ts: completed, status: 'stuck', message: exhausted });
@@ -1250,7 +1134,7 @@ export class Orchestrator {
 
   private mustGet(id: number): TaskEntry {
     const task = this.registry.get(id);
-    if (!task) throw new Error(`Task not found: ${id}`);
+    if (!task) throw Object.assign(new Error(`Task not found: ${id}`), { code: 'TASK_NOT_FOUND' });
     return task;
   }
 }
@@ -1291,23 +1175,6 @@ export class NodeGit implements GitAdapter {
   }
 }
 
-interface FallbackUnitRecord {
-  pid?: number;
-  state?: string;
-  command?: string;
-  /** Kept for disk compatibility; contains the ProcessStartToken value. */
-  startTimeTicks?: string;
-  startTokenKind?: ProcessStartToken['kind'];
-  unverifiedPid?: number;
-  reason?: string;
-  completedAt?: string;
-}
-
-const FALLBACK_TERMINAL_STATE = {
-  INACTIVE: 'inactive',
-  FAILED: 'failed',
-} as const;
-
 export interface NodeSystemdOptions {
   /** Test seam and explicit override for minimal POSIX images. */
   shellPath?: string;
@@ -1323,7 +1190,6 @@ export interface NodeSystemdOptions {
 
 export class NodeSystemd implements SupervisorBackend {
   private readonly baseDir: string;
-  private readonly fallbackDir: string;
   private readonly configuredShellPath?: string;
   private readonly configuredShimPath?: string;
   private readonly nodePath: string;
@@ -1334,7 +1200,6 @@ export class NodeSystemd implements SupervisorBackend {
 
   constructor(baseDir: string, options: NodeSystemdOptions = {}) {
     this.baseDir = baseDir;
-    this.fallbackDir = join(baseDir, 'systemd-fallback');
     this.configuredShellPath = options.shellPath;
     this.configuredShimPath = options.shimPath;
     this.nodePath = options.nodePath ?? process.execPath;
@@ -1342,7 +1207,6 @@ export class NodeSystemd implements SupervisorBackend {
     this.shutdownGraceMs = Math.max(0, options.shutdownGraceMs ?? 1_500);
     this.retentionMs = Math.max(0, options.retentionMs ?? 30 * 24 * 60 * 60_000);
     this.now = options.now ?? (() => new Date());
-    mkdirSync(this.fallbackDir, { recursive: true });
     mkdirSync(supervisionPaths(this.baseDir, '_').root, { recursive: true });
     gcSupervisionDirectories(this.baseDir, {
       nowMs: this.now().getTime(),
@@ -1406,15 +1270,14 @@ export class NodeSystemd implements SupervisorBackend {
       }
     }
     return new Map(await Promise.all([...new Set(units)].map(async unit => {
-      if (loaded?.has(unit)) return [unit, await this.isActive(unit, false)] as const;
-      // Readiness observes local owners without repairing legacy records.
-      const local = this.fallbackState(unit, false);
+      if (loaded?.has(unit)) return [unit, await this.isActive(unit)] as const;
+      const local = this.portableState(unit);
       if (loaded || unavailable || local.kind === 'terminal') return [unit, local] as const;
       return [unit, mergeSupervisorStatuses(local, failure!)] as const;
     })));
   }
 
-  async isActive(unit: string, repairLegacyRecords = true): Promise<UnitStatus> {
+  async isActive(unit: string): Promise<UnitStatus> {
     const portable = this.portableState(unit);
     // An atomically-written exit status is the only backend-independent result
     // and therefore outranks even a systemd unit that has not been reaped yet.
@@ -1437,13 +1300,11 @@ export class NodeSystemd implements SupervisorBackend {
       if (failure.killed || failure.signal === 'SIGTERM' || failure.code === 'ETIMEDOUT') {
         return { kind: 'unobservable', reason: 'systemctl probe timed out' };
       }
-      if (failure.code === 'ENOENT') return this.fallbackState(unit, repairLegacyRecords);
+      if (failure.code === 'ENOENT') return this.portableState(unit);
       // A bound live shim is conservative positive evidence. Terminal-unknown
       // and absent cannot prove that a real unit stopped while systemctl itself
       // is unobservable, so those cases preserve the Phase 1 fail-closed rule.
       if (portable.kind === 'active' || portable.kind === 'deactivating') return portable;
-      const legacy = this.legacyFallbackState(unit, repairLegacyRecords);
-      if (legacy.kind === 'active' || legacy.kind === 'deactivating') return legacy;
       return { kind: 'unobservable', reason: 'systemctl probe failed' };
     }
   }
@@ -1493,7 +1354,6 @@ export class NodeSystemd implements SupervisorBackend {
       shellPath,
       createdAt: this.now().toISOString(),
       shutdownGraceMs: this.shutdownGraceMs,
-      legacyRecordPath: this.fallbackPath(opts.unit),
       environment: supervisionEnvironment(process.env),
     };
     // The environment can contain secrets; keep it out of argv and private on disk.
@@ -1516,7 +1376,7 @@ export class NodeSystemd implements SupervisorBackend {
           stdio: 'ignore',
         });
         child.once('error', (error) => {
-          this.recordShimLaunchFailure(opts.unit, opts.command, error);
+          this.recordShimLaunchFailure(opts.unit, error);
         });
         // Once spawn succeeds, the shim's exit alone cannot prove that no agent
         // was launched: it may have detached the agent and then died before it
@@ -1525,7 +1385,7 @@ export class NodeSystemd implements SupervisorBackend {
         // Only spawn's error event is authoritative proof that the shim never ran.
         child.unref();
       } catch (error) {
-        this.recordShimLaunchFailure(opts.unit, opts.command, error);
+        this.recordShimLaunchFailure(opts.unit, error);
       }
     }
   }
@@ -1548,19 +1408,6 @@ export class NodeSystemd implements SupervisorBackend {
       const running = readSupervisionRunning(paths.running);
       if (!running || !await this.waitForPortableBinding(running)) return;
 
-      // The legacy mirror remains only for upgrade compatibility and Phase 1
-      // safety evidence. If somebody altered its command, fail closed instead
-      // of letting that weaker record silently disagree with the durable one.
-      try {
-        const mirror = JSON.parse(readFileSync(this.fallbackPath(unit), 'utf-8')) as FallbackUnitRecord;
-        if (typeof mirror.command === 'string' && mirror.command !== running.command) {
-          if (systemctlError) throw systemctlError;
-          return;
-        }
-      } catch (error) {
-        if (error === systemctlError) throw error;
-      }
-
       // The shim is deliberately outside the agent's process group. Signal the
       // strictly-bound shim as a bare PID; it owns TERM -> bounded KILL of the
       // agent group and writes exit.json only after reaping the agent.
@@ -1572,87 +1419,13 @@ export class NodeSystemd implements SupervisorBackend {
       await this.waitForPortableExit(unit, running.shimPid);
       return;
     }
-    await this.stopLegacyUnit(unit, systemctlError);
-  }
-
-  private async stopLegacyUnit(unit: string, systemctlError: unknown): Promise<void> {
-    const path = this.fallbackPath(unit);
-    if (!existsSync(path)) {
-      if (systemctlError) throw systemctlError;
-      return;
-    }
-    let fallbackPid: number | undefined;
-    let record: FallbackUnitRecord = {};
-    try {
-      record = JSON.parse(readFileSync(path, 'utf-8')) as FallbackUnitRecord;
-      if (Number.isInteger(record.pid) && (record.pid ?? 0) > 0) fallbackPid = record.pid;
-    } catch { /* malformed fallback record */ }
-    const recordedTicks = typeof record.startTimeTicks === 'string' && record.startTimeTicks
-      ? record.startTimeTicks
-      : undefined;
-    const recordedKind = record.startTokenKind === 'posix-lstart' || record.startTokenKind === 'linux'
-      ? record.startTokenKind
-      : 'linux';
-    const recordedToken: ProcessStartToken | undefined = recordedTicks
-      ? { kind: recordedKind, value: recordedTicks }
-      : undefined;
-    const fallbackAlive = fallbackPid !== undefined && processIsAlive(fallbackPid);
-    // A pid on its own is not evidence: the kernel reuses pids, so the number recorded when
-    // this unit started may now belong to anything. BSD's second-resolution token is
-    // additionally bound to the recorded command. A token that cannot be interpreted
-    // removes signal authority, but is never treated as evidence that a live pid died.
-    const identityBinds = fallbackPid !== undefined
-      && fallbackAlive
-      && processStartTokensMatch(recordedToken, processStartToken(fallbackPid))
-      && typeof record.command === 'string'
-      && processCommandMatches(fallbackPid, record.command);
-    if (fallbackPid !== undefined && !identityBinds) {
-      const reason = recordedTicks === undefined
-        ? 'fallback record predates start-time binding; refusing to signal an unverifiable pid'
-        : !fallbackAlive
-          ? 'recorded start time no longer matches this pid; refusing to signal a recycled pid'
-          : typeof record.command !== 'string' || !processCommandMatches(fallbackPid, record.command)
-            ? 'recorded command no longer matches this pid; refusing to signal an unbound process'
-            : 'recorded start time no longer matches this pid; refusing to signal a recycled pid';
-      this.writeFallbackRecord(unit, {
-        ...record,
-        state: fallbackAlive ? 'active' : 'inactive',
-        unverifiedPid: fallbackPid,
-        reason,
-        ...(!fallbackAlive ? { completedAt: record.completedAt ?? new Date().toISOString() } : {}),
-      });
-      if (systemctlError) throw systemctlError;
-      return;
-    }
-    if (fallbackPid !== undefined) {
-      const signalTarget = process.platform !== 'win32' ? -fallbackPid : fallbackPid;
-      try { process.kill(signalTarget, 'SIGTERM'); } catch { /* confirmation below remains authoritative */ }
-      if (processIsAlive(fallbackPid)) {
-        const startToken = recordedToken;
-        this.writeFallbackRecord(unit, {
-          ...record,
-          pid: fallbackPid,
-          state: 'deactivating',
-          ...(startToken ? {
-            startTimeTicks: startToken.value,
-            startTokenKind: startToken.kind,
-          } : {}),
-        });
-        return;
-      }
-    }
-    this.writeFallbackRecord(unit, {
-      ...record,
-      state: 'inactive',
-      completedAt: record.completedAt ?? new Date().toISOString(),
-    });
+    if (systemctlError) throw systemctlError;
   }
 
   async journalTail(unit: string, lines: number, _follow = false): Promise<string> {
-    const portableLogPath = supervisionPaths(this.baseDir, unit).log;
-    const logPath = existsSync(portableLogPath) ? portableLogPath : this.fallbackLogPath(unit);
+    const logPath = supervisionPaths(this.baseDir, unit).log;
     // A systemd-less Linux host can still have a journalctl executable. The
-    // fallback record/log, when present, is therefore stronger routing evidence
+    // supervise log, when present, is therefore stronger routing evidence
     // than command availability and must be read before consulting the journal.
     if (existsSync(logPath)) {
       return this.readFileLogSnapshot(logPath, lines).output;
@@ -1694,18 +1467,9 @@ export class NodeSystemd implements SupervisorBackend {
     if (hasSupervisionEvidence(this.baseDir, unit) || existsSync(portableLogPath)) {
       return { kind: 'file', path: portableLogPath };
     }
-    const fallbackLogPath = this.fallbackLogPath(unit);
-    if (existsSync(this.fallbackPath(unit)) || existsSync(fallbackLogPath)) {
-      return { kind: 'file', path: fallbackLogPath };
-    }
     const refusal = this.managerRefusal();
     if (refusal) return { kind: 'unavailable', reason: `Refusing per-user systemd manager: ${refusal}` };
     return { kind: 'journal', unit };
-  }
-
-  private fallbackState(unit: string, repairLegacyRecords = true): UnitStatus {
-    if (hasSupervisionEvidence(this.baseDir, unit)) return this.portableState(unit);
-    return this.legacyFallbackState(unit, repairLegacyRecords);
   }
 
   private portableState(unit: string): UnitStatus {
@@ -1713,37 +1477,6 @@ export class NodeSystemd implements SupervisorBackend {
       nowMs: this.now().getTime(),
       startupGraceMs: this.startupGraceMs,
     }).status;
-  }
-
-  private legacyFallbackState(unit: string, repairLegacyRecords: boolean): UnitStatus {
-    const path = this.fallbackPath(unit);
-    if (!existsSync(path)) return { kind: 'absent' };
-    try {
-      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as FallbackUnitRecord;
-      if (parsed.state === FALLBACK_TERMINAL_STATE.INACTIVE
-        || parsed.state === FALLBACK_TERMINAL_STATE.FAILED) {
-        return {
-          kind: 'terminal-unknown',
-          reason: parsed.reason ?? `fallback process ended without an exit status (${parsed.state})`,
-        };
-      }
-      if (parsed.pid && processIsAlive(parsed.pid)) {
-        return parsed.state === 'deactivating' ? { kind: 'deactivating' } : { kind: 'active' };
-      }
-      if (repairLegacyRecords) this.writeFallbackRecord(unit, {
-        ...parsed,
-        state: 'inactive',
-        completedAt: parsed.completedAt ?? new Date().toISOString(),
-      });
-      return { kind: 'terminal-unknown', reason: 'fallback process ended without an exit status' };
-    } catch {
-      if (repairLegacyRecords) this.writeFallbackRecord(unit, {
-        state: 'failed',
-        reason: 'fallback state record is malformed',
-        completedAt: new Date().toISOString(),
-      });
-      return { kind: 'terminal-unknown', reason: 'fallback state record is malformed' };
-    }
   }
 
   private fallbackShellPath(): string {
@@ -1769,7 +1502,7 @@ export class NodeSystemd implements SupervisorBackend {
     return ['--import', tsxLoader, shimPath, controlDir];
   }
 
-  private recordShimLaunchFailure(unit: string, command: string, error: unknown): void {
+  private recordShimLaunchFailure(unit: string, error: unknown): void {
     const reason = `shim launcher spawn failed: ${error instanceof Error ? error.message : String(error)}`;
     const endedAt = this.now().toISOString();
     const exit: SupervisionExitRecord = {
@@ -1780,12 +1513,6 @@ export class NodeSystemd implements SupervisorBackend {
       reason,
     };
     atomicWriteJson(supervisionPaths(this.baseDir, unit).exit, exit);
-    this.writeFallbackRecord(unit, {
-      state: 'failed',
-      command,
-      reason,
-      completedAt: endedAt,
-    });
   }
 
   private async waitForPortableExit(unit: string, shimPid: number): Promise<void> {
@@ -1810,18 +1537,6 @@ export class NodeSystemd implements SupervisorBackend {
       }
     }
     return false;
-  }
-
-  private writeFallbackRecord(unit: string, record: FallbackUnitRecord): void {
-    writeFileSync(this.fallbackPath(unit), JSON.stringify(record), 'utf-8');
-  }
-
-  private fallbackPath(unit: string): string {
-    return join(this.fallbackDir, `${unit.replace(/[^a-zA-Z0-9_.-]/g, '_')}.json`);
-  }
-
-  private fallbackLogPath(unit: string): string {
-    return join(this.fallbackDir, `${unit.replace(/[^a-zA-Z0-9_.-]/g, '_')}.log`);
   }
 
   private readFileLogSnapshot(path: string, lines: number): { output: string; offset: number } {
@@ -1874,8 +1589,8 @@ function normalizeSystemdStatus(output: string): UnitStatus {
       return { kind: 'active' };
     case 'deactivating':
       return { kind: 'deactivating' };
-    case FALLBACK_TERMINAL_STATE.INACTIVE:
-    case FALLBACK_TERMINAL_STATE.FAILED:
+    case 'inactive':
+    case 'failed':
       return { kind: 'terminal-unknown', reason: `systemd reported ${state} without an exit status` };
     case '':
     case 'unknown':
@@ -1923,13 +1638,13 @@ function readBoundRunBrief(task: TaskEntry): string | undefined {
 }
 
 function assertTaskBriefAdmission(task: TaskEntry): { brief: string; admission: BriefAdmissionRecord } {
-  if (task.kind === 'campaign' || task.config_path !== undefined) {
+  if (task.config_path !== undefined) {
     throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
   }
   const brief = readBrief(task);
   const taskVerification = verifyBriefAdmission(brief, task.brief_admission);
   if (taskVerification.status !== 'valid' || !task.brief_admission) {
-    throw new Error(admissionFailureMessage(taskVerification.status, taskVerification.report.digest));
+    throw new Error(admissionFailureMessage(taskVerification.status, taskVerification.digest));
   }
   const boundPath = task.run_id
     ? (isAbsolute(task.run_id) ? resolve(task.run_id) : join(runsRoot(), task.run_id))
@@ -1939,7 +1654,7 @@ function assertTaskBriefAdmission(task: TaskEntry): { brief: string; admission: 
     const runBrief = readBoundRunBrief(task) ?? '';
     const runVerification = verifyBriefAdmission(runBrief, runAdmission);
     if (runVerification.status !== 'valid' || !runAdmission) {
-      throw new Error(`Bound run ${task.run_id}: ${admissionFailureMessage(runVerification.status, runVerification.report.digest)}`);
+      throw new Error(`Bound run ${task.run_id}: ${admissionFailureMessage(runVerification.status, runVerification.digest)}`);
     }
     if (runAdmission.digest !== task.brief_admission.digest || runBrief !== brief) {
       throw new Error(`Bound run ${task.run_id}: task and run admission digests differ; refusing to launch.`);
@@ -1949,25 +1664,15 @@ function assertTaskBriefAdmission(task: TaskEntry): { brief: string; admission: 
 }
 
 export function buildCommand(task: TaskEntry, cliPath: string): string {
-  const userArgs: string[] = [];
-  for (let i = 0; i < (task.launch_args ?? []).length; i++) {
-    const arg = task.launch_args![i];
-    if (arg === '--existing-run-id'
-      || arg === '--task'
-      || arg === '--brief-input-base64'
-      || arg === '--project'
-      || arg === '--brief-admission-record') {
-      i += 1; // daemon-owned exact-input fields cannot be overridden by caller args
-      continue;
-    }
-    if (arg === '--acknowledge-brief-warnings'
-      || arg.startsWith('--acknowledge-brief-warnings=')
-      || arg === '--background'
-      || arg === '-') {
-      continue;
-    }
-    userArgs.push(arg);
-  }
+  const launch = task.launch_options ?? {};
+  const userArgs = [
+    ...(launch.adapter ? ['--adapter', launch.adapter] : []),
+    ...(launch.workflow ? ['--workflow', launch.workflow] : []),
+    ...(launch.maxIterations !== undefined ? ['--max-iterations', String(launch.maxIterations)] : []),
+    ...(launch.campaign ? ['--campaign', launch.campaign] : []),
+    ...(launch.noCampaign ? ['--no-campaign'] : []),
+    ...(launch.campaignContext ? [`--campaign-context=${launch.campaignContext}`] : []),
+  ];
   const admitted = assertTaskBriefAdmission(task);
   const args = ['quick',
        // The brief must survive shellJoin AND systemd's own ExecStart unescaping.

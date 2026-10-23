@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import {
   copyFileSync,
   existsSync,
@@ -9,7 +11,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,7 +27,8 @@ import {
   type GitWorktreeCreator,
 } from '../src/cli-ship-setup.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
-import { rehearseBriefIsolated } from '../src/rehearse.js';
+import { rehearseBriefIsolated } from './test-support/rehearse.js';
+
 
 class Capture {
   value = '';
@@ -45,7 +47,6 @@ let fixture: Fixture;
 function packageManifest(): Record<string, unknown> {
   return {
     scripts: { build: 'compile', test: 'check', lint: 'style' },
-    flowcrew: { testPopulation: { files: [] } },
   };
 }
 
@@ -119,7 +120,7 @@ function writeRunningRun(runsRoot: string): void {
 }
 
 describe('item 7: live-project validation binding', () => {
-  it('discovers facts for live, idle and explicit-skip projects without executing commands', async () => {
+  it('discovers facts for live and idle projects without executing commands', async () => {
     const liveRuns = join(fixture.state, 'live-runs');
     const emptyRuns = join(fixture.state, 'empty-runs');
     mkdirSync(emptyRuns, { recursive: true });
@@ -139,16 +140,6 @@ describe('item 7: live-project validation binding', () => {
     expect(unsafeErr.value).toContain('live FlowCrew run(s)');
     expect(unsafeErr.value).toContain('No project command was launched');
 
-    const skippedRunner = validationRunner();
-    const skippedErr = new Capture();
-    const skippedCode = await cmdShipPreflightWithDeps(
-      ['ship-preflight', '--no-baseline'],
-      preflightDependencies(liveRuns, skippedRunner, { stderr: skippedErr.writer, stdout: new Capture().writer }),
-    );
-    expect(skippedCode).toBe(0);
-    expect(skippedRunner).not.toHaveBeenCalled();
-    expect(skippedErr.value).toContain('Validation baseline: SKIPPED');
-
     const idleRunner = validationRunner();
     const idleCode = await cmdShipPreflightWithDeps(
       ['ship-preflight'],
@@ -156,17 +147,6 @@ describe('item 7: live-project validation binding', () => {
     );
     expect(idleCode).toBe(0);
     expect(idleRunner).not.toHaveBeenCalled();
-
-    const idleSkippedRunner = validationRunner();
-    const idleSkippedCode = await cmdShipPreflightWithDeps(
-      ['ship-preflight', '--no-baseline'],
-      preflightDependencies(emptyRuns, idleSkippedRunner, {
-        stdout: new Capture().writer,
-        stderr: new Capture().writer,
-      }),
-    );
-    expect(idleSkippedCode).toBe(0);
-    expect(idleSkippedRunner).not.toHaveBeenCalled();
   });
 });
 
@@ -227,6 +207,8 @@ describe('declared-input materialization and live producers', () => {
       '## Acceptance criteria', '1. Create report.md from tools/parity/main.py without changing its content.',
     ].join('\n');
     writeFileSync(join(fixture.project, 'brief.md'), brief);
+    isolatedProjectCommand('git', ['init', '-q'], fixture.project, fixture.root);
+    isolatedProjectCommand('git', ['add', '-f', ...tracked], fixture.project, fixture.root);
     return {
       brief,
       create: request => {
@@ -243,7 +225,7 @@ describe('declared-input materialization and live producers', () => {
     };
   }
 
-  it('agrees across admission surfaces when Python validation and collection generate caches inside an input', async () => {
+  it('agrees across admission surfaces when Python validation generates caches inside an input', async () => {
     const python = pythonInputFixture();
     const runner = validationRunner((role, cwd) => {
       if (role !== 'test') return;
@@ -265,32 +247,21 @@ describe('declared-input materialization and live producers', () => {
       expect(rehearsal.exitCode, JSON.stringify(rehearsal.findings)).toBe(0);
       expect(rehearsal.preflight.contractReady).toBe(true);
     } finally { rmSync(join(rehearsal.diagnosticsLogPath, '..'), { recursive: true, force: true }); }
-    const collector = vi.fn<ValidationCommandRunner>(request => {
-      if (request.command === 'make') {
-        return { exitCode: 0, stdout: 'python -m pytest\n', durationMs: 1 };
-      }
-      mkdirSync(join(request.cwd, 'tools', 'parity', '__pycache__'), { recursive: true });
-      writeFileSync(join(request.cwd, 'tools', 'parity', '__pycache__', 'collection.pyc'), 'collection cache\n');
-      return { exitCode: 0, stdout: 'tests/test_parity.py::test_parity\n1 test collected\n', durationMs: 1 };
-    });
     const target = join(fixture.root, 'python-cache-target');
     const setup = await runShipSetup(setupArgs(target, 'python-cache'), {
       createWorktree: python.create, runGitCommand: python.git,
-      runValidationCommand: runner, runTestCollectionCommand: collector, globalDir: () => fixture.state,
+      runValidationCommand: runner, globalDir: () => fixture.state,
     });
     expect(setup.state, JSON.stringify(setup.blockers)).toBe('ready');
-    expect(setup.testPopulation?.state).toBe('matched');
-    expect(collector).toHaveBeenCalledTimes(4);
     expect(runner.mock.calls).toContainEqual([expect.objectContaining({
       role: 'test', command: 'make', args: ['test'], cwd: target,
     })]);
     expect(existsSync(join(target, 'tools', 'parity', '__pycache__', 'main.cpython.pyc'))).toBe(true);
-    expect(existsSync(join(fixture.project, 'tools', 'parity', '__pycache__', 'collection.pyc'))).toBe(true);
   });
 
   it.each([
     { tracked: false, alias: false }, { tracked: true, alias: false }, { tracked: true, alias: true },
-  ])('compares materialized input content with the shared cache rule (tracked=$tracked, alias=$alias)', async ({ tracked, alias }) => {
+  ])('compares materialized input content without a cache-name exemption (tracked=$tracked, alias=$alias)', async ({ tracked, alias }) => {
     const python = pythonInputFixture({ trackedCache: tracked });
     if (alias) {
       symlinkSync('tools/parity', join(fixture.project, 'input-alias'), 'dir');
@@ -311,16 +282,12 @@ describe('declared-input materialization and live producers', () => {
       },
       runGitCommand: python.git, globalDir: () => fixture.state, runValidationCommand: runner,
     });
-    expect(setup.state, JSON.stringify(setup.blockers)).toBe(tracked ? 'refused' : 'ready');
-    if (tracked) {
-      expect(setup.blockers).toContainEqual(expect.objectContaining({
-        phase: 'target', input: alias ? cachePath.replace('tools/parity', 'input-alias') : cachePath,
-        reason: expect.stringContaining('content collision'),
-      }));
-      expect(runner).not.toHaveBeenCalled();
-    } else {
-      expect(setup.copies.some(copy => copy.path === cachePath)).toBe(false);
-    }
+    expect(setup.state, JSON.stringify(setup.blockers)).toBe('refused');
+    expect(setup.blockers).toContainEqual(expect.objectContaining({
+      phase: 'target', input: alias ? cachePath.replace('tools/parity', 'input-alias') : cachePath,
+      reason: expect.stringContaining('content collision'),
+    }));
+    expect(runner).not.toHaveBeenCalled();
   });
 
   it.each([false, true])('admits a declared output inside an input directory (existing=%s) through preflight, rehearsal, and setup', async existing => {
@@ -425,6 +392,8 @@ describe('declared-input materialization and live producers', () => {
       '---',
       '# Goal',
       'Validate without changing the declared inputs.',
+      '## Acceptance criteria',
+      '1. Keep the prepared input snapshot unchanged when the source producer updates it.',
     ].join('\n'));
 
     const mutatingTarget = join(fixture.root, 'mutating-target');
@@ -466,75 +435,7 @@ describe('declared-input materialization and live producers', () => {
     expect(readFileSync(join(stableTarget, 'generated', 'cache.txt'), 'utf8')).toBe('generated\n');
   });
 
-  it('accepts an independent live input update during test collection', async () => {
-    writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
-      scripts: { build: 'compile', test: 'vitest run', lint: 'style' },
-      devDependencies: { vitest: 'fixture' },
-    }));
-    mkdirSync(join(fixture.project, 'node_modules', 'vitest'), { recursive: true });
-    writeFileSync(join(fixture.project, 'node_modules', 'vitest', 'package.json'), JSON.stringify({
-      name: 'vitest', version: '0.0.0-fixture', exports: { './package.json': './package.json' },
-    }));
-    writeFileSync(join(fixture.project, 'node_modules', 'vitest', 'vitest.mjs'), 'export {};\n');
-    mkdirSync(join(fixture.project, 'spec'), { recursive: true });
-    writeFileSync(join(fixture.project, 'spec', 'example.test.ts'), 'export const example = true;\n');
-    mkdirSync(join(fixture.project, 'data'), { recursive: true });
-    writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'original\n');
-    writeFileSync(join(fixture.project, 'brief.md'), [
-      '---',
-      'inputs: [data/frozen.csv]',
-      '---',
-      '# Goal',
-      'Collect the tests without changing inputs.',
-    ].join('\n'));
-
-    const target = join(fixture.root, 'collection-target');
-    const create = vi.fn<GitWorktreeCreator>((request) => {
-      materializeTrackedTarget(request.targetDir);
-      mkdirSync(join(request.targetDir, 'node_modules', 'vitest'), { recursive: true });
-      copyFileSync(
-        join(request.projectDir, 'node_modules', 'vitest', 'package.json'),
-        join(request.targetDir, 'node_modules', 'vitest', 'package.json'),
-      );
-      copyFileSync(
-        join(request.projectDir, 'node_modules', 'vitest', 'vitest.mjs'),
-        join(request.targetDir, 'node_modules', 'vitest', 'vitest.mjs'),
-      );
-      mkdirSync(join(request.targetDir, 'spec'), { recursive: true });
-      copyFileSync(
-        join(request.projectDir, 'spec', 'example.test.ts'),
-        join(request.targetDir, 'spec', 'example.test.ts'),
-      );
-      return { exitCode: 0 };
-    });
-    const collector = vi.fn<ValidationCommandRunner>((request) => {
-      // This producer is independent of the collection command. An ambient
-      // source notification supplies no command ownership evidence.
-      if (request.cwd === target) execFileSync(process.execPath, ['-e',
-        "require('node:fs').writeFileSync(process.argv[1], 'producer update during collection\\n')",
-        join(fixture.project, 'data', 'frozen.csv'),
-      ], { cwd: fixture.project, env: { ...process.env, HOME: fixture.root, FC_HOME: fixture.state } });
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify([{ file: join(request.cwd, 'spec', 'example.test.ts') }]),
-        durationMs: 1,
-      };
-    });
-    const baseline = validationRunner();
-    const report = await runShipSetup(setupArgs(target, 'collection-branch'), {
-      createWorktree: create,
-      runTestCollectionCommand: collector,
-      runValidationCommand: baseline,
-      globalDir: () => fixture.state,
-    });
-
-    expect(report.state).toBe('ready');
-    expect(readFileSync(join(target, 'data', 'frozen.csv'), 'utf8')).toBe('original\n');
-    expect(collector).toHaveBeenCalledTimes(2);
-    expect(baseline).toHaveBeenCalledTimes(3);
-  });
-
-  it('never executes the source fallback that could mutate an input', async () => {
+  it('runs baseline validation only in the prepared target', async () => {
     writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
       scripts: { build: 'compile', test: 'custom-test-runner', lint: 'style' },
     }));
@@ -545,7 +446,9 @@ describe('declared-input materialization and live producers', () => {
       'inputs: [data/frozen.csv]',
       '---',
       '# Goal',
-      'Run the fallback without changing inputs.',
+      'Run validation without changing inputs.',
+      '## Acceptance criteria',
+      '1. Run all baseline validation commands in the prepared target and preserve the source input.',
     ].join('\n'));
     const target = join(fixture.root, 'fallback-target');
     const runner = validationRunner((role, cwd) => {
@@ -569,7 +472,6 @@ describe('declared-input materialization and live producers', () => {
     });
 
     expect(report.state).toBe('ready');
-    expect(report.testPopulation?.state).toBe('unverified');
     expect(runner).toHaveBeenCalledTimes(3);
     expect(runner.mock.calls.every(([request]) => request.cwd === target)).toBe(true);
     expect(readFileSync(join(fixture.project, 'data', 'frozen.csv'), 'utf8')).toBe('original\n');
@@ -604,7 +506,7 @@ function reuseRunner(
 
 describe('item 18: portable existing-worktree inventory', () => {
   it('reaches safe reuse without the unsupported option and retains every fail-closed identity check', async () => {
-    writeFileSync(join(fixture.project, 'brief.md'), '# Goal\nReuse the exact existing target.\n');
+    writeFileSync(join(fixture.project, 'brief.md'), '# Goal\nReuse the exact existing target.\n## Acceptance criteria\n1. Reuse only the registered worktree with the requested base and branch.\n');
     const target = join(fixture.root, 'reusable-target');
     materializeTrackedTarget(target);
     const portableRunner = reuseRunner({ exitCode: 0, stdout: worktreeRecord(target) });

@@ -1,12 +1,12 @@
+import { listProjectFiles } from './scheduler/sched_scope/path-capabilities.js';
 import { stageLiveLogPath, readStageLiveLogPath } from './stage-live-log.js';
 import { isRetryableAdapterFailure } from './adapters/failure.js';
-import { writeFileSync, appendFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
+import { atomicWrite, writeFileSync, appendFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
 
 
 // Module: worker
-import { withEngineIntegrity } from './engine-integrity.js';
-import { existsSync, lstatSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
-import { hashRollbackFileSync } from './rollback-content-store.js';
+import { EngineStateError, withEngineIntegrity } from './engine-integrity.js';
+import { existsSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
 import { recordInvocationInput } from './run-state-view.js';
 import { finalizeStageSessions, isSessionUuid, readSession } from './adapter-session.js';
 import { declaredOutputFacts, runStateContext } from './run-state-access.js';
@@ -17,13 +17,12 @@ import { ARTIFACT_CONTRACT_SCHEMA_DOC, artifactDeclarationErrors, type ArtifactC
 import { join, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 import { runProcessAbortSignal } from './adapters/base.js';
-export { ADAPTER_FAILURE_PATTERNS, classifyAdapterFailure } from './adapters/failure.js';
+export { classifyAdapterFailure } from './adapters/failure.js';
 import { buildStagePrompt, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
 import { recordGateValidationDelta, settleGateValidationEvidence } from './scheduler/sched_settlement/gate-validation.js';
 import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
 import { AuditFindingsSchema } from './scoped-audit-repair.js';
-import { getDefaultTimeout } from './config.js';
 import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
 import { renderPlannerPolicies } from './planner-policies.js';
 import { extractBriefCriteria } from './brief-criteria.js';
@@ -34,12 +33,9 @@ import {
   closeStageAttempt,
   settleStageAttempt,
   StageAttemptSettlementError,
-  readStageStatus,
   readRunState,
   writeStageStatus,
-  writeStageInput,
   writeStageOutput,
-  atomicWrite,
   TERMINAL_STATUSES,
   VERDICT_CONTRACT_DOC,
   PHASE_METADATA_FIELDS,
@@ -67,18 +63,15 @@ import {
   type StageCommandInterruptSignal,
 } from './command-interrupt.js';
 import {
-  compareLiveConstraintContentIdentities,
-  readLiveConstraintContentIdentity,
-  type LiveConstraintContentIdentity,
-  type LiveConstraintGuardFactory,
-  type LiveConstraintInvocationResult,
-} from './live-constraint-guard.js';
+  compareContentIdentities,
+  readContentIdentity,
+  type ContentIdentity,
+} from './content-identity.js';
 import {
   inspectStageArtifactContract,
   writeStageArtifactContractAudit,
   stageArtifactProduction,
 } from './stage-artifact-contract.js';
-import { readAcceptedScopeRevisionDecisions } from './runtime-negotiation.js';
 import { SINGLE_AUTHOR_NOTICE } from './scheduler/sched_policy/prompt-contracts.js';
 import { buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 
@@ -115,8 +108,8 @@ export interface StageOpts {
   technicalRetry?: {
     delaysMs?: readonly number[];
   };
-  /** The worker awaits scope admission, then audit classification, before publication. */
-  settlementBoundary?: (phase: 'child_closed' | 'attempt_closed') => Promise<boolean>;
+  /** The worker awaits the scheduler settlement projection before publication. */
+  settlementBoundary?: (phase: 'attempt_closed') => Promise<void>;
   projectDir: string;
   runId: string;
   runDir: string;
@@ -140,19 +133,9 @@ export interface StageOpts {
   resumeSessionId?: string;
   sessionOwnerStageId?: string;
   preserveSession?: boolean;
-  /** Scheduler-resolved effective project-write capability. Snapshot fallback
-   * observes only these roots; run-level scope enforcement owns global change
-   * detection and rollback. */
-  projectWriteScope?: string[];
-  /** Scheduler-owned canonical scope policy bound to the run rollback baseline. */
-  liveConstraintGuardFactory?: LiveConstraintGuardFactory;
 }
 
 const ADAPTER_RETRY_DELAYS = [30_000, 60_000, 120_000];
-
-const PARALLEL_EXECUTION_BOUNDARY = '# Parallel execution boundary\n'
-  + 'Other stages share this wave. Do not revert or stage their edits. Never use git add . or git commit -a. '
-  + 'Shared git status or diff does not attribute changes to you; the engine records per-attempt writes.';
 
 function inferAdapterName(adapter: Adapter): string | undefined {
   const name = adapter.constructor?.name;
@@ -161,59 +144,19 @@ function inferAdapterName(adapter: Adapter): string | undefined {
   return lower.endsWith('adapter') ? lower.slice(0, -'adapter'.length) : lower;
 }
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.fc', '.next', '.cache', '.pytest_cache', 'coverage', '__pycache__', '.venv', 'venv', '.tox', 'target', 'out', '.gradle']);
-
-function literalScopeRoot(scope: string): string | undefined {
-  const normalized = scope.trim().replace(/\\/g, '/').replace(/^\.\//, '');
-  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../')) return undefined;
-  const meta = normalized.search(/[!*?{}[\]()]/);
-  const prefix = (meta < 0 ? normalized : normalized.slice(0, meta)).replace(/\/+$/, '');
-  if (!prefix) return undefined;
-  return prefix;
-}
-
-function snapshotScopedContent(
-  projectDir: string,
-  scopes: readonly string[],
-): Map<string, LiveConstraintContentIdentity> {
-  const snap = new Map<string, LiveConstraintContentIdentity>();
-  function walk(dir: string, depth: number) {
-    if (depth > 20) return;
-    let entries: string[];
-    try { entries = readdirSync(dir); } catch { return; }
-    for (const e of entries) {
-      if (SKIP_DIRS.has(e)) continue;
-      const full = join(dir, e);
-      try {
-        const st = lstatSync(full);
-        if (st.isDirectory()) walk(full, depth + 1);
-        else snap.set(full, readLiveConstraintContentIdentity(full));
-      } catch { /* skip */ }
-    }
-  }
-  for (const scope of scopes) {
-    const root = literalScopeRoot(scope);
-    if (!root) continue;
-    const absolute = join(projectDir, root);
-    try {
-      const stat = lstatSync(absolute);
-      if (stat.isDirectory()) walk(absolute, 0);
-      else snap.set(absolute, readLiveConstraintContentIdentity(absolute));
-    } catch { /* an exact declared output may not exist yet */ }
-  }
-  return snap;
+function snapshotScopedContent(projectDir: string, paths: string[] = []): Map<string, ContentIdentity> {
+  return new Map([...new Set([...listProjectFiles(projectDir), ...paths])].map(path => [join(projectDir, path), readContentIdentity(join(projectDir, path))]));
 }
 
 function diffScopedArtifacts(
-  before: Map<string, LiveConstraintContentIdentity>,
+  before: Map<string, ContentIdentity>,
   projectDir: string,
-  scopes: readonly string[],
 ): string[] {
-  const after = snapshotScopedContent(projectDir, scopes);
+  const after = snapshotScopedContent(projectDir, [...before.keys()].map(path => relative(projectDir, path)));
   const changed: string[] = [];
-  const absent: LiveConstraintContentIdentity = { state: 'absent' };
+  const absent: ContentIdentity = { state: 'absent' };
   for (const path of new Set([...before.keys(), ...after.keys()])) {
-    if (compareLiveConstraintContentIdentities(before.get(path) ?? absent, after.get(path) ?? absent) !== 'different') continue;
+    if (compareContentIdentities(before.get(path) ?? absent, after.get(path) ?? absent) !== 'different') continue;
     changed.push(relative(projectDir, path).replace(/\\/g, '/'));
   }
   return changed.sort();
@@ -233,7 +176,7 @@ export function freshRunningStageProjection(
   };
   for (const field of [
     'exitCode', 'duration_ms', 'artifacts', 'completedAt', 'error', 'tokens_in', 'tokens_out',
-    'writes', 'writeAttribution', 'constraintAudit', 'timeout', 'acceptedFrom', 'continuation',
+    'writes', 'writeAttribution', 'constraintAudit', 'timeout', 'acceptedFrom', 'continuation', 'gate',
   ] as const) delete next[field];
   return next;
 }
@@ -263,12 +206,9 @@ export interface AttemptEvidenceGeneration {
   segmentStart: number;
   /** Content fingerprints at the boundary for shared artifact slots. An
    * unchanged prior-attempt verdict is therefore never current evidence. */
-  artifactBaselines: Record<string, string | null>;
+  // Old version-1 records stored bare hashes (or null for absence).
+  artifactBaselines: Record<string, ContentIdentity | string | null>;
   recordedAt: string;
-}
-
-function attemptArtifactFingerprint(path: string): string | null {
-  try { return hashRollbackFileSync(path).sha256; } catch { return null; }
 }
 
 /** Mark the attempt stream so the watchdog excludes its bookkeeping bytes. */
@@ -290,8 +230,9 @@ export function beginAttemptEvidenceGeneration(
     attemptStartedAt,
     segmentStart: statSync(logPath).size,
     artifactBaselines: {
-      output: attemptArtifactFingerprint(join(stagePath, `output_attempt_${attemptIndex}.md`)),
-      verdict: attemptArtifactFingerprint(join(runDirectory, `verdict_${stageId}.json`)),
+      output: readContentIdentity(join(stagePath, 'output.md')),
+      verdict: readContentIdentity(join(runDirectory, `verdict_${stageId}.json`)),
+      handoff: readContentIdentity(join(runDirectory, `handoff_${stageId}.md`)),
     },
     recordedAt: new Date().toISOString(),
   };
@@ -365,8 +306,6 @@ export async function runStage(
   const attemptDeadline = new AttemptDeadlineController({
     budgetMs: opts.timeout_ms,
     wrapUp: true,
-    ledgerDir: join(opts.runDir, 'stages', opts.stageId),
-    executionIndex: attemptIndex,
     ...(opts.deadlineClock ? { clock: opts.deadlineClock } : {}),
   });
   const effectiveBudgetMs = attemptDeadline.budgetMs;
@@ -395,7 +334,6 @@ export async function runStage(
   } catch { /* first execution has no delivery receipt */ }
   const guidanceBlock = (entries: ReturnType<typeof readGuidanceForStage>): string =>
     renderGuidanceDelivery(guidanceForExecution(entries, attemptIndex));
-  const liveConstraintGuard = opts.liveConstraintGuardFactory?.({ attemptIndex, attemptStartedAt });
   prompt = prompt
     .replace(/<current execution index>/g, String(attemptIndex))
     .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
@@ -501,8 +439,7 @@ export async function runStage(
     .replace(/\{phase_metadata_fields\}/g, PHASE_METADATA_FIELDS)
     .replace(/\{project_contract\}/g, projectContract)
     .replace(/\{run_dir\}/g, opts.runDir)
-    .replace(/\{project\}/g, opts.projectDir)
-    .replace(/\{default_timeout_ms\}/g, getDefaultTimeout());
+    .replace(/\{project\}/g, opts.projectDir);
   try {
     const taskBriefPath = join(opts.runDir, 'task_brief.md');
     if (existsSync(taskBriefPath)) {
@@ -557,8 +494,10 @@ export async function runStage(
   prompt += `\n\n${SINGLE_AUTHOR_NOTICE}`;
   const historicalCandidates = readdirSync(join(opts.runDir, 'stages', opts.stageId)).filter(name => /^(?:race_.*\.json|candidate_.*\.patch)$/.test(name));
   if (historicalCandidates.length) prompt += `\n\nHistorical candidate evidence (retained without selection or execution): ${historicalCandidates.map(name => join(opts.runDir, 'stages', opts.stageId, name)).join(', ')}. Inspect unfinished candidate work and patches before continuing in this project; preserve accepted gate provenance.`;
-  const projectWriteScope = opts.projectWriteScope ?? [];
-  const beforeSnapshot = snapshotScopedContent(opts.projectDir, projectWriteScope);
+  const terminalPaths = Object.values(runState?.terminalStates ?? {}).flatMap(entry => entry.paths);
+  const beforeSnapshot = snapshotScopedContent(opts.projectDir, [
+    ...terminalPaths, ...(opts.artifactContract?.produces ?? []).filter(artifact => artifact.root === 'project').map(artifact => artifact.path),
+  ]);
   // A declared run product may belong to later work, but an available product
   // cannot disappear during this attempt. This fact was only model advice;
   // deletion alone cannot preserve it, so bind the engine check to this start.
@@ -583,19 +522,18 @@ export async function runStage(
   let activeInvocationAbortController: AbortController | undefined;
   let activeInvocationIndex: number | undefined;
   type CommandBoundaryControl = {
-    kind: 'guidance' | 'budget_wrap_up' | 'timeout_projection' | 'operator_interrupt' | 'scope_revision';
+    kind: 'guidance' | 'budget_wrap_up' | 'timeout_projection' | 'operator_interrupt';
     command: CommandLifecycleEvent;
     guidance: ReturnType<typeof readGuidanceForStage>;
     interrupt?: StageCommandInterruptSignal;
   };
   let commandBoundaryControl: CommandBoundaryControl | undefined;
-  let scopeRevisionBoundaryReached = false;
   let stageAborted = false;
   let approvalSuspended = false;
   let approvalRequestId: string | undefined;
   let approvalRequestingStageId: string | undefined;
   let abortReason = '';
-  let terminationCause: StageAttemptTimeoutSummary['terminationCause'];
+  let terminationCause: RunResult['terminationCause'];
   let wrapUpRequestedAt: string | undefined;
   let wrapUpDeliveredAt: string | undefined;
   const requestWrapUp = (): void => {
@@ -609,7 +547,7 @@ export async function runStage(
       commandBoundaryControl = { kind: 'budget_wrap_up', command: { id: 'stage_budget', phase: 'completed', timestamp: wrapUpRequestedAt }, guidance };
       activeInvocationAbortController.abort('guidance_delivery_for_budget_wrap_up');
     }
-    attemptDeadline.append('stage_wrap_up_requested', { guidanceId: envelope.id, finishingMs: attemptDeadline.finishingMs });
+
     recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_wrap_up_requested', runId: opts.runId,
       timestamp: wrapUpRequestedAt, stageId: opts.stageId, attemptIndex, attemptStartedAt,
       guidanceId: envelope.id, finishingMs: attemptDeadline.finishingMs, deadlineAt: attemptDeadline.deadlineAt, source: 'worker' });
@@ -669,7 +607,6 @@ export async function runStage(
         approvalSuspended = true;
         approvalRequestId = parsed.signal.requestId;
         approvalRequestingStageId = parsed.signal.requestingStageId;
-        terminationCause = 'approval_suspension';
       } else {
         stageAborted = true;
         terminationCause ??= 'stage_abort';
@@ -776,10 +713,12 @@ export async function runStage(
       }
     } catch { /* retain an unreadable signal for diagnosis */ }
   };
-  pollAbortSignal();
-  pollCommandInterruptSignal();
-  const abortPollTimer = setInterval(pollAbortSignal, 1000);
-  const commandInterruptPollTimer = setInterval(pollCommandInterruptSignal, 250);
+  const pollRequests = (): void => {
+    pollAbortSignal();
+    pollCommandInterruptSignal();
+  };
+  pollRequests();
+  const requestPollTimer = setInterval(pollRequests, 1000);
   const requestWatchers: import('node:fs').FSWatcher[] = [];
   try {
     const signalsDir = join(opts.runDir, 'signals');
@@ -832,7 +771,6 @@ export async function runStage(
   let childCloseUnverified = false;
   let invocationIndex = 0;
   let inputRecordIndex = 0;
-  let latestLiveConstraintResult: LiveConstraintInvocationResult | undefined;
   const continuations = new Map<Adapter, { sessionId: string; ownerStageId: string }>();
   if (opts.resumeSessionId && isSessionUuid(opts.resumeSessionId)) {
     continuations.set(adapter, { sessionId: opts.resumeSessionId, ownerStageId: opts.sessionOwnerStageId ?? opts.stageId });
@@ -847,17 +785,9 @@ export async function runStage(
       if (attemptDeadline.signal.aborted) terminationCause ??= 'attempt_timeout';
       return cancelledResult();
     }
-    attemptDeadline.append('adapter_phase_started', {
-      stageId: opts.stageId,
-      attemptIndex,
-      remainingMs: Math.max(0, Math.floor(attemptDeadline.remainingMs())),
-      effectiveBudgetMs,
-    });
+
     invocationIndex++;
-    // Keep cached roles topology-neutral, including retries after a peer closes.
-    const invocationRole = opts.liveConstraintGuardFactory?.parallelExecution?.()
-      ? { ...selectedRole, prompt: `${selectedRole.prompt}\n\n${PARALLEL_EXECUTION_BOUNDARY}` }
-      : selectedRole;
+    const invocationRole = selectedRole;
     consumeNewGuidance('adapter_invocation', invocationIndex);
     const continuation = continuations.get(selectedAdapter);
     // A fresh child (including a failed-resume fallback) needs both its duties
@@ -886,40 +816,20 @@ export async function runStage(
       // preparing a prompt does not establish that a native call received it.
       if (wrapUpRequestedAt && !wrapUpDeliveredAt && input.userPrompt.includes('# Stage budget wrap-up')) {
         wrapUpDeliveredAt = new Date(attemptDeadline.wallNow()).toISOString();
-        attemptDeadline.append('stage_wrap_up_delivered', { invocationIndex, finishingMs: attemptDeadline.finishingMs });
+
         recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_wrap_up_delivered', runId: opts.runId,
           timestamp: wrapUpDeliveredAt, stageId: opts.stageId, attemptIndex, attemptStartedAt, invocationIndex,
           remainingMs: attemptDeadline.remainingMs(), source: 'worker' });
       }
     };
-    // input.md remains a compatible latest alias; immutable records carry exact inputs.
-    writeStageInput(opts.projectDir, opts.runId, opts.stageId, effectiveInvocationPrompt);
     const invocationAbortController = new AbortController();
     commandBoundaryControl = undefined;
     activeInvocationAbortController = invocationAbortController;
     activeInvocationIndex = invocationIndex;
     const invocationAbortSignal = AbortSignal.any([aggregateAbortSignal, invocationAbortController.signal]);
-    const liveMonitor = liveConstraintGuard?.beginInvocation(invocationIndex, (reason) => {
-      if (!invocationAbortController.signal.aborted) invocationAbortController.abort(reason);
-    });
     const onCommandLifecycle = (event: CommandLifecycleEvent): void => {
       if (event.phase === 'started') {
         activeCommands.set(event.id, event);
-        recordRunEvent(opts.projectDir, opts.runId, {
-          type: 'stage_command_started',
-          runId: opts.runId,
-          timestamp: event.timestamp,
-          stageId: opts.stageId,
-          attemptIndex,
-          attemptStartedAt,
-          invocationIndex,
-          commandId: event.id,
-          ...(event.command ? {
-            command: event.command,
-            commandFingerprint: commandFingerprint(event.command),
-          } : {}),
-          source: 'worker',
-        });
         const startGuidance = consumeNewGuidance(
           'tool_call_start', invocationIndex, { id: event.id, command: event.command },
         );
@@ -1010,41 +920,13 @@ export async function runStage(
       const completed = started
         ? { ...event, ...(started.command ? { command: started.command } : {}) }
         : event;
-      recordRunEvent(opts.projectDir, opts.runId, {
-        type: 'stage_command_completed',
-        runId: opts.runId,
-        timestamp: event.timestamp,
-        stageId: opts.stageId,
-        attemptIndex,
-        attemptStartedAt,
-        invocationIndex,
-        commandId: event.id,
-        ...(completed.command ? {
-          command: completed.command,
-          commandFingerprint: commandFingerprint(completed.command),
-        } : {}),
-        source: 'worker',
-      });
       const guidance = consumeNewGuidance(
         'tool_call_completion', invocationIndex, { id: event.id, command: completed.command },
       );
       if (guidance.length > 0 && !commandBoundaryControl) commandBoundaryControl = { kind: 'guidance', command: completed, guidance };
-      // Scope admission is an immutable control fact, independent of which
-      // operator guidance happened to arrive first. Finish every active tool
-      // and wait for child closure before re-admitting a new execution.
-      if (activeCommands.size === 0 && commandBoundaryControl?.kind !== 'operator_interrupt'
-        && readAcceptedScopeRevisionDecisions(join(opts.runDir, 'stages', opts.stageId), {
-          runId: opts.runId, stageId: opts.stageId, attemptIndex,
-        }).length > 0) {
-        commandBoundaryControl = { kind: 'scope_revision', command: completed, guidance: [] };
-      }
-      if ((commandBoundaryControl?.kind === 'guidance' || commandBoundaryControl?.kind === 'scope_revision')
-        && activeCommands.size === 0 && !invocationAbortController.signal.aborted) {
-        invocationAbortController.abort(commandBoundaryControl.kind === 'scope_revision'
-          ? 'scope_revision_at_tool_completion' : 'guidance_delivery_at_tool_completion');
-      }
+      if (commandBoundaryControl?.kind === 'guidance' && activeCommands.size === 0
+        && !invocationAbortController.signal.aborted) invocationAbortController.abort('guidance_delivery_at_tool_completion');
     };
-    latestLiveConstraintResult = undefined;
     const invocation = new Promise<RunResult>((resolvePromise, rejectPromise) => {
       let settled = false;
       let closeObservationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1071,7 +953,7 @@ export async function runStage(
         if (!closeObservationTimer) {
           closeObservationTimer = setTimeout(() => {
             childCloseUnverified = true;
-            finish({ ...cancelledResult(), exitCode: 125, timedOut: false,
+            finish({ ...cancelledResult(), exitCode: 125, timedOut: false, engineVoid: true, terminationCause: 'engine_void',
               friendlyError: 'ENGINE_STATE_REFUSED: adapter child closure is unverified; preserve its ownership evidence and exclude live consumers before continuing' });
           }, ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS);
         }
@@ -1103,7 +985,6 @@ export async function runStage(
         });
       }).then(
         (value) => {
-          if (value.writeAttribution === 'structured') liveMonitor?.observePaths(value.writes ?? []);
           if (isSessionUuid(value.sessionId)) {
             const recorded = readSession(opts.runDir, opts.stageId, selectedAdapter.sessionKind);
             continuations.set(selectedAdapter, {
@@ -1116,15 +997,15 @@ export async function runStage(
           observeAdapterSettlement();
           // Cancellation changes the attempt outcome, not telemetry already
           // parsed while the adapter was closing its child process.
-          finish(value.exitCode === 125 && /^ENGINE_STATE_(?:TAMPERED|REFUSED):/.test(value.friendlyError ?? '')
+          finish(value.engineVoid
             ? value : aggregateAbortSignal.aborted ? cancelledResult(value) : value);
         },
         (error) => {
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
-          if (error instanceof Error && /^ENGINE_STATE_(?:TAMPERED|REFUSED):/.test(error.message)) {
+          if (error instanceof EngineStateError) {
             approvalSuspended = false;
-            finish({ output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) });
+            finish({ engineVoid: true, terminationCause: 'engine_void', output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) });
           } else if (aggregateAbortSignal.aborted) finish(cancelledResult());
           else if (invocationAbortController.signal.aborted) finish(cancelledResult());
           else fail(error);
@@ -1142,7 +1023,6 @@ export async function runStage(
         activeInvocationAbortController = undefined;
         activeInvocationIndex = undefined;
       }
-      latestLiveConstraintResult = await liveMonitor?.finish();
     }
   };
 
@@ -1199,34 +1079,16 @@ export async function runStage(
       combined = mergeInvocationTelemetry(combined, current);
       const commandControl = commandBoundaryControl;
       // No correction may launch another child until the prior child is known
-      // closed; a scope grant cannot turn missing closure into clean suspension.
+      // closed before another child is started.
       if (childCloseUnverified) return combined;
-      if (!isRetryableAdapterFailure(current.adapterFailureKind)) return combined;
-      if (commandControl && !aggregateAbortSignal.aborted
-          && !latestLiveConstraintResult?.monitorFailure && !latestLiveConstraintResult?.incidents.length) {
+      if (!isRetryableAdapterFailure(current.providerFailure?.kind)) return combined;
+      if (commandControl && !aggregateAbortSignal.aborted) {
         activeCommands.delete(commandControl.command.id);
         // A valid completed result needs no replacement finishing turn, even
         // when the warning arrived before the child's result was observed.
         if (commandControl.kind === 'budget_wrap_up' && current.exitCode === 0 && opts.outputSchema) {
           try { if (finishedStageRecord(stageRecord(current.output))) return combined; }
           catch { /* malformed results still need the bounded finishing turn */ }
-        }
-        // A durable current-execution grant stops at the closed child boundary.
-        // The scheduler alone re-admits inherited capability for the next child.
-        if (commandControl.kind === 'scope_revision'
-            && (combined.exitCode !== 0 && combined.exitCode !== 137)) return combined;
-        if (commandControl.kind === 'scope_revision'
-            && !latestLiveConstraintResult?.monitorFailure
-            && !(latestLiveConstraintResult?.incidents.length)) {
-          scopeRevisionBoundaryReached = true;
-          return {
-            ...combined,
-            exitCode: 0,
-            timedOut: false,
-            adapterError: false,
-            providerFailure: undefined,
-            output: `${combined.output}${combined.output ? '\n\n' : ''}Accepted scope revision ended this attempt at the control boundary.`,
-          };
         }
         if (commandControl.kind === 'operator_interrupt' && commandControl.interrupt) {
           recordRunEvent(opts.projectDir, opts.runId, {
@@ -1262,61 +1124,28 @@ export async function runStage(
         } catch { /* event/guidance ledgers remain authoritative */ }
         continue;
       }
-      const live = latestLiveConstraintResult;
-      if (live?.validationGeneratedPaths.length) {
-        combined.validationGeneratedWrites = [...new Set([
-          ...(combined.validationGeneratedWrites ?? []),
-          ...live.validationGeneratedPaths,
-        ])];
-      }
-      if (live?.monitorFailure) {
-        return {
-          ...combined,
-          exitCode: 1,
-          timedOut: false,
-          adapterError: false,
-          friendlyError: live.monitorFailure.reason,
-          providerFailure: undefined,
-        };
-      }
-      const incidents = live?.incidents ?? [];
-      let recordError: string | undefined;
-      if (incidents.length === 0) {
-        if (combined.exitCode !== 0 || !opts.outputSchema) return combined;
-        try { stageRecord(combined.output); return combined; }
-        catch (error) { recordError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`; }
-      }
-      const instructions = recordError
-        ? [`# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct only the final JSON document using the retained work and evidence. Preserve the substantive result; never invent evidence or change a rejection to pass to satisfy the format.\nSchema: ${JSON.stringify(opts.outputSchema)}\nRejected answer:\n${combined.output}`]
-        : [...new Set(incidents.map((incident) => incident.scopeRevisionInstruction))];
-      if (incidents.some((incident) => !incident.restored)) {
-        return {
-          ...combined,
-          exitCode: 1,
-          timedOut: false,
-          adapterError: false,
-          friendlyError: `live constraint rollback failed; ${instructions.join(' ')}`,
-          providerFailure: undefined,
-        };
-      }
+      if (combined.exitCode !== 0 || !opts.outputSchema) return combined;
+      let recordError: string;
+      try { stageRecord(combined.output); return combined; }
+      catch (error) { recordError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`; }
+      const instruction = `# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct only the final JSON document using the retained work and evidence. Preserve the substantive result; never invent evidence or change a rejection to pass to satisfy the format.\nSchema: ${JSON.stringify(opts.outputSchema)}\nRejected answer:\n${combined.output}`;
       if (correctionReinvocations >= 1 || aggregateAbortSignal.aborted) {
         return {
           ...combined,
           exitCode: aggregateAbortSignal.aborted ? combined.exitCode : 1,
           timedOut: aggregateAbortSignal.aborted ? combined.timedOut : false,
-          adapterError: false,
           providerFailure: undefined,
           friendlyError: aggregateAbortSignal.aborted
             ? combined.friendlyError
-            : recordError ?? `scope_violation: repeated live constraint violation after same-attempt correction; ${instructions.join(' ')}`,
+            : recordError,
         };
       }
       correctionReinvocations++;
-      invocationPrompt = recordError ? instructions.join('\n') : `# Live constraint correction\n${instructions.join('\n')}`;
+      invocationPrompt = instruction;
       try {
         appendFileSync(
           liveLogPath,
-          `\n${recordError ?? `Live constraint guard restored ${incidents.map((incident) => incident.path).join(', ')}`}; reinvoking inside attempt ${attemptIndex}.\n`,
+          `\n${recordError}; reinvoking inside attempt ${attemptIndex}.\n`,
         );
       } catch { /* durable incident JSONL remains the audit source */ }
     }
@@ -1334,22 +1163,18 @@ export async function runStage(
   };
 
   let result: RunResult;
+  let validationFailure: RunResult | undefined;
   // All adapter work shares one immutable attempt boundary.
   try {
   try {
     const preflightErrors = artifactDeclarationErrors(opts.artifactContract, opts.stageId);
-    let validationFailure: RunResult | undefined;
     if (!preflightErrors.length && opts.isGate && !aggregateAbortSignal.aborted) {
       const dependencies = {
         remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
       };
       let validation = await recordGateValidationDelta(opts.projectDir, opts.runId, opts.stageId, dependencies);
       if (validation && !validation.pass && !validation.delta.some(entry => entry.state === 'regression')) {
-        const settlement = await settleGateValidationEvidence(opts.projectDir, opts.runId, opts.stageId, dependencies);
-        if (settlement.kind === 'refused') validationFailure = {
-          exitCode: 1, duration_ms: Math.round(attemptElapsedMs()), output: settlement.reason, friendlyError: settlement.reason,
-          writes: [], writeAttribution: 'structured',
-        };
+        await settleGateValidationEvidence(opts.projectDir, opts.runId, opts.stageId, dependencies);
         // Settlement owns the replay and its receipt; do not run commands again.
         validation = JSON.parse(readFileSync(join(opts.runDir, `validation_delta_${opts.stageId}.json`), 'utf8'));
       }
@@ -1359,15 +1184,15 @@ export async function runStage(
       const commandsPassed = configured.length > 0 && configured.every(command => command.state === 'passed');
       if (validation?.pass) prompt += `\n\nEngine validation: pass=true; ${validation.current.map(command => `${command.display ?? command.role}: exit=${command.exitCode ?? 'unavailable'}, state=${command.state}`).join('; ')}. Receipt: ${join(opts.runDir, validation.immutablePath ?? `validation_delta_${opts.stageId}.json`)} (each command's result and output tail). The engine enforces this comparison. Review every assigned criterion lacking a prior independent conclusion; validation receipts contain no semantic conclusions.${commandsPassed ? ' Do not rerun configured commands without a concrete evidence gap.' : ''} Project writes require post-write validation.`;
       const regressions = validation?.delta.filter(entry => entry.state === 'regression') ?? [];
-      if (validation && regressions.length) {
+      if (validation && !validation.pass) {
         // Use the existing verdict carrier and repair path without a model decision.
         const evidence = join(opts.runDir, validation.immutablePath!);
-        const reason = regressions.map(entry => `${entry.display ?? entry.role}: ${entry.newFailureIdentifiers.join(', ') || entry.reason}`).join('; ');
+        const reason = validation.delta.filter(entry => entry.state !== 'pass').map(entry => `${entry.display ?? entry.role}: ${entry.newFailureIdentifiers.join(', ') || entry.reason}`).join('; ');
         validationFailure = { exitCode: 0, duration_ms: Math.round(attemptElapsedMs()), writes: [], writeAttribution: 'structured', output: JSON.stringify({
           pass: false, reason,
           criteria: Object.fromEntries((opts.criterionRefs ?? []).map(id => [id, { status: 'fail', evidence }])),
           audit_findings: { version: 1, findings: [] },
-          repairability: { version: 1, disposition: 'repairable', evidence },
+          ...(regressions.length ? { repairability: { version: 1, disposition: 'repairable', evidence } } : {}),
         }) };
       } else if (direct && opts.isGate && !opts.resumeSessionId) {
         prompt += '\nThis is a fresh independent review. Evaluate the entire brief, including after an engine validation failure was repaired.';
@@ -1378,19 +1203,19 @@ export async function runStage(
       : validationFailure ?? await invokeAdapterWithCorrection(adapter, resolvedRole);
 
     // Adapter error detection + exponential backoff retry on the SAME adapter.
-    if (result.exitCode !== 0 && result.adapterError === true && isRetryableAdapterFailure(result.adapterFailureKind)) {
+    if (result.exitCode !== 0 && result.providerFailure !== undefined && isRetryableAdapterFailure(result.providerFailure?.kind)) {
       for (let attempt = 0; attempt < adapterRetryDelays.length; attempt++) {
         if (aggregateAbortSignal.aborted) break;
         const retryDelayMs = Math.max(0, adapterRetryDelays[attempt]);
         const delaySec = Math.round(retryDelayMs / 1000);
         try { appendFileSync(liveLogPath, `\n⏳ Adapter error detected — retrying in ${delaySec}s (attempt ${attempt + 2}/${adapterRetryDelays.length + 1})…\n`); } catch { /* ignore */ }
-        attemptDeadline.append('adapter_backoff_started', { stageId: opts.stageId, attemptIndex, delayMs: retryDelayMs });
+
         if (!await waitForRetry(retryDelayMs)) {
           result = cancelledResult();
           break;
         }
         result = await invokeAdapterWithCorrection(adapter, resolvedRole);
-        if (result.exitCode === 0 || result.adapterError !== true || !isRetryableAdapterFailure(result.adapterFailureKind)) break;
+        if (result.exitCode === 0 || !result.providerFailure || !isRetryableAdapterFailure(result.providerFailure?.kind)) break;
       }
 
       // The adapter classifies its own diagnostic channel. Worker output is an
@@ -1402,16 +1227,11 @@ export async function runStage(
     result = cancelledResult();
   }
 
-  // The scheduler flushes requests written immediately before a synchronous close
-  // while this attempt still owns its identity and immutable deadline.
-  if (opts.settlementBoundary && !aggregateAbortSignal.aborted) {
-    scopeRevisionBoundaryReached ||= await opts.settlementBoundary('child_closed');
-  }
   const enginePublishedCarriers: string[] = [];
   let blockedStageResult = false;
-  if (result.exitCode === 0 && opts.outputSchema && !scopeRevisionBoundaryReached) {
+  if (result.exitCode === 0 && opts.outputSchema) {
     try {
-      const record = stageRecord(result.output);
+      const record = validationFailure ? JSON.parse(result.output) as Record<string, unknown> : stageRecord(result.output);
       blockedStageResult = record.status === 'blocked';
       stageWorkFinished = finishedStageRecord(record);
       if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
@@ -1440,7 +1260,7 @@ export async function runStage(
         artifactContract: opts.artifactContract,
         statuses: opts.artifactStatuses,
       };
-      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || Boolean(wrapUpRequestedAt && !stageWorkFinished) || scopeRevisionBoundaryReached || result.exitCode !== 0);
+      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || Boolean(validationFailure) || Boolean(wrapUpRequestedAt && !stageWorkFinished) || result.exitCode !== 0);
       const productFacts = existsSync(join(opts.runDir, 'run.json')) ? declaredOutputFacts(opts.projectDir, opts.runId) : [];
       // A single direct author owns the whole brief. Split plans settle each
       // stage's artifact contract; completion still requires every run product.
@@ -1465,16 +1285,13 @@ export async function runStage(
     } catch (error) {
       result.exitCode = 1;
       result.timedOut = false;
-      result.adapterError = false;
-      result.adapterFailureKind = undefined;
       result.providerFailure = undefined;
       result.friendlyError = `artifact contract could not be checked: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
   } finally {
     pollAbortSignal();
-    clearInterval(abortPollTimer);
-    clearInterval(commandInterruptPollTimer);
+    clearInterval(requestPollTimer);
     for (const watcher of requestWatchers) watcher.close();
     attemptDeadline.wrapUpSignal.removeEventListener('abort', requestWrapUp);
     cleanupAbortSignalAtExit();
@@ -1496,18 +1313,16 @@ export async function runStage(
     || result.timedOut === true
     || (result.duration_ms >= effectiveBudgetMs && result.exitCode !== 0)
   );
-  if (scopeRevisionBoundaryReached && !stageAborted && !timedOut && result.exitCode === 0) {
-    result.suspended = true;
-    result.suspensionReason = 'scope_revision';
-  }
-  if (approvalSuspended) {
+  if (result.engineVoid) {
+    terminationCause = 'engine_void';
+  } else if (approvalSuspended) {
     result.exitCode = 0;
     result.timedOut = false;
     result.suspended = true;
     result.suspensionReason = 'approval';
     result.suspensionRequestId = approvalRequestId;
     result.suspensionRequestingStageId = approvalRequestingStageId;
-    terminationCause = 'approval_suspension';
+    terminationCause = 'exit';
   } else if (timedOut) {
     result.exitCode = 124;
     result.timedOut = true;
@@ -1516,31 +1331,23 @@ export async function runStage(
     result.exitCode = 137;
     result.timedOut = false;
     terminationCause = 'stage_abort';
-  } else if (result.suspensionReason === 'scope_revision') {
-    terminationCause = 'scope_revision_suspension';
-  } else if (settlementRefused) {
-    terminationCause = 'failed';
-  } else if (result.exitCode === 0) {
-    terminationCause = 'complete';
-  } else if (result.adapterError) {
-    terminationCause = 'adapter_error';
+
   } else {
-    terminationCause ??= 'failed';
+    terminationCause = 'exit';
   }
-  let retainedArtifacts: string[] | undefined;
-  if (!stageAborted && !approvalSuspended
+  const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
+  const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir);
+  if (!result.engineVoid && !stageAborted && !approvalSuspended
     && (result.exitCode === 0 && wrapUpRequestedAt && !stageWorkFinished || timedOut)) {
     const forced = timedOut;
-    const retainedPaths = retainedArtifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope);
+    const retainedPaths = artifacts;
     const summary = `Engine budget handoff. Done/evidence: retained changed files ${JSON.stringify(retainedPaths)} and the execution log at ${liveLogPath}. Their bytes are kept; unfinished duties are not certified complete. Remaining: complete the stage's declared duties and run unfinished checks; verify retained work before continuing. Disposition: ${forced ? 'bounded grace expired; child stopped with work kept' : 'cooperative wrap-up completed normally'}.`;
     result.continuation = { reason: 'stage_budget', forced, summary,
       handoff: `stages/${opts.stageId}/output_attempt_${attemptIndex}.md` };
     result.exitCode = 0;
     result.timedOut = false;
-    result.adapterError = false;
-    result.adapterFailureKind = undefined;
     result.friendlyError = undefined;
-    terminationCause = forced ? 'budget_forced_stop' : 'budget_wrap_up';
+    terminationCause = 'exit';
     // Keep authored JSON intact. A forced stop has no authored result; publish
     // a typed control handoff rather than inventing a gate verdict or checks.
     if (forced) result.output = JSON.stringify({ status: 'delivered', summary, checks: [],
@@ -1552,13 +1359,11 @@ export async function runStage(
   if (stageAborted) result.output = renderStageAbortOutput(result.output, opts.stageId, attemptIndex, abortReason);
   if (approvalSuspended || timedOut || stageAborted || result.exitCode === 0) result.providerFailure = undefined;
   result.effectiveTimeoutMs = effectiveBudgetMs;
-  result.timeoutTerminationCause = terminationCause;
+  result.terminationCause = terminationCause;
 
   writeStageOutput(opts.projectDir, opts.runId, opts.stageId, result.output, attemptIndex);
 
-  const artifacts = retainedArtifacts ?? diffScopedArtifacts(beforeSnapshot, opts.projectDir, projectWriteScope);
-  const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
-  const writes = structuredWrites ?? artifacts;
+  const writes = [...new Set([...(structuredWrites ?? []), ...artifacts])];
   const writeAttribution = structuredWrites ? 'structured' as const : 'snapshot' as const;
   // If no adapter child was started, reaching settlement itself proves there is
   // no live child. Otherwise only an adapter promise settlement may certify it.
@@ -1575,18 +1380,11 @@ export async function runStage(
     wrapUpRequestedAt, wrapUpDeliveredAt,
     elapsedMs: deadlineSnapshot.elapsedMs,
     remainingMs: deadlineSnapshot.remainingMs,
-    terminationCause,
     deadlineReachedAt: deadlineSnapshot.deadlineReachedAt,
     ...(childClosedAt ? { childClosedAt } : {}),
     deadlineOverrunMs: attemptDeadline.deadlineOverrunMs(),
   };
-  attemptDeadline.append('attempt_finished', {
-    stageId: opts.stageId,
-    attemptIndex,
-    exitCode: result.exitCode,
-    effectiveBudgetMs,
-    terminationCause,
-  });
+
   let final = closeStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, {
     ...(correctionReinvocations > 0 ? { disposition: 'repaired' as const } : {}),
     exitCode: result.exitCode,
@@ -1601,7 +1399,6 @@ export async function runStage(
         stageAborted
           ? (abortReason ? `aborted by engine: ${abortReason}` : 'aborted by engine')
           : result.providerFailure ? providerFailureDetail(result.exitCode, result.providerFailure)
-          : result.adapterError ? `upstream adapter failure (${result.adapterFailureKind ?? 'unclassified'})`
           : result.timedOut ? `timed out after ${Math.round(effectiveBudgetMs / 1000)}s`
           // A diagnosed failure explains itself in one actionable sentence
           // instead of leaving the operator with a bare exit code.
@@ -1611,7 +1408,8 @@ export async function runStage(
       : undefined,
     ...invocationUsageFields(result),
     invocations: result.invocations,
-    adapterFailureKind: result.adapterFailureKind,
+    terminationCause,
+    engineVoid: result.engineVoid,
     writes,
     writeAttribution,
     validationGeneratedWrites: result.validationGeneratedWrites,
@@ -1621,8 +1419,8 @@ export async function runStage(
 
   let boundaryError: unknown;
   try {
-    const suspended = await opts.settlementBoundary?.('attempt_closed');
-    final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, result.suspended === true || suspended === true);
+    await opts.settlementBoundary?.('attempt_closed');
+    final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, result.suspended === true);
   } catch (error) {
     boundaryError = error;
     final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, false,
@@ -1634,7 +1432,7 @@ export async function runStage(
     if (settled?.exitCode !== undefined) result.exitCode = settled.exitCode;
     result.suspended = suspended;
     if (result.exitCode !== 0) result.continuation = undefined;
-    if (result.exitCode !== 0 && !suspended) result.timeoutTerminationCause = settled?.timeout?.terminationCause ?? 'failed';
+    result.terminationCause = settled?.terminationCause ?? 'exit';
     recordRunEvent(opts.projectDir, opts.runId, {
       type: approvalSuspended ? 'approval_attempt_suspended' : suspended ? 'attempt_suspended' : result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
       runId: opts.runId,
@@ -1643,11 +1441,9 @@ export async function runStage(
       ...attemptEventFields(settled),
       status: final.status,
       exitCode: result.exitCode,
-      adapterFailure: result.adapterError === true,
       ...(result.processExitCode !== undefined ? { processExitCode: result.processExitCode } : {}),
       ...(result.processSignal !== undefined ? { processSignal: result.processSignal } : {}),
       ...(result.providerFailure ? { providerFailure: result.providerFailure } : {}),
-      ...(result.adapterFailureKind ? { adapterFailureKind: result.adapterFailureKind } : {}),
       ...(approvalRequestId ? { requestId: approvalRequestId } : {}),
       ...(approvalRequestingStageId ? { requestingStageId: approvalRequestingStageId } : {}),
       detail: approvalSuspended

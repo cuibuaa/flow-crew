@@ -1,4 +1,4 @@
-import { rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mergeTaskWithRunState } from '../src/cli-daemon.js';
@@ -56,12 +56,20 @@ afterEach(() => {
 });
 
 describe('closed-loop drift projection', () => {
-  it('replays all six evidence quantities with explicit thresholds and distributions', () => {
+  it('retains service routing from valid registry rows when the final registry append is torn', () => {
+    const value = fixture();
+    const before = row(readRunDriftProjection(value.runDir), 'log_growth');
+    expect(before.value).toBe(value.evidence.historical.serviceLogBytes);
+    appendFileSync(value.registryPath, '{"run_id":');
+    expect(row(readRunDriftProjection(value.runDir), 'log_growth')).toEqual(before);
+  });
+
+  it('replays all retained evidence quantities with explicit thresholds and distributions', () => {
     const value = fixture();
     const projection = readRunDriftProjection(value.runDir);
 
     expect(new Set(projection.rows.map((candidate) => candidate.id))).toEqual(EXPECTED_DRIFT_ROW_IDS);
-    expect(projection.rows).toHaveLength(6);
+    expect(projection.rows).toHaveLength(5);
     for (const candidate of projection.rows) {
       expect(candidate.source.reference).not.toBe('');
       expect(candidate.source.observedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
@@ -95,12 +103,6 @@ describe('closed-loop drift projection', () => {
       crossing: 'below',
       threshold: { kind: 'target', value: 1 },
       annotations: ['unsatisfied_requirements=1', 'later_admitted_attempt=2'],
-    });
-    expect(row(projection, 'supervisor_rejections')).toMatchObject({
-      value: '2 total; max 1/stage; 2 overturned',
-      comparisonValue: 1,
-      crossing: 'below',
-      threshold: { kind: 'budget', operator: '<=', value: 2, unit: 'rejections/stage' },
     });
     expect(row(projection, 'engine_overhead')).toMatchObject({
       value: 40067,
@@ -139,8 +141,6 @@ describe('closed-loop drift projection', () => {
       'b3-warn-flood-observation',
       'b3-registry-growth-observation',
       'b3-first-plan-admission-reason',
-      'b3-supervisor-rejection-1',
-      'b3-supervisor-rejection-2',
       'b4-dose-series',
       'b3-overhead-run-state',
     ]));
@@ -175,7 +175,7 @@ describe('closed-loop drift projection', () => {
     const watchRows = watched.drift.map((candidate) => formatRunDriftRow(candidate.row));
     expect(statusRows).toEqual(taskRows);
     expect(taskRows).toEqual(watchRows);
-    expect(statusRows).toHaveLength(6);
+    expect(statusRows).toHaveLength(5);
     expect(statusRows.every((line) => line.includes('observed='))).toBe(true);
     expect(formatWatchPoll(watched).filter((line) => line.startsWith('[DRIFT] '))).toEqual(
       watchRows.map((canonical) => `[DRIFT] ${value.runId} · ${canonical}`),
@@ -248,7 +248,6 @@ describe('closed-loop drift projection', () => {
     const value = fixture();
     writeFileSync(join(value.runDir, 'research_round_2_no_candidate_consumed.json'), '{broken\n');
     writeFileSync(join(value.runDir, 'plan_retry_state.json'), '{broken\n');
-    writeFileSync(join(value.runDir, 'signals', 'reject_counts.json'), '{broken\n');
     writeFileSync(join(value.runDir, 'events.jsonl'), '{broken\n');
     const before = fixtureMutationHash(value);
     const malformed = readRunDriftProjection(value.runDir);
@@ -260,11 +259,6 @@ describe('closed-loop drift projection', () => {
       annotations: expect.arrayContaining(['unavailable_rounds=2']),
     });
     expect(row(malformed, 'first_plan_admission')).toMatchObject({
-      value: null,
-      crossing: 'unavailable',
-      source: { availability: 'malformed' },
-    });
-    expect(row(malformed, 'supervisor_rejections')).toMatchObject({
       value: null,
       crossing: 'unavailable',
       source: { availability: 'malformed' },
@@ -282,19 +276,13 @@ describe('closed-loop drift projection', () => {
       },
     }, [
       { type: 'admission_rejected', detail: 'legacy event without an attempt index' },
-      { type: 'supervisor_reject', stageId: 'gate', detail: 'reject 1/2: legacy canonical budget' },
     ]);
     expect(row(legacy, 'research_dose')).toMatchObject({ value: null, source: { availability: 'legacy' } });
     expect(row(legacy, 'first_plan_admission')).toMatchObject({ value: null, source: { availability: 'legacy' } });
-    expect(row(legacy, 'supervisor_rejections')).toMatchObject({
-      value: '1 total; max 1/stage; 0 overturned',
-      threshold: { value: 2 },
-      source: { availability: 'legacy' },
-    });
     expect(legacy.rows.filter((candidate) => candidate.value === 0)).toEqual([]);
 
     const current = buildOperationalProjection(value.state, value.evidence.events);
-    expect(formatRunDriftProjection(current.drift)).toHaveLength(6);
+    expect(formatRunDriftProjection(current.drift)).toHaveLength(5);
     expect(loadClosedLoopDriftEvidence().baseFailure.exitCode).toBe(1);
   });
 });

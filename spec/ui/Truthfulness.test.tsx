@@ -1,14 +1,18 @@
 // @vitest-environment jsdom
 
+import '../test-support/policy-runtime.js';
+
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ApiError,
   BriefAdmissionRequestError,
   deleteRunCampaign,
   fetchDashboardStatus,
   fetchInboxOverview,
   fetchRunSummary,
+  fetchSettings,
   fetchRunDetail,
   fetchRunStageOutput,
   fetchStandaloneRuns,
@@ -32,7 +36,6 @@ vi.mock("../../ui/src/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../ui/src/api")>()),
   deleteRunCampaign: vi.fn(),
   fetchAgents: vi.fn(),
-  fetchCampaignBriefDiff: vi.fn(),
   fetchDashboardStatus: vi.fn(),
   fetchInboxOverview: vi.fn(),
   fetchRunDetail: vi.fn(),
@@ -43,7 +46,6 @@ vi.mock("../../ui/src/api", async (importOriginal) => ({
   cancelTask: vi.fn(),
   createTask: vi.fn(),
   renameRunCampaign: vi.fn(),
-  reviewCampaignPatch: vi.fn(),
   resolveInboxItem: vi.fn(),
 }));
 
@@ -89,7 +91,8 @@ function p11Preflight(
   };
 }
 
-function submitNewRunModal(): void {
+async function submitNewRunModal(): Promise<void> {
+  await waitFor(() => expect(screen.getByRole("spinbutton")).toHaveValue(5));
   const form = screen.getByTestId("new-run-modal").querySelector("form");
   if (!form) throw new Error("New Run form is missing");
   fireEvent.submit(form);
@@ -112,10 +115,10 @@ describe("dashboard truthfulness", () => {
       approvals: { status: "complete", items: [] },
       deferred: { status: "complete", items: [] },
       stale: { status: "complete", items: [] },
-      patches: { status: "complete", items: [], coverage: { succeeded: 0, failed: 0 } },
       campaignCount: 0,
     });
     vi.mocked(fetchRunSummary).mockResolvedValue(null);
+    vi.mocked(fetchSettings).mockResolvedValue({ projectDir: "/project", adapter: "codex", workflows: ["planner.yaml", "direct.yaml", "research.yaml"], skills: [], port: 3000, max_iterations: 5 });
     vi.mocked(fetchStandaloneRuns).mockResolvedValue({ runs: [], total: 0 });
   });
 
@@ -126,15 +129,24 @@ describe("dashboard truthfulness", () => {
     vi.clearAllMocks();
   });
 
+  it("takes the iteration budget and workflow choices from settings", async () => {
+    vi.mocked(fetchSettings).mockResolvedValue({ projectDir: "/project", adapter: "codex", workflows: ["planner.yaml", "direct.yaml"], skills: [], port: 3000, max_iterations: 13 });
+    render(<NewRunModal open onClose={() => {}} onSubmit={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("spinbutton")).toHaveValue(13));
+    expect(screen.getByLabelText("Workflow")).toHaveValue("");
+    expect(screen.getByRole("option", { name: "planner" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "direct" })).toBeInTheDocument();
+  });
+
   it.each([
     { kind: "clean", brief: "# Clean brief", checked: p11Preflight({ findings: [] }),
       messages: ["Preflight findings are advisory."] },
     { kind: "warnings", brief: "# Exact brief\n", checked: p11Preflight({ contractReady: false, findings: [
       { code: "frontmatter_valid", fingerprint: "frontmatter-valid", level: "ok",
         message: "Frontmatter parsed successfully", consequential: false },
-      { code: "criterion_instrument_wording", fingerprint: "criterion-warning", level: "warn",
-        message: "Criterion warning is visible", consequential: true },
-    ] }), messages: ["Frontmatter parsed successfully", "Criterion warning is visible"] },
+      { code: "terminal_states_missing", fingerprint: "terminal-states-missing", level: "warn",
+        message: "Terminal state warning is visible", consequential: true },
+    ] }), messages: ["Frontmatter parsed successfully", "Terminal state warning is visible"] },
     { kind: "invalid YAML", brief: "---\ninvalid: [", checked: p11Preflight({
       frontmatter: { status: "invalid", error: "Malformed YAML" }, contractReady: false,
       findings: [{ code: "frontmatter_invalid", fingerprint: "frontmatter-invalid", level: "fail",
@@ -150,12 +162,12 @@ describe("dashboard truthfulness", () => {
     const textarea = screen.getByLabelText("Brief content");
     fireEvent.change(textarea, { target: { value: brief } });
     expect(textarea).toHaveValue(brief);
-    submitNewRunModal();
+    await submitNewRunModal();
     expect(await screen.findByRole("region", { name: "Brief preflight result" })).toBeInTheDocument();
     for (const message of messages) expect(screen.getByText(message)).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Start run" })).toBeEnabled();
-    submitNewRunModal();
+    await submitNewRunModal();
     await waitFor(() => expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ brief }),
       { briefPreflightDigest: checked.report.digest, briefPreflightReceipt: checked.receipt },
@@ -174,7 +186,7 @@ describe("dashboard truthfulness", () => {
     render(<NewRunModal open campaigns={[]} onClose={() => {}} onSubmit={onSubmit} />);
     const textarea = screen.getByLabelText("Brief content");
     fireEvent.change(textarea, { target: { value: "# Before" } });
-    submitNewRunModal();
+    await submitNewRunModal();
     expect(await screen.findByRole("region", { name: "Brief preflight result" })).toBeInTheDocument();
 
     fireEvent.change(textarea, { target: { value: "# Before\n" } });
@@ -197,8 +209,8 @@ describe("dashboard truthfulness", () => {
     const refreshed = p11Preflight({
       digest: "3".repeat(64),
       findings: [{
-        code: "criterion_instrument_wording",
-        fingerprint: "criterion-warning",
+        code: "terminal_states_missing",
+        fingerprint: "terminal-states-missing",
         level: "warn",
         message: "Refreshed warning",
         consequential: true,
@@ -213,16 +225,16 @@ describe("dashboard truthfulness", () => {
       .mockResolvedValueOnce(undefined);
     render(<NewRunModal open campaigns={[]} onClose={() => {}} onSubmit={onSubmit} />);
     fireEvent.change(screen.getByLabelText("Brief content"), { target: { value: "# Brief" } });
-    submitNewRunModal();
+    await submitNewRunModal();
     expect(await screen.findByText("Initial warning")).toBeInTheDocument();
-    submitNewRunModal();
+    await submitNewRunModal();
 
     expect(await screen.findByText("Refreshed warning")).toBeInTheDocument();
     expect(screen.getByTestId("new-run-modal")).toHaveTextContent("+ New Run");
     expect(screen.getByRole("alert")).toHaveTextContent("Brief changed on the server");
     expect(screen.getByRole("button", { name: "Start run" })).toBeEnabled();
 
-    submitNewRunModal();
+    await submitNewRunModal();
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
     expect(onSubmit.mock.calls[1][1]).toEqual({
       briefPreflightDigest: refreshed.report.digest,
@@ -254,7 +266,6 @@ describe("dashboard truthfulness", () => {
       approvals: { status: "complete", items },
       deferred: { status: "complete", items: [] },
       stale: { status: "complete", items: [] },
-      patches: { status: "complete", items: [], coverage: { succeeded: 0, failed: 0 } },
       campaignCount: 0,
     });
     const review = p11Preflight({
@@ -411,25 +422,6 @@ describe("dashboard truthfulness", () => {
     expect(within(banner).getByRole("link", { name: "Open approval in Inbox" })).toHaveAttribute("href", "/inbox");
   });
 
-  it("keeps legacy plan approval separate from the parked-request inbox", () => {
-    const run: RunDetailData = {
-      runId: "legacy-approval-run",
-      projectDir: "/tmp/project",
-      workflowName: "default",
-      status: "awaiting_approval",
-      stages: [],
-      events: [],
-      stage_outputs: {},
-    };
-    render(<MemoryRouter><RunDetail run={run} /></MemoryRouter>);
-
-    const banner = screen.getByTestId("legacy-approval-banner");
-    expect(banner).toHaveTextContent("Legacy plan approval pending");
-    expect(banner).toHaveTextContent("separate from the consequential-action inbox");
-    expect(screen.queryByRole("link", { name: "Open approval in Inbox" })).not.toBeInTheDocument();
-    expect(screen.queryByTestId("parked-approval-banner")).not.toBeInTheDocument();
-  });
-
   it("uses router-native topbar navigation without a document reload", async () => {
     render(
       <MemoryRouter initialEntries={["/run/r1"]}>
@@ -460,7 +452,6 @@ describe("dashboard truthfulness", () => {
               approvals: { status: "complete", items: [] },
               deferred: { status: "complete", items: [] },
               stale: { status: "complete", items: [] },
-              patches: { status: "complete", items: [], coverage: { succeeded: 0, failed: 0 } },
               campaignCount: 0,
             }
           : undefined;
@@ -700,8 +691,8 @@ describe("dashboard truthfulness", () => {
     expect(screen.getByTestId("stage-output-preview")).toHaveTextContent("trustworthy terminal tail");
   });
 
-  it("explains a terminal stage that produced no output.md without a generic load-failure claim", async () => {
-    vi.mocked(fetchRunStageOutput).mockRejectedValue(new Error("404 Not Found"));
+  it.each([404, 503])("uses HTTP %i rather than error prose to identify missing terminal output", async (status) => {
+    vi.mocked(fetchRunStageOutput).mockRejectedValue(new ApiError("not found in upstream service", status));
     const terminal: RunDetailData = {
       runId: "terminal-without-output",
       projectDir: "/tmp/project",
@@ -716,8 +707,13 @@ describe("dashboard truthfulness", () => {
     disclosure.open = true;
     fireEvent(disclosure, new Event("toggle", { bubbles: true }));
 
-    expect(await screen.findByText("(This terminal stage produced no output.md.)")).toBeInTheDocument();
-    expect(document.body).not.toHaveTextContent("failed to load");
+    if (status === 404) {
+      expect(await screen.findByText("(This terminal stage produced no output.md.)")).toBeInTheDocument();
+      expect(document.body).not.toHaveTextContent("failed to load");
+    } else {
+      expect(await screen.findByText("(The terminal stage output is unavailable: not found in upstream service)")).toBeInTheDocument();
+      expect(document.body).not.toHaveTextContent("This terminal stage produced no output.md.");
+    }
   });
 
   it("shows blocking reality-gate evidence immediately and advisory evidence distinctly", () => {

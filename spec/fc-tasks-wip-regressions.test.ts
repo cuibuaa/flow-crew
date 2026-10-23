@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -283,18 +284,21 @@ describe('session ledger publication regressions', () => {
       import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
       const [moduleUrl, storeRoot, field, value, releasePath] = process.argv.slice(1);
-      const originalMkdir = fs.mkdirSync;
       let reportedContention = false;
-      fs.mkdirSync = (...args) => {
-        try { return originalMkdir(...args); }
-        catch (error) {
-          if (!reportedContention && error.code === 'EEXIST' && String(args[0]).includes('.fc-tasks-lock-')) {
-            reportedContention = true;
-            process.stdout.write('CONTENDED\\n');
+      for (const operation of ['mkdirSync', 'symlinkSync']) {
+        const original = fs[operation];
+        fs[operation] = (...args) => {
+          try { return original(...args); }
+          catch (error) {
+            const target = args[operation === 'symlinkSync' ? 1 : 0];
+            if (!reportedContention && error.code === 'EEXIST' && String(target).includes('.fc-tasks-lock-')) {
+              reportedContention = true;
+              process.stdout.write('CONTENDED\\n');
+            }
+            throw error;
           }
-          throw error;
-        }
-      };
+        };
+      }
       syncBuiltinESMExports();
       const { updateTaskEntry } = await import(moduleUrl);
       const wait = new Int32Array(new SharedArrayBuffer(4));
@@ -424,18 +428,21 @@ describe('session ledger publication regressions', () => {
       const opened = new Map();
       const originalOpen = fs.openSync;
       const originalFsync = fs.fsyncSync;
-      const originalMkdir = fs.mkdirSync;
       let reportedContention = false;
-      fs.mkdirSync = (...args) => {
-        try { return originalMkdir(...args); }
-        catch (error) {
-          if (!reportedContention && error.code === 'EEXIST' && String(args[0]).includes('.fc-tasks-lock-')) {
-            reportedContention = true;
-            process.stdout.write('CONTENDED\\n');
+      for (const operation of ['mkdirSync', 'symlinkSync']) {
+        const original = fs[operation];
+        fs[operation] = (...args) => {
+          try { return original(...args); }
+          catch (error) {
+            const target = args[operation === 'symlinkSync' ? 1 : 0];
+            if (!reportedContention && error.code === 'EEXIST' && String(target).includes('.fc-tasks-lock-')) {
+              reportedContention = true;
+              process.stdout.write('CONTENDED\\n');
+            }
+            throw error;
           }
-          throw error;
-        }
-      };
+        };
+      }
       fs.openSync = (...args) => { const fd = originalOpen(...args); opened.set(fd, String(args[0])); return fd; };
       fs.fsyncSync = (fd) => { events.push(['fsync', opened.get(fd) ?? 'unknown']); return originalFsync(fd); };
       syncBuiltinESMExports();
@@ -655,7 +662,7 @@ describe('session ledger input and CLI regressions', () => {
       'fc_tasks', 'render', '--unknown\nINJECTED\u001b[31m',
     ], { stdout, stderr: { write(_chunk: string) {} }, env: {}, cwd: root });
 
-    expect(code).toBe(2);
+    expect(code).toBe(1);
     expect(stdout.text.trimEnd().split('\n')).toHaveLength(1);
     expect(stdout.text).not.toContain('\u001b');
     expect(stdout.text).toContain('--unknown');

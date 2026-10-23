@@ -1,4 +1,4 @@
-import { publishRunCompletion } from '../sched_policy/run-completion.js';
+import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Collect gate facts and choose exact recovery routes; project verified research settlement. Contract refusal receives only the campaign publisher.
 import { resolveResearchPaths } from '../../research-paths.js';
 import { GateVerdict, RUN_STATUS, ResearchConfig, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir, stageDir } from '../../store.js';
@@ -12,10 +12,9 @@ import { mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { GateContract, loadGateContract } from './gate-contract.js';
-import { readGateVerdict, readGateEvaluation } from './gate-verdict.js';
+import { readGateEvaluation } from './gate-verdict.js';
 import { projectGateVerdict, readGateVerdictDocument } from './gate-evidence.js';
-import { archiveRejectedGateRuntimeFacts, gateArchiveCoordinate } from './gate-archives.js';
-import { gateValidationRefusal } from './gate-validation.js';
+import { archiveRejectedGateRuntimeFacts, archivedGateRejections, gateArchiveCoordinate } from './gate-archives.js';
 
 export interface GateRuntimeFacts {
   allPass: boolean;
@@ -50,33 +49,29 @@ export function classifyGateRecoveryFact(
   authoredVerdict: GateRecoveryFact['authoredVerdict'],
   effectiveVerdict: GateRecoveryFact['effectiveVerdict'],
 ): GateRecoveryFact {
-  const reason = effectiveVerdict?.reason;
-  const explicitEngineContractRejection = authoredVerdict?.pass === true
-    && effectiveVerdict?.pass === false
-    && /^(?:Gate contract violation:|Gate criterion contract violation:|Gate verdict contradiction:|Validation baseline delta\b)/i.test(reason ?? '');
-  const rejectionKind: GateRecoveryFact['rejectionKind'] = effectiveVerdict?.contractViolation
-    ? 'engine_contract_or_evidence_rejection'
-    : authoredVerdict?.pass === false
-    && effectiveVerdict?.pass === false && effectiveVerdict.repairability?.disposition === 'irreparable'
-    ? 'irreparable_rejection'
-    : authoredVerdict?.pass === true && effectiveVerdict?.pass === false
-      && effectiveVerdict.repairability?.disposition === 'repairable'
+  const kind = effectiveVerdict?.refusal?.kind;
+  const rejectionKind: GateRecoveryFact['rejectionKind'] = kind === 'validation_regression'
     ? 'repairable_failure'
-    : explicitEngineContractRejection
+    : kind === 'validation_unresolved' || kind === 'repairability'
     ? 'engine_contract_or_evidence_rejection'
-    : rejectionReportsOmittedOutcome(reason)
-      ? 'omitted_research_outcome'
-      : authoredVerdict?.pass === false
-      ? 'repairable_failure'
-      : authoredVerdict?.pass === true && effectiveVerdict?.pass === false
-        ? 'engine_contract_or_evidence_rejection'
-        : 'unclassified_rejection';
+    : effectiveVerdict?.repairability?.disposition === 'irreparable'
+    ? 'irreparable_rejection'
+    : effectiveVerdict?.pass === false
+      && (effectiveVerdict.repairability?.disposition === 'repairable' || authoredVerdict?.pass === false)
+    ? 'repairable_failure'
+    : kind === 'research_outcome_absent'
+    ? 'omitted_research_outcome'
+    : kind || authoredVerdict?.pass === true && effectiveVerdict?.pass === false
+    ? 'engine_contract_or_evidence_rejection'
+    : effectiveVerdict?.pass === false
+    ? 'repairable_failure'
+    : 'unclassified_rejection';
   return { gateId, authoredVerdict, effectiveVerdict, rejectionKind };
 }
 
 /**
  * Return the non-passing entries from the same raw verdict selected by
- * readGateVerdict. Undefined means that verdict supplied no structured
+ * readGateEvaluation. Undefined means that verdict supplied no structured
  * criterion map, so callers may fall back to admitted refs or the gate ID.
  */
 export function structuredFailingGateCriteria(
@@ -190,33 +185,28 @@ export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreSt
   const evaluations: GateRuntimeFacts['evaluations'] = [];
   for (const g of gateStages) {
     const gateStatus = state.stages[g.id]?.status;
-    const validation = gateStatus === STAGE_STATUS.FAILED && runId ? gateValidationRefusal(projectDir, runId, g.id) : undefined;
-    // A gate only passes after it completed and wrote an explicit pass verdict.
-    // Pending/running/skipped/missing gates in executable branches block completion.
-    if (gateStatus !== STAGE_STATUS.COMPLETE && !validation?.repairability) {
+    // Process completion and semantic acceptance are separate facts.
+    if (gateStatus !== STAGE_STATUS.COMPLETE
+      && !(gateStatus === STAGE_STATUS.FAILED && state.stages[g.id]?.gate?.refusal?.kind === 'validation_regression')) {
       failedGateIds.push(g.id);
-      evaluations.push({
-        id: g.id,
-        status: gateStatus,
-        attempts: state.stages[g.id]?.attempts?.length ?? 0,
-        authoredVerdict: null,
-        effectiveVerdict: null,
-      });
+      evaluations.push({ id: g.id, status: gateStatus, attempts: state.stages[g.id]?.attempts?.length ?? 0,
+        authoredVerdict: null, effectiveVerdict: null });
       continue;
     }
-    const { authoredVerdict, effectiveVerdict: verdict } = validation?.repairability
-      ? { authoredVerdict: validation, effectiveVerdict: validation }
-      : readGateEvaluation(projectDir, g, state, runId, contract);
+    let authoredVerdict = readGateVerdictDocument(runId ? runDir(projectDir, runId) : join(projectDir, 'docs'), g.id)?.project() ?? null;
+    if (!authoredVerdict && runId && !state.stages[g.id]?.gate && !state.stages[g.id]?.acceptedFrom) {
+      const archived = archivedGateRejections(runDir(projectDir, runId), g.id).at(-1);
+      try { authoredVerdict = projectGateVerdict(JSON.parse(readFileSync(archived!.verdictPath, 'utf8'))); }
+      catch { /* No archived authored verdict. */ }
+    }
+    const verdict = readGateEvaluation(projectDir, g.id, runId, contract);
     const recoveryFact = classifyGateRecoveryFact(g.id, authoredVerdict, verdict);
     evaluations.push({
       id: g.id,
       status: gateStatus,
       attempts: state.stages[g.id]?.attempts?.length ?? 0,
       authoredVerdict,
-      effectiveVerdict: verdict ? {
-        ...projectGateVerdict(verdict as unknown as Record<string, unknown>),
-        ...(verdict.contractViolation ? { contractViolation: verdict.contractViolation } : {}),
-      } : null,
+      effectiveVerdict: verdict,
       ...(verdict?.pass === false ? { rejectionKind: recoveryFact.rejectionKind } : {}),
     });
     if (verdict && verdict.pass === true) continue; // explicit pass (contract-honored if any)
@@ -224,8 +214,8 @@ export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreSt
     failedGateIds.push(g.id);
     if (verdict?.pass === false) {
       rejectedGateIds.push(g.id);
-      if (verdict.reason?.startsWith('Gate contract violation: missing required numeric gate value')) {
-        contractRefusals.push({ id: g.id, reason: verdict.reason });
+      if (verdict.refusal?.kind === 'numeric_evidence' || verdict.refusal?.kind === 'validation_unresolved') {
+        contractRefusals.push({ id: g.id, reason: verdict.reason ?? 'Missing numeric gate evidence' });
       }
     }
   }
@@ -276,7 +266,7 @@ export function recoverVerifiedResearchSettlement(
   const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
   for (const gate of [...allStages].reverse()) {
     if (!gate.is_gate || state.stages[gate.id]?.status !== STAGE_STATUS.COMPLETE) continue;
-    const effective = readGateVerdict(projectDir, gate.id, runId, contract, false);
+    const effective = readGateEvaluation(projectDir, gate.id, runId, contract);
     if (effective?.pass !== true) continue;
     let verdictBytes: Buffer;
     let metricBytes: Buffer;
@@ -360,22 +350,10 @@ export function findAllRetryToStages(allStages: StageConfig[], failedGateIds: st
   return allStages.filter(s => referencesFailedGate(s, id => failedSet.has(id)));
 }
 
-export const OMITTED_OUTCOME_REJECTION = /(?:\b(?:no|missing|absent|unavailable)\b.{0,80}\b(?:measurement|measured result|result|outcome|evidence)\b|\b(?:measurement|measured result|outcome)\b.{0,80}\b(?:missing|absent|unavailable)\b)/i;
-
-export const NEGATED_OUTCOME_OMISSION = /(?:\b(?:no|not|without)\s+(?:longer\s+)?(?:missing|absent|unavailable)\b.{0,80}\b(?:measurement|measured result|result|outcome|evidence)\b|\bno\s+(?:measurement|measured result|result|outcome|evidence)\b.{0,40}\b(?:is|are|was|were|remains?)\s+(?:missing|absent|unavailable)\b|\b(?:measurement|measured result|result|outcome|evidence)\b.{0,40}\b(?:is|are|was|were|remains?)\s+(?:not|no longer)\s+(?:missing|absent|unavailable)\b)/i;
-
-export function rejectionReportsOmittedOutcome(reason: string | undefined): boolean {
-  if (!reason || NEGATED_OUTCOME_OMISSION.test(reason)) return false;
-  return OMITTED_OUTCOME_REJECTION.test(reason);
-}
-
-/** Add a completed research outcome producer only when the gate's effective
- * reason says the outcome itself is absent. Ordinary report-quality rejection
- * continues to select only retry_to repair stages. */
+/** Typed engine omissions may rerun an outcome producer; model prose cannot. */
 export function findGateRecoveryStages(
   allStages: StageConfig[],
   rejectedGateIds: string[],
-  rejectionReasons: Readonly<Record<string, string | undefined>>,
   research?: ResearchConfig,
   rejectionFacts: Readonly<Record<string, GateRecoveryFact | undefined>> = {},
 ): StageConfig[] {
@@ -385,10 +363,7 @@ export function findGateRecoveryStages(
   const outcomePaths = paths ? [paths.resultFile, `${paths.resultFile}.no_candidate.json`] : [];
   for (const gateId of rejectedGateIds) {
     const fact = rejectionFacts[gateId];
-    const rejectionKind = fact?.rejectionKind
-      ?? (rejectionReportsOmittedOutcome(rejectionReasons[gateId])
-        ? 'omitted_research_outcome'
-        : 'unclassified_rejection');
+    const rejectionKind = fact?.rejectionKind ?? 'unclassified_rejection';
 
     if (rejectionKind === 'irreparable_rejection') continue;
 
@@ -478,44 +453,6 @@ export function isResearchOutcomeGate(
   ));
 }
 
-export function lastGatePassed(state: StoreState, dispatchedStageIds: string[], allStages: StageConfig[], projectDir?: string, runId?: string): boolean {
-  // If there are is_gate stages, use verdict-based checking
-  const gateStages = allStages.filter(s => s.is_gate && dispatchedStageIds.includes(s.id));
-  if (gateStages.length > 0 && projectDir) {
-    const { allPass } = checkGates(allStages, state, projectDir, runId);
-    return allPass;
-  }
-
-  // No is_gate stages: check verdict.json (legacy) then exit codes
-  if (projectDir) {
-    const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
-    const verdictPath = join(base, 'verdict.json');
-    try {
-      const verdict = JSON.parse(readFileSync(verdictPath, 'utf-8'));
-      return verdict.pass === true;
-    } catch { /* no verdict.json — fall through to exit code check */ }
-  }
-
-  // Find terminal stages
-  const hasDependent = new Set<string>();
-  for (const s of allStages) {
-    if (dispatchedStageIds.includes(s.id)) {
-      for (const dep of s.depends_on ?? []) {
-        if (dispatchedStageIds.includes(dep)) hasDependent.add(dep);
-      }
-    }
-  }
-  const terminalIds = dispatchedStageIds.filter(id => !hasDependent.has(id));
-  if (terminalIds.length === 0) return true;
-
-  return terminalIds.every(id => {
-    const ss = state.stages[id];
-    if (!ss) return false;
-    if (ss.status === STAGE_STATUS.SKIPPED) return true;
-    return ss.status === STAGE_STATUS.COMPLETE && (ss.exitCode === undefined || ss.exitCode === 0);
-  });
-}
-
 export function createGateContractRefusalHandler(writeCampaignEntry: (projectDir: string, state: StoreState) => void) {
   function terminateForGateContractRefusal(
     state: StoreState,
@@ -533,13 +470,12 @@ export function createGateContractRefusalHandler(writeCampaignEntry: (projectDir
       : facts.contractRefusals
       .map((refusal) => `${refusal.id}: ${refusal.reason}`)
       .join('; ');
-    state.status = irreparable.length > 0 ? RUN_STATUS.ESCALATED : RUN_STATUS.FAILED;
-    state.failureReason = `${irreparable.length > 0 ? 'Irreparable gate rejection' : 'Gate contract refusal'} before repair dispatch — ${detail}`;
-    state.completedAt = new Date().toISOString();
-    publishRunCompletion(state, projectDir, runId, () => ({
-      iteration,
-      detail: state.failureReason,
-    }), writeCampaignEntry);
+    concludeRun(state, {
+      status: irreparable.length > 0 ? RUN_STATUS.ESCALATED : RUN_STATUS.FAILED,
+      reasonCode: irreparable.length > 0 ? 'irreparable_gate_rejection' : 'gate_contract_refusal',
+      detail: `${irreparable.length > 0 ? 'Irreparable gate rejection' : 'Gate contract refusal'} before repair dispatch — ${detail}`,
+      eventFields: () => ({ iteration, detail: state.failureReason }), writeCampaignEntry,
+    });
     log.error({ runId, iteration, contractRefusals: facts.contractRefusals }, 'Gate contract refused before product repair');
     return true;
   }

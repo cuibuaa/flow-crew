@@ -6,10 +6,10 @@ import { execWithStdin, type Adapter } from '../src/adapters/base.js';
 import { archiveDeclaredOutputs } from '../src/declared-output-archive.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
 import { HANDOFF_SCHEMA } from '../src/handoff.js';
-import { scopeRevisionContract } from '../src/live-constraint-guard.js';
 import { runStateContext } from '../src/run-state-access.js';
-import { readGateVerdict } from '../src/scheduler.js';
-import { createRun, fcGlobalDir, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { readGateEvaluation } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 
 let root: string, project: string, directory: string, runId: string, previousStore: string;
@@ -22,16 +22,14 @@ beforeEach(() => {
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
 const role = { name: 'reviewer', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Review the candidate.' };
-const stageOptions = () => ({ stageId: 'review', role, dependsOn: [], promptTemplate: scopeRevisionContract({
-  runDir: directory, runId, stageId: 'review', attemptIndex: 1, scope: [], scopePresence: 'present', gate: true,
-}), projectDir: project, runId, runDir: directory, retries: 0, timeout_ms: 10000, projectWriteScope: [],
-outputSchema: HANDOFF_SCHEMA, artifactContract: { version: 1 as const, produces: [], reads: [], groups: [], replays: [] } });
+const stageOptions = () => ({ stageId: 'review', role, dependsOn: [], promptTemplate: 'Review the required project work.', projectDir: project, runId, runDir: directory, retries: 0, timeout_ms: 10000,
+outputSchema: HANDOFF_SCHEMA, artifactContract: { version: 1 as const, produces: [], reads: [], groups: [] } });
 const delivered = () => ({ output: JSON.stringify({ status: 'delivered', summary: 'Reviewed', files_modified: [], checks: [], caveats: [] }), exitCode: 0, duration_ms: 1 });
 function declare(path = 'report.md', expectedType: 'file' | 'directory' = 'file') {
   updateRunState(project, runId, state => { state.declaredOutputs = [{ path, expectedType }]; });
   writeFileSync(join(directory, 'verdict_review.json'), '{"pass":true}');
 }
-const verdict = () => readGateVerdict(project, 'review', runId, undefined, false, false);
+const verdict = () => readGateEvaluation(project, 'review', runId, undefined, false);
 
 describe('stage writes follow the run product contract', () => {
   it('puts protected products after conflicting GUIDE in the reviewer input and archives the retained report', async () => {

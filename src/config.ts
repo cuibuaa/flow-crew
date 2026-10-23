@@ -3,103 +3,37 @@ import { readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import { isRecognizedLiveConstraintExemptPattern } from './generated-path-policy.js';
+import { z } from 'zod';
 
-// --- Types ---
-
-export interface EngineDefaults {
-  timeout_ms: number;
-  /** Longest interval without attempt-bound output, artifact, or process progress. */
-  stage_idle_timeout_ms: number;
-  /** Wall clock a single validation command (build/test/lint) may take before it
-   * is killed. A project's suite grows as rounds add tests, and ship-setup runs
-   * the suite twice -- source baseline and target baseline -- so this has to
-   * exceed the slowest of them under whatever else the machine is doing. See
-   * defaults.yaml. */
-  validation_timeout_ms: number;
-  /** Untracked tool output excluded from input content and write enforcement. */
-  live_constraint_exempt_patterns: string[];
-  /** Portable full-tree reconciliation cadence when recursive watching is unavailable. */
-  live_constraint_fallback_scan_ms: number;
-  /** Longest interval without a completed live-constraint scan. */
-  live_constraint_monitor_deadline_ms: number;
-  /** Scheduler-loop progress publication cadence. */
-  scheduler_heartbeat_interval_ms: number;
-  /** Nonadvancing duration before the independent observer warns. */
-  scheduler_stall_threshold_ms: number;
-  /** Independent observer polling cadence. */
-  scheduler_stall_observer_poll_ms: number;
-  /** Dedicated bound for potentially large `git worktree add` checkouts. */
-  git_worktree_add_timeout_ms: number;
-  max_iterations: number;
-  gate_retry_loops: number;
-  stage_technical_retries: number;
-  /** Bounded re-plan budget for a plan (dynamic_dispatch) stage that exits 0 but emits zero valid injected stages. See defaults.yaml. */
-  plan_stage_retries: number;
-  model: string;
-  reasoning_effort: string;
-  adapter: string;
-  /** UUID-scoped cross-stage Codex resume. Defaults off until measured benefit justifies enabling. */
-  sessionReuse: boolean;
-}
+// Preserve the numeric budget contract: unrestricted numbers retain their value;
+// only the existing positive time bounds require finite values and floor them.
+const numeric = z.custom<number>((value) => typeof value === 'number');
+const positive = numeric.refine((value) => Number.isFinite(value) && value > 0).transform(Math.floor);
+const nonempty = z.string().min(1);
+const EngineDefaultsSchema = z.object({
+  default_timeout_ms: numeric,
+  stage_idle_timeout_ms: positive,
+  validation_timeout_ms: numeric,
+  scheduler_heartbeat_interval_ms: positive,
+  scheduler_stall_threshold_ms: positive,
+  scheduler_stall_observer_poll_ms: positive,
+  git_worktree_add_timeout_ms: positive,
+  max_iterations: numeric,
+  gate_retry_loops: numeric,
+  stage_technical_retries: numeric,
+  plan_stage_retries: numeric,
+  model: nonempty,
+  reasoning_effort: nonempty,
+  adapter: nonempty,
+  session_reuse: z.boolean(),
+});
+export type EngineDefaults = z.infer<typeof EngineDefaultsSchema>;
 
 /** The installed engine owns configuration; the working directory is irrelevant. */
 export const engineConfigDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'config');
 
 let _cache: EngineDefaults | null = null;
 let _cacheMtime = 0;
-
-function numberValue(raw: Record<string, unknown>, key: string): number {
-  const value = raw[key];
-  if (typeof value !== 'number') throw new Error(`config/defaults.yaml missing numeric ${key}`);
-  return value;
-}
-
-function stringValue(raw: Record<string, unknown>, key: string): string {
-  const value = raw[key];
-  if (typeof value !== 'string' || !value) throw new Error(`config/defaults.yaml missing string ${key}`);
-  return value;
-}
-
-function booleanValue(raw: Record<string, unknown>, key: string): boolean {
-  const value = raw[key];
-  if (typeof value !== 'boolean') throw new Error(`config/defaults.yaml missing boolean ${key}`);
-  return value;
-}
-
-function positiveNumberValue(raw: Record<string, unknown>, key: string): number {
-  const value = numberValue(raw, key);
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`config/defaults.yaml ${key} must be a positive finite number`);
-  }
-  return Math.floor(value);
-}
-
-function liveConstraintExemptPatternsValue(
-  raw: Record<string, unknown>,
-): string[] {
-  const key = 'live_constraint_exempt_patterns';
-  const value = raw[key];
-  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string' && entry.trim())) {
-    throw new Error(`config/defaults.yaml ${key} must be an array of non-empty strings`);
-  }
-  const patterns = [...new Set(value.map((entry) => String(entry).trim().replace(/\\/g, '/')))];
-  for (const pattern of patterns) {
-    const segments = pattern.split('/');
-    const recognizedGeneratedPattern = isRecognizedLiveConstraintExemptPattern(pattern);
-    if (
-      pattern.startsWith('/')
-      || /^[A-Za-z]:\//.test(pattern)
-      || segments.includes('..')
-      || !recognizedGeneratedPattern
-    ) {
-      throw new Error(
-        `config/defaults.yaml ${key} contains unsafe non-cache pattern ${JSON.stringify(pattern)}`,
-      );
-    }
-  }
-  return patterns;
-}
 
 // --- Campaign identity ---
 
@@ -160,27 +94,7 @@ export function loadEngineDefaults(): EngineDefaults {
   const mtime = statSync(p).mtimeMs;
   if (_cache && mtime === _cacheMtime) return _cache;
 
-  const raw = parseYaml(readFileSync(p, 'utf-8')) as Record<string, unknown>;
-  const parsed: EngineDefaults = {
-    timeout_ms: numberValue(raw, 'default_timeout_ms'),
-    stage_idle_timeout_ms: positiveNumberValue(raw, 'default_stage_idle_timeout_ms'),
-    validation_timeout_ms: numberValue(raw, 'default_validation_timeout_ms'),
-    live_constraint_exempt_patterns: liveConstraintExemptPatternsValue(raw),
-    live_constraint_fallback_scan_ms: positiveNumberValue(raw, 'live_constraint_fallback_scan_ms'),
-    live_constraint_monitor_deadline_ms: positiveNumberValue(raw, 'live_constraint_monitor_deadline_ms'),
-    scheduler_heartbeat_interval_ms: positiveNumberValue(raw, 'scheduler_heartbeat_interval_ms'),
-    scheduler_stall_threshold_ms: positiveNumberValue(raw, 'scheduler_stall_threshold_ms'),
-    scheduler_stall_observer_poll_ms: positiveNumberValue(raw, 'scheduler_stall_observer_poll_ms'),
-    git_worktree_add_timeout_ms: positiveNumberValue(raw, 'git_worktree_add_timeout_ms'),
-    max_iterations: numberValue(raw, 'default_max_iterations'),
-    gate_retry_loops: numberValue(raw, 'default_gate_retry_loops'),
-    stage_technical_retries: numberValue(raw, 'default_stage_technical_retries'),
-    plan_stage_retries: numberValue(raw, 'default_plan_stage_retries'),
-    model: stringValue(raw, 'model'),
-    reasoning_effort: stringValue(raw, 'reasoning_effort'),
-    adapter: stringValue(raw, 'adapter'),
-    sessionReuse: booleanValue(raw, 'session_reuse'),
-  };
+  const parsed = EngineDefaultsSchema.parse(parseYaml(readFileSync(p, 'utf-8')));
   // Commit the cache key only after the file has parsed and validated. If an
   // edit is malformed, every read must keep reporting that error rather than
   // treating a previous value as the cache entry for the broken mtime.
@@ -194,14 +108,5 @@ export function isSessionReuseEnabled(): boolean {
   const override = process.env.FC_SESSION_REUSE;
   if (override === '0') return false;
   if (override === '1') return true;
-  return loadEngineDefaults().sessionReuse;
-}
-
-export function getDefaultTimeout(): string {
-  return String(loadEngineDefaults().timeout_ms);
-}
-
-export function resetConfigCache(): void {
-  _cache = null;
-  _cacheMtime = 0;
+  return loadEngineDefaults().session_reuse;
 }

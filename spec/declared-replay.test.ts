@@ -1,15 +1,17 @@
+import './test-support/policy-runtime.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
-import { ArtifactContractSchema, RecordedArtifactContractSchema, inspectArtifactDeclarations } from '../src/artifact-declarations.js';
+import { ArtifactContractSchema, inspectArtifactDeclarations } from '../src/artifact-declarations.js';
 import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
 import { inspectDeclaredStageReads } from '../src/declared-artifact-audit.js';
 import { inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, normalizeStageContracts, runWorkflow, StageConfigSchema, WorkflowConfigSchema } from '../src/scheduler.js';
 import { parseChecksFromMarkdown, runAllChecks } from '../src/reality-gate/index.js';
-import { createRun, runDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { runDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import type { AgentConfig } from '../src/adapters/base.js';
 
@@ -23,7 +25,7 @@ function fixture() {
 describe('artifact locations and historical observations', () => {
   it('preserves concurrent ownership and unbound read protections', () => {
     const f = fixture();
-    const c = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'data', root: 'project', path: 'data.json' }], reads: [], replays: [] });
+    const c = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'data', root: 'project', path: 'data.json' }], reads: [] });
     const writer = { id: 'writer', depends_on: [], artifact_contract: c };
     const runOutput = { ...c, produces: [{ ...c.produces[0], root: 'run' as const, path: 'shared.json' }] };
     expect(inspectArtifactDeclarations({ stages: [{ ...writer, artifact_contract: runOutput }, { ...writer, id: 'other', artifact_contract: runOutput }] }).join('\n')).toContain('ARTIFACT_OUTPUT_CONCURRENT_OWNERS');
@@ -33,12 +35,10 @@ describe('artifact locations and historical observations', () => {
   it('normalizes omitted duties without waiving an unrelated dependency refusal', () => {
     const raw = { id: 'work', role: 'coder', depends_on: ['missing'], dependency_reasons: { missing: 'Consumes evidence' }, scope: [], prompt_template: 'Write prose.md' };
     const stage = parseDispatchedStageConfig(raw);
-    expect(stage.artifact_contract).toMatchObject({produces:[],reads:[],replays:[]});
+    expect(stage.artifact_contract).toMatchObject({produces:[],reads:[]});
     const report = inspectDispatchAdmission({ dispatched: [stage], baseStages: [], dispatchStageId: 'plan' });
-    expect(report.errors.some((error) => error.includes('ARTIFACT_DECLARATION_REQUIRED'))).toBe(false);
-    expect(report.errors.some((error) => error.includes('unknown'))).toBe(true);
-    expect(RecordedArtifactContractSchema.parse({ version: 1, produces: [], reads: [] }).replays).toBeUndefined();
-    expect(ArtifactContractSchema.parse({ version: 1, produces: [], reads: [] }).replays).toBeUndefined();
+    expect(report.errors.some((error) => error.message.includes('ARTIFACT_DECLARATION_REQUIRED'))).toBe(false);
+    expect(report.errors.some((error) => error.message.includes('unknown'))).toBe(true);
   });
   it('launches omitted static contracts through the same ordinary and gate defaults as live stages', async () => {
     const f = fixture(); const invoked: string[] = [];
@@ -80,7 +80,7 @@ describe('artifact locations and historical observations', () => {
     expect(invoked).toBe(false); expect(existsSync(join(f.project, '.fc'))).toBe(false);
   });
   it('retains engine-path and outward-link refusals for declared outputs', () => {
-    const f = fixture(); const c = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: 'events.jsonl' }], reads: [], replays: [] });
+    const f = fixture(); const c = ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: 'events.jsonl' }], reads: [] });
     expect(inspectArtifactDeclarations({ stages: [{ id: 'work', depends_on: [], artifact_contract: c }], projectDir: f.project, runDir: f.directory }).join('\n')).toContain('ARTIFACT_FRAMEWORK_PATH');
     symlinkSync(f.root, join(f.project, 'outward'), 'dir'); c.produces[0] = { ...c.produces[0], root: 'project', path: 'outward/file.json' };
     expect(inspectArtifactDeclarations({ stages: [{ id: 'work', depends_on: [], artifact_contract: c }], projectDir: f.project, runDir: f.directory }).join('\n')).toContain('ARTIFACT_PATH_ESCAPE');

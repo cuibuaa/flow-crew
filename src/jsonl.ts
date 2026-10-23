@@ -42,9 +42,14 @@ export function readJsonlFileWithDiagnostics<T>(path: string, cursor?: JsonlRead
       cursor.offset += end;
     } finally { closeSync(fd); }
   }
+  return parseJsonlWithDiagnostics<T>(raw);
+}
+
+/** Parse already-observed bytes without bypassing a caller's read fence or byte bound. */
+export function parseJsonlWithDiagnostics<T>(raw: string | readonly string[]): JsonlReadDiagnostics<T> {
   const rows: T[] = [];
   let unreadableRecords = 0;
-  for (const line of raw.split('\n')) {
+  for (const line of typeof raw === 'string' ? raw.split('\n') : raw) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
@@ -55,6 +60,10 @@ export function readJsonlFileWithDiagnostics<T>(path: string, cursor?: JsonlRead
     }
   }
   return { rows, unreadableRecords };
+}
+
+export function parseJsonl<T>(raw: string | readonly string[]): T[] {
+  return parseJsonlWithDiagnostics<T>(raw).rows;
 }
 
 export function readJsonlFile<T>(path: string, cursor?: JsonlReadCursor): T[] {

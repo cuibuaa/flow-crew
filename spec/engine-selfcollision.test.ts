@@ -6,37 +6,22 @@ import {
   type DaemonLoadedBuildProbe,
   type ShipPreflightDependencies,
 } from '../src/cli-ship-preflight.js';
-import { findDeployedDistConsumers } from '../src/daemon-identity.js';
 import {
   renderFcTasks,
   type FcTaskEntry,
   type FcTaskRunResolver,
   type LedgerReadResult,
 } from '../src/fc-tasks.js';
-import { GENERATED_PATH_POLICIES, stableGeneratedScope } from '../src/generated-path-policy.js';
-import { LiveConstraintGuard } from '../src/live-constraint-guard.js';
 import type {
   ProjectValidationBaseline,
   ValidationCommandResult,
   ValidationCommandRunner,
 } from '../src/project-validation.js';
-import { scopePathDigest, type ScopeRevisionRequestV1 } from '../src/runtime-negotiation.js';
-import {
-  captureRepairRoundSnapshot,
-  decideScopeRevision,
-  inspectDispatchAdmission,
-  parseBriefFrontmatter,
-  parseDispatchedStageConfig,
-  readGateVerdict,
-  recordGateValidationDelta,
-  restoreProjectPath,
-  writeCampaignEntry,
-  type StageConfig,
-} from '../src/scheduler.js';
+import { captureRepairRoundSnapshot, inspectDispatchAdmission, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, restoreProjectPath, writeCampaignEntry, type StageConfig } from '../src/scheduler.js';
 import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js';
+import { createRun } from './test-support/create-run.js';
 import {
   campaignsRoot,
-  createRun,
   fcGlobalDir,
   readRunState,
   RUN_STATUS,
@@ -187,8 +172,8 @@ function seedCampaignPhase(
   state.campaignId = campaignStorageKey;
   state.campaignStorageKey = campaignStorageKey;
   state.campaignName = campaignStorageKey;
-  state.research = { baseline: 0, policy: 'best_of_n' };
-  state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], [], []), id: 'qa', role: 'qa', is_gate: true })];
+  state.research = { baseline: 0, policy: 'greedy_stack' };
+  state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []), id: 'qa', role: 'qa', is_gate: true })];
   state.stages.qa = { status: 'complete', retries: 0 };
   write(join(created.runDirPath, 'verdict_qa.json'), `${JSON.stringify({
     pass: true, phase: 'research', phaseComplete: false,
@@ -209,8 +194,7 @@ function linkedWorktree(root: string, name: string, common: string): string {
 afterEach(async () => {
   try {
     const events = await import('../src/run-events.js');
-    events.clearAttemptSummaryRefreshDebounce();
-  } catch { /* module may not have loaded */ }
+    } catch { /* module may not have loaded */ }
   setFcGlobalDir(originalFcRoot);
   appendFault.eventPath = '';
   appendFault.needle = '';
@@ -232,7 +216,7 @@ describe('engine self-collision after-state replays and controls', () => {
       '---',
       'research:',
       '  baseline: 0',
-      '  policy: best_of_n',
+      '  policy: greedy_stack',
       '  result_file: artifacts/round.json',
       '  report_dir: artifacts',
       '---',
@@ -244,26 +228,9 @@ describe('engine self-collision after-state replays and controls', () => {
       research,
     });
 
-    const aborts: string[] = [];
-    const guard = new LiveConstraintGuard({
-      projectDir,
-      runDir: runDirectory,
-      stageId: 'terminal_report',
-      attemptIndex: 1,
-      effectiveScope: () => [],
-      watchProject: () => undefined,
-      fallbackScanMs: 60_000,
-      monitorDeadlineMs: 60_000,
-      scopeRevisionInstruction: () => 'unused',
-      scanAndRestore: () => ({ scannedPaths: 1, violations: [] }),
-    });
-    const monitor = guard.beginInvocation(1, (reason) => aborts.push(reason));
     writeCampaignEntry(projectDir, state);
-    const schedulerResult = await monitor.finish();
     expect(existsSync(globalPath)).toBe(true);
     expect(existsSync(localPath)).toBe(false);
-    expect(schedulerResult.incidents).toEqual([]);
-    expect(aborts).toEqual([]);
 
     write(localPath, 'stage-authored\n');
     const restored = restoreProjectPath(projectDir, localRelative, {
@@ -276,8 +243,6 @@ describe('engine self-collision after-state replays and controls', () => {
     recordAfter(1, 'write a scored campaign row while an empty-scope stage guard is active', {
       engineWrite: { path: globalPath.slice(root.length + 1), projectRelative: false },
       projectLedgerExists: existsSync(localPath),
-      guardIncidents: schedulerResult.incidents,
-      aborts,
       frameworkReservedScopes: reservation.frameworkReservedScopes,
       control: { actor: 'stage', path: localRelative, restored },
     });
@@ -324,70 +289,6 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it('3 — admits future scope independently of past generated or ordinary churn', () => {
-    const fixtures = new Map<string, string>([
-      [`${dependencyDirectory}/.vite/vitest/**`, `${dependencyDirectory}/.vite/vitest/${'a'.repeat(40)}/results.json`],
-      ['.cache/build-generations/**', `.cache/build-generations/${'b'.repeat(64)}/.flowcrew-build-manifest.json`],
-    ]);
-    const decide = (requestedPath: string, member: string, label: string) => {
-      const root = temporaryRoot(`item-3-${label}`);
-      const projectDir = join(root, 'project');
-      const stateRoot = join(root, 'state');
-      mkdirSync(projectDir, { recursive: true });
-      setFcGlobalDir(stateRoot);
-      const created = createRun(projectDir, 'scope-fixture', 'name: scope-fixture', ['writer']);
-      write(join(projectDir, member), 'before\n');
-      const snapshot = captureRepairRoundSnapshot(
-        projectDir,
-        [stage({ id: 'snapshot', scope: [requestedPath] })],
-        { runDirPath: created.runDirPath },
-      );
-      writeFileSync(join(projectDir, member), 'after with the same pathname\n');
-      const request: ScopeRevisionRequestV1 = {
-        version: 1,
-        kind: 'scope_revision',
-        requestId: `generated-${label}`,
-        runId: created.runId,
-        stageId: 'writer',
-        attemptIndex: 1,
-        requestedBy: 'stage',
-        requestedPaths: [requestedPath],
-        pathDigest: scopePathDigest([requestedPath]),
-        reason: 'configured command owns this generated tree',
-      };
-      return decideScopeRevision({
-        request,
-        stage: stage({ id: 'writer', scope: [] }),
-        priorScope: [],
-        activePeers: [],
-        projectDir,
-        runId: created.runId,
-        attemptIndex: 1,
-        snapshot,
-      });
-    };
-    const generated = GENERATED_PATH_POLICIES
-      .filter((policy) => policy.contentAddressedMember && policy.stableScope)
-      .map((policy) => {
-        const member = fixtures.get(policy.stableScope!)!;
-        return { stableScope: policy.stableScope, member, decision: decide(policy.stableScope!, member, member.length.toString()) };
-      });
-    expect(generated.every(({ decision }) => decision.accepted)).toBe(true);
-    const ordinary = decide('src/generated/**', 'src/generated/ordinary.ts', 'ordinary');
-    expect(ordinary).toMatchObject({ accepted: true, decision: 'accepted' });
-    const generatedMember = fixtures.get('.cache/build-generations/**')!;
-    const literal = decide(generatedMember, generatedMember, 'literal');
-    expect(literal).toMatchObject({ accepted: true, decision: 'accepted' });
-
-    recordAfter(3, 'rewrite each recognized content-addressed member, request its stable parent, then exercise ordinary and literal controls', {
-      generated,
-      ordinaryControl: ordinary,
-      literalGeneratedControl: literal,
-      projectionPositive: stableGeneratedScope(generatedMember),
-      projectionNegative: stableGeneratedScope('src/generated/ordinary.ts') ?? null,
-    });
-  });
-
   it('5 — rejects a prior-attempt delta by execution identity and preserves immutable attempt evidence', async () => {
     const root = temporaryRoot('item-5');
     const projectDir = join(root, 'project');
@@ -419,7 +320,7 @@ describe('engine self-collision after-state replays and controls', () => {
         stdout: 'TAP version 13\nnot ok 1 - spec/regression-a.test.ts\nnot ok 2 - spec/regression-b.test.ts\nnot ok 3 - spec/regression-c.test.ts\n1..3\n# tests 3\n# pass 0\n# fail 3\n',
       }),
     });
-    const currentRegression = readGateVerdict(projectDir, 'qa', created.runId);
+    const currentRegression = readGateEvaluation(projectDir, 'qa', created.runId);
     expect(currentRegression).toMatchObject({ pass: false, reason: expect.stringContaining('recorded regressions') });
     const immutableFailure = readFileSync(join(created.runDirPath, failed!.immutablePath!), 'utf-8');
     const second = {
@@ -433,7 +334,7 @@ describe('engine self-collision after-state replays and controls', () => {
       reason: 'repair complete; no new failing identifiers',
       recordedAt: new Date().toISOString(),
     })}\n`);
-    const stale = readGateVerdict(projectDir, 'qa', created.runId);
+    const stale = readGateEvaluation(projectDir, 'qa', created.runId);
     expect(stale).toMatchObject({ pass: false, reason: expect.stringContaining('not current execution') });
     expect(stale?.reason).toContain('run configured validation for the current gate attempt');
 
@@ -444,7 +345,7 @@ describe('engine self-collision after-state replays and controls', () => {
         stdout: 'TAP version 13\nok 1 - spec/repaired.test.ts\n1..1\n# tests 1\n# pass 1\n# fail 0\n',
       }),
     });
-    expect(readGateVerdict(projectDir, 'qa', created.runId)).toMatchObject({ pass: true });
+    expect(readGateEvaluation(projectDir, 'qa', created.runId)).toMatchObject({ pass: true });
     expect(JSON.parse(immutableFailure)).toMatchObject({
       attemptIndex: 1,
       pass: false,
@@ -458,142 +359,7 @@ describe('engine self-collision after-state replays and controls', () => {
       failedDelta: failed,
       passingDelta: passing,
       immutableAttemptOneStillFailing: JSON.parse(immutableFailure),
-      currentDecision: readGateVerdict(projectDir, 'qa', created.runId),
-    });
-  });
-
-  it('6 — records configured-command intent without turning validation by-products into stage scope', () => {
-    const root = temporaryRoot('item-6');
-    const projectDir = join(root, 'project');
-    mkdirSync(projectDir, { recursive: true });
-    write(join(projectDir, 'package.json'), JSON.stringify({
-      scripts: {
-        build: 'compile',
-        test: 'vitest run',
-        lint: 'style',
-        'build:ui': 'cd ui && npm run build',
-      },
-      devDependencies: { vitest: 'fixture' },
-    }));
-    write(join(projectDir, 'package-lock.json'), '{}\n');
-    write(join(projectDir, 'tsconfig.json'), JSON.stringify({
-      compilerOptions: { outDir: 'dist', tsBuildInfoFile: '.cache/tsc.tsbuildinfo' },
-    }));
-    write(join(projectDir, 'ui', 'package.json'), JSON.stringify({
-      scripts: { build: 'vite build' },
-      devDependencies: { vite: 'fixture' },
-    }));
-    const generatedScopes = [
-      '.cache/**',
-      'dist/**',
-      `${dependencyDirectory}/.vite/**`,
-      `${dependencyDirectory}/.vite-temp/**`,
-      'ui/dist/**',
-      `ui/${dependencyDirectory}/.vite/**`,
-      `ui/${dependencyDirectory}/.vite-temp/**`,
-    ];
-    const implementation = Array.from({ length: 6 }, (_value, index) => stage({
-      id: `implement_${index + 1}`,
-      prompt_template: 'Implement the assigned change and run npm run build plus npm test before finishing.',
-      scope: [],
-    }));
-    const wrong = [
-      ...implementation,
-      stage({ id: 'write_report', prompt_template: 'Write the final report.', scope: generatedScopes }),
-      stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_gate.json" }], [], [], []), id: 'gate', role: 'qa', is_gate: true, prompt_template: 'Run npm run build, npm run test, and npm run lint.', scope: generatedScopes }),
-      stage({ id: 'repair', prompt_template: 'Repair the gate and rerun npm test.', scope: generatedScopes,
-        depends_on: ['gate'], dependency_reasons: { gate: 'Correct the gate rejection.' }, retry_to: ['gate'] }),
-    ];
-    const zeroScope = inspectDispatchAdmission({
-      dispatched: wrong, baseStages: [], dispatchStageId: 'plan', projectDir,
-    });
-    expect(zeroScope.pass, zeroScope.errors.join('\n')).toBe(true);
-    expect(zeroScope.errors.filter((error) => error.includes('lacks generated output capabilities'))).toEqual([]);
-
-    const corrected = wrong.map((candidate) => candidate.id === 'write_report'
-      ? { ...candidate, scope: [] }
-      : { ...candidate, scope: [...generatedScopes] });
-    const accepted = inspectDispatchAdmission({
-      dispatched: corrected, baseStages: [], dispatchStageId: 'plan', projectDir,
-    });
-    expect(accepted.pass, accepted.errors.join('\n')).toBe(true);
-    expect(accepted.configuredCommandScopes).toEqual([...generatedScopes].sort());
-    expect(accepted.configuredCommandStageRoles).not.toHaveProperty('write_report');
-
-    const inert = inspectDispatchAdmission({
-      dispatched: [
-        stage({ id: 'owner', prompt_template: 'Run npm run test.', scope: generatedScopes }),
-        stage({ id: 'sentence', prompt_template: 'Audit the result. Run npm run build.', scope: generatedScopes }),
-        stage({ id: 'capture', prompt_template: 'Capture npm run lint directly.', scope: generatedScopes }),
-        stage({ id: 'rerun', prompt_template: 'Re-run npm test after repair.', scope: generatedScopes }),
-        stage({ id: 'described', prompt_template: 'Run the configured test command before finishing.', scope: generatedScopes }),
-        stage({ id: 'verify', prompt_template: 'After implementation, verify with npm run test before finishing.', scope: generatedScopes }),
-        stage({ id: 'negated', prompt_template: 'Do not run npm run test; summarize its existing result.', scope: [] }),
-        stage({ id: 'negated_verify', prompt_template: 'Do not verify with npm run test; summarize its existing result.', scope: [] }),
-        stage({ id: 'quoted', prompt_template: 'Example only:\n```\nnpm run test\n```', scope: [] }),
-      ],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      projectDir,
-    });
-    expect(inert.pass, inert.errors.join('\n')).toBe(true);
-    expect(inert.configuredCommandStageRoles).toEqual({
-      capture: ['lint'], described: ['test'], owner: ['test'], rerun: ['test'], sentence: ['build'], verify: ['test'],
-    });
-
-    const absent = inspectDispatchAdmission({
-      dispatched: [stage({ id: 'runner', prompt_template: 'Run npm run test.', scope: [] })],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      projectDir,
-    });
-    const partial = inspectDispatchAdmission({
-      dispatched: [stage({ id: 'runner', prompt_template: 'Run npm run test.', scope: ['.cache/**'] })],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      projectDir,
-    });
-    const ordinaryImperative = inspectDispatchAdmission({
-      dispatched: [stage({
-        id: 'runner',
-        prompt_template: 'After implementation, verify with npm run test before finishing.',
-        scope: [],
-      })],
-      baseStages: [],
-      dispatchStageId: 'plan',
-      projectDir,
-    });
-    expect(absent.pass, absent.errors.join('\n')).toBe(true);
-    expect(absent.configuredCommandScopes).toEqual([...generatedScopes].sort());
-    expect(partial.pass, partial.errors.join('\n')).toBe(true);
-    expect(partial.errors.join('\n')).not.toContain('dist/**');
-    expect(ordinaryImperative.pass, ordinaryImperative.errors.join('\n')).toBe(true);
-    expect(ordinaryImperative.configuredCommandStageRoles).toEqual({ runner: ['test'] });
-
-    recordAfter(6, 'admit zero-scope and partial-scope validation runners while retaining generated-path and command-intent telemetry', {
-      zeroScopeAllocation: {
-        pass: zeroScope.pass,
-        errors: zeroScope.errors,
-        configuredCommandScopes: zeroScope.configuredCommandScopes,
-        configuredCommandStageRoles: zeroScope.configuredCommandStageRoles,
-      },
-      correctedAllocation: {
-        pass: accepted.pass,
-        errors: accepted.errors,
-        reportScope: corrected.find(({ id }) => id === 'write_report')?.scope,
-      },
-      inertControls: {
-        pass: inert.pass,
-        stageRoles: inert.configuredCommandStageRoles,
-      },
-      absentAllocation: { pass: absent.pass, errors: absent.errors },
-      partialAllocation: { pass: partial.pass, errors: partial.errors },
-      ordinaryImperative: {
-        prompt: 'After implementation, verify with npm run test before finishing.',
-        pass: ordinaryImperative.pass,
-        errors: ordinaryImperative.errors,
-        stageRoles: ordinaryImperative.configuredCommandStageRoles,
-      },
+      currentDecision: readGateEvaluation(projectDir, 'qa', created.runId),
     });
   });
 
@@ -608,7 +374,6 @@ describe('engine self-collision after-state replays and controls', () => {
     mkdirSync(otherProject, { recursive: true });
     write(join(projectDir, 'package.json'), JSON.stringify({
       scripts: { build: 'compile', test: 'check', lint: 'style' },
-      flowcrew: { testPopulation: { files: [] } },
     }));
     write(join(projectDir, 'package-lock.json'), '{}\n');
     write(join(packageRoot, 'src', 'probe.ts'), 'export const probe = true;\n');
@@ -623,60 +388,6 @@ describe('engine self-collision after-state replays and controls', () => {
     write(join(runRoot, 'cross-project-run', 'run.json'), `${JSON.stringify({
       runId: 'cross-project-run', projectDir: otherProject, status: 'running',
     })}\n`);
-    const procRoot = join(root, 'proc');
-    write(join(procRoot, '4242', 'cmdline'), Buffer.from([
-      'node', join(packageRoot, 'dist', 'cli.js'), '--existing-run-id', 'cross-project-run', '',
-    ].join('\0')));
-    const consumers = findDeployedDistConsumers(join(packageRoot, 'dist'), {
-      procRoot, diskBuildHash: 'fixture', processAlive: () => true,
-    });
-    const unrelated = findDeployedDistConsumers(join(root, 'unrelated-engine', 'dist'), {
-      procRoot, diskBuildHash: 'fixture', processAlive: () => true,
-    });
-    expect(consumers).toHaveLength(1);
-    expect(unrelated).toEqual([]);
-    write(join(procRoot, '4343', 'cmdline'), Buffer.from([
-      'node', join(root, 'unrelated', 'reporter.js'),
-      `--output=${join(packageRoot, 'dist', 'diagnostic.txt')}`, '',
-    ].join('\0')));
-    const opaqueArgument = findDeployedDistConsumers(join(packageRoot, 'dist'), {
-      procRoot, diskBuildHash: 'fixture', processAlive: () => true,
-    });
-    expect(opaqueArgument).toEqual(consumers);
-    const evalProcRoot = join(root, 'eval-proc');
-    write(join(evalProcRoot, '4444', 'cmdline'), Buffer.from([
-      'node', '--input-type=module', '-e',
-      `await import(${JSON.stringify(`file://${join(packageRoot, 'dist', 'probe.js')}`)})`,
-      '--', '--existing-run-id', 'eval-run', '',
-    ].join('\0')));
-    const evaluatedImport = findDeployedDistConsumers(join(packageRoot, 'dist'), {
-      procRoot: evalProcRoot, diskBuildHash: 'fixture', processAlive: () => true,
-    });
-    expect(evaluatedImport).toHaveLength(1);
-    const relativeProcRoot = join(root, 'relative-proc');
-    write(join(relativeProcRoot, '4545', 'cmdline'), Buffer.from([
-      'node', 'dist/cli.js', '--existing-run-id', 'relative-run', '',
-    ].join('\0')));
-    const relativeEntrypoint = findDeployedDistConsumers(join(packageRoot, 'dist'), {
-      procRoot: relativeProcRoot,
-      diskBuildHash: 'fixture',
-      processAlive: () => true,
-      readProcessCwd: () => packageRoot,
-    });
-    expect(relativeEntrypoint).toEqual([{
-      pid: 4545,
-      kind: 'run',
-      runId: 'relative-run',
-      label: 'run relative-run (pid 4545)',
-    }]);
-    const relativeOtherDistribution = findDeployedDistConsumers(join(packageRoot, 'dist'), {
-      procRoot: relativeProcRoot,
-      diskBuildHash: 'fixture',
-      processAlive: () => true,
-      readProcessCwd: () => join(root, 'other-engine'),
-    });
-    expect(relativeOtherDistribution).toEqual([]);
-
     class Capture {
       value = '';
       writer = { write: (chunk: string): void => { this.value += chunk; } };
@@ -695,7 +406,6 @@ describe('engine self-collision after-state replays and controls', () => {
         state: 'fresh', loadedBuild: 'same', diskBuild: 'same',
       }),
       inspectLiveRun: () => true,
-      findDistConsumers: () => consumers,
       runValidationCommand: runner,
       stdout: new Capture().writer,
       stderr: stderr.writer,
@@ -704,25 +414,6 @@ describe('engine self-collision after-state replays and controls', () => {
     expect(unrelatedTarget).toBe(0);
     expect(runner).not.toHaveBeenCalled();
     expect(stderr.value).not.toContain('Validation baseline refused');
-
-    const noBaselineRunner = vi.fn<ValidationCommandRunner>();
-    const noBaseline = await cmdShipPreflightWithDeps(['ship-preflight', '--no-baseline'], {
-      ...dependencies, runValidationCommand: noBaselineRunner,
-    });
-    expect(noBaseline).toBe(0);
-    expect(noBaselineRunner).not.toHaveBeenCalled();
-
-    const quietRunner = vi.fn<ValidationCommandRunner>((request) => ({
-      exitCode: 0, durationMs: 1, stdout: `${request.role} passed\n`,
-    }));
-    const quiet = await cmdShipPreflightWithDeps(['ship-preflight'], {
-      ...dependencies,
-      findDistConsumers: () => [],
-      runValidationCommand: quietRunner,
-      stderr: new Capture().writer,
-    });
-    expect(quiet).toBe(0);
-    expect(quietRunner).not.toHaveBeenCalled();
 
     const terminalRunner = vi.fn<ValidationCommandRunner>((request) => ({
       exitCode: 0, durationMs: 1, stdout: `${request.role} passed\n`,
@@ -736,19 +427,10 @@ describe('engine self-collision after-state replays and controls', () => {
     expect(terminal).toBe(0);
     expect(terminalRunner).not.toHaveBeenCalled();
 
-    recordAfter(7, 'run preflight with a verified cross-project consumer of this package dist, then no-baseline, unrelated-dist, terminal-run, and opaque-data-argument controls', {
-      consumerDetectorPositive: consumers,
-      consumerDetectorNegative: unrelated,
-      opaqueDataArgumentIgnored: !opaqueArgument.some(({ pid }) => pid === 4343),
-      evaluatedImportDetected: evaluatedImport,
-      cwdRelativeEntrypointDetected: relativeEntrypoint,
-      cwdRelativeOtherDistributionIgnored: relativeOtherDistribution,
+    recordAfter(7, 'run preflight for a cross-project run, then a terminal-run control', {
       unrelatedTargetExitCode: unrelatedTarget,
       unrelatedTargetRoles: runner.mock.calls.map(([request]) => request.role),
       validationOutput: stderr.value,
-      noBaselineExitCode: noBaseline,
-      unrelatedConsumerExitCode: quiet,
-      unrelatedConsumerRoles: quietRunner.mock.calls.map(([request]) => request.role),
       terminalRunExitCode: terminal,
       terminalRunRoles: terminalRunner.mock.calls.map(([request]) => request.role),
     });
@@ -811,17 +493,20 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it('9 — commits the cursor only after retryably appending every obligation exactly once', async () => {
+  it.each(['snapshot', 'stopped snapshot', 'operational'] as const)('9 — commits the cursor after retryably appending every obligation exactly once (%s)', async kind => {
     const root = temporaryRoot('item-9');
     const projectDir = join(root, 'project');
     const stateRoot = join(root, 'state');
     mkdirSync(projectDir, { recursive: true });
     setFcGlobalDir(stateRoot);
     const created = createRun(projectDir, 'cursor-fixture', 'name: cursor-fixture', []);
-    const state = readRunState(projectDir, created.runId);
-    state.status = RUN_STATUS.COMPLETE;
+    let state = readRunState(projectDir, created.runId);
+    state.status = kind === 'stopped snapshot' ? RUN_STATUS.CANCELLED : RUN_STATUS.COMPLETE;
     state.completedAt = new Date().toISOString();
     writeRunState(projectDir, created.runId, state);
+    state = readRunState(projectDir, created.runId);
+    // Isolate the interrupted observation from createRun/publication history.
+    write(join(created.runDirPath, 'events.jsonl'), '');
     const cursorPath = join(created.runDirPath, 'run_event_status.json');
     write(cursorPath, `${JSON.stringify({
       version: 1, status: RUN_STATUS.RUNNING, observedAt: new Date(0).toISOString(),
@@ -834,36 +519,27 @@ describe('engine self-collision after-state replays and controls', () => {
     appendFault.eventPath = join(created.runDirPath, 'events.jsonl');
     appendFault.needle = '"type":"operator_wrap_up_required"';
     appendFault.remaining = 1;
-    expect(() => isolatedEvents.recordRunEvent(projectDir, created.runId, {
-      type: 'campaign_alert',
-      runId: created.runId,
-      timestamp: new Date().toISOString(),
-      detail: 'trigger terminal observation',
-    }, { debounceMs: 60_000 })).toThrow('injected obligation append failure');
+    const publish = () => kind === 'operational'
+      ? isolatedStore.updateOperationalRunStateAtPath(created.runDirPath, () => {})
+      : isolatedStore.writeRunState(projectDir, created.runId, state);
+    expect(publish)
+      .toThrow('injected obligation append failure');
     const cursorAfterFailure = JSON.parse(readFileSync(cursorPath, 'utf-8')) as { status: string };
     const failureEvents = isolatedEvents.readRunEvents(projectDir, created.runId);
     expect(cursorAfterFailure.status).toBe(RUN_STATUS.RUNNING);
-    expect(failureEvents.map(({ type }) => type)).toEqual(['campaign_alert', 'run_status_changed']);
+    expect(failureEvents.map(({ type }) => type)).toEqual(['run_status_changed']);
+    const interruptedObservationId = failureEvents[0].observationId;
+    expect(interruptedObservationId).toBe(`${new Date(0).toISOString()}:running->${state.status}`);
 
     appendFault.remaining = 0;
-    isolatedEvents.recordRunEvent(projectDir, created.runId, {
-      type: 'campaign_alert',
-      runId: created.runId,
-      timestamp: new Date().toISOString(),
-      detail: 'retry after recovery',
-    }, { debounceMs: 60_000 });
-    isolatedEvents.recordRunEvent(projectDir, created.runId, {
-      type: 'campaign_alert',
-      runId: created.runId,
-      timestamp: new Date().toISOString(),
-      detail: 'unchanged repeat',
-    }, { debounceMs: 60_000 });
+    publish();
+    publish();
     const retryEvents = isolatedEvents.readRunEvents(projectDir, created.runId);
     expect(retryEvents.filter(({ type }) => type === 'run_status_changed')).toHaveLength(1);
     expect(retryEvents.filter(({ type }) => type === 'operator_wrap_up_required')).toHaveLength(1);
-    expect(JSON.parse(readFileSync(cursorPath, 'utf-8'))).toMatchObject({ status: RUN_STATUS.COMPLETE });
-    isolatedEvents.clearAttemptSummaryRefreshDebounce();
-
+    expect(retryEvents.every(({ observationId }) => observationId === interruptedObservationId)).toBe(true);
+    expect(new Set(retryEvents.map(({ timestamp }) => timestamp)).size).toBe(1);
+    expect(JSON.parse(readFileSync(cursorPath, 'utf-8'))).toMatchObject({ status: state.status });
     recordAfter(9, 'append the status event, inject the wrap-up obligation failure, retry, then observe the unchanged status again', {
       cursorAfterFailure,
       eventTypesAfterFailure: failureEvents.map(({ type }) => type),

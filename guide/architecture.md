@@ -90,27 +90,24 @@ Sources: [shim](../src/supervise-shim.ts), [supervision records](../src/supervis
 
 ## Write and publication ownership
 
-Project scope is a result constraint with live monitoring and settlement reconciliation.
-`ScopeBatchContext` owns partitions, capabilities, first-write preimages and delivery;
-[scope grants](agent-protocol.md#scope-and-plan-revisions) suspend at a closed child boundary.
-Restoration requires an observed change and baseline content, then re-reads the result.
-An unknown preimage alone proves no write; an attributed write without a restorable preimage
-remains a failure. Gitignored generated output, including installed dependencies, is disposable;
-tracked files and declared inputs remain protected. Batch ownership decides both preservation
-and the audit outcome; scope admission and input protection share one intersection model.
-Snapshot overlap is observation, not proof that two parallel stages wrote the same file;
-structured direct attribution is required for a parallel-write conflict claim.
+The scheduling frontier admits one stage at a time into a shared mutable project tree.
+Planner scopes describe estimated work and product ownership. They never veto legitimate
+project writes. The run baseline binds task-declared immutable evidence once, including its
+canonical identities, exact output precedence and restorable bytes. Settlement owns content
+rejection and restoration; the audit projects its result without assigning snapshot changes
+to an invented author. Git owns ordinary disposable-output accounting. Tracked and frozen
+content remains evidence regardless of spelling, and unknown preimages never imply absence.
 
 Settling an admitted write retains its bytes in the existing run rollback content store before
-a later writer can overwrite them. A later batch keeps that retained preimage when the path
-becomes a read-only input. Identity-only inspection still avoids copying uncaptured read-only
-data; unknown preimages still cannot authorize destructive restoration.
+the next writer starts. Task-frozen preimages remain bound to run admission and are never
+relearned from a changed tree. Ordinary input locators remain mutable; unknown preimages
+never authorize destructive restoration.
 
 Project validation owns dependency preparation. Each configured validation batch
 installs from the current project lockfiles with the discovered package manager's
 frozen install command before running checks; preparation failures stop the batch.
-Setup captures this baseline before collecting the exact test population. The ready
-record fixes comparison commands and results, not the installed dependency set:
+Setup captures the target baseline. The ready record fixes comparison commands and
+results, not the installed dependency set:
 live gates and settlement prepare from the run's current lockfiles through the same
 [validation owner](../src/project-validation.ts).
 

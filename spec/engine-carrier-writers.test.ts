@@ -1,3 +1,4 @@
+import { atomicWrite } from '../src/engine-fs.js';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ESLint } from 'eslint';
@@ -8,24 +9,24 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as engineFs from '../src/engine-fs.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
-import { atomicWrite, createRun, fcGlobalDir, readRunState, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
-import { resetConfigCache } from '../src/config.js';
+
 import { runStage } from '../src/worker.js';
 import { execWithStdin, type Adapter, type AgentConfig } from '../src/adapters/base.js';
 import { runWorkflow } from '../src/scheduler.js';
 
 let root: string, project: string, run: string, runId: string, previous: string;
-const contract = { version: 1 as const, produces: [], reads: [], groups: [], replays: [] };
+const contract = { version: 1 as const, produces: [], reads: [], groups: [] };
 const role: AgentConfig = { name: 'fixture', description: '', model: 'default', reasoning_effort: 'low', tools: [], prompt: '' };
 const input = () => ({ projectDir: project, runDir: run, stageId: 'work', artifactContract: contract });
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'engine-carrier-writers-'));
   project = join(root, 'project'); mkdirSync(project);
-  previous = fcGlobalDir(); setFcGlobalDir(join(root, 'state')); resetConfigCache();
-  ({ runId, runDirPath: run } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']));
+  previous = fcGlobalDir(); setFcGlobalDir(join(root, 'state')); ({ runId, runDirPath: run } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']));
 });
-afterEach(() => { setFcGlobalDir(previous); resetConfigCache(); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); });
 
 describe('engine carrier writers', () => {
   it('keeps watchdog progress consistent through a real stage', async () => {
@@ -81,6 +82,34 @@ describe('engine carrier writers', () => {
     expect(readFileSync(carrier, 'utf8')).toBe('trusted');
   });
 
+  it('protects parent cancellation records beneath the signals directory', async () => {
+    const signals = join(run, 'signals'), cancellation = join(signals, 'abort_work.json');
+    await expect(withEngineIntegrity(input(), async () => {
+      engineFs.mkdirSync(signals, { recursive: true });
+      engineFs.writeFileSync(cancellation, 'trusted cancellation');
+      writeFileSync(cancellation, 'counterfeit cancellation');
+    })).rejects.toThrow('ENGINE_STATE_TAMPERED');
+    expect(readFileSync(cancellation, 'utf8')).toBe('trusted cancellation');
+  });
+
+  it('keeps the trusted record when a child writes between post-publication stat and retention', async () => {
+    const carrier = join(run, 'stage_watchdog.json'); writeFileSync(carrier, 'trusted');
+    const lstat = fs.lstatSync;
+    let armed = false;
+    fs.lstatSync = ((...args: Parameters<typeof lstat>) => {
+      const value = lstat(...args);
+      if (armed && String(args[0]) === carrier) { armed = false; writeFileSync(carrier, 'counterfeit'); }
+      return value;
+    }) as typeof lstat;
+    syncBuiltinESMExports();
+    try {
+      await expect(withEngineIntegrity(input(), async () => {
+        engineFs.publishEngineFiles([carrier], () => { writeFileSync(carrier, 'parent'); armed = true; });
+      })).rejects.toThrow('ENGINE_STATE_TAMPERED');
+      expect(readFileSync(carrier, 'utf8')).toBe('trusted');
+    } finally { fs.lstatSync = lstat; syncBuiltinESMExports(); }
+  });
+
   it('normalizes an unacknowledged history tail while a stage is guarded', async () => {
     const history = join(run, 'run-history.jsonl');
     writeFileSync(history, 'torn unacknowledged append');
@@ -108,16 +137,22 @@ describe('engine carrier writers', () => {
     expect(existsSync(directory)).toBe(false);
   });
 
-  it('checks a carrier before a descriptor append can hide child tampering', async () => {
+  it.each([false, true])('rejects a forged journal and restores trusted bytes (defer detection by restoring size and mtime: %s)', async restoreTime => {
     const history = join(run, 'run-history.jsonl'); writeFileSync(history, 'trusted');
+    if (restoreTime) fs.utimesSync(history, 1, 1);
     await expect(withEngineIntegrity(input(), async () => {
       const fd = engineFs.openSync(history, 'a');
       try {
-        writeFileSync(history, 'counterfeit');
-        expect(() => engineFs.writeSync(fd, 'parent')).toThrow('ENGINE_STATE_TAMPERED');
+        const before = fs.statSync(history);
+        writeFileSync(history, restoreTime ? 'forgery' : 'counterfeit');
+        if (restoreTime) fs.utimesSync(history, before.atime, before.mtime);
+        if (restoreTime) engineFs.writeSync(fd, 'parent');
+        else expect(() => engineFs.writeSync(fd, 'parent')).toThrow('ENGINE_STATE_TAMPERED');
       } finally { engineFs.closeSync(fd); }
     })).rejects.toThrow('ENGINE_STATE_TAMPERED');
-    expect(readFileSync(history, 'utf8')).toBe('trusted');
+    expect(readFileSync(history, 'utf8')).toBe(restoreTime ? 'trustedparent' : 'trusted');
+    engineFs.appendFileSync(history, ' settlement');
+    expect(readFileSync(history, 'utf8')).toBe((restoreTime ? 'trustedparent' : 'trusted') + ' settlement');
   });
 
   it('accepts a parent URL rename between hardlinks to the same carrier', async () => {
@@ -157,6 +192,46 @@ describe('engine carrier writers', () => {
     expect(state.status).toBe('failed');
     expect(state.failureReason).toContain('fixture setup failure');
     expect(readRunState(project, runId).status).toBe('failed');
+  });
+
+  it('refuses child truncation before a parent append returns and restores the trusted journal', async () => {
+    const carrier = join(run, 'run-history.jsonl'); writeFileSync(carrier, 'trusted prefix');
+    const append = fs.appendFileSync;
+    fs.appendFileSync = ((target, ...args) => {
+      append(target, ...args);
+      if (String(target) === carrier) {
+        execFileSync(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(carrier)}, 'forged')`],
+          { cwd: project, env: { ...process.env, HOME: root, FC_HOME: join(root, 'state') }, timeout: 5000, stdio: 'ignore' });
+      }
+    }) as typeof append;
+    syncBuiltinESMExports();
+    try {
+      await expect(withEngineIntegrity(input(), async () => { engineFs.appendFileSync(carrier, 'parent tail'); }))
+        .rejects.toThrow('ENGINE_STATE_TAMPERED');
+      expect(readFileSync(carrier, 'utf8')).toBe('trusted prefix');
+    } finally { fs.appendFileSync = append; syncBuiltinESMExports(); }
+    engineFs.appendFileSync(carrier, ' settlement');
+    expect(readFileSync(carrier, 'utf8')).toBe('trusted prefix settlement');
+  });
+
+  it('rejects matching forged carrier and recovery bytes without adopting the backup identity', async () => {
+    const carrier = join(run, 'stage_watchdog.json'); writeFileSync(carrier, 'trusted');
+    const copy = fs.copyFileSync;
+    let recovery: string | undefined;
+    fs.copyFileSync = ((source, destination, ...options) => {
+      copy(source, destination, ...options);
+      if (String(source) === carrier) recovery = String(destination);
+    }) as typeof copy;
+    syncBuiltinESMExports();
+    try {
+      await expect(withEngineIntegrity(input(), async () => {
+        expect(recovery).toBeDefined();
+        writeFileSync(carrier, 'forgery');
+        writeFileSync(recovery!, 'forgery');
+      })).rejects.toThrow('ENGINE_STATE_TAMPERED');
+      // Destroyed recovery bytes cannot be presented as restored trusted state.
+      expect(readFileSync(carrier, 'utf8')).toBe('forgery');
+    } finally { fs.copyFileSync = copy; syncBuiltinESMExports(); }
   });
 
   it('enforces the filesystem boundary for new raw imports and dynamic access', async () => {

@@ -1,9 +1,10 @@
+import './test-support/policy-runtime.js';
 import { describe, expect, it } from 'vitest';
 import { HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
 import { PLAN_SCHEMA, RECORDED_PLAN_SCHEMA } from '../src/plan-interface.js';
 import { parseDispatchedStageConfig, StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { createDispatchAdmission } from '../src/scheduler/sched_admission/dispatch.js';
-import { firstDeclaredInputScopeConflict } from '../src/scheduler/sched_scope/path-capabilities.js';
+import { firstImmutableEvidenceConflict } from '../src/scheduler/sched_scope/path-capabilities.js';
 import { inspectStageGraph, topoSort } from '../src/scheduler/sched_admission/frontier.js';
 
 const minimalPlan = () => ({ stages: [
@@ -28,14 +29,14 @@ describe('planner results contain consumed dispatch fields', () => {
       parseDispatchedStageConfig({ id: 'review', role: 'qa', is_gate: true, depends_on: ['work'] }),
     ];
     const graph = inspectStageGraph(stages);
-    expect(graph.errors).toEqual([
+    expect(graph.errors.map(error => error.message)).toEqual([
       'work.depends_on: unknown stage "missing"',
       'work.depends_on: dependency cycle detected',
       'review.depends_on: dependency cycle detected',
     ]);
-    expect(() => topoSort(stages)).toThrow(graph.errors.join('; '));
-    const admission = createDispatchAdmission(firstDeclaredInputScopeConflict)({ dispatched: stages, baseStages: [], dispatchStageId: 'plan' });
-    expect(admission.errors).toEqual(expect.arrayContaining(graph.errors));
+    expect(() => topoSort(stages)).toThrow(graph.errors.map(error => typeof error === 'string' ? error : error.message).join('; '));
+    const admission = createDispatchAdmission()({ dispatched: stages, baseStages: [], dispatchStageId: 'plan' });
+    expect(admission.errors.map(error => error.message)).toEqual(expect.arrayContaining(graph.errors.map(error => error.message)));
     stages[0].depends_on = [];
     expect(inspectStageGraph(stages).errors).toEqual([]);
     expect(topoSort(stages.reverse()).map(stage => stage.id)).toEqual(['work', 'review']);
@@ -48,7 +49,7 @@ describe('planner results contain consumed dispatch fields', () => {
     expect(stageRecordSchema({})).toBe(HANDOFF_SCHEMA);
     expect(() => parseStageRecord(JSON.stringify(plan), stageRecordSchema({}))).toThrow();
     const stages = plan.stages.map(parseDispatchedStageConfig);
-    const admission = createDispatchAdmission(firstDeclaredInputScopeConflict)({
+    const admission = createDispatchAdmission()({
       dispatched: stages, dispatchStageId: 'plan',
       baseStages: [StageConfigSchema.parse({ id: 'plan', role: 'planner', dynamic_dispatch: true,
         artifact_contract: { version: 1, produces: [], reads: [] } })],
@@ -69,7 +70,7 @@ describe('planner results contain consumed dispatch fields', () => {
 
   it('refuses an unread top-level plan-check report while retaining scope deferrals', () => {
     expect(() => parseStageRecord(JSON.stringify({ ...minimalPlan(), plan_check: { pass: true } }), PLAN_SCHEMA)).toThrow('unknown field');
-    const deferred = { ...minimalPlan(), scope_negotiation: { defer: ['pending_digest'] } };
+    const deferred = { ...minimalPlan(), };
     expect(parseStageRecord(JSON.stringify(deferred), PLAN_SCHEMA)).toEqual(deferred);
     expect(() => parseStageRecord(JSON.stringify({ ...minimalPlan(), scope_negotiation: { report: 'unused' } }), PLAN_SCHEMA)).toThrow('unknown field');
   });

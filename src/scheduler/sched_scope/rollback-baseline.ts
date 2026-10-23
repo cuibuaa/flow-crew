@@ -1,15 +1,19 @@
+import { ignoredProjectPaths } from '../../project-identity.js';
 // Boundary: Own one run-scoped lazy Git/disk preimage cache, watcher journal, current-image nomination, committed writes and lifecycle cleanup.
-import { type LiveConstraintGitIndexEntry, parseLiveConstraintGitIndexEntries } from "../../live-constraint-guard.js";
-import { RollbackContentStore, type RollbackStatIdentity, rollbackStatIdentity, rollbackStatIdentitiesEqual, hashRollbackFileCooperatively } from "../../rollback-content-store.js";
+import { type GitIndexEntry, parseGitIndexEntries } from "./file-images.js";
+import { RollbackContentStore, type RollbackStatIdentity, rollbackStatIdentity, rollbackStatIdentitiesEqual } from "../../rollback-content-store.js";
 import { normalizedProjectPath, normalizedProjectContentPath } from "../sched_admission/scope-services.js";
 import { execFileSync, spawnSync } from "node:child_process";
-import { resolve, join } from "node:path";
-import { lstatSync, watch } from "node:fs";
+import { resolve, join, relative, dirname } from "node:path";
+import { existsSync, readFileSync, readlinkSync, lstatSync, realpathSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
-import { type RepairFileImage, stageZeroIndexEntry, readRepairFileImage, repairFileIdentity, compareRepairFileContents, repairFileImageBytes, describeRepairError, gitObjectIdForPath } from './file-images.js';
-import { REPAIR_DIFF_SKIP_DIRS, listProjectFiles, listProjectFilesAt } from './path-capabilities.js';
+import { type RepairFileImage, stageZeroIndexEntry, readRepairFileImage, repairFileIdentity, repairFileImageBytes, describeRepairError, gitObjectIdForPath } from './file-images.js';
+import { resolveImmutableEvidenceBindings, canonicalPotentialProjectPath, listProjectFiles, listProjectFilesAt, firstImmutableEvidenceConflict, type ImmutableEvidenceBinding } from './path-capabilities.js';
 
 export interface RunRollbackBaseline {
+  frozenInputs: ImmutableEvidenceBinding[];
+  frozenImages: Map<string, RepairFileImage>;
+  frozenTopology: Set<string>;
   key: string;
   projectDir: string;
   runDirPath?: string;
@@ -17,9 +21,7 @@ export interface RunRollbackBaseline {
   images: Map<string, RepairFileImage>;
   cleanTracked: Set<string>;
   lazyGitTracked: Map<string, RollbackStatIdentity>;
-  /** Immutable Git-index membership. Unlike cleanTracked, authorized writes never remove this proof. */
-  trackedPaths: Set<string>;
-  gitIndexEntries: Map<string, LiveConstraintGitIndexEntry[]>;
+  gitIndexEntries: Map<string, GitIndexEntry[]>;
   gitRoot?: string;
   journal: Map<string, number>;
   journalSequence: number;
@@ -60,7 +62,7 @@ function nulPaths(output: string): string[] {
 }
 
 function rollbackListedPaths(output: string): string[] {
-  return nulPaths(output).filter((path) => !path.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part)));
+  return nulPaths(output).filter((path) => normalizedProjectContentPath(path) !== undefined);
 }
 
 function gitOutput(projectDir: string, args: string[]): string {
@@ -74,12 +76,14 @@ function gitOutput(projectDir: string, args: string[]): string {
 }
 
 function rollbackBaselineKey(projectDir: string, runDirPath?: string): string {
-  return `${resolve(projectDir)}\u0000${runDirPath ? resolve(runDirPath) : '__standalone__'}`;
+  let root = resolve(projectDir);
+  try { root = realpathSync(projectDir); } catch { /* cleanup may follow removal of the project */ }
+  return `${root}\u0000${runDirPath ? resolve(runDirPath) : '__standalone__'}`;
 }
 
 function noteRollbackPath(baseline: RunRollbackBaseline, rawPath: string): void {
   const observedPath = normalizedProjectPath(rawPath);
-  if (!observedPath || observedPath.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part))) return;
+  if (!observedPath || !normalizedProjectContentPath(observedPath)) return;
   const path = trackedGitlinkAncestor(baseline, observedPath) ?? observedPath;
   baseline.journalSequence++;
   baseline.journal.set(path, baseline.journalSequence);
@@ -88,12 +92,12 @@ function noteRollbackPath(baseline: RunRollbackBaseline, rawPath: string): void 
 
 function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRollbackBaseline {
   const key = rollbackBaselineKey(projectDir, runDirPath);
+  projectDir = realpathSync(projectDir);
   const contentStore = new RollbackContentStore(runDirPath);
   const images = new Map<string, RepairFileImage>();
   const cleanTracked = new Set<string>();
   const lazyGitTracked = new Map<string, RollbackStatIdentity>();
-  const trackedPaths = new Set<string>();
-  const indexEntries = new Map<string, LiveConstraintGitIndexEntry[]>();
+  const indexEntries = new Map<string, GitIndexEntry[]>();
   let filesEnumerated = 0;
   let filesRead = 0;
   let filesHashed = 0;
@@ -101,7 +105,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
   let bytesHashed = 0;
   let strategy: RunRollbackBaseline['initialization']['strategy'] = 'filesystem-images';
   let gitRoot: string | undefined;
-  const captureBaselineImage = (path: string, entries?: readonly LiveConstraintGitIndexEntry[]): void => {
+  const captureBaselineImage = (path: string, entries?: readonly GitIndexEntry[]): void => {
     const image = repairFileIdentity(readRepairFileImage(projectDir, path, entries));
     images.set(path, image);
     filesRead++;
@@ -113,8 +117,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
   };
   try {
     gitRoot = gitOutput(projectDir, ['rev-parse', '--show-toplevel']).trim();
-    const trackedEntries = parseLiveConstraintGitIndexEntries(gitOutput(projectDir, ['ls-files', '-s', '-z', '--cached', '--', '.']));
-    for (const path of trackedEntries.keys()) trackedPaths.add(path);
+    const trackedEntries = parseGitIndexEntries(gitOutput(projectDir, ['ls-files', '-s', '-z', '--cached', '--', '.']));
     const tracked = new Set(trackedEntries.keys());
     for (const [path, entries] of trackedEntries) indexEntries.set(path, entries);
     const ignored = rollbackListedPaths(gitOutput(projectDir, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', '.']));
@@ -185,10 +188,47 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     }
   }
   const baseline: RunRollbackBaseline = {
-    key, projectDir, runDirPath, contentStore, images, cleanTracked, lazyGitTracked, trackedPaths, gitIndexEntries: indexEntries, gitRoot,
+    frozenInputs: [], frozenImages: new Map(), frozenTopology: new Set(),
+    key, projectDir, runDirPath, contentStore, images, cleanTracked, lazyGitTracked, gitIndexEntries: indexEntries, gitRoot,
     journal: new Map(), journalSequence: 0, reliable: true,
     initialization: { filesEnumerated, filesRead, filesHashed, bytesRead, bytesHashed, strategy },
   };
+  const briefPath = runDirPath && join(runDirPath, 'task_brief.md');
+  baseline.frozenInputs = briefPath && existsSync(briefPath)
+    ? resolveImmutableEvidenceBindings(projectDir, readFileSync(briefPath, 'utf8')) : [];
+  // Derive supporting topology only for identities still frozen after exact
+  // output precedence. A released input alias is not a separate prohibition.
+  const pending = evidenceMemberPaths(baseline).filter(path =>
+    firstImmutableEvidenceConflict([path], baseline.frozenInputs, projectDir));
+  const inspected = new Set<string>();
+  const structuralRoots = new Set(baseline.frozenInputs.map(input => input.path));
+  for (const member of pending) {
+    let path = member;
+    while (path && path !== '.') {
+      if (!inspected.has(path) && (path !== member || structuralRoots.has(path))) {
+        inspected.add(path);
+        try {
+          const stat = lstatSync(join(projectDir, path));
+          if (stat.isDirectory() || stat.isSymbolicLink()) baseline.frozenTopology.add(path);
+          if (stat.isSymbolicLink()) {
+            const target = normalizedProjectContentPath(relative(projectDir,
+              resolve(projectDir, dirname(path), readlinkSync(join(projectDir, path)))));
+            if (target && !inspected.has(target)) { structuralRoots.add(target); pending.push(target); }
+          }
+        } catch { /* capture below retains observed absence or inspection failure */ }
+      }
+      path = dirname(path);
+    }
+  }
+  for (const path of evidenceMemberPaths(baseline)) {
+    const image = readRepairFileImage(projectDir, path, indexEntries.get(path), { contentStore });
+    if (image.inspectionFailure || image.materializationFailure || image.provenance === 'unknown') {
+      throw new Error(`IMMUTABLE_EVIDENCE_UNAVAILABLE: ${path}`);
+    }
+    image.restorationParent = canonicalPotentialProjectPath(projectDir, dirname(path));
+    baseline.frozenImages.set(path, image);
+    images.set(path, image);
+  }
   try {
     baseline.watcher = watch(projectDir, { recursive: true, persistent: false }, (_event, name) => {
       if (!name) {
@@ -319,10 +359,18 @@ export function baselineImage(baseline: RunRollbackBaseline, path: string): Repa
   const captured = baseline.images.get(path);
   if (captured) return captured;
   if (baseline.cleanTracked.has(path)) return imageFromGitBaseline(baseline, path);
+  // A leaf inventory never proves absence below an existing alias.
+  let parent = path;
+  while (parent.includes('/')) {
+    parent = parent.slice(0, parent.lastIndexOf('/'));
+    const ancestor = baseline.images.get(parent);
+    if (ancestor?.type === 'symlink' || ancestor?.provenance === 'unknown'
+      || stageZeroIndexEntry(baseline.gitIndexEntries.get(parent))?.kind === 'symlink') return { exists: false, provenance: 'unknown' };
+  }
   // Cache/engine trees are omitted. A miss there is unknown existence. Both
   // baseline strategies enumerate the complete project tree, so a missing
   // entry positively proves that the path did not exist when the run began.
-  if (path.split('/').some((part) => REPAIR_DIFF_SKIP_DIRS.has(part))) {
+  if (!normalizedProjectContentPath(path) || ignoredProjectPaths(baseline.projectDir, [path]).has(path)) {
     return { exists: false, provenance: 'unknown' };
   }
   return { exists: false, provenance: 'observed' };
@@ -342,48 +390,6 @@ export function readRollbackCurrentImage(
   return image;
 }
 
-export async function readRollbackCurrentImageCooperatively(
-  baseline: RunRollbackBaseline,
-  projectDir: string,
-  path: string,
-  before: RepairFileImage,
-): Promise<RepairFileImage> {
-  const absolute = join(projectDir, path);
-  const identity = rollbackStatIdentity(absolute);
-  const unchanged = unchangedRollbackFileImage(before, identity);
-  if (unchanged) return unchanged;
-  if (identity?.type !== 'file') return readRollbackCurrentImage(baseline, projectDir, path, before);
-  try {
-    const hashed = await hashRollbackFileCooperatively(absolute);
-    if (hashed.sha256 === before.sha256 && hashed.byteLength === before.byteLength) {
-      // Promote only nomination metadata. The immutable preimage identity,
-      // mode and backing bytes must remain available for later rollback and
-      // attributed metadata-write judgment.
-      before.verifiedStatIdentity = hashed.statIdentity;
-    }
-    return {
-      exists: true,
-      type: 'file',
-      sha256: hashed.sha256,
-      ...(before.gitObjectId ? { gitObjectId: gitObjectIdForPath(projectDir, absolute) } : {}),
-      byteLength: hashed.byteLength,
-      binary: true,
-      mode: Number(BigInt(hashed.statIdentity.mode) & 0o7777n),
-      statIdentity: hashed.statIdentity,
-      ...(before.indexEntryKind ? { indexEntryKind: before.indexEntryKind } : {}),
-    };
-  } catch (error) {
-    return {
-      exists: true,
-      type: 'file',
-      mode: before.mode,
-      statIdentity: identity,
-      inspectionFailure: `could not hash ${path} cooperatively: ${describeRepairError(error)}`,
-      ...(before.indexEntryKind ? { indexEntryKind: before.indexEntryKind } : {}),
-    };
-  }
-}
-
 export function captureRollbackCurrentImage(
   baseline: RunRollbackBaseline,
   projectDir: string,
@@ -391,12 +397,9 @@ export function captureRollbackCurrentImage(
   before?: RepairFileImage,
 ): RepairFileImage {
   const identity = rollbackStatIdentity(join(projectDir, path));
-  if (before && (before.backingPath || before.gitObjectId || before.bytes || before.text !== undefined)
-      && rollbackStatIdentitiesEqual(before.statIdentity, identity)) return before;
-  const image = readRepairFileImage(projectDir, path, baseline.gitIndexEntries.get(path),
-    { contentStore: baseline.contentStore });
-  // Promote only an unchanged baseline to restorable backing. Earlier rounds
-  // retain their own image when a newly admitted writer sees different bytes.
+  if (before && rollbackStatIdentitiesEqual(before.statIdentity, identity)) return before;
+  const image = repairFileIdentity(readRepairFileImage(projectDir, path, baseline.gitIndexEntries.get(path)));
+  // Earlier rounds retain their own identity when a writer sees different bytes.
   if (before && before.sha256 === image.sha256 && before.exists === image.exists) {
     baseline.images.set(path, image);
   }
@@ -405,25 +408,11 @@ export function captureRollbackCurrentImage(
 
 export function settleRollbackBaselinePath(baseline: RunRollbackBaseline, projectDir: string, path: string): void {
   const before = baseline.images.get(path);
-  // Settlement admits these bytes as the next preimage. Detection identities
-  // cannot restore them after a later trespass; use the existing owned store.
+  // Settlement admits this identity; only task-frozen bytes need restoration.
   const image = captureRollbackCurrentImage(baseline, projectDir, path, before);
   baseline.images.set(path, image);
   baseline.cleanTracked.delete(path);
   baseline.gitIndexEntries.delete(path);
-}
-
-/** Follow an admitted writer back to its batch preimage without touching lazy Git entries. */
-export function resettleRollbackBaselinePath(
-  baseline: RunRollbackBaseline,
-  projectDir: string,
-  path: string,
-  current: RepairFileImage,
-  admitted: () => boolean = () => true,
-): void {
-  const settled = baseline.images.get(path);
-  if (!settled || compareRepairFileContents(settled, current) !== 'different' || !admitted()) return;
-  settleRollbackBaselinePath(baseline, projectDir, path);
 }
 
 /** Commit a scheduler-owned project artifact into the run rollback baseline. */
@@ -445,7 +434,7 @@ function unchangedRollbackFileImage(
   identity: RollbackStatIdentity | undefined,
 ): RepairFileImage | undefined {
   if (before?.type === 'file' && (before.sha256 !== undefined || before.gitObjectId !== undefined)
-      && rollbackStatIdentitiesEqual(before.verifiedStatIdentity ?? before.statIdentity, identity)) {
+      && rollbackStatIdentitiesEqual(before.statIdentity, identity)) {
     return {
       exists: true,
       type: 'file',
@@ -459,4 +448,24 @@ function unchangedRollbackFileImage(
     };
   }
   return undefined;
+}
+
+/** Canonical frozen members are always nominated, independent of Git ignore or
+ * the project watcher. Newly appearing members retain an explicit absent image. */
+function evidenceMemberPaths(baseline: RunRollbackBaseline): string[] {
+  const paths = new Set([...baseline.frozenImages.keys(), ...baseline.frozenTopology]);
+  for (const input of baseline.frozenInputs) {
+    const canonical = normalizedProjectContentPath(relative(baseline.projectDir, input.resolvedPath));
+    if (!canonical) throw new Error(`IMMUTABLE_EVIDENCE_UNBOUND: frozen target is outside the project: ${input.path}`);
+    if (input.kind === 'tree') {
+      paths.add(input.path); paths.add(canonical);
+      for (const path of listProjectFilesAt(baseline.projectDir, canonical, false, { complete: true })) paths.add(path);
+    } else { paths.add(input.path); paths.add(canonical); }
+  }
+  return [...paths].sort();
+}
+
+export function frozenEvidencePaths(baseline: RunRollbackBaseline): string[] {
+  return evidenceMemberPaths(baseline).filter(path => baseline.frozenTopology.has(path)
+    || firstImmutableEvidenceConflict([path], baseline.frozenInputs, baseline.projectDir));
 }

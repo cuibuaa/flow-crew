@@ -1,6 +1,6 @@
 export const ABORT_SIGNAL_VERSION = 1 as const;
 
-export type AbortSignalSource = 'supervisor' | 'watchdog' | 'scheduler';
+export type AbortSignalSource = 'watchdog' | 'scheduler';
 
 /** One-shot cancellation envelope owned by one concrete stage execution. */
 export interface StageAbortSignal {
@@ -49,7 +49,7 @@ export function parseStageAbortSignal(raw: string): ParsedStageAbortSignal {
   }
   if (typeof candidate.reason !== 'string') return invalid('missing reason');
   if (typeof candidate.timestamp !== 'string' || !candidate.timestamp) return invalid('missing timestamp');
-  if (candidate.source !== 'supervisor' && candidate.source !== 'watchdog' && candidate.source !== 'scheduler') {
+  if (candidate.source !== 'watchdog' && candidate.source !== 'scheduler') {
     return invalid('invalid source');
   }
   if (candidate.requestId !== undefined && (typeof candidate.requestId !== 'string' || !candidate.requestId)) {

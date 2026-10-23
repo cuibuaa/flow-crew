@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,8 +10,9 @@ import { assertContinuationCompatible } from '../src/engine-continuation.js';
 import { sendRpc } from '../src/orchestrator-rpc.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { normalizeStageContracts, WorkflowConfigSchema } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  beginStageAttempt, completeStageAttempt, createRun, fcGlobalDir, readRunState,
+  beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState,
   readStageStatus, rependStageStatus, setFcGlobalDir, updateRunState, writeStageStatus,
 } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
@@ -116,7 +118,7 @@ it.each([true, false])(
     expect(cancelled.status, cancelled.stdout + cancelled.stderr).toBe(0);
     expect(cancelled.stdout).toContain(`Task #${task.id} cancelled`);
     expect(() => assertContinuationCompatible(fixture.project, run.runId)).not.toThrow();
-    expect(readRunState(fixture.project, run.runId)).toMatchObject({ status: 'stopped', failureReason: 'Cancelled by user',
+    expect(readRunState(fixture.project, run.runId)).toMatchObject({ status: 'cancelled', failureReason: 'Cancelled by user',
       stages: { done, done2, work: { status: 'pending', attempts: priorWork.attempts } } });
     expect(readFileSync(ledgerPath, 'utf8')).toBe(ledgerBeforeCancel);
 
@@ -156,7 +158,7 @@ async function createHarness(): Promise<Harness> {
   writeFileSync(join(home, '.bash_profile'), `export PATH='${bin}'\n`);
   writeFileSync(join(mock, 'work.json'), JSON.stringify({ output_text: 'Repended work completed.', exit_code: 0, tokens_in: 0, tokens_out: 0 }));
   // No done.json/done2.json: repeating either completed stage fails the workflow.
-  const socket = join(root, 'd.sock');
+  const socket = join(root, 'daemon.sock');
   const env = { ...process.env, HOME: home, FC_HOME: root, PROJECT_DIR: project, PATH: bin,
     FLOWCREW_DAEMON_SOCKET: socket, MOCK_FIXTURE_DIR: mock, NO_COLOR: '1' };
   const previousStore = fcGlobalDir();

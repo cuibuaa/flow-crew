@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Inbox from "../../ui/src/components/Inbox";
 import ToastContainer from "../../ui/src/components/Toast";
-import type { InboxItem, InboxOverview, InboxPatchItem } from "../../ui/src/types";
+import type { InboxItem, InboxOverview } from "../../ui/src/types";
 
 const approval: InboxItem = {
   runId: "run-approval",
@@ -39,34 +39,18 @@ const stale = {
   staleRunId: "run-stale",
 };
 
-const pendingPatch: InboxPatchItem = {
-  index: 0,
-  ts: "2026-07-30T01:00:00.000Z",
-  campaignId: "campaign-patch",
-  campaignName: "Patch campaign",
-  reason: "Tighten the risk controls",
-  severity: "high",
-  patch: { type: "brief_patch", section: "## Risk", op: "append", value: "Require rollback evidence." },
-  patchSummary: "append ## Risk: Require rollback evidence.",
-  briefVersion: "v1",
-  latestVersion: "v2",
-};
-
 function makeOverview(overrides: Partial<InboxOverview> = {}): InboxOverview {
   return {
     approvals: { status: "complete", items: [] },
     deferred: { status: "complete", items: [] },
     stale: { status: "complete", items: [] },
-    patches: { status: "complete", items: [], coverage: { succeeded: 0, failed: 0 } },
     campaignCount: 0,
     ...overrides,
   };
 }
 
 const loadOverview = vi.fn();
-const loadBriefDiff = vi.fn();
 const resolveItem = vi.fn();
-const reviewPatch = vi.fn();
 const markRunFailed = vi.fn();
 
 function view() {
@@ -75,9 +59,7 @@ function view() {
       <ToastContainer />
       <Inbox
         loadOverview={loadOverview}
-        loadBriefDiff={loadBriefDiff}
         resolveItem={resolveItem}
-        reviewPatch={reviewPatch}
         markRunFailed={markRunFailed}
       />
     </MemoryRouter>,
@@ -87,9 +69,7 @@ function view() {
 describe("operator Inbox", () => {
   beforeEach(() => {
     loadOverview.mockResolvedValue(makeOverview());
-    loadBriefDiff.mockResolvedValue("--- v1\n+++ v2\n+ Require rollback evidence.");
     resolveItem.mockResolvedValue({ ok: true, won: true, resumeRegistered: true });
-    reviewPatch.mockResolvedValue({ remaining: 0, version: "v2" });
     markRunFailed.mockResolvedValue({ ok: true });
   });
 
@@ -122,9 +102,9 @@ describe("operator Inbox", () => {
             kind: "ended",
             live: false,
             runId: approval.runId,
-            runStatus: "stopped",
+            runStatus: "cancelled",
             completedAt: "2026-09-18T05:02:14.987Z",
-            reason: "originating run reached terminal status stopped",
+            reason: "originating run reached terminal status cancelled",
           },
         }],
       },
@@ -133,7 +113,7 @@ describe("operator Inbox", () => {
     view();
 
     expect(await screen.findByText("Originating run: ended")).toBeInTheDocument();
-    expect(screen.getByText("originating run reached terminal status stopped")).toBeInTheDocument();
+    expect(screen.getByText("originating run reached terminal status cancelled")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve and resume" })).not.toBeInTheDocument();
   });
@@ -162,47 +142,17 @@ describe("operator Inbox", () => {
 
     await waitFor(() => expect(markRunFailed).toHaveBeenCalledWith("run-stale"));
     await waitFor(() => expect(loadOverview).toHaveBeenCalledTimes(2));
-    expect(screen.queryByTestId("inbox-patches")).not.toBeInTheDocument();
   });
 
-  it("loads an accessible brief diff and accepts the patch", async () => {
-    loadOverview.mockResolvedValue(makeOverview({ patches: { status: "complete", items: [pendingPatch] } }));
 
-    view();
 
-    const group = await screen.findByTestId("inbox-patches");
-    expect(group).toHaveTextContent("Tighten the risk controls");
-    const disclosure = screen.getByRole("button", { name: "View diff" });
-    expect(disclosure).toHaveAttribute("aria-controls", "patch-diff-campaign-patch:0");
-    fireEvent.click(disclosure);
-    const diff = await screen.findByTestId("patch-diff-campaign-patch:0");
-    expect(diff).toHaveTextContent("Require rollback evidence");
-    expect(diff).toHaveAttribute("tabindex", "0");
-    expect(loadBriefDiff).toHaveBeenCalledWith("campaign-patch", "v1", "v2");
-
-    fireEvent.click(screen.getByRole("button", { name: "Accept patch" }));
-    await waitFor(() => expect(reviewPatch).toHaveBeenCalledWith("campaign-patch", 0, "accept"));
-    await waitFor(() => expect(loadOverview).toHaveBeenCalledTimes(2));
-  });
-
-  it("supports rejecting a pending brief patch", async () => {
-    loadOverview.mockResolvedValue(makeOverview({ patches: { status: "complete", items: [pendingPatch] } }));
-    view();
-    await screen.findByTestId("inbox-patches");
-
-    fireEvent.click(screen.getByRole("button", { name: "Reject patch" }));
-
-    await waitFor(() => expect(reviewPatch).toHaveBeenCalledWith("campaign-patch", 0, "reject"));
-  });
-
-  it("shows only the exact empty state when all four item classes are empty", async () => {
+  it("shows only the exact empty state when all three item classes are empty", async () => {
     view();
 
     expect(await screen.findByText("Nothing needs your attention")).toBeInTheDocument();
     expect(screen.queryByTestId("inbox-approvals")).not.toBeInTheDocument();
     expect(screen.queryByTestId("inbox-deferred")).not.toBeInTheDocument();
     expect(screen.queryByTestId("inbox-stale")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("inbox-patches")).not.toBeInTheDocument();
   });
 
   it("shows the winning operator when an approval loses the first-wins race", async () => {
@@ -251,7 +201,6 @@ describe("operator Inbox", () => {
     ["approvals", { ...approval, runId: 42 }],
     ["deferred", { ...deferred, deferReason: null }],
     ["stale", { ...stale, name: null, status: "complete" }],
-    ["patches", { ...pendingPatch, patch: { ...pendingPatch.patch, op: "delete" } }],
   ] as const)("rejects a malformed %s item before rendering it as trusted work", async (sourceKey, malformed) => {
     const invalid = makeOverview();
     invalid[sourceKey] = { status: "complete", items: [malformed] } as never;
@@ -267,13 +216,11 @@ describe("operator Inbox", () => {
     ["approvals", "inbox-approvals"],
     ["deferred", "inbox-deferred"],
     ["stale", "inbox-stale"],
-    ["patches", "inbox-patches"],
-  ] as const)("localizes a %s source failure and keeps the other three groups", async (failedKey, failedTestId) => {
+  ] as const)("localizes a %s source failure and keeps the other two groups", async (failedKey, failedTestId) => {
     const full = makeOverview({
       approvals: { status: "complete", items: [approval] },
       deferred: { status: "complete", items: [deferred] },
       stale: { status: "complete", items: [stale] },
-      patches: { status: "complete", items: [pendingPatch] },
       campaignCount: 120,
     });
     full[failedKey] = { status: "unavailable", items: [], error: `${failedKey} offline` } as never;
@@ -283,58 +230,21 @@ describe("operator Inbox", () => {
 
     expect(await screen.findByTestId(`inbox-source-error-${failedKey}`)).toHaveTextContent("unavailable");
     expect(screen.queryByTestId(failedTestId)).not.toBeInTheDocument();
-    for (const testId of ["inbox-approvals", "inbox-deferred", "inbox-stale", "inbox-patches"]) {
+    for (const testId of ["inbox-approvals", "inbox-deferred", "inbox-stale"]) {
       if (testId !== failedTestId) expect(screen.getByTestId(testId)).toBeInTheDocument();
     }
     expect(screen.queryByText("Nothing needs your attention")).not.toBeInTheDocument();
   });
 
-  it("labels items plus an error as incomplete rather than unavailable", async () => {
-    loadOverview.mockResolvedValue(makeOverview({
-      approvals: { status: "complete", items: [approval] },
-      deferred: { status: "unavailable", items: [], error: "daemon offline" },
-      patches: {
-        status: "partial",
-        items: [pendingPatch],
-        error: "one campaign unreadable",
-        coverage: { succeeded: 119, failed: 1 },
-      },
-      campaignCount: 120,
-    }));
 
-    view();
-
-    expect(await screen.findByTestId("inbox-source-error-patches")).toHaveTextContent("incomplete");
-    expect(screen.getByTestId("inbox-source-error-deferred")).toHaveTextContent("unavailable");
-    expect(screen.getByText("2 items loaded · 1 incomplete sources · 1 unavailable sources")).toBeInTheDocument();
-    expect(screen.getByTestId("inbox-patches")).toHaveTextContent("Tighten the risk controls");
-  });
-
-  it("uses read coverage to label a partial empty result as incomplete", async () => {
-    loadOverview.mockResolvedValue(makeOverview({
-      patches: {
-        status: "partial",
-        items: [],
-        error: "one campaign unreadable",
-        coverage: { succeeded: 119, failed: 1 },
-      },
-      campaignCount: 120,
-    }));
-
-    view();
-
-    expect(await screen.findByTestId("inbox-source-error-patches")).toHaveTextContent("incomplete");
-    expect(screen.getByText("0 items loaded · 1 incomplete sources · 0 unavailable sources")).toBeInTheDocument();
-    expect(screen.queryByText("Nothing needs your attention")).not.toBeInTheDocument();
-  });
 
   it.each([
     { status: "complete", items: [], error: "should not exist" },
     { status: "partial", items: [], error: "missing coverage" },
     { status: "partial", items: [], error: "no successful reads", coverage: { succeeded: 0, failed: 1 } },
-    { status: "unavailable", items: [pendingPatch], error: "cannot include items" },
-  ])("rejects an invalid source-state combination %#", async (patches) => {
-    loadOverview.mockResolvedValue(makeOverview({ patches: patches as never }));
+    { status: "unavailable", items: [approval], error: "cannot include items" },
+  ])("rejects an invalid source-state combination %#", async (approvals) => {
+    loadOverview.mockResolvedValue(makeOverview({ approvals: approvals as never }));
 
     view();
 

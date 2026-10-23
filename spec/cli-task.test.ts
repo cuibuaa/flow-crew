@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -36,11 +37,22 @@ describe('cmdTask', () => {
     });
 
     const out = new Capture();
-    const code = await cmdTask(['task', 'list', '--status', 'all', '--limit', '5', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any });
+    const code = await cmdTask(['task', 'list', '--status', 'all', '--limit', '5', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any });
 
     expect(code).toBe(0);
     expect(requests[0]).toMatchObject({ cmd: 'list', filter: { status: 'all', limit: 5 } });
     expect(out.text()).toContain('flowcrew-task-2.service');
+  });
+
+  it('shows a deferred reason without loading the full operational projection', async () => {
+    server = await startRpcServer(socketPath, () => ({
+      tasks: [task({ status: 'deferred', defer_reason: 'waiting for project admission' })],
+    }));
+    const out = new Capture();
+    expect(await cmdTask(['task', 'list', '--status', 'all', '--socket', socketPath], {
+      stdout: out.stream as any, stderr: out.err as any,
+    })).toBe(0);
+    expect(out.text()).toContain('waiting for project admission');
   });
 
   it('surfaces unreadable registry records instead of silently hiding them', async () => {
@@ -51,7 +63,7 @@ describe('cmdTask', () => {
     const out = new Capture();
 
     const code = await cmdTask(
-      ['task', 'list', '--port', socketPath],
+      ['task', 'list', '--socket', socketPath],
       { stdout: out.stream as any, stderr: out.err as any },
     );
 
@@ -71,17 +83,17 @@ describe('cmdTask', () => {
     }));
     const out = new Capture();
 
-    const code = await cmdTask(['task', 'show', '3', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any });
+    const code = await cmdTask(['task', 'show', '3', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any });
 
     expect(code).toBe(0);
     expect(out.text()).toContain('Task #3');
     expect(out.text()).toContain('Raw ticks: hidden (pass --raw)');
     expect(out.text()).not.toContain('- tick');
-    expect(out.text().split(/\r?\n/u).filter((line) => line.startsWith('Drift '))).toHaveLength(6);
+    expect(out.text().split(/\r?\n/u).filter((line) => line.startsWith('Drift '))).toHaveLength(5);
     expect(out.text()).toContain('Drift research_dose: value=unavailable; unit=unknown; threshold=');
 
     const raw = new Capture();
-    const rawCode = await cmdTask(['task', 'show', '3', '--raw', '--port', socketPath], { stdout: raw.stream as any, stderr: raw.err as any });
+    const rawCode = await cmdTask(['task', 'show', '3', '--raw', '--socket', socketPath], { stdout: raw.stream as any, stderr: raw.err as any });
     expect(rawCode).toBe(0);
     expect(raw.text()).toContain('Recent ticks (raw JSON):');
     expect(raw.text()).toContain('- tick');
@@ -97,7 +109,7 @@ describe('cmdTask', () => {
     const out = new Capture();
 
     const code = await cmdTask(
-      ['task', 'show', '3', '--port', socketPath],
+      ['task', 'show', '3', '--socket', socketPath],
       { stdout: out.stream as any, stderr: out.err as any },
     );
 
@@ -119,7 +131,7 @@ describe('cmdTask', () => {
     const out = new Capture();
 
     const code = await cmdTask(
-      ['task', 'show', '3', '--port', socketPath],
+      ['task', 'show', '3', '--socket', socketPath],
       { stdout: out.stream as any, stderr: out.err as any },
     );
 
@@ -156,7 +168,7 @@ describe('cmdTask', () => {
     const out = new Capture();
 
     expect(await cmdTask(
-      ['task', 'show', '3', '--port', socketPath],
+      ['task', 'show', '3', '--socket', socketPath],
       { stdout: out.stream as any, stderr: out.err as any },
     )).toBe(0);
     expect(out.text()).toContain(
@@ -167,18 +179,16 @@ describe('cmdTask', () => {
   it('renders daemon-merged run status, verdict, completion, and failure detail', async () => {
     server = await startRpcServer(socketPath, () => ({
       task: {
-        ...task({ id: 3, status: 'running' }),
-        status: 'complete',
-        completed_at: '2026-08-06T20:00:00.000Z',
+        ...task({ id: 3, status: 'failed' }),
+        run: { status: 'complete', completedAt: '2026-08-06T20:00:00.000Z', failureReason: 'retained diagnostic' },
         run_verdict: 'PASS',
-        failure_reason: 'retained diagnostic',
       },
       recent_ticks: [],
     }));
     const out = new Capture();
 
     const code = await cmdTask(
-      ['task', 'show', '3', '--port', socketPath],
+      ['task', 'show', '3', '--socket', socketPath],
       { stdout: out.stream as any, stderr: out.err as any },
     );
 
@@ -189,12 +199,12 @@ describe('cmdTask', () => {
     expect(out.text()).toContain('Failure reason: retained diagnostic\n');
   });
 
-  it('shows summary verdict and one-liner at the top of task details', async () => {
+  it('shows run verdict and retained summary one-liner at the top of task details', async () => {
     server = await startRpcServer(socketPath, () => ({
       task: task({
         id: 3,
         status: 'done',
-        summary_verdict: 'PASS',
+        run_verdict: 'PASS',
         summary_one_liner: 'The daemon now surfaces task outcomes.',
         summary_full: '# Task Summary\n',
       }),
@@ -202,7 +212,7 @@ describe('cmdTask', () => {
     }));
     const out = new Capture();
 
-    const code = await cmdTask(['task', 'show', '3', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any });
+    const code = await cmdTask(['task', 'show', '3', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any });
 
     expect(code).toBe(0);
     expect(out.text().split(/\r?\n/).slice(0, 4)).toEqual([
@@ -220,7 +230,7 @@ describe('cmdTask', () => {
     });
     const out = new Capture();
 
-    const code = await cmdTask(['task', 'list', '--status', 'all', '--with-summary', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any });
+    const code = await cmdTask(['task', 'list', '--status', 'all', '--with-summary', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any });
 
     expect(code).toBe(0);
     expect(out.text()).toContain('Summary');
@@ -232,7 +242,7 @@ describe('cmdTask', () => {
     server = await startRpcServer(socketPath, () => ({
       tasks: [{
         ...task({ id: 2, status: 'done' }),
-        status: 'complete',
+        run: { status: 'complete' },
         terminal_status_mismatch: {
           lifecycle_status: 'complete',
           terminal_status: 'escalated',
@@ -243,7 +253,7 @@ describe('cmdTask', () => {
     const out = new Capture();
 
     const code = await cmdTask(
-      ['task', 'list', '--status', 'all', '--port', socketPath],
+      ['task', 'list', '--status', 'all', '--socket', socketPath],
       { stdout: out.stream as any, stderr: out.err as any },
     );
 
@@ -256,7 +266,7 @@ describe('cmdTask', () => {
     server = await startRpcServer(socketPath, () => ({ task: task({ id: 3, status: 'done', summary_full: summary }), recent_ticks: ['- tick'] }));
     const out = new Capture();
 
-    const code = await cmdTask(['task', 'show', '3', '--summary-only', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any });
+    const code = await cmdTask(['task', 'show', '3', '--summary-only', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any });
 
     expect(code).toBe(0);
     expect(out.text()).toBe(summary);
@@ -273,15 +283,15 @@ describe('cmdTask', () => {
     });
     const out = new Capture();
 
-    expect(await cmdTask(['task', 'cancel', '1', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
-    expect(await cmdTask(['task', 'resume', '1', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
-    expect(await cmdTask(['task', 'retry', '1', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
-    expect(await cmdTask(['task', 'tail', '1', '--tail', '3', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
+    expect(await cmdTask(['task', 'cancel', '1', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
+    expect(await cmdTask(['task', 'resume', '1', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
+    expect(await cmdTask(['task', 'retry', '1', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
+    expect(await cmdTask(['task', 'tail', '1', '--tail', '3', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any })).toBe(0);
 
     expect(requests.map((r) => r.cmd)).toEqual(['cancel', 'resume', 'retry', 'tail']);
     expect(requests[1]).toEqual({ cmd: 'resume', id: 1 });
-    expect(out.text()).toContain('resume queued after launch 2');
-    expect(out.text()).toContain('retry queued after launch 2');
+    expect(out.text()).toContain('resume queued (budget attempt 2)');
+    expect(out.text()).toContain('retry queued (budget attempt 2)');
     expect(out.text()).toContain('journal');
   });
 
@@ -302,7 +312,7 @@ describe('cmdTask', () => {
     const out = new Capture();
 
     const code = await cmdTask(
-      ['task', 'tail', '7', '--follow', '--tail', '9', '--port', socketPath],
+      ['task', 'tail', '7', '--follow', '--tail', '9', '--socket', socketPath],
       {
         stdout: out.stream as any,
         stderr: out.err as any,
@@ -331,7 +341,7 @@ describe('cmdTask', () => {
     const out = new Capture();
 
     const code = await cmdTask(
-      ['task', 'tail', '7', '--follow', '--port', socketPath],
+      ['task', 'tail', '7', '--follow', '--socket', socketPath],
       {
         stdout: out.stream as any,
         stderr: out.err as any,
@@ -362,7 +372,7 @@ describe('cmdTask', () => {
     const out = new Capture();
 
     const code = await cmdTask(
-      ['task', 'tail', '8', '--follow', '--port', socketPath],
+      ['task', 'tail', '8', '--follow', '--socket', socketPath],
       {
         stdout: out.stream as any,
         stderr: out.err as any,
@@ -380,7 +390,7 @@ describe('cmdTask', () => {
 
   it('reports missing daemon clearly', async () => {
     const out = new Capture();
-    const code = await cmdTask(['task', 'list', '--port', socketPath], { stdout: out.stream as any, stderr: out.err as any });
+    const code = await cmdTask(['task', 'list', '--socket', socketPath], { stdout: out.stream as any, stderr: out.err as any });
 
     expect(code).toBe(1);
     expect(out.errorText()).toContain('daemon not running. Start with: flowcrew daemon start');
@@ -389,7 +399,7 @@ describe('cmdTask', () => {
   it('never prints cancelled for a terminal-unknown daemon result', async () => {
     server = await startRpcServer(socketPath, (request): RpcResponse => {
       if (request.cmd === 'show') return { task: task({ id: request.id }), recent_ticks: [] };
-      if (request.cmd === 'cancel') {
+      if (request.cmd === 'cancel' && 'id' in request) {
         return {
           ok: false,
           status: 'outcome-unknown',
@@ -410,11 +420,11 @@ describe('cmdTask', () => {
     const out = new Capture();
 
     const code = await cmdTask(
-      ['task', 'cancel', '4', '--port', socketPath],
+      ['task', 'cancel', '4', '--socket', socketPath],
       { stdout: out.stream as any, stderr: out.err as any },
     );
 
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(out.errorText()).toContain('Cancellation outcome unknown; processes may still be running');
     expect(out.text()).not.toContain('cancelled');
   });
@@ -431,7 +441,8 @@ function task(overrides: Partial<TaskEntry>): TaskEntry {
     systemd_unit: `flowcrew-task-${id}.service`,
     status: 'running',
     attempt: 1,
-    max_retries: 2,
+    launch: 1,
+    max_attempts: 2,
     created_at: '2026-01-01T00:00:00.000Z',
     tick_log_path: join(tempDir, 'tasks', String(id), 'tick_log.md'),
     ...overrides,

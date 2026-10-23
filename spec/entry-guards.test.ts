@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
 import { stringify as stringifyYaml } from 'yaml';
@@ -19,8 +20,8 @@ import { buildCommand, Orchestrator, type GitAdapter, type SupervisorBackend, ty
 import { startRpcServer, type RpcRequest } from '../src/orchestrator-rpc.js';
 import { recordRequest } from '../src/inbox.js';
 import { cmdInbox } from '../src/cli-inbox.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   listRuns,
   readRunState,
@@ -38,7 +39,7 @@ const WORKFLOW = [
   '  - id: work',
   '    role: worker',
   '    prompt_template: work',
-  '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
+  '    artifact_contract: {version: 1, produces: [], reads: []}',
   '',
 ].join('\n');
 
@@ -115,7 +116,6 @@ describe('Dashboard admission handshake', () => {
       contractReady: true,
       frontmatter: { status: 'absent' },
     });
-    expect(checked.report.findings.map((finding) => finding.code)).toContain('criterion_instrument_wording');
 
     const unchecked = await app.inject({ method: 'POST', url: '/api/tasks', payload: { brief, workflow: 'default' } });
     expect(unchecked.statusCode).toBe(409);
@@ -136,7 +136,8 @@ describe('Dashboard admission handshake', () => {
         acknowledgement: { kind: 'explicit', source: 'dashboard_receipt' },
       },
     });
-    expect(registrations[0].launch_args).not.toContain('--acknowledge-brief-warnings');
+    expect(registrations[0]).not.toHaveProperty('launch_args');
+    expect(registrations[0].launch_options).not.toHaveProperty('acknowledgeBriefWarnings');
 
     const changed = await app.inject({
       method: 'POST',
@@ -233,7 +234,7 @@ describe('Dashboard admission handshake', () => {
     expect(prompts).not.toContain('_summary');
   });
 
-  it('replaces a same-digest invalid record before consuming an Inbox decision', async () => {
+  it('replaces a mismatched digest before consuming an Inbox decision', async () => {
     const spawns: string[] = [];
     app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
       registerTask: async (task) => {
@@ -247,7 +248,7 @@ describe('Dashboard admission handshake', () => {
     const requestId = 'p11-resume-review';
     const state = readRunState(projectDir, runId);
     const malformed = explicitAdmission(brief);
-    malformed.findingFingerprints = [];
+    malformed.digest = inspectBrief(`${brief}\n`).digest;
     state.status = 'parked';
     state.taskDescription = brief;
     state.briefAdmission = malformed;
@@ -445,7 +446,8 @@ describe('deferred continuation snapshots', () => {
 
     expect(code).toBe(0);
     expect(registeredTask).toMatchObject({ run_id: runId, brief_text: brief, brief_admission: admission });
-    expect(registeredTask?.launch_args).not.toContain('--task');
+    expect(registeredTask).not.toHaveProperty('launch_args');
+    expect(registeredTask?.launch_options).not.toHaveProperty('task');
     expect(readFileSync(sidecar, 'utf-8')).toBe(changed);
   });
 });
@@ -454,10 +456,10 @@ describe('quick and operator entry behavior', () => {
   it('prints the full report and stops plain text or a wrong digest before project writes', () => {
     const isolated = cliFixture();
     const plain = runQuickSync(isolated, ['quick', 'Fix the race', '--project', isolated.project]);
-    expect(plain.status).toBe(2);
+    expect(plain.status).toBe(1);
     expect(`${plain.stdout}${plain.stderr}`).toContain('Brief preflight');
     expect(`${plain.stdout}${plain.stderr}`).toContain('[plain_text_input]');
-    expect(`${plain.stdout}${plain.stderr}`).toContain('no structurally extractable criterion');
+    expect(plain.stderr).toContain(`[brief_criteria_missing] ${inspectBrief('Fix the race').findings.find(finding => finding.code === 'brief_criteria_missing')!.message}`);
     expect(`${plain.stdout}${plain.stderr}`).not.toContain('--acknowledge-brief-warnings=');
     expect(readProjectBrief(isolated.project)).toBeUndefined();
 
@@ -466,7 +468,7 @@ describe('quick and operator entry behavior', () => {
       'quick', digestGuardedBrief, '--project', isolated.project,
       '--acknowledge-brief-warnings=wrong-digest',
     ]);
-    expect(wrong.status).toBe(2);
+    expect(wrong.status).toBe(1);
     expect(`${wrong.stdout}${wrong.stderr}`).toContain('digest mismatch');
     expect(readProjectBrief(isolated.project)).toBeUndefined();
   });
@@ -503,7 +505,52 @@ describe('quick and operator entry behavior', () => {
         },
       });
       const task = (request as Extract<RpcRequest, { cmd: 'register' }>).task;
-      expect(task.launch_args).not.toContain('--acknowledge-brief-warnings');
+      expect(task).not.toHaveProperty('launch_args');
+      expect(task.launch_options).not.toHaveProperty('acknowledgeBriefWarnings');
+      expect(readProjectBrief(isolated.project)).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('prints advisory findings and registers exact stdin bytes acknowledged by digest', async () => {
+    const isolated = cliFixture();
+    const socketPath = join(isolated.fcHome, 'daemon.sock');
+    let request: RpcRequest | undefined;
+    const server = await startRpcServer(socketPath, (incoming) => {
+      request = incoming;
+      return { id: 7, unit: 'fixture.service', pid: process.pid, build: 'fixture' };
+    });
+    try {
+      const exact = [
+        '# Goal',
+        'Automate the guarded submit.',
+        '',
+        '## What the report must show',
+        '1. Preserve these exact stdin bytes through registration.',
+        '',
+      ].join('\n');
+      writeReadySetupRecord(isolated.project, exact, isolated.fcHome);
+      const result = await runQuick(isolated, [
+        'quick', '--background', '--project', isolated.project, '-',
+        `--acknowledge-brief-warnings=${inspectBrief(exact).digest}`,
+      ], exact, socketPath);
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain('Brief preflight');
+      expect(result.stdout).toContain('[terminal_states_missing]');
+      expect(request).toMatchObject({
+        cmd: 'register',
+        task: {
+          brief_text: exact,
+          brief_admission: {
+            digest: inspectBrief(exact).digest,
+            acknowledgement: { kind: 'explicit', source: 'cli_digest_flag' },
+          },
+        },
+      });
+      const task = (request as Extract<RpcRequest, { cmd: 'register' }>).task;
+      expect(task).not.toHaveProperty('launch_args');
+      expect(task.launch_options).not.toHaveProperty('acknowledgeBriefWarnings');
       expect(readProjectBrief(isolated.project)).toBeUndefined();
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -540,8 +587,8 @@ describe('quick and operator entry behavior', () => {
       ], brief, socketPath);
       expect(automatic.code).toBe(0);
       expect(automatic.stderr).toContain('defaulted planner context to skip');
-      expect((requests[0] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_args)
-        .toContain('--campaign-context=skip');
+      expect((requests[0] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_options)
+        .toMatchObject({ campaignContext: 'skip' });
 
       const explicit = await runQuick(isolated, [
         'quick', '--background', '--acknowledge-brief-warnings', '--project', isolated.project,
@@ -549,12 +596,11 @@ describe('quick and operator entry behavior', () => {
       ], brief, socketPath);
       expect(explicit.code).toBe(0);
       expect(explicit.stderr).not.toContain('defaulted planner context to skip');
-      const explicitArgs = (requests[1] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_args;
-      expect(explicitArgs).toContain('--campaign-context=inherit');
-      expect(explicitArgs).not.toContain('--campaign-context=skip');
+      const explicitLaunch = (requests[1] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_options;
+      expect(explicitLaunch).toMatchObject({ campaignContext: 'inherit' });
       console.info(`[ENGINE_INSTRUMENT_ITEM3] ${JSON.stringify({
-        automatic: { stderr: automatic.stderr, launchArgs: (requests[0] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_args },
-        explicit: { stderr: explicit.stderr, launchArgs: explicitArgs },
+        automatic: { stderr: automatic.stderr, launchOptions: (requests[0] as Extract<RpcRequest, { cmd: 'register' }>).task.launch_options },
+        explicit: { stderr: explicit.stderr, launchOptions: explicitLaunch },
       })}`);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -580,7 +626,7 @@ describe('quick and operator entry behavior', () => {
       'quick', '--existing-run-id', runId, '--project', isolated.project,
       '--adapter', 'mock', '--workflow', 'p11-missing',
     ]);
-    expect(missing.status).toBe(2);
+    expect(missing.status).toBe(1);
     expect(`${missing.stdout}${missing.stderr}`).toContain('Launch paused before run creation');
 
     const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8'));
@@ -593,6 +639,51 @@ describe('quick and operator entry behavior', () => {
     expect(valid.status).toBe(1);
     expect(`${valid.stdout}${valid.stderr}`).toContain('Workflow not found: p11-missing.yaml');
     expect(`${valid.stdout}${valid.stderr}`).not.toContain('Launch paused before run creation');
+  });
+
+  it.each([true, false])('preserves the transported continuation acknowledgement (task bytes supplied: %s)', async (taskSupplied) => {
+    const isolated = cliFixture();
+    const runId = 'acknowledgement-precedence';
+    const runPath = join(isolated.fcHome, 'runs', runId);
+    const brief = '# Goal\nContinue the admitted run.\n\n## What the report must show\n1. Preserve the transported acknowledgement.\n';
+    const stored = explicitAdmission(brief);
+    const transported = createBriefAdmission(inspectBrief(brief), {
+      kind: 'explicit',
+      source: 'dashboard_receipt',
+      at: '2026-08-04T00:00:00.000Z',
+    });
+    mkdirSync(runPath, { recursive: true });
+    writeFileSync(join(runPath, 'task_brief.md'), brief, 'utf-8');
+    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+      runId,
+      projectDir: isolated.project,
+      status: 'failed',
+      taskDescription: brief,
+      briefAdmission: stored,
+      stages: {},
+    }), 'utf-8');
+
+    const socketPath = join(isolated.fcHome, 'daemon.sock');
+    let request: RpcRequest | undefined;
+    const server = await startRpcServer(socketPath, (incoming) => {
+      request = incoming;
+      return { id: 7, unit: 'fixture.service', pid: process.pid, build: 'fixture' };
+    });
+    try {
+      const result = await runQuick(isolated, [
+        'quick', '--background', '--existing-run-id', runId,
+        '--project', isolated.project, '--adapter', 'mock',
+        '--brief-admission-record', Buffer.from(JSON.stringify(transported), 'utf8').toString('base64url'),
+        ...(taskSupplied ? ['--brief-input-base64', Buffer.from(brief, 'utf8').toString('base64url')] : []),
+      ], '', socketPath);
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(request).toMatchObject({ cmd: 'register', task: { run_id: runId, brief_text: brief } });
+      const task = (request as Extract<RpcRequest, { cmd: 'register' }>).task;
+      expect(task.brief_admission).toEqual(transported);
+      expect(task.brief_admission).not.toEqual(stored);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it('binds a background continuation to its named run while a fresh background launch stays unbound', async () => {

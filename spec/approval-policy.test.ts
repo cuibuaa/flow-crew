@@ -1,8 +1,11 @@
+import './test-support/policy-runtime.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
+import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
+import { DaemonUnavailableError, RpcOutcomeUnknownError } from '../src/orchestrator-rpc.js';
 import { cmdInbox } from '../src/cli-inbox.js';
 import { approvalArtifactPath, isValidApprovalRequestId } from '../src/approval-artifacts.js';
 import { createApprovalMonitor } from '../src/scheduler/sched_policy/approvals.js';
@@ -11,11 +14,11 @@ import {
   recordRequest,
   resolveRequest,
 } from '../src/inbox.js';
+import { createRun } from './test-support/create-run.js';
 import {
   RUN_STATUS,
   readRunState,
   writeRunState,
-  createRun,
   runDir,
   fcGlobalDir,
   setFcGlobalDir,
@@ -64,6 +67,45 @@ describe('approval policy and request identifiers', () => {
     ]);
   });
 
+  it.each([
+    ['unavailable', new DaemonUnavailableError(), 0],
+    ['refused', new Error('daemon refused resume'), 0],
+    ['unknown', new RpcOutcomeUnknownError('response lost after write'), 2],
+  ])('keeps the recorded approval when resume is %s', async (_kind, failure, expected) => {
+    const runId = pendingRequest('resume-publish', 'publish', 'result');
+    const brief = '# Goal\nPublish the verified report.\n\n## What the report must show\n1. The report contains verified evidence.\n';
+    const report = inspectBrief(brief);
+    const state = readRunState(projectDir, runId);
+    state.status = RUN_STATUS.PARKED;
+    state.taskDescription = brief;
+    state.briefAdmission = createBriefAdmission(report, report.requiresAcknowledgement
+      ? { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() }
+      : { kind: 'not_required' });
+    writeRunState(projectDir, runId, state);
+    const output = new PassThrough();
+    let messages = '';
+    output.on('data', chunk => { messages += chunk; });
+    const code = await cmdInbox(['inbox', 'approve', 'resume-publish', '--run', runId], {
+      stdout: output as unknown as NodeJS.WriteStream,
+      stderr: output as unknown as NodeJS.WriteStream,
+      registerTask: async () => { throw failure; },
+    });
+    expect(foldItems(runId).get('resume-publish')?.state).toBe('approved');
+    expect(code).toBe(expected);
+    expect(messages).toContain('approved');
+    if (expected === 0) expect(messages).toContain('resume was not queued');
+  });
+
+  it('reports a lost approval race as a known refusal', async () => {
+    const runId = pendingRequest('raced', 'publish', 'result');
+    resolveRequest(projectDir, runId, 'raced', 'deny', { by: 'first' });
+    const output = new PassThrough();
+    expect(await cmdInbox(['inbox', 'approve', 'raced', '--run', runId, '--no-resume'], {
+      stdout: output as unknown as NodeJS.WriteStream, stderr: output as unknown as NodeJS.WriteStream,
+    })).toBe(1);
+    expect(foldItems(runId).get('raced')?.resolution?.decision).toBe('deny');
+  });
+
   it('enforces approval request-id length, character, and Unicode boundaries', () => {
     expect(isValidApprovalRequestId('a'.repeat(64))).toBe(true);
     expect(isValidApprovalRequestId('a'.repeat(65))).toBe(false);
@@ -94,7 +136,7 @@ describe('approval policy and request identifiers', () => {
       createdAt: '2026-09-14T00:00:00.000Z',
     });
     const state = readRunState(projectDir, runId);
-    state.status = RUN_STATUS.STOPPED;
+    state.status = RUN_STATUS.CANCELLED;
     state.completedAt = '2026-09-18T00:00:00.000Z';
     writeRunState(projectDir, runId, state);
     const stdout = new PassThrough();

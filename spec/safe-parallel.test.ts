@@ -1,3 +1,4 @@
+import { latestAttemptWrites } from '../src/scheduler/sched_admission/frontier.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -7,7 +8,6 @@ import { randomBytes } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import {
-  detectParallelWriteConflicts,
   findAllReady,
   runWorkflow,
   selectRunnableBatch,
@@ -15,15 +15,15 @@ import {
   WorkflowConfigSchema,
   type StageConfig,
 } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   runDir,
   type StageStatus,
   type StoreState,
   type WriteAttribution,
 } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
-import { assertDistFresh, publishBuildGeneration } from '../src/build-manifest.js';
+import { assertDistFresh, publishBuildOutputs } from '../src/build-manifest.js';
 
 let projectDir: string;
 
@@ -158,7 +158,6 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
             physicalWriteCalls.left++;
             writeFileSync(join(projectDir, sharedPath), 'export const source = "left";\n');
             markWriterDone();
-            await observerDone;
             return fixtureResult({
               output: 'left wrote', exitCode: 0, duration_ms: 1,
               writes: [sharedPath], writeAttribution: 'structured',
@@ -177,7 +176,6 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
         if (physicalWriteCalls[opts.stageId as 'left' | 'right'] === 1) {
           writerArrivals++;
           if (writerArrivals === 2) markWritersArrived();
-          await writersArrived;
         }
         writeFileSync(join(projectDir, sharedPath), `export const source = "${opts.stageId}";\n`);
         return fixtureResult({
@@ -208,7 +206,7 @@ beforeEach(() => {
 afterEach(() => rmSync(projectDir, { recursive: true, force: true }));
 
 describe('safe scope batching', () => {
-  it('runs independent authors with private build outputs together while shared output scopes still serialize', async () => {
+  it('serializes shared-tree authors even when build outputs are private', async () => {
     mkdirSync(join(projectDir, 'src'));
     mkdirSync(join(projectDir, 'dist'));
     writeFileSync(join(projectDir, 'tsconfig.json'), '{}');
@@ -220,7 +218,7 @@ describe('safe scope batching', () => {
         { id: 'build', root: 'run' as const, path: `stages/${id}/build`, kind: 'directory' as const },
         { id: 'published', root: 'run' as const, path: `stages/${id}/build/dist`, kind: 'directory' as const },
       ],
-      reads: [], replays: [],
+      reads: [],
     }]));
     const measured = await runStatic([['src/left.ts'], ['src/right.ts']], id => [`src/${id}.ts`], (id, opts) => {
       writeFileSync(join(projectDir, `src/${id}.ts`), `export const ${id} = 1;`);
@@ -232,24 +230,24 @@ describe('safe scope batching', () => {
         writeFileSync(join(stagedDistDir, `${name}.d.ts`), `export declare const ${name}: number;`);
       }
       const distDir = join(outputRoot, 'dist');
-      publishBuildGeneration({ projectRoot: projectDir, stagedDistDir, distDir });
+      publishBuildOutputs({ projectRoot: projectDir, stagedDistDir, distDir });
       destinations.push(distDir);
     }, contracts);
     expect(measured.final.status).toBe('complete');
-    expect(measured.maxActive).toBe(2);
+    expect(measured.maxActive).toBe(1);
     expect(new Set(destinations).size).toBe(2);
     expect(readFileSync(join(destinations[0], 'left.js'), 'utf8')).toBe('export const left = 1;');
     expect(readFileSync(join(destinations[1], 'right.js'), 'utf8')).toBe('export const right = 1;');
     expect(assertDistFresh(projectDir, destinations[1]).outputs).toHaveLength(4);
     expect(readFileSync(join(projectDir, 'dist/served.js'), 'utf8')).toBe('serving generation');
-    expect(measured.events.some(event => event.type === 'parallel_scope_serialized')).toBe(false);
+    expect(measured.events.some(event => event.type === 'parallel_scope_serialized')).toBe(true);
     expect(selectRunnableBatch([
       stage({ id: 'left', scope: ['src/left.ts', 'dist/'] }),
       stage({ id: 'right', scope: ['src/right.ts', 'dist/'] }),
     ]).selected).toHaveLength(1);
   });
 
-  it('H3a runs later-literal-disjoint globs concurrently and serializes real overlap', async () => {
+  it('H3a serializes all authors while accepting required writes outside their estimates', async () => {
     const ownPath = 'a/round_1/control/owned.txt';
     const peerPath = 'a/round_1/arms/x/escaped.txt';
     const disjoint = await runStatic([
@@ -257,8 +255,8 @@ describe('safe scope batching', () => {
       ['a/round_*/arms/x/**'],
     ]);
     expect(disjoint.final.status).toBe('complete');
-    expect(disjoint.maxActive).toBe(2);
-    expect(disjoint.events.some((event) => event.type === 'parallel_scope_serialized')).toBe(false);
+    expect(disjoint.maxActive).toBe(1);
+    expect(disjoint.events.some((event) => event.type === 'parallel_scope_serialized')).toBe(true);
 
     const guarded = await runStatic([
       ['a/round_*/control/**'],
@@ -270,11 +268,11 @@ describe('safe scope batching', () => {
       writeFileSync(join(projectDir, ownPath), 'owned by control\n');
       writeFileSync(join(projectDir, peerPath), 'must be reverted\n');
     });
-    expect(guarded.maxActive).toBe(2);
+    expect(guarded.maxActive).toBe(1);
     expect(existsSync(join(projectDir, ownPath))).toBe(true);
-    expect(existsSync(join(projectDir, peerPath))).toBe(false);
-    expect(guarded.final.stages.left.error).toContain('scope_violation');
-    expect(guarded.final.stages.left.constraintAudit).toMatchObject({ violationCount: 1 });
+    expect(existsSync(join(projectDir, peerPath))).toBe(true);
+    expect(guarded.final.status).toBe('complete');
+    expect(guarded.final.stages.left.constraintAudit).toMatchObject({ violationCount: 0 });
 
     const overlapping = await runStatic([
       ['a/round_*/arms/**'],
@@ -285,18 +283,18 @@ describe('safe scope batching', () => {
     expect(overlapping.events.some((event) => event.type === 'parallel_scope_serialized')).toBe(true);
   });
 
-  it('A2 overlaps disjoint-scope attempts but serializes maybe-overlapping scopes with parallel_scope_serialized', async () => {
+  it('A2 serializes disjoint and overlapping estimates through the same frontier', async () => {
     const stages = [
       stage({ id: 'left', scope: ['src/left.ts'] }),
       stage({ id: 'right', scope: ['spec/right/**'] }),
     ];
     const ready = findAllReady(stages, stateFor(stages));
     expect(ready).toHaveLength(2);
-    expect(selectRunnableBatch(ready).selected.map((item) => item.id)).toEqual(['left', 'right']);
+    expect(selectRunnableBatch(ready).selected.map((item) => item.id)).toEqual(['left']);
 
     const measured = await runStatic([['src/left.ts'], ['spec/right/**']]);
     expect(measured.final.status).toBe('complete');
-    expect(measured.maxActive).toBe(2);
+    expect(measured.maxActive).toBe(1);
 
     const serialized = await runStatic([['src/shared/**'], ['src/shared/file.ts']]);
     expect(serialized.final.status).toBe('complete');
@@ -313,7 +311,7 @@ describe('safe scope batching', () => {
     ];
     const batch = selectRunnableBatch(stages);
     expect(batch.selected.map((item) => item.id)).toEqual(['left']);
-    expect(batch.deferred[0].conflict.reason).toContain('may overlap');
+    expect(batch.deferred[0].conflict.reason).toContain('mutable project tree');
 
     const measured = await runStatic([['src/shared/**'], ['src/shared/file.ts']]);
     expect(measured.final.status).toBe('complete');
@@ -327,14 +325,14 @@ describe('safe scope batching', () => {
       stage({ id: 'child', scope: ['src/child.ts'] }),
     ]);
     expect(nested.selected.map((item) => item.id)).toEqual(['directory']);
-    expect(nested.deferred[0].conflict.reason).toContain('may overlap');
+    expect(nested.deferred[0].conflict.reason).toContain('mutable project tree');
 
     const siblings = selectRunnableBatch([
       stage({ id: 'backend', scope: ['src'] }),
       stage({ id: 'frontend', scope: ['src-ui/child.ts'] }),
     ]);
-    expect(siblings.selected.map((item) => item.id)).toEqual(['backend', 'frontend']);
-    expect(siblings.deferred).toEqual([]);
+    expect(siblings.selected.map((item) => item.id)).toEqual(['backend']);
+    expect(siblings.deferred).toHaveLength(1);
   });
 
   it('canonicalizes explicit directory and dot-segment aliases without conflating path-segment siblings', () => {
@@ -358,22 +356,22 @@ describe('safe scope batching', () => {
       stage({ id: 'core', scope: ['packages/core/.'] }),
       stage({ id: 'core_ui', scope: ['packages/core-ui/index.ts'] }),
     ]);
-    expect(siblings.selected.map((item) => item.id)).toEqual(['core', 'core_ui']);
-    expect(siblings.deferred).toEqual([]);
+    expect(siblings.selected.map((item) => item.id)).toEqual(['core']);
+    expect(siblings.deferred).toHaveLength(1);
   });
 
-  it('runs an empty-scope observer beside a writer without claiming the peer write', async () => {
+  it('admits an empty-scope observer after a writer without claiming the peer write', async () => {
     const measured = await runPhysicalWriteScenario('one-writer');
     const warnings = measured.events.filter((event) => event.type === 'parallel_write_conflict');
     const leftAttempt = measured.final.stages.left.attempts?.at(-1);
     const rightAttempt = measured.final.stages.right.attempts?.at(-1);
 
-    expect(measured.maxActive).toBe(2);
+    expect(measured.maxActive).toBe(1);
     expect(measured.physicalWriteCalls).toEqual({ left: 1, right: 0 });
     expect(measured.observerSawWrite).toBe(true);
     expect(leftAttempt).toMatchObject({ writes: [measured.sharedPath], writeAttribution: 'structured' });
     expect(rightAttempt).toMatchObject({
-      writes: [measured.sharedPath],
+      writes: [],
       writeAttribution: 'snapshot',
       constraintAudit: { appliedWriteCount: 0 },
     });
@@ -381,93 +379,41 @@ describe('safe scope batching', () => {
     expect(measured.final.status).toBe('complete');
   });
 
-  it('runs disjoint scheduler writers concurrently and retains conflict/audit backstops', async () => {
+  it('accepts sequential authors of the same path without a false parallel conflict', async () => {
     const measured = await runPhysicalWriteScenario('two-writers');
     const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
 
-    expect(measured.maxActive).toBe(2);
-    expect(measured.physicalWriteCalls).toEqual({ left: 2, right: 2 });
+    expect(measured.maxActive).toBe(1);
+    expect(measured.physicalWriteCalls).toEqual({ left: 1, right: 1 });
     expect(measured.final.stages.left.attempts?.at(-1)).toMatchObject({
       writes: [measured.sharedPath], writeAttribution: 'structured',
     });
     expect(measured.final.stages.right.attempts?.at(-1)).toMatchObject({
       writes: [measured.sharedPath], writeAttribution: 'structured',
     });
-    expect(warning).toMatchObject({
-      level: 'warning', stageIds: ['left', 'right'], files: [measured.sharedPath],
-    });
-    expect(warning?.detail).toContain('attribution: structured / structured');
-    expect(measured.final.status).toBe('failed');
-    expect(measured.final.stages.left.constraintAudit).toMatchObject({ violationCount: 1 });
-    expect(measured.final.stages.right.constraintAudit).toMatchObject({ violationCount: 1 });
+    expect(warning).toBeUndefined();
+    expect(measured.final.status).toBe('complete');
+    expect(measured.final.stages.left.constraintAudit).toMatchObject({ violationCount: 0 });
+    expect(measured.final.stages.right.constraintAudit).toMatchObject({ violationCount: 0 });
   });
 
-  it('preserves an identical ../ factual write in both the event and summary warning', async () => {
+  it('retains factual external-path observations without inventing a concurrent conflict', async () => {
     const reported = '../fc-home/runs/example/./notes.json';
     const canonical = '../fc-home/runs/example/notes.json';
     const measured = await runStatic([['src/left.ts'], ['src/right.ts']], [reported]);
     const warning = measured.events.find((event) => event.type === 'parallel_write_conflict');
-    expect(measured.maxActive).toBe(2);
-    expect(warning).toMatchObject({
-      level: 'warning',
-      stageIds: ['left', 'right'],
-      files: [canonical],
-    });
-    expect(measured.final.status).toBe('failed');
-    expect(measured.final.stages.left.error).toContain('scope_violation');
-    expect(measured.final.stages.right.error).toContain('scope_violation');
+    expect(measured.maxActive).toBe(1);
+    expect(warning).toBeUndefined();
+    expect(measured.final.status).toBe('complete');
+    expect(latestAttemptWrites(completedWithWrite(reported, 'structured'))).toEqual({ files: [canonical], attribution: 'structured' });
   });
 
-  it('requires structured evidence from both sides across every attribution pairing', () => {
-    const shared = '../fc-home/runs/example/notes.json';
-    const attributions: WriteAttribution[] = ['structured', 'snapshot', 'unknown'];
-    const outcomes: Record<string, string[]> = {};
-    for (const leftAttribution of attributions) {
-      for (const rightAttribution of attributions) {
-        outcomes[`${leftAttribution}/${rightAttribution}`] = detectParallelWriteConflicts(
-          ['left', 'right'],
-          {
-            left: completedWithWrite(shared, leftAttribution),
-            right: completedWithWrite(shared, rightAttribution),
-          },
-        ).flatMap((conflict) => conflict.files);
-      }
-    }
-
-    expect(outcomes).toEqual({
-      'structured/structured': [shared],
-      'structured/snapshot': [],
-      'structured/unknown': [],
-      'snapshot/structured': [],
-      'snapshot/snapshot': [],
-      'snapshot/unknown': [],
-      'unknown/structured': [],
-      'unknown/snapshot': [],
-      'unknown/unknown': [],
-    });
-
-    const legacyUnknown = completedWithWrite(shared, 'unknown');
-    delete legacyUnknown.attempts?.[0].writeAttribution;
-    expect(detectParallelWriteConflicts(['left', 'right'], {
-      left: completedWithWrite(shared, 'structured'),
-      right: legacyUnknown,
-    })).toEqual([]);
-  });
-
-  it('retains path normalization and ignores disjoint structured writes', () => {
-    expect(detectParallelWriteConflicts(['left', 'right'], {
-      left: completedWithWrite('./src/area/../shared.ts', 'structured'),
-      right: completedWithWrite('src/shared.ts', 'structured'),
-    })).toEqual([{
-      stageIds: ['left', 'right'],
-      files: ['src/shared.ts'],
-      attribution: ['structured', 'structured'],
-    }]);
-
-    expect(detectParallelWriteConflicts(['left', 'right'], {
-      left: completedWithWrite('src/left.ts', 'structured'),
-      right: completedWithWrite('src/right.ts', 'structured'),
-    })).toEqual([]);
+  it.each(['structured', 'snapshot', 'unknown'] as const)('retains factual observations without upgrading %s attribution', attribution => {
+    expect(latestAttemptWrites(completedWithWrite('./src/area/../shared.ts', attribution)))
+      .toEqual({ files: ['src/shared.ts'], attribution });
+    const legacy = completedWithWrite('src/shared.ts', attribution);
+    delete legacy.attempts?.[0].writeAttribution;
+    expect(latestAttemptWrites(legacy)).toEqual({ files: ['src/shared.ts'], attribution: 'unknown' });
   });
 
   it('keeps a linear DAG one-stage-at-a-time', () => {

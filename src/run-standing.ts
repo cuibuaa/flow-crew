@@ -1,6 +1,5 @@
 import { inspectRunScheduler, type RunSchedulerObservation } from './run-lock.js';
 import {
-  isAwaitingApprovalRunStatus,
   isPausedRunStatus,
   readArchivedRunState,
   runDir,
@@ -80,7 +79,7 @@ export function inspectApprovalRunStanding(projectDir: string, runId: string): A
       reason: `originating run reached terminal status ${runStatus}`,
     };
   }
-  if (isPausedRunStatus(runStatus) || isAwaitingApprovalRunStatus(runStatus)) {
+  if (isPausedRunStatus(runStatus)) {
     return {
       ...common,
       kind: 'parked',

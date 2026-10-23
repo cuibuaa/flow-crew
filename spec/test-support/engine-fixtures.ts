@@ -8,7 +8,6 @@ export function emptyInbox(): CampaignInboxOverviewLike {
     approvals: { status: 'complete', items: [] },
     deferred: { status: 'complete', items: [] },
     stale: { status: 'complete', items: [] },
-    patches: { status: 'complete', items: [], coverage: { succeeded: 1, failed: 0 } },
   };
 }
 export function portCanBind(port: number): Promise<boolean> {

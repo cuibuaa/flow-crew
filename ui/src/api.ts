@@ -13,18 +13,25 @@ import type {
 
 const BASE = "/api";
 
-async function errorMessage(response: Response): Promise<string> {
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function responseError(response: Response): Promise<ApiError> {
   const fallback = `${response.status} ${response.statusText}`.trim();
   try {
     const body = await response.clone().json() as { error?: string };
-    return body?.error || fallback;
+    return new ApiError(body?.error || fallback, response.status);
   } catch {
-    return fallback;
+    return new ApiError(fallback, response.status);
   }
 }
 
 async function responseJson<T>(response: Response): Promise<T> {
-  if (!response.ok) throw new Error(await errorMessage(response));
+  if (!response.ok) throw await responseError(response);
   return response.json() as Promise<T>;
 }
 
@@ -43,21 +50,19 @@ function post<T>(url: string, body: unknown): Promise<T> {
 interface CreateTaskRequest extends BriefAdmissionSubmission {
   brief: string;
   projectDir?: string;
-  workflow: string;
-  maxIterations: number;
+  workflow?: string;
+  maxIterations?: number;
   noCampaign?: boolean;
   campaignId?: string;
   campaignName?: string;
 }
 
-export class BriefAdmissionRequestError extends Error {
-  readonly status: number;
+export class BriefAdmissionRequestError extends ApiError {
   readonly preflight: BriefPreflightResponse;
 
   constructor(message: string, status: number, preflight: BriefPreflightResponse) {
-    super(message);
+    super(message, status);
     this.name = "BriefAdmissionRequestError";
-    this.status = status;
     this.preflight = preflight;
   }
 }
@@ -128,7 +133,7 @@ export const fetchRunStageOutput = async (
   const response = await fetch(
     `${BASE}/runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageId)}/output${stageOutputQuery(options)}`,
   );
-  if (!response.ok) throw new Error(await errorMessage(response));
+  if (!response.ok) throw await responseError(response);
   return {
     text: await response.text(),
     totalBytes: Number(response.headers.get("X-Output-Total-Bytes")) || null,
@@ -151,7 +156,7 @@ export const fetchRunDetail = (id: string) =>
 export const fetchRunSummary = async (runId: string): Promise<string | null> => {
   const response = await fetch(`${BASE}/tasks/${encodeURIComponent(runId)}/summary`);
   if (response.status === 404) return null;
-  if (!response.ok) throw new Error(await errorMessage(response));
+  if (!response.ok) throw await responseError(response);
   let data: { content?: unknown } | null;
   try {
     data = await response.json() as { content?: unknown } | null;
@@ -185,17 +190,3 @@ export const resolveInboxItem = (
   `${BASE}/inbox/${encodeURIComponent(runId)}/${encodeURIComponent(requestId)}/resolve`,
   body,
 );
-
-export const reviewCampaignPatch = (campaignId: string, index: number, decision: "accept" | "reject") =>
-  post<{ remaining: number; version?: string }>(
-    `${BASE}/campaigns/${encodeURIComponent(campaignId)}/review/${index}`,
-    { decision },
-  );
-
-export const fetchCampaignBriefDiff = async (campaignId: string, from: string, to: string): Promise<string> => {
-  const response = await fetch(
-    `${BASE}/campaigns/${encodeURIComponent(campaignId)}/brief-diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-  );
-  if (!response.ok) throw new Error(await errorMessage(response));
-  return response.text();
-};

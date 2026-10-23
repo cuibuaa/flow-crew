@@ -127,7 +127,7 @@ describe('portable process identity', () => {
       expect(processCommandBinding(ownedChild.pid!, recordedSuperset)).toBe('unbound');
       expect(processCommandBinding(2_000_000_000, recorded)).toBe('unreadable');
       const source = readFileSync(new URL('../src/run-lock.ts', import.meta.url), 'utf-8');
-      expect(source).toContain("['-ww', '-o', 'lstart=', '-p', String(pid)]");
+      expect(readFileSync(new URL('../src/process-liveness.ts', import.meta.url), 'utf8')).toContain("['-ww', '-o', 'lstart=', '-p', String(pid)]");
       expect(source).toContain("['-ww', '-o', 'args=', '-p', String(pid)]");
     } finally {
       if (previousPath === undefined) delete process.env.PATH;

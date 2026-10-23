@@ -17,7 +17,6 @@ function emptyInbox() {
     approvals: { status: 'complete' as const, items: [] },
     deferred: { status: 'complete' as const, items: [] },
     stale: { status: 'complete' as const, items: [] },
-    patches: { status: 'complete' as const, items: [], coverage: { succeeded: 1, failed: 0 } },
   };
 }
 
@@ -51,7 +50,6 @@ function sources(): Partial<CampaignPageSources> {
     campaignId,
     campaignStorageKey: campaignId,
     campaignName: 'Operator API fixture',
-    supervise: false,
   };
   runEvidenceDir = join(runsRoot(), state.runId);
   mkdirSync(runEvidenceDir, { recursive: true });

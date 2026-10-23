@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -253,8 +254,8 @@ describe('partial failure evidence audit', () => {
       state: 'regression', reason: 'Known failure count increased',
     });
     expect(testDelta(greenBaseline, partialCurrent)).toMatchObject({
-      state: 'unresolved',
-      reason: expect.stringContaining('partial'),
+      state: 'regression',
+      reason: 'A green baseline no longer passes',
     });
     expect(testDelta(partialBaseline, passed)).toMatchObject({ state: 'pass' });
   });

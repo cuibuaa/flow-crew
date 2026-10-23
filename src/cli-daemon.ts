@@ -1,8 +1,10 @@
+import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { sweepRunScratch } from './invocation-scratch.js';
 import { appendFileSync, closeSync, mkdirSync, openSync, rmSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import {
   STALE_DAEMON_MESSAGE,
   computeBuildFingerprint,
@@ -12,11 +14,12 @@ import {
   writeDaemonIdentity,
   type DaemonIdentity,
 } from './daemon-identity.js';
-import { TaskRegistry, TASK_STATUS, type TaskEntry } from './task-registry.js';
+import { TaskRegistry, TASK_LIST_STATUS, TASK_STATUS, isActiveTaskStatus, type TaskEntry } from './task-registry.js';
 import { Orchestrator, type DeploymentStatus } from './orchestrator.js';
 import { createDaemonReconciler } from './daemon-reconciliation.js';
 import {
   DaemonUnavailableError,
+  RpcOutcomeUnknownError,
   commandSocketPath,
   rpcErrorExitCode,
   sendRpc as sendRpcRequest,
@@ -27,21 +30,30 @@ import {
   type RpcRequest,
   type RpcResponse,
   type TaskShowEntry,
+  type TaskListRpcResponse,
 } from './orchestrator-rpc.js';
 import type { CancellationResult } from './run-control.js';
 import { runsRoot } from './store.js';
 import { terminalArtifactStatusMismatch } from './terminal-artifact-status.js';
 import { readOperationalProjection, type OperationalRunState } from './cli-events.js';
 import { inspectRunScheduler } from './run-lock.js';
+import { fcGlobalDir } from './store.js';
+import { readDeploymentHold } from './deployment-hold.js';
+import { readRunIndexRecords } from './run-index.js';
+import { assertDistFresh, buildProjectRoot, pinBuildRuntime } from './build-manifest.js';
+import { processIsAlive } from './process-liveness.js';
+import { resolveRunStatus, taskDisplayStatus } from './lifecycle-status.js';
 
 type RpcSender = (socketPath: string, request: RpcRequest, timeoutMs?: number) => Promise<RpcResponse>;
 
 export interface DaemonProcessControls {
   sendRpc: RpcSender;
   findSocketOwnerPid: (socketPath: string) => number | undefined;
-  spawnDaemon: (socketPath: string, logPath: string) => void;
+  spawnDaemon: (socketPath: string, logPath: string) => { pid?: number; exited: Promise<string> };
   killProcess: (pid: number, signal: NodeJS.Signals) => void;
   delay: (ms: number) => Promise<void>;
+  processAlive: (pid: number) => boolean;
+  build: (projectRoot: string) => Promise<void>;
 }
 
 export interface DaemonCommandOptions {
@@ -55,51 +67,54 @@ export interface DaemonCommandOptions {
 export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {}): Promise<number> {
   const stdout = opts.stdout ?? process.stdout;
   const stderr = opts.stderr ?? process.stderr;
-  const sub = args[1];
-  if (args.includes('--help') || args.includes('-h')) {
-    stdout.write(`${daemonUsage()}\n`);
-    return 0;
-  }
+  const sub = args[1]?.startsWith('-') ? undefined : args[1];
   try {
-  const socketPath = resolve(commandSocketPath(
-    valueAfter(args, '--port')
-      ?? valueAfter(args, '--socket'),
-  ));
-  const baseDir = dirname(socketPath);
-  const logPath = join(baseDir, 'daemon.log');
-  const distDir = resolve(opts.distDir ?? (import.meta.dirname ?? '.'));
-  const controls: DaemonProcessControls = {
-    sendRpc: (path, request, timeoutMs) => sendRpcRequest(path, request, timeoutMs),
-    findSocketOwnerPid: findUnixSocketOwnerPid,
-    spawnDaemon: spawnDetachedDaemon,
-    killProcess: (pid, signal) => process.kill(pid, signal),
-    delay,
-    ...opts.controls,
-  };
+    const parsed = parseCommandArgs(`daemon${sub ? ` ${sub}` : ''}`, args);
+    if (parsed.help) {
+      stdout.write(`${commandUsage(`daemon${sub ? ` ${sub}` : ''}`)}\n`);
+      return 0;
+    }
+    const socketPath = resolve(commandSocketPath(parsed.values.get('--socket')));
+    const baseDir = dirname(socketPath);
+    const logPath = join(baseDir, 'daemon.log');
+    const distDir = resolve(opts.distDir ?? (sub === 'serve'
+      ? import.meta.dirname ?? '.'
+      : join(buildProjectRoot(import.meta.dirname ?? '.'), 'dist')));
+    if (sub === 'serve' && !opts.distDir && buildProjectRoot(distDir) === dirname(distDir)) {
+      const runtime = pinBuildRuntime(distDir, join(baseDir, 'runtime'));
+      const pinned = await import(pathToFileURL(join(runtime, 'cli-daemon.js')).href);
+      return pinned.cmdDaemon(args, { ...opts, distDir: runtime });
+    }
+    const controls: DaemonProcessControls = {
+      sendRpc: (path, request, timeoutMs) => sendRpcRequest(path, request, timeoutMs),
+      findSocketOwnerPid: findUnixSocketOwnerPid,
+      spawnDaemon: (path, log) => spawnDetachedDaemon(path, log, distDir),
+      killProcess: (pid, signal) => process.kill(pid, signal),
+      delay,
+      processAlive: processIsAlive,
+      build: (root) => buildDeployment(root, stdout, stderr),
+      ...opts.controls,
+    };
+
+    if (sub === 'deploy') {
+      return await deployDaemon(parsed, socketPath, logPath, distDir, stdout, stderr, controls);
+    }
 
     if (sub === 'hold' || sub === 'hold-status' || sub === 'continue') {
-      const timeoutMs = Number(valueAfter(args, '--timeout-ms') ?? '60000');
-      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 86_400_000) throw new Error('--timeout-ms must be an integer from 0 to 86400000');
-      const deadline = Date.now() + timeoutMs;
-      const request = sub === 'hold' ? 'deploy-hold' : sub === 'continue' ? 'deploy-continue' : 'deploy-status';
-      let result = await controls.sendRpc(socketPath, { cmd: request }) as DeploymentStatus;
-      if (!Array.isArray(result.tasks) || !Array.isArray(result.errors)) throw new Error('Daemon does not support deployment hold');
-      while (sub === 'hold' && !result.ready && Date.now() < deadline) {
-        await controls.delay(Math.min(200, Math.max(1, deadline - Date.now())));
-        if (Date.now() >= deadline) break;
-        result = await controls.sendRpc(socketPath, { cmd: 'deploy-status' }, Math.max(1, Math.min(2000, deadline - Date.now()))) as DeploymentStatus;
-      }
+      const timeoutMs = Number(parsed.values.get('--timeout-ms') ?? '60000');
+      const result = sub === 'hold' ? await holdAndWait(socketPath, timeoutMs, controls)
+        : deploymentStatus(await controls.sendRpc(socketPath, { cmd: sub }));
       stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       if (sub === 'hold' && !result.ready) stderr.write('HOLD NOT SETTLED: timeout/refusal; hold remains active. Do not deploy. No running attempt was killed.\n');
       return sub === 'continue' ? (result.released && !result.errors.length ? 0 : 1) : result.ready ? 0 : 1;
     }
 
     if (sub === 'start') {
-      if (await isRunning(socketPath, controls.sendRpc)) {
+      if (await isRunning(socketPath, controls)) {
         stdout.write(`daemon already running at ${socketPath}; use "flowcrew daemon restart" to load a new build\n`);
         return 0;
       }
-      const guardCode = checkRestartSafety(baseDir, args.includes('--force'), stderr, 'start');
+      const guardCode = checkRestartSafety(baseDir, parsed.flags.has('--force'), stderr, 'start');
       if (guardCode !== 0) return guardCode;
       mkdirSync(baseDir, { recursive: true });
       const status = await startDetachedAndWait(socketPath, logPath, controls);
@@ -119,7 +134,7 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
     }
 
     if (sub === 'restart') {
-      const guardCode = checkRestartSafety(baseDir, args.includes('--force'), stderr, 'restart');
+      const guardCode = checkRestartSafety(baseDir, parsed.flags.has('--force'), stderr, 'restart');
       if (guardCode !== 0) return guardCode;
       const previousPid = controls.findSocketOwnerPid(socketPath);
       if (previousPid === undefined) {
@@ -135,11 +150,11 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
     }
 
     if (sub === 'logs') {
-      const tail = Number.parseInt(valueAfter(args, '--tail') ?? '100', 10);
+      const tail = Number.parseInt(parsed.values.get('--tail') ?? '100', 10);
       if (!existsSync(logPath)) return 0;
       const lines = readFileSync(logPath, 'utf-8').split(/\r?\n/);
       stdout.write(lines.slice(Math.max(0, lines.length - tail - 1)).join('\n'));
-      if (args.includes('--follow')) {
+      if (parsed.flags.has('--follow')) {
         const child = spawn('tail', ['-f', logPath], { stdio: 'inherit' });
         await new Promise((resolve) => child.on('exit', resolve));
         return child.exitCode ?? 0;
@@ -156,18 +171,7 @@ export async function cmdDaemon(args: string[], opts: DaemonCommandOptions = {})
 }
 
 export function daemonUsage(): string {
-  return [
-      'Usage: flowcrew daemon <command> [options]',
-      '  restart [--force]  Reload the background orchestrator (operator entry point)',
-      '  status             Prove listener pid, loaded build, and registry health',
-      '  hold [--timeout-ms N]  Fence launches; wait for settled stage groups (default 60000ms)',
-      '  hold-status        Observe hold and scheduler/unit/command retirement',
-      '  continue           Release hold; continue compatible held runs automatically',
-      '  start [--force]    Compatibility: start only when no daemon is listening',
-      '  stop               Stop the background orchestrator',
-      '  serve              Run the orchestrator in the foreground (internal/service entry)',
-      '  logs [--tail N]    Read daemon.log',
-    ].join('\n');
+  return commandUsage('daemon');
 }
 
 export function createDaemonRpcErrorLogger(
@@ -182,21 +186,12 @@ export function createDaemonRpcErrorLogger(
 }
 
 export async function handleDaemonCancellationRequest(
-  orchestrator: Pick<Orchestrator, 'cancel' | 'cancelRun' | 'cancellationStatus'>,
+  orchestrator: Pick<Orchestrator, 'cancel' | 'cancelRun'>,
   request: RpcRequest,
 ): Promise<CancellationResult | undefined> {
-  if (request.cmd === 'cancel') {
-    const result = await orchestrator.cancel(request.id);
-    if (!result.ok) {
-      if (result.status === 'outcome-unknown') {
-        throw new Error(`Cancellation outcome unknown; processes may still be running: ${result.message}`);
-      }
-      throw new Error(`Cancellation still in progress: ${result.message}. Check progress with: flowcrew task show ${request.id}`);
-    }
-    return result;
-  }
-  if (request.cmd === 'cancel-run') return orchestrator.cancelRun(request.runId, request.unit);
-  if (request.cmd === 'cancel-status') return orchestrator.cancellationStatus(request.runId, request.unit);
+  if (request.cmd === 'cancel') return 'id' in request
+    ? orchestrator.cancel(request.id)
+    : orchestrator.cancelRun(request.runId, request.unit);
   return undefined;
 }
 
@@ -229,20 +224,16 @@ export function mergeTaskWithRunState(
     const scheduler = inspectRunScheduler(String(state.runId ?? task.run_id), runPath);
     return {
       ...task,
-      status: state.status,
+      run: {
+        status: canonicalRunStatus(state.status),
+        ...(typeof state.failureReason === 'string' ? { failureReason: state.failureReason } : {}),
+        ...(typeof state.completedAt === 'string' ? { completedAt: state.completedAt } : {}),
+      },
       engine_history: state.engineHistory,
       continuation_failure: state.continuationFailure,
       ...(scheduler.kind === 'live' ? { scheduler_live: { pid: scheduler.pid } } : {}),
       operational: readOperationalProjection(runPath, { state, includeDrift: options.includeDrift }),
-      // A terminal registry timestamp may record a later control-plane action
-      // (for example an already-terminal cancellation). Preserve it when
-      // present; otherwise project the run's authoritative completion time.
-      completed_at: task.completed_at
-        ?? (typeof state.completedAt === 'string' ? state.completedAt : undefined),
       ...(verdict ? { run_verdict: verdict } : {}),
-      ...(typeof state.failureReason === 'string' && state.failureReason
-        ? { failure_reason: state.failureReason }
-        : {}),
       ...(mismatch ? {
         terminal_status_mismatch: {
           lifecycle_status: mismatch.lifecycleStatus,
@@ -254,6 +245,11 @@ export function mergeTaskWithRunState(
   } catch {
     return { ...task };
   }
+}
+
+function canonicalRunStatus(status: string): string {
+  const resolution = resolveRunStatus(status);
+  return resolution.kind === 'known' ? resolution.status : status;
 }
 
 function runVerdict(verdict: unknown, realityGate: unknown): string | undefined {
@@ -278,42 +274,47 @@ export async function handleDaemonRegistrationRequest(
 ): Promise<RegisterRpcResponse> {
   const persisted = request.acknowledgement === 'persisted';
   const task = persisted ? orchestrator.enqueue(request.task) : await orchestrator.register(request.task);
-  return { id: task.id, unit: task.systemd_unit, pid: identity.pid, build: identity.build.hash,
+  return { id: task.id, unit: task.systemd_unit, new_attempt: task.attempt, pid: identity.pid, build: identity.build.hash,
     ...(persisted ? { acknowledgement: 'persisted' as const } : {}) };
+}
+
+/** List keeps launch metadata in the registry and reads lifecycle status from the index. */
+export function handleDaemonListRequest(
+  registry: TaskRegistry,
+  request: Extract<RpcRequest, { cmd: 'list' }>,
+): TaskListRpcResponse {
+  const runs = new Map((readRunIndexRecords(fcGlobalDir()) ?? []).map(run => [run.runId, run]));
+  const filter = request.filter;
+  let tasks: TaskShowEntry[] = registry.list({ status: TASK_LIST_STATUS.ALL }).map(task => {
+    const run = task.run_id ? runs.get(basename(task.run_id)) : undefined;
+    return run?.status ? { ...task, run: { status: canonicalRunStatus(run.status), completedAt: run.completedAt } } : { ...task };
+  });
+  if (filter?.status && filter.status !== TASK_LIST_STATUS.ALL) {
+    tasks = tasks.filter(task => filter.status === TASK_LIST_STATUS.ACTIVE
+      ? isActiveTaskStatus(taskDisplayStatus(task.status, task.run?.status))
+      : taskDisplayStatus(task.status, task.run?.status) === filter.status);
+  }
+  if (filter?.limit && filter.limit > 0) tasks = tasks.slice(-filter.limit);
+  return { tasks, registry_unreadable_records: registry.health().unreadableRecords };
 }
 
 async function serve(socketPath: string, logPath: string, distDir: string): Promise<void> {
   mkdirSync(dirname(socketPath), { recursive: true });
-  const identity = createDaemonIdentity({ socketPath, distDir });
-  const warn = (message: string) => {
-    appendFileSync(logPath, `${new Date().toISOString()} WARN ${message}\n`, 'utf-8');
-  };
-  sweepRunScratch(runsRoot(), warn);
-  const registry = new TaskRegistry({ baseDir: dirname(socketPath), warn });
-  const orchestrator = new Orchestrator({
-    registry,
-    reconcileOrphanRuns: createDaemonReconciler(registry, warn),
-    onMaintenanceEvent: (event) => {
-      appendFileSync(logPath, `${event.timestamp} EVENT ${JSON.stringify(event)}\n`, 'utf-8');
-    },
-  });
+  let identity: DaemonIdentity;
+  let registry: TaskRegistry;
+  let orchestrator: Orchestrator;
   const handler = async (req: RpcRequest): Promise<RpcResponse> => {
     appendFileSync(logPath, `${new Date().toISOString()} ${req.cmd}\n`, 'utf-8');
     if (req.cmd === 'register') {
       return handleDaemonRegistrationRequest(orchestrator, req, identity);
     }
-    if (req.cmd === 'deploy-hold') return orchestrator.holdDeployment();
-    if (req.cmd === 'deploy-status') return orchestrator.deploymentStatus();
-    if (req.cmd === 'deploy-continue') return orchestrator.continueDeployment();
-    if (req.cmd === 'list') {
-      return {
-        tasks: registry.list(req.filter).map((task) => mergeTaskWithRunState(task, runsRoot(), { includeDrift: false })),
-        registry_unreadable_records: registry.health().unreadableRecords,
-      };
-    }
+    if (req.cmd === 'hold') return orchestrator.holdDeployment();
+    if (req.cmd === 'hold-status') return orchestrator.deploymentStatus();
+    if (req.cmd === 'continue') return orchestrator.continueDeployment();
+    if (req.cmd === 'list') return handleDaemonListRequest(registry, req);
     if (req.cmd === 'show') {
       const task = registry.get(req.id);
-      if (!task) throw new Error(`Task not found: ${req.id}`);
+      if (!task) throw Object.assign(new Error(`Task not found: ${req.id}`), { code: 'TASK_NOT_FOUND' });
       const unitStatus = await orchestrator.unitStatus(req.id);
       return {
         task: mergeTaskWithRunState(task),
@@ -346,24 +347,42 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
       }, 10);
       return { ok: true };
     }
-    return { error: 'unknown command' };
+    throw Object.assign(new Error('unknown command'), { code: 'RPC_UNKNOWN_COMMAND' });
   };
 
   const server = await startRpcServer(socketPath, handler, {
     onHandlerError: createDaemonRpcErrorLogger(logPath),
     onResponse: (req, response) => {
-      if ((req.cmd === 'register' && 'acknowledgement' in response) || req.cmd === 'deploy-hold' || req.cmd === 'deploy-continue') {
-        setImmediate(() => void orchestrator.tickOnce());
+      if ((req.cmd === 'register' && 'acknowledgement' in response) || req.cmd === 'hold' || req.cmd === 'continue') {
+        setImmediate(() => orchestrator.requestTick());
       }
     },
   });
-  writeDaemonIdentity(socketPath, identity);
-  orchestrator.start();
-  appendFileSync(
-    logPath,
-    `${new Date().toISOString()} daemon started ${socketPath} pid=${identity.pid} build=${identity.build.hash}\n`,
-    'utf-8',
-  );
+  try {
+    identity = createDaemonIdentity({ socketPath, distDir });
+    const warn = (message: string) => {
+      appendFileSync(logPath, `${new Date().toISOString()} WARN ${message}\n`, 'utf-8');
+    };
+    registry = new TaskRegistry({ baseDir: dirname(socketPath), warn });
+    orchestrator = new Orchestrator({
+      registry,
+      reconcileOrphanRuns: createDaemonReconciler(registry, warn),
+    });
+    writeDaemonIdentity(socketPath, identity);
+    // Only unlink aliases of deleted owners here. Recursive scratch retirement
+    // and retention planning belong to explicit cleanup and run lifecycle boundaries.
+    sweepRunScratch(runsRoot(), warn);
+    orchestrator.start();
+    appendFileSync(
+      logPath,
+      `${new Date().toISOString()} daemon started ${socketPath} pid=${identity.pid} build=${identity.build.hash}\n`,
+      'utf-8',
+    );
+  } catch (error) {
+    server.close();
+    rmSync(socketPath, { force: true });
+    throw error;
+  }
 }
 
 function rpcIdentity(identity: DaemonIdentity): Pick<
@@ -380,6 +399,91 @@ function rpcIdentity(identity: DaemonIdentity): Pick<
   };
 }
 
+function deploymentStatus(response: RpcResponse): DeploymentStatus {
+  const result = response as DeploymentStatus;
+  if (!Array.isArray(result.tasks) || !Array.isArray(result.errors)) throw new Error('Daemon does not support deployment hold');
+  return result;
+}
+
+async function holdAndWait(socketPath: string, timeoutMs: number, controls: DaemonProcessControls): Promise<DeploymentStatus> {
+  const deadline = Date.now() + timeoutMs;
+  let result = deploymentStatus(await controls.sendRpc(socketPath, { cmd: 'hold' }));
+  while (!result.ready && Date.now() < deadline) {
+    await controls.delay(Math.min(200, Math.max(1, deadline - Date.now())));
+    if (Date.now() >= deadline) break;
+    result = deploymentStatus(await controls.sendRpc(socketPath, { cmd: 'hold-status' }, Math.max(1, Math.min(2000, deadline - Date.now()))));
+  }
+  return result;
+}
+
+async function deployDaemon(
+  parsed: ReturnType<typeof parseCommandArgs>, socketPath: string, logPath: string, distDir: string,
+  stdout: NodeJS.WriteStream, stderr: NodeJS.WriteStream, controls: DaemonProcessControls,
+): Promise<number> {
+  let step = 'hold';
+  const projectRoot = buildProjectRoot(distDir);
+  try {
+    const timeoutMs = Number(parsed.values.get('--timeout-ms') ?? '60000');
+    if (parsed.flags.has('--force')) throw new Error('Deployment cannot bypass safety checks with --force');
+    if (checkRestartSafety(dirname(socketPath), false, stderr, 'start') !== 0) throw new Error('Daemon start safety check refused');
+    // The durable hold is the only recovery record. After an interrupted build,
+    // start the last published generation and ask it to settle that same hold.
+    if (controls.findSocketOwnerPid(socketPath) === undefined) await startDetachedAndWait(socketPath, logPath, controls);
+    const held = await holdAndWait(socketPath, timeoutMs, controls);
+    stdout.write(`${JSON.stringify(held, null, 2)}\n`);
+    if (!held.ready) throw new Error('Hold is not settled; inspect flowcrew daemon hold-status');
+    const hold = readDeploymentHold();
+    if (!hold || hold.releasedAt || hold.id !== held.hold?.id) throw new Error('Daemon hold does not match this FC_HOME');
+    const previous = await verifiedDaemonStatus(socketPath, controls);
+    const identity = readDaemonIdentity(socketPath)!;
+    if (identity.distDir ? buildProjectRoot(identity.distDir) !== projectRoot : identity.build.hash !== computeBuildFingerprint(distDir).hash) {
+      throw new Error('Cannot bind the held daemon to this deployment checkout');
+    }
+    step = 'stop';
+    await controls.sendRpc(socketPath, { cmd: 'stop' });
+    if (!await waitForOwnerRelease(socketPath, previous.pid, controls, 40)) throw new Error('Held daemon did not release its socket');
+    step = 'build';
+    stdout.write(`Building deployment checkout ${projectRoot}\n`);
+    await controls.build(projectRoot);
+    const manifest = assertDistFresh(projectRoot, distDir);
+    const expectedBuild = computeBuildFingerprint(distDir).hash;
+    step = 'start';
+    const started = await startDetachedAndWait(socketPath, logPath, controls);
+    step = 'verify';
+    if ((started.pid === previous.pid && started.startedAt === previous.startedAt)
+        || started.build !== expectedBuild
+        || assertDistFresh(projectRoot, distDir).generation !== manifest.generation
+        || await reportDaemonStatus(socketPath, distDir, stdout, controls) !== 0) {
+      throw new Error('New daemon identity/build generation could not be verified');
+    }
+    stdout.write(`generation: ${manifest.generation}\n`);
+    step = 'continue';
+    const continued = deploymentStatus(await controls.sendRpc(socketPath, { cmd: 'continue' }));
+    stdout.write(`${JSON.stringify(continued, null, 2)}\n`);
+    if (!continued.released || continued.errors.length) throw new Error('Continuation refused; inspect hold-status and the reported task/run before retrying');
+    stdout.write('Deployment complete; hold released.\n');
+    return 0;
+  } catch (error) {
+    let holdState = 'hold state unverified; inspect daemon hold-status';
+    try {
+      const hold = readDeploymentHold();
+      holdState = hold && !hold.releasedAt ? 'hold remains active' : hold?.releasedAt ? 'hold already released; verify tasks before retrying' : 'no hold recorded';
+    } catch { /* corrupt control state remains a refusal */ }
+    stderr.write(`DEPLOY STOPPED at ${step}: ${errorMessage(error)}. ${holdState}. Retry flowcrew daemon deploy --socket ${JSON.stringify(socketPath)} from ${projectRoot} (same FC_HOME).\n`);
+    return rpcErrorExitCode(error);
+  }
+}
+
+async function buildDeployment(projectRoot: string, stdout: NodeJS.WriteStream, stderr: NodeJS.WriteStream): Promise<void> {
+  await new Promise<void>((done, reject) => {
+    const child = spawn('npm', ['run', 'build'], {
+      cwd: projectRoot, stdio: ['ignore', stdout, stderr], env: { ...process.env, FC_HOME: fcGlobalDir() },
+    });
+    child.once('error', reject);
+    child.once('exit', (code, signal) => code === 0 ? done() : reject(new Error(`Build exited ${code ?? signal}`)));
+  });
+}
+
 function checkRestartSafety(
   baseDir: string,
   force: boolean,
@@ -394,7 +498,7 @@ function checkRestartSafety(
     );
     stderr.write('Inspect the proposed recovery first: flowcrew doctor --repair-registry\n');
     stderr.write('After reviewing it, apply with: flowcrew doctor --repair-registry --apply\n');
-    return 3;
+    return 1;
   }
   const unsafe = snapshot.tasks.filter((task) => task.status === TASK_STATUS.RUNNING && !task.run_id);
   if (unsafe.length === 0 || force) return 0;
@@ -406,7 +510,7 @@ function checkRestartSafety(
   stderr.write('After a new daemon takes over, an exiting unit without a run binding can be mistaken for an early crash and replay its brief.\n');
   for (const task of unsafe) stderr.write(`  resolve first: flowcrew task cancel ${task.id}\n`);
   stderr.write(`If you explicitly accept that replay risk, rerun: flowcrew daemon ${action} --force\n`);
-  return 3;
+  return 1;
 }
 
 async function reportDaemonStatus(
@@ -581,37 +685,13 @@ function reportRegistryScaleValues(scale: RegistryScale, stdout: NodeJS.WriteStr
 
 function reportRegistryScale(baseDir: string, stdout: NodeJS.WriteStream): void {
   try {
-    reportRegistryScaleValues(readRegistryScale(baseDir), stdout);
+    reportRegistryScaleValues(new TaskRegistry({ baseDir }).metrics(), stdout);
   } catch (error) {
     stdout.write('registry_bytes: UNVERIFIED\n');
     stdout.write('registry_records: UNVERIFIED\n');
     stdout.write('registry_tasks: UNVERIFIED\n');
     stdout.write(`UNVERIFIED: cannot inspect local task registry (${errorMessage(error)}).\n`);
   }
-}
-
-function readRegistryScale(baseDir: string): RegistryScale {
-  const path = join(baseDir, 'tasks.jsonl');
-  if (!existsSync(path)) return { bytes: 0, records: 0, tasks: 0 };
-
-  const raw = readFileSync(path);
-  const taskIds = new Set<number>();
-  let records = 0;
-  for (const line of raw.toString('utf-8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    records += 1;
-    try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      if (parsed && typeof parsed === 'object' && typeof (parsed as { id?: unknown }).id === 'number') {
-        taskIds.add((parsed as { id: number }).id);
-      }
-    } catch {
-      // Physical records include corrupt lines; task count mirrors readLatest()
-      // by folding only readable rows with numeric ids.
-    }
-  }
-  return { bytes: raw.byteLength, records, tasks: taskIds.size };
 }
 
 function statusRpcFailureSummary(error: unknown): string {
@@ -680,24 +760,51 @@ async function startDetachedAndWait(
   logPath: string,
   controls: DaemonProcessControls,
 ): Promise<DaemonStatusRpcResponse> {
-  controls.spawnDaemon(socketPath, logPath);
-  for (let i = 0; i < 40; i++) {
-    try {
-      const response = await controls.sendRpc(socketPath, { cmd: 'status' }, 300);
-      const status = asDaemonStatus(response);
-      const owner = controls.findSocketOwnerPid(socketPath);
-      if (status && owner === status.pid && resolve(status.socketPath) === socketPath) return status;
-    } catch {
-      // The child may not have bound its socket yet.
+  const child = controls.spawnDaemon(socketPath, logPath);
+  let ready = false;
+  let waiting = true;
+  let childExited = false;
+  try {
+    const exited = child.exited.then(reason => { childExited = true; throw new Error(`daemon child exited before readiness (${reason}); see ${logPath}`); });
+    const status = await Promise.race([exited, (async () => {
+      while (waiting) {
+        try {
+          const response = await controls.sendRpc(socketPath, { cmd: 'status' }, 300);
+          // A competing listener is never evidence that our child started.
+          const verified = await verifiedDaemonStatus(socketPath, controls, response);
+          if (verified.pid !== child.pid) throw new Error('Daemon socket belongs to a different child');
+          return verified;
+        } catch (error) {
+          if (!(error instanceof DaemonUnavailableError) && !(error instanceof RpcOutcomeUnknownError)) throw error;
+        }
+        await controls.delay(100);
+      }
+      throw new Error('Daemon startup ended');
+    })()]);
+    ready = true;
+    return status;
+  } finally {
+    waiting = false;
+    if (!ready && !childExited && child.pid !== undefined && controls.processAlive(child.pid)) {
+      controls.killProcess(child.pid, 'SIGKILL');
+      await child.exited;
     }
-    await controls.delay(100);
   }
-  throw new Error(`daemon did not become ready with a verifiable identity; see ${logPath}`);
 }
 
-async function isRunning(socketPath: string, rpc: RpcSender): Promise<boolean> {
+async function verifiedDaemonStatus(socketPath: string, controls: DaemonProcessControls, response?: RpcResponse): Promise<DaemonStatusRpcResponse> {
+  const status = asDaemonStatus(response ?? await controls.sendRpc(socketPath, { cmd: 'status' }));
+  const identity = readDaemonIdentity(socketPath);
+  if (!status || controls.findSocketOwnerPid(socketPath) !== status.pid
+      || !identity || !identityMatchesStatus(identity, status, socketPath)) {
+    throw new Error('Daemon RPC identity, socket owner and daemon.json do not agree');
+  }
+  return status;
+}
+
+async function isRunning(socketPath: string, controls: DaemonProcessControls): Promise<boolean> {
   try {
-    await rpc(socketPath, { cmd: 'status' }, 300);
+    await verifiedDaemonStatus(socketPath, controls);
     return true;
   } catch (error) {
     if (error instanceof DaemonUnavailableError) return false;
@@ -705,20 +812,21 @@ async function isRunning(socketPath: string, rpc: RpcSender): Promise<boolean> {
   }
 }
 
-function spawnDetachedDaemon(socketPath: string, logPath: string): void {
+function spawnDetachedDaemon(socketPath: string, logPath: string, distDir: string): ReturnType<DaemonProcessControls['spawnDaemon']> {
   mkdirSync(dirname(logPath), { recursive: true });
-  const cliPath = resolve(import.meta.dirname ?? '.', 'cli.js');
   const out = openSync(logPath, 'a');
   try {
-    const child = spawn(process.execPath, [cliPath, 'daemon', 'serve', '--socket', socketPath], {
+    const runtimeDist = pinBuildRuntime(distDir, join(dirname(socketPath), 'runtime'));
+    const child = spawn(process.execPath, [join(runtimeDist, 'cli.js'), 'daemon', 'serve', '--socket', socketPath], {
       detached: true,
       stdio: ['ignore', out, out],
-      env: { ...process.env, FLOWCREW_DAEMON_SOCKET: socketPath },
     });
-    child.once('error', (error) => {
-      appendFileSync(logPath, `${new Date().toISOString()} daemon spawn failed: ${error.stack ?? error.message}\n`, 'utf-8');
+    const exited = new Promise<string>(done => {
+      child.once('error', error => done(error.message));
+      child.once('exit', (code, signal) => done(String(code ?? signal)));
     });
     child.unref();
+    return { pid: child.pid, exited };
   } finally {
     closeSync(out);
   }
@@ -753,11 +861,6 @@ function identityMatchesStatus(identity: DaemonIdentity, status: DaemonStatusRpc
 function readNumber(value: RpcResponse, key: string): number | undefined {
   const candidate = (value as unknown as Record<string, unknown>)[key];
   return typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : undefined;
-}
-
-function valueAfter(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  return idx >= 0 ? args[idx + 1] : undefined;
 }
 
 function delay(ms: number): Promise<void> {

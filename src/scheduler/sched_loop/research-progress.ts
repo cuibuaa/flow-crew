@@ -1,3 +1,4 @@
+import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Publish iteration accounting, advance only fully settled research evidence, and dispatch admitted policy finalizers before deciding to continue.
 import { pendingResearchGateCandidates, readResearchGateCandidate, rejectPendingResearchGateCandidates, settleResearchGateCandidate } from '../../research-candidate.js';
 import { Adapter, AgentConfig } from '../../adapters/base.js';
@@ -21,7 +22,7 @@ import { join } from 'node:path';
 export async function advanceSettledResearch(
   state: StoreState, sorted: StageConfig[], baseStages: StageConfig[], iteration: number,
   iterationDispatchedIds: string[], innerRetriesUsed: number, maxInnerRetries: number,
-  maxIterations: number, injectedDispatchStages: Set<string>, planStageRetries: Map<string, number>,
+  maxIterations: number, injectedDispatchStages: Set<string>,
   projectDir: string, runId: string, runDirPath: string, workflow: WorkflowConfig,
   adapter: Adapter, agents: Map<string, AgentConfig>, resolvedAgentsDir: string,
   roleRegistry: Map<string, { name: string; description: string }>,
@@ -104,10 +105,8 @@ export async function advanceSettledResearch(
         } catch { /* handled as an unresolved owner below */ }
         const finalizer = terminalOwner ? sorted.find((stage) => stage.id === terminalOwner) : undefined;
         if (!finalizer) {
-          state.status = RUN_STATUS.INCOMPLETE;
-          state.failureReason = 'Research policy reached a terminal decision, but its admitted terminal owner could not be resolved.';
-          state.completedAt = new Date().toISOString();
-          writeRunState(projectDir, runId, state);
+          state = await concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'terminal_owner_unresolved',
+            detail: 'Research policy reached a terminal decision, but its admitted terminal owner could not be resolved.', writeCampaignEntry });
           return { kind: 'settled', state };
         }
         state.stages[finalizer.id] = rependStageStatus(state.stages[finalizer.id], 0);
@@ -116,7 +115,7 @@ export async function advanceSettledResearch(
         try { unlinkSync(terminalReadyPath); } catch { /* one-shot */ }
         const finalized = await executeIteration(
           sorted, projectDir, runId, runDirPath, workflow, adapter, agents,
-          resolvedAgentsDir, roleRegistry, injectedDispatchStages, planStageRetries, skills, taskDescription,
+          resolvedAgentsDir, roleRegistry, injectedDispatchStages, skills, taskDescription,
           availableSkillsList, attemptDeadlineClockFactory,
         );
         state = readRunState(projectDir, runId);
@@ -131,7 +130,6 @@ export async function advanceSettledResearch(
               const path = join(runDirPath, 'stages', finalizer.id, 'output.md');
               try { return hashRollbackFileSync(path).sha256; } catch { return undefined; }
             })(),
-            threshold: state.campaignTriggers?.repeatedFailureAfter,
           });
           const repeatedFinalizer = concludeRepeatedBlockage(
             state,

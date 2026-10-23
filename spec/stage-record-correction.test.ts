@@ -6,10 +6,11 @@ import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { ArtifactPathSchema, resolveArtifactLocation } from '../src/artifact-location.js';
 import { HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
 import { AuditFindingsSchema } from '../src/scoped-audit-repair.js';
-import { clearAttemptSummaryRefreshDebounce, readRunEvents } from '../src/run-events.js';
-import { createRun, fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
+import { readRunEvents } from '../src/run-events.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
-import { readGateVerdict } from '../src/scheduler/sched_settlement/gate-verdict.js';
+import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 
 let root: string, projectDir: string, runDir: string, runId: string, previousStore: string;
 const role = { name: 'reviewer', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Review independently.' };
@@ -19,8 +20,8 @@ const rejected = () => ({ pass: false, reason: 'Reproduced a report defect.', cr
 const passed = () => ({ pass: true, reason: 'The report meets the brief.', criteria: { criterion: { status: 'pass', evidence: 'Inspected docs/report.md.' } }, audit_findings: { version: 1, findings: [] } });
 const schema = () => stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] });
 const options = () => ({ stageId: 'review', role, dependsOn: [], promptTemplate: 'Review the report.', projectDir, runId, runDir,
-  retries: 0, timeout_ms: 10000, projectWriteScope: [], isGate: true, criterionRefs: ['criterion'], outputSchema: schema(),
-  artifactContract: { version: 1 as const, produces: [{ id: 'verdict', root: 'run' as const, path: 'verdict_review.json', kind: 'file' as const }], reads: [], groups: [], replays: [] } });
+  retries: 0, timeout_ms: 10000,  isGate: true, criterionRefs: ['criterion'], outputSchema: schema(),
+  artifactContract: { version: 1 as const, produces: [{ id: 'verdict', root: 'run' as const, path: 'verdict_review.json', kind: 'file' as const }], reads: [], groups: [] } });
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'stage-record-spec-'));
@@ -29,7 +30,7 @@ beforeEach(() => {
   ({ runId, runDirPath: runDir } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['review']));
   writeFileSync(join(runDir, 'dispatch_admission.json'), JSON.stringify({ criterionGateRefs: { review: ['criterion'] } }));
 });
-afterEach(() => { clearAttemptSummaryRefreshDebounce(); setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
 describe('stage record constraints before settlement', () => {
   it.each(['/outside', ['..', 'outside'].join('/'), 'docs/../outside', 'docs//report.md', './report.md', 'docs/', 'docs\\report.md', 'docs/\0report.md', ''])('rejects the unsafe artifact path %j at declaration and use', path => {
@@ -90,7 +91,7 @@ describe('informational citations preserve independent refusals', () => {
     expect(AuditFindingsSchema.parse(record.audit_findings)).toEqual(record.audit_findings);
     expect(JSON.parse(readFileSync(join(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
     // Accepting the citation must preserve the real unmet-outcome rejection.
-    expect(readGateVerdict(projectDir, 'review', runId)).toMatchObject({ pass: false, reason: record.reason });
+    expect(readGateEvaluation(projectDir, 'review', runId)).toMatchObject({ pass: false, reason: record.reason });
     expect(readRunEvents(projectDir, runId).filter(event => event.type === 'attempt_failed')).toHaveLength(0);
     // The same string remains unusable as a writable artifact capability.
     expect(ArtifactPathSchema.safeParse(path).success).toBe(false);
@@ -144,7 +145,7 @@ describe('record correction uses the existing attempt', () => {
       return { output: JSON.stringify(++calls === 1 ? {} : record), exitCode: 0, duration_ms: 1 };
     } };
     const result = await runStage(adapter, { ...options(), isGate: false, dynamicDispatch, outputSchema: HANDOFF_SCHEMA,
-      artifactContract: { version: 1, produces: dynamicDispatch ? [{ id: 'dispatch', root: 'run', path: 'dispatch.yaml', kind: 'file', nonempty: true }] : [], reads: [], groups: [], replays: [] } });
+      artifactContract: { version: 1, produces: dynamicDispatch ? [{ id: 'dispatch', root: 'run', path: 'dispatch.yaml', kind: 'file', nonempty: true }] : [], reads: [], groups: [] } });
     expect(result.exitCode, result.friendlyError).toBe(0);
     expect(calls).toBe(2);
     if (dynamicDispatch) expect(readFileSync(join(runDir, 'dispatch.yaml'), 'utf8')).toBe(dispatch);
@@ -165,7 +166,7 @@ describe('record correction uses the existing attempt', () => {
       let calls = 0;
       const adapter: Adapter = { async run() { calls++; return { output: JSON.stringify({ status: 'blocked', summary: 'Required input absent.', files_modified: [], checks: [], caveats: [] }), exitCode, duration_ms: 1 }; } };
       const result = await runStage(adapter, { ...options(), isGate: false, outputSchema: HANDOFF_SCHEMA,
-        artifactContract: { version: 1, produces: [], reads: [], groups: [], replays: [] } });
+        artifactContract: { version: 1, produces: [], reads: [], groups: [] } });
       expect(result.exitCode).toBe(1); expect(calls).toBe(1);
     }
   });

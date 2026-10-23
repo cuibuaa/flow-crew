@@ -1,13 +1,25 @@
+import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchRunSummary } from "../ui/src/api";
+import { ApiError, cancelTask, fetchRunSummary, fetchRunStageOutput } from "../ui/src/api";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startDashboard } from '../src/dashboard.js';
-import { createRun, fcGlobalDir, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
 
 describe("run summary read semantics", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    [409, () => cancelTask("refused")],
+    [404, () => fetchRunStageOutput("missing", "stage")],
+    [503, () => fetchRunSummary("unavailable")],
+  ] as const)("preserves HTTP %i separately from server prose", async (status, request) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "server detail" }), { status })));
+    await expect(request()).rejects.toMatchObject({ name: "ApiError", status, message: "server detail" });
+    await expect(request()).rejects.toBeInstanceOf(ApiError);
+  });
 
   it("treats only HTTP 404 as a known missing summary", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "not found" }), { status: 404 })));

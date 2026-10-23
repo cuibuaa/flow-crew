@@ -6,7 +6,8 @@ import { join, resolve } from 'node:path';
 import { stringify } from 'yaml';
 import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
 import { captureResearchGateCandidate } from '../src/research-candidate.js';
-import { createRun, fcGlobalDir, readRunState, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { normalizeStageContracts, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
@@ -25,7 +26,7 @@ afterEach(() => {
   setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true });
 });
 function brief(reportDir = 'docs') {
-  return `---\nresearch:\n  baseline: 0\n  policy: best_of_n\n  result_file: docs/round.json\n  report_dir: ${reportDir}\n  stop: {beat: 0.5, max_rounds: 1}\n---\n# Goal\nIndependently measure a round.\n`;
+  return `---\nresearch:\n  baseline: 0\n  policy: greedy_stack\n  result_file: docs/round.json\n  report_dir: ${reportDir}\n  stop: {beat: 0.5, max_rounds: 1}\n---\n# Goal\nIndependently measure a round.\n`;
 }
 function configure(reportDir = 'docs') {
   expect(configureWorkflowBrief({ name: 'research', description: '', defaults: {}, stages: [] },
@@ -173,9 +174,9 @@ it.each([
   }
   writeFileSync(join(run, 'task_brief.md'), brief());
   updateRunState(project, runId, state => {
-    state.status = 'stopped'; state.failureReason = 'Synthetic interruption after production.';
+    state.status = 'cancelled'; state.failureReason = 'Synthetic interruption after production.';
     state.completedAt = new Date().toISOString();
-    state.research = { baseline: 0, policy: 'best_of_n', resultFile: 'docs/round.json', reportDir: 'docs', stop: { beat: 0.5, maxRounds: 1 } };
+    state.research = { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json', reportDir: 'docs', stop: { beat: 0.5, maxRounds: 1 } };
     if (!sameValue) delete state.researchInputGeneration;
   });
   const adapter = new ScriptedAdapter({ review: { output: 'Independent review.', runFiles: {

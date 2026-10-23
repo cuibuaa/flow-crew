@@ -1,3 +1,4 @@
+import { atomicWrite } from '../src/engine-fs.js';
 import { stageWrapUpTiming } from '../src/attempt-deadline.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { retireRunScratch } from '../src/invocation-scratch.js';
@@ -22,9 +23,8 @@ import {
   type AgentConfig,
   type RunResult,
 } from '../src/adapters/base.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  atomicWrite,
-  createRun,
   fcGlobalDir,
   readStageStatus,
   setFcGlobalDir,
@@ -294,7 +294,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('applies graceful cleanup to stdin timeouts and both supervisor-abort paths', { timeout: 30_000 }, async () => {
+  it('applies graceful cleanup to stdin timeouts and both watchdog-abort paths', { timeout: 30_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-matrix-'));
     try {
       const observations: CleanupObservation[] = [];
@@ -473,7 +473,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
             role: FIXTURE_ROLE,
             dependsOn: [],
             promptTemplate: 'deadline fixture',
-            projectWriteScope: ['deadline-*'],
+
             timeout_ms: budgetMs,
             projectDir: projectRoot,
             runId: created.runId,
@@ -495,7 +495,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
           });
           expect(status.error).toBeUndefined();
           expect(status.continuation).toMatchObject({ forced: true });
-          expect(timeout.terminationCause).toBe('budget_forced_stop');
+          expect(status.attempts?.at(-1)?.terminationCause).toBe('exit');
           expect(timeout.remainingMs).toBe(0);
         } finally {
           hardStopFixture(fixturePid(pidPath));
@@ -521,7 +521,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     }
   });
 
-  it('preserves supervisor-abort exit 137 and attribution while allowing cleanup', { timeout: 8_000 }, async () => {
+  it('preserves watchdog-abort exit 137 and attribution while allowing cleanup', { timeout: 8_000 }, async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-abort-project-'));
     const stateRoot = mkdtempSync(join(tmpdir(), 'flowcrew-graceful-abort-state-'));
     const previousStateRoot = fcGlobalDir();
@@ -562,9 +562,9 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
           version: 1,
           stageId,
           attemptIndex: 1,
-          reason: 'fixture supervisor decision',
+          reason: 'fixture watchdog decision',
           timestamp: new Date().toISOString(),
-          source: 'supervisor',
+          source: 'watchdog',
         }));
         return adapterExecution;
       },
@@ -576,8 +576,8 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
         stageId,
         role: FIXTURE_ROLE,
         dependsOn: [],
-        promptTemplate: 'supervisor abort fixture',
-        projectWriteScope: ['abort-*'],
+        promptTemplate: 'watchdog abort fixture',
+
         timeout_ms: 7_000,
         projectDir: projectRoot,
         runId: created.runId,
@@ -586,8 +586,8 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
       });
       const status = readStageStatus(projectRoot, created.runId, stageId);
       expect(result.exitCode).toBe(137);
-      expect(status.error).toBe('aborted by engine: fixture supervisor decision');
-      expect(status.timeout?.terminationCause).toBe('stage_abort');
+      expect(status.error).toBe('aborted by engine: fixture watchdog decision');
+      expect(status.attempts?.at(-1)?.terminationCause).toBe('stage_abort');
       expect(status.timeout?.deadlineReachedAt).toBeUndefined();
       expect(status.timeout?.deadlineOverrunMs).toBe(0);
       expect(existsSync(cleanupPath)).toBe(true);

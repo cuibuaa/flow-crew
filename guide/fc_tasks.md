@@ -43,8 +43,8 @@ form a valid ledger graph. Optional `flowcrewTaskId` is a positive safe integer,
 project-name match. Update merges a validated partial patch under the ledger lock and
 writes atomically. Creation never overwrites an existing entry. Clearing a link is explicit.
 
-The engine registry compatibility reader bounds each `tasks.jsonl` row to 4 MiB (4,194,304 bytes);
-an oversized row cannot supply verified linkage. A directory-persistence failure after publication
+Engine task linkage uses the shared `TaskRegistry` reader for the requested task IDs.
+A directory-persistence failure after publication
 can be outcome-ambiguous: inspect the actual store before retrying, rather than assuming every
 refusal left every JSON file unchanged.
 
@@ -60,7 +60,9 @@ Source: [validation/writers/reconciliation](../src/fc-tasks.ts).
 
 ## Frontend integration boundary
 
-An operator-owned frontend hook can invoke the renderer with an explicit session or payload.
+FlowCrew's installer installs the shared frontend hook and Claude status-line wrapper;
+[launch-side delivery](session-push.md) describes installation, durable delivery and ACK.
+Other frontend hooks can invoke the renderer with an explicit session or payload.
 For a payload whose key is `thread-id`, select `--session-key thread-id` and pass its JSON
 through `--payload-arg`. A supplied payload shape must be verified for that frontend; FlowCrew
 code does not establish another product's callback cadence or footer capabilities.
@@ -68,7 +70,8 @@ code does not establish another product's callback cadence or footer capabilitie
 The renderer uses terminal dimensions and Unicode display width to bound rows. It keeps
 ledger intent and verified run links distinct. FlowCrew supplies no native task-tool alias
 and no installed `fc_tasks` skill. The shipped [status skill](../skills/fc-status.md) uses
-project run status; any ledger skill, notification shim or frontend settings are operator tooling.
+project run status. The shipped session integration keeps delivery receipts separate from
+business ACK and explicit ledger closure.
 
 Sources: [renderer](../src/fc-tasks.ts), [CLI payload handling](../src/cli-fc-tasks.ts),
 [shipped installer](../skills/install.sh).

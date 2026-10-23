@@ -1,5 +1,8 @@
-import { readSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { EXIT_CODE } from './exit-code.js';
+import { commandUsage, parseCommandArgs, type ParsedCliArguments as ParsedArguments } from './cli-args.js';
+import { readSync, readFileSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { estimateProgress, progressLine, type ProgressRun, type ProgressHistory } from './task-progress.js';
 import {
   FcTasksRefusal,
   createEngineTaskRunResolver,
@@ -30,53 +33,11 @@ export interface FcTasksCliDependencies {
   taskRunResolver?: FcTaskRunResolver;
 }
 
-interface ParsedArguments {
-  values: Map<string, string>;
-  flags: Set<string>;
-  positionals: string[];
-}
-
-const COMMON_VALUE_OPTIONS = new Set([
-  '--session',
-  '--session-key',
-  '--payload-arg',
-  '--store-root',
-  '--engine-root',
-  '--max-entries',
-]);
-
-const RENDER_VALUE_OPTIONS = new Set([
-  ...COMMON_VALUE_OPTIONS,
-  '--columns',
-  '--lines',
-]);
-
-const WRITE_VALUE_OPTIONS = new Set([
-  ...COMMON_VALUE_OPTIONS,
-  '--entry',
-  '--flowcrew-task-id',
-]);
-
-const UPDATE_VALUE_OPTIONS = new Set([
-  ...WRITE_VALUE_OPTIONS,
-  '--expected-run-id',
-]);
-
 const MAX_CLI_INPUT_BYTES = 1024 * 1024;
 const stdinWaitCell = new Int32Array(new SharedArrayBuffer(4));
 
 export function fcTasksUsage(): string {
-  return [
-    'Usage:',
-    '  flowcrew fc_tasks render [--session <id>] [--session-key <key>] [--payload-arg <json>] [--store-root <dir>] [--engine-root <dir>]',
-    '  flowcrew fc_tasks list [--json] [--session <id>] [--store-root <dir>] [--engine-root <dir>]',
-    '  flowcrew fc_tasks reconcile [--json] [--session <id>] [--store-root <dir>] [--engine-root <dir>]',
-    '  flowcrew fc_tasks create --session <id> [--entry <json>] [--flowcrew-task-id <number>] [--store-root <dir>] [--engine-root <dir>]',
-    '  flowcrew fc_tasks update <id> --session <id> [--entry <json>] [--flowcrew-task-id <number> | --clear-flowcrew-task-link] [--expected-run-id <id>] [--store-root <dir>] [--engine-root <dir>]',
-    '',
-    'Render reads a front-end JSON payload from stdin when no explicit selector or --payload-arg is present.',
-    'Create and update read the entry JSON from stdin unless --entry is present.',
-  ].join('\n');
+  return commandUsage('fc_tasks');
 }
 
 function reconciliationEngineLabel(projection: FcTaskReconciliation): string {
@@ -128,35 +89,6 @@ function renderReconciliationHuman(
   return `${rows.join('\n')}\n`;
 }
 
-function parseArguments(
-  tokens: string[],
-  valueOptions: ReadonlySet<string>,
-  flagOptions: ReadonlySet<string>,
-): ParsedArguments {
-  const values = new Map<string, string>();
-  const flags = new Set<string>();
-  const positionals: string[] = [];
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (!token.startsWith('--')) {
-      positionals.push(token);
-      continue;
-    }
-    const equals = token.indexOf('=');
-    const name = equals === -1 ? token : token.slice(0, equals);
-    if (flagOptions.has(name)) {
-      if (equals !== -1) throw new FcTasksRefusal(`${name} does not take a value`);
-      flags.add(name);
-      continue;
-    }
-    if (!valueOptions.has(name)) throw new FcTasksRefusal(`unknown option ${name}`);
-    const value = equals === -1 ? tokens[++index] : token.slice(equals + 1);
-    if (value === undefined || value === '') throw new FcTasksRefusal(`${name} requires a value`);
-    if (values.has(name)) throw new FcTasksRefusal(`${name} may be supplied only once`);
-    values.set(name, value);
-  }
-  return { values, flags, positionals };
-}
 
 function positiveInteger(value: string | undefined, name: string): number | undefined {
   if (value === undefined) return undefined;
@@ -290,14 +222,14 @@ function parseEntry(
 
 function writeUsageError(stdout: Writer, message: string): number {
   stdout.write(`fc_tasks: usage error · ${sanitizeDiagnostic(message)}\n`);
-  return 2;
+  return EXIT_CODE.failed;
 }
 
 function writeRefusal(stderr: Writer, operation: string, error: unknown): number {
   stderr.write(
     `fc_tasks: refused ${sanitizeDiagnostic(operation)} · ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error))}\n`,
   );
-  return 1;
+  return EXIT_CODE.failed;
 }
 
 function sanitizeDiagnostic(value: string): string {
@@ -325,18 +257,24 @@ export function cmdFcTasks(
   const requested = args[1];
   if (requested === '--help' || requested === '-h' || requested === 'help') {
     stdout.write(`${fcTasksUsage()}\n`);
-    return 0;
+    return EXIT_CODE.completed;
   }
   const subcommand = requested ?? 'render';
   const tokens = requested === undefined ? [] : args.slice(2);
 
+  let parsed: ParsedArguments;
+  try {
+    parsed = parseCommandArgs(`fc_tasks ${subcommand}`, ['fc_tasks', subcommand, ...tokens]);
+  } catch (error) {
+    return writeUsageError(stdout, error instanceof Error ? error.message : String(error));
+  }
+  if (parsed.help) {
+    stdout.write(`${fcTasksUsage()}\n`);
+    return EXIT_CODE.completed;
+  }
+
   if (subcommand === 'render') {
     try {
-      const parsed = parseArguments(tokens, RENDER_VALUE_OPTIONS, new Set(['--help']));
-      if (parsed.flags.has('--help')) {
-        stdout.write(`${fcTasksUsage()}\n`);
-        return 0;
-      }
       if (parsed.positionals.length > 0) throw new FcTasksRefusal('render takes no positional arguments');
       const env = dependencies.env ?? process.env;
       const rendered = renderFcTasks({
@@ -348,10 +286,17 @@ export function cmdFcTasks(
         columns: parsed.values.get('--columns') ?? env.COLUMNS,
         lines: parsed.values.get('--lines') ?? env.LINES,
         maxEntries: maxEntries(parsed),
+        agentTaskRoot: env.AGENT_TASK_ROOT,
         taskRunResolver: taskRunResolver(parsed, dependencies),
+        taskProgress: id => {
+          try {
+            const display = JSON.parse(readFileSync(join(engineRoot(parsed, dependencies), 'tasks', String(id), 'session-push.json'), 'utf8')) as { progress?: ProgressRun; history?: ProgressHistory };
+            return display.progress ? progressLine(id, estimateProgress(display.progress, display.history || [])) : undefined;
+          } catch { return undefined; }
+        },
       });
       stdout.write(rendered.text);
-      return 0;
+      return EXIT_CODE.completed;
     } catch (error) {
       return writeUsageError(stdout, error instanceof Error ? error.message : String(error));
     }
@@ -359,11 +304,6 @@ export function cmdFcTasks(
 
   if (subcommand === 'list') {
     try {
-      const parsed = parseArguments(tokens, COMMON_VALUE_OPTIONS, new Set(['--json', '--help']));
-      if (parsed.flags.has('--help')) {
-        stdout.write(`${fcTasksUsage()}\n`);
-        return 0;
-      }
       if (parsed.positionals.length > 0) throw new FcTasksRefusal('list takes no positional arguments');
       const session = resolveSessionForCommand(parsed, dependencies, true);
       if (!session.ok) return writeRefusal(stderr, 'list', `${session.code}: ${session.detail}`);
@@ -381,8 +321,8 @@ export function cmdFcTasks(
       return ledger.state === 'unavailable'
         || ledger.issues.length > 0
         || runLinks.some(({ state }) => state === 'unavailable')
-        ? 1
-        : 0;
+        ? EXIT_CODE.failed
+        : EXIT_CODE.completed;
     } catch (error) {
       return writeUsageError(stdout, error instanceof Error ? error.message : String(error));
     }
@@ -390,11 +330,6 @@ export function cmdFcTasks(
 
   if (subcommand === 'reconcile') {
     try {
-      const parsed = parseArguments(tokens, COMMON_VALUE_OPTIONS, new Set(['--json', '--help']));
-      if (parsed.flags.has('--help')) {
-        stdout.write(`${fcTasksUsage()}\n`);
-        return 0;
-      }
       if (parsed.positionals.length > 0) throw new FcTasksRefusal('reconcile takes no positional arguments');
       const session = resolveSessionForCommand(parsed, dependencies, true);
       if (!session.ok) return writeRefusal(stderr, 'reconcile', `${session.code}: ${session.detail}`);
@@ -426,8 +361,8 @@ export function cmdFcTasks(
       return ledger.state === 'unavailable'
         || ledger.issues.length > 0
         || runLinks.some(({ state }) => state === 'unavailable')
-        ? 1
-        : 0;
+        ? EXIT_CODE.failed
+        : EXIT_CODE.completed;
     } catch (error) {
       return writeRefusal(stderr, 'reconcile', error);
     }
@@ -435,11 +370,6 @@ export function cmdFcTasks(
 
   if (subcommand === 'create') {
     try {
-      const parsed = parseArguments(tokens, WRITE_VALUE_OPTIONS, new Set(['--help']));
-      if (parsed.flags.has('--help')) {
-        stdout.write(`${fcTasksUsage()}\n`);
-        return 0;
-      }
       if (parsed.positionals.length > 0) throw new FcTasksRefusal('create takes no positional arguments');
       const session = resolveSessionForCommand(parsed, dependencies, false);
       if (!session.ok) return writeRefusal(stderr, 'create', `${session.code}: ${session.detail}`);
@@ -453,7 +383,7 @@ export function cmdFcTasks(
         taskRunResolver: taskRunResolver(parsed, dependencies),
       });
       stdout.write(`fc_tasks: created ${sanitizeDiagnostic(`${session.session}/${String((entry as { id?: unknown }).id)}`)}\n`);
-      return 0;
+      return EXIT_CODE.completed;
     } catch (error) {
       return writeRefusal(stderr, 'create', error);
     }
@@ -461,11 +391,6 @@ export function cmdFcTasks(
 
   if (subcommand === 'update') {
     try {
-      const parsed = parseArguments(tokens, UPDATE_VALUE_OPTIONS, new Set(['--help', '--clear-flowcrew-task-link']));
-      if (parsed.flags.has('--help')) {
-        stdout.write(`${fcTasksUsage()}\n`);
-        return 0;
-      }
       if (parsed.positionals.length !== 1) throw new FcTasksRefusal('update requires exactly one id');
       const session = resolveSessionForCommand(parsed, dependencies, false);
       if (!session.ok) return writeRefusal(stderr, 'update', `${session.code}: ${session.detail}`);
@@ -482,7 +407,7 @@ export function cmdFcTasks(
         taskRunResolver: taskRunResolver(parsed, dependencies),
       });
       stdout.write(`fc_tasks: updated ${sanitizeDiagnostic(`${session.session}/${parsed.positionals[0]}`)}\n`);
-      return 0;
+      return EXIT_CODE.completed;
     } catch (error) {
       return writeRefusal(stderr, 'update', error);
     }

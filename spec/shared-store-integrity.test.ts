@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 import { startSchedulerHeartbeat } from '../src/scheduler-heartbeat.js';
-import { createRun, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
 let root: string, project: string, run: string, previousStore: string;
 beforeEach(() => {

@@ -10,7 +10,8 @@ import { CodexAdapter } from '../src/adapters/codex.js';
 import { parseStreamJsonToText, startDashboard } from '../src/dashboard.js';
 import { readOperationalProjection } from '../src/cli-events.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
-import { beginStageAttempt, completeStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatus,
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus,
   resetStageLiveAttemptAliases, setFcGlobalDir, writeRunState, writeStageStatus } from '../src/store.js';
 import { stageLiveLogPath, readStageLiveLogPath } from '../src/stage-live-log.js';
 import { inspectStageExecutionFacts } from '../src/stage-watchdog.js';
@@ -82,7 +83,7 @@ function gateWorkflow(): { config: WorkflowConfig; yaml: string; agentsDir: stri
   }
   return {
     agentsDir,
-    yaml: 'name: native-attempts\ndefaults: {max_iterations: 1, max_retries: 0}\nstages:\n  - id: plan\n    role: planner\n    dynamic_dispatch: true\n    artifact_contract: {version: 1, produces: [], reads: [], replays: []}\n',
+    yaml: 'name: native-attempts\ndefaults: {max_iterations: 1, max_retries: 0}\nstages:\n  - id: plan\n    role: planner\n    dynamic_dispatch: true\n    artifact_contract: {version: 1, produces: [], reads: []}\n',
     config: { name: 'native-attempts', description: '', defaults: { max_iterations: 1, max_retries: 0 },
       stages: [{ id: 'plan', role: 'planner', dynamic_dispatch: true, depends_on: [], skills: [], criterion_refs: [],
         is_gate: false, prompt_template: '', artifact_contract: fixtureArtifactContract('plan') }] },
@@ -136,9 +137,12 @@ describe('native logs belong to scheduler attempts', () => {
       { pass: false, reason: 'native attempt 1' },
       { pass: true, reason: 'native attempt 2' },
     ]);
-    // Claude's resumed session cost is cumulative; only the first call's cost
-    // is independently attributable. Both raw native totals must still survive.
-    if (kind === 'claude') expect(status.cost_usd).toBeCloseTo(0.01);
+    // Native costs remain cumulative in the logs; each ledger entry holds its interval.
+    if (kind === 'claude') {
+      expect(status.cost_usd).toBeCloseTo(0.02);
+      expect(status.attempts?.map(attempt => attempt.cost_usd)).toEqual([0.01, 0.01]);
+      expect(status.attempts?.every(attempt => attempt.costUsage === 'known')).toBe(true);
+    }
     for (const n of [1, 2]) {
       const stream = readFileSync(stageLiveLogPath(created.runDirPath, 'review', n), 'utf8');
       expect(stream).toContain(`native stderr attempt ${n}`);
@@ -177,11 +181,11 @@ describe('native logs belong to scheduler attempts', () => {
     expect(stageLiveLogPath(created.runDirPath, 'work')).toBe(current);
     let previousLiveLogBytes: number | undefined;
     const facts = () => inspectStageExecutionFacts({ runDir: created.runDirPath, stageId: 'work',
-      status, sinceMs: 0, previousLiveLogBytes });
+      status, previousLiveLogBytes });
     expect(facts().liveProgressThisTick).toBe(false);
     appendFileSync(legacy, 'late historical bytes\n');
     appendFileSync(stageLiveLogPath(created.runDirPath, 'work', 1), 'late prior-attempt bytes\n');
-    expect(facts()).toMatchObject({ liveProgressThisTick: false, artifactProgressThisTick: false,
+    expect(facts()).toMatchObject({ liveProgressThisTick: false,
       protectedFromIdleAbort: false });
     appendFileSync(current, 'current native bytes\n');
     const progress = facts();

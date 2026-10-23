@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
-import { createRun, readRunState, runDir, writeRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { readRunState, runDir, writeRunState } from '../src/store.js';
 
 
 let projectDir: string;
@@ -46,7 +47,7 @@ describe('append-only gate history under a technical retry', () => {
       '  - id: plan',
       '    role: planner',
       '    dynamic_dispatch: true',
-      '    artifact_contract: {version: 1, produces: [{id: dispatch, root: run, path: dispatch.yaml}], reads: [], replays: []}',
+      '    artifact_contract: {version: 1, produces: [{id: dispatch, root: run, path: dispatch.yaml}], reads: []}',
     ].join('\n');
     const workflow: WorkflowConfig = {description: '', 
       name: 'gate-technical-retry-history',

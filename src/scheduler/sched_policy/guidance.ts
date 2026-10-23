@@ -1,4 +1,4 @@
-import { publishRunCompletion } from './run-completion.js';
+import { concludeRun } from './run-completion.js';
 /** Deduplicated scheduler guidance and stable blockage escalation; terminal owner lookup is shared, campaign persistence is supplied. */
 import { appendGuidanceEnvelope, RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
 import { mkdirSync, writeFileSync } from '../../engine-fs.js';
@@ -6,7 +6,6 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordBlockageOccurrence } from '../../blockage-ledger.js';
 import { RUN_STATUS, type StoreState } from '../../store.js';
-import { markLeftoverStagesSkipped } from '../sched_admission/brief-contract.js';
 import { admittedTerminalOwner } from './terminal-ownership.js';
 
 export function appendSchedulerGuidanceOnce(
@@ -86,10 +85,6 @@ export function createBlockageConcluder(writeCampaignEntry: (projectDir: string,
     const consecutive = typeof signal.consecutive === 'number' ? signal.consecutive : 3;
     const stageId = typeof signal.stageId === 'string' ? signal.stageId : undefined;
     const reason = `Escalated after ${consecutive} consecutive observations of the same blockage${stageId ? ` at ${stageId}` : ''}: ${detail}. A different repair/evidence state or external intervention is required.`;
-    state.status = RUN_STATUS.ESCALATED;
-    state.failureReason = reason;
-    state.completedAt = new Date().toISOString();
-    markLeftoverStagesSkipped(state, reason);
     const escalationPath = state.terminalStates?.[RUN_STATUS.ESCALATED]?.paths?.[0];
     const terminalOwner = escalationPath ? admittedTerminalOwner(ctx.runDirPath, escalationPath) : undefined;
     if (terminalOwner) {
@@ -101,12 +96,11 @@ export function createBlockageConcluder(writeCampaignEntry: (projectDir: string,
         Object.keys(state.stages),
       );
     }
-    publishRunCompletion(state, ctx.projectDir, ctx.runId, () => ({
+    return concludeRun(state, { status: RUN_STATUS.ESCALATED, reasonCode: 'repeated_blockage', detail: reason, pendingStageNote: reason, eventFields: () => ({
       iteration: ctx.iteration,
       ...(stageId ? { stageId } : {}),
       detail: reason,
-    }), writeCampaignEntry);
-    return state;
+    }), writeCampaignEntry });
   }
 
   return { concludeRepeatedBlockage };

@@ -1,3 +1,4 @@
+import { atomicWrite } from '../src/engine-fs.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -6,9 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { runWorkflow, StageConfigSchema, type WorkflowConfig } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  atomicWrite,
-  createRun,
   fcGlobalDir,
   readRunState,
   runDir,
@@ -218,7 +218,6 @@ describe('engine-owned unresolved stage obligations', () => {
     seeded.unresolvedStageObligations = [{
       stageId: 'phase5_ci_docs',
       declaredIteration: 1,
-      scopePlanningDigests: ['undisposed-scope-digest'],
     }];
     writeRunState(projectDir, run.runId, seeded);
     const adapter: Adapter = {

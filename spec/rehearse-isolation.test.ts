@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -56,7 +57,7 @@ function runRehearsal(
 ) {
   const installation = join(fixture.root, 'installation');
   mkdirSync(installation);
-  cpSync(join(repositoryRoot, 'dist'), join(installation, 'dist'), { recursive: true });
+  cpSync(realpathSync(join(repositoryRoot, 'dist')), join(installation, 'dist'), { recursive: true });
   cpSync(join(repositoryRoot, 'config'), join(installation, 'config'), { recursive: true });
   copyFileSync(join(repositoryRoot, 'package.json'), join(installation, 'package.json'));
   const dependencies = dirname(dirname(createRequire(import.meta.url).resolve('yaml/package.json')));

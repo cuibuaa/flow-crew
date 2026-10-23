@@ -1,11 +1,14 @@
-import { randomUUID } from 'node:crypto';
-import { appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from './engine-fs.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { atomicWrite, appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, unlinkSync, writeFileSync, writeSync } from './engine-fs.js';
 import { constants, existsSync, fstatSync, fsyncSync, readFileSync, readSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { fcGlobalDir } from './store.js';
 import { TASK_STATUS, isActiveTaskStatus, isKnownTaskStatus, type TaskStatus } from './lifecycle-status.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
+import type { LaunchTarget } from './session-push.js';
+import { processLiveness, type ProcessStartToken } from './process-liveness.js';
+import { lockOwnerIdentity, parseLockOwner, publishLockOwner, recoverStaleLock, type LockObservation } from './lock-publication.js';
 export { TASK_STATUS, isActiveTaskStatus } from './lifecycle-status.js';
 export type { TaskStatus } from './lifecycle-status.js';
 
@@ -17,12 +20,65 @@ export const TASK_LIST_STATUS = {
   ACTIVE: 'active',
   ALL: 'all',
 } as const;
-export type TaskListStatus = TaskStatus | typeof TASK_LIST_STATUS[keyof typeof TASK_LIST_STATUS];
-/** Legacy campaign rows remain readable; new tasks are always quick launches. */
-export type TaskKind = 'quick' | 'campaign';
-export type TaskSummaryVerdict = 'PASS' | 'FAIL' | 'ESCALATE';
+export type TaskListStatus = import('./lifecycle-status.js').RunStatus | TaskStatus | typeof TASK_LIST_STATUS[keyof typeof TASK_LIST_STATUS];
+export type TaskKind = 'quick';
+
+export function hasLiveForegroundOwner(task: TaskEntry): boolean {
+  const owner = task.foregroundOwner;
+  // Unobservable identity cannot authorize another executor or display creator.
+  return !!owner && processLiveness(owner.pid, owner.processStart) !== 'dead';
+}
+
+/** Startup settings are data; retired CLI spellings are consumed only at ingress. */
+export interface TaskLaunchOptions {
+  adapter?: string;
+  workflow?: string;
+  maxIterations?: number;
+  campaign?: string;
+  noCampaign?: boolean;
+  campaignContext?: 'inherit' | 'skip';
+}
+
+export const DEFAULT_MAX_ATTEMPTS = 2;
+
+export function normalizeLaunchOptions(args: string[]): TaskLaunchOptions {
+  const launch: TaskLaunchOptions = {};
+  for (let i = 0; i < args.length; i++) {
+    const [flag, inline] = args[i].split(/=(.*)/s);
+    const value = () => inline ?? args[++i];
+    if (flag === '--adapter') launch.adapter = value();
+    else if (flag === '--workflow') launch.workflow = value();
+    else if (flag === '--max-iterations') launch.maxIterations = Number(value());
+    else if (flag === '--campaign') launch.campaign = value();
+    else if (flag === '--no-campaign') launch.noCampaign = true;
+    else if (flag === '--campaign-context') launch.campaignContext = value() as 'inherit' | 'skip';
+    else if (flag === '--no-inherit-campaign') launch.campaignContext = 'skip';
+    else if (['--timeout', '--existing-run-id', '--task', '--brief-input-base64', '--project', '--brief-admission-record'].includes(flag)) value();
+  }
+  if (launch.workflow === 'default') launch.workflow = 'planner';
+  return launch;
+}
+
+/** Read aliases once; new records contain only the canonical fields. */
+export function normalizeTaskEntry(raw: TaskEntry & {
+  launch_seq?: number; max_retries?: number; launch_args?: string[];
+}): TaskEntry {
+  const { launch_seq, max_retries, launch_args, ...task } = raw;
+  return {
+    ...task,
+    launch: task.launch ?? (launch_seq ?? (task.attempt ?? 1) - 1) + 1,
+    max_attempts: task.max_attempts ?? max_retries ?? DEFAULT_MAX_ATTEMPTS,
+    launch_options: task.launch_options
+      ? { ...task.launch_options, ...(task.launch_options.workflow === 'default' ? { workflow: 'planner' } : {}) }
+      : normalizeLaunchOptions(launch_args ?? []),
+  };
+}
 
 export interface TaskEntry {
+  /** Explicit launch-side address; never inherited from a daemon/worker. */
+  launcher?: LaunchTarget;
+  /** The foreground CLI owns execution and push until this exact process exits. */
+  foregroundOwner?: { pid: number; processStart?: ProcessStartToken };
   id: number;
   name: string;
   kind?: TaskKind;
@@ -35,13 +91,12 @@ export interface TaskEntry {
   run_id?: string;
   status: TaskStatus;
   attempt: number;
-  /** Monotonic actual-launch sequence, independent of retry budget consumption. */
-  launch_seq?: number;
-  max_retries: number;
+  /** Actual launch, starting at one; independent of retry budget consumption. */
+  launch: number;
+  max_attempts: number;
   commit_prefix?: string;
   expected_artifacts?: string[];
   expected_summary_path?: string;
-  summary_verdict?: TaskSummaryVerdict;
   summary_one_liner?: string;
   summary_full?: string;
   summary_source?: string;
@@ -52,7 +107,7 @@ export interface TaskEntry {
   completing_commit?: string;
   notes?: string;
   tick_log_path: string;
-  launch_args?: string[];
+  launch_options?: TaskLaunchOptions;
   /** ISO time before which a 'deferred' task must not be launched (backoff / project-busy wait). */
   not_before?: string;
   /** Why the task is deferred — surfaced in `task list` so a waiting task never looks hung. */
@@ -63,24 +118,34 @@ export interface TaskEntry {
   defer_kind?: 'wait' | 'retry';
 }
 
+export function sessionTaskIndexPath(baseDir: string, launcher: Pick<LaunchTarget, 'frontend' | 'sessionId'>): string {
+  const key = createHash('sha256').update(JSON.stringify([launcher.frontend, launcher.sessionId])).digest('hex');
+  return join(baseDir, 'session-push', 'task-index', `${key}.json`);
+}
+
 export interface TaskCreateInput {
+  launcher?: LaunchTarget;
+  foregroundOwner?: TaskEntry['foregroundOwner'];
   name?: string;
   kind?: 'quick';
   brief_path?: string;
   brief_text?: string;
   brief_admission?: BriefAdmissionRecord;
-  config_path?: string;
   projectDir: string;
   systemd_unit?: string;
   run_id?: string;
   status?: TaskStatus;
   attempt?: number;
+  launch?: number;
+  max_attempts?: number;
+  /** Legacy registration aliases; never written. */
   launch_seq?: number;
   max_retries?: number;
   commit_prefix?: string;
   expected_artifacts?: string[];
   expected_summary_path?: string;
   notes?: string;
+  launch_options?: TaskLaunchOptions;
   launch_args?: string[];
 }
 
@@ -104,9 +169,7 @@ export interface TaskRegistrySnapshot extends TaskRegistryHealth {
   tasks: TaskEntry[];
 }
 
-// Surface growth well before the observed 341 MiB / 28,551-record incident,
-// while avoiding churn for ordinary E4-era sidecar-backed registries. Doctor
-// exposes the threshold; the daemon consumes it for backup-first compaction.
+// Explicit doctor diagnostics; ordinary registry writes never compact history.
 export const REGISTRY_COMPACTION_THRESHOLDS = {
   bytes: 64 * 1024 * 1024,
   records: 10_000,
@@ -118,19 +181,6 @@ export interface TaskRegistryMetrics extends TaskRegistryHealth {
   tasks: number;
   activeTasks: number;
   compactRecommended: boolean;
-}
-
-/** Observable counters for proving that hot reads consume only appended bytes. */
-export interface TaskRegistryCacheDiagnostics {
-  generation: number;
-  identity?: string;
-  readOffset: number;
-  pendingBytes: number;
-  lastBytesParsed: number;
-  totalBytesParsed: number;
-  rebuilds: number;
-  durableAppends: number;
-  suppressedAppends: number;
 }
 
 export type RegistryMaintenanceActionKind = 'repair' | 'quarantine' | 'drop-obsolete' | 'drop-blank';
@@ -167,8 +217,6 @@ export interface TaskRegistryOptions {
   now?: () => Date;
   /** Maximum time to wait for an active registry owner. Production default: 5 seconds. */
   lockTimeoutMs?: number;
-  /** Age after which a lock can be recovered even if its recorded owner still exists. Production default: 30 seconds. */
-  staleLockMs?: number;
   lockPollMs?: number;
   warn?: (message: string) => void;
   /** Fault-injection seam. Returning means the append is durable and may be acknowledged. */
@@ -192,18 +240,6 @@ export class TaskRegistryIntegrityError extends Error {
   }
 }
 
-interface RegistryLockOwner {
-  pid: number;
-  acquiredAt?: string;
-  token?: string;
-}
-
-interface RegistryLockObservation {
-  owner?: RegistryLockOwner;
-  mtimeMs: number;
-  signature: string;
-}
-
 interface RegistryReadResult extends TaskRegistryHealth {
   tasks: ReadonlyMap<number, TaskEntry>;
   activeTasks: ReadonlyMap<number, TaskEntry>;
@@ -215,7 +251,6 @@ interface RegistryReadResult extends TaskRegistryHealth {
 interface RegistryCache {
   dev: number;
   ino: number;
-  generation: number;
   readOffset: number;
   fileSize: number;
   mtimeMs: number;
@@ -268,7 +303,6 @@ interface CompactPlan {
 }
 
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
-const DEFAULT_STALE_LOCK_MS = 30_000;
 const DEFAULT_LOCK_POLL_MS = 10;
 
 export function defaultFcDir(): string {
@@ -290,17 +324,10 @@ export class TaskRegistry {
   readonly lockPath: string;
   private readonly now: () => Date;
   private readonly lockTimeoutMs: number;
-  private readonly staleLockMs: number;
   private readonly lockPollMs: number;
   private readonly warn: (message: string) => void;
   private readonly syncFile: (fd: number) => void;
   private registryCache?: RegistryCache;
-  private cacheGeneration = 0;
-  private cacheLastBytesParsed = 0;
-  private cacheTotalBytesParsed = 0;
-  private cacheRebuilds = 0;
-  private durableAppends = 0;
-  private suppressedAppends = 0;
   private readonly tickProjections = new Map<number, TickProjection>();
 
   constructor(opts: TaskRegistryOptions = {}) {
@@ -311,7 +338,6 @@ export class TaskRegistry {
     this.lockPath = join(this.baseDir, 'tasks.lock');
     this.now = opts.now ?? (() => new Date());
     this.lockTimeoutMs = opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
-    this.staleLockMs = opts.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
     this.lockPollMs = opts.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
     this.warn = opts.warn ?? ((message) => console.warn(message));
     this.syncFile = opts.syncFile ?? fsyncSync;
@@ -319,7 +345,7 @@ export class TaskRegistry {
   }
 
   create(input: TaskCreateInput): TaskEntry {
-    if ((input.kind !== undefined && input.kind !== 'quick') || input.config_path !== undefined) {
+    if (input.kind !== undefined && input.kind !== 'quick') {
       throw new Error('Campaign automation was retired; launch an admitted brief with quick --campaign <name>.');
     }
     return this.withLock(() => {
@@ -338,7 +364,9 @@ export class TaskRegistry {
       const briefPath = input.brief_text === undefined
         ? input.brief_path
         : this.writeBriefSidecar(id, input.brief_text);
-      const entry: TaskEntry = {
+      const entry: TaskEntry = normalizeTaskEntry({
+        launcher: input.launcher,
+        foregroundOwner: input.foregroundOwner,
         id,
         name,
         kind: 'quick',
@@ -349,16 +377,16 @@ export class TaskRegistry {
         run_id: input.run_id,
         status: input.status ?? TASK_STATUS.PENDING,
         attempt: input.attempt ?? 1,
-        launch_seq: input.launch_seq,
-        max_retries: input.max_retries ?? 2,
+        launch: input.launch ?? (input.launch_seq ?? (input.attempt ?? 1) - 1) + 1,
+        max_attempts: input.max_attempts ?? input.max_retries ?? DEFAULT_MAX_ATTEMPTS,
         commit_prefix: input.commit_prefix,
         expected_artifacts: input.expected_artifacts,
         expected_summary_path: input.expected_summary_path,
         created_at: this.now().toISOString(),
         notes: input.notes,
         tick_log_path: join(taskDir, 'tick_log.md'),
-        launch_args: input.launch_args,
-      };
+        launch_options: input.launch_options ?? normalizeLaunchOptions(input.launch_args ?? []),
+      });
       this.appendEntry(entry, { allowCompleteUnreadable: true });
       return structuredClone(entry);
     });
@@ -403,7 +431,6 @@ export class TaskRegistry {
         tick_log_path: current.tick_log_path,
       });
       if (JSON.stringify(next) === JSON.stringify(current)) {
-        this.suppressedAppends += 1;
         return structuredClone(current);
       }
       this.appendEntry(next);
@@ -468,21 +495,6 @@ export class TaskRegistry {
     return this.withLock(() => this.metricsFromCache(this.readLatestUnlocked()));
   }
 
-  cacheDiagnostics(): TaskRegistryCacheDiagnostics {
-    const cache = this.registryCache;
-    return {
-      generation: cache?.generation ?? this.cacheGeneration,
-      ...(cache ? { identity: `${cache.dev}:${cache.ino}:${cache.generation}` } : {}),
-      readOffset: cache?.readOffset ?? 0,
-      pendingBytes: cache?.pending.length ?? 0,
-      lastBytesParsed: this.cacheLastBytesParsed,
-      totalBytesParsed: this.cacheTotalBytesParsed,
-      rebuilds: this.cacheRebuilds,
-      durableAppends: this.durableAppends,
-      suppressedAppends: this.suppressedAppends,
-    };
-  }
-
   /**
    * Recover provably complete task rows embedded after a same-id torn prefix,
    * and quarantine every other unreadable physical row. This is a dry-run
@@ -511,6 +523,11 @@ export class TaskRegistry {
             + `The original registry was restored from ${backupPath}.`,
           );
         }
+      }
+
+      if (options.apply) {
+        const tasks = this.readLatestUnlocked().tasks;
+        this.writeSessionTaskIndexes(tasks, [...tasks.values()].flatMap((task) => task.launcher ? [task.launcher] : []));
       }
 
       return {
@@ -630,10 +647,6 @@ export class TaskRegistry {
     }
   }
 
-  nextId(): number {
-    return this.withLock(() => this.nextIdUnlocked());
-  }
-
   private compactStages(value: unknown): Record<string, unknown> | undefined {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
     const compact: Record<string, unknown> = {};
@@ -703,7 +716,7 @@ export class TaskRegistry {
         continue;
       }
       if (line.value && typeof line.value === 'object') {
-        const task = line.value as TaskEntry;
+        const task = normalizeTaskEntry(line.value as TaskEntry);
         if (typeof task.id === 'number') tasks.set(task.id, task);
       }
     }
@@ -739,7 +752,7 @@ export class TaskRegistry {
     const tasks = new Map<number, TaskEntry>();
     for (const line of this.physicalLines(raw)) {
       if (line.unreadable || !line.value || typeof line.value !== 'object') continue;
-      const task = line.value as TaskEntry;
+      const task = normalizeTaskEntry(line.value as TaskEntry);
       if (typeof task.id === 'number') tasks.set(task.id, task);
     }
     return Array.from(tasks.values()).sort((left, right) => left.id - right.id);
@@ -813,14 +826,14 @@ export class TaskRegistry {
 
   private isCompleteTaskRecord(value: unknown): value is TaskEntry {
     if (!value || typeof value !== 'object') return false;
-    const row = value as Partial<TaskEntry>;
+    const row = value as Partial<TaskEntry> & { max_retries?: number };
     return Number.isInteger(row.id)
       && typeof row.name === 'string'
       && typeof row.projectDir === 'string'
       && typeof row.systemd_unit === 'string'
       && typeof row.status === 'string'
       && typeof row.attempt === 'number'
-      && typeof row.max_retries === 'number'
+      && typeof (row.max_attempts ?? row.max_retries) === 'number'
       && typeof row.created_at === 'string'
       && typeof row.tick_log_path === 'string';
   }
@@ -909,23 +922,16 @@ export class TaskRegistry {
 
   private writeAtomic(path: string, content: string | Buffer): void {
     mkdirSync(dirname(path), { recursive: true });
-    const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
-    try {
-      writeFileSync(tmp, content, { flag: 'wx' });
-      renameSync(tmp, path);
-    } finally {
-      try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
-    }
+    // Registry records and brief sidecars are durable task/recovery inputs.
+    atomicWrite(path, content, { durability: 'durable' });
   }
 
   private readLatestUnlocked(): RegistryReadResult {
-    this.cacheLastBytesParsed = 0;
     let fd: number | undefined;
     try {
       fd = openSync(this.registryPath, 'r');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      if (this.registryCache) this.cacheGeneration += 1;
       this.registryCache = undefined;
       return { tasks: new Map(), activeTasks: new Map(), unknownTaskStatuses: false, unreadableRecords: 0, unreadableTail: false };
     }
@@ -945,12 +951,9 @@ export class TaskRegistry {
         || stat.size < cached.readOffset
         || sameSizeWasRewritten;
       if (rebuild) {
-        this.cacheGeneration += 1;
-        this.cacheRebuilds += 1;
         this.registryCache = {
           dev: stat.dev,
           ino: stat.ino,
-          generation: this.cacheGeneration,
           readOffset: 0,
           fileSize: stat.size,
           mtimeMs: stat.mtimeMs,
@@ -977,8 +980,6 @@ export class TaskRegistry {
         const bytes = consumed === chunk.length ? chunk : chunk.subarray(0, consumed);
         this.applyRegistryBytes(cache, bytes);
         cache.readOffset += consumed;
-        this.cacheLastBytesParsed = consumed;
-        this.cacheTotalBytesParsed += consumed;
       }
       const after = fstatSync(fd);
       cache.fileSize = after.size;
@@ -1016,6 +1017,7 @@ export class TaskRegistry {
     if (current.unreadableRecords > 0 && !(opts.allowCompleteUnreadable && !current.unreadableTail)) {
       throw new TaskRegistryIntegrityError(this.registryPath, current.unreadableRecords);
     }
+    const previousLauncher = current.tasks.get(entry.id)?.launcher;
     const cache = this.registryCache;
     const needsSeparator = Boolean(cache && cache.pending.length > 0 && cache.pending.toString('utf-8').trim().length > 0);
     const bytes = Buffer.from(`${needsSeparator ? '\n' : ''}${JSON.stringify(entry)}\n`, 'utf-8');
@@ -1042,10 +1044,41 @@ export class TaskRegistry {
         try { if (parent !== undefined) closeSync(parent); } catch { /* best effort */ }
       }
     }
-    this.durableAppends += 1;
     // Acknowledgement follows sync. Folding the newly durable suffix keeps the
     // hot cache coherent without rereading any historical byte.
-    this.readLatestUnlocked();
+    const tasks = this.readLatestUnlocked().tasks;
+    if (!existsSync(join(this.baseDir, 'session-push', 'task-index', 'ready'))) {
+      this.writeSessionTaskIndexes(tasks, [...tasks.values()].flatMap(task => task.launcher ? [task.launcher] : []));
+    } else if (!isDeepStrictEqual(previousLauncher, entry.launcher)) {
+      this.writeSessionTaskIndexes(tasks, [previousLauncher, entry.launcher].filter((launcher): launcher is LaunchTarget => Boolean(launcher)));
+    }
+  }
+
+  /** Bootstrap legacy launcher rows before trusting a missing session index. */
+  ensureSessionTaskIndexes(): void {
+    this.withLock(() => {
+      if (existsSync(join(this.baseDir, 'session-push', 'task-index', 'ready'))) return;
+      const tasks = this.readLatestUnlocked().tasks;
+      this.writeSessionTaskIndexes(tasks, [...tasks.values()].flatMap((task) => task.launcher ? [task.launcher] : []));
+    });
+  }
+
+  private writeSessionTaskIndexes(tasks: ReadonlyMap<number, TaskEntry>, launchers: LaunchTarget[]): void {
+    const sessions = new Map(launchers.map((launcher) => [sessionTaskIndexPath(this.baseDir, launcher), [] as number[]]));
+    for (const task of tasks.values()) {
+      if (task.launcher) sessions.get(sessionTaskIndexPath(this.baseDir, task.launcher))?.push(task.id);
+    }
+    for (const [path, ids] of sessions) {
+      const content = `${JSON.stringify(ids)}\n`;
+      try { if (readFileSync(path, 'utf8') === content) continue; } catch { /* index not yet written */ }
+      mkdirSync(dirname(path), { recursive: true });
+      this.writeAtomic(path, content);
+    }
+    const ready = join(this.baseDir, 'session-push', 'task-index', 'ready');
+    if (!existsSync(ready)) {
+      mkdirSync(dirname(ready), { recursive: true });
+      this.writeAtomic(ready, 'ready\n');
+    }
   }
 
   private applyRegistryBytes(cache: RegistryCache, bytes: Buffer): void {
@@ -1067,7 +1100,7 @@ export class TaskRegistry {
           continue;
         }
         if (value && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'number') {
-          const task = value as TaskEntry;
+          const task = normalizeTaskEntry(value as TaskEntry);
           cache.tasks.set(task.id, task);
           // The same parsed row updates both views; no independent history scan.
           if (isActiveTaskStatus(task.status)) cache.activeTasks.set(task.id, task);
@@ -1085,28 +1118,17 @@ export class TaskRegistry {
     try {
       const value = JSON.parse(pending) as unknown;
       if (value && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'number') {
-        cache.pendingTask = value as TaskEntry;
+        cache.pendingTask = normalizeTaskEntry(value as TaskEntry);
       }
     } catch {
       cache.pendingReadable = false;
     }
   }
 
-  private invalidateRegistryCache(): void {
-    this.registryCache = undefined;
-  }
-
   private writeBriefSidecar(id: number, brief: string): string {
     const taskDir = join(this.tasksDir, String(id));
     const briefPath = join(taskDir, 'brief.md');
-    const tmp = join(taskDir, `.brief.${process.pid}.${randomUUID()}.tmp`);
-    mkdirSync(taskDir, { recursive: true });
-    try {
-      writeFileSync(tmp, brief, 'utf-8');
-      renameSync(tmp, briefPath);
-    } finally {
-      try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
-    }
+    this.writeAtomic(briefPath, brief);
     return briefPath;
   }
 
@@ -1125,33 +1147,29 @@ export class TaskRegistry {
       current = Number.parseInt(raw, 10) || 0;
     }
     const next = current + 1;
-    const tmp = `${this.seqPath}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${next}\n`, 'utf-8');
-    renameSync(tmp, this.seqPath);
+    atomicWrite(this.seqPath, `${next}\n`, { durability: 'durable' });
     return next;
   }
 
   private withLock<T>(fn: () => T): T {
     mkdirSync(this.baseDir, { recursive: true });
     const started = Date.now();
-    let fd: number | undefined;
     const token = randomUUID();
-    while (fd === undefined) {
+    for (;;) {
       try {
-        fd = openSync(this.lockPath, 'wx');
-        try {
-          writeFileSync(fd, `${JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), token })}\n`, 'utf-8');
-        } catch (error) {
-          try { closeSync(fd); } catch { /* best effort */ }
-          fd = undefined;
-          try { unlinkSync(this.lockPath); } catch { /* best effort */ }
-          throw error;
-        }
+        publishLockOwner(this.lockPath, { ...lockOwnerIdentity(), acquiredAt: new Date().toISOString(), token });
+        break;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
         const observed = this.inspectLock();
-        const staleReason = observed ? this.staleReason(observed) : undefined;
-        if (observed && staleReason && this.takeOverStaleLock(observed, staleReason)) continue;
+        const reason = observed && recoverStaleLock(observed, () => this.inspectLock(), () => unlinkSync(this.lockPath));
+        if (reason) {
+          const owner = observed.owner ? ` left by pid=${observed.owner.pid}` : '';
+          try {
+            this.warn(`TaskRegistry: took over stale lock${owner} at ${this.lockPath} (${reason}).`);
+          } catch { /* diagnostics must not turn a successful recovery into another outage */ }
+          continue;
+        }
         if (Date.now() - started >= this.lockTimeoutMs) throw this.lockTimeoutError(observed);
         sleepSync(this.lockPollMs);
       }
@@ -1159,7 +1177,6 @@ export class TaskRegistry {
     try {
       return fn();
     } finally {
-      try { if (fd !== undefined) closeSync(fd); } catch { /* best effort */ }
       try {
         const current = this.inspectLock();
         if (current?.owner?.token === token) unlinkSync(this.lockPath);
@@ -1167,25 +1184,14 @@ export class TaskRegistry {
     }
   }
 
-  private inspectLock(): RegistryLockObservation | undefined {
+  private inspectLock(): LockObservation | undefined {
     let fd: number | undefined;
     try {
       fd = openSync(this.lockPath, 'r');
       const stat = fstatSync(fd);
       const raw = readFileSync(fd, 'utf-8');
-      let owner: RegistryLockOwner | undefined;
-      try {
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
-        if (Number.isInteger(parsed.pid) && (parsed.pid as number) > 0) {
-          owner = {
-            pid: parsed.pid as number,
-            acquiredAt: typeof parsed.acquiredAt === 'string' ? parsed.acquiredAt : undefined,
-            token: typeof parsed.token === 'string' ? parsed.token : undefined,
-          };
-        }
-      } catch { /* legacy empty or malformed lock; mtime is its only safe age signal */ }
       return {
-        owner,
+        owner: parseLockOwner(raw),
         mtimeMs: stat.mtimeMs,
         signature: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${raw}`,
       };
@@ -1197,47 +1203,7 @@ export class TaskRegistry {
     }
   }
 
-  private staleReason(observed: RegistryLockObservation): string | undefined {
-    const now = Date.now();
-    if (observed.owner && !this.processExists(observed.owner.pid)) {
-      return `recorded owner pid=${observed.owner.pid} no longer exists`;
-    }
-    const acquiredAtMs = observed.owner?.acquiredAt ? Date.parse(observed.owner.acquiredAt) : Number.NaN;
-    if (Number.isFinite(acquiredAtMs)) {
-      const ageMs = now - acquiredAtMs;
-      if (ageMs >= this.staleLockMs) return `recorded acquisition is ${Math.floor(ageMs)}ms old`;
-      return undefined;
-    }
-    const ageMs = now - observed.mtimeMs;
-    return ageMs >= this.staleLockMs ? `lock mtime is ${Math.floor(ageMs)}ms old and owner metadata is incomplete` : undefined;
-  }
-
-  private processExists(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-    }
-  }
-
-  private takeOverStaleLock(observed: RegistryLockObservation, reason: string): boolean {
-    const current = this.inspectLock();
-    if (!current || current.signature !== observed.signature) return false;
-    try {
-      unlinkSync(this.lockPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-      throw error;
-    }
-    const owner = observed.owner ? ` left by pid=${observed.owner.pid}` : '';
-    try {
-      this.warn(`TaskRegistry: took over stale lock${owner} at ${this.lockPath} (${reason}).`);
-    } catch { /* diagnostics must not turn a successful recovery into another outage */ }
-    return true;
-  }
-
-  private lockTimeoutError(observed: RegistryLockObservation | undefined): Error {
+  private lockTimeoutError(observed: LockObservation | undefined): Error {
     if (observed?.owner) {
       const since = observed.owner.acquiredAt ? ` since ${observed.owner.acquiredAt}` : '';
       return new Error(

@@ -1,22 +1,19 @@
 import { stageLiveLogPath } from '../stage-live-log.js';
-import { appendFileSync, mkdirSync } from '../engine-fs.js';
-
-
+import { atomicWrite, appendFileSync, mkdirSync } from '../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { Adapter, AdapterFailureKind, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
+import type { Adapter, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
-import { classifyAdapterFailure, isRetryableAdapterFailure } from './failure.js';
+import { isRetryableAdapterFailure } from './failure.js';
 import { NativeEventSummary, normalizeNativeEvent } from './native-events.js';
-import { providerFailureFromEvent, type ProviderFailure } from '../provider-result.js';
+import { providerDiagnosticReason, providerFailureFromDiagnostic, type ProviderFailure } from '../provider-result.js';
 import { extractFinalMessage } from './transcript.js';
-import { AdapterParameterRepair, diagnoseAdapterFailure, CLI_BUILTIN_DEFAULT, resolveAdapterCapabilityIdentity, readAdapterCapabilityMemory, rememberUnsupportedEffort, type AdapterCapabilityIdentity, type AdapterCapabilityMemory, type Diagnosis } from './diagnose.js';
+import { AdapterParameterRepair, diagnoseAdapterFailure, CLI_BUILTIN_DEFAULT, resolveAdapterCapabilityIdentity, type AdapterCapabilityIdentity, type Diagnosis } from './diagnose.js';
 import { prepareAdapterHome, withAdapterCredentials } from '../adapter-home.js';
 import { captureCodexRollouts, codexRolloutInterval, parsePrintedTokenUsage, sumInvocationUsage, type NativeInvocationUsage } from '../invocation-usage.js';
 import { generationCompatibleSchema } from '../reality-gate/checks/json-schema-match.js';
-import { atomicWrite } from '../store.js';
-import { finalizeSessionHome, isSessionUuid, readSession, settleSession, stageSessionHome, type SessionMetadata } from '../adapter-session.js';
+import { finalizeSessionHome, isSessionUuid, settleSession, stageSessionHome, shouldStartFreshSession } from '../adapter-session.js';
 
 /** Parse token usage from codex CLI output */
 function parseTokens(output: string): { tokens_in?: number; tokens_out?: number } {
@@ -33,9 +30,6 @@ function parseTokens(output: string): { tokens_in?: number; tokens_out?: number 
 // the shared session primitive.
 export type { SessionMetadata as CodexSessionMetadata } from '../adapter-session.js';
 export { isSessionUuid as isCodexSessionUuid, finalizeSessionHome as finalizeCodexHome } from '../adapter-session.js';
-export function readCodexSession(runDir: string, stageId: string): SessionMetadata | undefined {
-  return readSession(runDir, stageId, 'codex');
-}
 
 function numericUsage(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
@@ -47,7 +41,6 @@ export interface ParsedCodexJsonl {
   /** Diagnostic from a terminal CLI event, separate from agent-authored text. */
   terminalError?: string;
   providerFailure?: ProviderFailure;
-  adapterFailureKind?: AdapterFailureKind;
   sessionId?: string;
   tokens_in?: number;
   tokens_out?: number;
@@ -68,20 +61,15 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
   let tokensCached: number | undefined;
   let tokensReasoning: number | undefined;
   const summary = new NativeEventSummary(workDir);
-  let providerFailure: ProviderFailure | undefined;
-
 
   for (const line of output.split(/\r?\n/)) {
     if (!line.trim().startsWith('{')) continue;
     let event: Record<string, unknown>;
     try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
     eventCount++;
-    const type = typeof event.type === 'string' ? event.type : '';
-    const normalized = normalizeNativeEvent(event);
+    const normalized = normalizeNativeEvent(event, 'codex');
     if (normalized.sessionId) sessionId = normalized.sessionId;
     summary.observe(normalized);
-    if (normalized.terminal === true) providerFailure = undefined;
-    if (type === 'error' || type === 'turn.failed') providerFailure = providerFailureFromEvent('codex', event);
 
     const usage = event.usage && typeof event.usage === 'object' ? event.usage as Record<string, unknown> : undefined;
     const input = numericUsage(usage?.input_tokens ?? usage?.inputTokens);
@@ -95,13 +83,11 @@ export function parseCodexJsonl(output: string, workDir?: string): ParsedCodexJs
   }
 
   const terminalError = summary.diagnostic;
-  const adapterFailureKind = terminalError ? classifyAdapterFailure(terminalError) : undefined;
   return {
     eventCount,
     output: summary.output,
     ...(terminalError ? { terminalError } : {}),
-    ...(providerFailure ? { providerFailure } : {}),
-    ...(adapterFailureKind ? { adapterFailureKind } : {}),
+    providerFailure: summary.providerFailure,
     sessionId,
     tokens_in: sawTokensIn ? tokensIn : undefined,
     tokens_out: sawTokensOut ? tokensOut : undefined,
@@ -145,7 +131,6 @@ function globalCodexConfigValue(key: string): string | undefined {
  */
 export { CLI_BUILTIN_DEFAULT } from './diagnose.js';
 export type CodexCapabilityIdentity = AdapterCapabilityIdentity;
-export type CodexCapabilityMemory = AdapterCapabilityMemory;
 
 /** Preserve Codex configuration inheritance while sharing native capability memory. */
 export function resolveCodexCapabilityIdentity(
@@ -162,14 +147,6 @@ export function resolveCodexCapabilityIdentity(
         : globalCodexConfigValue('model_reasoning_effort') ?? 'cli_builtin_default',
     ...overrides,
   });
-}
-
-export function readCodexCapabilityMemory(runDir: string, identity: CodexCapabilityIdentity): CodexCapabilityMemory | undefined {
-  return readAdapterCapabilityMemory(runDir, identity, 'codex');
-}
-
-export function rememberCodexUnsupportedEffort(runDir: string, identity: CodexCapabilityIdentity): void {
-  rememberUnsupportedEffort(runDir, identity, 'codex');
 }
 
 export function writeCodexConfig(codexHome: string, role: AgentConfig, sessionHome?: string): string {
@@ -251,10 +228,6 @@ export class CodexAdapter implements Adapter {
     const codexHome = stageCodexHome(opts.runDir, ownerStageId);
     let sessionHome = opts.resumeSessionId && opts.sessionOwnerStageId && opts.sessionOwnerStageId !== opts.stageId
       ? stageCodexHome(opts.runDir, opts.sessionOwnerStageId) : undefined;
-    // Mutable because a dead session is recoverable: `fresh_session` abandons the resume
-    // id and rebuilds these arguments. Tracking it here rather than reading
-    // `opts.resumeSessionId` later matters — the session capture below falls back to the
-    // resume id, which would otherwise record the dead session as this stage's own.
     let resumeSessionId = opts.resumeSessionId;
     let invocationPrompt = prompt;
     // Materialize only the schema this CLI will consume, outside its write authority.
@@ -264,6 +237,7 @@ export class CodexAdapter implements Adapter {
     let result: ExecResult | undefined;
     const invocations: NativeInvocationUsage[] = [];
     let durationMs = 0;
+    let parsed: ParsedCodexJsonl;
     const liveLogPath = stageLiveLogPath(opts.runDir, opts.stageId, opts.attemptIndex, opts.attemptStartedAt);
     try {
       if (schemaPath) {
@@ -305,53 +279,53 @@ export class CodexAdapter implements Adapter {
         }));
         // Settle before any diagnosis can replace this native call, and before
         // successful-home cleanup removes its rollout evidence.
-        const events = parseCodexJsonl(result.stdout ?? result.output, opts.workDir);
+        const events = parsed = parseCodexJsonl(result.stdout ?? result.output, opts.workDir);
+        if (result.exitCode === 0 && events.terminalError) result.exitCode = 1;
         const sessionId = events.sessionId ?? resumeSessionId;
         const interval = sessionId
           ? codexRolloutInterval(countersBefore, captureCodexRollouts(codexHome), sessionId)
           : { reason: 'session_id_unavailable' };
         const stdoutUsage = events.eventCount > 0 ? events : parseTokens(result.output);
         const usage = interval.usage ?? stdoutUsage;
-        const mismatch = interval.usage && events.completed && events.tokens_in !== undefined && events.tokens_out !== undefined
-          && (interval.usage.tokens_in !== events.tokens_in || interval.usage.tokens_out !== events.tokens_out);
         invocations.push({
           startedAt: invocationStartedAt, completedAt: new Date().toISOString(), exitCode: result.exitCode, sessionId,
           tokens_in: usage.tokens_in, tokens_out: usage.tokens_out,
           tokens_cached: 'tokens_cached' in usage ? numericUsage(usage.tokens_cached) : undefined,
           tokens_reasoning: 'tokens_reasoning' in usage ? numericUsage(usage.tokens_reasoning) : undefined,
-          tokenUsage: result.exitCode === 0 && events.completed && !mismatch && usage.tokens_in !== undefined && usage.tokens_out !== undefined
+          tokenUsage: result.exitCode === 0 && events.completed && usage.tokens_in !== undefined && usage.tokens_out !== undefined
             ? 'known' : usage.tokens_in !== undefined || usage.tokens_out !== undefined ? 'partial' : 'unknown',
           source: interval.usage ? 'rollout_interval' : events.eventCount > 0 ? 'native_stdout' : 'unknown',
-          reason: mismatch ? 'rollout_stdout_disagreement' : interval.reason,
+          reason: interval.reason,
         });
         durationMs += result.duration_ms;
         if (result.exitCode === 0) break;
-        // Machine events and the stderr stream are failure evidence. Agent
-        // messages inside JSONL must not supply a CLI parameter-fix diagnosis.
-        const attemptEvents = parseCodexJsonl(result.stdout ?? result.output);
-        const failureEvidence = attemptEvents.eventCount > 0
-          ? [attemptEvents.terminalError, result.stderr].filter(Boolean).join('\n')
-          : result.output;
+        const failureEvidence = events.eventCount > 0
+          ? [events.terminalError, result.stderr].filter(Boolean).join('\n') : result.output;
+        if (![124, 125, 137].includes(result.exitCode) && !result.spawnError) {
+          result.providerFailure = events.providerFailure
+            ?? providerFailureFromDiagnostic({ provider: 'codex', eventType: 'cli_diagnostic', message: events.eventCount ? result.stderr ?? '' : result.output });
+        }
         diagnosis = result.spawnError && result.exitCode !== 124 && result.exitCode !== 137
           ? { fix: 'none', friendly: `Could not launch Codex: ${result.spawnError.message}. Check the executable, its interpreter and working directory ${result.spawnError.cwd}.`, matched: result.spawnError.code ?? 'spawn error' }
           : diagnoseAdapterFailure(failureEvidence, result.exitCode);
-        const kind = classifyAdapterFailure(failureEvidence);
-        if (!isRetryableAdapterFailure(kind) || !repair.apply(diagnosis)) break;
-        if (diagnosis.fix === 'fresh_session') {
+        if (!isRetryableAdapterFailure(result.providerFailure?.kind)) break;
+        if (!repair.apply(diagnosis)) {
+          if (!shouldStartFreshSession(result, resumeSessionId, events.sessionId)) break;
           resumeSessionId = undefined;
           invocationPrompt = opts.freshSessionPrompt ?? prompt;
+          continue;
         }
         try {
           appendFileSync(liveLogPath,
             `\n↪︎ flowcrew: exit ${result.exitCode} matched "${diagnosis.matched}" → retrying once with ${diagnosis.fix}\n`);
         } catch { /* non-critical */ }
       }
-      if (result.exitCode !== 0 && diagnosis.friendly) result.friendlyError = diagnosis.friendly;
+      if (result.exitCode !== 0) result.friendlyError = providerDiagnosticReason(
+        [diagnosis.friendly, parsed.terminalError].filter(Boolean).join(' — ')) || undefined;
       const rawOutput = result.output;
-      const parsed = parseCodexJsonl(result.stdout ?? rawOutput, opts.workDir);
       Object.assign(result, sumInvocationUsage(invocations), { invocations, duration_ms: durationMs });
       settleSession(opts.runDir, opts.stageId, result, parsed.sessionId, resumeSessionId, opts.sessionOwnerStageId, {
-        mismatchMessage: 'Codex resume returned a different thread UUID; continuation was not verified',
+        adapter: this.sessionKind, mismatchMessage: 'Codex resume returned a different thread UUID; continuation was not verified',
       });
       if (parsed.writes.length > 0) {
         result.writes = parsed.writes;
@@ -359,12 +333,6 @@ export class CodexAdapter implements Adapter {
       } else {
         result.writeAttribution = 'unknown';
       }
-      // Return the agent's final message plus failure diagnostics from the
-      // terminal event, stderr or launch error. `codex exec` echoes the entire session (banner + full prompt +
-      // prior-stage transcripts + token footer). Returning that raw stream
-      // would pollute output.md, downstream handoff context, and run summaries. The raw
-      // transcript is preserved in live.log for debugging.
-      // (Parse tokens above FIRST — cleaning strips the "tokens used" footer.)
       result.output = result.spawnError ? rawOutput
         : parsed.output || extractFinalMessage(result.stdout ?? rawOutput);
       if (result.exitCode !== 0 && result.stderr?.trim() && !result.output.includes(result.stderr.trim())) {
@@ -372,14 +340,6 @@ export class CodexAdapter implements Adapter {
       }
       if (result.exitCode === 137 && !result.output.includes('[stage cancelled by control plane]')) {
         result.output += '\n[stage cancelled by control plane]\n';
-      }
-      if (result.exitCode !== 0 && result.exitCode !== 124 && result.exitCode !== 137) {
-        const kind = result.spawnError ? undefined : parsed.eventCount > 0
-          ? parsed.adapterFailureKind ?? classifyAdapterFailure(result.stderr ?? '')
-          : classifyAdapterFailure(rawOutput);
-        result.adapterError = kind !== undefined;
-        result.adapterFailureKind = kind;
-        if (result.exitCode !== 125 && !result.spawnError) result.providerFailure = parsed.providerFailure;
       }
       delete result.stdout;
       delete result.stderr;

@@ -1,16 +1,18 @@
-/** DAG reachability, topological order, readiness and conservative parallel scope conflicts. Gate readers are explicit services. */
+import type { DispatchAdmissionError } from './dispatch.js';
+/** DAG reachability, readiness and single shared-tree author admission. Gate readers are explicit services. */
 import { STAGE_STATUS, type StoreState, isPendingStageStatus, isSatisfiedStageDependencyStatus, runDir, type WriteAttribution, type StageStatus } from '../../store.js';
 import { existsSync } from 'node:fs';
 import { join, posix } from 'node:path';
-import { parseDeclaredScope, scopeLanguagesMayOverlap } from './scope-services.js';
 export { parseDeclaredScope, type ParsedScope } from './scope-services.js';
 import { type StageConfig } from './configuration.js';
 import type { GateContract } from '../../scheduler.js';
 
-export function inspectStageGraph(stages: StageConfig[]): { sorted: StageConfig[]; errors: string[] } {
-  const errors: string[] = [];
+export function inspectStageGraph(stages: StageConfig[]): { sorted: StageConfig[]; errors: DispatchAdmissionError[] } {
+  const errors: DispatchAdmissionError[] = [];
   const ids = new Set(stages.map((s) => s.id));
-  if (ids.size !== stages.length) errors.push('Duplicate stage IDs detected');
+  for (const stageId of ids) if (stages.filter(stage => stage.id === stageId).length > 1) {
+    errors.push({ code: 'stage_graph', stageId, field: 'id', message: 'Duplicate stage IDs detected' });
+  }
   const inDeg = new Map<string, number>();
   const adj = new Map<string, string[]>();
   for (const s of stages) {
@@ -19,8 +21,8 @@ export function inspectStageGraph(stages: StageConfig[]): { sorted: StageConfig[
   }
   for (const s of stages) {
     for (const d of s.depends_on ?? []) {
-      if (!ids.has(d)) { errors.push(`${s.id}.depends_on: unknown stage ${JSON.stringify(d)}`); continue; }
-      if (d === s.id) errors.push(`${s.id}.depends_on: self dependency is forbidden`);
+      if (!ids.has(d)) { errors.push({ code: 'stage_graph', stageId: s.id, field: `depends_on.${d}`, message: `${s.id}.depends_on: unknown stage ${JSON.stringify(d)}` }); continue; }
+      if (d === s.id) errors.push({ code: 'stage_graph', stageId: s.id, field: `depends_on.${d}`, message: `${s.id}.depends_on: self dependency is forbidden` });
       adj.get(d)!.push(s.id);
       inDeg.set(s.id, (inDeg.get(s.id) ?? 0) + 1);
     }
@@ -38,7 +40,7 @@ export function inspectStageGraph(stages: StageConfig[]): { sorted: StageConfig[
   }
   if (sorted.length !== stages.length) {
     const byId = new Map(stages.map(stage => [stage.id, stage]));
-    for (const stage of stages) if (transitivelyDependsOn(stage.id, stage.id, byId)) errors.push(`${stage.id}.depends_on: dependency cycle detected`);
+    for (const stage of stages) if (transitivelyDependsOn(stage.id, stage.id, byId)) errors.push({ code: 'stage_graph', stageId: stage.id, field: 'depends_on', message: `${stage.id}.depends_on: dependency cycle detected` });
   }
   const order = new Map(sorted.map((id, i) => [id, i]));
   return { sorted: [...stages].sort((a, b) => order.get(a.id)! - order.get(b.id)!), errors };
@@ -46,13 +48,13 @@ export function inspectStageGraph(stages: StageConfig[]): { sorted: StageConfig[
 
 export function topoSort(stages: StageConfig[]): StageConfig[] {
   const result = inspectStageGraph(stages);
-  if (result.errors.length) throw new Error(result.errors.join('; '));
+  if (result.errors.length) throw new Error(result.errors.map(error => error.message).join('; '));
   return result.sorted;
 }
 
 export interface GateReadServices {
   loadGateContract(projectDir: string, runId?: string, campaignStorageKey?: string): GateContract | null;
-  readGateVerdict(projectDir: string, stageId: string, runId?: string, contract?: GateContract | null, allowSharedFallback?: boolean, requireValidationDelta?: boolean): { pass: boolean; reason?: string } | null;
+  readGateEvaluation(projectDir: string, stageId: string, runId?: string, contract?: GateContract | null, requireValidationDelta?: boolean): { pass: boolean; reason?: string } | null;
 }
 
 /** Follow observed conditional skips upstream, without re-evaluating conditions.
@@ -72,7 +74,7 @@ export function isStageInSkippedBranch(stageId: string, stages: ReadonlyMap<stri
   return visit(stageId);
 }
 
-export function createReadyFinder({ loadGateContract, readGateVerdict }: GateReadServices) {
+export function createReadyFinder({ loadGateContract, readGateEvaluation }: GateReadServices) {
   return (function findAllReady(stages: StageConfig[], state: StoreState): StageConfig[] {
     const ready: StageConfig[] = [];
     const stagesById = new Map(stages.map((stage) => [stage.id, stage]));
@@ -93,7 +95,7 @@ export function createReadyFinder({ loadGateContract, readGateVerdict }: GateRea
           `verdict_${d}.json`,
         ));
         const verdict = hasRunLocation && (dependency?.is_gate === true || hasSpecificVerdict)
-          ? readGateVerdict(state.projectDir, d, state.runId, contract, false, dependency?.is_gate === true)
+          ? readGateEvaluation(state.projectDir, d, state.runId, contract, dependency?.is_gate === true)
           : undefined;
         // A negative verdict is authoritative even if an older/static workflow
         // forgot to mark the producing stage as a gate. Stage status describes
@@ -135,28 +137,8 @@ export interface ScopeConflict {
 }
 
 export function findScopeConflict(left: StageConfig, right: StageConfig): ScopeConflict | undefined {
-  // An explicitly empty scope means the stage declares no project writes.
-  if (left.scope?.length === 0 || right.scope?.length === 0) return undefined;
-  if (!left.scope) return { leftStageId: left.id, rightStageId: right.id, reason: `${left.id} has no declared scope` };
-  if (!right.scope) return { leftStageId: left.id, rightStageId: right.id, reason: `${right.id} has no declared scope` };
-  const leftParsed = left.scope.map(parseDeclaredScope);
-  const rightParsed = right.scope.map(parseDeclaredScope);
-  for (const a of leftParsed) {
-    if (a.kind === 'unknown') return { leftStageId: left.id, rightStageId: right.id, leftScope: a.raw, reason: `${left.id}: ${a.reason}` };
-    for (const b of rightParsed) {
-      if (b.kind === 'unknown') return { leftStageId: left.id, rightStageId: right.id, rightScope: b.raw, reason: `${right.id}: ${b.reason}` };
-      if (scopeLanguagesMayOverlap(a, b)) {
-        return {
-          leftStageId: left.id,
-          rightStageId: right.id,
-          leftScope: a.raw,
-          rightScope: b.raw,
-          reason: `declared scopes may overlap: ${a.raw} ↔ ${b.raw}`,
-        };
-      }
-    }
-  }
-  return undefined;
+  return { leftStageId: left.id, rightStageId: right.id,
+    reason: 'stages share one mutable project tree; wait for the active stage to settle' };
 }
 
 export function selectRunnableBatch(ready: StageConfig[]): {
@@ -217,20 +199,14 @@ export function parallelScopeAdmissionWarnings(stages: StageConfig[]): string[] 
         .map((conflict) => `${conflict.leftStageId} ↔ ${conflict.rightStageId}: ${conflict.reason}`);
       warnings.push(
         `Parallel scope warning: stages [${[...component].join(', ')}] can be runnable in the same scheduling frontier, `
-        + `but their project-write scopes are not provably disjoint (${details.join('; ')}). `
-        + 'They are admitted but will be serialized at runtime; give stages intended to run in parallel separate project paths.',
+        + `and share one mutable project tree (${details.join('; ')}). `
+        + 'They are admitted but will be serialized at runtime; independent runs need separate workspaces for parallel authorship.',
       );
     }
 
     for (const stage of frontier) remaining.delete(stage.id);
   }
   return warnings;
-}
-
-export interface ParallelWriteConflict {
-  stageIds: [string, string];
-  files: string[];
-  attribution: [WriteAttribution, WriteAttribution];
 }
 
 export function latestAttemptWrites(status: StageStatus | undefined): { files: string[]; attribution: WriteAttribution } {
@@ -243,48 +219,6 @@ export function latestAttemptWrites(status: StageStatus | undefined): { files: s
     // writing the same run-owned artifact outside the project remain visible.
     .map((file) => posix.normalize(file));
   return { files: [...new Set(files)], attribution: attempt?.writeAttribution ?? 'unknown' };
-}
-
-function directlyAttributesWrites(attribution: WriteAttribution): boolean {
-  switch (attribution) {
-    case 'structured':
-      return true;
-    case 'snapshot':
-    case 'unknown':
-      return false;
-    default: {
-      const exhaustive: never = attribution;
-      void exhaustive;
-      return false;
-    }
-  }
-}
-
-export function detectParallelWriteConflicts(
-  stageIds: string[],
-  statuses: Record<string, StageStatus>,
-): ParallelWriteConflict[] {
-  const conflicts: ParallelWriteConflict[] = [];
-  for (let i = 0; i < stageIds.length; i++) {
-    const left = latestAttemptWrites(statuses[stageIds[i]]);
-    const leftSet = new Set(left.files);
-    for (let j = i + 1; j < stageIds.length; j++) {
-      const right = latestAttemptWrites(statuses[stageIds[j]]);
-      // A shared-worktree snapshot observes that a path changed while the stage
-      // ran; it cannot establish which concurrent stage authored the change.
-      // Require direct attribution from both sides before claiming co-authorship.
-      if (!directlyAttributesWrites(left.attribution) || !directlyAttributesWrites(right.attribution)) continue;
-      const files = [...new Set(right.files.filter((file) => leftSet.has(file)))].sort();
-      if (files.length > 0) {
-        conflicts.push({
-          stageIds: [stageIds[i], stageIds[j]],
-          files,
-          attribution: [left.attribution, right.attribution],
-        });
-      }
-    }
-  }
-  return conflicts;
 }
 
 export function transitivelyDependsOn(stageId: string, ancestorId: string, byId: ReadonlyMap<string, StageConfig>): boolean {

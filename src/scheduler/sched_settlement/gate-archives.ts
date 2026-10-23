@@ -1,10 +1,11 @@
-// Boundary: Canonical iteration/round coordinates, compatible archived-record reads, evidence copies and gate framing; no live verdict policy or provider execution.
+// Boundary: Canonical iteration/round coordinates, archived-record reads, evidence copies and gate framing; no live verdict policy or provider execution.
 import { GATE_VERDICT_CORRECTION_VERSION, gateVerdictCorrectionPath } from '../sched_admission/sessions.js';
 import { copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GateRuntimeFacts } from './gate-recovery.js';
-import type { GateVerdict } from '../../store.js';
+import { readArchivedRunStateFromDirectory, type GateVerdict } from '../../store.js';
+import { latestInvocationInput } from '../../run-state-view.js';
 
 export interface GateArchiveCoordinate { iteration: number; round: number }
 
@@ -52,22 +53,6 @@ export function canonicalGateRoundArtifactDir(
   );
 }
 
-export function legacyGateRoundArtifactDir(runDirPath: string, round: number): string {
-  return join(gateReevaluationArchiveRoot(runDirPath), `round_${round}`);
-}
-
-export function hasIterationGateArchiveNamespace(runDirPath: string): boolean {
-  const archiveRoot = gateReevaluationArchiveRoot(runDirPath);
-  try {
-    return readdirSync(archiveRoot, { withFileTypes: true })
-      .some((entry) => /^iteration_\d+$/.test(entry.name));
-  } catch {
-    // Compatibility is allowed only when absence of an iteration namespace is
-    // observable. An unreadable/non-directory archive root therefore fails closed.
-    return existsSync(archiveRoot);
-  }
-}
-
 export function canonicalGateArchiveArtifactPath(
   runDirPath: string,
   coordinate: GateArchiveCoordinate,
@@ -76,36 +61,31 @@ export function canonicalGateArchiveArtifactPath(
   return join(canonicalGateRoundArtifactDir(runDirPath, coordinate), artifactName);
 }
 
-export function compatibleGateArchiveArtifactReadPath(
-  runDirPath: string,
-  coordinate: GateArchiveCoordinate,
-  artifactName: string,
-): string {
-  const canonicalPath = canonicalGateArchiveArtifactPath(runDirPath, coordinate, artifactName);
-  if (existsSync(canonicalPath) || hasIterationGateArchiveNamespace(runDirPath)) {
-    return canonicalPath;
-  }
-  const legacyPath = join(legacyGateRoundArtifactDir(runDirPath, coordinate.round), artifactName);
-  return existsSync(legacyPath) ? legacyPath : canonicalPath;
-}
-
 const GATE_ARCHIVE_ARTIFACT_NAMES = {
   verdict: ['rejected_verdict', 'json'],
   effectiveVerdict: ['engine_verdict', 'json'],
   metric: ['metric', 'json'],
-  output: ['previous_output', 'md'],
-  input: ['evaluated_input', 'md'],
 } as const;
 
 export function gateArchiveArtifactPath(
   runDirPath: string, coordinate: GateArchiveCoordinate, gateId: string,
-  artifact: keyof typeof GATE_ARCHIVE_ARTIFACT_NAMES, access: 'read' | 'write',
+  artifact: keyof typeof GATE_ARCHIVE_ARTIFACT_NAMES | 'input' | 'output',
 ): string {
+  if (artifact === 'input' || artifact === 'output') {
+    try {
+      const reference = JSON.parse(readFileSync(gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'effectiveVerdict'), 'utf8'));
+      if (artifact === 'output') {
+        // A replan already preserves attempt outputs before reusing stage indices.
+        const retired = readArchivedRunStateFromDirectory(runDirPath).state.stageEvidence?.find(entry => entry.iteration === coordinate.iteration && entry.stageId === gateId);
+        const output = retired?.attemptOutputPaths.find(entry => entry.attemptIndex === reference.attemptIndex);
+        if (output) return join(runDirPath, output.path);
+      }
+      return reference[`${artifact}Path`] ?? '';
+    } catch { return ''; }
+  }
   const [prefix, extension] = GATE_ARCHIVE_ARTIFACT_NAMES[artifact];
   const artifactName = `${prefix}_${gateId}.${extension}`;
-  return access === 'read'
-    ? compatibleGateArchiveArtifactReadPath(runDirPath, coordinate, artifactName)
-    : canonicalGateArchiveArtifactPath(runDirPath, coordinate, artifactName);
+  return canonicalGateArchiveArtifactPath(runDirPath, coordinate, artifactName);
 }
 
 export function archivedGateVerdictWritePath(
@@ -125,39 +105,41 @@ export function archiveGateRoundEvidence(
   const artifactDir = canonicalGateRoundArtifactDir(runDirPath, coordinate);
   mkdirSync(artifactDir, { recursive: true });
   for (const gateId of gateIds) {
-    const perGateVerdict = join(runDirPath, `verdict_${gateId}.json`);
-    const verdict = existsSync(perGateVerdict) ? perGateVerdict : join(runDirPath, 'verdict.json');
-    const output = join(runDirPath, 'stages', gateId, 'output.md');
+    const verdict = join(runDirPath, `verdict_${gateId}.json`);
+    const stage = join(runDirPath, 'stages', gateId);
+    let attempt: { index: number } | undefined;
+    try { attempt = JSON.parse(readFileSync(join(stage, 'status.json'), 'utf8')).attempts?.at(-1); } catch { /* no completed attempt */ }
+    const output = attempt ? join(stage, `output_attempt_${attempt.index}.md`) : '';
     const metric = join(runDirPath, 'stages', gateId, 'metric.json');
-    const input = join(runDirPath, 'stages', gateId, 'input.md');
+    const input = latestInvocationInput(runDirPath, gateId)?.path;
     try { if (existsSync(verdict)) copyFileSync(verdict, archivedGateVerdictWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
-    try { if (existsSync(output)) copyFileSync(output, gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'output', 'write')); } catch { /* best effort */ }
-    try { if (existsSync(metric)) copyFileSync(metric, gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'metric', 'write')); } catch { /* best effort */ }
-    try { if (existsSync(input)) copyFileSync(input, gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'input', 'write')); } catch { /* best effort */ }
+    try { if (existsSync(metric)) copyFileSync(metric, gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'metric')); } catch { /* best effort */ }
     // The archived verdict is the file the gate WROTE. The engine can reject it
     // for reasons the file cannot show — a contract
     // violation — and a repair handed only the written file then sees `pass:
     // true` with nothing to fix, and burns the retry budget. Archive what the
     // engine concluded, and why, beside it.
     const effective = effectiveVerdicts?.get(gateId);
-    if (effective) {
-      try {
-        writeFileSync(
-          gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'effectiveVerdict', 'write'),
+    try {
+      writeFileSync(
+          gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'effectiveVerdict'),
           JSON.stringify({
             gateId,
+            attemptIndex: attempt?.index,
+            outputPath: output,
+            inputPath: input,
             written_verdict_pass: readWrittenVerdictPass(verdict),
-            engine_effective_pass: effective.pass,
-            engine_rejection_reason: effective.reason ?? null,
-            ...(effective.repairability ? { repairability: effective.repairability } : {}),
+            engine_effective_pass: effective?.pass ?? null,
+            kind: effective?.refusal?.kind ?? (effective?.pass ? 'pass' : effective?.repairability?.disposition ?? 'repairable'),
+            engine_rejection_reason: effective?.reason ?? null,
+            ...(effective?.repairability ? { repairability: effective.repairability } : {}),
             note: 'The engine\'s conclusion. If engine_effective_pass is false while '
               + 'written_verdict_pass is true, the gate file is not the thing to fix — '
               + 'engine_rejection_reason is.',
           }, null, 2) + '\n',
           'utf-8',
         );
-      } catch { /* best effort */ }
-    }
+    } catch { /* best effort */ }
   }
 }
 
@@ -204,16 +186,10 @@ export interface ArchivedGateRejection {
  * bounded repair therefore all receive the same framing decision. */
 export function archivedGateRejections(runDirPath: string, gateId: string): ArchivedGateRejection[] {
   const root = gateReevaluationArchiveRoot(runDirPath);
-  const legacyCoordinates: Array<{ iteration: number; round: number; directory: string }> = [];
   const canonicalCoordinates: Array<{ iteration: number; round: number; directory: string }> = [];
   try {
     for (const entry of readdirSync(root, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const legacy = /^round_(\d+)$/.exec(entry.name);
-      if (legacy) {
-        legacyCoordinates.push({ iteration: 0, round: Number(legacy[1]), directory: join(root, entry.name) });
-        continue;
-      }
       const iteration = /^iteration_(\d+)$/.exec(entry.name);
       if (!iteration) continue;
       const iterationDir = join(root, entry.name);
@@ -237,25 +213,20 @@ export function archivedGateRejections(runDirPath: string, gateId: string): Arch
     const effectiveVerdictPath = join(directory, `engine_verdict_${gateId}.json`);
     // The scheduler owns this basename and writes it only for a rejected gate.
     // Its preserved bytes may be pass:true when the engine rejected a metric
-    // contradiction, and legacy archives may not be parseable JSON.
+    // contradiction.
     const rejected = existsSync(verdictPath);
     if (!rejected) return [];
     return [{
       iteration,
       round,
       verdictPath,
-      outputPath: join(directory, `previous_output_${gateId}.md`),
-      inputPath: join(directory, `evaluated_input_${gateId}.md`),
+      outputPath: gateArchiveArtifactPath(runDirPath, { iteration, round }, gateId, 'output'),
+      inputPath: gateArchiveArtifactPath(runDirPath, { iteration, round }, gateId, 'input'),
       metricPath: join(directory, `metric_${gateId}.json`),
       effectiveVerdictPath,
     }];
   });
-  const canonicalRejections = rejectionsFor(canonicalCoordinates);
-  const legacyRejections = rejectionsFor(legacyCoordinates);
-  // Precedence is per gate identity. An unrelated canonical namespace cannot
-  // erase a durable rejection for this gate, while a canonical rejection for
-  // this gate supersedes its legacy compatibility copy.
-  return (canonicalRejections.length > 0 ? canonicalRejections : legacyRejections)
+  return rejectionsFor(canonicalCoordinates)
     .sort((left, right) => left.iteration - right.iteration || left.round - right.round);
 }
 
@@ -367,15 +338,15 @@ export function buildGateFixCorrectionContract(
   coordinate: GateArchiveCoordinate,
 ): string {
   const entries = gateIds.map((gateId) => {
-    const evaluatedInput = gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'input', 'read');
+    const evaluatedInput = gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'input');
     return [
       `- Gate ${gateId}:`,
-      `  - archived rejected verdict: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'verdict', 'read')}`,
+      `  - archived rejected verdict: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'verdict')}`,
       existsSync(evaluatedInput)
         ? `  - archived evaluated input: ${evaluatedInput}`
         : '  - archived evaluated input: unavailable (this round predates input archiving or did not retain an input)',
-      `  - archived evaluated metric: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'metric', 'read')}`,
-      `  - archived QA output: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'output', 'read')}`,
+      `  - archived evaluated metric: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'metric')}`,
+      `  - archived QA output: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'output')}`,
       `  - optional correction marker: ${gateVerdictCorrectionPath(runDirPath, gateId)}`,
     ].join('\n');
   }).join('\n');

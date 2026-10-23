@@ -1,4 +1,3 @@
-import { mkdirSync } from './engine-fs.js';
 import { realpathSync } from 'node:fs';
 
 import { join } from 'node:path';
@@ -12,10 +11,6 @@ export function validationEnvironment(
   inherited: NodeJS.ProcessEnv,
   explicit?: NodeJS.ProcessEnv,
 ): { env: NodeJS.ProcessEnv; removed: string[] } {
-  // Keep the fuse short for invocation scratch aliases. This private endpoint
-  // is never a bind target, so an overlong root must not refuse a command.
-  // Actual daemon clients still validate socket paths before I/O.
-  const socket = join(root, 's');
   const env = { ...(explicit ?? inherited) };
   const removed: string[] = [];
   for (const name of Object.keys(env)) {
@@ -35,13 +30,11 @@ export function validationEnvironment(
   const fcHome = join(home, '.fc');
   const codexHome = join(root, 'codex');
   const runtime = join(root, 'runtime');
-  for (const directory of [fcHome, codexHome, runtime, join(home, '.config')]) mkdirSync(directory, { recursive: true });
   Object.assign(env, {
     HOME: explicit?.HOME ?? home,
     USERPROFILE: explicit?.USERPROFILE ?? explicit?.HOME ?? home,
     FC_HOME: fcHome,
     CODEX_HOME: codexHome,
-    FLOWCREW_DAEMON_SOCKET: socket,
     XDG_RUNTIME_DIR: runtime,
     XDG_CONFIG_HOME: explicit?.XDG_CONFIG_HOME ?? join(home, '.config'),
   });

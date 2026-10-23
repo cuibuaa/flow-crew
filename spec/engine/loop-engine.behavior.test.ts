@@ -17,15 +17,16 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { runWorkflow, type WorkflowConfig } from '../../src/scheduler.js';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../../src/adapters/base.js';
-import { createRun, readRunState, runDir, writeRunState } from '../../src/store.js';
+import { createRun } from '../test-support/create-run.js';
+import { readRunState, runDir, writeRunState } from '../../src/store.js';
 
 let projectDir: string;
 beforeEach(() => { projectDir = join(tmpdir(), 'fc-loop-' + randomBytes(6).toString('hex')); mkdirSync(projectDir, { recursive: true }); });
 afterEach(() => { rmSync(projectDir, { recursive: true, force: true }); });
 
 const researchWorkflow: { config: WorkflowConfig; yaml: string } = {
-  yaml: ['name: research', 'defaults:', '  max_iterations: 12', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}'].join('\n'),
-  config: {description: '',  name: 'research', defaults: { max_iterations: 12 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [], replays: [] } }] },
+  yaml: ['name: research', 'defaults:', '  max_iterations: 12', 'stages:', '  - id: plan', '    role: planner', '    dynamic_dispatch: true', '    artifact_contract: {version: 1, produces: [], reads: []}'].join('\n'),
+  config: {description: '',  name: 'research', defaults: { max_iterations: 12 }, stages: [{criterion_refs: [],  id: 'plan', role: 'planner', depends_on: [], prompt_template: '', dynamic_dispatch: true, is_gate: false, skills: [], artifact_contract: { version: 1, produces: [], reads: [] } }] },
 };
 
 function writeRoles(): string {
@@ -42,7 +43,7 @@ function setupRun(stop: Record<string, unknown>, confirmCommand?: string): strin
   const rd = runDir(projectDir, created.runId);
   writeFileSync(join(rd, 'scheduler.pid'), String(process.pid));
   const brief = [
-    '---', 'research:', '  baseline: 0', '  policy: best_of_n', '  higher_is_better: true',
+    '---', 'research:', '  baseline: 0', '  policy: greedy_stack', '  higher_is_better: true',
     '  result_file: docs/research_round_result.json',
     ...(confirmCommand ? ['  confirm:', `    command: ${JSON.stringify(confirmCommand)}`, '    requires: candidate must reconfirm on a fresh split'] : []),
     '  stop:',
@@ -71,7 +72,7 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
           '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
           '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
           '    task: measure this round',
-          '    artifact_contract: {version: 1, produces: [{id: result, root: project, path: docs/research_round_result.json}, {id: sidecar, root: project, path: docs/research_round_result.json.no_candidate.json}], reads: [], replays: [], groups: [{id: outcome, mode: exactly_one, members: [result, sidecar]}]}',
+          '    artifact_contract: {version: 1, produces: [{id: result, root: project, path: docs/research_round_result.json}, {id: sidecar, root: project, path: docs/research_round_result.json.no_candidate.json}], reads: [], groups: [{id: outcome, mode: exactly_one, members: [result, sidecar]}]}',
         ].join('\n')));
         return fixtureResult(ok('planned a round'), opts);
       }
@@ -145,11 +146,11 @@ describe('loop engine — research behavior (mock-driven)', () => {
             'stages:', '  - id: closeout', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "audit only after this iteration is planned"}',
             '    is_gate: true', '    task: close out',
-            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_closeout.json}], reads: [], replays: []}',
+            '    artifact_contract: {version: 1, produces: [{id: verdict, root: run, path: verdict_closeout.json}], reads: []}',
             '  - id: repair_closeout', '    role: researcher', '    depends_on: [closeout]', '    scope: []',
             '    dependency_reasons: {closeout: "repair only an explicit closeout rejection"}',
             '    retry_to: [closeout]', '    task: repair the rejected closeout evidence',
-            '    artifact_contract: {version: 1, produces: [], reads: [], replays: []}',
+            '    artifact_contract: {version: 1, produces: [], reads: []}',
           ].join('\n')));
           return fixtureResult(ok('planned (no round)'), opts);
         }

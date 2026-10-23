@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,7 +8,8 @@ import { TaskRegistry } from '../src/task-registry.js';
 import { Orchestrator, type SupervisorBackend, type GitAdapter } from '../src/orchestrator.js';
 import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import { sendRpc, startRpcServer, type RegisterRpcResponse } from '../src/orchestrator-rpc.js';
-import { createRun, fcGlobalDir, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, runDir, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { recordRequest, resolveRequest } from '../src/inbox.js';
 
 let root: string;
@@ -133,11 +135,10 @@ describe('registry selection before mutable copies', () => {
     const selected = registry.list({ status: 'active', limit: 1 });
     expect(clone).toHaveBeenCalledTimes(1);
     expect(selected[0].id).toBe(active.id);
-    selected[0].launch_args!.push('mutated'); selected[0].status = 'done';
-    expect(registry.get(active.id)?.launch_args).toEqual(['--adapter', 'mock']);
+    selected[0].launch_options!.adapter = 'mutated'; selected[0].status = 'done';
+    expect(registry.get(active.id)?.launch_options).toEqual({ adapter: 'mock' });
     expect(registry.list({ status: 'active' }).map(task => task.id)).toEqual([active.id]);
     expect(registry.list({ status: 'done' })[0].id).toBe(done.id);
-    expect(registry.cacheDiagnostics().lastBytesParsed).toBe(0);
   });
 
   it('keeps active transitions and unterminated overlays coherent across external writes', () => {

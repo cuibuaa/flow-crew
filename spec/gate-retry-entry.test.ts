@@ -1,3 +1,6 @@
+import { readStageInput } from '../src/store.js';
+import { readInvocationInput } from '../src/run-state-view.js';
+import { gateArchiveArtifactPath } from '../src/scheduler/sched_settlement/gate-archives.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -178,7 +181,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
         return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === GATE_ID) {
-        gateInputs.push(readFileSync(join(opts.runDir, 'stages', GATE_ID, 'input.md'), 'utf-8'));
+        gateInputs.push(readStageInput(projectDir, opts.runDir.split('/').at(-1)!, GATE_ID));
         const pass = options.gatePasses[Math.min(gateCalls, options.gatePasses.length - 1)];
         gateCalls++;
         const verdict = scoredVerdict(pass, pass ? 'accepted' : 'explicit rejection');
@@ -261,9 +264,9 @@ async function runScenario(options: ScenarioOptions): Promise<{
     options.terminalArtifactOnPass
       ? `---\nterminal_states:\n  complete:\n    paths: [docs/final_verification.md]\n---\n# E18 scheduler-level terminal fixture\n`
       : options.escalationTerminal
-        ? `---\nterminal_states:\n  escalated:\n    paths: [docs/research_escalation.md]\nresearch:\n  baseline: 0\n  policy: best_of_n\n  result_file: research/round_result.json\n---\n# Exhausted research gate fixture\n`
+        ? `---\nterminal_states:\n  escalated:\n    paths: [docs/research_escalation.md]\nresearch:\n  baseline: 0\n  policy: greedy_stack\n  result_file: research/round_result.json\n---\n# Exhausted research gate fixture\n`
         : options.researchMode
-          ? `---\nresearch:\n  baseline: 0\n  policy: best_of_n\n  result_file: research/round_result.json\n---\n# Exhausted research gate fixture\n`
+          ? `---\nresearch:\n  baseline: 0\n  policy: greedy_stack\n  result_file: research/round_result.json\n---\n# Exhausted research gate fixture\n`
           : 'E18 scheduler-level integration fixture',
     true,
   );
@@ -361,15 +364,15 @@ describe('gate retry loop entry', () => {
     expect(ready.failingCriteria).toEqual(['criterion_fail']);
   });
 
-  it('audits and refuses unauthorized escalation-finalizer work after gate exhaustion', async () => {
+  it('audits legitimate escalation-finalizer work outside its path estimate after gate exhaustion', async () => {
     const result = await runScenario({ gatePasses: [false], escalationTerminal: true, unauthorizedEscalationWrite: true,
       gateCriteria: { criterion_fail: { status: 'fail', evidence: 'still unsatisfied' } } });
     const finalizer = result.final.stages.escalation_finalize;
     expect(result.final.status, JSON.stringify({ status: finalizer.status, constraintAudit: finalizer.constraintAudit })).not.toBe(RUN_STATUS.ESCALATED);
     expect(result.escalationCalls).toBeGreaterThan(0);
-    expect(existsSync(join(projectDir, 'outside.txt'))).toBe(false);
+    expect(existsSync(join(projectDir, 'outside.txt'))).toBe(true);
     const attempt = finalizer.attempts?.at(-1);
-    expect(attempt?.status).toBe('failed');
+    expect(attempt?.status).toBe('complete');
     expect(attempt?.constraintAudit).toBeDefined();
     expect(readFileSync(join(result.runDirPath, attempt!.constraintAudit!.path), 'utf8')).toContain('outside.txt');
   });
@@ -408,18 +411,13 @@ describe('gate retry loop entry', () => {
       'round_1',
       `rejected_verdict_${GATE_ID}.json`,
     ), 'utf-8'))).toMatchObject({ pass: false, score: -1, threshold: 0 });
-    const archivedInput = readFileSync(join(
-      result.runDirPath,
-      'gate_reevaluation',
-      'iteration_1',
-      'round_1',
-      `evaluated_input_${GATE_ID}.md`,
-    ), 'utf-8');
+    const inputPath = gateArchiveArtifactPath(result.runDirPath, { iteration: 1, round: 1 }, GATE_ID, 'input');
+    expect(existsSync(inputPath)).toBe(true);
+    const archivedInput = readInvocationInput(inputPath).userPrompt;
     expect(result.gateInputs).toHaveLength(2);
     expect(archivedInput).toBe(result.gateInputs[0]);
     expect(archivedInput).not.toBe(result.gateInputs[1]);
-    expect(readFileSync(join(result.runDirPath, 'stages', GATE_ID, 'input.md'), 'utf-8'))
-      .toBe(result.gateInputs[1]);
+    expect(readStageInput(projectDir, result.final.runId, GATE_ID)).toBe(result.gateInputs[1]);
     expect(existsSync(join(
       result.runDirPath,
       'gate_reevaluation',

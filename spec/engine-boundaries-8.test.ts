@@ -57,10 +57,10 @@ process.stdin.on('end', () => {
   })) vi.stubEnv(key, value);
   return {
     root, bin,
-    run: () => new CodexAdapter().run('controlled offline prompt', {
+    run: (resume = true) => new CodexAdapter().run('controlled offline prompt', {
       name: 'coder', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: '',
     }, { workDir: root, runDir: join(root, 'run'), stageId: 'subject', timeout_ms: 2500,
-      resumeSessionId: uuid, sessionOwnerStageId: 'owner', preserveSession: true }),
+      ...(resume ? { resumeSessionId: uuid, sessionOwnerStageId: 'owner' } : {}), preserveSession: true }),
     calls: () => readFileSync(join(root, 'calls.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]),
   };
 }
@@ -166,7 +166,7 @@ describe('boundary 55: evidence from the launched process', () => {
   it('keeps stderr beside JSONL messages and classifies the diagnostic separately', async () => {
     const f = codexFixture('mixed');
     const result = await f.run();
-    expect(result).toMatchObject({ exitCode: 1, adapterError: true, adapterFailureKind: 'forbidden', sessionId: uuid });
+    expect(result).toMatchObject({ exitCode: 1, providerFailure: { kind: 'transient' }, sessionId: uuid });
     expect(result.output).toContain('interim agent text');
     expect(result.output).toContain('403 Forbidden [controlled]');
     expect(result).not.toHaveProperty('stdout');
@@ -188,7 +188,7 @@ describe('boundary 55: evidence from the launched process', () => {
       if (existsSync(join(f.root, 'started'))) process.env.PATH = emptyBin;
     }, 5);
     try {
-      const result = await f.run();
+      const result = await f.run(false);
       expect(result).toMatchObject({ exitCode: 1, output: '' });
       expect(result.friendlyError).toBeUndefined();
       expect(result.spawnError).toBeUndefined();

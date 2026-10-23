@@ -8,7 +8,7 @@ prompt: |
   appended to this input. The stage contract declares the plan output. Ordinary work needs an independent gate
   that decides the outcome and returns concrete repairable findings; the planner does not replace that
   judgement with its own finite checklist. Implementation includes targeted author verification.
-  Dependencies represent real data flow. Overlapping writes are serialized by the scheduler.
+  Dependencies represent real data flow. Overlapping writes are serialized by the scheduler; all authors sharing one project tree wait for its current owner.
   Human deliverables need their declared owners; engine records and summary do not need a finalizer.
 
   Available roles:
@@ -23,14 +23,13 @@ prompt: |
   {ledger_digest}
 
   # Admission and gate contract
-  Include project outputs in write scope. Authors that build declare their own run directory output
-  stages/<stage-id>/build in artifact_contract.produces and configure compiler output and caches there.
-  Settled workspaces are compacted; declare final products below that root explicitly and keep durable
-  evidence/handoff products in named evidence/ or handoff/ directories.
-  Their project scopes cover source edits; shared output scopes still serialize.
+  Use scope to estimate project paths for scheduling and reporting. Put compiler output and caches in $TMPDIR.
+  Scratch is retired at run termination; declare durable run products in artifact_contract.produces
+  and copy final evidence/handoff products from scratch to those declared paths before finishing.
+  Project path estimates do not authorize writes; authors sharing a mutable project tree serialize even with disjoint estimates.
   Repairs declare retry_to and depends_on on their rejecting
   gate and return to that same gate. Exhausted/failed repairs stop; revisions preserve result obligations,
-  executed history and initial capabilities at an idle boundary; unstarted declared tactics may be replaced. See guide/engine-state-and-revisions.md.
+  executed history and admitted result obligations at an idle boundary; unstarted declared tactics may be replaced. See guide/engine-state-and-revisions.md.
   Gate verdict contract:
   {verdict_contract}
   Terminal statuses: {terminal_statuses}
@@ -41,12 +40,12 @@ prompt: |
   No separate audit proof, replay or intermediate freshness protocol is required.
 
   # Optional reality checks
-  When needed, reality_checks.md contains a fenced YAML checks list: name, type, reads, params.
+  When needed, dispatch.yaml declares reality_checks as the typed list in PLAN_SCHEMA: name, type, reads, params.
   Script inputs are exact rooted reads. A hard check fails only for a
   brief-required property, including its exceptions. Wording expectations are advisory; equivalent property
   evidence passes. Shell checks use declared available tools and state environment requirements; optional
   tools require an availability guard and a skipped-check explanation when absent.
-  Omitting reality_checks.md inherits admitted bytes; a replacement amends checks atomically with dispatch.
+  Omitting reality_checks inherits admitted checks; [] clears them. A replacement amends checks atomically with dispatch.
 
   # Research contract
   Respect phase prerequisites. Dispatch one phase when campaign history must record every phase; otherwise retain intermediate receipts and let only the final gate emit the next-phase handoff. Revisit mechanisms when the goal or evidence calls for replication or retuning. Reuse

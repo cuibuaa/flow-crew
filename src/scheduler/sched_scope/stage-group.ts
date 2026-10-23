@@ -1,20 +1,16 @@
+import { settleGateEvaluation } from '../sched_settlement/gate-verdict.js';
 import { runStageWave } from '../stage-wave.js';
-import { bindReviewedGateValidation, recordGateValidationDelta } from '../sched_settlement/gate-validation.js';
-// Boundary: Run admitted disjoint batches, coordinate existing approval/revision monitors, settle audits, suspension and thrown attempts; stage execution is a supplied callback.
+import { bindReviewedGateValidation, recordGateValidationDelta, settleGateValidationEvidence } from '../sched_settlement/gate-validation.js';
+// Run serialized shared-tree authors, coordinate approvals, and settle each closed attempt.
 import { StageAttemptSettlementError, STAGE_STATUS, type StoreState, type AttemptAttribution, readRunState, readStageStatus, runDir, type StageStatus, completeStageAttempt, isPausedRunStatus, writeRunState } from "../../store.js";
-import { join } from "node:path";
 import { attemptEventFields, recordRunEvent, recordStageOutcome } from "../../run-events.js";
 import { log } from "../sched_admission/shared.js";
 import { type RunResult } from '../../adapters/base.js';
-import { type LiveConstraintGuardFactory } from "../../live-constraint-guard.js";
 import { type StageConfig } from "../sched_admission/configuration.js";
-import { detectParallelWriteConflicts, isStageInSkippedBranch, selectRunnableBatch } from "../sched_admission/frontier.js";
+import { isStageInSkippedBranch, selectRunnableBatch } from "../sched_admission/frontier.js";
 import { type RepairRoundSnapshot } from './snapshots.js';
 import { type ScopeBatchContext, createScopeBatchContext } from './scope-batch.js';
-import { acceptedInheritedScope, stageWithInheritedScope } from './scope-revisions.js';
 import { type createApprovalMonitor } from "../sched_policy/approvals.js";
-import { type createScopeRevisionMonitor } from './revision-monitor.js';
-import { type createLiveGuardFactory } from './write-enforcement.js';
 import { type createScopeReconciler } from './reconciliation.js';
 
 export function allDone(state: StoreState, stages: StageConfig[]): boolean {
@@ -91,62 +87,40 @@ export function syncStageStatuses(projectDir: string, runId: string, stageIds: s
 
 interface ScopeSafeStageServices {
   monitorApprovalRequests: ReturnType<typeof createApprovalMonitor>['monitorApprovalRequests'];
-  monitorScopeRevisionRequests: ReturnType<typeof createScopeRevisionMonitor>['monitorScopeRevisionRequests'];
-  createSchedulerLiveConstraintGuardFactory: ReturnType<typeof createLiveGuardFactory>['createSchedulerLiveConstraintGuardFactory'];
   reconcileCompletedStageAttempts: ReturnType<typeof createScopeReconciler>['reconcileCompletedStageAttempts'];
 }
 
-/** One policy boundary flushes request authority before verification and audits closure afterward. */
+/** Settlement projects one content-contract decision after child closure. */
 export function createStageSettlementBoundary(input: {
-  stage: StageConfig; selected: StageConfig[]; activeStageIds: Set<string>;
-  projectDir: string; runId: string; context: ScopeBatchContext;
-}, services: Pick<ScopeSafeStageServices, 'monitorScopeRevisionRequests' | 'reconcileCompletedStageAttempts'>): (phase: 'child_closed' | 'attempt_closed') => Promise<boolean> {
-  return async phase => {
+  stage: StageConfig; projectDir: string; runId: string; context: ScopeBatchContext;
+}, services: Pick<ScopeSafeStageServices, 'reconcileCompletedStageAttempts'>): (phase: 'attempt_closed') => Promise<void> {
+  return async () => {
     await new Promise<void>(resolve => setImmediate(resolve));
-    await services.monitorScopeRevisionRequests({ ...input, completion: AbortSignal.abort() });
-    const attempt = readStageStatus(input.projectDir, input.runId, input.stage.id).attempts?.at(-1);
-    if (phase === 'child_closed') return attempt !== undefined && input.context.attempt(input.stage.id, attempt.index).acceptedDuringAttempt;
-    const reconciled = services.reconcileCompletedStageAttempts(input);
-    return !reconciled.violation && reconciled.acceptedRevisionDuringAttempt
-      && reconciled.attemptIndex === attempt?.index && attempt?.exitCode === 0;
+    services.reconcileCompletedStageAttempts(input);
   };
 }
 
-/** Re-admit inherited paths against peers before starting another child. */
-export function readmitScopeContinuation(
-  stage: StageConfig, selected: StageConfig[], activeStageIds: Set<string>, runDirPath: string, context: ScopeBatchContext,
-): StageConfig | undefined {
-  const revised = stageWithInheritedScope(runDirPath, stage);
-  const peers = selected.filter((peer) => peer.id !== stage.id && activeStageIds.has(peer.id))
-    .map((peer) => stageWithInheritedScope(runDirPath, peer));
-  const admission = selectRunnableBatch([...peers, revised]);
-  if (admission.deferred.some((entry) => entry.stage.id === revised.id)) return undefined;
-  // Keep the shared frozen preimages and peer attribution. Only the next
-  // attempt's capability changes; old attempt records remain immutable.
-  const inherited = acceptedInheritedScope(runDirPath, stage);
-  context.inherit(stage.id, inherited);
-  return revised;
-}
-
 export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
-  const { monitorApprovalRequests, monitorScopeRevisionRequests, createSchedulerLiveConstraintGuardFactory } = services;
+  const { monitorApprovalRequests } = services;
 
   async function runScopeSafeStageGroup(
     stages: StageConfig[],
     projectDir: string,
     runId: string,
     iteration: number,
-    execute: (stage: StageConfig, liveConstraintGuardFactory?: LiveConstraintGuardFactory, settlementBoundary?: (phase: 'child_closed' | 'attempt_closed') => Promise<boolean>) => Promise<RunResult | void>,
+    execute: (stage: StageConfig, settlementBoundary?: (phase: 'attempt_closed') => Promise<void>) => Promise<RunResult | void>,
     repairEvidence?: RepairRoundSnapshot,
   ): Promise<void> {
     const runDirPath = runDir(projectDir, runId);
     const declaredStageById = new Map(stages.map((stage) => [stage.id, stage]));
-    let pending = stages.map((stage) => stageWithInheritedScope(runDirPath, stage));
+    let pending = stages;
+    const executedStages: StageConfig[] = [];
+    let interrupted = false;
     while (pending.length > 0) {
       const { selected, deferred } = selectRunnableBatch(pending);
       for (const { stage, conflict } of deferred) {
         const detail = `${stage.id} deferred behind ${conflict.leftStageId}: ${conflict.reason}`;
-        log.info({ stage: stage.id, conflict }, 'Serializing retry/gate stage because declared scopes are not provably disjoint');
+        log.info({ stage: stage.id, conflict }, 'Waiting for the shared project tree owner to settle');
         recordRunEvent(projectDir, runId, {
           type: 'parallel_scope_serialized', runId, timestamp: new Date().toISOString(),
           iteration, stageId: stage.id, stageIds: [conflict.leftStageId, conflict.rightStageId],
@@ -159,24 +133,12 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
         undefined,
         runId,
       );
-      const activeStageIds = context.activeStageIds;
-      const redispatch: StageConfig[] = [];
       const wave = await runStageWave(selected, {
-        activeStageIds,
-        monitorScope: (completion) => monitorScopeRevisionRequests({ selected, activeStageIds, projectDir, runId, context, completion }),
         monitorApproval: (completion) => monitorApprovalRequests({ selected, projectDir, runId, runDirPath, iteration, completion }),
         execute: async (initialStage) => {
-        let stage = initialStage;
-        let result: RunResult | void = undefined;
+        const stage = initialStage;
         try {
-          while (true) {
-            result = await execute(stage, createSchedulerLiveConstraintGuardFactory({ stage, projectDir, runId, context }), createStageSettlementBoundary({ stage, selected, activeStageIds, projectDir, runId, context }, services));
-            if (!result?.suspended || result.continuation) break;
-            if (isPausedRunStatus(readRunState(projectDir, runId).status)) break;
-            const next = readmitScopeContinuation(stage, selected, activeStageIds, runDirPath, context);
-            if (!next) { redispatch.push(stageWithInheritedScope(runDirPath, stage)); break; }
-            stage = next;
-          }
+          await execute(stage, createStageSettlementBoundary({ stage, projectDir, runId, context }, services));
         }
         catch (error) {
           const retries = (() => {
@@ -188,8 +150,9 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
         }
         },
       });
-      // Live enforcement always starts from this wave's current preimages.
-      // Retain those captures (including approved scope additions) for review,
+      executedStages.push(...selected);
+      // Each serialized wave observes the preceding author's settled content.
+      // Retain those captures for independent repair review,
       // preserving the earliest image when the round touched a path already.
       if (repairEvidence) {
         for (const [path, image] of context.snapshot.files) {
@@ -203,34 +166,42 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
       // Let recursive filesystem notifications queued by a synchronous adapter
       // reach the run-scoped journal before reconciliation reads its cursor.
       await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
-      for (const stage of selected) {
-        const finalStatus = readStageStatus(projectDir, runId, stage.id);
-        if (finalStatus.status === STAGE_STATUS.COMPLETE || finalStatus.status === STAGE_STATUS.FAILED) {
-          if (stage.is_gate && !bindReviewedGateValidation(projectDir, runId, stage.id, selected.map(peer => peer.id))) {
-            await recordGateValidationDelta(projectDir, runId, stage.id);
-          }
-          recordStageOutcome(projectDir, runId, stage.id, iteration, finalStatus);
-        }
-      }
       if (parkedDuringExecution || isPausedRunStatus(readRunState(projectDir, runId).status)) {
-        syncStageStatuses(projectDir, runId, selected.map((stage) => stage.id));
-        return;
+        interrupted = true;
+        break;
       }
-      const statuses: Record<string, StageStatus> = {};
-      for (const stage of selected) {
-        try { statuses[stage.id] = readStageStatus(projectDir, runId, stage.id); } catch { /* missing status */ }
-      }
-      for (const conflict of detectParallelWriteConflicts(selected.map((stage) => stage.id), statuses)) {
-        const detail = `${conflict.stageIds[0]} and ${conflict.stageIds[1]} both wrote ${conflict.files.join(', ')} (attribution: ${conflict.attribution.join(' / ')})`;
-        log.warn({ conflict }, 'Parallel retry/gate stages wrote the same file');
-        recordRunEvent(projectDir, runId, {
-          type: 'parallel_write_conflict', runId, timestamp: new Date().toISOString(), iteration,
-          stageIds: conflict.stageIds, files: conflict.files, level: 'warning', detail,
-        });
-      }
-      pending = [...redispatch, ...deferred.map(({ stage }) => stage)];
+      pending = deferred.map(({ stage }) => stage);
     }
+    // Interrupted groups publish execution outcomes only. Validation and the
+    // immutable gate result must wait for every serialized author to finish.
+    if (!interrupted) await settleStageGroup(projectDir, runId, executedStages);
+    for (const stage of executedStages) {
+      const status = readStageStatus(projectDir, runId, stage.id);
+      if (status.status === STAGE_STATUS.COMPLETE || status.status === STAGE_STATUS.FAILED) {
+        recordStageOutcome(projectDir, runId, stage.id, iteration, status);
+      }
+    }
+    syncStageStatuses(projectDir, runId, executedStages.map(stage => stage.id));
   }
 
   return { runScopeSafeStageGroup };
+}
+
+/** Both ordinary and repair waves bind validation and publish the same gate result. */
+export async function settleStageGroup(projectDir: string, runId: string, stages: StageConfig[]): Promise<void> {
+  for (const stage of stages.filter(stage => stage.is_gate)) {
+    const status = readStageStatus(projectDir, runId, stage.id);
+    if (status.status !== STAGE_STATUS.COMPLETE && status.status !== STAGE_STATUS.FAILED) continue;
+    try {
+      if (!bindReviewedGateValidation(projectDir, runId, stage.id, stages.map(peer => peer.id))) {
+        await recordGateValidationDelta(projectDir, runId, stage.id);
+      }
+      await settleGateValidationEvidence(projectDir, runId, stage.id);
+    } catch (error) {
+      // A missing bound receipt fails closed in gate evaluation. Keep launch
+      // failures inside settlement so the scheduler can publish that refusal.
+      log.error({ stage: stage.id, error: error instanceof Error ? error.message : String(error) }, 'Could not settle gate validation');
+    }
+    settleGateEvaluation(projectDir, runId, stage.id);
+  }
 }

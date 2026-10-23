@@ -20,12 +20,9 @@ import type {
 } from '../src/adapters/base.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
 import { parseStageCommandInterrupt, requestStageCommandInterrupt } from '../src/command-interrupt.js';
-import { loadEngineDefaults } from '../src/config.js';
 import { appendGuidanceEnvelope } from '../src/guidance.js';
-import { buildStagePrompt } from '../src/handoff.js';
-import { readGateVerdict } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   setFcGlobalDir,
   writeStageStatus,
@@ -88,7 +85,7 @@ function stageOptions(created: { runId: string; runDirPath: string }, stageId = 
     runId: created.runId,
     runDir: created.runDirPath,
     retries: 0,
-    projectWriteScope: [],
+
   };
 }
 
@@ -100,82 +97,7 @@ function events(runDir: string): Array<Record<string, unknown>> {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-const remedyCriterionId = 'criterion_acceptance_criteria_4_feedface';
-
-function makeRemedyFixture(options: { nestedCost?: boolean } = {}) {
-  const created = makeRun(['measure', 'repair', 'qa']);
-  const sourcePath = join(projectDir, 'docs', 'unit-cost.json');
-  writeFileSync(sourcePath, JSON.stringify(options.nestedCost
-    ? { measurements: [{ unitCostMs: 400, unit: 'blocks' }] }
-    : { unitCostMs: 400, unit: 'blocks' }), 'utf-8');
-  writeStageStatus(projectDir, created.runId, 'measure', {
-    status: 'complete', retries: 0, writeAttribution: 'snapshot', writes: ['docs/unit-cost.json'],
-    attempts: [{
-      index: 1, status: 'complete', startedAt: '2026-09-18T00:00:00.000Z',
-      completedAt: '2026-09-18T00:00:01.000Z', writes: ['docs/unit-cost.json'],
-    }],
-  });
-  writeStageStatus(projectDir, created.runId, 'repair', {
-    status: 'complete', retries: 0,
-    attempts: [{
-      index: 1, status: 'complete', startedAt: '2026-09-18T00:00:00.000Z',
-      completedAt: '2026-09-18T00:00:01.000Z',
-      timeout: {
-        attemptId: 'repair:1', budgetMs: 11_000,
-        attemptStartedAt: '2026-09-18T00:00:00.000Z', deadlineAt: '2026-09-18T00:00:11.000Z',
-        elapsedMs: 1_000, remainingMs: 10_000, rejectedExtensionCount: 0,
-        decisionPaths: [], mismatchPaths: [], terminationCause: 'complete',
-      },
-    }],
-  });
-  writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
-    version: 1, pass: true, checkedAt: 'now', terminalOwners: {}, errors: [],
-    criterionGateRefs: { qa: [remedyCriterionId] },
-  }), 'utf-8');
-  const verdictPath = join(created.runDirPath, 'verdict_qa.json');
-  const baseVerdict = {
-    pass: false,
-    reason: 'Increase the run to 40 blocks before acceptance.',
-    criteria: {
-      [remedyCriterionId]: { status: 'fail', evidence: 'The repair must run 40 blocks.' },
-    },
-  };
-  const sourcePrefix = options.nestedCost ? '/measurements/0/' : '';
-  const knownEntry = {
-    criterionId: remedyCriterionId,
-    targetStageId: 'repair',
-    targetQuantity: 40,
-    unit: 'blocks',
-    cost: {
-      status: 'known', unitCostMs: 400, costedQuantity: 40, unit: 'blocks',
-      source: {
-        stageId: 'measure', attemptIndex: 1, path: 'docs/unit-cost.json',
-        unitCostPath: `${sourcePrefix}unitCostMs`, unitCostUnit: 'ms',
-        unitPath: `${sourcePrefix}unit`,
-      },
-    },
-    impliedWallTimeMs: 16_000,
-    stageBudgetMs: 11_000,
-    fitsStageBudget: false,
-    disposition: 'infeasible',
-  };
-  return { created, sourcePath, verdictPath, baseVerdict, knownEntry };
-}
-
-function verdictWithRemedy(
-  fixture: ReturnType<typeof makeRemedyFixture>,
-  entry: Record<string, unknown>,
-  statement: string,
-) {
-  return {
-    ...fixture.baseVerdict,
-    reason: statement,
-    criteria: { [remedyCriterionId]: { status: 'fail', evidence: statement } },
-    remedyFeasibility: [{ ...entry, statement }],
-  };
-}
-
-describe('live guidance and feasibility controls', () => {
+describe('live guidance and command controls', () => {
   it('[J1] delivers guidance written after attempt start at a long-command completion boundary', async () => {
     const created = makeRun(['work']);
     const prompts: string[] = [];
@@ -220,7 +142,6 @@ describe('live guidance and feasibility controls', () => {
     });
     expect(prompts[1]).toContain('Stop the oversized measurement');
     expect(receipt).toContain('Stop the oversized measurement');
-    const startedAt = ledger.findIndex((event) => event.type === 'stage_command_started');
     const writtenAt = ledger.findIndex((event) => (
       event.type === 'guidance_written' && event.guidanceId === writtenGuidanceId
     ));
@@ -229,16 +150,12 @@ describe('live guidance and feasibility controls', () => {
       && event.boundary === 'tool_call_completion'
       && event.delivered === true
     ));
-    expect(startedAt).toBeGreaterThanOrEqual(0);
-    expect(writtenAt).toBeGreaterThan(startedAt);
+    expect(writtenAt).toBeGreaterThanOrEqual(0);
     expect(deliveredAt).toBeGreaterThan(writtenAt);
-    expect(ledger.filter((event) => event.type === 'stage_command_started')).toHaveLength(1);
     expect(ledger).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'stage_command_started', commandId: 'long-command' }),
       expect.objectContaining({
         type: 'guidance_delivery_checked', boundary: 'tool_call_completion', delivered: true,
       }),
-      expect.objectContaining({ type: 'stage_command_completed', commandId: 'long-command' }),
     ]));
   });
 
@@ -350,24 +267,20 @@ describe('live guidance and feasibility controls', () => {
       .toEqual({ cliExit: 0, exitCode: 0, invocations: 2 });
     expect(scenario.prompts[1]).toContain('10000-block job is infeasible');
     expect(scenario.ledger).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'stage_command_started', commandId: 'active-command' }),
       expect.objectContaining({ type: 'stage_command_interrupt_requested', source: 'operator' }),
       expect.objectContaining({ type: 'guidance_delivery_checked', boundary: 'operator_interrupt', delivered: true }),
       expect.objectContaining({ type: 'stage_command_interrupted', commandId: 'active-command' }),
     ]));
     expect(scenario.ledger.some((event) => event.type === 'interrupted_command_repeated')).toBe(false);
     const eventTypes = scenario.ledger.map((event) => event.type);
-    const startedAt = eventTypes.indexOf('stage_command_started');
-    const writtenAt = eventTypes.indexOf('guidance_written', startedAt + 1);
+    const writtenAt = eventTypes.indexOf('guidance_written');
     const requestedAt = eventTypes.indexOf('stage_command_interrupt_requested', writtenAt + 1);
     const deliveredAt = eventTypes.indexOf('guidance_delivery_checked', requestedAt + 1);
     const interruptedAt = eventTypes.indexOf('stage_command_interrupted', deliveredAt + 1);
-    expect(startedAt).toBeGreaterThanOrEqual(0);
-    expect(writtenAt).toBeGreaterThan(startedAt);
+    expect(writtenAt).toBeGreaterThanOrEqual(0);
     expect(requestedAt).toBeGreaterThan(writtenAt);
     expect(deliveredAt).toBeGreaterThan(requestedAt);
     expect(interruptedAt).toBeGreaterThan(deliveredAt);
-    expect(scenario.ledger.filter((event) => event.type === 'stage_command_started')).toHaveLength(1);
   });
 
   it('[J3 edge] reports a byte-equivalent command repeated after an operator interrupt', async () => {
@@ -442,232 +355,7 @@ describe('live guidance and feasibility controls', () => {
     }
   });
 
-  it('[J4] requires implied wall time for a quantified remedy with recorded unit cost', () => {
-    const fixture = makeRemedyFixture();
-    writeFileSync(fixture.verdictPath, JSON.stringify(fixture.baseVerdict), 'utf-8');
-
-    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
-      .toContain('quantified remedy has no remedyFeasibility entry');
-
-    const knownStatement = 'The 40-block target implies 16000 ms and is infeasible within the 11000 ms stage budget.';
-    writeFileSync(fixture.verdictPath, JSON.stringify(
-      verdictWithRemedy(fixture, fixture.knownEntry, knownStatement),
-    ), 'utf-8');
-    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)).toMatchObject({
-      pass: false, reason: knownStatement,
-    });
-
-    const unknownStatement = 'The cost and implied wall time for the 40-block target are unknown.';
-    const unknownVerdict = {
-      ...fixture.baseVerdict,
-      reason: unknownStatement,
-      criteria: { [remedyCriterionId]: { status: 'fail', evidence: unknownStatement } },
-      remedyFeasibility: [{
-        criterionId: remedyCriterionId,
-        targetStageId: 'repair',
-        targetQuantity: 40,
-        unit: 'blocks',
-        cost: { status: 'unknown', reason: 'No completed attempt recorded a per-block rate.' },
-        impliedWallTimeMs: null,
-        stageBudgetMs: 11_000,
-        fitsStageBudget: null,
-        disposition: 'unknown',
-        statement: unknownStatement,
-      }],
-    };
-    writeFileSync(fixture.verdictPath, JSON.stringify(unknownVerdict), 'utf-8');
-    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
-      .toContain('cost cannot be unknown');
-    rmSync(fixture.sourcePath);
-    writeFileSync(fixture.verdictPath, JSON.stringify(unknownVerdict), 'utf-8');
-    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)).toMatchObject({
-      pass: false, reason: unknownStatement,
-    });
-  });
-
-  it('[J4 edge] rejects feasibility prose that omits the computed wall-time value', () => {
-    const fixture = makeRemedyFixture();
-    const statement = 'The 40-block target has an implied wall time that is infeasible against the stage budget.';
-    writeFileSync(fixture.verdictPath, JSON.stringify(
-      verdictWithRemedy(fixture, fixture.knownEntry, statement),
-    ), 'utf-8');
-
-    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
-      .toContain('statement must include the computed implied wall time');
-  });
-
-  it('[J4 edge] rejects a nonexistent target stage instead of assigning it the default budget', () => {
-    const fixture = makeRemedyFixture();
-    const defaultBudget = loadEngineDefaults().timeout_ms;
-    const fits = fixture.knownEntry.impliedWallTimeMs <= defaultBudget;
-    const disposition = fits ? 'feasible' : 'infeasible';
-    const statement = `The 40-block target implies 16000 ms and is ${disposition} within the ${defaultBudget} ms stage budget.`;
-    writeFileSync(fixture.verdictPath, JSON.stringify(verdictWithRemedy(fixture, {
-      ...fixture.knownEntry,
-      targetStageId: 'ghost',
-      stageBudgetMs: defaultBudget,
-      fitsStageBudget: fits,
-      disposition,
-    }, statement)), 'utf-8');
-
-    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
-      .toContain('targetStageId ghost does not name an admitted stage');
-
-    writeFileSync(fixture.verdictPath, JSON.stringify(verdictWithRemedy(fixture, {
-      ...fixture.knownEntry,
-      targetStageId: 'qa',
-      stageBudgetMs: defaultBudget,
-      fitsStageBudget: fits,
-      disposition,
-    }, statement)), 'utf-8');
-    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)).toMatchObject({
-      pass: false, reason: statement,
-    });
-  });
-
-  it('[J4 edge] discovers and cites explicit unit costs nested in JSON arrays', () => {
-    const fixture = makeRemedyFixture({ nestedCost: true });
-    const unknownStatement = 'The cost and implied wall time for the 40-block target are unknown.';
-    const unknownEntry = {
-      criterionId: remedyCriterionId,
-      targetStageId: 'repair',
-      targetQuantity: 40,
-      unit: 'blocks',
-      cost: { status: 'unknown', reason: 'No completed attempt recorded a per-block rate.' },
-      impliedWallTimeMs: null,
-      stageBudgetMs: 11_000,
-      fitsStageBudget: null,
-      disposition: 'unknown',
-    };
-    writeFileSync(fixture.verdictPath, JSON.stringify(
-      verdictWithRemedy(fixture, unknownEntry, unknownStatement),
-    ), 'utf-8');
-    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)?.reason)
-      .toContain('cost cannot be unknown');
-
-    const knownStatement = 'The 40-block target implies 16000 ms and is infeasible within the 11000 ms stage budget.';
-    writeFileSync(fixture.verdictPath, JSON.stringify(
-      verdictWithRemedy(fixture, fixture.knownEntry, knownStatement),
-    ), 'utf-8');
-    expect(readGateVerdict(projectDir, 'qa', fixture.created.runId)).toMatchObject({
-      pass: false, reason: knownStatement,
-    });
-  });
-
-  it('[J5] rejects a criterion failure that ignores its attached operator ruling', () => {
-    const criterionId = 'criterion_acceptance_criteria_10_cafebabe';
-    const created = makeRun(['repair', 'qa']);
-    writeFileSync(join(created.runDirPath, 'brief_criteria.json'), JSON.stringify({
-      version: 1, briefDigest: 'fixture',
-      criteria: [{ id: criterionId, text: 'Satisfy the validation gate.', line: 1, section: 'Acceptance criteria' }],
-    }), 'utf-8');
-    const ruling = appendGuidanceEnvelope({
-      runDir: created.runDirPath,
-      target: 'repair',
-      source: 'operator',
-      body: 'Criterion 10 remains the operator ruling: the named red baseline is acceptable when no failures are added.',
-      knownStageIds: ['repair', 'qa'],
-    });
-    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
-      version: 1, pass: true, checkedAt: 'now', terminalOwners: {}, errors: [],
-      criterionGateRefs: { qa: [criterionId] },
-    }), 'utf-8');
-    const verdictPath = join(created.runDirPath, 'verdict_qa.json');
-    writeFileSync(verdictPath, JSON.stringify({
-      pass: false,
-      reason: 'Validation is red.',
-      criteria: { [criterionId]: { status: 'fail', evidence: 'The exact named baseline failures remain.' } },
-    }), 'utf-8');
-
-    const rejected = readGateVerdict(projectDir, 'qa', created.runId);
-    expect(rejected).toMatchObject({ pass: false });
-    expect(rejected?.reason).toContain(`ignores operator guidance ${ruling.id}`);
-    const laterGatePrompt = buildStagePrompt({
-      dependsOn: ['repair'],
-      promptTemplate: 'Evaluate the assigned criterion.',
-      projectDir,
-      runId: created.runId,
-      runDir: created.runDirPath,
-      stageId: 'qa',
-      role: 'qa',
-      isGate: true,
-      criterionRefs: [criterionId],
-    });
-    expect(laterGatePrompt).toContain(`Guidance ${ruling.id}`);
-    expect(laterGatePrompt).toContain('the named red baseline is acceptable');
-  });
-
-  it('[J6] reports a stage-authored check that conflicts with the ruling on its criterion', () => {
-    const criterionId = 'criterion_acceptance_criteria_10_decafbad';
-    const created = makeRun(['work', 'qa']);
-    writeFileSync(join(created.runDirPath, 'brief_criteria.json'), JSON.stringify({
-      version: 1, briefDigest: 'fixture',
-      criteria: [{ id: criterionId, text: 'Satisfy the validation gate.', line: 1, section: 'Acceptance criteria' }],
-    }), 'utf-8');
-    const ruling = appendGuidanceEnvelope({
-      runDir: created.runDirPath,
-      target: 'work',
-      source: 'operator',
-      body: 'Criterion 10: the named red baseline is acceptable; do not encode a green-only gate.',
-      knownStageIds: ['work', 'qa'],
-    });
-    writeFileSync(join(created.runDirPath, 'dispatch.yaml'), [
-      'stages:',
-      '  - id: work',
-      '    depends_on: []',
-      `    criterion_refs: [${criterionId}]`,
-      '  - id: qa',
-      '    depends_on: [work]',
-      `    criterion_refs: [${criterionId}]`,
-      '    is_gate: true',
-    ].join('\n'), 'utf-8');
-    const checkPath = 'spec/verify_delivery_audit.test.ts';
-    mkdirSync(join(projectDir, 'spec'), { recursive: true });
-    writeFileSync(join(projectDir, checkPath), 'expect(makeTestExit).toBe(0);\n', 'utf-8');
-    writeStageStatus(projectDir, created.runId, 'work', {
-      status: 'complete', retries: 0, writeAttribution: 'snapshot', writes: [checkPath],
-      artifacts: [checkPath],
-      attempts: [{
-        index: 1, status: 'complete', startedAt: '2026-09-18T00:00:00.000Z',
-        completedAt: '2026-09-18T00:00:01.000Z', writes: [checkPath],
-      }],
-    });
-    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
-      version: 1, pass: true, checkedAt: 'now', terminalOwners: {}, errors: [],
-      criterionGateRefs: { qa: [criterionId] },
-    }), 'utf-8');
-    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({
-      pass: false,
-      reason: 'The stage-authored contract requires operator review.',
-      criteria: {
-        [criterionId]: {
-          status: 'judgement',
-          evidence: 'The check requires green although the operator accepted the named red baseline.',
-          checkAssessments: [{
-            path: checkPath,
-            authorStageId: 'work',
-            guidanceId: ruling.id,
-            status: 'conflict',
-            reason: 'The check requires a green exit while the ruling accepts only the named baseline failures.',
-          }],
-        },
-      },
-    }), 'utf-8');
-
-    const verdict = readGateVerdict(projectDir, 'qa', created.runId);
-    expect(verdict?.reason).toContain(`Criterion check conflict: ${checkPath} by work`);
-    expect(events(created.runDirPath)).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: 'criterion_check_conflict',
-        criterionId,
-        checkPath,
-        authorStageId: 'work',
-        guidanceId: ruling.id,
-      }),
-    ]));
-  });
 });
-
 
 describe('continuation at closed tool boundaries', () => {
   it('keeps the stage UUID and all delivered guidance, with complete duties for a fresh fallback', async () => {
@@ -698,7 +386,7 @@ describe('continuation at closed tool boundaries', () => {
     expect(calls[2].prompt).toContain('hard stop');
   });
 
-  it('omits unchanged empty tool checks while retaining invocation checks and command lifecycle', async () => {
+  it('omits unchanged empty tool checks and command copies while retaining invocation checks', async () => {
     const created = makeRun(['work']);
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       for (let index = 0; index < 4; index++) {
@@ -711,6 +399,6 @@ describe('continuation at closed tool boundaries', () => {
     expect((await runStage(adapter, stageOptions(created))).exitCode).toBe(0);
     const ledger = events(created.runDirPath);
     expect(ledger.filter((event) => event.type === 'guidance_delivery_checked').map((event) => event.boundary)).toEqual(['attempt_start', 'adapter_invocation']);
-    expect(ledger.filter((event) => event.type === 'stage_command_completed')).toHaveLength(4);
+    expect(ledger.filter((event) => event.type === 'stage_command_completed')).toHaveLength(0);
   });
 });

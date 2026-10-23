@@ -3,14 +3,43 @@ import { errorMessage } from './source_services/cli-inputs.js';
 import { appendEngineFile, withEngineIntegrity } from './engine-integrity.js';
 import { CommandActivityTracker } from './command-activity.js';
 import { spawnOwnedCommand } from './adapters/base.js';
-import { mkdtempSync, rmSync } from './engine-fs.js';
+import { mkdirSync, mkdtempSync, rmSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { validationEnvironment } from './validation-environment.js';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { parseTapOutput } from './tap-output.js';
 import { loadEngineDefaults } from './config.js';
-import { discoverConfiguredPackages } from './scheduler/sched_admission/project-capabilities.js';
+import { spawnSync } from 'node:child_process';
+import { listProjectFiles } from './scheduler/sched_scope/path-capabilities.js';
+
+function readPackageManifest(path: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch { return undefined; }
+}
+
+/** Dependency preparation uses project-owned manifests rather
+ * than guessing package roots from command spelling. Git excludes installed
+ * packages and generated copies; non-Git projects use the existing inventory. */
+function discoverConfiguredPackages(projectDir: string): Array<{ root: string; manifest: Record<string, unknown> }> {
+  const projectRoot = resolve(projectDir);
+  const inventory = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', 'package.json', '**/package.json'], {
+    cwd: projectRoot, encoding: 'utf8', env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+  });
+  const paths = inventory.status === 0 ? inventory.stdout.split('\0') : listProjectFiles(projectRoot, {
+    skipDirectory: path => path.split('/').includes('node_modules'),
+  });
+  return [...new Set(['package.json', ...paths])].flatMap(path => {
+    if (path.split('/').includes('node_modules') || !/(?:^|\/)package\.json$/.test(path)) return [];
+    const manifest = readPackageManifest(join(projectRoot, path));
+    return manifest ? [{ root: dirname(join(projectRoot, path)), manifest }] : [];
+  });
+}
 
 export type ValidationRole = 'build' | 'test' | 'lint';
 export type PackageRunner = 'npm' | 'pnpm' | 'yarn' | 'bun';
@@ -68,14 +97,6 @@ export interface ValidationRunRequest extends ValidationCommand {
   /** Ordinary project inputs and explicit home/config reads. Reserved control,
    * credential and executable-injection settings are suppressed with a diagnostic. */
   env?: NodeJS.ProcessEnv;
-  observer?: ValidationProgressObserver;
-}
-
-export interface ValidationProgressObserver {
-  onCommandStart?: (command: ValidationCommand) => void;
-  onCommandOutput?: (command: ValidationCommand, stream: 'stdout' | 'stderr', chunk: string) => void;
-  onCommandHeartbeat?: (command: ValidationCommand, elapsedMs: number) => void;
-  onCommandFinish?: (command: ValidationCommand, response: ValidationRunResponse) => void;
 }
 
 export interface ValidationRunResponse {
@@ -134,7 +155,6 @@ export interface ProjectValidationDependencies {
   commands?: readonly ValidationCommand[];
   now?: () => number;
   maxOutputBytes?: number;
-  observer?: ValidationProgressObserver;
   skipExecution?: boolean;
 }
 
@@ -153,190 +173,6 @@ const nodeValidationFs: ValidationFileSystem = {
   exists: existsSync,
   readText: (path) => readFileSync(path, 'utf-8'),
 };
-
-export interface ValidationPathImpact {
-  path: string;
-  role: ValidationRole;
-  command: string;
-  evidence: string;
-}
-
-function validationGlobRegex(pattern: string): RegExp | undefined {
-  const normalized = pattern.replace(/\\/g, '/').replace(/^\.\//, '');
-  if (!normalized || normalized.startsWith('/') || normalized.includes('..')) return undefined;
-  let source = '^';
-  for (let index = 0; index < normalized.length; index++) {
-    const char = normalized[index];
-    if (char === '*' && normalized[index + 1] === '*') {
-      index++;
-      if (normalized[index + 1] === '/') {
-        index++;
-        source += '(?:.*/)?';
-      } else {
-        source += '.*';
-      }
-    } else if (char === '*') {
-      source += '[^/]*';
-    } else if (char === '?') {
-      source += '[^/]';
-    } else {
-      source += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
-    }
-  }
-  try { return new RegExp(`${source}$`); } catch { return undefined; }
-}
-
-interface LiteralConfigToken {
-  kind: 'word' | 'string' | 'punctuation';
-  value: string;
-}
-
-/** Tokenize only the syntax needed to prove a literal config binding. Comments
- * and template expressions are deliberately invisible so prose cannot create
- * an operator warning. */
-function literalConfigTokens(source: string): LiteralConfigToken[] {
-  const tokens: LiteralConfigToken[] = [];
-  for (let index = 0; index < source.length;) {
-    const char = source[index];
-    const next = source[index + 1];
-    if (/\s/.test(char)) {
-      index++;
-      continue;
-    }
-    if (char === '/' && next === '/') {
-      index += 2;
-      while (index < source.length && source[index] !== '\n') index++;
-      continue;
-    }
-    if (char === '/' && next === '*') {
-      index += 2;
-      while (index < source.length && !(source[index] === '*' && source[index + 1] === '/')) index++;
-      index = Math.min(source.length, index + 2);
-      continue;
-    }
-    if (char === '`') {
-      index++;
-      while (index < source.length) {
-        if (source[index] === '\\') index += 2;
-        else if (source[index++] === '`') break;
-      }
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      const quote = char;
-      let value = '';
-      index++;
-      while (index < source.length) {
-        const current = source[index++];
-        if (current === quote) break;
-        if (current === '\\' && index < source.length) value += source[index++];
-        else value += current;
-      }
-      tokens.push({ kind: 'string', value });
-      continue;
-    }
-    const word = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(source.slice(index));
-    if (word) {
-      tokens.push({ kind: 'word', value: word[0] });
-      index += word[0].length;
-      continue;
-    }
-    if ('{}[]():,'.includes(char)) tokens.push({ kind: 'punctuation', value: char });
-    index++;
-  }
-  return tokens;
-}
-
-function literalTestIncludePatterns(source: string): string[] {
-  const tokens = literalConfigTokens(source);
-  const patterns: string[] = [];
-  const named = (index: number, value: string): boolean => (
-    (tokens[index]?.kind === 'word' || tokens[index]?.kind === 'string')
-    && tokens[index]?.value === value
-  );
-  for (let index = 0; index < tokens.length - 2; index++) {
-    if (!named(index, 'test') || tokens[index + 1]?.value !== ':' || tokens[index + 2]?.value !== '{') continue;
-    if (index > 0 && !['{', ','].includes(tokens[index - 1]?.value ?? '')) continue;
-    let objectDepth = 1;
-    for (let cursor = index + 3; cursor < tokens.length && objectDepth > 0; cursor++) {
-      const token = tokens[cursor];
-      if (token.value === '{') {
-        objectDepth++;
-        continue;
-      }
-      if (token.value === '}') {
-        objectDepth--;
-        continue;
-      }
-      if (objectDepth !== 1 || !named(cursor, 'include')
-          || tokens[cursor + 1]?.value !== ':' || tokens[cursor + 2]?.value !== '[') continue;
-      let arrayDepth = 1;
-      for (cursor += 3; cursor < tokens.length && arrayDepth > 0; cursor++) {
-        const member = tokens[cursor];
-        if (member.value === '[') arrayDepth++;
-        else if (member.value === ']') arrayDepth--;
-        else if (arrayDepth === 1 && member.kind === 'string') patterns.push(member.value);
-      }
-      cursor--;
-    }
-  }
-  return patterns;
-}
-
-function literalVitestIncludes(
-  projectDir: string,
-  fs: ValidationFileSystem,
-): Array<{ pattern: string; evidencePath: string }> {
-  const configNames = [
-    'vitest.config.ts', 'vitest.config.tsx', 'vitest.config.mts', 'vitest.config.cts',
-    'vitest.config.js', 'vitest.config.mjs', 'vitest.config.cjs',
-  ];
-  const includes: Array<{ pattern: string; evidencePath: string }> = [];
-  for (const configName of configNames) {
-    const configPath = join(projectDir, configName);
-    if (!fs.exists(configPath)) continue;
-    let source: string;
-    try { source = fs.readText(configPath); } catch { continue; }
-    for (const pattern of literalTestIncludePatterns(source)) {
-      if (pattern) includes.push({ pattern, evidencePath: configName });
-    }
-  }
-  return includes;
-}
-
-/** Return only path/command intersections supported by a literal project
- * configuration binding. Unknown runner semantics stay silent. */
-export function validationPathImpacts(
-  projectDir: string,
-  commands: readonly ValidationCommand[],
-  paths: readonly string[],
-  fs: ValidationFileSystem = nodeValidationFs,
-): ValidationPathImpact[] {
-  const normalizedPaths = [...new Set(paths.map((path) => path.replace(/\\/g, '/').replace(/^\.\//, '')))];
-  const impacts: ValidationPathImpact[] = [];
-  for (const command of commands) {
-    const patterns = command.args
-      .filter((arg) => !arg.startsWith('-') && (arg.includes('/') || /[*?]/.test(arg)))
-      .map((pattern) => ({ pattern, evidencePath: command.evidencePath ?? command.display }));
-    if (command.role === 'test') patterns.push(...literalVitestIncludes(projectDir, fs));
-    for (const { pattern, evidencePath } of patterns) {
-      const matcher = validationGlobRegex(pattern);
-      if (!matcher) continue;
-      for (const path of normalizedPaths) {
-        if (!matcher.test(path)) continue;
-        impacts.push({
-          path,
-          role: command.role,
-          command: command.display,
-          evidence: `${evidencePath} literal input ${pattern}`,
-        });
-      }
-    }
-  }
-  return impacts.filter((impact, index, all) => all.findIndex((candidate) => (
-    candidate.path === impact.path && candidate.role === impact.role && candidate.command === impact.command
-  )) === index);
-}
 
 function packageRunnerFromField(value: unknown): PackageRunner | undefined {
   if (typeof value !== 'string') return undefined;
@@ -772,6 +608,9 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   const environmentRoot = mkdtempSync(join(tmpdir(), 'flowcrew-validation-'));
   try {
   const environment = validationEnvironment(environmentRoot, process.env, request.env);
+  for (const path of ['home/.fc', 'codex', 'runtime', 'home/.config']) {
+    mkdirSync(join(environmentRoot, path), { recursive: true });
+  }
   const launch = () => new Promise<ValidationRunResponse>((resolveResult) => {
   const started = Date.now();
   const { child, stop } = spawnOwnedCommand(request.command, request.args, {
@@ -812,16 +651,11 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
     stop();
   }, timeoutMs);
   timeout.unref();
-  const heartbeat = setInterval(() => {
-    try { request.observer?.onCommandHeartbeat?.(request, Date.now() - started); } catch { /* display callbacks cannot change validation */ }
-  }, 10_000);
-  heartbeat.unref();
   const settle = (exitCode: number | null, signal?: NodeJS.Signals | null, error?: string): void => {
     if (settled) return;
     settled = true;
     activity?.close();
     clearTimeout(timeout);
-    clearInterval(heartbeat);
     request.abortSignal?.removeEventListener('abort', onAbort);
     resolveResult({
       exitCode,
@@ -837,13 +671,11 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
     const value = chunk.toString();
     stdout += value;
     publishOutput(value);
-    try { request.observer?.onCommandOutput?.(request, 'stdout', value); } catch { /* display callbacks cannot change validation */ }
   });
   child.stderr?.on('data', (chunk: Buffer | string) => {
     const value = chunk.toString();
     stderr += value;
     publishOutput(value);
-    try { request.observer?.onCommandOutput?.(request, 'stderr', value); } catch { /* display callbacks cannot change validation */ }
   });
   child.once('error', (error) => { spawnError = error.message; });
   child.once('close', (code, signal) => {
@@ -853,6 +685,19 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
   return await launch();
   } finally { rmSync(environmentRoot, { recursive: true, force: true }); }
 };
+
+/** One dependency recipe supplies execution and baseline identity. */
+export function dependencyPreparation(projectDir: string): Array<{
+  root: string; manifest: Record<string, unknown>; runner: PackageRunner; inputs: string[];
+}> {
+  return discoverConfiguredPackages(projectDir).flatMap(({ root, manifest }) => {
+    const lockfiles = lockfileEvidence(root, nodeValidationFs).map(item => join(root, item.path));
+    if (!lockfiles.length) return [];
+    const manager = discoverPackageRunner(manifest, root, nodeValidationFs);
+    if (!manager.runner) throw new Error(manager.reason);
+    return [{ root, manifest, runner: manager.runner, inputs: [join(root, 'package.json'), ...lockfiles] }];
+  });
+}
 
 /** This command boundary owns the dependency environment, using current project
  * lockfiles even when validation commands come from the setup ready record.
@@ -864,27 +709,19 @@ export const runValidationCommand: ValidationCommandRunner = (request) => withEn
   const remaining = () => request.timeoutMs === undefined ? undefined : request.timeoutMs - (Date.now() - started);
   if (request.prepareDependencies) {
     try {
-      for (const { root, manifest } of discoverConfiguredPackages(request.cwd)) {
-        if (!lockfileEvidence(root, nodeValidationFs).length) continue;
-        const manager = discoverPackageRunner(manifest, root, nodeValidationFs);
-        if (!manager.runner) {
-          return {
-            exitCode: null, dependencyPreparationFailed: true,
-            error: `Dependency preparation refused: ${manager.reason}`, durationMs: Date.now() - started,
-          };
-        }
+      for (const { root, manifest, runner } of dependencyPreparation(request.cwd)) {
         const frozenArgs: Record<PackageRunner, string[]> = {
           npm: ['ci'], pnpm: ['install', '--frozen-lockfile'],
-          yarn: ['install', manager.runner === 'yarn' && (manifest.packageManager
+          yarn: ['install', runner === 'yarn' && (manifest.packageManager
             ? !/^yarn@1(?:\.|$)/.test(String(manifest.packageManager))
             : /\b__metadata:/.test(nodeValidationFs.readText(join(root, 'yarn.lock'))))
             ? '--immutable' : '--frozen-lockfile'],
           bun: ['install', '--frozen-lockfile'],
         };
-        const args = frozenArgs[manager.runner];
-        const display = [manager.runner, ...args].join(' ');
+        const args = frozenArgs[runner];
+        const display = [runner, ...args].join(' ');
         const response = await executeValidationCommand({ ...request, cwd: root,
-          command: manager.runner, args, display, timeoutMs: remaining() });
+          command: runner, args, display, timeoutMs: remaining() });
         if (response.exitCode !== 0 || response.error) return {
           ...response, dependencyPreparationFailed: true, durationMs: Date.now() - started,
           stderr: `Dependency preparation failed: ${display} in ${root}\n${response.stderr ?? ''}`,
@@ -1089,9 +926,8 @@ export async function runProjectValidationBaseline(
     }
     const started = now();
     let response: ValidationRunResponse;
-    try { dependencies.observer?.onCommandStart?.(command); } catch { /* display callbacks cannot change validation */ }
     try {
-      response = preparation ?? await runner({ ...command, cwd: root, observer: dependencies.observer,
+      response = preparation ?? await runner({ ...command, cwd: root,
         prepareDependencies: !prepared,
         ...(dependencies.remainingMs ? { timeoutMs: dependencies.remainingMs() } : {}),
         ...(dependencies.abortSignal ? { abortSignal: dependencies.abortSignal } : {}) });
@@ -1101,13 +937,12 @@ export async function runProjectValidationBaseline(
     // A failed preparation cannot fall through to later commands on stale deps.
     if (response.dependencyPreparationFailed) preparation = response;
     prepared = true;
-    try { dependencies.observer?.onCommandFinish?.(command, response); } catch { /* display callbacks cannot change validation */ }
     const durationMs = response.durationMs ?? Math.max(0, now() - started);
     const rawOutput = [response.stdout, response.stderr]
       .filter((value): value is string => Boolean(value))
       .join('\n');
     const output = boundedOutput(rawOutput, maxOutputBytes);
-    if (response.error || response.exitCode === null) {
+    if (response.dependencyPreparationFailed || response.error || response.exitCode === null) {
       results.push({
         role,
         display: command.display,
@@ -1116,7 +951,10 @@ export async function runProjectValidationBaseline(
         output,
         failureIdentifiers: [],
         failureIdentity: 'unknown',
-        reason: response.error ?? 'Validation command ended without an exit code',
+        exitCode: response.exitCode ?? undefined,
+        reason: response.dependencyPreparationFailed && response.exitCode !== null
+          ? `Dependency preparation exited with code ${response.exitCode}`
+          : response.error ?? 'Validation command ended without an exit code',
       });
       continue;
     }
@@ -1163,9 +1001,8 @@ export async function runProjectValidationBaseline(
   };
 }
 
-/** Compare a later validation result with its recorded baseline, never assuming unknown means zero. */
 /** A run of a configured command that produced nothing to compare: it could not launch, or failed unidentifiably. */
-function unmeasured(result: ValidationCommandResult): boolean {
+export function unmeasured(result: ValidationCommandResult): boolean {
   return (result.state === FAILED_VALIDATION_STATE || result.state === 'launch_error') && result.failureIdentity === 'unknown';
 }
 
@@ -1186,22 +1023,6 @@ export function evaluateValidationDelta(
           role: prior.role,
           state: 'unresolved',
           reason: `Current validation did not execute to a comparable pass/fail result (${next.state})`,
-          newFailureIdentifiers: [],
-        };
-      }
-      if (next.failureIdentity !== 'known') {
-        return {
-          role: prior.role,
-          state: 'unresolved',
-          reason: 'Green baseline no longer passes, but current failure identity/count is unavailable',
-          newFailureIdentifiers: [],
-        };
-      }
-      if (next.failureEvidence === 'partial') {
-        return {
-          role: prior.role,
-          state: 'unresolved',
-          reason: 'Green baseline no longer passes, but current failure evidence is partial',
           newFailureIdentifiers: [],
         };
       }

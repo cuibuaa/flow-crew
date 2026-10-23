@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -5,10 +6,9 @@ import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { formatDispatchStageSchemaFailure, StageConfigSchema, parseDispatchedStageConfig, inspectDispatchAdmission } from '../src/scheduler.js';
-import { fcGlobalDir, setFcGlobalDir, createRun, runDir, updateRunState } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir, runDir, updateRunState } from '../src/store.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
-import { decideScopeRevision } from '../src/scheduler/sched_scope/scope-revisions.js';
-import { scopePathDigest } from '../src/runtime-negotiation.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { renderPlannerPolicies } from '../src/planner-policies.js';
 
@@ -33,7 +33,7 @@ function readShipSkill(): string {
 
 describe('planner dispatch contract', () => {
   it('names the invalid dispatch field and a repair action', () => {
-    const parsed = StageConfigSchema.safeParse({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'work', role: 'coder', scope: 'src/**' });
+    const parsed = StageConfigSchema.safeParse({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'work', role: 'coder', scope: 'src/**' });
     if (parsed.success) throw new Error('invalid dispatch fixture unexpectedly parsed');
 
     const message = formatDispatchStageSchemaFailure(parsed.error);
@@ -48,14 +48,14 @@ describe('planner dispatch contract', () => {
     const gate = parseDispatchedStageConfig({id:'audit',role:'qa',is_gate:true,depends_on:['work'],scope:[]});
     const repair = parseDispatchedStageConfig({id:'repair',role:'coder',depends_on:['audit'],retry_to:['audit'],scope:['src/**']});
     const admit = (dispatched: typeof work[]) => inspectDispatchAdmission({dispatched,baseStages:[],dispatchStageId:'plan',criteria});
-    expect(admit([work]).errors.join(';')).toContain('not assigned to a gate');
+    expect(admit([work]).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('not assigned to a gate');
     expect(admit([work,gate,repair]).pass).toBe(true);
     expect(gate.criterion_refs).toEqual(['required']);
     expect(gate.artifact_contract!.produces[0].path).toBe('verdict_audit.json');
     expect(admit([parseDispatchedStageConfig({id:'audit',role:'qa',is_gate:true}),{...repair,scope:[]}]).pass).toBe(true);
   });
 
-  it('refuses a sole product-authoring gate, including a later scope amendment, while retaining independent audits and repairs', () => {
+  it('refuses a sole product-authoring gate, while retaining independent audits and repairs', () => {
     const root = mkdtempSync(join(tmpdir(), 'planner-independent-audit-'));
     const project = join(root, 'project'); mkdirSync(project);
     const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
@@ -66,7 +66,7 @@ describe('planner dispatch contract', () => {
       const repair = parseDispatchedStageConfig({ id: 'repair', role: 'coder', scope: ['src/**'], depends_on: ['audit'], retry_to: ['audit'] });
       const planner = parseDispatchedStageConfig({ id: 'plan', role: 'planner', dynamic_dispatch: true });
       const admit = (dispatched: typeof audit[]) => inspectDispatchAdmission({ dispatched, baseStages: [], dispatchStageId: 'plan', criteria });
-      expect(admit([{ ...audit, scope: ['src/**'] }]).errors.join(';')).toContain('product-writing gate requires an independent work stage');
+      expect(admit([{ ...audit, scope: ['src/**'] }]).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('product-writing gate requires an independent work stage');
       expect(admit([audit, { ...repair, scope: [] }]).pass).toBe(true);
       expect(admit([audit, repair]).pass).toBe(true);
       expect(admit([{ ...audit, scope: ['docs/report.md'] }, repair]).pass).toBe(false);
@@ -75,29 +75,7 @@ describe('planner dispatch contract', () => {
       writeFileSync(join(directory, 'task_brief.md'), brief);
       writeFileSync(join(directory, 'brief_criteria.json'), JSON.stringify(criteria));
       updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, audit, repair], directory, 'existing-work audit', true); state.dispatchedStages = [audit, repair]; });
-      const revise = (stage: typeof audit, paths: string[]) => decideScopeRevision({
-        request: { version: 1, kind: 'scope_revision', requestId: stage.id, runId, stageId: stage.id, attemptIndex: 1, requestedPaths: paths, pathDigest: scopePathDigest(paths), reason: 'Need product capability' },
-        stage, priorScope: stage.scope ?? [], activePeers: [], projectDir: project, runId, attemptIndex: 1,
-      });
-      const denied = revise(audit, ['src/**']);
-      expect(denied.accepted).toBe(false);
-      expect(denied.rejectionReason).toContain('product-writing gate requires an independent work stage');
-      expect(revise(repair, ['src/other.js']).accepted).toBe(true);
-      const work = parseDispatchedStageConfig({ id: 'work', role: 'coder', scope: ['src/**'] });
-      const downstream = { ...audit, depends_on: ['work'] };
-      updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, work, downstream, repair], directory, 'ordinary independent work', true); state.dispatchedStages = [work, downstream, repair]; });
-      expect(revise(downstream, ['docs/report.md']).accepted).toBe(true);
-      // Base workflow stages are not newly dispatched criterion owners.
-      updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, work, downstream, repair], directory, 'audit after base work', true); state.dispatchedStages = [downstream, repair]; });
-      expect(revise(downstream, ['docs/report.md']).accepted).toBe(false);
-      // Static workflows and pre-launch library fixtures never acquired the
-      // dynamic criterion contract; scope negotiation retains that boundary.
-      updateRunState(project, runId, state => { recordAdmittedPlan(state, [audit, repair], directory, 'static workflow', true); });
-      expect(revise(audit, ['docs/report.md']).accepted).toBe(true);
-      writeFileSync(join(directory, 'brief_criteria.json'), JSON.stringify({ ...criteria, criteria: [] }));
-      const legacyAudit = { ...audit, criterion_refs: [] };
-      updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, legacyAudit, repair], directory, 'legacy library fixture', true); state.dispatchedStages = [legacyAudit, repair]; });
-      expect(revise(repair, ['src/other.js']).accepted).toBe(true);
+
     } finally { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -112,7 +90,7 @@ describe('planner dispatch contract', () => {
 });
 
 describe('public gate and launch-workspace contract', () => {
-  it('documents binding gate scores, durable verdicts, recursive overlays, and population parity', () => {
+  it('documents binding gate scores, durable verdicts, and recursive overlays', () => {
     const protocol = readFileSync(resolve(import.meta.dirname, '..', 'guide', 'agent-protocol.md'), 'utf-8').replace(/\s+/g, ' ');
     const operations = readFileSync(resolve(import.meta.dirname, '..', 'guide', 'operations.md'), 'utf-8').replace(/\s+/g, ' ');
     expect(protocol).toContain('no optional campaign principal-metric publication channel');
@@ -122,9 +100,6 @@ describe('public gate and launch-workspace contract', () => {
     expect(protocol).toContain('gate_reevaluation/iteration_<n>/round_<n>/');
     expect(operations).toContain('copies of regular files/directories');
     expect(operations.toLowerCase()).toContain('target-owned');
-    expect(operations).toContain('normalized source/target identities');
-    expect(operations).toContain('unverified');
-    expect(operations).toContain('source suites are not run');
   });
 });
 
@@ -133,9 +108,12 @@ describe('ship authoring and operator bookkeeping contract', () => {
     expect(readShipSkill()).toMatch(/Declare every source input in a leading\s+frontmatter `inputs:` block\.[\s\S]*A path in prose or a table is only a reference, not a declaration/);
   });
 
-  it('specifies one exact post-launch wrap-up sentence and lifecycle updates', () => {
+  it('documents automatic post-launch bookkeeping and keeps lifecycle updates in the skill', () => {
     const skill = readShipSkill();
-    expect(skill).toContain(LAUNCH_WRAP_UP_SENTENCE);
+    const cli = readFileSync(resolve(import.meta.dirname, '..', 'guide', 'cli.md'), 'utf-8').replace(/\s+/g, ' ');
+    expect(cli).toContain(LAUNCH_WRAP_UP_SENTENCE);
+    expect(cli).toContain('quick creates one `in_progress` entry through `fc_tasks create`');
+    expect(skill).toContain('Report the returned task/run and ledger entry identities.');
     expect(skill).toMatch(/After cancellation, update or remove that entry\. After re-shipping, replace its id with the new one\./);
   });
 

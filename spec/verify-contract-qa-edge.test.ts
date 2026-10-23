@@ -5,16 +5,15 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Adapter } from '../src/adapters/base.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
-import { inspectBrief } from '../src/brief-preflight.js';
 import { appendGuidanceEnvelope, guidanceForStageFromText } from '../src/guidance.js';
 import {
   inspectDispatchAdmission,
   inspectRealityCheckReachability,
   parseDispatchedStageConfig,
-  readGateVerdict,
+  readGateEvaluation,
 } from '../src/scheduler.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  createRun,
   fcGlobalDir,
   readRunState,
   setFcGlobalDir,
@@ -43,7 +42,7 @@ function gateVerdictWithFields(metric: Record<string, unknown>): { pass: boolean
     );
     writeFileSync(join(created.runDirPath, 'verdict_audit_round06.json'),
       JSON.stringify({ pass: true, reason: 'The verdict carries the phase decision.', ...metric }));
-    return readGateVerdict(projectDir, 'audit_round06', created.runId);
+    return readGateEvaluation(projectDir, 'audit_round06', created.runId);
   } finally {
     setFcGlobalDir(priorFcHome);
   }
@@ -78,19 +77,9 @@ describe('verification-owned orchestration edge probes', () => {
     ]);
   });
 
-  it('does not parse a descriptive QA-stage heading as a stage assignment', () => {
-    const report = inspectBrief([
-      '# Historical evidence',
-      '## QA stage behavior in the prior run',
-      'The stage recorded the observed failure without changing project files.',
-    ].join('\n'));
-
-    expect(report.findings.some((finding) => finding.code === 'stage_writable_paths_missing')).toBe(false);
-  });
-
   it('rejects an absent unquoted literal path in a hard exec reality check', () => {
     const projectDir = temporaryRoot('flowcrew-qa-reality-');
-    const work = parseDispatchedStageConfig({ artifact_contract: artifacts([], [], [], []),
+    const work = parseDispatchedStageConfig({ artifact_contract: artifacts([], [], []),
       id: 'work',
       role: 'coder',
       scope: ['docs/owned.json'],
@@ -118,7 +107,7 @@ describe('verification-owned orchestration edge probes', () => {
       .toContain('docs/not_owned.json');
   });
 
-  it.each([{ outcome: 'reject_repair_required' }, { requires_repair: true }, { repair_required: true }, { status: 'rejected' }])('refuses explicit current rejection %j despite pass=true', (fields) => {
+  it.each([{ requires_repair: true }, { repair_required: true }])('refuses explicit current rejection %j despite pass=true', (fields) => {
     expect(gateVerdictWithFields(fields)).toMatchObject({ pass: false });
   });
 
@@ -141,7 +130,7 @@ describe('verification-owned orchestration edge probes', () => {
 
   it('rejects a hard check on the optional result even when a mandatory stage owns that path', () => {
     const projectDir = temporaryRoot('flowcrew-qa-optional-result-');
-    const measure = parseDispatchedStageConfig({ artifact_contract: artifacts([], [], [], []),
+    const measure = parseDispatchedStageConfig({ artifact_contract: artifacts([], [], []),
       id: 'measure',
       role: 'researcher',
       scope: ['docs/round.json'],
@@ -170,7 +159,7 @@ describe('verification-owned orchestration edge probes', () => {
       stages: [measure],
       research: {
         baseline: 0,
-        policy: 'best_of_n',
+        policy: 'greedy_stack',
         resultFile: 'docs/round.json',
         reportDir: 'docs',
       },

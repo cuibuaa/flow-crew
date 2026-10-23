@@ -25,11 +25,9 @@ import {
 } from '../src/fc-tasks.js';
 import { readOperationalProjection } from '../src/cli-events.js';
 import {
-  clearAttemptSummaryRefreshDebounce,
   readRunEvents,
-  recordRunEvent,
 } from '../src/run-events.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { fcGlobalDir, readRunState, setFcGlobalDir, writeRunState } from '../src/store.js';
 
 const BASE_COMMIT = 'a'.repeat(40);
 const TOPIC_COMMIT = 'b'.repeat(40);
@@ -214,7 +212,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  clearAttemptSummaryRefreshDebounce();
   setFcGlobalDir(originalGlobalDir);
   rmSync(root, { recursive: true, force: true });
 });
@@ -229,7 +226,7 @@ describe('independent ledger convergence replay', () => {
 
     for (let taskId = 1; taskId <= 9; taskId += 1) {
       const ledgerStatus = taskId <= 4 ? 'in_progress' : 'completed';
-      const runStatus = taskId <= 3 ? 'stopped' : taskId === 4 ? 'running' : 'complete';
+      const runStatus = taskId <= 3 ? 'cancelled' : taskId === 4 ? 'running' : 'complete';
       const runId = `run-${taskId}`;
       writeEntry(storeRoot, session, entry(String(taskId), ledgerStatus, taskId));
       writeRun(engineRoot, runId, projectDir, runStatus);
@@ -246,9 +243,9 @@ describe('independent ledger convergence replay', () => {
 
     expect(rendered.text.split('\n').slice(0, 5)).toEqual([
       'fc_tasks: 3 wrap-up overdue · engine 1 running · ledger 4 in progress, 0 pending, 5 done',
-      '▶ wrap-up-overdue:run:stopped:#1 [1] active-1',
-      '▶ wrap-up-overdue:run:stopped:#2 [2] active-2',
-      '▶ wrap-up-overdue:run:stopped:#3 [3] active-3',
+      '▶ wrap-up-overdue:run:cancelled:#1 [1] active-1',
+      '▶ wrap-up-overdue:run:cancelled:#2 [2] active-2',
+      '▶ wrap-up-overdue:run:cancelled:#3 [3] active-3',
       '▶ run:running [4] active-4',
     ]);
   });
@@ -264,7 +261,7 @@ describe('independent ledger convergence replay', () => {
     for (let taskId = 1; taskId <= 4; taskId += 1) {
       const runId = `run-${taskId}`;
       paths.push(writeEntry(storeRoot, session, entry(String(taskId), 'in_progress', taskId)));
-      writeRun(engineRoot, runId, projectDir, taskId < 4 ? 'stopped' : 'running');
+      writeRun(engineRoot, runId, projectDir, taskId < 4 ? 'cancelled' : 'running');
       writeEngineTask(engineRoot, taskId, projectDir, runId, taskId < 4 ? 'done' : 'running');
     }
     const before = paths.map((path) => readFileSync(path));
@@ -298,24 +295,26 @@ describe('independent ledger convergence replay', () => {
   it('persists one unattended terminal obligation while leaving acceptance open', () => {
     const fixture = seedLandFixture();
     setFcGlobalDir(fixture.engineRoot);
+    writeRun(fixture.engineRoot, fixture.runId, fixture.projectDir, 'running');
     writeFileSync(join(fixture.engineRoot, 'runs', fixture.runId, 'run_event_status.json'), `${JSON.stringify({
       version: 1,
       status: 'running',
       observedAt: '2031-01-01T00:00:00.000Z',
     })}\n`, 'utf-8');
 
-    for (const detail of ['terminal transition', 'later observation']) {
-      recordRunEvent(fixture.projectDir, fixture.runId, {
-        type: 'campaign_alert',
-        runId: fixture.runId,
-        timestamp: '2031-01-01T00:02:00.000Z',
-        detail,
-      }, { debounceMs: 60_000 });
-    }
+    const state = readRunState(fixture.projectDir, fixture.runId);
+    state.status = 'complete';
+    state.completedAt = '2031-01-01T00:02:00.000Z';
+    writeRunState(fixture.projectDir, fixture.runId, state);
+    writeRunState(fixture.projectDir, fixture.runId, state);
 
     const obligations = readRunEvents(fixture.projectDir, fixture.runId)
       .filter(({ type }) => type === 'operator_wrap_up_required');
     expect(obligations).toHaveLength(1);
+    const transitions = readRunEvents(fixture.projectDir, fixture.runId)
+      .filter(({ type }) => type === 'run_status_changed');
+    expect(transitions).toHaveLength(1);
+    expect(obligations[0].observationId).toBe(transitions[0].observationId);
     expect(obligations[0].detail).toContain('terminal state is not acceptance');
     expect(readOperationalProjection(join(fixture.engineRoot, 'runs', fixture.runId), {
       includeDrift: false,
@@ -331,19 +330,18 @@ describe('independent ledger convergence replay', () => {
     const projectDir = join(root, 'project');
     const runId = 'active-run';
     setFcGlobalDir(engineRoot);
-    const runDirectory = writeRun(engineRoot, runId, projectDir, 'running');
+    const runDirectory = writeRun(engineRoot, runId, projectDir, 'pending');
     writeFileSync(join(runDirectory, 'run_event_status.json'), `${JSON.stringify({
       version: 1,
       status: 'pending',
       observedAt: '2031-01-01T00:00:00.000Z',
     })}\n`, 'utf-8');
 
-    recordRunEvent(projectDir, runId, {
-      type: 'campaign_alert',
-      runId,
-      timestamp: '2031-01-01T00:02:00.000Z',
-      detail: 'active control',
-    }, { debounceMs: 60_000 });
+    const state = readRunState(projectDir, runId);
+    state.status = 'running';
+    writeRunState(projectDir, runId, state);
+    expect(readRunEvents(projectDir, runId)
+      .filter(({ type }) => type === 'run_status_changed')).toHaveLength(1);
 
     expect(readRunEvents(projectDir, runId)
       .filter(({ type }) => type === 'operator_wrap_up_required')).toEqual([]);

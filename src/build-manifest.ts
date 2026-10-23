@@ -1,10 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { hashRollbackFileSync, updateFileHashSync } from './rollback-content-store.js';
-import { chmodSync, closeSync, copyFileSync, mkdirSync, openSync, renameSync, rmSync, unlinkSync, writeFileSync } from './engine-fs.js';
-import { existsSync, fsyncSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { homedir } from 'node:os';
-import { findDeployedDistConsumers } from './daemon-identity.js';
+import { hashRollbackFileSync } from './rollback-content-store.js';
+import { cpSync, mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from './engine-fs.js';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { prospectivePhysicalPath } from './engine-owned-carriers.js';
 
 export const BUILD_MANIFEST_FILENAME = '.flowcrew-build-manifest.json';
@@ -34,11 +32,7 @@ export interface BuildManifest {
   artifacts?: { backend: BuildFileRecord[]; ui: BuildFileRecord[] };
 }
 
-export type BuildPublicationPhase =
-  | 'previous_generation_archived'
-  | 'replacement_files_prepared'
-  | 'runtime_files_published'
-  | 'manifest_committed';
+export type BuildPublicationPhase = 'generation_prepared' | 'manifest_committed';
 
 export interface PublishBuildOptions {
   projectRoot: string;
@@ -48,8 +42,6 @@ export interface PublishBuildOptions {
   cacheDir?: string;
   manifest?: BuildManifest;
   onPhase?: (phase: BuildPublicationPhase, detail: string) => void;
-  /** Local fault/timing seam for transactional tests; production callers omit it. */
-  beforeFileCommit?: (relativePath: string, index: number) => void;
 }
 
 function portableRelative(root: string, path: string): string {
@@ -87,6 +79,7 @@ function digestRecords(records: BuildFileRecord[]): string {
  * nodes can supply served bytes outside the attested roots. The manifest is the
  * commit record, so its own bytes cannot be part of its content digest. */
 export function collectBuildArtifacts(root: string, excludeCommitRecord = false): BuildFileRecord[] {
+  if (existsSync(root)) root = realpathSync(root);
   const paths: string[] = [];
   const walk = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -114,8 +107,9 @@ function assertArtifactRecords(actual: BuildFileRecord[], expected: BuildFileRec
 }
 
 export function assertBuildArtifactInventory(distDir: string, manifest: BuildManifest): NonNullable<BuildManifest['artifacts']> {
-  const backend = collectBuildArtifacts(resolve(distDir), true);
-  const ui = collectBuildArtifacts(join(resolve(distDir), '..', 'ui', 'dist'));
+  const physicalDist = realpathSync(distDir);
+  const backend = collectBuildArtifacts(physicalDist, true);
+  const ui = collectBuildArtifacts(join(physicalDist, '..', 'ui', 'dist'));
   const backendByPath = new Map(backend.map((record) => [record.path, record]));
   for (const record of manifest.outputs) {
     const actual = backendByPath.get(record.path);
@@ -384,64 +378,21 @@ function ensurePrivateBuildStaging(path: string, roots: string[]): void {
   }
 }
 
-function durableTemporaryCopy(source: string, target: string, generation: string): string {
-  mkdirSync(dirname(target), { recursive: true });
-  const temporary = join(dirname(target), `.${basename(target)}.${generation.slice(0, 12)}.${randomUUID()}.tmp`);
-  copyFileSync(source, temporary);
-  chmodSync(temporary, statSync(source).mode & 0o777);
-  const fd = openSync(temporary, 'r');
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-  return temporary;
+/** Source checkout for a runtime, including immutable published generations. */
+export function buildProjectRoot(distDir: string): string {
+  const root = dirname(resolve(distDir));
+  const source = join(root, '.project-root');
+  return existsSync(source) ? realpathSync(source) : root;
 }
 
-function durableTemporaryText(contents: string, target: string, generation: string): string {
-  mkdirSync(dirname(target), { recursive: true });
-  const temporary = join(dirname(target), `.${basename(target)}.${generation.slice(0, 12)}.${randomUUID()}.tmp`);
-  const fd = openSync(temporary, 'wx', 0o644);
-  try {
-    writeFileSync(fd, contents, 'utf-8');
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  return temporary;
-}
-
-function archiveCopy(source: string, target: string): void {
-  mkdirSync(dirname(target), { recursive: true });
-  if (existsSync(target)) return;
-  copyFileSync(source, target);
-}
-
-function legacyGeneration(distDir: string, touchedPaths: string[]): string {
-  const hash = createHash('sha256');
-  for (const path of touchedPaths.sort((left, right) => left.localeCompare(right))) {
-    const absolute = join(distDir, path);
-    if (!existsSync(absolute)) continue;
-    const size = statSync(absolute).size;
-    hash.update(`${path}:${size}:`);
-    if (updateFileHashSync(absolute, hash).byteLength !== size) {
-      throw new Error(`${absolute} changed while its build identity was hashed`);
-    }
-  }
-  return `legacy-${hash.digest('hex')}`;
-}
-
-/**
- * Publish the exact staged backend output set without removing the dist root.
- * Refuse publication while a live consumer can still import the previous outputs.
- * Each replacement is complete before rename; the manifest is the commit record
- * and is renamed last. A synchronous failure rolls every touched path back from
- * the retained previous generation.
- */
-export function publishBuildGeneration(options: PublishBuildOptions): BuildManifest {
+function validateBuildPublication(options: PublishBuildOptions) {
   const projectRoot = resolve(options.projectRoot);
   const stagedDistDir = resolve(options.stagedDistDir);
   const stagedUiDir = options.stagedUiDir ? resolve(options.stagedUiDir) : undefined;
   const distDir = resolve(options.distDir ?? join(projectRoot, 'dist'));
   const cacheDir = resolve(options.cacheDir ?? join(distDir, '..', '.cache'));
   const uiRoot = join(distDir, '..', 'ui', 'dist');
-  let manifest = options.manifest ?? createBuildManifest(projectRoot, stagedDistDir, { stagedUiDir });
+  const manifest = options.manifest ?? createBuildManifest(projectRoot, stagedDistDir, { stagedUiDir });
   if (!isBuildManifest(manifest)) throw new Error('Refusing to publish an invalid build manifest');
   const inputs = validateManifestForPublication(projectRoot, stagedDistDir, manifest, stagedUiDir);
   const publicationRoots = [projectRoot, distDir, uiRoot, cacheDir, ...buildInputDirectories(projectRoot),
@@ -449,134 +400,131 @@ export function publishBuildGeneration(options: PublishBuildOptions): BuildManif
   ensurePrivateBuildStaging(stagedDistDir, publicationRoots);
   if (stagedUiDir) ensurePrivateBuildStaging(stagedUiDir, publicationRoots);
 
-  const merge = (prior: BuildFileRecord[], current: BuildFileRecord[]): BuildFileRecord[] => {
-    const records = new Map(prior.map((record) => [record.path, record]));
-    for (const record of current) records.set(record.path, record);
-    return [...records.values()].sort((a, b) => a.path.localeCompare(b.path));
-  };
-  const priorBackend = collectBuildArtifacts(distDir, true);
-  const currentPaths = new Set(manifest.outputs.map(({ path }) => path));
-  const removedOutputs = priorBackend.filter(({ path }) => !currentPaths.has(path))
-    .map(({ path }) => ({ key: path, target: join(distDir, path) }));
-  const consumers = findDeployedDistConsumers(distDir, {
-    fcHome: resolve(process.env.FC_HOME ?? join(homedir(), '.fc')),
-  });
-  if (consumers.length) {
-    throw new Error('Refusing to publish build outputs while dist has live consumers: '
-      + consumers.map(({ label }) => label).join(', ')
-      + '. Publish to a private build root or after those consumers stop.');
-  }
-  const artifacts = {
-    backend: manifest.outputs,
-    ui: merge(collectBuildArtifacts(uiRoot), manifest.ui?.outputs ?? []),
-  };
-  if (!manifest.ui && artifacts.ui.length) {
-    throw new Error('Refusing backend-only publication while retained UI is still served');
-  }
-  const uiPresence = manifest.ui ? 'required' : 'absent';
-  manifest = { ...manifest, uiPresence, artifacts,
-    generation: generationDigest(manifest.inputs.hash, manifest.outputs, manifest.ui, uiPresence, artifacts) };
+  return { projectRoot, stagedDistDir, stagedUiDir, distDir, cacheDir, uiRoot, manifest };
+}
 
-  mkdirSync(distDir, { recursive: true });
-  mkdirSync(cacheDir, { recursive: true });
-  const manifestPath = join(distDir, BUILD_MANIFEST_FILENAME);
-  let priorManifest: BuildManifest | undefined;
-  try { priorManifest = readBuildManifest(distDir); } catch { /* legacy/corrupt marker is archived byte-for-byte */ }
-  const files = [
-    ...manifest.outputs.map((record) => ({ key: record.path, source: join(stagedDistDir, record.path), target: join(distDir, record.path), record })),
-    ...(manifest.ui?.outputs ?? []).map((record) => ({ key: `ui-dist/${record.path}`, source: join(stagedUiDir!, record.path), target: join(uiRoot, record.path), record })),
-  ];
-  const changedOutputs = files.filter(({ target, record }) => {
-    if (!existsSync(target)) return true;
-    const content = hashRollbackFileSync(target);
-    return content.byteLength !== record.bytes || content.sha256 !== record.sha256;
-  });
-  const touched = [...changedOutputs.map(({ key, target }) => ({ key, target })), ...removedOutputs,
-    { key: BUILD_MANIFEST_FILENAME, target: manifestPath }];
-  const archiveFiles = [
-    ...priorBackend.map(({ path }) => ({ key: path, target: join(distDir, path) })),
-    ...collectBuildArtifacts(uiRoot).map(({ path }) => ({ key: `ui-dist/${path}`, target: join(uiRoot, path) })),
-    { key: BUILD_MANIFEST_FILENAME, target: manifestPath },
-  ];
-  const previousGeneration = priorManifest?.generation ?? legacyGeneration(distDir, archiveFiles.filter(({ key }) => !key.startsWith('ui-dist/')).map(({ key }) => key));
-  const backupRoot = join(cacheDir, 'build-generations', previousGeneration);
-  const previous = new Map<string, string | undefined>();
-  // Rollback uses a fresh physical snapshot, including any modified prior files.
-  // The retained generation must never be hard-linked to a writable publication.
-  const rollbackRoot = join(cacheDir, `build-rollback-${randomUUID()}`);
-  for (const { key, target } of archiveFiles) {
-    if (existsSync(target)) archiveCopy(target, join(backupRoot, key));
-  }
-  for (const { key, target } of touched) {
-    const backup = join(rollbackRoot, key);
-    if (existsSync(target)) archiveCopy(target, backup);
-    previous.set(key, existsSync(backup) ? backup : undefined);
-  }
-  options.onPhase?.('previous_generation_archived', previousGeneration);
-
-  // Prepare the manifest before UI writes. A validation launch that changes
-  // the running distribution is voided by the parent integrity check.
-  let manifestTemporary: string;
+/** Ordinary build outputs are portable directories, independent of runtime caches. */
+export function publishBuildOutputs(options: PublishBuildOptions): BuildManifest {
+  const { stagedDistDir, stagedUiDir, distDir, cacheDir, uiRoot, manifest } = validateBuildPublication(options);
+  const temporary = join(cacheDir, `.build-${randomUUID()}`);
   try {
-    manifestTemporary = durableTemporaryText(
-      `${JSON.stringify(manifest, null, 2)}\n`, manifestPath, manifest.generation,
-    );
-  } catch (error) {
-    rmSync(rollbackRoot, { recursive: true, force: true });
-    throw error;
-  }
-  const prepared: Array<{ relativePath: string; target: string; temporary: string }> = [];
-  try {
-    for (const file of changedOutputs) prepared.push({
-      relativePath: file.key, target: file.target,
-      temporary: durableTemporaryCopy(file.source, file.target, manifest.generation),
-    });
-  } catch (error) {
-    for (const file of prepared) rmSync(file.temporary, { force: true });
-    rmSync(manifestTemporary, { force: true });
-    rmSync(rollbackRoot, { recursive: true, force: true });
-    throw error;
-  }
-  options.onPhase?.('replacement_files_prepared', manifest.generation);
-
-  let manifestCommitted = false;
-  try {
-    for (const [index, file] of prepared.entries()) {
-      options.beforeFileCommit?.(file.relativePath, index);
-      renameSync(file.temporary, file.target);
+    copyBuildPayload(stagedDistDir, stagedUiDir, temporary, manifest);
+    options.onPhase?.('generation_prepared', manifest.generation);
+    const commit = join(temporary, BUILD_MANIFEST_FILENAME);
+    renameSync(join(temporary, 'dist', BUILD_MANIFEST_FILENAME), commit);
+    // The manifest is the commit record. Remove it before replacing either tree
+    // so an interrupted publication cannot attest a mixed backend/UI pair.
+    if (existsSync(distDir) && !lstatSync(distDir).isSymbolicLink()) {
+      rmSync(join(distDir, BUILD_MANIFEST_FILENAME), { force: true });
     }
-    for (const [index, file] of removedOutputs.entries()) {
-      options.beforeFileCommit?.(file.key, prepared.length + index);
-      unlinkSync(file.target);
+    for (const [destination, payload] of [[uiRoot, 'ui/dist'], [distDir, 'dist']]) {
+      const source = join(temporary, payload);
+      if (existsSync(source)) publishBuildFiles(source, destination);
+      else rmSync(destination, { recursive: true, force: true });
     }
-    options.onPhase?.('runtime_files_published', manifest.generation);
-    // Reobserve the exact backend set and retained UI payloads. Only our pending
-    // commit record is excluded; a late file cannot be silently blessed as fresh.
-    assertArtifactRecords(collectBuildArtifacts(distDir, true)
-      .filter((record) => record.path !== basename(manifestTemporary)), artifacts.backend, 'dist');
-    assertArtifactRecords(collectBuildArtifacts(uiRoot), artifacts.ui, 'UI');
-    renameSync(manifestTemporary, manifestPath);
-    manifestCommitted = true;
+    renameSync(commit, join(distDir, BUILD_MANIFEST_FILENAME));
     options.onPhase?.('manifest_committed', manifest.generation);
     return manifest;
-  } catch (error) {
-    for (const { key, target } of touched) {
-      const backup = previous.get(key);
-      try {
-        if (backup) {
-          const temporary = durableTemporaryCopy(backup, target, previousGeneration.replace(/^legacy-/, ''));
-          renameSync(temporary, target);
-        } else if (existsSync(target)) {
-          unlinkSync(target);
-        }
-      } catch { /* preserve the original publication error; the retained backup remains recoverable */ }
-    }
-    throw error;
   } finally {
-    rmSync(rollbackRoot, { recursive: true, force: true });
-    if (!manifestCommitted) {
-      for (const file of prepared) rmSync(file.temporary, { force: true });
-      rmSync(manifestTemporary, { force: true });
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
+/** Preserve live directory paths while atomically replacing individual files. */
+function publishBuildFiles(source: string, destination: string): void {
+  const previous = lstatSync(destination, { throwIfNoEntry: false });
+  if (previous && !previous.isDirectory()) rmSync(destination, { recursive: true, force: true });
+  mkdirSync(destination, { recursive: true });
+  const entries = readdirSync(source, { withFileTypes: true });
+  const names = new Set(entries.map(entry => entry.name));
+  for (const name of readdirSync(destination)) {
+    if (!names.has(name)) rmSync(join(destination, name), { recursive: true, force: true });
+  }
+  for (const entry of entries) {
+    const from = join(source, entry.name), to = join(destination, entry.name);
+    if (entry.isDirectory()) publishBuildFiles(from, to);
+    else {
+      if (lstatSync(to, { throwIfNoEntry: false })?.isDirectory()) rmSync(to, { recursive: true, force: true });
+      renameSync(from, to);
     }
+  }
+}
+
+function copyBuildPayload(dist: string, ui: string | undefined, target: string, manifest: BuildManifest): void {
+  mkdirSync(target, { recursive: true });
+  cpSync(realpathSync(dist), join(target, 'dist'), { recursive: true });
+  rmSync(join(target, 'dist', '.tsbuildinfo'), { force: true });
+  if (ui) cpSync(realpathSync(ui), join(target, 'ui', 'dist'), { recursive: true });
+  writeFileSync(join(target, 'dist', BUILD_MANIFEST_FILENAME), `${JSON.stringify(manifest, null, 2)}\n`);
+  assertBuildArtifactInventory(join(target, 'dist'), manifest);
+}
+
+/** Pin only a daemon's runtime. Rebuilds never publish into this owner. */
+export function pinBuildRuntime(distDir: string, runtimeRoot: string): string {
+  distDir = realpathSync(distDir);
+  ensurePrivateBuildStaging(runtimeRoot, [distDir, join(distDir, '..', 'ui', 'dist')]);
+  const manifest = readBuildManifest(distDir);
+  if (!manifest) throw new Error('Cannot pin runtime: build manifest is missing');
+  assertBuildArtifactInventory(distDir, manifest);
+  const projectRoot = buildProjectRoot(distDir);
+  publishRuntimeGeneration({ projectRoot, stagedDistDir: distDir,
+    stagedUiDir: manifest.ui ? join(distDir, '..', 'ui', 'dist') : undefined,
+    distDir: join(runtimeRoot, 'dist'), cacheDir: join(runtimeRoot, '.cache'), manifest });
+  return realpathSync(join(runtimeRoot, 'dist'));
+}
+
+function publishRuntimeGeneration(options: PublishBuildOptions & {
+  distDir: string; cacheDir: string; manifest: BuildManifest;
+}): BuildManifest {
+  const { projectRoot, stagedDistDir, stagedUiDir, distDir, cacheDir, manifest } = options;
+  const uiRoot = join(distDir, '..', 'ui', 'dist');
+  const generations = join(cacheDir, 'build-generations');
+  const generationRoot = join(generations, manifest.generation);
+  const temporary = join(generations, `.${randomUUID()}`);
+  const selected = join(cacheDir, 'build-current');
+  const nextLink = join(cacheDir, `.build-current-${randomUUID()}`);
+  const previous = existsSync(distDir) ? realpathSync(distDir) : undefined;
+  mkdirSync(generations, { recursive: true });
+  try {
+    copyBuildPayload(stagedDistDir, stagedUiDir, temporary, manifest);
+    for (const resource of ['package.json', 'config']) {
+      const source = join(projectRoot, resource);
+      if (existsSync(source)) cpSync(source, join(temporary, resource), { recursive: true });
+    }
+    for (const resource of ['node_modules', 'skills', 'guide', 'examples']) {
+      const source = join(projectRoot, resource);
+      if (existsSync(source)) symlinkSync(source, join(temporary, resource));
+    }
+    symlinkSync(projectRoot, join(temporary, '.project-root'));
+    options.onPhase?.('generation_prepared', manifest.generation);
+    if (existsSync(generationRoot)) {
+      // An identical rebuild reuses the immutable bytes; modified generations
+      // are refused rather than silently repaired under a running process.
+      assertBuildArtifactInventory(join(generationRoot, 'dist'), manifest);
+      if (join(generationRoot, 'dist') === previous) return manifest;
+    } else renameSync(temporary, generationRoot);
+    symlinkSync(generationRoot, nextLink);
+    // Initial conversion requires the old daemon to be stopped. Afterwards
+    // both stable public links follow the same atomically selected generation.
+    for (const [publicPath, payload] of [[distDir, 'dist'], [uiRoot, 'ui/dist']]) {
+      mkdirSync(dirname(publicPath), { recursive: true });
+      if (existsSync(publicPath) && !lstatSync(publicPath).isSymbolicLink()) {
+        renameSync(publicPath, join(generations, `legacy-${randomUUID()}`));
+      }
+      if (!existsSync(publicPath)) {
+        rmSync(publicPath, { force: true }); // a backend-only UI link can be dangling
+        symlinkSync(join(selected, payload), publicPath);
+      }
+    }
+    renameSync(nextLink, selected);
+    options.onPhase?.('manifest_committed', manifest.generation);
+    for (const entry of readdirSync(generations)) {
+      const root = join(generations, entry);
+      if (root !== generationRoot && join(root, 'dist') !== previous) rmSync(root, { recursive: true, force: true });
+    }
+    return manifest;
+  } finally {
+    rmSync(nextLink, { force: true });
+    rmSync(temporary, { recursive: true, force: true });
   }
 }

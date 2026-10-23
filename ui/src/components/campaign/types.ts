@@ -1,3 +1,6 @@
+import type { RunStatus } from "../../lib/run-status";
+export type { RunStatus } from "../../lib/run-status";
+
 export type SourceStatus = "complete" | "partial" | "unavailable";
 
 export interface SourceCoverage {
@@ -26,21 +29,6 @@ export interface SourceResult<T> {
   issues?: SourceIssue[];
 }
 
-export type RunStatus =
-  | "pending"
-  | "running"
-  | "parked"
-  | "complete"
-  | "failed"
-  | "awaiting_approval"
-  | "shipped"
-  | "ceiling_hit"
-  | "escalated"
-  | "reality_gate_failed"
-  | "phase_complete"
-  | "stopped"
-  | "incomplete";
-
 export interface CampaignClassification {
   kind: "research" | "engineering" | "mixed" | "unknown";
   status: "complete" | "partial";
@@ -58,13 +46,13 @@ export interface CampaignIdentity {
   storageKey: string;
   runCount: number;
   startedAt: string | null;
-  startedAtSource: "runs" | "legacy" | "unknown";
+  startedAtSource: "runs" | "unknown";
   classification: CampaignClassification;
 }
 
 export interface CampaignAttentionItem {
   id: string;
-  kind: "approval" | "brief_review" | "deferred" | "parked" | "worker_missing" | "campaign_alert" | "stale";
+  kind: "approval" | "deferred" | "parked" | "worker_missing" | "campaign_alert" | "stale";
   title: string;
   reason: string;
   runId?: string;
@@ -102,7 +90,6 @@ export interface CampaignActivity {
 export interface CampaignCost {
   wallMs: number;
   tokens: number;
-  supervisorTokens: number;
   runCoverage: SourceCoverage;
   wallCoverage: SourceCoverage;
   tokenCoverage: SourceCoverage;
@@ -116,7 +103,7 @@ export interface AcceptedMeasurementPoint {
   value: number;
   timestamp: string | null;
   direction: "higher" | "lower" | "unknown";
-  evidence: "research_journal" | "campaign_ledger" | "outer_campaign";
+  evidence: "research_journal" | "campaign_ledger";
 }
 
 export interface ResearchMetricGroup {

@@ -1,12 +1,12 @@
+import { parseJsonlWithDiagnostics } from './jsonl.js';
 import { stageAttemptKey } from './stage-live-log.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, linkSync, mkdirSync, openSync, unlinkSync, writeFileSync } from './engine-fs.js';
-import { existsSync, fsyncSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { fsyncSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { parseGuidanceLedger, type GuidanceEnvelope } from './guidance.js';
-import { readResourceLeaseRegistry, resourceLeaseRegistryPath, type ResourceLeaseRegistryRead } from './resource-leases.js';
 import { STAGE_STATUS, readArchivedRunState, runDir, type ArchivedStoreState, type RetiredStageUsage, type StageAttempt, type StageStatus } from './store.js';
 import { externalOutputDirectory } from './ship-inputs.js';
 
@@ -55,7 +55,6 @@ export const RunQueryStateSchema = z.object({
   planHistory: z.array(PlanRevisionSchema).default([]),
   artifacts: z.array(ArtifactSchema).default([]),
   findings: z.array(FindingSchema).default([]),
-  resourceRegistryPath: nonempty.refine(isAbsolute, 'expected an absolute registry path').optional(),
 }).strict();
 export type RunQueryState = z.input<typeof RunQueryStateSchema>;
 export type QueryableStoreState = ArchivedStoreState & { queryState?: RunQueryState };
@@ -136,18 +135,34 @@ function checkedInvocation(value: unknown): InvocationInputRecord {
   return record;
 }
 
-/** Both formats are self-contained. Compression removes repeated prompt bytes
- * in transport payloads without changing the public record or its hashes. */
+/** Compression removes repeated prompt bytes in transport payloads. */
 export function readInvocationInput(path: string): InvocationInputRecord {
   const bytes = readFileSync(path);
-  return checkedInvocation(JSON.parse((path.endsWith('.gz') ? gunzipSync(bytes) : bytes).toString('utf8')));
+  return checkedInvocation(JSON.parse(gunzipSync(bytes).toString('utf8')));
+}
+
+/** Locate retained input by execution identity, without a mutable prompt copy. */
+export function latestInvocationInput(runDirectory: string, stageId: string): { path: string; record: InvocationInputRecord } | undefined {
+  const root = carrierPath(runDirectory, join('stages', safeId.parse(stageId), 'invocations'));
+  const inputs: Array<{ path: string; record: InvocationInputRecord }> = [];
+  try {
+    for (const entry of readdirSync(root, { recursive: true, encoding: 'utf8' })) {
+      if (!/^attempt_\d+_[0-9a-f]{24}\/invocation_\d+\.json\.gz$/.test(entry)) continue;
+      try {
+        const path = carrierPath(runDirectory, join('stages', stageId, 'invocations', entry));
+        const record = readInvocationInput(path);
+        if (record.stageId === stageId && invocationInputPath(runDirectory, record) === path) inputs.push({ path, record });
+      } catch { /* an invalid old record cannot hide a retained input */ }
+    }
+  } catch { /* no retained invocation input */ }
+  return inputs.sort((a, b) => a.record.attemptStartedAt.localeCompare(b.record.attemptStartedAt)
+    || a.record.attemptIndex - b.record.attemptIndex || a.record.invocationIndex - b.record.invocationIndex).at(-1);
 }
 
 /** Publish after final rendering, before execution, for EVERY actual invocation.
  * A captured input proves supplied bytes at its boundary, not successful execution. */
 export function recordInvocationInput(runDirectory: string, input: InvocationInput): { path: string; record: InvocationInputRecord } {
-  // Every carrier in this operation belongs to the same canonical namespace,
-  // including legacy siblings. A caller's root alias is not a different run.
+  // A caller's root alias is not a different run namespace.
   runDirectory = realpathSync(runDirectory);
   const record = checkedInvocation({
     ...input,
@@ -158,13 +173,10 @@ export function recordInvocationInput(runDirectory: string, input: InvocationInp
     userSha256: sha256(input.userPrompt),
     ...(input.transport ? { transport: { ...input.transport, sha256: sha256(input.transport.payload) } } : {}),
   });
-  const run = JSON.parse(readFileSync(carrierPath(runDirectory, 'run.json'), 'utf8')) as { runId?: unknown; stages?: Record<string, unknown>; supervise?: unknown; supervisor?: unknown; auxiliaryAttempts?: Record<string, unknown> };
-  const knownActor = Object.hasOwn(run.stages ?? {}, record.stageId) || (record.stageId === '_supervisor' && (run.supervise === true || recordObject(run.supervisor) !== undefined)) || (record.stageId === '_summary' && Array.isArray(run.auxiliaryAttempts?._summary));
-  if (run.runId !== record.runId || basename(resolve(runDirectory)) !== record.runId || !knownActor) throw new RunStateViewError('INVOCATION_RUN_BINDING', 'invocation must bind an initialized run and a known stage or configured supervisor');
-  const compressedPath = invocationInputPath(runDirectory, record);
-  // Replays of a historical identity must not create a second record.
-  const legacyPath = carrierPath(runDirectory, relative(runDirectory, compressedPath.slice(0, -3)));
-  const path = existsSync(legacyPath) ? legacyPath : compressedPath;
+  const run = JSON.parse(readFileSync(carrierPath(runDirectory, 'run.json'), 'utf8')) as { runId?: unknown; stages?: Record<string, unknown>; auxiliaryAttempts?: Record<string, unknown> };
+  const knownActor = Object.hasOwn(run.stages ?? {}, record.stageId) || (record.stageId === '_summary' && Array.isArray(run.auxiliaryAttempts?._summary));
+  if (run.runId !== record.runId || basename(resolve(runDirectory)) !== record.runId || !knownActor) throw new RunStateViewError('INVOCATION_RUN_BINDING', 'invocation must bind an initialized run and a known stage');
+  const path = invocationInputPath(runDirectory, record);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   // Recheck after directory creation; a preexisting outside-root symlink is never a capability.
   invocationInputPath(runDirectory, record);
@@ -287,12 +299,10 @@ export interface RunStateView {
   run: { runId: string; projectDir: string; workflowName: string; status: unknown; statusResolution: ReturnType<typeof readArchivedRunState>['status']; startedAt: string; completedAt?: string; currentIteration: number | null; failureReason?: string };
   plan: { stages: unknown[]; source: 'dispatchedStages' | 'plan' | 'unavailable'; revision: z.infer<typeof PlanRevisionSchema> | null; history: z.infer<typeof PlanRevisionSchema>[]; decisions: Record<string, import('./plan-revisions.js').PlanRevisionDecision>; admissionClaim: 'recorded' | 'unknown' };
   stages: Record<string, StageStatus>;
-  histories: Pick<ArchivedStoreState, 'retiredStageUsage' | 'stageEvidence' | 'criterionDischarges' | 'unresolvedStageObligations' | 'supervisor' | 'auxiliaryAttempts'>;
+  histories: Pick<ArchivedStoreState, 'retiredStageUsage' | 'stageEvidence' | 'criterionDischarges' | 'unresolvedStageObligations' | 'auxiliaryAttempts'>;
   artifacts: ArtifactObservation[];
   artifactContracts: Array<{ stageId: string; path: string; record: unknown }>;
   budget: ReturnType<typeof budgetView>;
-  resources: ResourceLeaseRegistryRead;
-  resourceWaits: Array<{ stageId: string; attemptIndex: number; attemptStartedAt: string; requestId: string; waitStartedAt: string; reason: string }>;
   audits: { findings: z.infer<typeof FindingSchema>[]; openFindings: z.infer<typeof FindingSchema>[]; verdicts: Array<{ stageId: string; path: string; record: unknown }> };
   guidance: GuidanceView[];
   events: { rows: Array<Record<string, unknown>>; malformedRecords: number };
@@ -329,7 +339,14 @@ export function projectRunStageHistory(
 
 export function budgetView(state: ArchivedStoreState, observedAt: string) {
   const seen = new Set<string>();
-  let knownInputTokens = 0, knownOutputTokens = 0, unknownTokenAttempts = 0, unknownLegacyStages = 0, knownAttemptDurationMs = 0, unknownDurationAttempts = 0;
+  const attemptEvidence = { known: 0, recordedUnknown: 0, unrecorded: 0 };
+  let knownUsd = 0, unknownAttempts = 0;
+  const addCost = (value: { cost_usd?: number; costUsage?: string }) => {
+    const known = typeof value.cost_usd === 'number' && Number.isFinite(value.cost_usd) && value.cost_usd >= 0;
+    if (known) knownUsd += value.cost_usd!;
+    if (!known || value.costUsage === 'partial' || value.costUsage === 'unknown') unknownAttempts += 1;
+  };
+  let knownInputTokens = 0, knownOutputTokens = 0, knownPartialLegacyTokens = 0, unknownTokenAttempts = 0, unknownLegacyStages = 0, knownAttemptDurationMs = 0, unknownDurationAttempts = 0;
   const add = (stageId: string, status: StageStatus) => {
     if (status.attempts?.length) {
       for (const attempt of status.attempts) {
@@ -339,7 +356,12 @@ export function budgetView(state: ArchivedStoreState, observedAt: string) {
         if (quantity.safeParse(attempt.tokens_in).success) knownInputTokens += attempt.tokens_in!;
         if (quantity.safeParse(attempt.tokens_out).success) knownOutputTokens += attempt.tokens_out!;
         if (attempt.tokenUsage === 'unknown' || attempt.tokenUsage === 'partial'
-          || !quantity.safeParse(attempt.tokens_in).success || !quantity.safeParse(attempt.tokens_out).success) unknownTokenAttempts += 1;
+          || !quantity.safeParse(attempt.tokens_in).success || !quantity.safeParse(attempt.tokens_out).success) {
+          unknownTokenAttempts += 1;
+          if (attempt.tokenUsage === 'unknown' || attempt.tokenUsage === 'partial') attemptEvidence.recordedUnknown += 1;
+          else attemptEvidence.unrecorded += 1;
+        } else attemptEvidence.known += 1;
+        addCost(attempt);
         if (quantity.safeParse(attempt.duration_ms).success) knownAttemptDurationMs += attempt.duration_ms!;
         else unknownDurationAttempts += 1;
       }
@@ -347,20 +369,24 @@ export function budgetView(state: ArchivedStoreState, observedAt: string) {
       if (quantity.safeParse(status.tokens_in).success && quantity.safeParse(status.tokens_out).success) {
         knownInputTokens += status.tokens_in!;
         knownOutputTokens += status.tokens_out!;
-      } else unknownLegacyStages += 1;
+        attemptEvidence.known += 1;
+      } else {
+        unknownLegacyStages += 1; attemptEvidence.unrecorded += 1;
+        // Preserve legacy pair counters while retaining a one-sided lower bound.
+        if (quantity.safeParse(status.tokens_in).success) knownPartialLegacyTokens += status.tokens_in!;
+        if (quantity.safeParse(status.tokens_out).success) knownPartialLegacyTokens += status.tokens_out!;
+      }
+      addCost(status);
       if (quantity.safeParse(status.duration_ms).success) knownAttemptDurationMs += status.duration_ms!;
       else unknownDurationAttempts += 1;
     }
   };
   for (const [id, status] of Object.entries(state.stages)) add(id, status);
+  // Accounting retains every carrier in legacy order: a display projection can
+  // replace or omit rows whose missing telemetry must still keep usage unknown.
   for (const retired of state.retiredStageUsage ?? []) add(retired.stageId, retired.status);
   for (const evidence of state.stageEvidence ?? []) add(evidence.stageId, evidence.status);
   for (const [id, attempts] of Object.entries(state.auxiliaryAttempts ?? {})) add(id, { status: STAGE_STATUS.COMPLETE, retries: 0, attempts });
-  if (state.supervisor) {
-    if (state.supervisor.attempts?.length) {
-      for (const attempt of state.supervisor.attempts) add('_supervisor', { status: attempt.status === STAGE_STATUS.COMPLETE ? 'complete' : 'failed', retries: 0, attempts: [attempt as StageAttempt] });
-    } else if (state.supervisor.calls > 0) add('_supervisor', { status: state.supervisor.status, retries: 0, tokens_in: state.supervisor.tokens_in, tokens_out: state.supervisor.tokens_out, duration_ms: state.supervisor.duration_ms });
-  }
   const tokensComplete = unknownTokenAttempts + unknownLegacyStages === 0;
   const start = Date.parse(state.startedAt);
   const end = Date.parse(state.completedAt ?? observedAt);
@@ -368,14 +394,14 @@ export function budgetView(state: ArchivedStoreState, observedAt: string) {
   const limit = quantity.safeParse(declared.totalTokens).success ? declared.totalTokens! : null;
   return {
     declared,
-    tokens: { knownInputTokens, knownOutputTokens, unknownTokenAttempts, unknownLegacyStages, complete: tokensComplete, limit, remaining: tokensComplete && limit !== null ? Math.max(0, limit - knownInputTokens - knownOutputTokens) : null },
+    tokens: { knownInputTokens, knownOutputTokens, knownTotalTokens: knownInputTokens + knownOutputTokens + knownPartialLegacyTokens, unknownTokenAttempts, unknownLegacyStages, attemptEvidence, complete: tokensComplete, limit, remaining: tokensComplete && limit !== null ? Math.max(0, limit - knownInputTokens - knownOutputTokens) : null },
+    cost: { knownUsd, unknownAttempts, complete: unknownAttempts === 0 },
     time: { knownAttemptDurationMs, unknownDurationAttempts, wallElapsedMs: Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null, limitMs: quantity.safeParse(declared.totalTimeMs).success ? declared.totalTimeMs! : null, accounting: 'summed_attempt_duration_is_not_wall_time' as const },
   };
 }
 
 export interface RunStateViewOptions {
   includePromptText?: boolean;
-  resourceRegistryPath?: string;
   observedAt?: string;
   maximumReadAttempts?: number;
 }
@@ -405,14 +431,12 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
     for (const declaration of declarations) artifacts.push({ declaration, existence: fence.watchValue(() => observeArtifact(projectDir, runDirectory, declaration)) });
     const eventRaw = fence.read(path('events.jsonl'));
     const rows: Array<Record<string, unknown>> = [];
-    let malformedRecords = 0;
-    for (const line of (eventRaw ?? '').split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        const row = recordObject(JSON.parse(line));
-        if (!row || row.runId !== runId) malformedRecords += 1;
-        else rows.push(row);
-      } catch { malformedRecords += 1; }
+    const parsedEvents = parseJsonlWithDiagnostics<unknown>(eventRaw ?? '');
+    let malformedRecords = parsedEvents.unreadableRecords;
+    for (const value of parsedEvents.rows) {
+      const row = recordObject(value);
+      if (!row || row.runId !== runId) malformedRecords += 1;
+      else rows.push(row);
     }
     if (malformedRecords) fence.diagnostics.push({ code: 'STATE_EVENT_ROWS_UNREADABLE', path: path('events.jsonl'), detail: `${malformedRecords} malformed or unbound event rows retained as a gap` });
     const artifactContracts: RunStateView['artifactContracts'] = [];
@@ -431,15 +455,11 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
     addGuidance(path('supervisor_guidance.md'));
     for (const archive of fence.list(path('guidance_history')).filter((name) => /^iter_\d+\.md$/.test(name))) addGuidance(path(join('guidance_history', archive)));
     const stageIds = new Set([...Object.keys(state.stages), ...Object.keys(state.auxiliaryAttempts ?? {}), ...(state.stageEvidence ?? []).map((entry) => entry.stageId), ...(state.retiredStageUsage ?? []).map((entry) => entry.stageId)]);
-    if (state.supervisor || state.supervise === true) stageIds.add('_supervisor');
     const allAttempts: Array<{ stageId: string; attempt: StageAttempt }> = [];
     const seenAttempts = new Set<string>();
     for (const stageId of stageIds) {
       if (!safeId.safeParse(stageId).success) { fence.diagnostics.push({ code: 'STATE_STAGE_ID_INVALID', detail: `stage identifier ${JSON.stringify(stageId)} is not safe to resolve` }); continue; }
       const stagePath = (value: string) => path(join('stages', stageId, value));
-      const inputPath = stagePath('input.md');
-      const latest = fence.read(inputPath);
-      if (latest !== undefined) legacyInputs.push({ stageId, path: inputPath, sha256: sha256(latest), exact: false, reason: 'mutable latest alias; final system input and earlier invocation identity are not proven', ...(options.includePromptText ? { text: latest } : {}) });
       addGuidance(stagePath('guidance.md'));
       const contractPath = stagePath('artifact_contract.json');
       const contract = fence.json(contractPath);
@@ -474,7 +494,7 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
       const verdictPath = path(`verdict_${stageId}.json`);
       const verdict = fence.json(verdictPath);
       if (verdict !== undefined) verdicts.push({ stageId, path: verdictPath, record: verdict });
-      const attempts = [...(state.stages[stageId]?.attempts ?? []), ...(state.auxiliaryAttempts?.[stageId] ?? []), ...(state.stageEvidence ?? []).filter((entry) => entry.stageId === stageId).flatMap((entry) => entry.status.attempts ?? []), ...(state.retiredStageUsage ?? []).filter((entry) => entry.stageId === stageId).flatMap((entry) => entry.status.attempts ?? []), ...(stageId === '_supervisor' ? state.supervisor?.attempts ?? [] : [])];
+      const attempts = [...(state.stages[stageId]?.attempts ?? []), ...(state.auxiliaryAttempts?.[stageId] ?? []), ...(state.stageEvidence ?? []).filter((entry) => entry.stageId === stageId).flatMap((entry) => entry.status.attempts ?? []), ...(state.retiredStageUsage ?? []).filter((entry) => entry.stageId === stageId).flatMap((entry) => entry.status.attempts ?? [])];
       for (const execution of attempts) {
         const key = JSON.stringify([stageId, execution.index, execution.startedAt]);
         if (!seenAttempts.has(key)) { allAttempts.push({ stageId, attempt: execution }); seenAttempts.add(key); }
@@ -482,13 +502,13 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
       const invocationRoot = stagePath('invocations');
       for (const directory of fence.list(invocationRoot).filter((name) => /^attempt_\d+_[0-9a-f]{24}$/.test(name))) {
         const directoryPath = stagePath(join('invocations', directory));
-        for (const filename of fence.list(directoryPath).filter((name) => /^invocation_\d+\.json(?:\.gz)?$/.test(name))) {
+        for (const filename of fence.list(directoryPath).filter((name) => /^invocation_\d+\.json\.gz$/.test(name))) {
           const invocationPath = stagePath(join('invocations', directory, filename));
           try {
             const value = fence.json(invocationPath);
             const record = checkedInvocation(value);
             const expectedPath = invocationInputPath(runDirectory, record);
-            if (record.runId !== runId || record.stageId !== stageId || (expectedPath !== invocationPath && expectedPath.slice(0, -3) !== invocationPath)) throw new RunStateViewError('INVOCATION_RUN_BINDING', 'invocation carrier path and identity differ');
+            if (record.runId !== runId || record.stageId !== stageId || expectedPath !== invocationPath) throw new RunStateViewError('INVOCATION_RUN_BINDING', 'invocation carrier path and identity differ');
             const matched = attempts.some((entry) => entry.index === record.attemptIndex && entry.startedAt === record.attemptStartedAt);
             const { systemPrompt, userPrompt, transport, ...metadata } = record;
             invocations.push({ path: invocationPath, integrity: 'verified', attemptBinding: matched ? 'matched' : 'unmatched', record: { ...metadata, ...(options.includePromptText ? { systemPrompt, userPrompt } : {}), ...(transport ? { transport: { kind: transport.kind, sha256: transport.sha256, ...(options.includePromptText ? { payload: transport.payload } : {}) } } : {}) } });
@@ -500,32 +520,16 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
     for (const { stageId, attempt: entry } of allAttempts) {
       if (!invocations.some((view) => view.integrity === 'verified' && view.attemptBinding === 'matched' && view.record?.stageId === stageId && view.record.attemptIndex === entry.index && view.record.attemptStartedAt === entry.startedAt)) missingAttemptInputs.push({ stageId, attemptIndex: entry.index, attemptStartedAt: entry.startedAt });
     }
-    const registryPath = options.resourceRegistryPath ?? queryState.resourceRegistryPath ?? resourceLeaseRegistryPath();
-    const resources = fence.watchValue(() => readResourceLeaseRegistry(registryPath));
     const stages = state.dispatchedStages ?? state.plan ?? [];
     const source = state.dispatchedStages ? 'dispatchedStages' : state.plan ? 'plan' : 'unavailable';
-    const resourceWaits: RunStateView['resourceWaits'] = [];
-    for (const row of rows) {
-      if (row.type !== 'resource_lease_wait_started' && row.type !== 'resource_lease_wait_finished') continue;
-      if (typeof row.requestId !== 'string') continue;
-      const previous = resourceWaits.findIndex((entry) => entry.requestId === row.requestId);
-      if (previous >= 0) resourceWaits.splice(previous, 1);
-      const status = typeof row.stageId === 'string' ? state.stages[row.stageId] : undefined;
-      const active = status?.attempts?.at(-1);
-      if (row.type === 'resource_lease_wait_started' && typeof row.stageId === 'string'
-        && typeof row.attemptIndex === 'number' && typeof row.attemptStartedAt === 'string'
-        && active?.status === STAGE_STATUS.RUNNING && active.index === row.attemptIndex && active.startedAt === row.attemptStartedAt) {
-        resourceWaits.push({ stageId: row.stageId, attemptIndex: row.attemptIndex, attemptStartedAt: row.attemptStartedAt, requestId: row.requestId, waitStartedAt: String(row.waitStartedAt ?? row.timestamp), reason: String(row.detail ?? 'resource contention') });
-      }
-    }
     const view: RunStateView = {
       version: 1, observedAt,
-      snapshot: { runStateRevision: state.stateFormat?.revision ?? null, runStateSha256: sha256(raw), evidenceSha256: sha256(JSON.stringify({ sources: fence.sources, artifacts, resources })), sources: fence.sources },
+      snapshot: { runStateRevision: state.stateFormat?.revision ?? null, runStateSha256: sha256(raw), evidenceSha256: sha256(JSON.stringify({ sources: fence.sources, artifacts })), sources: fence.sources },
       run: { runId, projectDir: state.projectDir, workflowName: state.workflowName, status: state.status, statusResolution: archived.status, startedAt: state.startedAt, completedAt: state.completedAt, currentIteration: state.currentIteration ?? null, failureReason: state.failureReason },
       plan: { stages, source, revision: queryState.planRevision ?? null, history: queryState.planHistory, decisions: state.planRevisionDecisions ?? {}, admissionClaim: queryState.planRevision ? 'recorded' : 'unknown' },
       stages: state.stages,
-      histories: { retiredStageUsage: state.retiredStageUsage, stageEvidence: state.stageEvidence, criterionDischarges: state.criterionDischarges, unresolvedStageObligations: state.unresolvedStageObligations, supervisor: state.supervisor, auxiliaryAttempts: state.auxiliaryAttempts },
-      artifacts, artifactContracts, budget: budgetView(state, observedAt), resources, resourceWaits,
+      histories: { retiredStageUsage: state.retiredStageUsage, stageEvidence: state.stageEvidence, criterionDischarges: state.criterionDischarges, unresolvedStageObligations: state.unresolvedStageObligations, auxiliaryAttempts: state.auxiliaryAttempts },
+      artifacts, artifactContracts, budget: budgetView(state, observedAt),
       audits: { findings: queryState.findings, openFindings: queryState.findings.filter((finding) => finding.status === 'open'), verdicts },
       guidance, events: { rows, malformedRecords },
       prompts: { invocations, legacyInputs, missingAttemptInputs, coverage: invocations.some((entry) => entry.integrity === 'verified') ? (missingAttemptInputs.length || invocations.some((entry) => entry.integrity === 'invalid' || entry.attemptBinding !== 'matched') ? 'partial' : 'recorded') : legacyInputs.length ? 'legacy_only' : 'none', completeness: 'unknown' },

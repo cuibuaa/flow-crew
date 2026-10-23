@@ -11,8 +11,9 @@ import {
   sessionResumeForStage, shouldPreserveSession,
 } from '../src/scheduler/sched_admission/sessions.js';
 import { StageConfigSchema, type StageConfig } from '../src/scheduler.js';
-import { createRun, fcGlobalDir, setFcGlobalDir, type StageStatus, type StoreState } from '../src/store.js';
-import { clearAttemptSummaryRefreshDebounce } from '../src/run-events.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir, type StageStatus, type StoreState } from '../src/store.js';
+
 
 const UUID = '11111111-1111-4111-8111-111111111111';
 const OTHER_UUID = '22222222-2222-4222-8222-222222222222';
@@ -79,7 +80,6 @@ process.stdin.on('end', () => {
 });
 
 afterEach(() => {
-  clearAttemptSummaryRefreshDebounce();
   setFcGlobalDir(previousStore);
   vi.unstubAllEnvs();
   rmSync(root, { recursive: true, force: true });

@@ -30,9 +30,8 @@ import {
 } from '../src/fc-tasks.js';
 import { RUN_STATUS, TASK_STATUS, isTerminalRunStatus } from '../src/lifecycle-status.js';
 import {
-  clearAttemptSummaryRefreshDebounce,
   readRunEvents,
-  recordRunEvent,
+  observeRunStatusChange,
 } from '../src/run-events.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
@@ -260,7 +259,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  clearAttemptSummaryRefreshDebounce();
   setFcGlobalDir(originalGlobalDir);
   rmSync(root, { recursive: true, force: true });
 });
@@ -278,9 +276,9 @@ describe('ledger convergence projection', () => {
 
     expect(rendered.text).toBe([
       'fc_tasks: 3 wrap-up overdue · engine 1 running · ledger 4 in progress, 0 pending, 5 done',
-      '▶ wrap-up-overdue:run:stopped:#1 [1] active-1',
-      '▶ wrap-up-overdue:run:stopped:#2 [2] active-2',
-      '▶ wrap-up-overdue:run:stopped:#3 [3] active-3',
+      '▶ wrap-up-overdue:run:cancelled:#1 [1] active-1',
+      '▶ wrap-up-overdue:run:cancelled:#2 [2] active-2',
+      '▶ wrap-up-overdue:run:cancelled:#3 [3] active-3',
       '▶ run:running [4] active-4',
       '',
     ].join('\n'));
@@ -411,12 +409,12 @@ describe('ledger convergence projection', () => {
 
     expect(counts).toEqual({
       executed: FC_TASK_STATUSES.length * expectedEngineCases,
-      aligned: 31,
-      wrap_up_required: 30,
-      ledger_closed_engine_active: 8,
+      aligned: 28,
+      wrap_up_required: 28,
+      ledger_closed_engine_active: 7,
       not_comparable: 12,
       engineRunning: 6,
-      oldLedgerRunning: 27,
+      oldLedgerRunning: 25,
     });
     expect(reconcileFcTask(
       task('known-positive', 'in_progress', 1),
@@ -438,7 +436,7 @@ describe('ledger convergence projection', () => {
 });
 
 describe('durable wrap-up obligation', () => {
-  it('executes the full 182-transition matrix and surfaces the event operationally', () => {
+  it('executes the full lifecycle transition matrix and surfaces the event operationally', () => {
     const engineRoot = join(root, 'event-engine');
     setFcGlobalDir(engineRoot);
     const priorStatuses: Array<string | undefined> = [undefined, ...Object.values(RUN_STATUS)];
@@ -459,14 +457,16 @@ describe('durable wrap-up obligation', () => {
             observedAt: '2030-01-01T00:00:00.000Z',
           })}\n`, 'utf-8');
         }
-        recordRunEvent(root, runId, {
-          type: 'campaign_alert',
-          runId,
-          timestamp: '2030-01-01T00:02:00.000Z',
-          detail: 'later scheduler-owned record',
-        }, { debounceMs: 60_000 });
-        const obligations = readRunEvents(root, runId)
-          .filter(({ type }) => type === 'operator_wrap_up_required');
+        observeRunStatusChange(runDirectory, runId, next);
+        observeRunStatusChange(runDirectory, runId, next);
+        const events = readRunEvents(root, runId);
+        const transitions = events.filter(({ type }) => type === 'run_status_changed');
+        expect(transitions).toHaveLength(prior === next ? 0 : 1);
+        if (prior !== next) {
+          expect(transitions[0].observationId).toBe(`${prior === undefined ? 'initial' : '2030-01-01T00:00:00.000Z'}:${prior ?? 'unobserved'}->${next}`);
+          expect(events.every(({ observationId }) => observationId === transitions[0].observationId)).toBe(true);
+        }
+        const obligations = events.filter(({ type }) => type === 'operator_wrap_up_required');
         const expected = isTerminalRunStatus(next) && !isTerminalRunStatus(prior);
         expect(obligations).toHaveLength(expected ? 1 : 0);
         if (expected) obligationCount += 1;
@@ -495,12 +495,7 @@ describe('durable wrap-up obligation', () => {
     });
 
     const positiveRunId = basename(positiveRunDirectory);
-    recordRunEvent(root, positiveRunId, {
-      type: 'campaign_alert',
-      runId: positiveRunId,
-      timestamp: '2030-01-01T00:03:00.000Z',
-      detail: 'repeated observation',
-    }, { debounceMs: 60_000 });
+    observeRunStatusChange(positiveRunDirectory, positiveRunId, RUN_STATUS.COMPLETE);
     expect(readRunEvents(root, positiveRunId)
       .filter(({ type }) => type === 'operator_wrap_up_required')).toHaveLength(1);
   });
@@ -514,12 +509,7 @@ describe('explicit successful wrap-up closes one exact entry', () => {
       status: RUN_STATUS.RUNNING,
       observedAt: '2030-01-01T00:00:00.000Z',
     })}\n`, 'utf-8');
-    recordRunEvent(fixture.projectDir, fixture.runId, {
-      type: 'run_completed',
-      runId: fixture.runId,
-      timestamp: '2030-01-01T00:02:00.000Z',
-      detail: 'run completed while no renderer or reconciler was active',
-    }, { debounceMs: 60_000 });
+    observeRunStatusChange(join(fixture.engineRoot, 'runs', fixture.runId), fixture.runId, RUN_STATUS.COMPLETE);
 
     expect(ledgerEntry(fixture).status).toBe('in_progress');
 

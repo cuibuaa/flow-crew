@@ -1,4 +1,7 @@
+import './test-support/policy-runtime.js';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { installDiskGuardFixture } from './test-support/disk-guard-fixture.js';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
@@ -27,11 +30,11 @@ import {
   type GitWorktreeRequest,
 } from '../src/cli-ship-setup.js';
 import type { ValidationCommandRunner } from '../src/project-validation.js';
-import { extractBriefInputPaths } from '../src/ship-inputs.js';
-import { createRun, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { execWithStdin } from '../src/adapters/base.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
-import { clearAttemptSummaryRefreshDebounce } from '../src/run-events.js';
+
 
 // Temporary projects and outputs share this repository as a container, while
 // their synthetic installation remains a separate sibling fixture namespace.
@@ -88,21 +91,13 @@ beforeEach(() => {
   mkdirSync(fixture.project, { recursive: true });
   writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
     scripts: { build: 'compile', test: 'check', lint: 'style' },
-    flowcrew: { testPopulation: { files: [] } },
   }), 'utf-8');
   writeFileSync(join(fixture.project, 'package-lock.json'), '{}', 'utf-8');
   writeFileSync(join(fixture.project, '.gitignore'), 'data/\nnode_modules/\n', 'utf-8');
-  const fixtureVitest = join(fixture.root, 'node_modules', 'vitest');
-  mkdirSync(fixtureVitest, { recursive: true });
-  writeFileSync(join(fixtureVitest, 'package.json'), JSON.stringify({
-    name: 'vitest', version: '0.0.0-fixture', exports: { './package.json': './package.json' },
-  }));
-  writeFileSync(join(fixtureVitest, 'vitest.mjs'), 'export {};\n');
   setFcGlobalDir(fixture.state);
 });
 
 afterEach(() => {
-  clearAttemptSummaryRefreshDebounce();
   rmSync(fixture.root, { recursive: true, force: true });
 });
 
@@ -111,17 +106,7 @@ afterAll(() => {
 });
 
 function writeBrief(lines: string[]): void {
-  const body = lines.join('\n');
-  // Legacy cases below exercise linking/assertion mechanics, not prose input
-  // discovery. Materialize their `# Inputs` paths as the frontmatter contract
-  // now required by ship-setup while retaining the body assertions verbatim.
-  const declared = !body.startsWith('---') && /^# Inputs\b/m.test(body)
-    ? extractBriefInputPaths(body)
-    : [];
-  const brief = declared.length > 0
-    ? ['---', 'inputs:', ...declared.map((path) => `  - ${path}`), '---', body].join('\n')
-    : body;
-  writeFileSync(fixture.brief, brief, 'utf-8');
+  writeFileSync(fixture.brief, [...lines, '## Requirements', '1. Produce the declared deliverable.'].join('\n'), 'utf-8');
 }
 
 function setupArgs(extra: string[] = []): string[] {
@@ -156,39 +141,16 @@ function successfulGit(
 function validationRunner(testExit = 0): ReturnType<typeof vi.fn<ValidationCommandRunner>> {
   return vi.fn<ValidationCommandRunner>((request) => ({
     exitCode: request.role === 'test' ? testExit : 0,
-    stdout: request.args.includes('--collect-only')
-      ? 'checks/test_example.py::test_example\n'
-      : request.role === 'test' && testExit !== 0
-        ? 'FAIL spec/existing.test.ts\nTests 1 failed'
-        : `${request.role} passed`,
+    stdout: request.role === 'test' && testExit !== 0
+      ? 'FAIL spec/existing.test.ts\nTests 1 failed'
+      : `${request.role} passed`,
     durationMs: 4,
   }));
 }
 
-function testPopulationRunner(): ReturnType<typeof vi.fn<ValidationCommandRunner>> {
-  return vi.fn<ValidationCommandRunner>((request) => {
-    const files: string[] = [];
-    const walk = (directory: string): void => {
-      for (const entry of readdirSync(directory, { withFileTypes: true })) {
-        if (entry.name === 'node_modules' || entry.name === '.git') continue;
-        const path = join(directory, entry.name);
-        if (entry.isDirectory()) walk(path);
-        else if (/\.test\.tsx?$/.test(entry.name)) files.push(path);
-      }
-    };
-    walk(request.cwd);
-    return {
-      exitCode: 0,
-      stdout: JSON.stringify(files.sort().map((file) => ({ file }))),
-      durationMs: 2,
-    };
-  });
-}
-
-function writePopulationFixture(): void {
+function writeDirectoryFixture(): void {
   writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
-    scripts: { build: 'compile', test: 'vitest run', lint: 'style' },
-    devDependencies: { vitest: 'fixture' },
+    scripts: { build: 'compile', test: 'check', lint: 'style' },
   }), 'utf-8');
   mkdirSync(join(fixture.project, 'spec'), { recursive: true });
   mkdirSync(join(fixture.project, 'checks', 'fixtures'), { recursive: true });
@@ -197,7 +159,7 @@ function writePopulationFixture(): void {
   writeFileSync(join(fixture.project, 'checks', 'private.test.ts'), 'export const privateTest = true;\n');
 }
 
-function copyPopulationTrackedFiles(request: GitWorktreeRequest): void {
+function copyDirectoryTrackedFiles(request: GitWorktreeRequest): void {
   mkdirSync(join(request.targetDir, 'spec'), { recursive: true });
   mkdirSync(join(request.targetDir, 'checks', 'fixtures'), { recursive: true });
   copyFileSync(join(request.projectDir, 'spec', 'public.test.ts'), join(request.targetDir, 'spec', 'public.test.ts'));
@@ -220,6 +182,161 @@ function noReadyRecord(): boolean {
 }
 
 describe('ship-setup fail-closed worktree transaction', () => {
+  it('refuses the deduplicated 27 GB input batch before worktree creation or any copy', async () => {
+    const home = join(fixture.root, 'guard-home');
+    const log = installDiskGuardFixture(home, 12_000_000_000);
+    vi.stubEnv('HOME', home);
+    try {
+      mkdirSync(join(fixture.project, 'hf_cache'));
+      for (const name of ['a', 'b', 'c']) writeFileSync(join(fixture.project, 'hf_cache', name), 'tiny fixture');
+      writeBrief(['---', 'inputs: [hf_cache, hf_cache/a]', '---', '# Goal', 'Read the cache.']);
+      const git = successfulGit();
+      const copy = vi.fn(nodeShipSetupFileSystem.copyFile);
+      const report = await runShipSetup(setupArgs(), {
+        createWorktree: git, runValidationCommand: validationRunner(),
+        fs: { ...nodeShipSetupFileSystem, copyFile: copy, stat: path => {
+          const info = nodeShipSetupFileSystem.stat(path);
+          if (path.startsWith(join(fixture.project, 'hf_cache') + '/') && !info.isDirectory()) {
+            return { isDirectory: () => false, isFile: () => true, size: 9_000_000_000 };
+          }
+          return info;
+        } },
+      });
+      expect(report.state).toBe('refused');
+      expect(report.blockers[0].reason).toContain('Disk admission refused before copying 27000000000 bytes');
+      expect(readFileSync(log, 'utf8').trim()).toBe('27000000000');
+      expect(git).not.toHaveBeenCalled();
+      expect(copy).not.toHaveBeenCalled();
+      expect(existsSync(fixture.target)).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it('admits one small input batch, copies independent bytes, and skips admission when reused', async () => {
+    const home = join(fixture.root, 'guard-home');
+    const log = installDiskGuardFixture(home, 12);
+    vi.stubEnv('HOME', home);
+    try {
+      mkdirSync(join(fixture.project, 'data'));
+      for (const name of ['a', 'b']) writeFileSync(join(fixture.project, 'data', name), '123456');
+      writeBrief(['---', 'inputs: [data, data/a]', '---', '# Goal', 'Read the inputs.']);
+      const overrides = { createWorktree: successfulGit(), runValidationCommand: validationRunner() };
+      const report = await runShipSetup(setupArgs(), overrides);
+      expect(report.state, JSON.stringify(report)).toBe('ready');
+      expect(readFileSync(log, 'utf8')).toBe('12\n');
+      writeFileSync(join(fixture.target, 'data', 'a'), 'target');
+      expect(readFileSync(join(fixture.project, 'data', 'a'), 'utf8')).toBe('123456');
+      writeFileSync(join(fixture.target, 'data', 'a'), '123456');
+      const reused = await runShipSetup(setupArgs(), {
+        ...overrides,
+        runGitCommand: request => {
+          if (request.args[0] === 'worktree') return { exitCode: 0, stdout:
+            `worktree ${fixture.target}\nHEAD fixture-base\nbranch refs/heads/autonomous-result\n` };
+          if (request.args[0] === 'rev-parse') return { exitCode: 0, stdout: 'fixture-base\n' };
+          return { exitCode: 1 };
+        },
+      });
+      expect(reused.state, JSON.stringify(reused)).toBe('ready');
+      expect(readFileSync(log, 'utf8')).toBe('12\n');
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it('copies both files under a declared gitignored data directory and records them in READY', async () => {
+    isolatedProjectCommand('git', ['init', '-q'], fixture.project, fixture.root);
+    mkdirSync(join(fixture.project, 'data'));
+    writeFileSync(join(fixture.project, 'data', 'a.csv'), 'id\n1\n');
+    writeFileSync(join(fixture.project, 'data', 'b.csv'), 'id\n2\n');
+    expect(isolatedProjectCommand('git', ['check-ignore', 'data/a.csv', 'data/b.csv'], fixture.project, fixture.root))
+      .toBe('data/a.csv\ndata/b.csv\n');
+    writeBrief(['---', 'inputs: [data]', '---', '# Goal', 'Use the declared data.']);
+
+    isolatedProjectCommand('git', ['add', '.gitignore', 'package.json', 'package-lock.json', 'brief.md'], fixture.project, fixture.root);
+    isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Declared input fixture'], fixture.project, fixture.root);
+    const args = setupArgs();
+    args[args.indexOf('--base') + 1] = 'HEAD';
+    const report = await runShipSetup(args, {
+      runValidationCommand: validationRunner(),
+    });
+
+    expect(report.state, JSON.stringify(report.blockers)).toBe('ready');
+    expect(readdirSync(join(fixture.target, 'data')).sort()).toEqual(['a.csv', 'b.csv']);
+    for (const name of ['a.csv', 'b.csv']) {
+      expect(readFileSync(join(fixture.target, 'data', name), 'utf8'))
+        .toBe(readFileSync(join(fixture.project, 'data', name), 'utf8'));
+    }
+    expect(report.copies.map(copy => copy.path).sort()).toEqual(['data/a.csv', 'data/b.csv']);
+    if (report.state !== 'ready') throw new Error('declared ignored data unexpectedly refused');
+    const record = JSON.parse(readFileSync(report.readyRecordPath, 'utf8'));
+    expect(record).toMatchObject({ state: 'ready', ready: true, copies: report.copies });
+  });
+
+  it('copies a declared frozen input into target-owned bytes and records its frozen declaration', async () => {
+    mkdirSync(join(fixture.project, 'data'));
+    writeFileSync(join(fixture.project, 'data', 'evidence.txt'), 'frozen evidence');
+    writeBrief(['---', 'inputs: [{path: data, frozen: true}]', '---', '# Goal', 'Read the frozen evidence.']);
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(), runValidationCommand: validationRunner(),
+    });
+    expect(report.state, JSON.stringify(report.blockers)).toBe('ready');
+    expect(lstatSync(join(fixture.target, 'data')).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(fixture.target, 'data', 'evidence.txt'), 'utf8')).toBe('frozen evidence');
+    expect(report.copies).toEqual([expect.objectContaining({ path: 'data/evidence.txt' })]);
+    expect(report.sourceVerification?.inputs).toContainEqual(expect.objectContaining({ path: 'data', frozen: true }));
+    writeFileSync(join(fixture.target, 'data', 'evidence.txt'), 'target edit');
+    expect(readFileSync(join(fixture.project, 'data', 'evidence.txt'), 'utf8')).toBe('frozen evidence');
+  });
+
+  it('budgets both destinations for a declared directory and a file alias', async () => {
+    const home = join(fixture.root, 'guard-home');
+    const log = installDiskGuardFixture(home, 10);
+    vi.stubEnv('HOME', home);
+    try {
+      isolatedProjectCommand('git', ['init', '-q'], fixture.project, home);
+      mkdirSync(join(fixture.project, 'data'));
+      writeFileSync(join(fixture.project, 'data', 'file'), '123456');
+      symlinkSync('data/file', join(fixture.project, 'alias'));
+      writeBrief(['---', 'inputs: [data, alias]', '---', '# Goal', 'Read the inputs.']);
+      const git = successfulGit();
+      const copy = vi.fn(nodeShipSetupFileSystem.copyFile);
+      const report = await runShipSetup(setupArgs(), {
+        createWorktree: git, runValidationCommand: validationRunner(),
+        runGitCommand: () => ({ exitCode: 0, stdout: '' }),
+        fs: { ...nodeShipSetupFileSystem, copyFile: copy },
+      });
+      expect(report.state).toBe('refused');
+      expect(report.blockers[0].reason).toContain('before copying 12 bytes');
+      expect(readFileSync(log, 'utf8')).toBe('12\n');
+      expect(git).not.toHaveBeenCalled();
+      expect(copy).not.toHaveBeenCalled();
+      expect(existsSync(fixture.target)).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it('budgets missing descendants through an internal link when reusing a real target directory', async () => {
+    const home = join(fixture.root, 'guard-home');
+    const log = installDiskGuardFixture(home, 10);
+    vi.stubEnv('HOME', home);
+    try {
+      mkdirSync(join(fixture.project, 'data', 'real'), { recursive: true });
+      writeFileSync(join(fixture.project, 'data', 'real', 'large'), '123456');
+      writeFileSync(join(fixture.project, 'data', 'new'), '123456');
+      symlinkSync('real', join(fixture.project, 'data', 'alias'));
+      mkdirSync(join(fixture.target, 'data', 'real'), { recursive: true });
+      mkdirSync(join(fixture.target, 'data', 'alias'));
+      copyFileSync(join(fixture.project, 'data', 'real', 'large'), join(fixture.target, 'data', 'real', 'large'));
+      writeBrief(['---', 'inputs: [data]', '---', '# Goal', 'Read the inputs.']);
+      const report = await runShipSetup(setupArgs(), {
+        createWorktree: successfulGit(), runValidationCommand: validationRunner(),
+        runGitCommand: () => ({ exitCode: 1 }),
+      });
+      expect(report.state).toBe('refused');
+      expect(report.blockers[0].reason).toContain('before copying 12 bytes');
+      expect(readFileSync(log, 'utf8')).toBe('12\n');
+      expect(existsSync(join(fixture.target, 'data', 'new'))).toBe(false);
+      expect(existsSync(join(fixture.target, 'data', 'alias', 'large'))).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it('refuses an external output inside the launch target before creating it', async () => {
     const path = join(fixture.target, 'runs', 'results');
     writeBrief(['---', 'outputs:', `  - path: ${path}`, '    type: directory', '---', '# Goal', 'Retain results.']);
@@ -245,8 +362,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(existsSync(path)).toBe(false);
     const run = createRun(target, 'external-output', 'name: fixture\nstages: []\n', ['work']);
     writeFileSync(join(run.runDirPath, 'task_brief.md'), readFileSync(fixture.brief));
-    const input = { projectDir: target, runDir: run.runDirPath, stageId: 'work', projectWriteScope: [],
-      artifactContract: { version: 1 as const, produces: [], reads: [], groups: [], replays: [] } };
+    const input = { projectDir: target, runDir: run.runDirPath, stageId: 'work',
+      artifactContract: { version: 1 as const, produces: [], reads: [], groups: [] } };
     const action = vi.fn(async () => execWithStdin(process.execPath, ['-e', `const fs=require('node:fs');fs.mkdirSync(${JSON.stringify(path)},{recursive:true});fs.writeFileSync(${JSON.stringify(join(path, 'result.txt'))},'result');`], '', { cwd: target, timeout_ms: 5000 }));
     if (inPlace) {
       await expect(withEngineIntegrity(input, action)).rejects.toThrow('overlaps project');
@@ -275,7 +392,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('H4 times worktree add from config, reports progress, and rolls back owned failure residue', async () => {
-    setEngineDefaults({ timeout_ms: 60000, git_worktree_add_timeout_ms: 1800000 });
+    setEngineDefaults({ default_timeout_ms: 60000, git_worktree_add_timeout_ms: 1800000 });
     writeBrief(['# Goal', 'Create an isolated worktree.']);
     const stderr = new Capture();
     const calls: string[][] = [];
@@ -429,9 +546,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
         baseRefExists: true,
       }),
     ]);
-    expect(accepted.proseInputWarnings).toEqual([
-      expect.objectContaining({ path: 'prose/missing.ts' }),
-    ]);
     expect(gitRunner).toHaveBeenCalledWith(expect.objectContaining({
       args: ['cat-file', '-e', 'release-base:base/only.txt'],
     }));
@@ -513,10 +627,16 @@ describe('ship-setup fail-closed worktree transaction', () => {
     writeFileSync(join(fixture.project, 'node_modules', 'revision-generator', 'beta.js'), 'export {};\n', 'utf-8');
     const digest = createHash('sha256').update(prices).digest('hex');
     writeBrief([
-      '# Inputs',
-      '- Read `package.json`.',
-      `- Read \`data/frozen.csv\`; it has 2 rows, spans 2022-01-01 .. 2022-01-03, sha256: ${digest}.`,
-      `- Consume \`${IGNORED_MODULE_PATH}/\`; it contains 2 files.`,
+      '---',
+      'inputs:',
+      '  - package.json',
+      '  - path: data/frozen.csv',
+      '    rows: 2',
+      '    span: 2022-01-01 .. 2022-01-03',
+      `    sha256: ${digest}`,
+      `  - path: ${IGNORED_MODULE_PATH}/`,
+      '    files: 2',
+      '---',
       '# Deliverables',
       '- Write `docs/result.md`.',
     ]);
@@ -577,14 +697,44 @@ describe('ship-setup fail-closed worktree transaction', () => {
     });
     expect(record.sourceVerification.inputs).toHaveLength(3);
     expect(record.targetVerification.inputs).toHaveLength(3);
-    expect(record.targetVerification.inputs.flatMap((input: any) => input.assertions)
-      .every((assertion: any) => assertion.state === 'confirmed')).toBe(true);
     expect(record.validationBaseline.results).toContainEqual(expect.objectContaining({
       role: 'test', state: 'failed', exitCode: 1, failureCount: 1,
     }));
     expect(record.validationBaseline.gateCriteria).toContainEqual(expect.objectContaining({
       role: 'test', rule: 'no_regression_from_baseline', baselineFailureCount: 1,
     }));
+  });
+
+  it('executes and records both configured test commands for a mixed JavaScript/Python project', async () => {
+    const python = '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n';
+    writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({ scripts: { test: 'check' } }));
+    writeFileSync(join(fixture.project, 'pyproject.toml'), python);
+    writeBrief(['# Goal', 'Validate both project environments.']);
+    const runner = validationRunner();
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: successfulGit(request => writeFileSync(join(request.targetDir, 'pyproject.toml'), python)),
+      runValidationCommand: runner,
+    });
+    expect(report.state).toBe('ready');
+    expect(runner.mock.calls.map(([request]) => [request.display, request.cwd]))
+      .toEqual([['npm run test', fixture.target], ['python -m pytest', fixture.target]]);
+    expect(report.validationBaseline?.gateCriteria.filter(criterion => criterion.role === 'test')).toHaveLength(2);
+  });
+
+  it.each([
+    ['TAP version 13\nok 1 - passes\nnot ok 2 - fails\n1..2', 'known', ['fails']],
+    ['custom runner stopped', 'unknown', []],
+  ])('retains target red baseline failure evidence and its delta rule (%s)', async (output, identity, failures) => {
+    writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({ scripts: { test: 'custom-test-runner' } }));
+    writeBrief(['# Goal', 'Record existing test failures.']);
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 1, stdout: output as string }));
+    const report = await runShipSetup(setupArgs(), { createWorktree: successfulGit(), runValidationCommand: runner });
+    expect(report).toMatchObject({ state: 'ready', validationBaseline: {
+      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'failed', exitCode: 1,
+        failureIdentity: identity, failureIdentifiers: failures })]),
+      gateCriteria: expect.arrayContaining([expect.objectContaining({ role: 'test', rule: 'no_regression_from_baseline' })]),
+    } });
+    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ role: 'test', cwd: fixture.target }));
   });
 
   it('reaches READY for a Python worktree using pyproject-inferred validation argv', async () => {
@@ -623,8 +773,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
       ['python', ['-m', 'build']],
       ['python', ['-m', 'pytest']],
       ['python', ['-m', 'ruff', 'check', '.']],
-      ['python', ['-m', 'pytest', '--collect-only', '-q']],
-      ['python', ['-m', 'pytest', '--collect-only', '-q']],
     ]);
     if (report.state !== 'ready') throw new Error('Python setup unexpectedly refused');
     expect(existsSync(report.readyRecordPath)).toBe(true);
@@ -650,29 +798,14 @@ describe('ship-setup fail-closed worktree transaction', () => {
       return { exitCode: 0 };
     });
     const baseline = validationRunner();
-    const population = vi.fn<ValidationCommandRunner>(() => ({
-      exitCode: 0,
-      stdout: 'checks/test_research.py::test_population\n',
-      durationMs: 3,
-    }));
 
     const report = await runShipSetup(setupArgs(), {
       createWorktree: git,
       runValidationCommand: baseline,
-      runTestCollectionCommand: population,
     });
 
     expect(report).toMatchObject({
       state: 'ready',
-      testPopulation: {
-        state: 'matched',
-        method: {
-          tool: 'pytest',
-          evidencePath: `${fixture.brief}#validation.commands.test`,
-        },
-        source: { count: 1 },
-        target: { count: 1 },
-      },
       validationBaseline: {
         discovery: {
           state: 'partial',
@@ -698,10 +831,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
         ]),
       },
     });
-    expect(population.mock.calls.map(([request]) => [request.command, request.args, request.cwd])).toEqual([
-      [declaredPython, ['-m', 'pytest', '--label', 'literal; $(must-not-run)', '--collect-only', '-q'], fixture.project],
-      [declaredPython, ['-m', 'pytest', '--label', 'literal; $(must-not-run)', '--collect-only', '-q'], fixture.target],
-    ]);
     expect(baseline).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       command: declaredPython,
       args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
@@ -735,6 +864,17 @@ describe('ship-setup fail-closed worktree transaction', () => {
       ['npm', ['run', 'test']],
       ['npm', ['run', 'lint']],
     ]);
+  });
+
+  it('refuses a brief without criteria before creating a worktree', async () => {
+    writeFileSync(fixture.brief, '# Goal\nProduce a deliverable.\n');
+    const git = successfulGit();
+    const runner = validationRunner();
+    const report = await runShipSetup(setupArgs(), { createWorktree: git, runValidationCommand: runner });
+    expect(report).toMatchObject({ state: 'refused', worktreeCreated: false,
+      blockers: [expect.objectContaining({ reason: expect.stringContaining('No structurally extractable criterion') })] });
+    expect(git).not.toHaveBeenCalled();
+    expect(runner).not.toHaveBeenCalled();
   });
 
   it('refuses malformed and structurally invalid validation declarations before creating a worktree', async () => {
@@ -961,7 +1101,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('defaults the source project to the injected current directory and reports human-readable delta criteria', async () => {
-    writeBrief(['# Inputs', '- Read `package.json`.']);
+    writeBrief(['---', 'inputs: [{path: package.json}]', '---', '# Goal', 'Use the declared input.']);
     const git = successfulGit();
     const stdout = new Capture();
 
@@ -993,7 +1133,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('refuses a missing declared source input before creating a worktree or running validation', async () => {
-    writeBrief(['# Inputs', '- Read `data/missing.csv`; it has 2 rows.']);
+    writeBrief(['---', 'inputs: [{path: data/missing.csv, rows: 2}]', '---', '# Goal', 'Use the declared input.']);
     const git = vi.fn<GitWorktreeCreator>();
     const runner = validationRunner();
     const stderr = new Capture();
@@ -1019,63 +1159,11 @@ describe('ship-setup fail-closed worktree transaction', () => {
     });
   });
 
-  it('refuses a refuted source property before Git and accepts the same input when its property is true', async () => {
-    mkdirSync(join(fixture.project, 'data'), { recursive: true });
-    writeFileSync(join(fixture.project, 'data', 'rows.csv'), 'id\n1\n2\n', 'utf-8');
-    writeBrief(['# Inputs', '- Read `data/rows.csv`; it has 3 rows.']);
-    const git = successfulGit();
-
-    const refuted = await runShipSetup(setupArgs(), { createWorktree: git, runValidationCommand: validationRunner() });
-
-    expect(refuted).toMatchObject({
-      state: 'refused',
-      worktreeCreated: false,
-      blockers: [expect.objectContaining({
-        phase: 'source', input: 'data/rows.csv', assertion: 'row_count', reason: expect.stringContaining('refuted'),
-      })],
-    });
-    expect(git).not.toHaveBeenCalled();
-    expect(noReadyRecord()).toBe(true);
-
-    writeBrief(['# Inputs', '- Read `data/rows.csv`; it has 2 rows.']);
-    const acceptedGit = successfulGit();
-    const accepted = await runShipSetup(setupArgs(), {
-      createWorktree: acceptedGit,
-      runValidationCommand: validationRunner(),
-    });
-    expect(accepted.state).toBe('ready');
-    expect(acceptedGit).toHaveBeenCalledTimes(1);
-  });
-
-  it('refuses an asserted property that is not mechanically checkable and does not reinterpret it as success', async () => {
-    writeFileSync(
-      join(fixture.project, 'ambiguous.csv'),
-      'start_date,end_date\n2022-01-01,2022-01-03\n',
-      'utf-8',
-    );
-    writeBrief(['# Inputs', '- Read `ambiguous.csv`; it spans 2022-01-01 .. 2022-01-03.']);
-    const git = successfulGit();
-
-    const report = await runShipSetup(setupArgs(), { createWorktree: git });
-
-    expect(report).toMatchObject({
-      state: 'refused',
-      blockers: [expect.objectContaining({
-        phase: 'source',
-        input: 'ambiguous.csv',
-        assertion: 'time_span',
-        reason: expect.stringContaining('not_checkable'),
-      })],
-    });
-    expect(git).not.toHaveBeenCalled();
-    expect(noReadyRecord()).toBe(true);
-  });
-
   it('refuses unreadable source evidence through the injected filesystem seam', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     const input = join(fixture.project, 'data', 'locked.csv');
     writeFileSync(input, 'id\n1\n', 'utf-8');
-    writeBrief(['# Inputs', '- Read `data/locked.csv`.']);
+    writeBrief(['---', 'inputs: [{path: data/locked.csv}]', '---', '# Goal', 'Use the declared input.']);
     const git = successfulGit();
 
     const report = await runShipSetup(setupArgs(), {
@@ -1096,7 +1184,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
   it('refuses when an ignored input cannot be copied, and never runs or records the baseline', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n', 'utf-8');
-    writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 1 row.']);
+    writeBrief(['---', 'inputs: [{path: data/frozen.csv, rows: 1}]', '---', '# Goal', 'Use the declared input.']);
     const runner = validationRunner();
 
     const report = await runShipSetup(setupArgs(), {
@@ -1122,7 +1210,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
   it('compares copied bytes through the target and refuses a corrupted input', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n2\n', 'utf-8');
-    writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 2 rows.']);
+    writeBrief(['---', 'inputs: [{path: data/frozen.csv, rows: 2}]', '---', '# Goal', 'Use the declared input.']);
     const copyInput = vi.fn((_: string, target: string) => {
       writeFileSync(target, 'id\n1\n', 'utf-8');
     });
@@ -1145,7 +1233,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('does not overwrite an existing target or an existing tracked input', async () => {
-    writeBrief(['# Inputs', '- Read `package.json`.']);
+    writeBrief(['---', 'inputs: [{path: package.json}]', '---', '# Goal', 'Use the declared input.']);
     mkdirSync(fixture.target, { recursive: true });
     const sentinel = join(fixture.target, 'keep.txt');
     writeFileSync(sentinel, 'preserve me', 'utf-8');
@@ -1164,7 +1252,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
 
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'tracked.csv'), 'id\n1\n2\n', 'utf-8');
-    writeBrief(['# Inputs', '- Read `data/tracked.csv`; it has 2 rows.']);
+    writeBrief(['---', 'inputs: [{path: data/tracked.csv, rows: 2}]', '---', '# Goal', 'Use the declared input.']);
     const createLink = vi.fn(nodeShipSetupFileSystem.createLink);
     const trackedGit = successfulGit((request) => {
       mkdirSync(join(request.targetDir, 'data'), { recursive: true });
@@ -1182,7 +1270,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('refuses Git failure and a false Git success without leaving a ready record', async () => {
-    writeBrief(['# Inputs', '- Read `package.json`.']);
+    writeBrief(['---', 'inputs: [{path: package.json}]', '---', '# Goal', 'Use the declared input.']);
     const failedGit = vi.fn<GitWorktreeCreator>(() => ({ exitCode: 128, stderr: 'unknown base' }));
 
     const failed = await runShipSetup(setupArgs(), { createWorktree: failedGit });
@@ -1203,10 +1291,40 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(noReadyRecord()).toBe(true);
   });
 
+  it('refuses a declared target directory that resolves outside the worktree', async () => {
+    mkdirSync(join(fixture.project, 'checks'));
+    writeFileSync(join(fixture.project, 'checks', 'private.test.ts'), 'export {};\n');
+    writeBrief(['---', 'inputs: [checks]', '---', '# Goal', 'Run the declared checks.']);
+    const outside = join(fixture.root, 'outside-target');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'sentinel.txt'), 'unchanged\n');
+    const git = successfulGit((request) => {
+      symlinkSync(outside, join(request.targetDir, 'checks'), 'dir');
+    });
+    const baseline = validationRunner();
+
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: git,
+      runValidationCommand: baseline,
+    });
+
+    expect(report).toMatchObject({
+      state: 'refused',
+      blockers: [expect.objectContaining({
+        phase: 'target',
+        input: 'checks',
+        reason: 'Existing declared target input resolves outside the worktree; recreate the target to materialize target-owned inputs',
+      })],
+    });
+    expect(readFileSync(join(outside, 'sentinel.txt'), 'utf-8')).toBe('unchanged\n');
+    expect(baseline).not.toHaveBeenCalled();
+    expect(noReadyRecord()).toBe(true);
+  });
+
   it('blocks a target parent that canonicalizes outside the worktree', async () => {
     mkdirSync(join(fixture.project, 'data'), { recursive: true });
     writeFileSync(join(fixture.project, 'data', 'frozen.csv'), 'id\n1\n', 'utf-8');
-    writeBrief(['# Inputs', '- Read `data/frozen.csv`; it has 1 row.']);
+    writeBrief(['---', 'inputs: [{path: data/frozen.csv, rows: 1}]', '---', '# Goal', 'Use the declared input.']);
     const outside = join(fixture.root, 'outside');
     mkdirSync(outside, { recursive: true });
     const git = successfulGit((request) => {
@@ -1226,7 +1344,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('refuses an atomic ready-record failure after baseline capture', async () => {
-    writeBrief(['# Inputs', '- Read `package.json`.']);
+    writeBrief(['---', 'inputs: [{path: package.json}]', '---', '# Goal', 'Use the declared input.']);
     const runner = validationRunner();
     const writeAtomic = vi.fn(() => { throw new Error('state volume unavailable'); });
 
@@ -1252,63 +1370,52 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report.blockers[0].repair).toMatch(/restore|choose|retry|writable/i);
   });
 
-  it('refuses validation launch errors after capture without writing a ready record', async () => {
-    writeBrief(['# Inputs', '- Read `package.json`.']);
-    const runner = vi.fn<ValidationCommandRunner>(() => ({
-      exitCode: null,
-      error: 'validation runner unavailable',
-    }));
-
-    const report = await runShipSetup(setupArgs(), {
-      createWorktree: successfulGit(),
-      runValidationCommand: runner,
-    });
-
+  it.each([
+    { exitCode: null, error: 'spawn validation ENOENT' },
+    { exitCode: 127, stderr: 'sh: validation-tool: command not found' },
+    { exitCode: 1, stderr: '/usr/bin/python: No module named pytest' },
+  ])('records unmeasurable inferred baselines as environment gaps: %j', async response => {
+    writeBrief(['---', 'inputs: [{path: package.json}]', '---', '# Goal', 'Use the declared input.']);
+    const runner = vi.fn<ValidationCommandRunner>(() => response);
+    const report = await runShipSetup(setupArgs(), { createWorktree: successfulGit(), runValidationCommand: runner });
     expect(runner).toHaveBeenCalledTimes(3);
-    expect(report).toMatchObject({
-      state: 'refused',
-      validationBaseline: {
-        results: expect.arrayContaining([
-          expect.objectContaining({ role: 'build', state: 'launch_error' }),
-          expect.objectContaining({ role: 'test', state: 'launch_error' }),
-          expect.objectContaining({ role: 'lint', state: 'launch_error' }),
-        ]),
-      },
-      blockers: [
-        expect.objectContaining({ phase: 'validation', reason: expect.stringContaining('build baseline') }),
-        expect.objectContaining({ phase: 'validation', reason: expect.stringContaining('test baseline') }),
-        expect.objectContaining({ phase: 'validation', reason: expect.stringContaining('lint baseline') }),
-      ],
-    });
-    expect(noReadyRecord()).toBe(true);
+    expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
+      results: expect.arrayContaining([expect.objectContaining({ role: 'test', failureIdentity: 'unknown',
+        output: expect.stringContaining(response.stderr ?? ''), reason: expect.any(String) })]),
+    } });
+    expect(noReadyRecord()).toBe(false);
   });
 
-  it('refuses an all-role exit-127 baseline in the verdict line and writes no ready record', async () => {
-    writeBrief(['# Inputs', '- Read `package.json`.']);
-    const runner = vi.fn<ValidationCommandRunner>(({ role }) => ({
-      exitCode: 127,
-      stderr: `sh: ${role}-tool: command not found`,
-    }));
+  it('reports a missing inferred pytest module as an environment gap at setup', async () => {
+    writeBrief(['# Goal', 'Change the project.']);
     const stdout = new Capture();
-    const stderr = new Capture();
-
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 1, stderr: '/usr/bin/python: No module named pytest' }));
     const code = await cmdShipSetupWithDeps(setupArgs(), {
-      createWorktree: successfulGit(),
-      runValidationCommand: runner,
-      stdout: stdout.writer,
-      stderr: stderr.writer,
+      createWorktree: successfulGit(), runValidationCommand: runner, stdout: stdout.writer,
     });
+    expect(code).toBe(0);
+    expect(stdout.value).toContain('test: ENVIRONMENT GAP exit=1');
+    expect(noReadyRecord()).toBe(false);
+  });
 
-    expect(code).toBe(1);
-    expect(stdout.value).toBe('');
-    expect(stderr.value.split('\n')[0]).toBe('Ship setup: REFUSED');
-    expect(stderr.value).toContain('REFUSED [validation]');
-    expect(stderr.value).toContain('exit 127');
+  it('refuses an unidentifiable brief-declared failure as unmeasurable', async () => {
+    rmSync(join(fixture.project, 'package.json'));
+    rmSync(join(fixture.project, 'package-lock.json'));
+    writeBrief(['---', 'validation:', '  commands:', '    test:', '      command: python',
+      '      args: [-m, pytest]', '---', '# Goal', 'Measure the declared tests.']);
+    const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 1, stderr: '/usr/bin/python: No module named pytest' }));
+    const report = await runShipSetup(setupArgs(), {
+      createWorktree: request => { mkdirSync(request.targetDir, { recursive: true }); return { exitCode: 0 }; },
+      runValidationCommand: runner,
+    });
+    expect(report).toMatchObject({ state: 'refused', blockers: [expect.objectContaining({
+      phase: 'validation', reason: expect.stringContaining(`${fixture.brief}#validation.commands.test`),
+    })] });
     expect(noReadyRecord()).toBe(true);
   });
 
   it('records a project command that cannot run here while the others run, and reaches READY', async () => {
-    writeBrief(['# Inputs', '- Read `package.json`.']);
+    writeBrief(['---', 'inputs: [{path: package.json}]', '---', '# Goal', 'Use the declared input.']);
     const runner = vi.fn<ValidationCommandRunner>(({ role }) => role === 'test'
       ? { exitCode: 127, stderr: 'sh: karma: command not found' }
       : { exitCode: 0, stdout: 'ok' });
@@ -1332,9 +1439,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('records a tox.ini-inferred runner that is not installed here as a gap, and reaches READY', async () => {
-    // A project whose only validation is inferred from tox.ini had no inferred command before INI inference and was set
-    // up unconfigured; a missing tox must stay an environment gap (SWE-bench django checkouts carry tox.ini, the host has
-    // no tox). A project whose declared scripts none launch is still refused (previous case).
     rmSync(join(fixture.project, 'package.json'));
     rmSync(join(fixture.project, 'package-lock.json'));
     writeFileSync(join(fixture.project, 'tox.ini'), '[testenv]\ncommands = python tests/runtests.py\n', 'utf-8');
@@ -1464,22 +1568,20 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('reconciles missing descendants when a declared directory already has tracked target content', async () => {
-    writePopulationFixture();
+    writeDirectoryFixture();
     writeBrief([
       '---',
       'inputs:',
       '  - checks',
       '---',
       '# Goal',
-      'Run the complete configured test population.',
+      'Materialize the declared directory.',
     ]);
     const baseline = validationRunner();
-    const population = testPopulationRunner();
 
     const report = await runShipSetup(setupArgs(), {
-      createWorktree: successfulGit(copyPopulationTrackedFiles),
+      createWorktree: successfulGit(copyDirectoryTrackedFiles),
       runValidationCommand: baseline,
-      runTestCollectionCommand: population,
     });
 
     expect(report.state).toBe('ready');
@@ -1492,61 +1594,22 @@ describe('ship-setup fail-closed worktree transaction', () => {
     writeFileSync(join(fixture.target, 'checks', 'private.test.ts'), 'target-only edit\n');
     expect(readFileSync(join(fixture.project, 'checks', 'private.test.ts'), 'utf-8'))
       .toContain('privateTest = true');
-    expect(report.testPopulation).toMatchObject({
-      state: 'matched',
-      source: { count: 3 },
-      target: { count: 3 },
-      missingFromTarget: [],
-      extraInTarget: [],
-    });
-    expect(population).toHaveBeenCalledTimes(2);
     expect(baseline).toHaveBeenCalledTimes(3);
-  });
-
-  it('refuses a smaller target test population after baseline when the ignored input was omitted', async () => {
-    writePopulationFixture();
-    writeBrief(['# Goal', 'Run the complete configured test population.']);
-    const baseline = validationRunner();
-    const population = testPopulationRunner();
-
-    const report = await runShipSetup(setupArgs(), {
-      createWorktree: successfulGit(copyPopulationTrackedFiles),
-      runValidationCommand: baseline,
-      runTestCollectionCommand: population,
-    });
-
-    expect(report).toMatchObject({
-      state: 'refused',
-      testPopulation: {
-        state: 'mismatched',
-        source: { count: 3 },
-        target: { count: 2 },
-        missingFromTarget: ['checks/private.test.ts'],
-        extraInTarget: [],
-      },
-      blockers: [expect.objectContaining({
-        phase: 'validation',
-        reason: expect.stringContaining('checks/private.test.ts'),
-      })],
-    });
-    expect(population).toHaveBeenCalledTimes(2);
-    expect(baseline).toHaveBeenCalledTimes(3);
-    expect(noReadyRecord()).toBe(true);
   });
 
   it('refuses a content collision inside a declared directory without overwriting the target', async () => {
-    writePopulationFixture();
+    writeDirectoryFixture();
     writeBrief([
       '---',
       'inputs:',
       '  - checks',
       '---',
       '# Goal',
-      'Run the complete configured test population.',
+      'Materialize the declared directory.',
     ]);
     const baseline = validationRunner();
     const git = successfulGit((request) => {
-      copyPopulationTrackedFiles(request);
+      copyDirectoryTrackedFiles(request);
       writeFileSync(
         join(request.targetDir, 'checks', 'fixtures', 'published.test.ts'),
         'export const published = false;\n',
@@ -1556,7 +1619,6 @@ describe('ship-setup fail-closed worktree transaction', () => {
     const report = await runShipSetup(setupArgs(), {
       createWorktree: git,
       runValidationCommand: baseline,
-      runTestCollectionCommand: testPopulationRunner(),
     });
 
     expect(report).toMatchObject({
@@ -1617,7 +1679,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
   });
 
   it('binds ready records to the exact brief bytes as well as the target identity', async () => {
-    const firstBrief = '# Goal\nMeasure the first brief.\n';
+    const firstBrief = '# Goal\nMeasure the first brief.\n## Requirements\n1. Report the first measurement.\n';
     writeFileSync(fixture.brief, firstBrief, 'utf-8');
     const first = await runShipSetup(setupArgs(), {
       createWorktree: successfulGit(),
@@ -1627,7 +1689,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     if (first.state !== 'ready') throw new Error('first setup unexpectedly refused');
 
     rmSync(fixture.target, { recursive: true, force: true });
-    const secondBrief = '# Goal\nMeasure a substantively different second brief.\n';
+    const secondBrief = '# Goal\nMeasure a substantively different second brief.\n## Requirements\n1. Report the second measurement.\n';
     writeFileSync(fixture.brief, secondBrief, 'utf-8');
     const second = await runShipSetup(setupArgs(), {
       createWorktree: successfulGit(),

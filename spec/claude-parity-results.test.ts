@@ -67,32 +67,35 @@ describe('Claude native result parity (zero provider tokens)', () => {
     { type: 'result', subtype: 'error_max_turns', result: '429 Too Many Requests' },
   ])('G06 interprets root and terminal error envelopes %j', async event => {
     const result = await invoke(jsonl(assistant('progress'), event));
-    expect(result).toMatchObject({ exitCode: 1, adapterFailureKind: 'rate_limited' });
+    expect(result).toMatchObject({ exitCode: 1, providerFailure: { kind: 'transient' } });
     expect(result.output).toContain('429 Too Many Requests');
   });
 
   it('G06 uses the latest terminal outcome instead of latching the first', async () => {
-    expect(await invoke(jsonl({ type: 'result', is_error: true, errors: ['429 Too Many Requests'] }, terminal('done')))).toMatchObject({ exitCode: 0, output: 'done', adapterError: false });
+    const recovered = await invoke(jsonl({ type: 'result', is_error: true, errors: ['429 Too Many Requests'] }, terminal('done')));
+    expect(recovered).toMatchObject({ exitCode: 0, output: 'done' });
+    expect(recovered.providerFailure).toBeUndefined();
     expect(await invoke(jsonl(terminal('done'), { type: 'result', subtype: 'error_max_turns' }))).toMatchObject({ exitCode: 1, output: 'done\nerror_max_turns' });
   });
 
   it('G06 retains explicit native failure even when its diagnostic is absent', async () => {
     for (const event of [{ type: 'result', is_error: true }, { type: 'error' }]) {
-      expect(await invoke(jsonl(event))).toMatchObject({ exitCode: 1, output: '', adapterError: false });
+      const result = await invoke(jsonl(event));
+      expect(result).toMatchObject({ exitCode: 1, output: event.type, friendlyError: event.type });
+      expect(result.providerFailure).toBeUndefined();
     }
   });
 
   it.each([
-    ['429 Too Many Requests', 'rate_limited'], ['overloaded', 'overloaded'],
-    ['403 Forbidden', 'forbidden'], ['ECONNRESET', 'connection_reset'],
-  ])('G07-G08 retain post-progress stderr diagnostics: %s', async (stderr, kind) => {
+    '429 Too Many Requests', 'overloaded', '403 Forbidden', 'ECONNRESET',
+  ])('G07-G08 retain post-progress stderr diagnostics: %s', async stderr => {
     const result = await invoke(jsonl(assistant('progress')), { stderr, exit: 1 });
-    expect(result).toMatchObject({ exitCode: 1, adapterFailureKind: kind, output: `progress\n${stderr}` });
+    expect(result).toMatchObject({ exitCode: 1, providerFailure: { kind: 'transient' }, output: `progress\n${stderr}` });
     expect(result).not.toHaveProperty('stderr');
   });
 
   it('G08 appends native diagnostics after progress', async () => {
-    expect(await invoke(jsonl(assistant('progress'), { type: 'error', message: '502 Bad Gateway' }), { exit: 1 })).toMatchObject({ output: 'progress\n502 Bad Gateway', adapterFailureKind: 'bad_gateway' });
+    expect(await invoke(jsonl(assistant('progress'), { type: 'error', message: '502 Bad Gateway' }), { exit: 1 })).toMatchObject({ output: 'progress\n502 Bad Gateway', providerFailure: { kind: 'transient' } });
   });
 
   it('G09 returns only the last assistant message and never tool-only JSON', async () => {

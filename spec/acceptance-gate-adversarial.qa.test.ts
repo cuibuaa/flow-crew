@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +10,8 @@ import {
   type StageConfig,
 } from '../src/scheduler.js';
 import type { StageStatus } from '../src/store.js';
+
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
 const UUID = '33333333-3333-4333-8333-333333333333';
 let root: string;
@@ -43,7 +45,6 @@ function artifact(snapshot: ReturnType<typeof captureRepairRoundSnapshot>, write
     files: Array<{
       path: string;
       status: string;
-      preimageAvailable: boolean;
       before: { exists: boolean; sha256?: string; text?: string; symlink?: boolean; type?: string; mode?: string };
       after: { exists: boolean; sha256?: string; text?: string; symlink?: boolean; type?: string; mode?: string };
     }>;
@@ -76,32 +77,34 @@ describe('adversarial gate-continuation boundaries', () => {
 });
 
 describe('complete repair diff edge cases', () => {
-  it('records deletion of a declared-scope text file with its full preimage', () => {
+  it('records deletion of a declared-scope text file with its content identity', () => {
     const file = join(project, 'src', 'deleted.ts');
     writeFileSync(file, 'export const removed = true;\n');
     const before = captureRepairRoundSnapshot(project, [repair]);
     unlinkSync(file);
     const row = artifact(before).files.find((entry) => entry.path === 'src/deleted.ts');
-    expect(row).toMatchObject({ status: 'deleted', preimageAvailable: true, before: { exists: true }, after: { exists: false } });
-    expect(row?.before.text).toContain('removed = true');
+    expect(row).toMatchObject({ status: 'deleted', before: { exists: true }, after: { exists: false } });
+    expect(row?.before.sha256).toBe(sha256('export const removed = true;\n'));
+    expect(row?.before).not.toHaveProperty('text');
   });
 
-  it('flags an out-of-scope deletion without pretending its preimage content was captured', () => {
+  it('reports a deletion outside the estimate with the captured identity', () => {
     const file = join(project, 'docs', 'outside.md');
     writeFileSync(file, 'outside preimage\n');
     const before = captureRepairRoundSnapshot(project, [repair]);
     unlinkSync(file);
     const row = artifact(before, ['docs/outside.md']).files.find((entry) => entry.path === 'docs/outside.md');
-    expect(row).toMatchObject({ status: 'deleted', preimageAvailable: false, before: { exists: true }, after: { exists: false } });
+    expect(row).toMatchObject({ status: 'deleted', before: { exists: true }, after: { exists: false } });
     expect(row?.before.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(row?.before.text).toBeUndefined();
+    expect(row?.before.sha256).toBe(sha256('outside preimage\n'));
+    expect(row?.before).not.toHaveProperty('text');
   });
 
   it('keeps an unchanged but authoritatively reported path in the diff', () => {
     writeFileSync(join(project, 'src', 'reported.ts'), 'export const same = true;\n');
     const before = captureRepairRoundSnapshot(project, [repair]);
     const row = artifact(before, ['src/reported.ts']).files.find((entry) => entry.path === 'src/reported.ts');
-    expect(row).toMatchObject({ status: 'reported-touched', preimageAvailable: true });
+    expect(row).toMatchObject({ status: 'reported-touched' });
   });
 
   it('records a symlink target change without traversing the link', () => {
@@ -113,7 +116,7 @@ describe('complete repair diff edge cases', () => {
     unlinkSync(link);
     symlinkSync('two.txt', link);
     const row = artifact(before).files.find((entry) => entry.path === 'src/current.txt');
-    expect(row).toMatchObject({ status: 'modified', before: { symlink: true, text: 'one.txt' }, after: { symlink: true, text: 'two.txt' } });
+    expect(row).toMatchObject({ status: 'modified', before: { symlink: true, sha256: sha256('one.txt') }, after: { symlink: true, sha256: sha256('two.txt') } });
   });
 
   it('records an executable-mode-only change as a touched path', () => {

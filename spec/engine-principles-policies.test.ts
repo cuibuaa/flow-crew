@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,7 +10,8 @@ import { inspectDispatchAdmission, runWorkflow, StageConfigSchema, WorkflowConfi
 import { log } from '../src/scheduler/sched_admission/shared.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { readRunStateView } from '../src/run-state-view.js';
-import { createRun, fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 
 let root: string, project: string, previousStore: string;
@@ -85,8 +87,8 @@ describe('brief policy selection is explicit and does not replace core admission
       expect(parseBriefFrontmatter(brief(policies)).plannerPolicies).toEqual(policies);
       const stage = StageConfigSchema.parse({ id: 'work', role: 'coder', scope: [], depends_on: ['absent'], dependency_reasons: { absent: 'Needs absent output.' }, prompt_template: 'Work.' });
       const admission = inspectDispatchAdmission({ dispatched: [stage], baseStages: [], dispatchStageId: 'plan', requireArtifactContracts: true });
-      expect(admission.pass).toBe(false); expect(admission.errors.join(';')).toContain('ARTIFACT_DECLARATION_REQUIRED');
-      expect(admission.errors.join(';')).toContain('absent');
+      expect(admission.pass).toBe(false); expect(admission.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('ARTIFACT_DECLARATION_REQUIRED');
+      expect(admission.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('absent');
     }
   });
 

@@ -5,7 +5,8 @@ import { afterEach, beforeEach, expect, it } from 'vitest';
 import { stringify } from 'yaml';
 import { ArtifactContractSchema, inspectArtifactDeclarations } from '../src/artifact-declarations.js';
 import { normalizeStageContracts, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
-import { beginStageAttempt, completeStageAttempt, createRun, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState, writeStageStatus } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
@@ -45,7 +46,7 @@ it.each(['file', 'directory'] as const)('refuses an escaping %s output root befo
   expect(called).toBe(false);
 });
 
-it.each((['failed', 'incomplete', 'stopped'] as const).flatMap(status =>
+it.each((['failed', 'incomplete', 'cancelled'] as const).flatMap(status =>
   (['pending', 'skipped'] as const).map(successor => ({ status, successor }))))(
   'continues a $status run from failed stages with its admitted work and budget ($successor successor)', async ({ status, successor }) => {
     const roles = join(project, 'config/agents'); mkdirSync(roles, { recursive: true });
@@ -143,6 +144,7 @@ it.each(['current', 'legacy settlement', 'accepted gate', 'unrecorded round', 'e
   writeFileSync(join(created.runDirPath, contract.produces[0].path, 'result.txt'), 'Earlier repair build.\n');
   updateRunState(project, created.runId, state => {
     state.currentIteration = 2; state.maxIterations = 3; state.maxRetries = repairRound;
+    state.gateRetryRound = { iteration: 2, round: repairRound };
     recordAdmittedPlan(state, workflow.stages, created.runDirPath, 'Admitted repair fixture.');
   });
   for (const id of ['plan', 'review']) {

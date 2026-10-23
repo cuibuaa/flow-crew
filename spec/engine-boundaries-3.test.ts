@@ -1,3 +1,4 @@
+import { changedProjectPathsSinceSnapshot } from '../src/scheduler/sched_scope/snapshots.js';
 import { closeRepairRoundSnapshot } from './test-support/close-repair-snapshot.js';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -5,7 +6,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { buildRetryPreamble, captureRepairRoundSnapshot, changedProjectPathsSinceSnapshotCooperatively, parseDispatchedStageConfig, restoreProjectPath } from '../src/scheduler.js';
+import { buildRetryPreamble, captureRepairRoundSnapshot, parseDispatchedStageConfig } from '../src/scheduler.js';
+import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
 import { artifacts, inputFile, stageArtifacts } from './spec_contracts/declared-fixtures.js';
 
@@ -49,8 +51,8 @@ afterEach(() => {
   for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-describe('A — tracked Git preimages', () => {
-  it('captures an unfiltered clean tree by object identity and still restores changed bytes', async () => {
+describe('A — tracked Git identities and frozen preimages', () => {
+  it('captures an unfiltered clean tree by object identity and detects changed bytes', async () => {
     const project = root();
     const run = root();
     mkdirSync(join(project, 'data'), { recursive: true });
@@ -58,21 +60,19 @@ describe('A — tracked Git preimages', () => {
     git(project, ['init', '-q']);
     git(project, ['add', '.']);
     git(project, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
-    const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
+    const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
     try {
       expect(snapshot.measurement).toMatchObject({ scopedFilesVisited: 8, scopedFilesRead: 0, scopedFilesHashed: 0 });
-      const before = snapshot.allFileImages.get('data/0.bin')!;
+      const before = snapshot.rollbackBaseline.images.get('data/0.bin')!;
       expect(before.gitObjectId).toMatch(/^[a-f0-9]{40,64}$/);
       expect(before.bytes).toBeUndefined();
       const original = readFileSync(join(project, 'data/0.bin'));
       write(join(project, 'data/0.bin'), randomBytes(original.length));
-      expect(await changedProjectPathsSinceSnapshotCooperatively(snapshot, project)).toContain('data/0.bin');
-      expect(restoreProjectPath(project, 'data/0.bin', before)).toEqual({ restored: true });
-      expect(readFileSync(join(project, 'data/0.bin'))).toEqual(original);
+      expect(changedProjectPathsSinceSnapshot(snapshot, project)).toContain('data/0.bin');
     } finally { closeRepairRoundSnapshot(snapshot); }
   });
 
-  it('still materializes dirty and attribute-filtered preimages before rollback', () => {
+  it('restores dirty and attribute-filtered frozen worktree bytes at settlement', () => {
     const project = root();
     const run = root();
     write(join(project, '.gitattributes'), 'data/filtered.bin filter=copy\n');
@@ -83,23 +83,27 @@ describe('A — tracked Git preimages', () => {
     git(project, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     write(join(project, 'data/dirty.bin'), 'dirty-now');
     write(join(project, 'data/filtered.bin'), 'filtered-now');
-    const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
+    write(join(run, 'task_brief.md'), '---\ninputs: [{path: data/dirty.bin, frozen: true}, {path: data/filtered.bin, frozen: true}]\n---\n');
+    const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
     try {
-      const dirty = snapshot.allFileImages.get('data/dirty.bin')!;
-      const filtered = snapshot.files.get('data/filtered.bin')!;
+      const dirty = snapshot.rollbackBaseline.frozenImages.get('data/dirty.bin')!;
+      const filtered = snapshot.rollbackBaseline.frozenImages.get('data/filtered.bin')!;
       expect(dirty.sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(filtered.sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(filtered.gitObjectId).toBeUndefined();
       write(join(project, 'data/dirty.bin'), 'dirty-bad');
-      expect(restoreProjectPath(project, 'data/dirty.bin', dirty)).toEqual({ restored: true });
-      expect(readFileSync(join(project, 'data/dirty.bin'), 'utf8')).toBe('dirty-now');
       write(join(project, 'data/filtered.bin'), 'filtered-bad');
-      expect(restoreProjectPath(project, 'data/filtered.bin', filtered)).toEqual({ restored: true });
+      const paths = ['data/dirty.bin', 'data/filtered.bin'];
+      expect(settleProjectWrites({ projectDir: project, snapshot, rawWrites: paths, definiteWrites: new Set(paths) }))
+        .toMatchObject({ rolledBackWrites: paths, rollbackFailures: [], violations: paths.map(path => ({
+          path, certainty: 'definite', reason: 'task-frozen evidence content changed',
+        })) });
+      expect(readFileSync(join(project, 'data/dirty.bin'), 'utf8')).toBe('dirty-now');
       expect(readFileSync(join(project, 'data/filtered.bin'), 'utf8')).toBe('filtered-now');
     } finally { closeRepairRoundSnapshot(snapshot); }
   });
 
-  it('keeps local bytes hidden by assume-unchanged as the rollback preimage', () => {
+  it('restores frozen local bytes hidden by assume-unchanged at settlement', () => {
     const project = root();
     const run = root();
     write(join(project, 'data/local.txt'), 'committed\n');
@@ -108,12 +112,15 @@ describe('A — tracked Git preimages', () => {
     git(project, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     git(project, ['update-index', '--assume-unchanged', 'data/local.txt']);
     write(join(project, 'data/local.txt'), 'operator-local\n');
-    const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
+    write(join(run, 'task_brief.md'), '---\ninputs: [{path: data/local.txt, frozen: true}]\n---\n');
+    const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
     try {
-      const before = snapshot.files.get('data/local.txt')!;
+      const before = snapshot.rollbackBaseline.frozenImages.get('data/local.txt')!;
       expect(before.gitObjectId).toBeUndefined();
       write(join(project, 'data/local.txt'), 'stage-change\n');
-      expect(restoreProjectPath(project, 'data/local.txt', before)).toEqual({ restored: true });
+      expect(settleProjectWrites({ projectDir: project, snapshot, rawWrites: ['data/local.txt'], definiteWrites: new Set(['data/local.txt']) }))
+        .toMatchObject({ rolledBackWrites: ['data/local.txt'], rollbackFailures: [],
+          violations: [{ path: 'data/local.txt', certainty: 'definite', reason: 'task-frozen evidence content changed' }] });
       expect(readFileSync(join(project, 'data/local.txt'), 'utf8')).toBe('operator-local\n');
     } finally { closeRepairRoundSnapshot(snapshot); }
   });

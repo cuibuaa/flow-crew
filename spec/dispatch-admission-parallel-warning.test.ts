@@ -17,7 +17,7 @@ function stage(id: string, scope: string[], dependsOn: string[] = []): StageConf
     dependency_reasons: Object.fromEntries(dependsOn.map((dependency) => [dependency, `Consumes ${dependency}.`])),
     criterion_refs: [],
     prompt_template: 'work',
-    artifact_contract: { version: 1, produces: [], reads: [], replays: [] },
+    artifact_contract: { version: 1, produces: [], reads: [] },
   });
 }
 
@@ -30,7 +30,7 @@ function warningsFor(stages: StageConfig[]): string[] | undefined {
 }
 
 describe('parallel scope dispatch admission', () => {
-  it('A4 admits but warns for a runnable frontier whose scopes are not provably disjoint', () => {
+  it('A4 admits and warns for every shared-tree frontier', () => {
     const overlapping = inspectDispatchAdmission({
       dispatched: [
         stage('left', ['src/shared/**']),
@@ -49,7 +49,7 @@ describe('parallel scope dispatch admission', () => {
     expect(warningsFor([
       stage('left', ['src/left.ts']),
       stage('right', ['spec/right.ts']),
-    ])).toEqual([]);
+    ])).toHaveLength(1);
     expect(warningsFor([
       stage('left', ['src/shared/**']),
       stage('right', ['src/shared/file.ts'], ['left']),

@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -7,11 +8,11 @@ import { ClaudeAdapter } from '../src/adapters/claude.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { classifyAdapterFailure, isRetryableAdapterFailure } from '../src/adapters/failure.js';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
-import { LiveConstraintGuard, readLiveConstraintIncidents } from '../src/live-constraint-guard.js';
 import { WorkflowConfigSchema } from '../src/scheduler.js';
 import { executeReadyBatch } from '../src/scheduler/sched_loop/stage-batch.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
-import { createRun, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir } from '../src/store.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -37,7 +38,7 @@ beforeEach(() => {
   vi.stubEnv('CODEX_SKILLS_CACHE', join(root, 'skills'));
   vi.stubEnv('PATH', `${bin}:/usr/bin:/bin`);
   vi.stubEnv('FC_AUTH_FIXTURE_CALLS', callsPath);
-  setEngineDefaults({ timeout_ms: 5_000, stage_technical_retries: 2 });
+  setEngineDefaults({ default_timeout_ms: 5_000, stage_technical_retries: 2 });
   for (const provider of providers) writeFileSync(join(bin, provider), `#!${process.execPath}\n` + String.raw`
 const fs = require('node:fs'), path = require('node:path');
 process.stdin.resume();
@@ -95,7 +96,7 @@ describe('native authentication failures', () => {
 
   it('retains transport recovery when its diagnostic mentions authentication infrastructure', () => {
     const kind = classifyAdapterFailure('authentication service connection reset: ECONNRESET');
-    expect(kind).toBe('connection_reset');
+    expect(kind).toBe('transient');
     expect(isRetryableAdapterFailure(kind)).toBe(true);
   });
 
@@ -104,7 +105,7 @@ describe('native authentication failures', () => {
       artifactContract: fixtureArtifactContract('work') },
     () => adapter(provider).run('fixture', role, { workDir: project, runDir, stageId: 'work', timeout_ms: 5_000,
       resumeSessionId: uuid, sessionOwnerStageId: 'work', freshSessionPrompt: 'fresh fixture' }));
-    expect(result).toMatchObject({ exitCode: 1, adapterError: true, adapterFailureKind: 'authentication' });
+    expect(result).toMatchObject({ exitCode: 1, providerFailure: { kind: 'authentication' } });
     expect(result.invocations).toHaveLength(1);
     expect(calls()).toHaveLength(1);
     expect(calls()[0].argv).toContain(provider === 'claude' ? '--resume' : 'resume');
@@ -116,8 +117,8 @@ describe('native authentication failures', () => {
     const result = await withEngineIntegrity({ projectDir: project, runDir, stageId: 'work',
       artifactContract: fixtureArtifactContract('work') },
     () => adapter(provider).run('fixture', role, { workDir: project, runDir, stageId: 'work', timeout_ms: 5_000 }));
-    expect(result).toMatchObject({ exitCode: 1, adapterError: false });
-    expect(result.adapterFailureKind).toBeUndefined();
+    expect(result.exitCode).toBe(1);
+    expect(result.providerFailure).toBeUndefined();
     expect(result.output).toContain('Not logged in');
     expect(calls()).toHaveLength(1);
   });
@@ -128,38 +129,10 @@ describe('native authentication failures', () => {
     const result = await runStage(adapter(provider), {
       stageId: s.stageId, role, dependsOn: [], promptTemplate: 'fixture', artifactContract: fixtureArtifactContract(s.stageId),
       projectDir: project, runId: s.created.runId, runDir: s.created.runDirPath, retries: 0, timeout_ms: 5_000,
-      projectWriteScope: [], technicalRetry: { delaysMs: [0, 0, 0] },
+       technicalRetry: { delaysMs: [0, 0, 0] },
     });
-    expect(result).toMatchObject({ exitCode: 1, adapterError: true, adapterFailureKind: 'authentication' });
+    expect(result).toMatchObject({ exitCode: 1, providerFailure: { kind: 'authentication' } });
     expect(calls()).toHaveLength(2);
-    expect(readStageStatus(project, s.created.runId, s.stageId).attempts).toHaveLength(1);
-  });
-
-  it.each(providers)('%s retains authentication failure without replaying a restored scope incident', async provider => {
-    const s = scenario();
-    let incidentReported = false;
-    const result = await runStage(adapter(provider), {
-      stageId: s.stageId, role, dependsOn: [], promptTemplate: 'fixture', artifactContract: fixtureArtifactContract(s.stageId),
-      projectDir: project, runId: s.created.runId, runDir: s.created.runDirPath, retries: 0, timeout_ms: 5_000,
-      projectWriteScope: [], technicalRetry: { delaysMs: [0, 0, 0] },
-      liveConstraintGuardFactory: ({ attemptIndex }) => new LiveConstraintGuard({
-        projectDir: project, runDir: s.created.runDirPath, stageId: s.stageId, attemptIndex,
-        effectiveScope: () => [], watchProject: () => undefined,
-        scopeRevisionInstruction: () => 'correct the restored scope incident',
-        scanAndRestore: (_paths, trigger) => {
-          // Report the synthetic restored incident only after the real fixture CLI closes.
-          if (trigger !== 'phase_boundary' || incidentReported) return { scannedPaths: 0, violations: [] };
-          incidentReported = true;
-          return { scannedPaths: 1, violations: [{ path: 'protected.txt', reason: 'outside scope', restored: true }] };
-        },
-      }),
-    });
-    expect(result).toMatchObject({ exitCode: 1, adapterError: true, adapterFailureKind: 'authentication' });
-    expect(calls()).toHaveLength(1);
-    expect(result.invocations).toHaveLength(1);
-    expect(readLiveConstraintIncidents(s.created.runDirPath, s.stageId, 1)).toEqual([
-      expect.objectContaining({ path: 'protected.txt', restored: true, trigger: 'phase_boundary' }),
-    ]);
     expect(readStageStatus(project, s.created.runId, s.stageId).attempts).toHaveLength(1);
   });
 

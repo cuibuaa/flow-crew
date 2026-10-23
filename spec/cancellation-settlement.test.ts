@@ -5,9 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { assertContinuationCompatible } from '../src/engine-continuation.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
 import type { SupervisorBackend } from '../src/supervision.js';
+import { createRun } from './test-support/create-run.js';
 import {
-  beginStageAttempt, closeStageAttempt, completeStageAttempt, createRun, fcGlobalDir,
-  readRunState, readStageStatus, rependStageStatus, RUN_STATUS, setFcGlobalDir, STAGE_STATUS, updateRunState,
+  beginStageAttempt, closeStageAttempt, completeStageAttempt, fcGlobalDir,
+  readRunState, readStageStatus, writeStageStatus, rependStageStatus, RUN_STATUS, setFcGlobalDir, STAGE_STATUS, updateRunState,
 } from '../src/store.js';
 import { TASK_STATUS, TaskRegistry } from '../src/task-registry.js';
 
@@ -35,6 +36,20 @@ afterEach(() => {
 });
 
 describe('cancellation settles interrupted execution', () => {
+  it.each(['known', 'partial'] as const)('keeps sampled native usage as a lower bound when cancellation settles a %s attempt', async tokenUsage => {
+    const run = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['work']);
+    updateRunState(projectDir, run.runId, state => { state.status = RUN_STATUS.RUNNING; });
+    const status = beginStageAttempt(projectDir, run.runId, 'work', 0, startedAt);
+    const usage = { tokens_in: 20, tokens_out: 3, cost_usd: 0.02, tokenUsage, costUsage: tokenUsage };
+    writeStageStatus(projectDir, run.runId, 'work', { ...status, attempts: [{ ...status.attempts![0], ...usage }] });
+    const registry = new TaskRegistry({ baseDir: root });
+    const task = registry.create({ projectDir, run_id: run.runId, status: TASK_STATUS.RUNNING });
+    const result = await new RunCancellationCoordinator({ registry, units, now: () => new Date(completedAt), timeoutMs: 0, signalGraceMs: 0 }).cancelTask(task.id);
+    expect(result).toMatchObject({ ok: true });
+    expect(readStageStatus(projectDir, run.runId, 'work').attempts?.[0]).toMatchObject({ ...usage, tokenUsage: 'partial', costUsage: 'partial', exitCode: 143, status: 'failed' });
+    expect(readRunState(projectDir, run.runId).stages.work).toMatchObject({ tokens_in: 20, tokens_out: 3, cost_usd: 0.02, costUsage: 'partial' });
+  });
+
   it.each(['running', 'closed', 'timeout-retry'] as const)('publishes terminal matching ledgers for %s work and preserves completed stages', async phase => {
     const run = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['done', 'work', 'later']);
     updateRunState(projectDir, run.runId, state => { state.status = RUN_STATUS.RUNNING; });
@@ -58,7 +73,7 @@ describe('cancellation settles interrupted execution', () => {
     expect(result).toMatchObject({ ok: true, status: 'cancelled' });
     const state = readRunState(projectDir, run.runId);
     const work = readStageStatus(projectDir, run.runId, 'work');
-    expect(state).toMatchObject({ status: RUN_STATUS.STOPPED, failureReason: 'Cancelled by user', completedAt });
+    expect(state).toMatchObject({ status: RUN_STATUS.CANCELLED, failureReason: 'Cancelled by user', completedAt });
     expect(work).toEqual(state.stages.work);
     expect(work).toMatchObject({ status: STAGE_STATUS.FAILED, retries: phase === 'timeout-retry' ? 1 : 0 });
     expect(work.attempts?.at(-1)).toMatchObject({ status: 'failed', exitCode: 143, error: 'CANCELLED_INTERRUPTED: Cancelled by user' });
@@ -132,7 +147,7 @@ describe('cancellation preserves ledger evidence', () => {
 
     expect(result).toMatchObject({ ok: true, status: 'cancelled' });
     const state = readRunState(projectDir, run.runId);
-    expect(state.status).toBe(RUN_STATUS.STOPPED);
+    expect(state.status).toBe(RUN_STATUS.CANCELLED);
     expect(state.stages.work.attempts!.at(-1)).toMatchObject(kind === 'status disagreement'
       ? { status: 'complete', exitCode: 0 } : { status: 'failed', exitCode: 143 });
     expect(existsSync(ledgerPath) ? readFileSync(ledgerPath, 'utf8') : undefined).toBe(before);

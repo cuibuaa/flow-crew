@@ -1,3 +1,4 @@
+import { inspectRunScheduler } from './run-lock.js';
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stageLiveLogPath } from './stage-live-log.js';
@@ -9,6 +10,7 @@ import {
   runsRoot as globalRunsRoot,
   STAGE_STATUS,
 } from './store.js';
+import { type ContentIdentity } from './content-identity.js';
 import { terminalArtifactStatusMismatch } from './terminal-artifact-status.js';
 import { listOperationalRunIdsFromIndex } from './run-index.js';
 import {
@@ -37,10 +39,9 @@ export interface WatchPollDependencies {
   /** Active/unknown candidates from the run index; null selects legacy root scan. */
   candidateRunIds?: (path: string) => readonly string[] | null;
   readText?: (path: string) => string;
-  isProcessAlive?: (pid: number) => boolean;
-  artifactMtimeMs?: (path: string) => number | undefined;
+  isProcessAlive?: (pid: number, runId: string, runPath: string) => boolean;
+  artifactIdentity?: (path: string) => ContentIdentity;
   readPathMetadata?: (path: string) => WatchPathMetadata | undefined;
-  readDriftProjection?: (runDirectory: string, state: Record<string, unknown>) => RunDriftProjection;
   nowMs?: () => number;
 }
 
@@ -152,10 +153,9 @@ interface ResolvedWatchPollDependencies {
   readDirectory: (path: string) => readonly string[];
   candidateRunIds: (path: string) => readonly string[] | null;
   readText: (path: string) => string;
-  isProcessAlive: (pid: number) => boolean;
-  artifactMtimeMs?: (path: string) => number | undefined;
+  isProcessAlive: (pid: number, runId: string, runPath: string) => boolean;
+  artifactIdentity?: (path: string) => ContentIdentity;
   readPathMetadata: (path: string) => WatchPathMetadata | undefined;
-  readDriftProjection: (runDirectory: string, state: Record<string, unknown>) => RunDriftProjection;
   nowMs: () => number;
 }
 
@@ -194,10 +194,7 @@ const QUIESCENT_STAGE_STATUSES = new Set<string>([
 ]);
 const TOP_LEVEL_ACTIVITY_FILES = [
   'events.jsonl',
-  'progress.md',
   'stage_watchdog.json',
-  'supervisor_log.md',
-  'supervisor_state.json',
 ] as const;
 
 /** The primary lag maximum (513.037s), rounded up to twelve 45-second polls. */
@@ -205,15 +202,6 @@ export const WATCH_TERMINAL_GRACE_MS = 540_000;
 
 export function createWatchState(): WatchState {
   return { initialized: false, activeConditionIds: new Set<string>(), driftRows: {} };
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException)?.code === 'EPERM';
-  }
 }
 
 function pathMetadata(path: string): WatchPathMetadata | undefined {
@@ -244,11 +232,13 @@ function resolveDependencies(overrides: WatchPollDependencies): ResolvedWatchPol
         ? (() => null)
         : (() => listOperationalRunIdsFromIndex(''))),
     readText: overrides.readText ?? ((path) => readFileSync(path, 'utf-8')),
-    isProcessAlive: overrides.isProcessAlive ?? processIsAlive,
-    artifactMtimeMs: overrides.artifactMtimeMs,
+    isProcessAlive: overrides.isProcessAlive ?? ((_pid, runId, runPath) => {
+      const owner = inspectRunScheduler(runId, runPath);
+      if (owner.kind === 'corrupt' || owner.kind === 'unverifiable') throw new Error(owner.detail);
+      return owner.kind === 'live';
+    }),
+    artifactIdentity: overrides.artifactIdentity,
     readPathMetadata: overrides.readPathMetadata ?? pathMetadata,
-    readDriftProjection: overrides.readDriftProjection
-      ?? ((runDirectory, state) => readRunDriftProjection(runDirectory, { state })),
     nowMs: overrides.nowMs ?? Date.now,
   };
 }
@@ -309,27 +299,6 @@ function readDirectory(
   }
 }
 
-function parseLegacyVerdictMetric(verdict: JsonObject): GateMetricEvidence | undefined {
-  const score = typeof verdict.score === 'number' && Number.isFinite(verdict.score)
-    ? verdict.score
-    : typeof verdict.value === 'number' && Number.isFinite(verdict.value)
-      ? verdict.value
-      : undefined;
-  if (typeof verdict.metric !== 'string'
-    || verdict.metric.trim().length === 0
-    || score === undefined) return undefined;
-  return {
-    metric: verdict.metric,
-    score,
-    ...(typeof verdict.threshold === 'number' && Number.isFinite(verdict.threshold)
-      ? { threshold: verdict.threshold }
-      : {}),
-    ...(typeof verdict.higherIsBetter === 'boolean'
-      ? { higherIsBetter: verdict.higherIsBetter }
-      : {}),
-  };
-}
-
 function parseMetricArtifact(metric: JsonObject): GateMetricEvidence | undefined {
   if (metric.hasMetric !== true) return undefined;
   const score = typeof metric.value === 'number' && Number.isFinite(metric.value)
@@ -372,8 +341,7 @@ function readVerdict(
     diagnostics.invalidVerdicts += 1;
     return record;
   }
-  const legacyMetric = parseLegacyVerdictMetric(verdict);
-  if (verdict.pass === true || (typeof verdict.pass !== 'boolean' && !legacyMetric)) {
+  if (verdict.pass !== false) {
     diagnostics.invalidVerdicts += 1;
     return record;
   }
@@ -383,7 +351,7 @@ function readVerdict(
     rawMetric = parseObject(deps.readText(join(roundDir, `metric_${gateId}.json`)));
   } catch (error) {
     if (isMissingPathError(error)) {
-      return legacyMetric ? { ...record, metric: legacyMetric } : record;
+      return record;
     }
     diagnostics.invalidVerdicts += 1;
     return record;
@@ -453,47 +421,27 @@ function collectGateVerdicts(
     .sort((a, b) => a.iteration - b.iteration);
 
   const records: GateVerdictRecord[] = [];
-  if (iterations.length > 0) {
-    // Once the canonical iteration namespace exists, legacy round-only evidence is
-    // stale by repository convention and must not be mixed into a judgement.
-    for (const { name, iteration } of iterations) {
-      const iterationDir = join(archiveRoot, name);
-      const entries = readDirectory(iterationDir, deps, diagnostics);
-      if (!entries) continue;
-      const rounds = entries
-        .map((entry) => ({ entry, match: safeEntryName(entry) ? ROUND_DIRECTORY.exec(entry) : null }))
-        .filter((item): item is { entry: string; match: RegExpExecArray } => item.match !== null)
-        .map(({ entry, match }) => ({ entry, round: Number(match[1]) }))
-        .filter(({ round }) => Number.isSafeInteger(round) && round > 0)
-        .sort((a, b) => a.round - b.round);
-      for (const { entry, round } of rounds) {
-        records.push(...verdictsInRound(
-          iteration,
-          round,
-          join(iterationDir, entry),
-          deps,
-          diagnostics,
-        ));
-      }
+  for (const { name, iteration } of iterations) {
+    const iterationDir = join(archiveRoot, name);
+    const entries = readDirectory(iterationDir, deps, diagnostics);
+    if (!entries) continue;
+    const rounds = entries
+      .map((entry) => ({ entry, match: safeEntryName(entry) ? ROUND_DIRECTORY.exec(entry) : null }))
+      .filter((item): item is { entry: string; match: RegExpExecArray } => item.match !== null)
+      .map(({ entry, match }) => ({ entry, round: Number(match[1]) }))
+      .filter(({ round }) => Number.isSafeInteger(round) && round > 0)
+      .sort((a, b) => a.round - b.round);
+    for (const { entry, round } of rounds) {
+      records.push(...verdictsInRound(
+        iteration,
+        round,
+        join(iterationDir, entry),
+        deps,
+        diagnostics,
+      ));
     }
-    return records;
   }
 
-  const legacyRounds = topLevel
-    .map((entry) => ({ entry, match: safeEntryName(entry) ? ROUND_DIRECTORY.exec(entry) : null }))
-    .filter((item): item is { entry: string; match: RegExpExecArray } => item.match !== null)
-    .map(({ entry, match }) => ({ entry, round: Number(match[1]) }))
-    .filter(({ round }) => Number.isSafeInteger(round) && round > 0)
-    .sort((a, b) => a.round - b.round);
-  for (const { entry, round } of legacyRounds) {
-    records.push(...verdictsInRound(
-      0,
-      round,
-      join(archiveRoot, entry),
-      deps,
-      diagnostics,
-    ));
-  }
   return records;
 }
 
@@ -802,7 +750,7 @@ export function pollWatch(
     stats.readableRuns += 1;
     const mismatch = terminalArtifactStatusMismatch(state, {
       runDir,
-      artifactMtimeMs: deps.artifactMtimeMs,
+      artifactIdentity: deps.artifactIdentity,
     });
     if (mismatch) {
       const alert: WatchTerminalStatusAlert = {
@@ -836,7 +784,7 @@ export function pollWatch(
     }
     let live: boolean;
     try {
-      live = deps.isProcessAlive(pid);
+      live = deps.isProcessAlive(pid, runId, runDir);
     } catch {
       livenessGaps += 1;
       unjudgeableRunIds.add(runId);
@@ -847,7 +795,7 @@ export function pollWatch(
 
     let driftProjection: RunDriftProjection;
     try {
-      driftProjection = deps.readDriftProjection(runDir, state);
+      driftProjection = readRunDriftProjection(runDir, { state });
     } catch {
       // A view failure is evidence unavailability, never permission to infer
       // zeros or to stop the existing watch judgements.

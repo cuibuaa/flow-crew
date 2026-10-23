@@ -4,16 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEngineIntegrity } from '../src/engine-integrity.js';
 import { RollbackContentStore, hashRollbackFileSync } from '../src/rollback-content-store.js';
-import { createRun, fcGlobalDir, setFcGlobalDir } from '../src/store.js';
-import { clearAttemptSummaryRefreshDebounce } from '../src/run-events.js';
-import { inspectBriefOutputs, nodeShipInputFileSystem, verifyDeclaredBriefInputs } from '../src/ship-inputs.js';
+import { createRun } from './test-support/create-run.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+
+import { inspectBriefOutputs, nodeShipInputFileSystem } from '../src/ship-inputs.js';
 import { restoreProjectPath } from '../src/scheduler/sched_scope/restore.js';
-import { archiveDeclaredOutputs, isPathSafelyArchived } from '../src/declared-output-archive.js';
+import { createArchivedPathVerifier, archiveDeclaredOutputs } from '../src/declared-output-archive.js';
 
 let root: string | undefined;
 const previous = fcGlobalDir();
 afterEach(() => {
-  clearAttemptSummaryRefreshDebounce();
   setFcGlobalDir(previous);
   if (root) rmSync(root, { recursive: true, force: true });
 });
@@ -52,12 +52,10 @@ it('excludes sparse multi-GiB rollback payloads from engine scans and verifies t
   expect(restored).toMatchObject({ restored: false, failure: expect.stringContaining('staged preimage verification failed') });
   expect(hashRollbackFileSync(absolute).sha256).toBe(captured.sha256);
 
-  const brief = `---\ninputs:\n  - path: ${path}\n    sha256: ${captured.sha256}\noutputs:\n  - path: ${path}\n    on_existing: update\n---\n`;
+  const brief = `---\noutputs:\n  - path: ${path}\n    on_existing: update\n---\n`;
   expect(inspectBriefOutputs(brief, project).entries[0].sha256).toBe(captured.sha256);
-  const verified = verifyDeclaredBriefInputs(brief, project);
-  expect(verified.inputs[0].assertions).toMatchObject([{ kind: 'sha256', state: 'confirmed', observed: captured.sha256 }]);
   const declaration = { path, expectedType: 'file' as const, disposition: 'update' as const, source: 'outputs' as const, line: 2 };
   const manifest = archiveDeclaredOutputs(project, run, [declaration]);
   expect(manifest.outputs[0]).toMatchObject({ members: [{ bytes: size, sha256: captured.sha256 }] });
-  expect(isPathSafelyArchived(project, run, path, nodeShipInputFileSystem)).toBe(true);
+  expect(createArchivedPathVerifier(project, run, nodeShipInputFileSystem)(path)).toBe(true);
 });

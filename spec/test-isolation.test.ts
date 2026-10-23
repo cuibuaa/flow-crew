@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { EventEmitter } from 'node:events';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -121,10 +122,9 @@ describe('root-suite file isolation', () => {
     expectInside(fcGlobalDir(), explicitRoot);
   });
 
-  it('keeps an inherited daemon socket inside the disposable test root', () => {
-    const root = process.env.FLOWCREW_VITEST_ROOT!;
-    const socket = process.env.FLOWCREW_DAEMON_SOCKET!;
-    expectInside(socket, root);
+  it('uses the disposable FC root for the default daemon socket', () => {
+    const socket = join(fcGlobalDir(), 'daemon.sock');
+    expectInside(socket, explicitRoot);
     expect(existsSync(socket)).toBe(false);
   });
 

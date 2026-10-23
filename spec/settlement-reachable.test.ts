@@ -1,3 +1,4 @@
+import './test-support/policy-runtime.js';
 import { createHash } from 'node:crypto';
 import { emptyArtifactContract, gateArtifactContract } from './spec_presentation/declared-fixtures.js';
 import {
@@ -265,10 +266,10 @@ describe('criterion discharge boundary', () => {
     };
     const before = inspectDispatchAdmission(input);
     expect(before.pass).toBe(false);
-    expect(before.errors.join('\n')).toContain('not assigned to a work stage or gate');
+    expect(before.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('not assigned to a work stage or gate');
 
     const after = inspectDispatchAdmission({ ...input, criterionDischarges: [discharge] });
-    expect(after.pass, after.errors.join('\n')).toBe(true);
+    expect(after.pass, after.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toBe(true);
     expect(after.dischargedCriteria).toEqual([discharge]);
 
     const changedBrief = inspectDispatchAdmission({

@@ -2,7 +2,6 @@
 import { APPROVAL_REQUEST_FILE } from '../../approval-artifacts.js';
 import { join } from 'node:path';
 import { type StageConfig } from '../sched_admission/configuration.js';
-import { scopeRevisionContract } from '../../live-constraint-guard.js';
 import { type ResearchConfig, type TerminalStatesConfig, type StoreState } from '../../store.js';
 import { resolveResearchPaths } from '../../research-paths.js';
 import type { AgentConfig } from '../../adapters/base.js';
@@ -16,7 +15,7 @@ and evidence. Pass only when all meet their acceptance lines. Disclose missing o
 never invent a threshold or waive a supplied one. Examples do not exclude equivalent property evidence
 unless the criterion explicitly requires that means. A wording/property conflict identifies its originating
 sentence; a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it. Reviewers say briefly in their reason what they did not examine and why.
-Independent reviewers must not durably modify the reviewed target or authoritative inputs (the engine guards reviewer writes, so this needs no reviewer proof); isolated temporary probes and declared evidence generation are allowed within admitted capabilities. Target repairs belong to an author.
+Independent reviewers must not durably modify the reviewed target or authoritative inputs; isolated temporary probes and declared evidence generation are allowed within admitted capabilities. Target repairs belong to an author.
 
 ## Run-directory safety
 Never write, move, delete, or otherwise modify any run directory other than this task's own run directory. This prohibition is absolute; read authorization never grants mutation authority.
@@ -35,23 +34,10 @@ export function appendApprovalRequestContract(prompt: string, runDirPath: string
     + `Each stage has its own slot. Non-external requests receive a deterministic decision without parking; an existing scratch acknowledgement grants no external effects. Read approvals/<id>.decision.json before continuing a requested action.`;
 }
 
-export function appendScopeRevisionContract(
-  prompt: string,
-  runDirPath: string,
-  runId: string,
-  stage: StageConfig,
-): string {
-  const declaredScope = stage.scope ?? [];
-  const scopePresence = stage.scope === undefined ? 'missing' : 'present';
-  return `${prompt}\n\n${scopeRevisionContract({
-    runDir: runDirPath,
-    runId,
-    stageId: stage.id,
-    attemptIndex: '<current execution index>',
-    scope: declaredScope,
-    scopePresence,
-    gate: stage.is_gate === true,
-  })}`;
+export function appendProjectWriteContext(prompt: string, stage: StageConfig): string {
+  return `${prompt}\n\nPlanner project-path estimate: ${JSON.stringify(stage.scope ?? [])}. This estimate informs scheduling and reporting; required project work may use other paths. `
+    + 'Preserve evidence that the task explicitly declares frozen. Input locators alone do not freeze source trees. '
+    + 'Each invocation has private scratch at $TMPDIR (also $TMP and $TEMP). Use mktemp -d "$TMPDIR/probe-XXXXXX" for disposable probes; check creation succeeded before copying.';
 }
 
 export function appendResearchPathContract(
@@ -86,7 +72,7 @@ export function appendPlannerAdmissionContract(
     ? terminalPaths.map(({ status, path }) => `- ${status}: ${path} — one final ordinary producer; ordered writers and repairs may share its scope`).join('\n')
     : '- none declared';
   return `${prompt}\n\n# Engine admission contract for this proposal (pre-submit)\n${rows}\n`
-    + `Give each author that builds a private run directory output at stages/<stage-id>/build in artifact_contract.produces. Configure compiler output and caches there; project scope covers its source edits. Settled workspaces are compacted: put durable handoffs/logs/evidence in named directories, explicitly declare final products below the workspace root, and cite evidence paths in the result. Shared build destinations still conflict and serialize. `
+    + `Put compiler output and caches in $TMPDIR; project scope covers source edits. Scratch is retired at run termination. Declare durable run products in artifact_contract.produces, copy final products and evidence from scratch to those paths before finishing, and cite them in the result. `
     + `Paths under an external run store (for example .fc/runs/) are not project outputs and cannot be made reachable by declaring project scope.`;
 }
 
@@ -112,8 +98,7 @@ export function appendGateConstraintAuditContext(
       if (!attempt.constraintAudit) return [];
       const summary = attempt.constraintAudit;
       return [`- ${id} attempt ${attempt.index}: ${join(runDirPath, summary.path)} `
-        + `(accepted=${summary.acceptedRevisionCount}, rejected=${summary.rejectedRevisionCount}, `
-        + `mismatch=${summary.mismatchCount}, violations=${summary.violationCount}, unverified=${summary.unverifiedCount})`];
+        + `(violations=${summary.violationCount}, unverified=${summary.unverifiedCount})`];
     });
   });
   if (rows.length === 0) return prompt;

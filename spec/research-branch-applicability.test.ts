@@ -18,7 +18,7 @@ function fixture(transitive = false) {
   roots.push(projectDir);
   const stage = (id: string, extra: Record<string, unknown> = {}): StageConfig => StageConfigSchema.parse({
     id, role: 'worker', prompt_template: 'Branch settlement contract.', scope: [], depends_on: [],
-    artifact_contract: { version: 1, produces: [], reads: [], replays: [], groups: [] },
+    artifact_contract: { version: 1, produces: [], reads: [], groups: [] },
     ...extra,
   });
   const stages = [

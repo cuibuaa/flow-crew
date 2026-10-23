@@ -34,7 +34,6 @@ export function prospectivePhysicalPath(path: string, fs: {
 }
 
 export const RUN_INDEX_FILENAME = 'run-index.sqlite';
-export const RESOURCE_LEASE_REGISTRY_FILENAME = 'resource-leases.v1.sqlite';
 const registeredSqlitePaths = new Set<string>();
 
 /** Trusted native providers enroll custom databases before publication. This
@@ -44,8 +43,7 @@ export function registerEngineOwnedSqlitePath(path: string): void {
 }
 
 export function engineOwnedDatabasePaths(storeRoot: string): string[] {
-  const paths = new Set([join(resolve(storeRoot), RUN_INDEX_FILENAME),
-    join(resolve(storeRoot), RESOURCE_LEASE_REGISTRY_FILENAME), ...registeredSqlitePaths]);
+  const paths = new Set([join(resolve(storeRoot), RUN_INDEX_FILENAME), ...registeredSqlitePaths]);
   // Keep both SQLite's supplied spelling and its physical name. This also
   // reserves a future target reached through a dangling link or missing parent.
   for (const path of paths) paths.add(prospectivePhysicalPath(path));
@@ -98,16 +96,16 @@ export function engineOwnedGlobalCarriers(storeRoot: string): string[] {
 export function isEngineOwnedRunPath(path: string, stage: { id: string; is_gate?: boolean; dynamic_dispatch?: boolean }): boolean {
   if (path === 'scratch' || path === 'scratch/.tmpdir') return true;
   if (!path || /^run-history(?:[./]|$)/.test(path) || /^(?:\.run-reservation\.json|\.run-state\.lock)(?:\/|$)/.test(path)) return true;
-  if (/^(?:run\.json|events\.jsonl|workflow\.yaml|task_brief\.md|brief_criteria\.json|validation_baseline\.json|validation_delta_[^/]+\.json|dispatch_admission\.json|run_history\.jsonl|plan_history|audit_findings|signals|resource_leases|stage_watchdog\.json|supervisor_state\.json|supervisor_usage\.json)(?:\/|$)/.test(path)) return true;
+  if (/^(?:run\.json|events\.jsonl|workflow\.yaml|task_brief\.md|brief_criteria\.json|validation_baseline\.json|validation_delta_[^/]+\.json|dispatch_admission\.json|plan_history|audit_findings|signals|stage_watchdog\.json)(?:\/|$)/.test(path)) return true;
   if (/^(?:stage_evidence|gate_reevaluation|dispatch_rejections|plan_retry|declared_outputs|terminal_snapshots|guidance_history|supervisor_rejections|discarded|approvals|\.rollback-preimages)(?:\/|$)/.test(path)
-    || /^(?:iteration_log\.md|run_event_status\.json|attempt_summary_refresh\.json|criterion_discharges\.json|supervisor_guidance\.md|scheduler\.pid|scheduler\.identity\.json|scheduler-heartbeat\.json|scheduler-loop-stall\.json|\.reality-gate\.json|\.reality-gate\.failures\.md|approvals\.jsonl|user_input\.md|blockage_ledger\.json|repeated_blockage\.json|plan_retry_state\.json|rollback_change_journal\.jsonl|gate_contract\.json|supervisor_log\.md|summary\.md|progress\.md|verdict\.json)(?:\/|$)/.test(path)) return true;
-  if (/^(?:research_round_input_error\.json|research_round_contract_repair\.json|research_integrity_rejections\.json|research_terminal_ready\.json|research_continue\.json|research_gate_exhausted\.json|goal_met\.json|repair_diff\.json|campaign_revision_request\.jsonl|post_terminate_hook\.log)(?:\/|$)/.test(path)) return true;
+    || /^(?:iteration_log\.md|run_event_status\.json|supervisor_guidance\.md|scheduler\.pid|scheduler\.identity\.json|scheduler-heartbeat\.json|scheduler-loop-stall\.json|\.reality-gate\.json|\.reality-gate\.failures\.md|approvals\.jsonl|user_input\.md|blockage_ledger\.json|repeated_blockage\.json|plan_retry_state\.json|gate_contract\.json|summary\.md|verdict\.json)(?:\/|$)/.test(path)) return true;
+  if (/^(?:research_round_input_error\.json|research_round_contract_repair\.json|research_integrity_rejections\.json|research_terminal_ready\.json|research_continue\.json|research_gate_exhausted\.json|goal_met\.json|repair_diff\.json|post_terminate_hook\.log)(?:\/|$)/.test(path)) return true;
   if (/^stages(?:\/|$)/.test(path)) {
     // Stage namespaces carry both engine records and authored outputs. Guard
     // their directory identities and the same record slots for every stage;
     // switching stages cannot turn a private build into engine state.
     if (/^stages(?:\/[^/]+)?$/.test(path)) return true;
-    if (/^stages\/[^/]+\/(?:status\.json|input\.md|output_schema\.json|invocations|attempt_generation\.json|(?:plan_revision|scope_revision)_decision_[^/]+\.json|approval_resolution\.json|attempt_deadline_[^/]+\.jsonl|constraint_audit_attempt_\d+\.json|command_activity\.json|session\.json|artifact_contract\.json|guidance_consumed\.md|guidance\.md|live(?:_attempt_\d+_[a-f0-9]{24})?\.log|trace\.jsonl)(?:\/|$)/.test(path)) return true;
+    if (/^stages\/[^/]+\/(?:status\.json|output_schema\.json|invocations|attempt_generation\.json|plan_revision_decision_[^/]+\.json|constraint_audit_attempt_\d+\.json|command_activity\.json|session\.json|artifact_contract\.json|guidance_consumed\.md|guidance\.md|live(?:_attempt_\d+_[a-f0-9]{24})?\.log)(?:\/|$)/.test(path)) return true;
   }
   return (/^dispatch\.yaml(?:\/|$)/.test(path) && !(stage.dynamic_dispatch && path === 'dispatch.yaml'))
     || (/^verdict_[^/]+\.json(?:\/|$)/.test(path) && !(stage.is_gate && path === `verdict_${stage.id}.json`))

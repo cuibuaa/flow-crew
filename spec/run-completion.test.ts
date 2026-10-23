@@ -1,3 +1,5 @@
+import './test-support/policy-runtime.js';
+import { createRun } from './test-support/create-run.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -9,7 +11,7 @@ import { createResearchBudgetFinalizer } from '../src/scheduler/sched_loop/resea
 import { beginResearchInputGeneration, captureResearchGateCandidate, readResearchGateCandidate } from '../src/research-candidate.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
 import { log } from '../src/scheduler/sched_admission/shared.js';
-import { publishRunCompletion, settleTerminalResearchCandidates } from '../src/scheduler/sched_policy/run-completion.js';
+import { concludeRun, settleTerminalResearchCandidates } from '../src/scheduler/sched_policy/run-completion.js';
 import * as store from '../src/store.js';
 
 let root: string, project: string, directory: string, runId: string, previousStore: string;
@@ -19,13 +21,13 @@ beforeEach(() => {
   mkdirSync(project);
   previousStore = store.fcGlobalDir();
   store.setFcGlobalDir(join(root, 'store'));
-  const run = store.createRun(project, 'completion', 'name: completion\nstages: []\n', []);
+  const run = createRun(project, 'completion', 'name: completion\nstages: []\n', []);
   runId = run.runId;
   directory = run.runDirPath;
   const state = store.readRunState(project, runId);
   state.status = 'running';
   state.startedAt = new Date(0).toISOString();
-  state.research = { baseline: 0, policy: 'best_of_n', resultFile: 'round.json' };
+  state.research = { baseline: 0, policy: 'greedy_stack', resultFile: 'round.json' };
   beginResearchInputGeneration(project, state);
   store.writeRunState(project, runId, state);
   writeFileSync(join(project, 'round.json'), JSON.stringify({ label: 'pending-measurement', result: 0.2 }));
@@ -36,8 +38,8 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-it.each(['complete', 'failed', 'incomplete', 'ceiling_hit', 'escalated', 'stopped'] as const)(
-  'settles research evidence before publishing %s state, campaign and completion event', status => {
+it.each(['complete', 'failed', 'incomplete', 'ceiling_hit', 'escalated', 'cancelled'] as const)(
+  'settles research evidence before publishing %s state, campaign and completion event', async status => {
     const state = store.readRunState(project, runId);
     state.status = status;
     state.completedAt = new Date().toISOString();
@@ -48,11 +50,11 @@ it.each(['complete', 'failed', 'incomplete', 'ceiling_hit', 'escalated', 'stoppe
       observed.push('state');
       return write(...args);
     });
-    publishRunCompletion(state, project, runId, () => ({ detail: status }), () => {
+    await concludeRun(state, { status, reasonCode: 'workflow_complete', eventFields: () => ({ detail: status }), writeCampaignEntry: () => {
       expect(readResearchGateCandidate(directory, 'review')?.settlement?.disposition).toBe('rejected');
       expect(readRunEvents(project, runId).filter(event => ['research_gate_candidate_settled', 'run_completed'].includes(event.type)).map(event => event.type)).toEqual(['research_gate_candidate_settled']);
       observed.push('campaign');
-    });
+    } });
     expect(observed).toEqual(['state', 'campaign']);
     expect(store.readRunState(project, runId).status).toBe(status);
     expect(readRunEvents(project, runId).filter(event => ['research_gate_candidate_settled', 'run_completed'].includes(event.type)).map(event => event.type)).toEqual([
@@ -69,7 +71,7 @@ it('records corrupt-candidate cleanup errors and still publishes the original te
   state.failureReason = 'Original scheduler failure';
   state.completedAt = new Date().toISOString();
   const campaign = vi.fn();
-  expect(() => publishRunCompletion(state, project, runId, () => ({ detail: state.failureReason }), campaign)).not.toThrow();
+  expect(() => concludeRun(state, { status: 'failed', reasonCode: 'scheduler_failed', detail: state.failureReason, eventFields: () => ({ detail: state.failureReason }), writeCampaignEntry: campaign })).not.toThrow();
   expect(error).toHaveBeenCalledWith({ err: expect.any(SyntaxError), runId }, 'Failed to settle pending research gate candidates');
   expect(campaign).toHaveBeenCalledWith(project, state);
   expect(store.readRunState(project, runId)).toMatchObject({ status: 'failed', failureReason: 'Original scheduler failure' });
@@ -85,7 +87,7 @@ it('does not retry a transient cleanup failure after completion, including with 
   state.status = 'failed';
   state.failureReason = 'Original scheduler failure';
   state.completedAt = new Date().toISOString();
-  publishRunCompletion(state, project, runId, () => ({ detail: state.failureReason }));
+  concludeRun(state, { status: 'failed', reasonCode: 'scheduler_failed', detail: state.failureReason, eventFields: () => ({ detail: state.failureReason }) });
   expect(error).toHaveBeenCalledTimes(1);
   rmSync(corrupt);
   settleTerminalResearchCandidates(project, store.readRunState(project, runId));
@@ -101,7 +103,7 @@ it('settles a later terminal outcome despite a prior completion event', () => {
   const state = store.readRunState(project, runId);
   state.status = 'failed';
   state.completedAt = new Date(1).toISOString();
-  publishRunCompletion(state, project, runId, () => ({ detail: 'New outcome' }));
+  concludeRun(state, { status: 'failed', reasonCode: 'scheduler_failed', eventFields: () => ({ detail: 'New outcome' }) });
   expect(readResearchGateCandidate(directory, 'review')?.settlement?.disposition).toBe('rejected');
   expect(readRunEvents(project, runId).filter(event => ['research_gate_candidate_settled', 'run_completed'].includes(event.type)).map(event => event.type))
     .toEqual(['run_completed', 'research_gate_candidate_settled', 'run_completed']);
@@ -123,7 +125,7 @@ it.each(['stage-failure', 'iteration-safety-net', 'research-budget'] as const)(
         workflow, adapter, new Map(), '', new Map());
     } else {
       await finalizer(state, 1, 'Synthetic budget exhausted', {
-        stages: [], injectedDispatchStages: new Set(), planStageRetries: new Map(),
+        stages: [], injectedDispatchStages: new Set(),
       });
     }
     expect(readResearchGateCandidate(directory, 'review')?.settlement?.disposition).toBe('rejected');

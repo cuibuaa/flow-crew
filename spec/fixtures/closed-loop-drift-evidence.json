@@ -11,7 +11,6 @@
     "doseMinutes": [1.19595173424691, 2.1428210997008135, 2.1175898313695143],
     "doseFloorMinutes": 20,
     "firstPlan": {"attemptIndex": 1, "admitted": false, "laterAdmittedAttemptIndex": 2},
-    "supervisorRejections": {"total": 2, "maxPerStage": 1, "laterOverturned": 2, "budgetPerStage": 2},
     "overhead": [
       {"stageId": "plan", "attemptIndex": 1, "startedAt": "2026-09-03T17:09:33.456Z", "completedAt": "2026-09-03T17:13:57.577Z", "adapterMs": 222869, "overheadMs": 41252},
       {"stageId": "plan", "attemptIndex": 2, "startedAt": "2026-09-03T17:14:24.052Z", "completedAt": "2026-09-03T17:17:00.271Z", "adapterMs": 114686, "overheadMs": 41533},
@@ -77,42 +76,6 @@
         "retries": 0,
         "attempts": [{"index": 1, "status": "running", "startedAt": "2026-09-04T03:06:00.000Z"}]
       }
-    },
-    "supervisor": {
-      "status": "running",
-      "calls": 1,
-      "tokens_in": 100,
-      "tokens_out": 10,
-      "duration_ms": 1,
-      "startedAt": "2026-09-03T17:09:17.000Z",
-      "attempts": [{
-        "index": 1,
-        "startedAt": "2026-09-03T17:09:18.000Z",
-        "completedAt": "2026-09-03T17:09:18.001Z",
-        "status": "complete",
-        "duration_ms": 1,
-        "exitCode": 0,
-        "trigger": {
-          "version": 1,
-          "eventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "type": "stage_transition",
-          "observedAt": "2026-09-03T17:09:18.000Z",
-          "source": "fixture-byte-anchor",
-          "quantities": {
-            "iteration": 1,
-            "runningStageCount": 1,
-            "activeAttempts": [],
-            "minArtifactDeltaBytes": 4096,
-            "deadlineMarginMs": 60000,
-            "pollIntervalMs": 30000,
-            "changedBytes": 0,
-            "changedPathCount": 0,
-            "supervisorAssessmentBudget": {"used": 0, "maximum": 20, "remaining": 20},
-            "supervisorRejectBudget": {"maximum": 2},
-            "gateRetryBudget": {"maximum": 2}
-          }
-        }
-      }]
     }
   },
   "planRetryState": {
@@ -135,17 +98,13 @@
   },
   "events": [
     {"type": "admission_rejected", "runId": "example-run-1", "timestamp": "2026-09-03T17:14:10.031Z", "stageId": "plan", "attemptIndex": 1, "detail": "first plan rejected"},
-    {"type": "supervisor_reject", "runId": "example-run-1", "timestamp": "2026-09-03T19:11:33.703Z", "iteration": 1, "stageId": "run_round", "detail": "reject 1/2: audit contradiction"},
     {"type": "stage_complete", "runId": "example-run-1", "timestamp": "2026-09-03T20:12:24.800Z", "iteration": 1, "stageId": "run_round"},
-    {"type": "supervisor_reject", "runId": "example-run-1", "timestamp": "2026-09-03T23:18:45.044Z", "iteration": 2, "stageId": "run_round2", "detail": "reject 1/2: missing supplied-quantity dependencies"},
     {"type": "stage_complete", "runId": "example-run-1", "timestamp": "2026-09-03T23:46:24.216Z", "iteration": 2, "stageId": "run_round2"}
   ],
   "anchors": [
     {"label":"b3-warn-flood-observation","sourcePath":"/workspace/project/docs/review_2026_09_03/cli_tui_ux.md","byteStart":440,"byteEndExclusive":1310,"sha256":"35de3a538ebc4685f8439e332505682620feb9eabe91beaf6a5959db2b4503f3"},
     {"label":"b3-registry-growth-observation","sourcePath":"/workspace/project/docs/review_2026_09_03/engine_performance.md","byteStart":6913,"byteEndExclusive":7531,"sha256":"8617c93be8fe42fcca33b78a4c8635bab58c8c5c1c667b83e6352d95df69f961"},
     {"label":"b3-first-plan-admission-reason","sourcePath":"/workspace/state/runs/example-run-1/dispatch_rejections/attempt_1/rejection.json","byteStart":0,"byteEndExclusive":598,"sha256":"18e3e20237193d15bdb478d3cda2bdfdf6f2c8dbf52a9ba68de042402f5a0e98"},
-    {"label":"b3-supervisor-rejection-1","sourcePath":"/workspace/state/runs/example-run-1/events.jsonl","byteStart":3675,"byteEndExclusive":4045,"sha256":"8361d22d9f99aca249a8cef9d9bda1e12753b30b7538630133b5d2925ca2392e"},
-    {"label":"b3-supervisor-rejection-2","sourcePath":"/workspace/state/runs/example-run-1/events.jsonl","byteStart":7466,"byteEndExclusive":7901,"sha256":"51372022ca0496d7fd415bf183e35871ecbd031de4f6fbed714f0f4ee076f6d7"},
     {"label":"b4-dose-series","sourcePath":"/workspace/example-project/docs/example-project_explore8b/rounds/round_03/report.md","byteStart":4196,"byteEndExclusive":4812,"sha256":"1b8b7ff0cc8e0ce21044d9dd9efb84f45811c20e87fe70b3c2a930fa559cc254"},
     {"label":"b3-overhead-run-state","sourcePath":"/workspace/state/runs/example-run-1/run.json","bytes":221958,"sha256":"d0056ac0e01a107a78795a92e8dc88a761fd67c87cca9f782c21f74f835c309e"}
   ]

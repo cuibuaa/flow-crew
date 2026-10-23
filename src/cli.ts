@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { CliUsageError, commandName, commandUsage, parseCommandArgs } from './cli-args.js';
+import { EXIT_CODE } from './exit-code.js';
 import type { RetiredStageUsage, RunStatus } from './store.js';
 import type { AdapterName, AdapterResolution } from './adapters/availability.js';
 import type { RegisterRpcResponse } from './orchestrator-rpc.js';
@@ -6,7 +8,7 @@ import type { TaskCreateInput } from './task-registry.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
 
 function handleOutputError(error: NodeJS.ErrnoException): never {
-  if (error.code === 'EPIPE') process.exit(0);
+  if (error.code === 'EPIPE') process.exit(EXIT_CODE.completed);
   throw error;
 }
 
@@ -18,65 +20,28 @@ process.on('exit', () => {
   }
 });
 
-function earlyCommandHelp(input: string[]): string | undefined {
-  if (!input.includes('--help') && !input.includes('-h')) return undefined;
-  const command = input[0];
-  const subcommand = input[1];
-  if (command === 'task') {
-    if (subcommand === 'list') return 'Usage: flowcrew task list [--status active|all|<status>] [--limit N] [--with-summary]';
-    if (subcommand === 'show') return 'Usage: flowcrew task show <id> [--summary-only | --raw]\nShows bounded run/stage detail; raw tick JSON is opt-in.';
-    return 'Usage: flowcrew task list|show|cancel|resume|retry|tail ...';
-  }
-  if (command === 'daemon') return 'Usage: flowcrew daemon start|serve|stop|restart|status|hold|hold-status|continue|logs [options]\n  hold [--timeout-ms N] fences launches and waits for settled groups (default 60000ms).\n  hold-status reports settlement; continue releases compatible held runs.';
-  if (command === 'quick') return 'Usage: flowcrew quick <task|brief path|-> [--project <path>] [--max-iterations N]';
-  if (command === 'rehearse') return 'Usage: flowcrew rehearse <brief> [--project <path>] [--json]';
-  if (command === 'interrupt') return 'Usage: flowcrew interrupt --run <run-id> --stage <stage-id> "reason"';
-  if (command === 'state') return 'Usage: flowcrew state --project <path> --run <run-id> [--prompts] [--summary]';
-  if (command === 'campaign') return 'Usage: flowcrew campaign status|pending|review ...';
-  if (command === 'brief') return 'Usage: flowcrew brief head|diff|rollback|log ...';
-  const usage: Record<string, string> = {
-    start: 'Usage: flowcrew start (PORT and PROJECT_DIR select the dashboard)',
-    guide: 'Usage: flowcrew guide [--run <run-id>] [--stage <stage-id>] "message"',
-    inbox: 'Usage: flowcrew inbox list|show|approve|deny ...',
-    dashboard: 'Usage: flowcrew dashboard status [--port N]',
-    init: 'Usage: flowcrew init',
-    adapter: 'Usage: flowcrew adapter [codex|claude|auto]',
-    status: 'Usage: flowcrew status [--all] [--project <path>]',
-    list: 'Usage: flowcrew list [--limit N]',
-    clean: 'Usage: flowcrew clean [--keep N]',
-    prune: 'Usage: flowcrew prune [--run <run-id>] [--dry-run | --apply] [--json]\nCompacts settled workspaces; defaults to a read-only dry-run. Keeps run history and evidence.',
-    export: 'Usage: flowcrew export [run-id]',
-    'audit-reality': 'Usage: flowcrew audit-reality [options]',
-    'ship-preflight': 'Usage: flowcrew ship-preflight [--brief <path>] [options]',
-    'ship-setup': 'Usage: flowcrew ship-setup --brief <path> --target <path> [options]',
-    watch: 'Usage: flowcrew watch [--once]',
-    events: 'Usage: flowcrew events [--run <run-id>] [--follow]',
-    doctor: 'Usage: flowcrew doctor [--repair-registry|--compact-registry] [--apply]',
-    'plan-check': 'Usage: flowcrew plan-check --project <project> (--brief <brief-file> | --run <run-dir>) <dispatch-file>',
-    version: 'Usage: flowcrew version',
-  };
-  return usage[command];
-}
-
 const bootstrapArgs = process.argv.slice(2);
-const bootstrapHelp = earlyCommandHelp(bootstrapArgs);
+const bootstrapName = commandName(bootstrapArgs);
+const bootstrapHelp = !bootstrapArgs.length || bootstrapArgs.some(arg => arg === '--help' || arg === '-h')
+  ? commandUsage(bootstrapName) || undefined
+  : undefined;
 // A status surface invokes this path repeatedly. Keep it ahead of the orchestration imports so
 // rendering does not pay to initialize the scheduler, dashboard, YAML, and adapter modules.
 if (bootstrapHelp !== undefined) {
   process.stdout.write(`${bootstrapHelp}\n`);
-  process.exitCode = 0;
-} else if (bootstrapArgs[0] === 'land' && (bootstrapArgs.includes('--help') || bootstrapArgs.includes('-h'))) {
-  const { cmdLand } = await import('./cli-land.js');
-  process.exitCode = await cmdLand(bootstrapArgs);
+  process.exitCode = EXIT_CODE.completed;
 } else if (bootstrapArgs[0] === 'fc_tasks') {
   try {
     const { cmdFcTasks } = await import('./cli-fc-tasks.js');
     process.exitCode = cmdFcTasks(bootstrapArgs);
   } catch (error) {
     process.stdout.write(`fc_tasks: degraded[internal_error] · command failed to load: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
+    process.exitCode = EXIT_CODE.failed;
   }
-} else if (bootstrapArgs[0] === 'prune') {
+} else if (bootstrapArgs[0] === 'session-push') {
+  const { cmdSessionPush } = await import('./cli-session-push.js');
+  process.exitCode = await cmdSessionPush(bootstrapArgs.slice(1));
+} else if (bootstrapArgs[0] === 'prune' || bootstrapArgs[0] === 'clean') {
   const { cmdPrune } = await import('./run-retention.js');
   process.exitCode = cmdPrune(bootstrapArgs);
 } else if (bootstrapArgs[0] === 'plan-check') {
@@ -90,18 +55,14 @@ const [
   fsModule,
   pathModule,
   childProcessModule,
-  readlineModule,
   yamlModule,
   storeModule,
   configModule,
   campaignsModule,
   campaignHygieneModule,
-  briefVersioningModule,
-  campaignReviewModule,
   adapterLoaderModule,
   adapterAvailabilityModule,
   cliDoctorModule,
-  runLockModule,
   terminalArtifactStatusModule,
   cliEventsModule,
   guidanceModule,
@@ -112,18 +73,14 @@ const [
   import('./engine-fs.js'),
   import('node:path'),
   import('node:child_process'),
-  import('node:readline/promises'),
   import('yaml'),
   import('./store.js'),
   import('./config.js'),
   import('./campaigns.js'),
   import('./campaign-hygiene.js'),
-  import('./brief-versioning.js'),
-  import('./campaign-review.js'),
   import('./adapters/loader.js'),
   import('./adapters/availability.js'),
   import('./cli-doctor.js'),
-  import('./run-lock.js'),
   import('./terminal-artifact-status.js'),
   import('./cli-events.js'),
   import('./guidance.js'),
@@ -139,36 +96,29 @@ const {
   mkdirSync,
   readdirSync,
   realpathSync,
-  rmSync,
   lstatSync,
   statSync,
 } = fsModule;
 const { join, relative, resolve } = pathModule;
 const { execFileSync, execSync } = childProcessModule;
-const { createInterface } = readlineModule;
 const { parse: parseYaml, parseDocument } = yamlModule;
 const { projectRunStageHistory } = runStateViewModule;
 const {
-  campaignDir,
   extractTaskTitle,
   isPausedRunStatus,
   isRunningRunStatus,
   isSuccessfulRunStatus,
-  isTerminalRunStatus,
   resolveRunStatus,
   readRunState,
   readArchivedRunState,
+  readStageInput,
   RUN_STATUS,
-  RUN_RESERVATION_FILE,
-  RUN_RESERVATION_TTL_MS,
   runsRoot,
   STAGE_STATUS,
 } = storeModule;
 const { campaignBaseDirectory, engineConfigDir, loadEngineDefaults } = configModule;
-const { readCampaignEntries } = campaignsModule;
+const { readCampaignEntries, resolveCampaignStorageKey } = campaignsModule;
 const { assessCampaignHygiene } = campaignHygieneModule;
-const { diffVersions, readHead, rollback } = briefVersioningModule;
-const { consumePendingReview, readPendingReviews, ReviewConflictError, summarizePatch } = campaignReviewModule;
 const { AVAILABLE_ADAPTER_NAMES, loadAdapterByName, normalizeAdapterName } = adapterLoaderModule;
 const {
   ADAPTER_CLI,
@@ -179,7 +129,6 @@ const {
   resolveAdapterChoice,
 } = adapterAvailabilityModule;
 const { detectSupervisorBackend } = cliDoctorModule;
-const { isLiveFlowcrewSchedulerForRun, parseSchedulerPidMarker } = runLockModule;
 const { formatTerminalArtifactStatusMismatch, terminalArtifactStatusMismatch } = terminalArtifactStatusModule;
 const {
   formatHumanDuration,
@@ -193,7 +142,6 @@ const { recordLaunchRefusal } = supervisionModule;
 
 const args = bootstrapArgs;
 const command = args[0];
-const CAMPAIGN_PENDING_SUBCOMMAND = 'pending';
 
 interface CliRunStatusPresentation {
   listLabel: string;
@@ -207,13 +155,11 @@ const CLI_RUN_STATUS_PRESENTATION = {
   [RUN_STATUS.PARKED]: { listLabel: '· parked  ', notificationTitle: 'FlowCrew: Awaiting Your Approval' },
   [RUN_STATUS.COMPLETE]: { listLabel: '✓ complete', notificationTitle: 'FlowCrew: Task Complete' },
   [RUN_STATUS.FAILED]: { listLabel: '✗ failed  ', notificationTitle: 'FlowCrew: Task Failed' },
-  [RUN_STATUS.AWAITING_APPROVAL]: { listLabel: '· awaiting_approval', notificationTitle: 'FlowCrew: Task Failed' },
   [RUN_STATUS.SHIPPED]: { listLabel: '· shipped ', notificationTitle: 'FlowCrew: shipped' },
   [RUN_STATUS.CEILING_HIT]: { listLabel: '· ceiling_hit', notificationTitle: 'FlowCrew: ceiling_hit' },
   [RUN_STATUS.ESCALATED]: { listLabel: '· escalated', notificationTitle: 'FlowCrew: Task Failed' },
   [RUN_STATUS.REALITY_GATE_FAILED]: { listLabel: '· reality_gate_failed', notificationTitle: 'FlowCrew: Task Failed' },
-  [RUN_STATUS.PHASE_COMPLETE]: { listLabel: '· phase_complete', notificationTitle: 'FlowCrew: Task Failed' },
-  [RUN_STATUS.STOPPED]: { listLabel: '· stopped ', notificationTitle: 'FlowCrew: Task Failed' },
+  [RUN_STATUS.CANCELLED]: { listLabel: '· cancelled ', notificationTitle: 'FlowCrew: Task Failed' },
   [RUN_STATUS.INCOMPLETE]: { listLabel: '· incomplete', notificationTitle: 'FlowCrew: Task Failed' },
 } as const satisfies Record<RunStatus, CliRunStatusPresentation>;
 
@@ -288,11 +234,40 @@ function writeAdapterSetting(adapter: AdapterName | 'auto'): string {
   return path;
 }
 
-async function registerBackgroundTask(task: TaskCreateInput): Promise<void> {
+async function registerBackgroundTask(task: TaskCreateInput): Promise<RegisterRpcResponse> {
   const { commandSocketPath, formatDaemonRegistration, sendRpc } = await import('./orchestrator-rpc.js');
   const socketPath = commandSocketPath();
   const response = await sendRpc<RegisterRpcResponse>(socketPath, { cmd: 'register', task, acknowledgement: 'persisted' });
   console.log(formatDaemonRegistration(response));
+  return response;
+}
+
+async function registerLaunchLedger(id: number, task: string, digest: string, session?: string): Promise<void> {
+  const entry = {
+    id: `flowcrew-${id}`,
+    subject: `FlowCrew task ${id}: ${extractTaskTitle(task) || 'Quick task'}`,
+    description: `FlowCrew task ${id} is registered; wrap-up remains: read the result, verify it independently, archive unique output, and reclaim the worktree and branch.\nBrief digest: ${digest}`,
+    activeForm: `Wrapping up FlowCrew task ${id}`,
+    status: 'in_progress',
+    blocks: [],
+    blockedBy: [],
+  };
+  const createArgs = ['fc_tasks', 'create', '--flowcrew-task-id', String(id), '--entry', JSON.stringify(entry)];
+  if (session === undefined) {
+    console.log(`No session id is known; no ledger entry was created. Create it with: flowcrew ${createArgs.map(shellQuote).join(' ')} --session '<session-id>'`);
+  } else {
+    // Registration is durable. Ledger failures must never turn it into a failed launch.
+    try {
+      const { cmdFcTasks } = await import('./cli-fc-tasks.js');
+      let diagnostic = '';
+      const code = cmdFcTasks([...createArgs, '--session', session], {
+        stderr: { write: (chunk) => { diagnostic += chunk; } },
+      });
+      if (code !== 0) throw new Error(diagnostic.trim());
+    } catch (error) {
+      console.warn(`Warning: task #${id} remains registered, but no ledger entry was created: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 }
 
 async function cmdInit() {
@@ -514,7 +489,7 @@ function commandSucceeds(commandName: string, commandArgs: string[]): boolean {
 
 function cmdAdapter(): void {
   // Flags are not adapter names.
-  const positional = args.slice(1).filter((a) => !a.startsWith('-'));
+  const positional = parseCommandArgs('adapter', args).positionals;
   const requested = positional[0]?.trim().toLowerCase();
   if (!requested) {
     const setting = readAdapterSetting();
@@ -532,18 +507,18 @@ function cmdAdapter(): void {
     if (!setting.exists) console.log('Next: reinstall FlowCrew to restore its engine configuration.');
     else if (setting.error) console.log('Next: fix the file by hand, or run `flowcrew adapter <auto|codex|claude>` to rewrite the adapter line.');
     else if (installed.length === 0) console.log(`Next: install an adapter CLI — ${ADAPTER_INSTALL_HINT[RECOMMENDED]}`);
-    if (setting.error) process.exitCode = 1;
+    if (setting.error) process.exitCode = EXIT_CODE.failed;
     return;
   }
   if (positional.length > 1 || (requested !== 'auto' && requested !== 'codex' && requested !== 'claude')) {
-    console.error('Usage: flowcrew adapter [auto|codex|claude]');
-    process.exitCode = 1;
+    console.error(commandUsage('adapter'));
+    process.exitCode = EXIT_CODE.failed;
     return;
   }
   if (requested !== 'auto' && !installedAdapters().includes(requested)) {
     console.error(`Cannot select ${requested}: its CLI is not installed or visible on PATH.`);
     console.error(`Install it first: ${ADAPTER_INSTALL_HINT[requested]}`);
-    process.exitCode = 1;
+    process.exitCode = EXIT_CODE.failed;
     return;
   }
   const path = writeAdapterSetting(requested);
@@ -627,6 +602,8 @@ async function cmdDoctor() {
   }
   for (const adapter of installed) {
     addDoctorSkillCheck(checks, adapter, projectDir, skillPackageRoot);
+    const { doctorSessionIntegration } = await import('./session-integration.js');
+    checks.push(doctorSessionIntegration(adapter, projectDir, skillPackageRoot, process.env));
   }
   if (installed.length === 0) {
     checks.push({ name: 'Any adapter CLI', status: 'warn', message: 'No agent CLI found. Install and log in to Claude Code or Codex before a live run.' });
@@ -800,7 +777,7 @@ async function cmdDoctor() {
   console.log('');
   if (hasFailure) {
     console.log('Some checks failed. Fix the issues above and run `flowcrew doctor` again.');
-    process.exit(1);
+    process.exit(EXIT_CODE.failed);
   } else if (hasWarning) {
     console.log('Some checks need attention before a live run. Review the warnings above.');
   } else {
@@ -825,7 +802,7 @@ async function cmdStart() {
     if (!portAvailable) {
       console.error(`❌ Port ${port} is already in use. Either stop the other process or use a different port:`);
       console.error(`   PORT=${port + 1} flowcrew start`);
-      process.exit(1);
+      process.exit(EXIT_CODE.failed);
     }
   }
 
@@ -847,89 +824,44 @@ async function cmdStart() {
 }
 
 async function cmdQuick() {
-  let projectDir = detectProjectDir();
-  let task = '';
-  let adapter = '';
-  let workflow = 'default';
-  let workflowExplicit = false; // true once the user passes --workflow, so we don't override their choice
-  let maxIterations: number | undefined;
-  let campaignArg: string | undefined; // --campaign <name> wins over the repository name; --no-campaign forces undefined
-  let campaignDisabled = false;
-  let inheritCampaignContext = true; // Context is independent from campaign ownership; legacy alias maps to skip.
-  let campaignContextExplicit = false;
-  let existingRunId: string | undefined; // dashboard rerun/execute path passes this to spawn a detached scheduler
-  let background = false;
-  let acknowledgementPresent = false;
-  let acknowledgementDigest: string | undefined;
+  const parsed = parseCommandArgs('quick', args);
+  const value = (name: string) => parsed.values.get(`--${name}`);
+  const has = (name: string) => parsed.flags.has(`--${name}`);
+  const projectDir = value('project') ? resolve(value('project')!) : detectProjectDir();
+  let task = value('task') ?? '';
+  let adapter = value('adapter') ?? '';
+  let workflow = value('workflow') ?? 'planner';
+  const workflowExplicit = value('workflow') !== undefined;
+  const maxIterations = value('max-iterations') === undefined ? undefined : Number(value('max-iterations'));
+  const campaignArg = value('campaign');
+  const campaignDisabled = has('no-campaign');
+  const context = parsed.order.lastIndexOf('--no-inherit-campaign') > parsed.order.lastIndexOf('--campaign-context')
+    ? 'skip' : value('campaign-context');
+  let inheritCampaignContext = context !== 'skip';
+  const campaignContextExplicit = context !== undefined;
+  let existingRunId = value('existing-run-id');
+  const background = has('background');
+  const session = value('session') || process.env.CLAUDE_CODE_SESSION_ID || process.env.CODEX_THREAD_ID || undefined;
+  const acknowledgementPresent = has('acknowledge-brief-warnings') || value('acknowledge-brief-warnings') !== undefined;
+  const acknowledgementDigest = value('acknowledge-brief-warnings');
   let transportedAdmission: BriefAdmissionRecord | undefined;
   let storedAdmission: BriefAdmissionRecord | undefined;
-  let taskSupplied = false;
-  const launchArgs: string[] = [];
-  const taskParts: string[] = [];
-
-  if (args.includes('--help') || args.includes('-h')) { args.length = 0; } // trigger usage
-
-  for (let i = 1; i < args.length; i++) {
-    if (args[i] === '--project' && args[i + 1]) { projectDir = resolve(args[++i]); continue; }
-    if (args[i] === '--adapter' && args[i + 1]) { adapter = args[++i]; launchArgs.push('--adapter', adapter); continue; }
-    if (args[i] === '--workflow' && args[i + 1]) { workflow = args[++i]; workflowExplicit = true; launchArgs.push('--workflow', workflow); continue; }
-    if (args[i] === '--max-iterations' && args[i + 1]) { maxIterations = parseInt(args[++i], 10); launchArgs.push('--max-iterations', String(maxIterations)); continue; }
-    if (args[i] === '--timeout' || args[i].startsWith('--timeout=')) {
-      console.error('The --timeout run override was removed; edit the engine config/defaults.yaml::default_timeout_ms instead.');
-      process.exitCode = 1;
-      return;
-    }
-    if (args[i] === '--campaign' && args[i + 1]) { campaignArg = args[++i]; launchArgs.push('--campaign', campaignArg); continue; }
-    if (args[i] === '--no-campaign') { campaignDisabled = true; launchArgs.push('--no-campaign'); continue; }
-    if (args[i].startsWith('--campaign-context=')) {
-      const mode = args[i].slice('--campaign-context='.length);
-      if (mode !== 'inherit' && mode !== 'skip') {
-        throw new Error(`Invalid --campaign-context value "${mode}"; expected inherit or skip.`);
-      }
-      inheritCampaignContext = mode === 'inherit';
-      campaignContextExplicit = true;
-      launchArgs.push(args[i]);
-      continue;
-    }
-    if (args[i] === '--campaign-context') {
-      throw new Error('Invalid --campaign-context syntax; use --campaign-context=inherit or --campaign-context=skip.');
-    }
-    if (args[i] === '--no-inherit-campaign') { inheritCampaignContext = false; campaignContextExplicit = true; launchArgs.push('--no-inherit-campaign'); continue; }
-    if (args[i] === '--task' && args[i + 1]) { task = args[++i]; taskSupplied = true; continue; }
-    if (args[i] === '--brief-input-base64' && args[i + 1]) {
-      try {
-        task = Buffer.from(args[++i], 'base64url').toString('utf8');
-        taskSupplied = true;
-      } catch {
-        throw new Error('Invalid internal brief input');
-      }
-      continue;
-    }
-    if (args[i] === '--existing-run-id' && args[i + 1]) { existingRunId = args[++i]; continue; }
-    if (args[i] === '--background') { background = true; continue; }
-    if (args[i] === '--acknowledge-brief-warnings') { acknowledgementPresent = true; continue; }
-    if (args[i].startsWith('--acknowledge-brief-warnings=')) {
-      acknowledgementPresent = true;
-      acknowledgementDigest = args[i].slice('--acknowledge-brief-warnings='.length);
-      continue;
-    }
-    if (args[i] === '--brief-admission-record' && args[i + 1]) {
-      transportedAdmission = decodeBriefAdmission(args[++i]);
-      continue;
-    }
-    if (args[i] === '-') { task = readFileSync(0, 'utf-8'); taskSupplied = true; continue; }
-    // Without this check, removed options would silently become brief text.
-    if (args[i].startsWith('--')) {
-      console.error(`Unknown quick option: ${args[i]}`);
-      process.exitCode = 1;
-      return;
-    }
-    taskParts.push(args[i]);
-  }
-  if (!task && taskParts.length > 0) {
-    task = taskParts.join(' ');
+  let taskSupplied = value('task') !== undefined;
+  const launchOptions: import('./task-registry.js').TaskLaunchOptions = {
+    ...(adapter ? { adapter } : {}),
+    ...(maxIterations === undefined ? {} : { maxIterations }),
+    ...(campaignArg === undefined ? {} : { campaign: campaignArg }),
+    ...(campaignDisabled ? { noCampaign: true } : {}),
+    ...(context === undefined ? {} : { campaignContext: context as 'inherit' | 'skip' }),
+  };
+  const transport = parsed.order.filter(name => ['--task', '--brief-input-base64', '-'].includes(name)).at(-1);
+  if (transport === '--brief-input-base64') {
+    task = Buffer.from(value('brief-input-base64')!, 'base64url').toString('utf8');
     taskSupplied = true;
   }
+  if (value('brief-admission-record') !== undefined) transportedAdmission = decodeBriefAdmission(value('brief-admission-record')!);
+  if (transport === '-') { task = readFileSync(0, 'utf-8'); taskSupplied = true; }
+  if (!task && parsed.positionals.length) { task = parsed.positionals.join(' '); taskSupplied = true; }
 
   // --existing-run-id path: dashboard handing off a rerun/execute to a detached
   // scheduler process. Reuse the existing run state and read the task brief
@@ -953,7 +885,7 @@ async function cmdQuick() {
   }
 
   if (!task.trim()) {
-    console.error('Usage: flowcrew quick "task description" [options]');
+    console.error(commandUsage('quick'));
     console.error('');
     console.error('Options:');
     console.error('  --adapter auto|codex|claude|mock  Agent backend (defaults to engine config/defaults.yaml)');
@@ -965,33 +897,25 @@ async function cmdQuick() {
     console.error('  --project <path>        Project directory (default: cwd)');
     console.error('  --task "text"           Task description as flag');
     console.error('  --background            Register and launch under the flowcrew daemon');
+    console.error('  --session <id>          Session ledger for registration (default: CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID)');
     console.error('  --acknowledge-brief-warnings[=<digest>]  Confirm changed-run continuation (never skips inspection)');
     console.error('  -                       Read task from stdin');
     console.error('  --existing-run-id <id>  Resume an existing run (reads task from <run_dir>/task_brief.md)');
-    process.exit(1);
+    process.exit(EXIT_CODE.failed);
   }
 
   const {
+    briefDeclarationFailures,
     createBriefAdmission,
     formatBriefPreflightReport,
     inspectBrief,
     verifyBriefAdmission,
   } = await import('./brief-preflight.js');
-  const { projectBriefPreflightContext } = await import('./rehearse.js');
-  const preflightContext = projectBriefPreflightContext(projectDir, task);
-  const preflight = inspectBrief(task, preflightContext);
+  const preflight = inspectBrief(task);
   console.log(`${formatBriefPreflightReport(preflight)}\n`);
   const { parseBriefFrontmatter, autoSelectedWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
   const parsedBrief = parseBriefFrontmatter(task);
   const auto = autoSelectedWorkflow(parsedBrief, workflowExplicit ? workflow : undefined);
-  if (auto.error) {
-    const refusal = `Launch refused: ${auto.error}.`;
-    recordLaunchRefusal(refusal);
-    console.error(refusal);
-    process.exitCode = 2;
-    return;
-  }
-
   // Nothing about the brief matters if nothing can execute it. A newcomer whose
   // adapter CLI is not installed must be told the install command, not sent to
   // fix a brief they cannot run either way, so environment refusals precede
@@ -1003,31 +927,40 @@ async function cmdQuick() {
     });
     if (!earlyResolution.ok) {
       console.error(`❌ ${earlyResolution.hint}`);
-      process.exitCode = 1;
+      process.exitCode = EXIT_CODE.failed;
       return;
     }
   }
 
-  if (preflight.findings.some((finding) => finding.code === 'brief_criteria_missing')) {
-    const refusal = 'Launch refused: the exact brief has no structurally extractable criterion. This is not an acknowledgeable warning.';
+  const refusalFindings = briefDeclarationFailures(task, preflight);
+  if (refusalFindings.length) {
+    const refusal = refusalFindings.map(finding => `[${finding.code}] ${finding.message}`).join('\n');
     recordLaunchRefusal(refusal);
     console.error(refusal);
-    process.exitCode = 2;
+    process.exitCode = EXIT_CODE.failed;
+    return;
+  }
+
+  if (auto.error) {
+    const refusal = `Launch refused: ${auto.error}.`;
+    recordLaunchRefusal(refusal);
+    console.error(refusal);
+    process.exitCode = EXIT_CODE.failed;
     return;
   }
 
   if (acknowledgementDigest !== undefined && acknowledgementDigest !== preflight.digest) {
     console.error(`Brief acknowledgement digest mismatch: received ${acknowledgementDigest || '(empty)'}, current digest is ${preflight.digest}.`);
     console.error(`Review the report and rerun with --acknowledge-brief-warnings=${preflight.digest}`);
-    process.exit(2);
+    process.exit(EXIT_CODE.failed);
   }
 
   const transportedExistingRun = Boolean(existingRunId && taskSupplied && transportedAdmission);
   const transportedVerification = transportedAdmission
-    ? verifyBriefAdmission(task, transportedAdmission, preflightContext)
+    ? verifyBriefAdmission(task, transportedAdmission)
     : undefined;
   const storedVerification = storedAdmission
-    ? verifyBriefAdmission(task, storedAdmission, preflightContext)
+    ? verifyBriefAdmission(task, storedAdmission)
     : undefined;
   const transportedContinuationIsBound = transportedExistingRun
     && transportedVerification?.status === 'valid'
@@ -1041,7 +974,7 @@ async function cmdQuick() {
         : (storedAdmission ?? (transportedVerification?.status === 'valid' ? transportedAdmission : undefined)))
     : (transportedAdmission ?? storedAdmission);
   const priorVerification = priorAdmission
-    ? verifyBriefAdmission(task, priorAdmission, preflightContext)
+    ? verifyBriefAdmission(task, priorAdmission)
     : undefined;
   let briefAdmission: BriefAdmissionRecord;
   if (priorVerification?.status === 'valid') {
@@ -1056,7 +989,7 @@ async function cmdQuick() {
       console.error('Review the complete report above, then explicitly continue this exact brief with:');
       console.error(`  --acknowledge-brief-warnings=${preflight.digest}`);
       console.error('For deterministic CI/cron policy, the bare --acknowledge-brief-warnings flag accepts the current inspected input without prompting.');
-      process.exit(2);
+      process.exit(EXIT_CODE.failed);
     }
     briefAdmission = createBriefAdmission(
       preflight,
@@ -1072,9 +1005,9 @@ async function cmdQuick() {
 
   // Auto-select the workflow only after the shared report is visible. The canonical frontmatter parser owns this
   // decision, quick has no YAML regex, and rehearse reports the same choice.
-  if (!workflowExplicit && workflow === 'default' && auto.workflow !== 'default') {
-    workflow = auto.workflow;
-    launchArgs.push('--workflow', workflow);
+  workflow = auto.workflow;
+  launchOptions.workflow = workflow;
+  if (!workflowExplicit && workflow !== 'planner') {
     console.error(`Note: ${auto.reason} -> auto-selected --workflow ${workflow} (pass --workflow to override).`);
   }
 
@@ -1091,17 +1024,14 @@ async function cmdQuick() {
       const refusal = `Launch refused: ${detail}. Run flowcrew ship-setup successfully for this target and exact brief, then retry.`;
       recordLaunchRefusal(refusal);
       console.error(refusal);
-      process.exitCode = 2;
+      process.exitCode = EXIT_CODE.failed;
       return;
     }
   }
 
   const defaults = loadEngineDefaults();
   const campaignBaseDir = campaignBaseDirectory(projectDir);
-  const campaignBaseSlug = (campaignBaseDir.split(/[\\/]/).filter(Boolean).pop() ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+  const campaignBaseSlug = resolveCampaignStorageKey({ campaignName: campaignBaseDir.split(/[\\/]/).filter(Boolean).pop(), projectDir: campaignBaseDir });
   const resolvedCampaign = campaignDisabled
     ? undefined
     : (campaignArg || campaignBaseSlug || undefined);
@@ -1110,14 +1040,14 @@ async function cmdQuick() {
     try {
       const continuation = readRunState(projectDir, existingRunId);
       inheritCampaignContext = continuation.inheritCampaignContext !== false;
-      if (background) launchArgs.push(`--campaign-context=${inheritCampaignContext ? 'inherit' : 'skip'}`);
+      if (background) launchOptions.campaignContext = inheritCampaignContext ? 'inherit' : 'skip';
     } catch { /* scheduler remains authoritative for an unreadable continuation */ }
   } else if (!campaignContextExplicit && resolvedCampaign) {
     try {
       const hygiene = assessCampaignHygiene(readCampaignEntries(projectDir, resolvedCampaign));
       if (hygiene.suggestContextSkip) {
         inheritCampaignContext = false;
-        launchArgs.push('--campaign-context=skip');
+        launchOptions.campaignContext = 'skip';
         console.error(
           `Note: campaign ${resolvedCampaign} has ${hygiene.recentAdverse}/${hygiene.recentEnded} recent adverse endings; defaulted planner context to skip (pass --campaign-context=inherit to override).`,
         );
@@ -1145,19 +1075,21 @@ async function cmdQuick() {
     });
     if (!backgroundResolution.ok) {
       console.error(`❌ ${backgroundResolution.hint}`);
-      process.exitCode = 1;
+      process.exitCode = EXIT_CODE.failed;
       return;
     }
     try {
-      await registerBackgroundTask({
+      const { id } = await registerBackgroundTask({
+        launcher: (await import('./session-push.js')).captureLauncher(process.env, process.cwd(), session),
         kind: 'quick',
         name: extractTaskTitle(task) || 'Quick task',
         brief_text: task,
         brief_admission: briefAdmission,
         projectDir,
         ...(existingRunId ? { run_id: existingRunId } : {}),
-        launch_args: launchArgs,
+        launch_options: launchOptions,
       });
+      await registerLaunchLedger(id, task, briefAdmission.digest, session);
       return;
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
@@ -1173,7 +1105,7 @@ async function cmdQuick() {
   });
   if (!adapterResolution.ok) {
     console.error(`❌ ${adapterResolution.hint}`);
-    process.exitCode = 1;
+    process.exitCode = EXIT_CODE.failed;
     return;
   }
   adapter = adapterResolution.adapter;
@@ -1189,7 +1121,7 @@ async function cmdQuick() {
     const available = existsSync(workflowsDir) ? readdirSync(workflowsDir).filter(f => f.endsWith('.yaml')).map(f => f.replace('.yaml', '')) : [];
     if (available.length > 0) console.error(`  Available: ${available.join(', ')}`);
     else console.error('  Reinstall FlowCrew to restore its engine workflows.');
-    process.exit(1);
+    process.exit(EXIT_CODE.failed);
   }
 
   const { assessResearchIterationBudget, loadWorkflow, runWorkflow } = await import('./scheduler.js');
@@ -1201,7 +1133,7 @@ async function cmdQuick() {
       parsedBrief.research,
       config.defaults.max_iterations ?? budgetDefaults.max_iterations,
       {
-        attemptTimeoutMs: budgetDefaults.timeout_ms,
+        attemptTimeoutMs: budgetDefaults.default_timeout_ms,
         technicalRetries: budgetDefaults.stage_technical_retries,
       },
     );
@@ -1209,7 +1141,7 @@ async function cmdQuick() {
       const refusal = `Launch refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding.`;
       recordLaunchRefusal(refusal);
       console.error(refusal);
-      process.exitCode = 2;
+      process.exitCode = EXIT_CODE.failed;
       return;
     }
   }
@@ -1219,12 +1151,49 @@ async function cmdQuick() {
 
   const adapterInstance = await loadAdapterByName(adapter);
 
+  // Background workers already have a durable task→run binding. A foreground
+  // launch records the same obligation without handing execution to the daemon.
+  const { TaskRegistry, TASK_LIST_STATUS } = await import('./task-registry.js');
+  const { SessionPush, captureLauncher } = await import('./session-push.js');
+  const registry = new TaskRegistry();
+  const boundTask = existingRunId ? registry.list({ status: TASK_LIST_STATUS.ALL })
+    .find(entry => entry.run_id === existingRunId && entry.projectDir === projectDir) : undefined;
+  const launcher = captureLauncher(process.env, process.cwd(), session);
+  let foregroundTask;
+  if (launcher && boundTask?.foregroundOwner && boundTask.launcher?.sessionId === launcher.sessionId
+      && boundTask.launcher.frontend === launcher.frontend) {
+    const { hasLiveForegroundOwner } = await import('./task-registry.js');
+    if (hasLiveForegroundOwner(boundTask)) throw new Error(`Task #${boundTask.id} still has a live foreground owner; refusing concurrent continuation`);
+    const { processStartToken } = await import('./run-lock.js');
+    foregroundTask = registry.update(boundTask.id, {
+      foregroundOwner: { pid: process.pid, processStart: processStartToken(process.pid) },
+      launcher, status: 'running', completed_at: undefined,
+    });
+  } else if (launcher && !boundTask) {
+    const { reserveRun } = await import('./store.js');
+    const { processStartToken } = await import('./run-lock.js');
+    existingRunId ??= reserveRun(projectDir).runId;
+    foregroundTask = registry.create({
+      launcher, foregroundOwner: { pid: process.pid, processStart: processStartToken(process.pid) },
+      kind: 'quick', name: extractTaskTitle(task) || 'Quick task', brief_text: task,
+      brief_admission: briefAdmission, projectDir, run_id: existingRunId, status: 'running', launch_options: launchOptions,
+    });
+    console.log(`Task #${foregroundTask.id} registered (foreground execution).`);
+    await registerLaunchLedger(foregroundTask.id, task, briefAdmission.digest, session);
+  }
+  const push = foregroundTask ? new SessionPush(registry) : undefined;
+  let activePush: Promise<void> | undefined;
+  const refreshPush = () => activePush ??= push!.sweep(foregroundTask!.id)
+    .catch(error => console.warn(`Warning: foreground session delivery remains pending: ${String(error)}`))
+    .finally(() => { activePush = undefined; });
+  const pushTimer = push ? setInterval(() => { void refreshPush(); }, 2000) : undefined;
+
   console.log(`FlowCrew: shipping task with workflow "${config.name}"...`);
   console.log(`Task: ${task.slice(0, 100)}${task.length > 100 ? '...' : ''}`);
   console.log(`Project: ${projectDir}`);
   console.log(`Adapter: ${adapter}`);
   console.log(`Max iterations: ${config.defaults.max_iterations ?? defaults.max_iterations}`);
-  console.log(`Stage timeout: ${defaults.timeout_ms}ms (engine config/defaults.yaml::default_timeout_ms)`);
+  console.log(`Stage timeout: ${defaults.default_timeout_ms}ms (engine config/defaults.yaml::default_timeout_ms)`);
   // Resolve campaign id: explicit --campaign > slug(basename(campaignBaseDirectory)).
   // --no-campaign forces undefined (run stays untagged).
   console.log(`Campaign: ${resolvedCampaign ?? '(none — --no-campaign)'}`);
@@ -1264,9 +1233,19 @@ async function cmdQuick() {
 
   let finalState;
   try {
+    if (push) await refreshPush();
     finalState = await runWorkflow(config, raw, projectDir, adapterInstance as any, agents as any, undefined, resolvedAgentsDir, existingRunId, task, true, resolvedCampaign, inheritCampaignContext, briefAdmission);
   } finally {
     clearInterval(progressTimer);
+    clearInterval(pushTimer);
+    if (push && foregroundTask) {
+      await activePush;
+      registry.update(foregroundTask.id, {
+        status: !finalState ? 'failed' : isPausedRunStatus(finalState.status) ? 'deferred' : 'done',
+        completed_at: finalState?.completedAt,
+      });
+      await refreshPush();
+    }
   }
   console.log(`FlowCrew run: ${finalState.runId}`);
 
@@ -1311,7 +1290,7 @@ async function cmdQuick() {
   // A PARK is likewise not a failure: exiting non-zero would make systemd report
   // the unit failed, and the daemon would relaunch the brief as a BRAND-NEW run —
   // i.e. re-run the very consequential action that is waiting for approval.
-  process.exitCode = (succeeded || parked) ? 0 : 1;
+  process.exitCode = (succeeded || parked) ? EXIT_CODE.completed : EXIT_CODE.failed;
 }
 
 /**
@@ -1381,64 +1360,17 @@ interface StatusRun {
   };
 }
 
-function printStatusUsage(): void {
-  console.log('Usage: flowcrew status [--all | --project <path>] [--details]');
-  console.log('');
-  console.log('Shows the latest run for the current project by default.');
-  console.log('  --all              Show the latest run across all projects');
-  console.log('  --project <path>   Show the latest run for another project');
-  console.log('  --details          Include generated summary/progress and research journals');
-}
+function printStatusUsage() { console.log(commandUsage('status')); }
 
 function parseStatusSelection(): StatusSelection | undefined {
-  let all = false;
-  let details = false;
-  let project: string | undefined;
-  for (let index = 1; index < args.length; index++) {
-    const value = args[index];
-    if (value === '--help' || value === '-h') {
-      printStatusUsage();
-      return undefined;
-    }
-    if (value === '--all') {
-      all = true;
-      continue;
-    }
-    if (value === '--details') {
-      details = true;
-      continue;
-    }
-    if (value === '--project') {
-      const selected = args[index + 1];
-      if (!selected || selected.startsWith('--')) {
-        console.error('--project requires a path.');
-        printStatusUsage();
-        process.exitCode = 1;
-        return undefined;
-      }
-      project = selected;
-      index++;
-      continue;
-    }
-    if (value.startsWith('--project=')) {
-      project = value.slice('--project='.length);
-      if (!project) {
-        console.error('--project requires a path.');
-        printStatusUsage();
-        process.exitCode = 1;
-        return undefined;
-      }
-      continue;
-    }
-    console.error(`Unknown status option: ${value}`);
-    printStatusUsage();
-    process.exitCode = 1;
-    return undefined;
-  }
+  const parsed = parseCommandArgs('status', args);
+  const all = parsed.flags.has('--all');
+  const details = parsed.flags.has('--details');
+  const project = parsed.values.get('--project');
   if (all && project !== undefined) {
     console.error('--all and --project cannot be used together.');
     printStatusUsage();
-    process.exitCode = 1;
+    process.exitCode = EXIT_CODE.failed;
     return undefined;
   }
   return all
@@ -1525,19 +1457,15 @@ function cmdStatus() {
   if (selected.historyError) console.log(`History unavailable: ${selected.historyError}`);
   if (selection.details) {
     const summaryPath = join(runDir, 'summary.md');
-    const progressPath = join(runDir, 'progress.md');
     if (existsSync(summaryPath)) console.log(`\n${readFileSync(summaryPath, 'utf-8').trimEnd()}`);
-    else if (!isTerminalRunStatus(state.status ?? '') && existsSync(progressPath)) console.log(`\n${readFileSync(progressPath, 'utf-8').trimEnd()}`);
     printResearchProgress(runDir);
   }
 }
 
 function cmdList() {
-
+  const limit = Number(parseCommandArgs('list', args).values.get('--limit'));
   const root = runsRoot();
   if (!existsSync(root)) { console.log('No runs found. Run `flowcrew quick "task"` first.'); return; }
-  const limitArg = args.find((a, i) => args[i - 1] === '--limit');
-  const limit = limitArg ? parseInt(limitArg, 10) : 10;
   const runs = runIdsByRecency(root).slice(0, limit);
   if (runs.length === 0) { console.log('No runs found.'); return; }
   console.log(`\nRecent runs (${runs.length}):\n`);
@@ -1569,58 +1497,17 @@ interface GuideRunCandidate {
   stageIds: string[];
 }
 
-function printGuideUsage(): void {
-  console.log('Usage: flowcrew guide [--run <run-id>] [--stage <stage-id>] "your guidance message"');
-  console.log('');
-  console.log('Omit --run only when exactly one run is currently executing.');
-}
+function printGuideUsage() { console.log(commandUsage('guide')); }
 
 function guideArgumentError(message: string): never {
   console.error(message);
-  console.error('Usage: flowcrew guide [--run <run-id>] [--stage <stage-id>] "your guidance message"');
-  process.exit(1);
+  console.error(commandUsage('guide'));
+  process.exit(EXIT_CODE.failed);
 }
 
 function parseGuideArguments(): { message: string; targetRunId?: string; targetStageId?: string } {
-  const messageParts: string[] = [];
-  let targetRunId: string | undefined;
-  let targetStageId: string | undefined;
-  for (let index = 1; index < args.length; index++) {
-    const value = args[index];
-    if (value === '--run') {
-      const selected = args[index + 1];
-      if (!selected || selected.startsWith('--')) guideArgumentError('--run requires a run id.');
-      if (targetRunId !== undefined) guideArgumentError('--run may be specified only once.');
-      targetRunId = selected;
-      index++;
-      continue;
-    }
-    if (value.startsWith('--run=')) {
-      const selected = value.slice('--run='.length);
-      if (!selected) guideArgumentError('--run requires a run id.');
-      if (targetRunId !== undefined) guideArgumentError('--run may be specified only once.');
-      targetRunId = selected;
-      continue;
-    }
-    if (value === '--stage') {
-      const selected = args[index + 1];
-      if (!selected || selected.startsWith('--')) guideArgumentError('--stage requires a stage id.');
-      if (targetStageId !== undefined) guideArgumentError('--stage may be specified only once.');
-      targetStageId = selected;
-      index++;
-      continue;
-    }
-    if (value.startsWith('--stage=')) {
-      const selected = value.slice('--stage='.length);
-      if (!selected) guideArgumentError('--stage requires a stage id.');
-      if (targetStageId !== undefined) guideArgumentError('--stage may be specified only once.');
-      targetStageId = selected;
-      continue;
-    }
-    messageParts.push(value);
-  }
-  const message = messageParts.join(' ').trim();
-  return { message, targetRunId, targetStageId };
+  const parsed = parseCommandArgs(command!, args);
+  return { message: parsed.positionals.join(' ').trim(), targetRunId: parsed.values.get('--run'), targetStageId: parsed.values.get('--stage') };
 }
 
 function safeGuideRunId(runId: string): boolean {
@@ -1661,36 +1548,32 @@ function readGuideCandidate(root: string, runId: string): GuideRunCandidate | un
 }
 
 function cmdGuide() {
-  if (args.includes('--help') || args.includes('-h')) {
-    printGuideUsage();
-    return;
-  }
   const { message, targetRunId, targetStageId } = parseGuideArguments();
   if (!message) guideArgumentError('Guidance message must not be empty.');
   const root = runsRoot();
-  if (!existsSync(root)) { console.error('No runs found.'); process.exit(1); }
+  if (!existsSync(root)) { console.error('No runs found.'); process.exit(EXIT_CODE.failed); }
   const runs = runIdsByRecency(root);
-  if (runs.length === 0) { console.error('No runs found.'); process.exit(1); }
+  if (runs.length === 0) { console.error('No runs found.'); process.exit(EXIT_CODE.failed); }
 
   let selected: GuideRunCandidate;
   if (targetRunId !== undefined) {
     if (!safeGuideRunId(targetRunId) || !runs.includes(targetRunId)) {
       console.error(`Run "${targetRunId}" was not found; guidance was not sent.`);
-      process.exit(1);
+      process.exit(EXIT_CODE.failed);
     }
     const candidate = readGuideCandidate(root, targetRunId);
     if (!candidate) {
       console.error(`Run "${targetRunId}" is unreadable or unsafe; guidance was not sent.`);
-      process.exit(1);
+      process.exit(EXIT_CODE.failed);
     }
     const statusResolution = resolveRunStatus(candidate.status);
     if (statusResolution.kind === 'unknown') {
       console.error(`Run "${targetRunId}" has unrecognized archived status ${statusResolution.display}; guidance was not sent.`);
-      process.exit(1);
+      process.exit(EXIT_CODE.failed);
     }
     if (!isRunningRunStatus(candidate.status)) {
       console.error(`Run "${targetRunId}" is ${candidate.status || 'in an unknown state'}, not running; guidance was not sent.`);
-      process.exit(1);
+      process.exit(EXIT_CODE.failed);
     }
     selected = candidate;
   } else {
@@ -1701,21 +1584,21 @@ function cmdGuide() {
       ));
     if (running.length === 0) {
       console.error('No running runs found; guidance was not sent.');
-      process.exit(1);
+      process.exit(EXIT_CODE.failed);
     }
     if (running.length > 1) {
       console.error('Multiple runs are currently executing; guidance was not sent. Choose one explicitly:');
       for (const candidate of running) {
         console.error(`  flowcrew guide --run ${candidate.id} "message"  # ${candidate.title}`);
       }
-      process.exit(1);
+      process.exit(EXIT_CODE.failed);
     }
     selected = running[0];
   }
 
   if (targetStageId !== undefined && !selected.stageIds.includes(targetStageId)) {
     console.error(`Stage "${targetStageId}" is not part of run "${selected.id}"; guidance was not sent.`);
-    process.exit(1);
+    process.exit(EXIT_CODE.failed);
   }
   const target = targetStageId ?? RUN_WIDE_GUIDANCE_TARGET;
   const envelope = queueOperatorGuidance({
@@ -1726,7 +1609,7 @@ function cmdGuide() {
   });
   if (envelope.quarantined) {
     console.error(`Guidance ${envelope.id} quarantined: ${envelope.quarantineReason}; not queued for delivery.`);
-    process.exit(2);
+    process.exit(EXIT_CODE.failed);
   }
   console.log(`Guidance ${envelope.id} queued for ${targetStageId ? 'stage ' + targetStageId : 'all stages'} in run ${selected.id}:`);
   console.log(`  "${message}"`);
@@ -1734,31 +1617,25 @@ function cmdGuide() {
 }
 
 function cmdInterrupt() {
-  if (args.includes('--help') || args.includes('-h')) {
-    console.log('Usage: flowcrew interrupt --run <run-id> --stage <stage-id> ["reason"]');
-    console.log('');
-    console.log('Stops the active stage command and delivers the reason or action description as operator guidance.');
-    return;
-  }
   const { message: reason, targetRunId, targetStageId } = parseGuideArguments();
   if (!targetRunId || !targetStageId) {
     console.error('Both --run and --stage are required for a command interrupt.');
-    console.error('Usage: flowcrew interrupt --run <run-id> --stage <stage-id> ["reason"]');
-    process.exit(1);
+    console.error(commandUsage('interrupt'));
+    process.exit(EXIT_CODE.failed);
   }
   const root = runsRoot();
   if (!safeGuideRunId(targetRunId)) {
     console.error(`Run "${targetRunId}" is unsafe; no command was interrupted.`);
-    process.exit(1);
+    process.exit(EXIT_CODE.failed);
   }
   const candidate = readGuideCandidate(root, targetRunId);
   if (!candidate || !isRunningRunStatus(candidate.status)) {
     console.error(`Run "${targetRunId}" is not running; no command was interrupted.`);
-    process.exit(1);
+    process.exit(EXIT_CODE.failed);
   }
   if (!candidate.stageIds.includes(targetStageId)) {
     console.error(`Stage "${targetStageId}" is not part of run "${targetRunId}"; no command was interrupted.`);
-    process.exit(1);
+    process.exit(EXIT_CODE.failed);
   }
   try {
     const signal = requestStageCommandInterrupt({
@@ -1771,79 +1648,18 @@ function cmdInterrupt() {
     console.log('The engine will validate the interrupt and record its reason as operator guidance before stopping the command.');
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
+    process.exit(EXIT_CODE.failed);
   }
-}
-
-async function cmdClean() {
-  if (args.includes('--help') || args.includes('-h')) {
-    console.log('Usage: flowcrew clean [--keep N]');
-    console.log('');
-    console.log('Deletes oldest runs, keeping N most recent runs (default: 5).');
-    return;
-  }
-  const root = runsRoot();
-  if (!existsSync(root)) { console.log('Nothing to clean.'); return; }
-  const keepArg = args.find((a, i) => args[i - 1] === '--keep');
-  const keep = keepArg ? parseInt(keepArg, 10) : 5;
-  const entries = readdirSync(root).sort().reverse();
-  const readableRuns = entries.filter((runId) => {
-    try {
-      const state = JSON.parse(readFileSync(join(root, runId, 'run.json'), 'utf-8')) as { runId?: unknown };
-      return state.runId === runId;
-    } catch { return false; }
-  });
-  const expiredReservations = entries.filter((runId) => {
-    if (readableRuns.includes(runId)) return false;
-    try {
-      const marker = JSON.parse(readFileSync(join(root, runId, RUN_RESERVATION_FILE), 'utf-8')) as {
-        version?: unknown; runId?: unknown; reservedAt?: unknown;
-      };
-      const reservedAt = typeof marker.reservedAt === 'string' ? Date.parse(marker.reservedAt) : Number.NaN;
-      return marker.version === 1 && marker.runId === runId && Number.isFinite(reservedAt)
-        && Date.now() - reservedAt > RUN_RESERVATION_TTL_MS;
-    } catch { return false; }
-  });
-  const toDelete = [...readableRuns.slice(Math.max(0, keep)), ...expiredReservations];
-  if (toDelete.length === 0) { console.log(`Nothing to clean (${readableRuns.length} readable runs, keeping ${keep}; ${entries.length - readableRuns.length} unclassified entries preserved).`); return; }
-  let skippedLive = 0;
-  let cleaned = 0;
-  for (const runId of toDelete) {
-    try {
-      const runPath = join(root, runId);
-      const pid = parseSchedulerPidMarker(readFileSync(join(runPath, 'scheduler.pid'), 'utf-8'));
-      if (pid !== null && isLiveFlowcrewSchedulerForRun(pid, runId, runPath)) {
-        skippedLive += 1;
-        continue;
-      }
-    } catch { /* no validated live scheduler; historical run is cleanable */ }
-    try {
-      // A crashed scheduler can leave owned commands alive. Keep their run
-      // records until every consumer has retired.
-      const { checkpointConsumers } = await import('./restart-recovery.js');
-      if (readableRuns.includes(runId) && checkpointConsumers(readRunState('', runId).engineCheckpoint).length > 0) {
-        skippedLive += 1;
-        continue;
-      }
-      const { retireRunScratch } = await import('./invocation-scratch.js');
-      retireRunScratch(join(root, runId));
-      rmSync(join(root, runId), { recursive: true, force: true });
-      cleaned += 1;
-    } catch { /* non-critical */ }
-  }
-  const preservedUnclassified = entries.length - readableRuns.length - expiredReservations.length;
-  console.log(`Cleaned ${cleaned} old readable/expired-reservation entries (kept ${Math.min(keep, readableRuns.length)} most recent readable runs; ${preservedUnclassified} unclassified or active-reservation entries preserved).`);
-  if (skippedLive > 0) console.log(`Skipped ${skippedLive} live run(s); stop them before cleaning their history.`);
 }
 
 function cmdExport() {
-
+  const selected = parseCommandArgs('export', args).positionals[0];
   const root = runsRoot();
-  if (!existsSync(root)) { console.error('No runs found.'); process.exit(1); }
-  const runId = args[1] || readdirSync(root).sort().reverse()[0];
-  if (!runId) { console.error('No runs found.'); process.exit(1); }
+  if (!existsSync(root)) { console.error('No runs found.'); process.exit(EXIT_CODE.failed); }
+  const runId = selected || readdirSync(root).sort().reverse()[0];
+  if (!runId) { console.error('No runs found.'); process.exit(EXIT_CODE.failed); }
   const runDir = join(root, runId);
-  if (!existsSync(runDir)) { console.error(`Run not found: ${runId}\nRun \`flowcrew list\` to see available runs.`); process.exit(1); }
+  if (!existsSync(runDir)) { console.error(`Run not found: ${runId}\nRun \`flowcrew list\` to see available runs.`); process.exit(EXIT_CODE.failed); }
 
   const bundle: Record<string, unknown> = { runId, exportedAt: new Date().toISOString() };
   // v2 run.json is intentionally a compact projection. Export the hydrated
@@ -1856,14 +1672,13 @@ function cmdExport() {
       const sd = join(stagesDir, stageId);
       const stage: Record<string, unknown> = { id: stageId };
       try { stage.status = JSON.parse(readFileSync(join(sd, 'status.json'), 'utf-8')); } catch { /* non-critical */ }
-      try { stage.input = readFileSync(join(sd, 'input.md'), 'utf-8'); } catch { /* non-critical */ }
+      stage.input = readStageInput('', runId, stageId);
       try { stage.output = readFileSync(join(sd, 'output.md'), 'utf-8'); } catch { /* non-critical */ }
       stages[stageId] = stage;
     }
     bundle.stages = stages;
   }
-  try { bundle.supervisorLog = readFileSync(join(runDir, 'supervisor_log.md'), 'utf-8'); } catch { /* non-critical */ }
-  try { bundle.progress = readFileSync(join(runDir, 'progress.md'), 'utf-8'); } catch { /* non-critical */ }
+  try { bundle.progress = readFileSync(join(runDir, 'summary.md'), 'utf-8'); } catch { /* non-critical */ }
   try { bundle.dispatch = readFileSync(join(runDir, 'dispatch.yaml'), 'utf-8'); } catch { /* non-critical */ }
 
   const outputPath = `flowcrew-export-${runId}.json`;
@@ -1873,271 +1688,20 @@ function cmdExport() {
   console.log(`  ${Object.keys((bundle.stages as object) || {}).length} stages, ${size}KB`);
 }
 
-async function cmdCampaign() {
-  const subcommand = args[1];
-  if (subcommand === CAMPAIGN_PENDING_SUBCOMMAND) {
-    const id = args[2];
-    if (!id || args.includes('--help') || args.includes('-h')) {
-      console.log('Usage: flowcrew campaign pending <campaign_id>');
-      return;
-    }
-    const entries = readPendingReviews(id);
-    console.log(`Pending review: ${entries.length}`);
-    entries.forEach((entry, index) => {
-      console.log(`${index}: [${entry.severity ?? 'medium'}] ${entry.reason}`);
-      console.log(`   ${summarizePatch(entry.patch)}`);
-    });
-    return;
-  }
-
-  if (subcommand === 'review') {
-    const id = args[2];
-    if (!id || args.includes('--help') || args.includes('-h')) {
-      console.log('Usage: flowcrew campaign review <campaign_id>');
-      console.log('Interactively accept, reject, skip, or quit pending brief patches.');
-      return;
-    }
-    const scriptedAnswers = process.stdin.isTTY ? null : readFileSync(0, 'utf-8').split(/\r?\n/);
-    const rl = scriptedAnswers ? null : createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      let index = 0;
-      let answerIndex = 0;
-      while (true) {
-        const entries = readPendingReviews(id);
-        if (index >= entries.length) {
-          console.log('No more pending reviews.');
-          break;
-        }
-        const entry = entries[index];
-        console.log(`${index}: [${entry.severity ?? 'medium'}] ${entry.reason}`);
-        console.log(`   ${summarizePatch(entry.patch)}`);
-        const answer = (scriptedAnswers
-          ? (scriptedAnswers[answerIndex++] ?? 'q')
-          : await rl!.question('[a]ccept | [r]eject | [s]kip | [q]uit: ')).trim().toLowerCase();
-        if (answer === 'q' || answer === 'quit') break;
-        if (answer === 's' || answer === 'skip' || answer === '') {
-          index++;
-          continue;
-        }
-        if (answer === 'a' || answer === 'accept' || answer === 'r' || answer === 'reject') {
-          const decision = answer.startsWith('a') ? 'accept' : 'reject';
-          try {
-            const result = await consumePendingReview(id, index, decision);
-            console.log(`${decision === 'accept' ? 'Accepted' : 'Rejected'} review ${index}${result.version ? ` -> ${result.version}` : ''}`);
-          } catch (err) {
-            if (err instanceof ReviewConflictError) console.error(err.message);
-            else throw err;
-          }
-          continue;
-        }
-        console.log('Unrecognized choice.');
-      }
-    } finally {
-      rl?.close();
-    }
-    return;
-  }
-
-  if (subcommand === 'status') {
-    const id = args[2];
-    if (!id || args.includes('--help') || args.includes('-h')) {
-      console.error('Usage: flowcrew campaign status <campaign_id>');
-      process.exit(1);
-    }
-    const dir = campaignDir(id);
-    const summaryPath = join(dir, 'summary.json');
-    const logPath = join(dir, 'iteration_log.jsonl');
-    const activePath = join(dir, 'active.json');
-    console.log(`# Campaign: ${id}`);
-    if (!existsSync(dir)) {
-      console.log('Status: not found');
-      return;
-    }
-    if (existsSync(summaryPath)) {
-      try {
-        const summary = JSON.parse(readFileSync(summaryPath, 'utf-8'));
-        console.log(`Status: ${summary.status ?? 'unknown'}`);
-        if (summary.iter !== undefined) console.log(`Iterations: ${summary.iter}`);
-      } catch {
-        console.log('Status: summary unreadable');
-      }
-    } else if (existsSync(activePath)) {
-      try {
-        const active = JSON.parse(readFileSync(activePath, 'utf-8'));
-        console.log(`Status: running`);
-        console.log(`Iteration: ${active.iter ?? '?'}`);
-        console.log(`Unit: ${active.systemdUnit ?? '?'}`);
-      } catch {
-        console.log('Status: running');
-      }
-    } else {
-      console.log('Status: initialized');
-    }
-    if (existsSync(logPath)) {
-      const lines = readFileSync(logPath, 'utf-8').trim().split('\n').filter(Boolean);
-      console.log(`Log entries: ${lines.length}`);
-      const last = lines.at(-1);
-      if (last) console.log(`Last: ${last}`);
-    }
-    return;
-  }
-
-  console.error('Usage: flowcrew campaign status|pending|review ...');
-  process.exit(1);
-}
-
-function cmdBrief() {
-  const subcommand = args[1];
-  const briefDir = args[2] ? resolve(args[2]) : undefined;
-
-  if (subcommand === 'head') {
-    if (!briefDir || args.includes('--help') || args.includes('-h')) {
-      console.error('Usage: flowcrew brief head <briefDir>');
-      process.exit(1);
-    }
-    const head = readHead(briefDir);
-    console.log(`${head.version} ${head.path}`);
-    return;
-  }
-
-  if (subcommand === 'diff') {
-    const fromVersion = args[3];
-    const toVersion = args[4];
-    if (!briefDir || !fromVersion || !toVersion || args.includes('--help') || args.includes('-h')) {
-      console.error('Usage: flowcrew brief diff <briefDir> <fromVersion> <toVersion>');
-      process.exit(1);
-    }
-    process.stdout.write(diffVersions(briefDir, fromVersion, toVersion));
-    return;
-  }
-
-  if (subcommand === 'rollback') {
-    const version = args[3];
-    if (!briefDir || !version || args.includes('--help') || args.includes('-h')) {
-      console.error('Usage: flowcrew brief rollback <briefDir> <version>');
-      process.exit(1);
-    }
-    const head = rollback(briefDir, version, `cli rollback to ${version}`);
-    console.log(`${head.version} ${head.path}`);
-    return;
-  }
-
-  if (subcommand === 'log') {
-    if (!briefDir || args.includes('--help') || args.includes('-h')) {
-      console.error('Usage: flowcrew brief log <briefDir>');
-      process.exit(1);
-    }
-    const logPath = join(briefDir, 'revisions.jsonl');
-    if (!existsSync(logPath)) {
-      console.log('No revisions.');
-      return;
-    }
-    const lines = readFileSync(logPath, 'utf-8').trim().split('\n').filter(Boolean);
-    if (lines.length === 0) {
-      console.log('No revisions.');
-      return;
-    }
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line) as { ts?: string; from?: string; to?: string; reason?: string };
-        console.log(`${entry.ts ?? '?'} ${entry.from ?? '?'} -> ${entry.to ?? '?'} ${entry.reason ?? ''}`.trim());
-      } catch {
-        console.log(line);
-      }
-    }
-    return;
-  }
-
-  console.error('Usage: flowcrew brief head|diff|rollback|log ...');
-  process.exit(1);
-}
-
-function printUsage() {
-  console.log(`
-FlowCrew — Multi-agent orchestration platform
-
-Usage: flowcrew <command>
-
-Commands:
-  init      Initialize FlowCrew in the current project
-  adapter   Show or set the project adapter choice
-  quick     Inspect, then run or enqueue an authored brief (no server needed)
-  status    Show the latest run for this project (--all/--project for others)
-  list      Show all recent runs with status and duration
-  guide     Queue original guidance for a running stage or every stage
-  interrupt Stop the active command in a named stage and deliver a reason
-  clean     Delete old runs (keeps 5 most recent by default)
-  prune     Compact terminal run workspaces, preserving history/evidence (dry-run by default)
-  export    Export a run as JSON bundle
-  campaign  Inspect recorded campaign state and review pending brief patches
-  daemon    Operate the background orchestrator (hold/continue, restart/status; serve is internal)
-  dashboard Query the running web dashboard (status)
-  task      List and manage background tasks
-  fc_tasks  Render and safely update a conversational task ledger
-  audit-reality  Run declared checks against task history
-  plan-check  Check a draft stage list against a brief without launching
-  inbox     Review and resolve approval requests that parked a run
-  ship-preflight  Gather prior-run, campaign, build, and brief-input facts before shipping
-  ship-setup  Create a launch worktree, link declared inputs, and baseline validation
-  land      Audit terminal artifacts and every unique worktree item before safe removal
-  watch     Report edge-triggered stall judgements for live runs
-  events    Read or follow the canonical run event feed
-  rehearse  Wind-tunnel a research brief pre-launch: real scheduler + scripted fake agent, 0 tokens
-  brief     Inspect, diff, or roll back versioned briefs
-  doctor    Check system requirements; repair/compact the task registry (dry-run by default)
-  start     Start the web dashboard (this is NOT the background orchestrator daemon)
-  version   Show version
-
-Examples:
-  flowcrew adapter
-  flowcrew adapter claude
-  flowcrew quick "refactor auth module"
-  flowcrew quick "task" --max-iterations 3
-  flowcrew status
-  flowcrew status --all
-  flowcrew status --project ../another-project
-  flowcrew list --limit 20
-  flowcrew daemon status
-  flowcrew daemon restart
-  flowcrew dashboard status
-  flowcrew doctor --repair-registry
-  flowcrew doctor --repair-registry --apply
-  flowcrew doctor --compact-registry
-  flowcrew start  # web dashboard only
-  flowcrew task list
-  flowcrew fc_tasks render
-  flowcrew guide --run <run-id> "try a different approach"
-  flowcrew interrupt --run <run-id> --stage <stage-id> "stop the oversized job"
-  flowcrew clean --keep 3
-  flowcrew prune --dry-run
-  flowcrew prune --run <run-id> --apply
-  flowcrew ship-preflight --brief docs/task_brief.md
-  flowcrew ship-setup --brief docs/task_brief.md --target ../task-worktree --base HEAD --branch task-work
-  flowcrew land --run <run-id>
-  flowcrew watch --once
-  flowcrew events --follow
-  flowcrew brief head docs/brief
-
-Options:
-  --help    Show this help message
-
-Environment:
-  PORT          Server port (default: 3000)
-  PROJECT_DIR   Project directory (default: current directory)
-  FC_TASKS_ROOT Task-ledger root (default: ~/.claude/tasks)
-`);
-}
+function printUsage() { console.log(commandUsage()); }
 
 // Main
+try {
 switch (command) {
   case 'init':
-    cmdInit().catch((err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });
+    parseCommandArgs('init', args);
+    await cmdInit();
     break;
   case 'adapter':
-    try { cmdAdapter(); } catch (err) { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); }
+    cmdAdapter();
     break;
   case 'quick':
-    cmdQuick().catch((err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });
+    await cmdQuick();
     break;
   case 'status':
     cmdStatus();
@@ -2151,76 +1715,62 @@ switch (command) {
   case 'interrupt':
     cmdInterrupt();
     break;
-  case 'clean':
-    await cmdClean();
-    break;
   case 'export':
     cmdExport();
     break;
   case 'campaign':
-    cmdCampaign().catch((err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); });
+    console.error(`Unknown campaign subcommand: ${args[1] ?? ''}`);
+    process.exitCode = EXIT_CODE.failed;
     break;
   case 'daemon':
-    import('./cli-daemon.js').then(({ cmdDaemon }) => cmdDaemon(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./cli-daemon.js')).cmdDaemon(args);
     break;
   case 'dashboard':
-    import('./cli-dashboard.js').then(({ cmdDashboard }) => cmdDashboard(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./cli-dashboard.js')).cmdDashboard(args);
     break;
   case 'task':
-    import('./cli-task.js').then(({ cmdTask }) => cmdTask(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./cli-task.js')).cmdTask(args);
     break;
   case 'audit-reality':
-    import('./reality-gate/audit-reality.js').then(({ cmdAuditReality }) => cmdAuditReality(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./reality-gate/audit-reality.js')).cmdAuditReality(args);
     break;
   case 'inbox':
-    import('./cli-inbox.js').then(({ cmdInbox }) => cmdInbox(args)).then((code) => { process.exitCode = code; }).catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./cli-inbox.js')).cmdInbox(args);
     break;
   case 'ship-preflight':
-    import('./cli-ship-preflight.js').then(({ cmdShipPreflight }) => cmdShipPreflight(args))
-      .then((code) => { process.exitCode = code; })
-      .catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./cli-ship-preflight.js')).cmdShipPreflight(args);
     break;
   case 'ship-setup':
-    import('./cli-ship-setup.js').then(({ cmdShipSetup }) => cmdShipSetup(args))
-      .then((code) => { process.exitCode = code; })
-      .catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./cli-ship-setup.js')).cmdShipSetup(args);
     break;
   case 'land':
-    import('./cli-land.js').then(({ cmdLand }) => cmdLand(args))
-      .then((code) => { process.exitCode = code; })
-      .catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./cli-land.js')).cmdLand(args);
     break;
   case 'watch':
-    import('./cli-watch.js').then(({ cmdWatch }) => cmdWatch(args))
-      .then((code) => { process.exitCode = code; })
-      .catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./cli-watch.js')).cmdWatch(args);
     break;
   case 'events':
-    import('./cli-events.js').then(({ cmdEvents }) => cmdEvents(args))
-      .then((code) => { process.exitCode = code; })
-      .catch((err) => { console.error(err); process.exit(1); });
+    process.exitCode = await (await import('./cli-events.js')).cmdEvents(args);
     break;
   case 'rehearse':
-    import('./rehearse.js').then(({ cmdRehearse }) => cmdRehearse(args.slice(1))).catch((err) => { console.error(err); process.exit(1); });
-    break;
-  case 'brief':
-    try { cmdBrief(); } catch (err) { console.error(err); process.exit(1); }
+    await (await import('./rehearse.js')).cmdRehearse(args.slice(1));
     break;
   case 'doctor':
+    parseCommandArgs('doctor', args);
     if (args.includes('--repair-registry') || args.includes('--compact-registry') || args.includes('--apply')) {
-      import('./cli-doctor.js')
-        .then(({ cmdDoctorMaintenance }) => { process.exitCode = cmdDoctorMaintenance(args); })
-        .catch((err) => { console.error(err); process.exit(1); });
+      process.exitCode = (await import('./cli-doctor.js')).cmdDoctorMaintenance(args);
     } else {
-      cmdDoctor().catch((err) => { console.error(err); process.exit(1); });
+      await cmdDoctor();
     }
     break;
   case 'start':
-    cmdStart().catch((err) => { console.error(err); process.exit(1); });
+    parseCommandArgs('start', args);
+    await cmdStart();
     break;
   case 'version':
   case '--version':
   case '-v': {
+    parseCommandArgs('version', ['version', ...args.slice(1)]);
     const pkgPath = join(import.meta.dirname ?? '.', '..', 'package.json');
     try {
       const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
@@ -2238,6 +1788,12 @@ switch (command) {
   default:
     console.error(`Unknown command: ${command}`);
     printUsage();
-    process.exit(1);
+    process.exit(EXIT_CODE.failed);
+}
+} catch (error) {
+  console.error(error instanceof CliUsageError
+    ? error.message[0].toUpperCase() + error.message.slice(1)
+    : error instanceof Error ? error.message : String(error));
+  process.exit((await import('./orchestrator-rpc.js')).rpcErrorExitCode(error));
 }
 }

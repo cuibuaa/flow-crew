@@ -114,7 +114,7 @@ describe('a blocked author result goes to its gate', () => {
     // Without brief criteria, admission lets a static workflow run an author that no gate follows.
     const workflow = join(projectDir, 'solo.yaml');
     writeFileSync(workflow, ['name: solo', 'stages:', '  - id: implement', '    role: coder', '    scope: ["docs/"]',
-      '    artifact_contract: {version: 1, produces: [], reads: [], groups: [], replays: []}', ''].join('\n'));
+      '    artifact_contract: {version: 1, produces: [], reads: [], groups: []}', ''].join('\n'));
     const { final, calls } = await run([], undefined, workflow, '# Upgrade the parser\n');
     expect(calls).toEqual(['implement', 'implement']);
     expect(final.status).toBe('failed');

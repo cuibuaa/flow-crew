@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { canonicalJson, sha256Canonical } from './runtime-negotiation.js';
+import { canonicalJson, sha256Canonical } from './canonical-json.js';
 import { closeSync, linkSync, mkdirSync, openSync, unlinkSync, writeFileSync } from './engine-fs.js';
 import { existsSync, fsyncSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -16,7 +16,6 @@ export const PlanRevisionRequestSchema = z.object({
   baseRevision: z.number().int().nonnegative(), baseDigest: z.string().regex(/^[a-f0-9]{64}$/),
   reason: z.string().trim().min(1), stages: z.array(z.unknown()).min(1),
 }).strict();
-export type PlanRevisionRequest = z.infer<typeof PlanRevisionRequestSchema>;
 export interface PlanControl {
   version: 1;
   stages: RecordedStageConfig[];
@@ -77,7 +76,6 @@ export function applyPlanRevision(input: {
   projectDir: string; runId: string; request: unknown;
   parseStage: (value: unknown) => StageConfig;
   admit: (stages: StageConfig[], state: StoreState) => RevisionAdmission;
-  scopeContained: (scope: string, capabilities: readonly string[]) => boolean;
 }): { state: StoreState; decision: PlanRevisionDecision; stages?: StageConfig[] } {
   const request = PlanRevisionRequestSchema.parse(input.request);
   const requestDigest = sha256Canonical(request);
@@ -150,7 +148,6 @@ export function applyPlanRevision(input: {
           const contract = ArtifactContractSchema.safeParse(stage.artifact_contract);
           if (!contract.success) fail(`ARTIFACT_DECLARATION_REQUIRED: new stage ${stage.id} must declare artifact_contract {version:1,produces:[],reads:[]}`);
         }
-        for (const scope of stage.scope ?? []) if (!input.scopeContained(scope, state.planControl?.capabilities ?? [])) fail(`PLAN_REVISION_SCOPE_WIDENED: ${stage.id}.scope ${scope} exceeds the initial task capability`);
       }
       const admission = input.admit(candidate, state);
       decision.errors.push(...admission.errors);

@@ -11,7 +11,7 @@ import {
   type CampaignInboxOverviewLike,
   type CampaignPageSources,
 } from '../src/campaign-page.js';
-import { campaignsRoot, RUN_STATUS, runsRoot, STAGE_STATUS, type StoreState } from '../src/store.js';
+import { RUN_STATUS, runsRoot, STAGE_STATUS, type StoreState } from '../src/store.js';
 import type { CampaignHistoryEntry, CampaignSummaryRecord } from '../src/campaigns.js';
 import type { RunIndexRecord } from '../src/run-index.js';
 import type { TaskEntry } from '../src/task-registry.js';
@@ -21,7 +21,6 @@ let fixtureNumber = 0;
 let campaignId = '';
 let projectDir = '';
 let createdRunDirs: string[] = [];
-let createdCampaignDirs: string[] = [];
 
 const RESEARCH_WORKFLOW = [
   'name: fixture-research',
@@ -51,7 +50,6 @@ function runState(id: string, extra: Partial<StoreState> = {}): StoreState {
     campaignId,
     campaignStorageKey: campaignId,
     campaignName: 'Campaign fixture',
-    supervise: false,
     ...extra,
   };
 }
@@ -147,12 +145,10 @@ beforeEach(() => {
   campaignId = `campaign-page-fixture-${fixtureNumber}`;
   projectDir = join(runsRoot(), 'fixture-project');
   createdRunDirs = [];
-  createdCampaignDirs = [];
 });
 
 afterEach(() => {
   for (const dir of createdRunDirs) rmSync(dir, { recursive: true, force: true });
-  for (const dir of createdCampaignDirs) rmSync(dir, { recursive: true, force: true });
 });
 
 describe('campaign page evidence classifier', () => {
@@ -254,21 +250,6 @@ describe('campaign page evidence classifier', () => {
     expect(view.research.value?.selected?.metric).toBe('quality_pct');
   });
 
-  it('associates an accepted journal with a persisted campaign goal metric', async () => {
-    const state = runState('campaign-goal-journal', {
-      status: RUN_STATUS.SHIPPED,
-      research: { baseline: 0, policy: 'greedy_stack' },
-    });
-    writeEvidence(state, { workflow: RESEARCH_WORKFLOW, journal: { rounds: [{ label: 'accepted-a', result: 4 }] } });
-    const campaignDir = join(campaignsRoot(), campaignId);
-    createdCampaignDirs.push(campaignDir);
-    mkdirSync(campaignDir, { recursive: true });
-    writeFileSync(join(campaignDir, 'state.json'), JSON.stringify({ id: campaignId, name: 'Campaign fixture', goal: { metric: 'quality_pct', higherIsBetter: true } }));
-
-    const view = await readCampaignOperatorView(projectDir, campaignId, pageSources([state]));
-    expect(view.identity.classification.kind).toBe('research');
-    expect(view.research.value?.selected?.metric).toBe('quality_pct');
-  });
 });
 
 describe('research trend admission', () => {
@@ -343,13 +324,12 @@ describe('research trend admission', () => {
 });
 
 describe('cost, canonical states, title, and proof of work', () => {
-  it('has complete token accounting for current runs without model-supervisor state', () => {
-    const state = runState('stage-cost', { supervise: undefined });
-    expect(deriveRunTokenCost(state)).toMatchObject({ tokens: 15, supervisorTokens: 0, complete: true });
-    expect(deriveRunTokenCost({ ...state, supervise: true })).toMatchObject({ tokens: 15, complete: false });
+  it('has complete token accounting for current runs', () => {
+    const state = runState('stage-cost');
+    expect(deriveRunTokenCost(state)).toMatchObject({ tokens: 15, complete: true });
   });
 
-  it('accounts iteration evidence once when the legacy retired-usage mirror is also present', () => {
+  it('preserves budget accounting when legacy evidence and retired usage both lack attempt identities', () => {
     const historicalStatus = {
       status: STAGE_STATUS.COMPLETE,
       retries: 0,
@@ -369,40 +349,10 @@ describe('cost, canonical states, title, and proof of work', () => {
     });
 
     expect(deriveRunTokenCost(state)).toEqual({
-      tokens: 27,
-      supervisorTokens: 0,
+      tokens: 39,
       complete: true,
-      attemptEvidence: { known: 3, recordedUnknown: 0, unrecorded: 0 },
+      attemptEvidence: { known: 4, recordedUnknown: 0, unrecorded: 0 },
     });
-  });
-
-  it('adds independent supervisor tokens once and never adds supervisor duration to run wall clock', () => {
-    const state = runState('cost-proof', {
-      supervise: true,
-      stages: {
-        implement: { status: STAGE_STATUS.COMPLETE, retries: 0, tokens_in: 100, tokens_out: 50, duration_ms: 120_000 },
-        _supervisor: { status: STAGE_STATUS.COMPLETE, retries: 0, tokens_in: 999, tokens_out: 999, duration_ms: 800_000 },
-      },
-      supervisor: {
-        status: 'complete',
-        calls: 1,
-        tokens_in: 30,
-        tokens_out: 20,
-        duration_ms: 900_000,
-        startedAt: '2026-08-02T10:10:00.000Z',
-        completedAt: '2026-08-02T10:25:00.000Z',
-        attempts: [],
-      },
-    });
-    expect(deriveRunTokenCost(state)).toEqual({
-      tokens: 200,
-      supervisorTokens: 50,
-      complete: true,
-      attemptEvidence: { known: 1, recordedUnknown: 0, unrecorded: 0 },
-    });
-    expect(deriveRunWallClock(state, NOW.getTime())).toEqual({ milliseconds: 3_600_000, partial: false });
-    expect(deriveRunWallClock({ ...state, startedAt: 'invalid', completedAt: undefined }, NOW.getTime()))
-      .toEqual({ milliseconds: 120_000, partial: true });
   });
 
   it('uses the agreed short-name rule and deterministic fallbacks', () => {
@@ -456,7 +406,7 @@ describe('cost, canonical states, title, and proof of work', () => {
     const states = statuses.map((status, index) => runState(`canonical-${index}`, {
       status,
       startedAt: `2026-08-02T${String(index).padStart(2, '0')}:00:00.000Z`,
-      completedAt: status === RUN_STATUS.RUNNING || status === RUN_STATUS.PENDING || status === RUN_STATUS.PARKED || status === RUN_STATUS.AWAITING_APPROVAL
+      completedAt: status === RUN_STATUS.RUNNING || status === RUN_STATUS.PENDING || status === RUN_STATUS.PARKED
         ? undefined
         : `2026-08-02T${String(index).padStart(2, '0')}:30:00.000Z`,
       parked: status === RUN_STATUS.PARKED ? {
@@ -589,28 +539,6 @@ describe('campaign-local attention and failure isolation', () => {
       research: 'unknown',
       engineering: 'unknown',
     });
-  });
-
-  it('marks supervised cost as a known partial instead of silently filling missing supervisor use with zero', async () => {
-    const complete = runState('complete-cost');
-    const missingSupervisor = runState('missing-supervisor', { supervise: true, supervisor: undefined });
-    writeEvidence(complete);
-    writeEvidence(missingSupervisor);
-    const view = await readCampaignOperatorView(projectDir, campaignId, pageSources([complete, missingSupervisor]));
-    expect(view.cost.status).toBe('partial');
-    expect(view.cost.value.runCoverage).toEqual({ succeeded: 1, failed: 1, total: 2 });
-    expect(view.cost.value.wallCoverage).toEqual({ succeeded: 2, failed: 0, total: 2 });
-    expect(view.cost.value.tokenCoverage).toEqual({ succeeded: 1, failed: 1, total: 2 });
-    expect(view.cost.issues).toEqual([
-      expect.objectContaining({
-        code: 'cost-token-telemetry-incomplete',
-        affectedRuns: [expect.objectContaining({ runId: missingSupervisor.runId, shortName: '性能 E6' })],
-      }),
-    ]);
-
-    const onlyUnknown = await readCampaignOperatorView(projectDir, campaignId, pageSources([missingSupervisor]));
-    expect(onlyUnknown.cost.status).toBe('partial');
-    expect(onlyUnknown.cost.value.runCoverage).toEqual({ succeeded: 0, failed: 1, total: 1 });
   });
 
   it('keeps current running and parked facts visible beside historical shipped work', async () => {

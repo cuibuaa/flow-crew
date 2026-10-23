@@ -86,14 +86,14 @@ function isIdentity(value: unknown): boolean {
     && isString(value.storageKey) && value.storageKey.length > 0
     && isCount(value.runCount)
     && isNullableString(value.startedAt)
-    && new Set(["runs", "legacy", "unknown"]).has(String(value.startedAtSource))
+    && new Set(["runs", "unknown"]).has(String(value.startedAtSource))
     && isClassification(value.classification);
 }
 
 function isAttentionItem(value: unknown): boolean {
   return isRecord(value)
     && isString(value.id)
-    && new Set(["approval", "brief_review", "deferred", "parked", "worker_missing", "campaign_alert", "stale"]).has(String(value.kind))
+    && new Set(["approval", "deferred", "parked", "worker_missing", "campaign_alert", "stale"]).has(String(value.kind))
     && isString(value.title)
     && isString(value.reason)
     && (value.runId === undefined || isString(value.runId))
@@ -133,7 +133,6 @@ function isCost(value: unknown): boolean {
   return isRecord(value)
     && isFiniteNumber(value.wallMs) && value.wallMs >= 0
     && isFiniteNumber(value.tokens) && value.tokens >= 0
-    && isFiniteNumber(value.supervisorTokens) && value.supervisorTokens >= 0
     && isCoverage(value.runCoverage)
     && isCoverage(value.wallCoverage)
     && isCoverage(value.tokenCoverage);
@@ -148,7 +147,7 @@ function isMeasurementPoint(value: unknown): boolean {
     && isFiniteNumber(value.value)
     && isNullableString(value.timestamp)
     && DIRECTIONS.has(String(value.direction))
-    && new Set(["research_journal", "campaign_ledger", "outer_campaign"]).has(String(value.evidence));
+    && new Set(["research_journal", "campaign_ledger"]).has(String(value.evidence));
 }
 
 function isMetricGroup(value: unknown): boolean {
@@ -254,19 +253,6 @@ async function request(url: string): Promise<unknown> {
   }
 }
 
-async function requestText(url: string): Promise<string> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    let message = `${response.status} ${response.statusText}`.trim();
-    try {
-      const body = await response.clone().json() as { error?: unknown };
-      if (typeof body.error === "string") message = body.error;
-    } catch { /* HTTP status remains the useful error. */ }
-    throw new CampaignPageRequestError(message, response.status);
-  }
-  return response.text();
-}
-
 function assertIndex(value: unknown): CampaignOperatorIndex {
   if (!isRecord(value) || typeof value.generatedAt !== "string" || !isSource(value.campaigns, isIndexValue)) {
     throw new CampaignPageRequestError("Campaign index response does not match the page contract", 200);
@@ -304,27 +290,4 @@ export async function fetchCampaignOperatorView(id: string): Promise<CampaignOpe
 
 export async function fetchOlderCampaignRuns(id: string, cursor: string): Promise<SourceResult<CampaignRunPage>> {
   return assertRunPage(await request(`${BASE}/${encodeURIComponent(id)}/operator-runs?cursor=${encodeURIComponent(cursor)}`));
-}
-
-export interface CampaignBriefRevision {
-  from: string;
-  to: string;
-  reason: string;
-}
-
-export async function fetchCampaignBriefRevisions(id: string): Promise<CampaignBriefRevision[]> {
-  const value = await request(`${BASE}/${encodeURIComponent(id)}/revisions`);
-  if (!Array.isArray(value)) throw new CampaignPageRequestError("Brief revisions response is not an array", 200);
-  return value.flatMap((item) => {
-    if (!isRecord(item)) return [];
-    const from = typeof item.from === "string" ? item.from : typeof item.from_version === "string" ? item.from_version : "";
-    const to = typeof item.to === "string" ? item.to : typeof item.to_version === "string" ? item.to_version : typeof item.version === "string" ? item.version : "";
-    if (!/^v[1-9][0-9]*$/.test(from) || !/^v[1-9][0-9]*$/.test(to)) return [];
-    const reason = typeof item.reason === "string" ? item.reason : typeof item.rule === "string" ? item.rule : "Revision reason not recorded";
-    return [{ from, to, reason }];
-  });
-}
-
-export function fetchCampaignBriefDiff(id: string, from: string, to: string): Promise<string> {
-  return requestText(`${BASE}/${encodeURIComponent(id)}/brief-diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
 }

@@ -2,30 +2,28 @@ import { normalizeNativeEvent } from './adapters/native-events.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
-import { writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from './engine-fs.js';
+import { unlinkSync, openSync, closeSync } from './engine-fs.js';
 import { readFileSync, readdirSync, existsSync, statSync, readSync } from 'node:fs';
-import { join,extname,dirname,resolve } from "node:path";
+import { join,extname,resolve } from "node:path";
 import { createHmac,randomBytes,timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from 'node:http';
 import { homedir, networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { parse as parseYaml } from "yaml";
 import {
 campaignsRoot,extractTaskTitle,
-isAwaitingApprovalRunStatus,
-isPausedRunStatus,isTerminalRunStatus,isRunningStageStatus,isPendingStageStatus,
+isPausedRunStatus, isResumableRunStatus,isRunningStageStatus,isPendingStageStatus,
 listRuns,
 readRunState,readStageStatus,resolveRunStatus,updateRunState,
 runDir,
 RUN_STATUS,
 runsRoot,
 fcGlobalDir,
-STAGE_STATUS
 } from "./store.js";
-import type { RunStatus,StoreState } from "./store.js";
+import type { StoreState } from "./store.js";
 import { budgetView, projectRunStageHistory } from './run-state-view.js';
 import { countStandaloneRunsFromIndex,readRunIndexRecordsByCampaign,readRunIndexRecords,listStandaloneRunIdsFromIndex,getMaxUpdatedAt } from './run-index.js';
 import {
-listCampaigns,readCampaignEntries,
+listCampaigns,readCampaignEntries,resolveCampaignStorageKey,
 readAllCampaignEntries
 } from "./campaigns.js";
 import type { CampaignHistoryEntry } from "./campaigns.js";
@@ -35,13 +33,12 @@ import {
 describeLiveRunOwner,
 findLiveRunOwnerForProject,
 invalidateRunLockCache,
-isLiveFlowcrewSchedulerForRun,
 inspectRunScheduler,
 isProjectBusy,
-parseSchedulerPidMarker
 } from "./run-lock.js";
 import {
-defaultSocketPath,
+commandSocketPath,
+RpcRemoteError,
 RpcOutcomeUnknownError,
 sendRpc,
 type RegisterRpcResponse,
@@ -58,10 +55,8 @@ TASK_STATUS,
 type TaskCreateInput,
 type TaskListFilter,
 } from './task-registry.js';
-import { consumePendingReview,readPendingReviews,ReviewConflictError,summarizePatch } from './campaign-review.js';
-import type { PendingReviewEntry } from './campaign-review.js';
 import { readOperatorEvents,readOperationalProjection,type EventLike } from './cli-events.js';
-import { approvalResumeArgs,isValidApprovalRequestId } from './approval-artifacts.js';
+import { approvalResumeLaunch,isValidApprovalRequestId } from './approval-artifacts.js';
 import {
 getItem as getInboxItem,
 INBOX_FILTER_STATE,
@@ -69,7 +64,6 @@ listAll as listInboxItems,
 resolveRequest,type InboxItem
 } from './inbox.js';
 import { inspectApprovalRunStanding } from './run-standing.js';
-import { readOptionalJsonlFile as readJsonlFile } from './jsonl.js';
 import { z } from "zod";
 import pino from "pino";
 import { computeBuildFingerprint,isOperatorStateRoot,type DaemonBuildFingerprint } from './daemon-identity.js';
@@ -156,31 +150,15 @@ const CAMPAIGN_PRESENTATION_STATUS = {
 
 interface DashboardRunPresentation {
   campaignOutcome: string;
-  taskStatus: string;
 }
-
-/** Dashboard projections are distinct public consequences and are exhaustive. */
-const DASHBOARD_RUN_PRESENTATION = {
-  [RUN_STATUS.PENDING]: { campaignOutcome: 'pending', taskStatus: 'pending' },
-  [RUN_STATUS.RUNNING]: { campaignOutcome: 'running', taskStatus: 'running' },
-  [RUN_STATUS.PARKED]: { campaignOutcome: 'parked', taskStatus: 'parked' },
-  [RUN_STATUS.COMPLETE]: { campaignOutcome: 'shipped', taskStatus: 'completed' },
-  [RUN_STATUS.FAILED]: { campaignOutcome: 'failed', taskStatus: 'failed' },
-  [RUN_STATUS.AWAITING_APPROVAL]: { campaignOutcome: 'awaiting_approval', taskStatus: 'awaiting_approval' },
-  [RUN_STATUS.SHIPPED]: { campaignOutcome: 'shipped', taskStatus: 'shipped' },
-  [RUN_STATUS.CEILING_HIT]: { campaignOutcome: 'ceiling_hit', taskStatus: 'ceiling_hit' },
-  [RUN_STATUS.ESCALATED]: { campaignOutcome: 'escalated', taskStatus: 'escalated' },
-  [RUN_STATUS.REALITY_GATE_FAILED]: { campaignOutcome: 'reality_gate_failed', taskStatus: 'reality_gate_failed' },
-  [RUN_STATUS.PHASE_COMPLETE]: { campaignOutcome: 'phase_complete', taskStatus: 'phase_complete' },
-  [RUN_STATUS.STOPPED]: { campaignOutcome: 'stopped', taskStatus: 'stopped' },
-  [RUN_STATUS.INCOMPLETE]: { campaignOutcome: 'incomplete', taskStatus: 'incomplete' },
-} as const satisfies Record<RunStatus, DashboardRunPresentation>;
 
 function dashboardRunPresentation(status: unknown): DashboardRunPresentation {
   const resolution = resolveRunStatus(status);
-  if (resolution.kind === 'known') return DASHBOARD_RUN_PRESENTATION[resolution.status];
+  if (resolution.kind === 'known') return {
+    campaignOutcome: resolution.status === RUN_STATUS.COMPLETE ? RUN_STATUS.SHIPPED : resolution.status,
+  };
   const unrecognized = `unrecognized ${resolution.display}`;
-  return { campaignOutcome: unrecognized, taskStatus: unrecognized };
+  return { campaignOutcome: unrecognized };
 }
 // --- Shared helpers ---
 
@@ -265,39 +243,16 @@ interface WorkspaceCampaign {
   id: string;
   name: string;
   status: string;
-  brief_revisions: { version: string }[] | null;
   started_at?: string;
   staleRunId?: string;
-}
-
-export function readExecutionDefaults(): { timeoutMs: number; maxIterations: number; gateRetryLoops: number; stageTechnicalRetries: number } {
-  const defaults = loadEngineDefaults();
-  return {
-    timeoutMs: defaults.timeout_ms,
-    maxIterations: defaults.max_iterations,
-    gateRetryLoops: defaults.gate_retry_loops,
-    stageTechnicalRetries: defaults.stage_technical_retries,
-  };
 }
 
 function isSafeId(id: string): boolean {
   return !id.includes('..') && !id.includes('/') && !id.includes('\\');
 }
 
-function isSafeCampaignVersion(version: string): boolean {
-  return /^v\d+$/.test(version);
-}
-
 function campaignFsRoot(): string {
   return campaignsRoot();
-}
-
-function readJsonFile(filePath: string): Record<string, unknown> | null {
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
-  } catch { /* non-critical */
-    return null;
-  }
 }
 
 function formatDuration(startIso?: string, endIso?: string): string {
@@ -338,10 +293,7 @@ function readRunStateSafe(projectDir: string, runId: string): StoreState | null 
 export function schedulerIsAliveForRun(projectDir: string, runId: string): boolean {
   if (!projectDir || !runId) return false;
   try {
-    const runPath = runDir(projectDir, runId);
-    const pid = parseSchedulerPidMarker(readFileSync(join(runPath, 'scheduler.pid'), 'utf-8'));
-    if (pid === null) return false;
-    return isLiveFlowcrewSchedulerForRun(pid, runId, runPath);
+    return inspectRunScheduler(runId, runDir(projectDir, runId)).kind === 'live';
   } catch {
     return false;
   }
@@ -353,18 +305,11 @@ export function schedulerLoopIsStalled(projectDir: string, runId: string): boole
   catch { return false; }
 }
 
-function campaignStorageAliases(id: string): Set<string> {
-  const aliases = new Set<string>([id]);
-  const normalized = id.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  if (normalized) aliases.add(normalized);
-  return aliases;
-}
-
 function runMatchesCampaign(state: StoreState, id: string): boolean {
-  const aliases = campaignStorageAliases(id);
-  return [state.campaignId, state.campaignStorageKey, state.campaignName]
-    .filter((value): value is string => typeof value === 'string')
-    .some((value) => aliases.has(value) || aliases.has(value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')));
+  const key = resolveCampaignStorageKey({ campaignId: id, projectDir: state.projectDir });
+  return [state.campaignId, state.campaignStorageKey, state.campaignName].some(value =>
+    typeof value === 'string' && (value === id
+      || key !== undefined && resolveCampaignStorageKey({ campaignId: value, projectDir: state.projectDir }) === key));
 }
 
 /** Operator publications must not replace records owned by a live scheduler. */
@@ -486,7 +431,7 @@ function readStandaloneRuns(projectDir: string): { runs: StandaloneRunSummary[];
 function stageArtifactCount(projectDir: string, runId: string, stageId: string): number {
   const dir = join(runsRoot(), runId, 'stages', stageId);
   try {
-    return readdirSync(dir).filter((name) => name !== 'input.md' && name !== 'output.md' && name !== 'status.json').length;
+    return readdirSync(dir).filter((name) => name !== 'output.md' && name !== 'status.json').length;
   } catch {
     return 0;
   }
@@ -555,25 +500,6 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
       tokens_out: status?.tokens_out,
     };
   });
-  if (state.supervisor) {
-    stages.push({
-      id: '_supervisor',
-      role: 'supervisor',
-      depends_on: [],
-      dependsOn: [],
-      is_gate: false,
-      retry_to: [],
-      status: state.supervisor.status,
-      duration_ms: state.supervisor.duration_ms,
-      retries: 0,
-      reruns: Math.max(0, state.supervisor.calls - 1),
-      attempts: state.supervisor.attempts,
-      artifact_count: 0,
-      calls: state.supervisor.calls,
-      tokens_in: state.supervisor.tokens_in,
-      tokens_out: state.supervisor.tokens_out,
-    });
-  }
   const runDirectory = join(runsRoot(), state.runId);
   const stageHistoryDiagnostics: Array<{ code: string; path?: string; detail: string }> = [];
   const stageHistory = projectRunStageHistory(state, diagnostic => stageHistoryDiagnostics.push(diagnostic));
@@ -596,8 +522,6 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     campaignId: state.campaignId ?? state.campaignStorageKey,
     failureReason: state.failureReason,
     realityGate: state.realityGate,
-    supervise: state.supervise,
-    supervisor: state.supervisor,
     stages,
     stageEvidence: state.stageEvidence ?? [],
     stageHistory,
@@ -606,112 +530,6 @@ function stateToRunDetail(state: StoreState, projectDir: string) {
     events: readRunEvents(state.runId),
     operational: readOperationalProjection(runDirectory, { state }),
     stage_outputs: readStageOutputPreviews(state.runId),
-  };
-}
-
-function campaignDirOr404(id: string): string | null {
-  if (!isSafeId(id)) return null;
-  const dir = join(campaignFsRoot(), id);
-  try {
-    return statSync(dir).isDirectory() ? dir : null;
-  } catch { /* not found */
-    return null;
-  }
-}
-
-function getStringAt(obj: unknown, path: string[]): string | undefined {
-  let cursor: unknown = obj;
-  for (const key of path) {
-    if (!cursor || typeof cursor !== 'object' || !(key in cursor)) return undefined;
-    cursor = (cursor as Record<string, unknown>)[key];
-  }
-  return typeof cursor === 'string' && cursor.trim() ? cursor : undefined;
-}
-
-function resolveBriefDir(state: Record<string, unknown> | null): string | undefined {
-  const briefDir = getStringAt(state, ['briefDir'])
-    ?? getStringAt(state, ['brief_dir'])
-    ?? getStringAt(state, ['config', 'briefDir'])
-    ?? getStringAt(state, ['config', 'brief_dir'])
-    ?? getStringAt(state, ['campaign', 'briefDir'])
-    ?? getStringAt(state, ['campaign', 'brief_dir']);
-  if (briefDir) return briefDir;
-  const briefPath = getStringAt(state, ['briefPath'])
-    ?? getStringAt(state, ['brief_path'])
-    ?? getStringAt(state, ['config', 'briefPath'])
-    ?? getStringAt(state, ['config', 'brief_path']);
-  return briefPath ? dirname(briefPath) : undefined;
-}
-
-function latestIterationOutcome(iterations: unknown[]): string | undefined {
-  for (let i = iterations.length - 1; i >= 0; i--) {
-    const entry = iterations[i];
-    if (entry && typeof entry === 'object') {
-      const outcome = (entry as Record<string, unknown>).outcome;
-      if (typeof outcome === 'string') return outcome;
-    }
-  }
-  return undefined;
-}
-
-export function campaignSummary(id: string, dir: string): WorkspaceCampaign {
-  const state = readJsonFile(join(dir, 'state.json'));
-  const iterations = readJsonlFile(join(dir, 'iteration_log.jsonl'));
-  const stat = statSync(dir);
-  const latest = iterations.at(-1) as Record<string, unknown> | undefined;
-  const latestRunId = stringValue(latest?.runId)
-    ?? stringValue(latest?.run_id)
-    ?? getStringAt(state, ['runId'])
-    ?? getStringAt(state, ['run_id']);
-  let status = getStringAt(state, ['status'])
-    ?? getStringAt(state, ['state'])
-    ?? latestIterationOutcome(iterations)
-    ?? 'unknown';
-  // STALE DETECTION: if status='running' but neither state.json nor
-  // iteration_log.jsonl has been touched in >30min, the daemon likely
-  // exited without writing terminal status (framework bug or crash).
-  // Override to 'stale' so the dashboard stops showing it as RUNNING.
-  if (status === CAMPAIGN_PRESENTATION_STATUS.RUNNING) {
-    const projectDir = getStringAt(state, ['projectDir']) ?? '';
-    if (latestRunId && schedulerLoopIsStalled(projectDir, latestRunId)) {
-      status = CAMPAIGN_PRESENTATION_STATUS.STALE;
-    }
-    const STALE_MS = 30 * 60 * 1000;
-    let lastMtime = 0;
-    try { lastMtime = Math.max(lastMtime, statSync(join(dir, 'state.json')).mtimeMs); } catch { /* ignore */ }
-    try { lastMtime = Math.max(lastMtime, statSync(join(dir, 'iteration_log.jsonl')).mtimeMs); } catch { /* ignore */ }
-    if (status === CAMPAIGN_PRESENTATION_STATUS.RUNNING
-        && lastMtime > 0 && Date.now() - lastMtime > STALE_MS) {
-      const underlying = latestRunId ? readRunStateSafe(projectDir, latestRunId) : null;
-      status = underlying && (
-        isTerminalRunStatus(underlying.status)
-        || isPausedRunStatus(underlying.status)
-        || isAwaitingApprovalRunStatus(underlying.status)
-      )
-        ? underlying.status
-        // Silence is not death. Only demote to stale once no live scheduler
-        // process is bound to the run; a long stage is quiet, not lost.
-        : latestRunId && schedulerIsAliveForRun(projectDir, latestRunId)
-          ? status
-          : CAMPAIGN_PRESENTATION_STATUS.STALE;
-    }
-  }
-  const revisionsRaw = readJsonlFile(join(resolveBriefDir(state) ?? '', 'revisions.jsonl'));
-  const briefRevisions = revisionsRaw
-    .map((entry, index) => {
-      if (!entry || typeof entry !== 'object') return null;
-      const row = entry as Record<string, unknown>;
-      const to = stringValue(row.to_version) ?? stringValue(row.version) ?? `v${index + 2}`;
-      return { version: to };
-    })
-    .filter((entry): entry is { version: string } => entry !== null);
-  return {
-    id,
-    name: getStringAt(state, ['name']) ?? id,
-    status,
-    brief_revisions: briefRevisions.length ? briefRevisions : null,
-    started_at: getStringAt(state, ['started_at']) ?? getStringAt(state, ['startedAt']) ?? stat.birthtime.toISOString(),
-    ...(status === CAMPAIGN_PRESENTATION_STATUS.STALE && latestRunId ? { staleRunId: latestRunId } : {}),
   };
 }
 
@@ -758,7 +576,6 @@ function campaignFromHistory(
     id,
     name: name ?? latest?.campaignName ?? id,
     status,
-    brief_revisions: null,
     started_at: latest?.timestamp,
     ...(staleRunId ? { staleRunId } : {}),
   };
@@ -781,20 +598,6 @@ function listWorkspaceCampaigns(projectDir: string): WorkspaceCampaign[] {
 
 function computeWorkspaceCampaigns(projectDir: string): WorkspaceCampaign[] {
   const campaigns = new Map<string, WorkspaceCampaign>();
-  try {
-    for (const id of readdirSync(campaignFsRoot())
-      .filter((id) => isSafeId(id))
-    ) {
-      const dir = join(campaignFsRoot(), id);
-      try {
-        if (!statSync(dir).isDirectory()) continue;
-        const campaign = campaignSummary(id, dir);
-        campaigns.set(id, campaign);
-      } catch { /* skip */ }
-    }
-  } catch { /* no campaign root */
-    // Optional global campaign directory may not exist.
-  }
   // Prefetch ALL history entries and campaign runs in a single pass each, keyed
   // by canonical storage key. Previously campaignFromHistory re-scanned every
   // history file (and the SQLite index) once PER campaign — O(campaigns × all
@@ -853,51 +656,20 @@ function readAllCampaignRunsByKey(projectDir: string): Map<string, CampaignRunSl
   return out;
 }
 
-function readBriefFileForCampaign(dir: string, version: string): string | null {
-  if (!isSafeCampaignVersion(version)) return null;
-  const state = readJsonFile(join(dir, 'state.json'));
-  const briefDir = resolveBriefDir(state);
-  if (!briefDir) return null;
-  const filePath = join(briefDir, `${version}.md`);
-  try { return readFileSync(filePath, 'utf-8'); } catch { return null; }
-}
-
-function unifiedDiff(fromName: string, fromText: string, toName: string, toText: string): string {
-  const a = fromText.split('\n');
-  const b = toText.split('\n');
-  const dp = Array.from({ length: a.length + 1 }, () => Array<number>(b.length + 1).fill(0));
-  for (let i = a.length - 1; i >= 0; i--) {
-    for (let j = b.length - 1; j >= 0; j--) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-  const lines = [`--- ${fromName}`, `+++ ${toName}`, '@@ -1 +1 @@'];
-  let i = 0;
-  let j = 0;
-  while (i < a.length || j < b.length) {
-    if (i < a.length && j < b.length && a[i] === b[j]) {
-      lines.push(` ${a[i++]}`);
-      j++;
-    } else if (j < b.length && (i === a.length || dp[i][j + 1] >= dp[i + 1][j])) {
-      lines.push(`+${b[j++]}`);
-    } else if (i < a.length) {
-      lines.push(`-${a[i++]}`);
-    }
-  }
-  return lines.join('\n');
+function rpcHttpStatus(error: unknown): number {
+  return error instanceof RpcRemoteError ? (error.code.endsWith('_NOT_FOUND') ? 404 : 409) : 503;
 }
 
 type DashboardTaskRegistrar = (task: TaskCreateInput) => Promise<RegisterRpcResponse>;
 type DashboardTaskLister = (filter: TaskListFilter) => Promise<TaskShowEntry[]>;
 type DashboardRunCanceller = (runId: string) => Promise<CancellationResult>;
-type DashboardTaskResumer = (id: number) => Promise<{ new_attempt: number; unit: string }>;
 
 async function registerTaskWithDaemon(task: TaskCreateInput): Promise<RegisterRpcResponse> {
-  return sendRpc<RegisterRpcResponse>(defaultSocketPath(), { cmd: 'register', task, ...(task.run_id ? {} : { acknowledgement: 'persisted' as const }) });
+  return sendRpc<RegisterRpcResponse>(commandSocketPath(), { cmd: 'register', task, ...(task.run_id ? {} : { acknowledgement: 'persisted' as const }) });
 }
 
 async function listTasksFromDaemon(filter: TaskListFilter): Promise<TaskShowEntry[]> {
-  const response = await sendRpc<TaskListRpcResponse>(defaultSocketPath(), { cmd: 'list', filter });
+  const response = await sendRpc<TaskListRpcResponse>(commandSocketPath(), { cmd: 'list', filter });
   return response.tasks;
 }
 
@@ -906,7 +678,7 @@ export async function cancelRunWithControlPlane(
   options: CancellationClientOptions = {},
 ): Promise<CancellationResult> {
   return cancelRunThroughControlPlane(runId, undefined, {
-    socketPath: defaultSocketPath(),
+    socketPath: commandSocketPath(),
     rpcTimeoutMs: 5_000,
     ...options,
   });
@@ -936,13 +708,11 @@ export interface DashboardOptions {
   registerTask?: DashboardTaskRegistrar;
   listTasks?: DashboardTaskLister;
   cancelRun?: DashboardRunCanceller;
-  resumeTask?: DashboardTaskResumer;
   isProjectBusy?: typeof isProjectBusy;
   /** Inbox read seams let source-failure tests stay isolated from real operator data. */
   inboxSources?: {
     listApprovals?: () => InboxItem[];
     listCampaigns?: (projectDir: string) => WorkspaceCampaign[];
-    readPendingReviews?: (campaignId: string) => PendingReviewEntry[];
     listStale?: (campaigns: WorkspaceCampaign[]) => InboxStaleItem[];
   };
   /** Campaign-page read seams keep aggregation/source-isolation specs off live operator data. */
@@ -951,31 +721,17 @@ export interface DashboardOptions {
   distDir?: string;
 }
 
-const DASHBOARD_TIMEOUT_MIGRATION = 'Stage timeout overrides were removed; edit the engine config/defaults.yaml::default_timeout_ms instead.';
-const RemovedDashboardTimeoutSchema = z.unknown().refine(() => false, {
-  message: DASHBOARD_TIMEOUT_MIGRATION,
-});
-
 const DashboardTaskCreateSchema = z.object({
-  name: z.string().refine((value) => value.trim().length > 0, 'name must not be blank').optional(),
-  brief: z.string().refine((value) => value.trim().length > 0, 'brief must not be blank').optional(),
-  // Compatibility with the old form contract while callers migrate to `brief`.
-  planFile: z.string().refine((value) => value.trim().length > 0, 'planFile must not be blank').optional(),
+  brief: z.string().refine((value) => value.trim().length > 0, 'brief must not be blank'),
   projectDir: z.string().trim().min(1).optional(),
   workflow: z.string().trim().min(1).optional(),
   maxIterations: z.number().int().min(1).optional(),
-  maxIter: z.number().int().min(1).optional(),
-  timeoutMs: RemovedDashboardTimeoutSchema.optional(),
-  timeout_ms: RemovedDashboardTimeoutSchema.optional(),
-  timeout_total_ms: RemovedDashboardTimeoutSchema.optional(),
   noCampaign: z.boolean().optional(),
   campaign: z.string().trim().min(1).optional(),
   campaignId: z.string().trim().min(1).optional(),
   campaignName: z.string().trim().min(1).optional(),
   briefPreflightDigest: z.string().optional(),
   briefPreflightReceipt: z.string().optional(),
-}).refine((body) => Boolean(body.brief ?? body.planFile ?? body.name), {
-  message: 'brief is required',
 });
 
 const InboxResolveBodySchema = z.object({
@@ -1041,26 +797,10 @@ interface InboxStaleItem {
   staleRunId?: string;
 }
 
-interface InboxPatchItem {
-  index: number;
-  ts: string;
-  campaignId: string;
-  campaignName: string;
-  reason: string;
-  severity?: PendingReviewEntry['severity'];
-  patch: PendingReviewEntry['patch'];
-  patchSummary: string;
-  source?: string;
-  briefVersion?: string;
-  latestVersion?: string;
-  runId?: string;
-}
-
-export interface InboxOverviewResponse {
+interface InboxOverviewResponse {
   approvals: InboxSource<ReturnType<typeof dashboardInboxItem>>;
   deferred: InboxSource<DeferredInboxItem>;
   stale: InboxSource<InboxStaleItem>;
-  patches: InboxSource<InboxPatchItem>;
   campaignCount: number | null;
 }
 
@@ -1109,49 +849,6 @@ function defaultStaleItems(projectDir: string, campaigns: WorkspaceCampaign[]): 
     }));
 }
 
-function patchItems(
-  campaigns: WorkspaceCampaign[],
-  reader: (campaignId: string) => PendingReviewEntry[],
-): InboxSource<InboxPatchItem> {
-  const items: InboxPatchItem[] = [];
-  const failures: string[] = [];
-  let succeeded = 0;
-  for (const campaign of campaigns) {
-    try {
-      const latestVersion = campaign.brief_revisions?.at(-1)?.version;
-      const campaignItems: InboxPatchItem[] = [];
-      for (const [index, entry] of reader(campaign.id).entries()) {
-        campaignItems.push({
-          index,
-          ts: entry.ts,
-          campaignId: campaign.id,
-          campaignName: campaign.name,
-          reason: entry.reason,
-          severity: entry.severity,
-          patch: entry.patch,
-          patchSummary: summarizePatch(entry.patch),
-          source: entry.source,
-          briefVersion: entry.briefVersion,
-          latestVersion,
-          runId: entry.runId,
-        });
-      }
-      items.push(...campaignItems);
-      succeeded += 1;
-    } catch (error) {
-      failures.push(`${campaign.id} (${error instanceof Error ? error.message : String(error)})`);
-    }
-  }
-  const coverage = { succeeded, failed: failures.length };
-  if (!failures.length) return { status: 'complete', items, coverage };
-  const sample = failures.slice(0, 3).join(', ');
-  const remainder = failures.length > 3 ? `, and ${failures.length - 3} more` : '';
-  const error = `could not read all brief patches: ${sample}${remainder}`;
-  return succeeded > 0
-    ? { status: 'partial', items, error, coverage }
-    : { status: 'unavailable', items: [], error, coverage };
-}
-
 async function inboxOverview(
   projectDir: string,
   options: DashboardOptions,
@@ -1184,7 +881,6 @@ async function inboxOverview(
       approvals,
       deferred,
       stale: { status: 'unavailable', items: [], error },
-      patches: { status: 'unavailable', items: [], error },
       campaignCount: null,
     };
   }
@@ -1192,19 +888,13 @@ async function inboxOverview(
   const campaigns = campaignResult.value;
   const staleBuilder = options.inboxSources?.listStale
     ?? ((items: WorkspaceCampaign[]) => defaultStaleItems(projectDir, items));
-  const reviewReader = options.inboxSources?.readPendingReviews ?? readPendingReviews;
-  const [staleResult, patchesResult] = await Promise.allSettled([
+  const [staleResult] = await Promise.allSettled([
     Promise.resolve().then(() => staleBuilder(campaigns)),
-    Promise.resolve().then(() => patchItems(campaigns, reviewReader)),
   ]);
   const stale: InboxOverviewResponse['stale'] = staleResult.status === 'fulfilled'
     ? { status: 'complete', items: staleResult.value }
     : { status: 'unavailable', items: [], error: inboxError('could not derive stale alerts', staleResult.reason) };
-  const patches: InboxOverviewResponse['patches'] = patchesResult.status === 'fulfilled'
-    ? patchesResult.value
-    : { status: 'unavailable', items: [], error: inboxError('could not load brief patches', patchesResult.reason) };
-
-  return { approvals, deferred, stale, patches, campaignCount: campaigns.length };
+  return { approvals, deferred, stale, campaignCount: campaigns.length };
 }
 
 export function parseStreamJsonToText(raw: string, state?: { lineBuf: string; lastMessage?: string }, final = false): string {
@@ -1381,12 +1071,13 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     const { exactBrief, hasBriefSidecar } = effectiveRunBrief(state, runId);
     const stored = verifyBriefAdmission(exactBrief, state.briefAdmission);
     if (stored.status === 'valid' && state.briefAdmission) {
+      const report = inspectBrief(exactBrief);
       return {
         ok: true,
         exactBrief,
         hasBriefSidecar,
-        report: stored.report,
-        receipt: issueBriefReceipt(stored.report),
+        report,
+        receipt: issueBriefReceipt(report),
         admission: state.briefAdmission,
       };
     }
@@ -1562,7 +1253,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         projectDir: targetProjectDir,
         brief_text: briefAdmission.exactBrief,
         brief_admission: briefAdmission.admission,
-        launch_args: approvalResumeArgs(parkedState),
+        launch_options: approvalResumeLaunch(parkedState),
       };
     }
 
@@ -1614,7 +1305,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         resumeRegistered = true;
       } catch (error) {
         const unknown = error instanceof RpcOutcomeUnknownError;
-        return reply.code(unknown ? 502 : 503).send({
+        return reply.code(rpcHttpStatus(error)).send({
           ok: false, won: true, item, resumeRegistered: false,
           error: `Approval was recorded; resume ${unknown ? 'outcome is unknown' : 'registration failed'}: ${error instanceof Error ? error.message : String(error)}`,
         });
@@ -1643,7 +1334,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       return reply.code(400).send({ error });
     }
     const body = parsed.data;
-    const brief = body.brief ?? body.planFile ?? body.name!;
+    const brief = body.brief;
     const admission = admitDashboardBrief(brief, body);
     if (!admission.ok || !admission.admission) {
       return reply.code(409).send({
@@ -1652,38 +1343,36 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         receipt: admission.receipt,
       });
     }
-    const workflowName = body.workflow ?? 'default';
-    if (!isSafeId(workflowName)) {
+    const workflowName = body.workflow;
+    if (workflowName && !isSafeId(workflowName)) {
       return reply.code(400).send({ error: 'invalid workflow name' });
     }
     const targetProjectDir = body.projectDir ?? projectDir;
-    const maxIterations = body.maxIterations ?? body.maxIter;
-    const launchArgs: string[] = ['--workflow', workflowName];
-    if (maxIterations !== undefined) launchArgs.push('--max-iterations', String(maxIterations));
 
     const requestedCampaign = body.campaignId
       ?? (body.campaign !== 'standalone' && body.campaign !== 'new' ? body.campaign : undefined)
       ?? body.campaignName;
-    if (body.noCampaign) launchArgs.push('--no-campaign');
-    else if (requestedCampaign) launchArgs.push('--campaign', requestedCampaign);
 
     const task: TaskCreateInput = {
       kind: 'quick',
-      name: (body.name ?? extractTaskTitle(brief)) || 'Quick task',
+      name: extractTaskTitle(brief) || 'Quick task',
       brief_text: brief,
       brief_admission: admission.admission,
       projectDir: targetProjectDir,
-      launch_args: launchArgs,
+      launch_options: {
+        workflow: workflowName,
+        maxIterations: body.maxIterations,
+        ...(body.noCampaign ? { noCampaign: true } : requestedCampaign ? { campaign: requestedCampaign } : {}),
+      },
     };
     try {
       const registered = await (options.registerTask ?? registerTaskWithDaemon)(task);
       return reply.code(201).send({ id: registered.id, unit: registered.unit });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      if (err instanceof RpcOutcomeUnknownError) {
-        return reply.code(502).send({ error: `task registration outcome is unknown: ${detail}` });
-      }
-      return reply.code(503).send({ error: `task registration failed: ${detail}` });
+      return reply.code(rpcHttpStatus(err)).send({
+        error: `task registration ${err instanceof RpcOutcomeUnknownError ? 'outcome is unknown' : 'failed'}: ${detail}`,
+      });
     }
   });
 
@@ -1697,11 +1386,11 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       cancellation = await (options.cancelRun ?? cancelRunWithControlPlane)(id);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      return reply.code(503).send({ error: `could not request cancellation: ${detail}` });
+      return reply.code(rpcHttpStatus(error)).send({ error: `could not request cancellation: ${detail}` });
     }
     invalidateTaskListCache();
     if (!cancellation.ok) {
-      return reply.code(409).send({ error: cancellation.message, cancellation });
+      return reply.code(cancellation.status === 'outcome-unknown' ? 503 : 409).send({ error: cancellation.message, cancellation });
     }
     return cancellation;
   });
@@ -1711,18 +1400,19 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     if (!isSafeId(id)) return reply.code(400).send({ error: 'invalid task id' });
     let state: StoreState;
     try { state = readRunState(projectDir, id); } catch { return reply.code(404).send({ error: 'not found' }); }
-    if (state.status !== RUN_STATUS.STOPPED && state.status !== RUN_STATUS.FAILED && state.status !== RUN_STATUS.INCOMPLETE) {
-      return reply.code(409).send({ error: 'only stopped, failed or incomplete runs can be resumed' });
+    if (!isResumableRunStatus(state.status) || isPausedRunStatus(state.status)) {
+      return reply.code(409).send({ error: 'only cancelled, failed or incomplete runs can be resumed' });
     }
     try {
       const tasks = await (options.listTasks ?? listTasksFromDaemon)({ status: 'all' });
-      const task = tasks.sort((left, right) => right.id - left.id).find(task => task.run_id === id && resolve(task.projectDir) === resolve(state.projectDir));
-      if (!task) return reply.code(409).send({ error: 'run has no registered task to resume' });
-      const resumed = await (options.resumeTask ?? (taskId => sendRpc<{ new_attempt: number; unit: string }>(defaultSocketPath(), { cmd: 'resume', id: taskId })))(task.id);
+      if (!tasks.some(task => task.run_id === id && resolve(task.projectDir) === resolve(state.projectDir))) {
+        return reply.code(409).send({ error: 'run has no registered task to resume' });
+      }
+      const resumed = await (options.registerTask ?? registerTaskWithDaemon)({ kind: 'quick', run_id: id, projectDir: state.projectDir });
       invalidateTaskListCache();
-      return resumed;
+      return { new_attempt: resumed.new_attempt, unit: resumed.unit };
     } catch (error) {
-      return reply.code(error instanceof RpcOutcomeUnknownError ? 502 : 503).send({ error: `could not request resume: ${error instanceof Error ? error.message : String(error)}` });
+      return reply.code(rpcHttpStatus(error)).send({ error: `could not request resume: ${error instanceof Error ? error.message : String(error)}` });
     }
   });
 
@@ -1813,43 +1503,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
     } catch (error) {
       if (error instanceof CampaignNotFoundError) return reply.code(404).send({ error: 'not found' });
       throw error;
-    }
-  });
-
-  app.get<{ Params: { id: string; version: string } }>("/api/campaigns/:id/brief/:version", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    const text = readBriefFileForCampaign(dir, req.params.version);
-    if (text === null) return reply.code(404).send({ error: 'not found' });
-    return reply.type('text/markdown').send(text);
-  });
-
-  app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string } }>("/api/campaigns/:id/brief-diff", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    const from = req.query.from;
-    const to = req.query.to;
-    if (!from || !to || !isSafeCampaignVersion(from) || !isSafeCampaignVersion(to)) {
-      return reply.code(400).send({ error: 'from and to must be vN versions' });
-    }
-    const fromText = readBriefFileForCampaign(dir, from);
-    const toText = readBriefFileForCampaign(dir, to);
-    if (fromText === null || toText === null) return reply.code(404).send({ error: 'not found' });
-    return reply.type('text/plain').send(unifiedDiff(from, fromText, to, toText));
-  });
-
-  app.post<{ Params: { id: string; index: string }; Body: { decision?: string } }>("/api/campaigns/:id/review/:index", async (req, reply) => {
-    const dir = campaignDirOr404(req.params.id);
-    if (!dir) return reply.code(404).send({ error: 'not found' });
-    const index = Number(req.params.index);
-    if (!Number.isInteger(index) || index < 0) return reply.code(400).send({ error: 'index must be a non-negative integer' });
-    const decision = req.body?.decision;
-    if (decision !== 'accept' && decision !== 'reject') return reply.code(400).send({ error: 'decision must be accept or reject' });
-    try {
-      return await consumePendingReview(req.params.id, index, decision);
-    } catch (err) {
-      if (err instanceof ReviewConflictError) return reply.code(409).send({ error: err.message });
-      throw err;
     }
   });
 
@@ -1986,8 +1639,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Params: { id: string } }>("/api/tasks/:id/summary", async (req, reply) => {
     const summaryPath = join(runsRoot(), req.params.id, 'summary.md');
     if (!existsSync(summaryPath)) {
-      const progressPath = join(runsRoot(), req.params.id, 'progress.md');
-      if (existsSync(progressPath)) return { content: readFileSync(progressPath, 'utf-8'), runId: req.params.id };
       return reply.code(404).send({ error: 'No summary available yet. Summary is generated after run completes.' });
     }
     return { content: readFileSync(summaryPath, 'utf-8'), runId: req.params.id };
@@ -1995,13 +1646,12 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
   // 13. GET /api/settings
   app.get("/api/settings", async () => {
-    const defaultsPath = join(configDir, 'defaults.yaml');
-    const defaults = existsSync(defaultsPath) ? parseYaml(readFileSync(defaultsPath, 'utf-8')) as Record<string, unknown> : {};
+    const defaults = loadEngineDefaults();
     const workflowsDir = join(configDir, 'workflows');
     const skillsDir = join(projectDir, 'config', 'skills');
     const workflows = existsSync(workflowsDir) ? readdirSync(workflowsDir).filter((f) => f.endsWith('.yaml')) : [];
     const skills = existsSync(skillsDir) ? readdirSync(skillsDir).filter((f) => f.endsWith('.md')) : [];
-    return { projectDir, adapter: defaults.adapter ?? 'auto', workflows, skills, port, ...defaults };
+    return { projectDir, workflows, skills, port, ...defaults };
   });
 
   try {

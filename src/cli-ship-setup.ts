@@ -1,41 +1,33 @@
-import { errorMessage, optionValue, within } from './source_services/cli-inputs.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { errorMessage, within } from './source_services/cli-inputs.js';
+import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
+import { createHash } from 'node:crypto';
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
-import { copyFileSync, mkdirSync, rmSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from './engine-fs.js';
+import { atomicWrite, copyFileSync, mkdirSync, rmSync, symlinkSync } from './engine-fs.js';
 import { accessSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { parse as parseYaml } from 'yaml';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
+import { briefDeclarationFailures } from './brief-preflight.js';
 import {
-  discoverProjectValidation,
   reconcileProjectValidation,
-  runValidationCommand,
   runProjectValidationBaseline,
+  unmeasured,
   type BriefValidationCommand,
   type ProjectValidationBaseline,
-  type ValidationCommand,
   type ValidationCommandRunner,
   type ValidationRole,
-  type ValidationRunRequest,
-  type ValidationRunResponse,
 } from './project-validation.js';
 import {
-  extractBriefPathMentions,
-  extractDeclaredBriefInputPaths,
   verifyDeclaredBriefInputs,
   inspectBriefOutputs,
   type BriefOutputInventory,
-  type BriefInputAssertionResult,
   type BriefInputVerification,
-  type BriefPathMention,
   type ShipInputFileSystem,
 } from './ship-inputs.js';
 import { loadEngineDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
-import { shipSetupReadyRecordPath } from './ship-setup-record.js';
-import { withEngineIntegrity } from './engine-integrity.js';
-import { isLiveConstraintExemptDirectory, isLiveConstraintExemptPath } from './live-constraint-guard.js';
+import { reuseShipSetupBaseline, shipSetupReadyRecordPath } from './ship-setup-record.js';
+import { requireDiskCapacity } from './disk-admission.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
 
@@ -72,22 +64,6 @@ function nodeEntryExists(path: string): boolean {
   }
 }
 
-function nodeAtomicWrite(path: string, contents: string): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
-  try {
-    writeFileSync(temporary, contents, { encoding: 'utf-8', flag: 'wx' });
-    renameSync(temporary, path);
-  } catch (error) {
-    try {
-      unlinkSync(temporary);
-    } catch {
-      // Best-effort cleanup; the original atomic-write error is authoritative.
-    }
-    throw error;
-  }
-}
-
 export const nodeShipSetupFileSystem: ShipSetupFileSystem = {
   exists: existsSync,
   readable: nodeReadable,
@@ -113,7 +89,11 @@ export const nodeShipSetupFileSystem: ShipSetupFileSystem = {
     return sourceHash.byteLength === targetHash.byteLength && sourceHash.sha256 === targetHash.sha256;
   },
   removeEntry: (path) => rmSync(path, { recursive: true, force: true }),
-  writeAtomic: nodeAtomicWrite,
+  writeAtomic: (path, contents) => {
+    mkdirSync(dirname(path), { recursive: true });
+    // Setup briefs and configuration must survive before setup reports success.
+    atomicWrite(path, contents, { durability: 'durable' });
+  },
 };
 
 export interface GitCommandProgress {
@@ -230,7 +210,6 @@ export interface ShipSetupDependencies {
   createWorktree?: GitWorktreeCreator;
   runGitCommand?: GitCommandRunner;
   runValidationCommand?: ValidationCommandRunner;
-  runTestCollectionCommand?: ValidationCommandRunner;
   globalDir?: () => string;
   timestamp?: () => string;
   stdout?: Writer;
@@ -244,7 +223,6 @@ interface ResolvedShipSetupDependencies {
   managedWorktreeCreation: boolean;
   runGitCommand: GitCommandRunner;
   runValidationCommand?: ValidationCommandRunner;
-  runTestCollectionCommand: ValidationCommandRunner;
   globalDir: () => string;
   timestamp: () => string;
   stdout: Writer;
@@ -274,52 +252,12 @@ export interface ShipSetupCopy {
   target: string;
 }
 
-export interface TestPopulationObservation {
-  projectDir: string;
-  count: number;
-  identities: string[];
-  digest: string;
-  durationMs: number;
-}
-
-export interface TestPopulationRunner {
-  display: string;
-  command: string;
-  evidencePath?: string;
-}
-
-export type TestPopulationEvidenceMethod = {
-  tool: 'vitest' | 'pytest' | 'declared-files';
-  display: string;
-  evidencePath: string;
-} | {
-  source: 'baseline_output';
-  format: 'tap';
-  display: string;
-  evidencePath: 'source and target test command output';
-};
-
-export interface TestPopulationParity {
-  version: 1;
-  state: 'matched' | 'mismatched' | 'unverified';
-  runner?: {
-    source: TestPopulationRunner;
-    target: TestPopulationRunner;
-  };
-  method?: TestPopulationEvidenceMethod;
-  source?: TestPopulationObservation;
-  target?: TestPopulationObservation;
-  missingFromTarget: string[];
-  extraInTarget: string[];
-  reason?: string;
-}
-
 export interface ShipSetupBlocker {
   phase: 'source' | 'worktree' | 'target' | 'validation' | 'record';
+  code?: string;
   reason: string;
   repair: string;
   input?: string;
-  assertion?: BriefInputAssertionResult['kind'];
 }
 
 type ShipSetupBlockerInput = Omit<ShipSetupBlocker, 'repair'> & { repair?: string };
@@ -339,11 +277,10 @@ interface ShipSetupFacts {
   copies: ShipSetupCopy[];
   sourceVerification: BriefInputVerification;
   sourceOutputInventory: BriefOutputInventory;
-  proseInputWarnings: BriefPathMention[];
   targetVerification?: BriefInputVerification;
   targetOutputInventory?: BriefOutputInventory;
-  testPopulation?: TestPopulationParity;
   validationBaseline?: ProjectValidationBaseline;
+  baselineReuse?: { state: 'executed' | 'reused'; id?: string };
   blockers: ShipSetupBlocker[];
 }
 
@@ -375,9 +312,6 @@ function resolveDependencies(overrides: ShipSetupDependencies): ResolvedShipSetu
     managedWorktreeCreation: overrides.createWorktree === undefined,
     runGitCommand: git,
     ...(overrides.runValidationCommand ? { runValidationCommand: overrides.runValidationCommand } : {}),
-    runTestCollectionCommand: overrides.runTestCollectionCommand
-      ?? overrides.runValidationCommand
-      ?? runValidationCommand,
     globalDir: overrides.globalDir ?? fcGlobalDir,
     timestamp: overrides.timestamp ?? (() => new Date().toISOString()),
     stdout: overrides.stdout ?? process.stdout,
@@ -386,42 +320,22 @@ function resolveDependencies(overrides: ShipSetupDependencies): ResolvedShipSetu
 }
 
 export function parseShipSetupArgs(args: string[]): ParsedShipSetupArgs {
-  const parsed: ParsedShipSetupArgs = { help: false, json: false };
-  const values = new Set<'brief' | 'target' | 'base' | 'branch' | 'project'>();
-  const start = args[0] === 'ship-setup' ? 1 : 0;
-  for (let index = start; index < args.length;) {
-    const argument = args[index];
-    if (argument === '--help' || argument === '-h') {
-      parsed.help = true;
-      index += 1;
-      continue;
-    }
-    if (argument === '--json') {
-      parsed.json = true;
-      index += 1;
-      continue;
-    }
-    const name = (['brief', 'target', 'base', 'branch', 'project'] as const)
-      .find((candidate) => argument === `--${candidate}` || argument.startsWith(`--${candidate}=`));
-    if (!name) throw new Error(`unknown ship-setup option: ${argument}`);
-    if (values.has(name)) throw new Error(`--${name} may be specified only once`);
-    const value = optionValue(args, index, `--${name}`);
-    parsed[name] = value.value;
-    values.add(name);
-    index += value.consumed;
-  }
-  if (!parsed.help) {
-    for (const required of ['brief', 'target', 'base', 'branch'] as const) {
-      if (!parsed[required]) throw new Error(`--${required} is required`);
-    }
-  }
-  return parsed;
+  const { help, flags, values } = parseCommandArgs('ship-setup', args);
+  return {
+    help,
+    json: flags.has('--json'),
+    brief: values.get('--brief'),
+    target: values.get('--target'),
+    base: values.get('--base'),
+    branch: values.get('--branch'),
+    project: values.get('--project'),
+  };
 }
 
 export function shipSetupUsage(): string {
   return [
-    'Usage: flowcrew ship-setup --brief <path> --target <path> --base <ref> --branch <name> [--project <path>] [--json]',
-    'Creates the exact worktree, overlays missing declared-input descendants, records available test-population evidence, rechecks assertions, and records the validation baseline.',
+    commandUsage('ship-setup'),
+    'Creates the exact worktree, overlays missing declared-input descendants, verifies declared inputs, and records the validation baseline.',
   ].join('\n');
 }
 
@@ -429,16 +343,10 @@ function verificationBlockers(
   phase: 'source' | 'target',
   verification: BriefInputVerification,
 ): ShipSetupBlockerInput[] {
-  const blockers: ShipSetupBlockerInput[] = verification.unboundAssertions.map((assertion) => ({
-    phase,
-    assertion: assertion.kind,
-    reason: `${assertion.state}: ${assertion.reason} (line ${assertion.line})`,
-  }));
-  blockers.push(...verification.unresolvedInputs.map((input) => ({
-    phase,
-    input: input.value,
+  const blockers: ShipSetupBlockerInput[] = verification.unresolvedInputs.map((input) => ({
+    phase, input: input.value,
     reason: `Unresolved explicit input at line ${input.line}: ${input.reason}`,
-  })));
+  }));
   for (const input of verification.inputs) {
     if (!input.exists) blockers.push({
       phase,
@@ -446,17 +354,6 @@ function verificationBlockers(
       reason: `Declared input does not exist${input.checkedLocations?.length ? `; checked ${input.checkedLocations.join(' and ')}` : ''}`,
     });
     else if (!input.readable) blockers.push({ phase, input: input.path, reason: 'Declared input is not readable' });
-    if (phase === 'source' && input.sourceExists === false && input.baseRefExists === true) continue;
-    for (const assertion of input.assertions) {
-      if (assertion.state !== 'confirmed') {
-        blockers.push({
-          phase,
-          input: input.path,
-          assertion: assertion.kind,
-          reason: `${assertion.state}: ${assertion.reason}`,
-        });
-      }
-    }
   }
   return blockers;
 }
@@ -546,7 +443,7 @@ function persistRefused(
 function shipSetupBlockerRepair(blocker: ShipSetupBlockerInput): string {
   const subject = blocker.input ? ` ${JSON.stringify(blocker.input)}` : '';
   if (blocker.phase === 'source') {
-    return `Correct or remove the named leading input/assertion${subject}, ensure required source data is readable, then rerun ship-setup.`;
+    return `Correct or remove the named leading input${subject}, ensure required source data is readable, then rerun ship-setup.`;
   }
   if (blocker.phase === 'worktree') {
     return 'Inspect the reported Git base, branch, and target; correct the conflicting value or Git failure, then rerun ship-setup with a fresh reachable target.';
@@ -555,7 +452,7 @@ function shipSetupBlockerRepair(blocker: ShipSetupBlockerInput): string {
     return `Reconcile the named target input${subject} without overwriting unique data, ensure it stays inside the worktree and is readable, then rerun ship-setup.`;
   }
   if (blocker.phase === 'validation') {
-    return 'Correct the named validation declaration, command/environment, or test-population mismatch; run that command successfully from the target, then rerun ship-setup.';
+    return 'Correct the named validation declaration, command/environment; run that command successfully from the target, then rerun ship-setup.';
   }
   return 'Restore writable task-state storage or choose the configured writable FC state root, then retry ship-setup so the ready record can be persisted atomically.';
 }
@@ -597,28 +494,10 @@ function validationDeclarationError(briefPath: string, reason: string): BriefVal
 
 /** Parse only a leading frontmatter validation block into shell-free argv declarations. */
 export function parseBriefValidationCommands(brief: string, briefPath: string): BriefValidationParseResult {
-  const withoutBom = brief.startsWith('\uFEFF') ? brief.slice(1) : brief;
-  const openingLength = withoutBom.startsWith('---\r\n') ? 5 : withoutBom.startsWith('---\n') ? 4 : 0;
-  if (openingLength === 0) return { commands: [] };
-  const afterOpening = withoutBom.slice(openingLength);
-  const emptyFrontmatter = afterOpening === '---'
-    || afterOpening.startsWith('---\n')
-    || afterOpening.startsWith('---\r\n');
-  const closingFence = emptyFrontmatter ? undefined : /\r?\n---(?:\r?\n|$)/.exec(afterOpening);
-  if (!emptyFrontmatter && !closingFence) {
-    return validationDeclarationError(
-      briefPath,
-      'leading YAML frontmatter fence was opened but never closed',
-    );
-  }
-  const frontmatter = emptyFrontmatter ? '' : afterOpening.slice(0, closingFence?.index);
-
-  let parsed: unknown;
-  try {
-    parsed = parseYaml(frontmatter) as unknown;
-  } catch (error) {
-    return validationDeclarationError(briefPath, `YAML could not be parsed: ${errorMessage(error)}`);
-  }
+  const frontmatter = parseBriefFrontmatterDocument(brief);
+  if (!frontmatter) return { commands: [] };
+  if (frontmatter.error) return { commands: [], error: frontmatter.error };
+  const parsed = frontmatter.value;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { commands: [] };
   const validation = (parsed as Record<string, unknown>).validation;
   if (validation === undefined) return { commands: [] };
@@ -706,7 +585,6 @@ function setupFacts(
   parsed: ParsedShipSetupArgs,
   sourceVerification: BriefInputVerification,
   sourceOutputInventory: BriefOutputInventory,
-  proseInputWarnings: BriefPathMention[],
 ): Omit<ShipSetupFacts, 'blockers'> {
   return {
     version: 1,
@@ -722,15 +600,44 @@ function setupFacts(
     copies: [],
     sourceVerification,
     sourceOutputInventory,
-    proseInputWarnings,
   };
 }
 
-async function declaredInputTrackedPaths(rootDir: string, git: GitCommandRunner): Promise<ReadonlySet<string> | undefined> {
-  const result = await git({ command: 'git', args: ['ls-files', '-z', '--cached'], cwd: rootDir });
-  // Without an index inventory, retain every member rather than exempting a
-  // potentially tracked file. Freeze the inventory before validation can run.
-  return result.exitCode === 0 ? new Set((result.stdout ?? '').split('\0').filter(Boolean)) : undefined;
+/** Count declared input destinations once, including overlapping input roots.
+ * Existing targets are reconciled later; admission never authorizes overwrites.
+ * Logical sizes also cover copies that cannot use sparse files or reflinks. */
+async function estimateInputCopyBytes(
+  verification: BriefInputVerification, projectDir: string, targetDir: string,
+  deps: ResolvedShipSetupDependencies,
+): Promise<number> {
+  const fs = deps.fs;
+  const files = new Map<string, number>();
+  const count = (path: string, bytes: number): void => { files.set(path, Math.max(files.get(path) ?? 0, bytes)); };
+  const add = (source: string, root: string, ancestors: Set<string>, explicit: boolean): void => {
+    const path = relative(projectDir, source).split(sep).join('/');
+    const info = fs.lstat ? fs.lstat(source) : fs.stat(source);
+    const canonical = fs.realpath(source);
+    // Nested symlinks are recreated, not recursively flattened by reconciliation.
+    if (!explicit && info.isSymbolicLink?.() && !fs.exists(resolve(targetDir, path))) {
+      count(path, info.size ?? Buffer.byteLength(fs.readlink?.(source) ?? ''));
+      return;
+    }
+    if (!within(root, canonical)) throw new Error(`Cannot estimate input outside declared directory: ${path}`);
+    const stat = fs.stat(source);
+    if (stat.isDirectory()) {
+      if (ancestors.has(canonical)) throw new Error(`Cannot estimate cyclic input: ${path}`);
+      const next = new Set([...ancestors, canonical]);
+      for (const name of fs.readDirectory(source)) add(join(source, name), root, next, false);
+    } else if (!fs.entryExists(resolve(targetDir, path))) {
+      count(path, stat.size ?? fs.readBytes(source).byteLength);
+    }
+  };
+  for (const input of verification.inputs) {
+    if (input.sourceExists === false && input.baseRefExists === true) continue;
+    const source = resolve(projectDir, input.path);
+    add(source, fs.realpath(source), new Set(), true);
+  }
+  return [...files.values()].reduce((sum, bytes) => sum + bytes, 0);
 }
 
 function worktreeFailureReason(response: GitWorktreeResponse): string {
@@ -995,7 +902,6 @@ function reconcileInputs(
   projectDir: string,
   targetDir: string,
   fs: ShipSetupFileSystem,
-  trackedPaths?: ReadonlySet<string>,
 ): { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] } {
   const links: ShipSetupLink[] = [];
   const copies: ShipSetupCopy[] = [];
@@ -1004,17 +910,6 @@ function reconcileInputs(
   const normalizedInputPath = (sourcePath: string): string => relative(projectDir, sourcePath)
     .split(sep)
     .join('/');
-  const patterns = loadEngineDefaults().live_constraint_exempt_patterns;
-  const exempt = (sourcePath: string, directory: boolean): boolean => {
-    if (!trackedPaths) return false;
-    const path = normalizedInputPath(sourcePath);
-    if (directory) {
-      return isLiveConstraintExemptDirectory(path, patterns, trackedPaths)
-        && isLiveConstraintExemptDirectory(normalizedInputPath(fs.realpath(sourcePath)), patterns, trackedPaths);
-    }
-    return isLiveConstraintExemptPath(path, patterns, trackedPaths)
-      && !trackedPaths.has(normalizedInputPath(fs.realpath(sourcePath)));
-  };
   const addBlocker = (sourcePath: string, reason: string): void => {
     blockers.push({ phase: 'target', input: normalizedInputPath(sourcePath), reason });
   };
@@ -1045,11 +940,9 @@ function reconcileInputs(
       return;
     }
     fs.copyFile(source, target);
-    if (!exempt(source, false)) {
-      if (!fs.filesEqual(source, target)) {
-        addBlocker(source, 'Copied target descendant does not match the declared source bytes');
-        return;
-      }
+    if (!fs.filesEqual(source, target)) {
+      addBlocker(source, 'Copied target descendant does not match the declared source bytes');
+      return;
     }
     copies.push({ path: normalizedInputPath(source), source, target });
   };
@@ -1072,7 +965,6 @@ function reconcileInputs(
       const source = join(sourceDirectory, name);
       const target = join(targetDirectory, name);
       try {
-        if (exempt(source, (fs.lstat ? fs.lstat(source) : fs.stat(source)).isDirectory())) continue;
         if (!fs.exists(source) || !fs.readable(source)) {
           addBlocker(source, 'Source descendant is missing or unreadable');
           continue;
@@ -1216,7 +1108,7 @@ function reconcileInputs(
       }
       if (sourceDirectory) {
         reconcileExistingDirectory(source, target, sourceCanonical, target, new Set([sourceCanonical]));
-      } else if (!exempt(source, false)) {
+      } else {
         if (!fs.filesEqual(source, target)) {
           blockers.push({ phase: 'target', input: input.path, reason: 'Existing declared target input has a content collision and will not be overwritten' });
         }
@@ -1230,527 +1122,6 @@ function reconcileInputs(
     }
   }
   return { links, copies, blockers };
-}
-
-interface TestPopulationMethod {
-  tool: 'vitest' | 'pytest' | 'declared-files';
-  display: string;
-  evidencePath: string;
-  request?: ValidationRunRequest;
-  declaredIdentities?: string[];
-}
-
-interface TestPopulationDiscovery {
-  method?: TestPopulationMethod;
-  reason?: string;
-  hasConfiguredTests: boolean;
-  validationUnknown: boolean;
-  testCommand?: ValidationCommand;
-  runner?: TestPopulationRunner;
-}
-
-interface TestPopulationComparison {
-  population?: TestPopulationParity;
-  sourceDiscovery: TestPopulationDiscovery;
-  targetDiscovery: TestPopulationDiscovery;
-}
-
-function normalizedPopulationIdentity(projectDir: string, value: string): string {
-  const absolute = resolve(projectDir, value);
-  if (!within(projectDir, absolute)) throw new Error(`collector returned a path outside the project: ${value}`);
-  const identity = relative(projectDir, absolute).split(sep).join('/');
-  if (!identity || identity.startsWith('../')) throw new Error(`collector returned an invalid test identity: ${value}`);
-  return identity;
-}
-
-function isPythonExecutable(command: string): boolean {
-  return /^python(?:\d+(?:\.\d+)*)?(?:\.exe)?$/i.test(basename(command));
-}
-
-function resolveVitestExecutable(projectDir: string, fs: ShipSetupFileSystem): string {
-  const projectRequire = createRequire(join(projectDir, 'package.json'));
-  const specifier = 'vitest/package.json';
-  const lookupPaths = projectRequire.resolve.paths(specifier) ?? [];
-  let packagePath: string;
-  try {
-    packagePath = projectRequire.resolve(specifier);
-  } catch (error) {
-    throw new Error(
-      `Cannot resolve vitest from ${projectDir}; lookup paths: ${lookupPaths.join(', ') || '(none)'}`,
-      { cause: error },
-    );
-  }
-  const executable = join(dirname(packagePath), 'vitest.mjs');
-  if (!fs.exists(executable) || !fs.readable(executable)) {
-    throw new Error(
-      `Cannot resolve vitest executable from package ${packagePath}; expected ${executable}; `
-      + `lookup paths: ${lookupPaths.join(', ') || '(none)'}`,
-    );
-  }
-  return executable;
-}
-
-function directCommandWords(line: string): string[] | undefined {
-  if (!line.trim() || /[;&|<>`$\n\r]/.test(line)) return undefined;
-  const words = [...line.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)'|(\S+)/g)]
-    .map((match) => match[1] ?? match[2] ?? match[3]);
-  return words.length > 0 && words.join(' ').length > 0 ? words : undefined;
-}
-
-function explicitNodeTestMethod(
-  projectDir: string,
-  fs: ShipSetupFileSystem,
-  words: readonly string[],
-  evidencePath: string,
-): TestPopulationMethod | undefined {
-  const executable = basename(words[0] ?? '');
-  const testIndex = words.indexOf('--test');
-  if (!/^node(?:\.exe)?$/i.test(executable) || testIndex < 0) return undefined;
-  const candidates = words.slice(testIndex + 1).filter((word) => !word.startsWith('-'));
-  if (candidates.length === 0 || candidates.some((word) => /[*?{}[\]]/.test(word))) return undefined;
-  const identities = [...new Set(candidates.map((candidate) => normalizedPopulationIdentity(projectDir, candidate)))].sort();
-  if (identities.some((identity) => !fs.exists(join(projectDir, identity))
-      || !fs.readable(join(projectDir, identity)) || fs.stat(join(projectDir, identity)).isDirectory())) return undefined;
-  return {
-    tool: 'declared-files',
-    display: words.join(' '),
-    evidencePath,
-    declaredIdentities: identities,
-  };
-}
-
-function exactMethodForExpandedCommand(
-  projectDir: string,
-  fs: ShipSetupFileSystem,
-  words: readonly string[],
-  evidencePath: string,
-  depth = 0,
-): TestPopulationMethod | undefined {
-  if (depth > 1) return undefined;
-  const nodeMethod = explicitNodeTestMethod(projectDir, fs, words, evidencePath);
-  if (nodeMethod) return nodeMethod;
-
-  const executable = basename(words[0] ?? '').toLowerCase();
-  const vitestWord = executable === 'vitest' || executable === 'vitest.mjs'
-    || ((executable === 'npx' || executable === 'pnpx') && basename(words[1] ?? '').toLowerCase() === 'vitest')
-    || (executable === 'pnpm' && words[1] === 'exec' && basename(words[2] ?? '').toLowerCase() === 'vitest')
-    || (executable === 'yarn' && basename(words[1] ?? '').toLowerCase() === 'vitest');
-  if (vitestWord) {
-    const vitest = resolveVitestExecutable(projectDir, fs);
-    return {
-      tool: 'vitest',
-      display: 'vitest list --filesOnly --json --passWithNoTests',
-      evidencePath,
-      request: {
-        role: 'test',
-        command: process.execPath,
-        args: [vitest, 'list', '--filesOnly', '--json', '--passWithNoTests'],
-        display: 'vitest list --filesOnly --json --passWithNoTests',
-        evidencePath,
-        cwd: projectDir,
-      },
-    };
-  }
-
-  const pythonPytest = isPythonExecutable(words[0] ?? '') && words[1] === '-m' && words[2] === 'pytest';
-  if (executable === 'pytest' || pythonPytest) {
-    const args = [...words.slice(1), '--collect-only', '-q'];
-    return {
-      tool: 'pytest',
-      display: [words[0], ...args].join(' '),
-      evidencePath,
-      request: {
-        role: 'test',
-        command: words[0],
-        args,
-        display: [words[0], ...args].join(' '),
-        evidencePath,
-        cwd: projectDir,
-      },
-    };
-  }
-
-  const packageRunner = executable === 'npm' || executable === 'pnpm'
-    || executable === 'yarn' || executable === 'bun';
-  const invokesTestScript = words[1] === 'test' || (words[1] === 'run' && words[2] === 'test');
-  if (packageRunner && invokesTestScript) {
-    try {
-      const packagePath = join(projectDir, 'package.json');
-      const manifest = JSON.parse(fs.readText(packagePath)) as { scripts?: Record<string, unknown> };
-      const script = manifest.scripts?.test;
-      const scriptWords = typeof script === 'string' ? directCommandWords(script) : undefined;
-      return scriptWords
-        ? exactMethodForExpandedCommand(projectDir, fs, scriptWords, `${packagePath}#scripts.test`, depth + 1)
-        : undefined;
-    } catch { return undefined; }
-  }
-  return undefined;
-}
-
-async function discoverTestPopulationMethod(
-  projectDir: string,
-  fs: ShipSetupFileSystem,
-  declaredCommands: readonly BriefValidationCommand[],
-  runCollector: ValidationCommandRunner,
-): Promise<TestPopulationDiscovery> {
-  const validation = declaredCommands.length === 0
-    ? discoverProjectValidation(projectDir, { exists: fs.exists, readText: fs.readText })
-    : reconcileProjectValidation(projectDir, declaredCommands, { exists: fs.exists, readText: fs.readText });
-  const testCommands = validation.commands.filter(command => command.role === 'test');
-  if (testCommands.length > 1) return {
-    hasConfiguredTests: true, validationUnknown: validation.state === 'unknown',
-    reason: `Joint test population is unverified for configured commands: ${testCommands.map(command => command.display).join('; ')}. Every command still runs for validation; one collector cannot attest another runner's population`,
-  };
-  const testCommand = testCommands[0];
-  if (!testCommand) {
-    return {
-      hasConfiguredTests: false,
-      validationUnknown: validation.state === 'unknown',
-      reason: validation.reason ?? 'No configured test command was discovered',
-    };
-  }
-
-  let runner: TestPopulationRunner = {
-    display: testCommand.display,
-    command: testCommand.display,
-    ...(testCommand.evidencePath ? { evidencePath: testCommand.evidencePath } : {}),
-  };
-
-  const packagePath = join(projectDir, 'package.json');
-  if (fs.exists(packagePath)) {
-    try {
-      const manifest = JSON.parse(fs.readText(packagePath)) as Record<string, unknown>;
-      const scripts = manifest.scripts && typeof manifest.scripts === 'object'
-        ? manifest.scripts as Record<string, unknown>
-        : undefined;
-      const testScript = typeof scripts?.test === 'string' ? scripts.test : '';
-      if (testScript.trim()) {
-        runner = {
-          display: testScript.trim(),
-          command: testCommand.display,
-          evidencePath: `${packagePath}#scripts.test`,
-        };
-      }
-      const flowcrew = manifest.flowcrew && typeof manifest.flowcrew === 'object'
-        ? manifest.flowcrew as Record<string, unknown>
-        : undefined;
-      const population = flowcrew?.testPopulation && typeof flowcrew.testPopulation === 'object'
-        ? flowcrew.testPopulation as Record<string, unknown>
-        : undefined;
-      if (population && Array.isArray(population.files)) {
-        if (!population.files.every((file) => typeof file === 'string')) {
-          throw new Error('flowcrew.testPopulation.files must contain only strings');
-        }
-        const identities = [...new Set((population.files as string[])
-          .map((file) => normalizedPopulationIdentity(projectDir, file)))].sort();
-        for (const identity of identities) {
-          const path = join(projectDir, identity);
-          if (!fs.exists(path) || !fs.readable(path) || fs.stat(path).isDirectory()) {
-            throw new Error(`declared test population member is not a readable file: ${identity}`);
-          }
-        }
-        return {
-          hasConfiguredTests: true,
-          validationUnknown: false,
-          testCommand,
-          runner,
-          method: {
-            tool: 'declared-files',
-            display: 'package.json flowcrew.testPopulation.files',
-            evidencePath: packagePath,
-            declaredIdentities: identities,
-          },
-        };
-      }
-      if (/(?:^|[\s;&|()])vitest(?:[\s;&|()]|$)/.test(testScript)) {
-        const executable = resolveVitestExecutable(projectDir, fs);
-        return {
-          hasConfiguredTests: true,
-          validationUnknown: false,
-          testCommand,
-          runner,
-          method: {
-            tool: 'vitest',
-            display: 'vitest list --filesOnly --json --passWithNoTests --configLoader runner',
-            evidencePath: `${packagePath}#scripts.test`,
-            request: {
-              role: 'test',
-              command: process.execPath,
-              args: [executable, 'list', '--filesOnly', '--json', '--passWithNoTests', '--configLoader', 'runner'],
-              display: 'vitest list --filesOnly --json --passWithNoTests --configLoader runner',
-              evidencePath: packagePath,
-              cwd: projectDir,
-            },
-          },
-        };
-      }
-    } catch (error) {
-      return {
-        hasConfiguredTests: true,
-        validationUnknown: false,
-        testCommand,
-        runner,
-        reason: `Cannot derive test population from package.json: ${errorMessage(error)}`,
-      };
-    }
-  }
-
-  if (isPythonExecutable(testCommand.command)
-      && testCommand.args[0] === '-m'
-      && testCommand.args[1] === 'pytest') {
-    const collectorArgs = [...testCommand.args, '--collect-only', '-q'];
-    return {
-      hasConfiguredTests: true,
-      validationUnknown: false,
-      testCommand,
-      runner,
-      method: {
-        tool: 'pytest',
-        display: [testCommand.command, ...collectorArgs].join(' '),
-        evidencePath: testCommand.evidencePath ?? join(projectDir, 'pyproject.toml'),
-        request: {
-          ...testCommand,
-          args: collectorArgs,
-          display: [testCommand.command, ...collectorArgs].join(' '),
-          cwd: projectDir,
-        },
-      },
-    };
-  }
-
-  if (/^(?:g?make)(?:\.exe)?$/i.test(basename(testCommand.command)) && testCommand.args.length > 0) {
-    const dryRunDisplay = [testCommand.command, '-n', ...testCommand.args].join(' ');
-    let dryRun: ValidationRunResponse;
-    try {
-      dryRun = await runCollector({
-        ...testCommand,
-        args: ['-n', ...testCommand.args],
-        display: dryRunDisplay,
-        cwd: projectDir,
-      });
-    } catch (error) {
-      dryRun = { exitCode: null, error: errorMessage(error) };
-    }
-    const lines = (dryRun.stdout ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    const words = dryRun.exitCode === 0 && !dryRun.error && lines.length === 1
-      ? directCommandWords(lines[0])
-      : undefined;
-    const method = words
-      ? exactMethodForExpandedCommand(projectDir, fs, words, testCommand.evidencePath ?? join(projectDir, 'Makefile'))
-      : undefined;
-    if (method) {
-      return {
-        hasConfiguredTests: true,
-        validationUnknown: false,
-        testCommand,
-        runner,
-        method,
-      };
-    }
-    const diagnostic = dryRun.error
-      ?? (dryRun.exitCode !== 0 ? `${dryRunDisplay} exited ${dryRun.exitCode}`
-        : lines.length !== 1 ? `${dryRunDisplay} expanded to ${lines.length} command lines`
-          : 'expanded command is not a safe supported exact collector');
-    return {
-      hasConfiguredTests: true,
-      validationUnknown: false,
-      testCommand,
-      runner,
-      reason: `Configured test runner "${runner.display}" could not be unwrapped safely from Make: ${diagnostic}`,
-    };
-  }
-
-  return {
-    hasConfiguredTests: true,
-    validationUnknown: false,
-    testCommand,
-    runner,
-    reason: `Configured test runner "${runner.display}" (validation command "${runner.command}") has no exact population collector`,
-  };
-}
-
-function parseCollectedTestIdentities(
-  projectDir: string,
-  method: TestPopulationMethod,
-  response: ValidationRunResponse,
-): string[] {
-  if (method.declaredIdentities) return method.declaredIdentities;
-  const stdout = response.stdout ?? '';
-  const combinedOutput = [response.stdout, response.stderr]
-    .filter((value): value is string => typeof value === 'string' && value.length > 0)
-    .join('\n');
-  const identities: string[] = [];
-  if (method.tool === 'vitest') {
-    const parsed = JSON.parse(stdout) as unknown;
-    if (!Array.isArray(parsed)) throw new Error('Vitest collector output is not a JSON array');
-    for (const entry of parsed) {
-      const file = typeof entry === 'string'
-        ? entry
-        : entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).file === 'string'
-          ? (entry as Record<string, unknown>).file as string
-          : undefined;
-      if (!file) throw new Error('Vitest collector returned an entry without a file path');
-      identities.push(normalizedPopulationIdentity(projectDir, file));
-    }
-  } else if (method.tool === 'pytest') {
-    // Pytest and its plugins may route collection identities to stderr even
-    // on a successful exit. Both channels are collector evidence.
-    for (const rawLine of combinedOutput.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      const nodeId = line.includes('::') ? line.slice(0, line.indexOf('::')) : '';
-      if (!nodeId || !/\.py$/i.test(nodeId)) continue;
-      identities.push(normalizedPopulationIdentity(projectDir, nodeId));
-    }
-  }
-  return [...new Set(identities)].sort();
-}
-
-async function collectTestPopulation(
-  projectDir: string,
-  method: TestPopulationMethod,
-  runner: ValidationCommandRunner,
-): Promise<TestPopulationObservation> {
-  const started = Date.now();
-  let response: ValidationRunResponse;
-  if (method.declaredIdentities) {
-    response = { exitCode: 0, durationMs: 0 };
-  } else {
-    try {
-      response = await runner(method.request!);
-    } catch (error) {
-      response = { exitCode: null, error: errorMessage(error) };
-    }
-  }
-  const pytestEmpty = method.tool === 'pytest'
-    && response.exitCode === 5
-    && /no tests collected/i.test(`${response.stdout ?? ''}\n${response.stderr ?? ''}`);
-  if (response.error || response.exitCode === null || (response.exitCode !== 0 && !pytestEmpty)) {
-    throw new Error(
-      response.error
-        ?? `${method.display} exited ${response.exitCode}: ${(response.stderr ?? response.stdout ?? '').trim() || 'no diagnostic output'}`,
-    );
-  }
-  const identities = parseCollectedTestIdentities(projectDir, method, response);
-  if (method.tool === 'pytest' && identities.length === 0 && !pytestEmpty) {
-    const output = `${response.stdout ?? ''}\n${response.stderr ?? ''}`;
-    const positivelyEmpty = /(?:no tests (?:collected|ran)|0 tests? collected|collected 0 items)/i.test(output);
-    if (!positivelyEmpty) {
-      throw new Error(
-        `${method.display} exited successfully but produced no parseable test identities and did not positively report an empty collection`,
-      );
-    }
-  }
-  return {
-    projectDir,
-    count: identities.length,
-    identities,
-    digest: createHash('sha256').update(identities.join('\0')).digest('hex'),
-    durationMs: response.durationMs ?? Math.max(0, Date.now() - started),
-  };
-}
-
-async function compareTestPopulations(
-  sourceDir: string,
-  targetDir: string,
-  fs: ShipSetupFileSystem,
-  runner: ValidationCommandRunner,
-  declaredCommands: readonly BriefValidationCommand[],
-): Promise<TestPopulationComparison> {
-  const commandRunner = runner;
-  runner = (request) => withEngineIntegrity({ projectDir: request.cwd,
-    stageId: '_collection' }, () => Promise.resolve(commandRunner(request)));
-  const sourceDiscovery = await discoverTestPopulationMethod(sourceDir, fs, declaredCommands, runner);
-  const targetDiscovery = await discoverTestPopulationMethod(targetDir, fs, declaredCommands, runner);
-  const discoveries = { sourceDiscovery, targetDiscovery };
-  if (!sourceDiscovery.hasConfiguredTests && !targetDiscovery.hasConfiguredTests) return discoveries;
-  if (targetDiscovery.validationUnknown) return discoveries;
-  if (sourceDiscovery.hasConfiguredTests !== targetDiscovery.hasConfiguredTests) {
-    return {
-      ...discoveries,
-      population: {
-        version: 1,
-        state: 'mismatched',
-        missingFromTarget: [],
-        extraInTarget: [],
-        reason: sourceDiscovery.hasConfiguredTests
-          ? 'The source has a configured test command, but the target does not'
-          : 'The target has a configured test command, but the source does not',
-      },
-    };
-  }
-  const populationRunner = sourceDiscovery.runner && targetDiscovery.runner
-    ? { source: sourceDiscovery.runner, target: targetDiscovery.runner }
-    : undefined;
-  if (!sourceDiscovery.method || !targetDiscovery.method) {
-    const reasons = [...new Set([sourceDiscovery.reason, targetDiscovery.reason].filter(
-      (reason): reason is string => Boolean(reason),
-    ))];
-    return {
-      ...discoveries,
-      population: {
-        version: 1,
-        state: 'unverified',
-        ...(populationRunner ? { runner: populationRunner } : {}),
-        missingFromTarget: [],
-        extraInTarget: [],
-        reason: `${reasons.join('; ')}; source tests are not executed for population evidence. Declare package.json flowcrew.testPopulation.files or use a supported exact collector.`,
-      },
-    };
-  }
-  if (sourceDiscovery.method.tool !== targetDiscovery.method.tool) {
-    return {
-      ...discoveries,
-      population: {
-        version: 1,
-        state: 'unverified',
-        ...(populationRunner ? { runner: populationRunner } : {}),
-        missingFromTarget: [],
-        extraInTarget: [],
-        reason: `Source collector ${sourceDiscovery.method.tool} differs from target collector ${targetDiscovery.method.tool}`,
-      },
-    };
-  }
-  try {
-    const source = await collectTestPopulation(sourceDir, sourceDiscovery.method, runner);
-    const target = await collectTestPopulation(targetDir, targetDiscovery.method, runner);
-    const sourceSet = new Set(source.identities);
-    const targetSet = new Set(target.identities);
-    const missingFromTarget = source.identities.filter((identity) => !targetSet.has(identity));
-    const extraInTarget = target.identities.filter((identity) => !sourceSet.has(identity));
-    return {
-      ...discoveries,
-      population: {
-        version: 1,
-        state: missingFromTarget.length === 0 && extraInTarget.length === 0 ? 'matched' : 'mismatched',
-        method: {
-          tool: sourceDiscovery.method.tool,
-          display: sourceDiscovery.method.display,
-          evidencePath: sourceDiscovery.method.evidencePath,
-        },
-        source,
-        target,
-        missingFromTarget,
-        extraInTarget,
-      },
-    };
-  } catch (error) {
-    return {
-      ...discoveries,
-      population: {
-        version: 1,
-        state: 'unverified',
-        ...(populationRunner ? { runner: populationRunner } : {}),
-        method: {
-          tool: sourceDiscovery.method.tool,
-          display: sourceDiscovery.method.display,
-          evidencePath: sourceDiscovery.method.evidencePath,
-        },
-        missingFromTarget: [],
-        extraInTarget: [],
-        reason: `Cannot collect exact source/target test populations using ${sourceDiscovery.method.evidencePath}: ${errorMessage(error)}`,
-      },
-    };
-  }
 }
 
 /** Execute setup without rendering; operational refusals are returned as structured facts. */
@@ -1777,9 +1148,6 @@ export async function runShipSetup(
     deps.fs,
     deps.runGitCommand,
   );
-  const declaredInputPaths = new Set(extractDeclaredBriefInputPaths(brief));
-  const proseInputWarnings = extractBriefPathMentions(brief)
-    .filter((mention) => !declaredInputPaths.has(mention.path));
   const sourceOutputInventory = inspectBriefOutputs(brief, projectDir, deps.fs, { stateRoot: deps.globalDir(), launchProject: targetDir });
   let facts = setupFacts(
     projectDir,
@@ -1789,11 +1157,14 @@ export async function runShipSetup(
     parsed,
     sourceVerification,
     sourceOutputInventory,
-    proseInputWarnings,
   );
   const refuse = (blockers: ShipSetupBlockerInput[]): ShipSetupRefusedReport => (
     persistRefused(facts, blockers, targetDir, deps)
   );
+  const contractErrors = briefDeclarationFailures(brief);
+  if (contractErrors.length) return refuse(contractErrors.map(finding => ({
+    phase: finding.code === 'frontmatter_invalid' ? 'validation' : 'source', code: finding.code, reason: finding.message,
+  })));
   if (declaredValidation.error) {
     return refuse([{ phase: 'validation', reason: declaredValidation.error }]);
   }
@@ -1813,6 +1184,13 @@ export async function runShipSetup(
     base: parsed.base as string,
     branch: parsed.branch as string,
   };
+  try {
+    const bytes = await estimateInputCopyBytes(sourceVerification, projectDir, targetDir, deps);
+    if (bytes > 0) requireDiskCapacity(bytes);
+  } catch (error) {
+    return refuse([{ phase: 'target', reason: errorMessage(error),
+      repair: 'Resolve the disk admission or input estimate refusal, then rerun ship-setup. No worktree or input copy was started.' }]);
+  }
   if (deps.fs.entryExists(targetDir)) {
     const existing = await verifyReusableWorktree(worktreeRequest, deps.runGitCommand, deps.fs);
     if (!existing.reusable) {
@@ -1896,15 +1274,9 @@ export async function runShipSetup(
   // Input materialization owns target collisions and path confinement. A live
   // source may advance independently; setup cannot attribute that change to a
   // command, and does not promise an immutable experiment snapshot.
-  const sourceTrackedPaths = sourceVerification.inputs.length
-    ? await declaredInputTrackedPaths(projectDir, deps.runGitCommand) : undefined;
-  const targetTrackedPaths = sourceVerification.inputs.length
-    ? await declaredInputTrackedPaths(targetDir, deps.runGitCommand) : undefined;
-  const materializationTrackedPaths = sourceTrackedPaths && targetTrackedPaths
-    ? new Set([...sourceTrackedPaths, ...targetTrackedPaths]) : undefined;
   let reconciled: { links: ShipSetupLink[]; copies: ShipSetupCopy[]; blockers: ShipSetupBlockerInput[] };
   try {
-    reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs, materializationTrackedPaths);
+    reconciled = reconcileInputs(sourceVerification, projectDir, targetDir, deps.fs);
   } catch (error) {
     return refuse([{ phase: 'target', reason: `Cannot inspect target worktree: ${errorMessage(error)}` }]);
   }
@@ -1925,35 +1297,18 @@ export async function runShipSetup(
     })));
   }
 
-  const validationBaseline = await runProjectValidationBaseline(targetDir, {
-    fs: { exists: deps.fs.exists, readText: deps.fs.readText },
-    ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
-    declaredCommands: declaredValidation.commands,
-  });
-  facts = { ...facts, validationBaseline };
-
-  const populationComparison = await compareTestPopulations(
-    projectDir,
-    targetDir,
-    deps.fs,
-    deps.runTestCollectionCommand,
-    declaredValidation.commands,
+  const validationFs = { exists: deps.fs.exists, readText: deps.fs.readText };
+  const discovery = reconcileProjectValidation(targetDir, declaredValidation.commands, validationFs);
+  const { validationBaseline, baselineReuse } = await reuseShipSetupBaseline(
+    projectDir, targetDir, parsed.base as string, discovery,
+    targetVerification.inputs.map(input => input.path), deps.globalDir(),
+    () => runProjectValidationBaseline(targetDir, {
+      fs: validationFs,
+      ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
+      declaredCommands: declaredValidation.commands,
+    }),
   );
-  const testPopulation = populationComparison.population;
-  if (testPopulation) facts = { ...facts, testPopulation };
-  if (testPopulation?.state === 'mismatched') {
-    const missing = testPopulation.missingFromTarget.length > 0
-      ? `; missing from target: ${testPopulation.missingFromTarget.join(', ')}`
-      : '';
-    const extra = testPopulation.extraInTarget.length > 0
-      ? `; extra in target: ${testPopulation.extraInTarget.join(', ')}`
-      : '';
-    const reason = testPopulation.reason ? `; ${testPopulation.reason}` : '';
-    return refuse([{
-      phase: 'validation',
-      reason: `Test population mismatch: source=${testPopulation.source?.count ?? 'unknown'}, target=${testPopulation.target?.count ?? 'unknown'}${missing}${extra}${reason}`,
-    }]);
-  }
+  facts = { ...facts, validationBaseline, baselineReuse };
 
   const validationBlockers: ShipSetupBlockerInput[] = validationBaseline.discovery.state === 'unknown'
       && declaredValidation.commands.length > 0
@@ -1962,23 +1317,14 @@ export async function runShipSetup(
         reason: `Validation baseline is unknown: ${validationBaseline.discovery.reason ?? 'no build, test, or lint command could be inferred'}`,
       }]
     : [];
-  // A project command that cannot run here while others do is an environment gap the baseline records, and it cannot
-  // show a regression; a declared command that cannot launch, or a project none of whose commands launch, is the
-  // operator's to correct. A runner only inferred from a legacy INI file (tox.ini, pytest.ini) that cannot launch is an
-  // environment gap even when nothing else runs: before INI inference such a project inferred no command and was set up
-  // unconfigured, so inferring one must not turn a missing tool into a refusal.
-  type BaselineResult = (typeof validationBaseline.results)[number];
-  const commandOf = (result: BaselineResult) => validationBaseline.discovery.commands
-    .find(candidate => candidate.role === result.role && candidate.display === result.display);
-  const iniGap = (result: BaselineResult): boolean => result.state === 'launch_error'
-    && commandOf(result)?.provenance?.source !== 'brief' && /(?:^|[\\/])(?:tox|pytest)\.ini$/.test(commandOf(result)?.evidencePath ?? '');
-  const noneLaunched = validationBaseline.results.every((result) => iniGap(result) || (result.state !== 'passed' && result.state !== 'failed'));
+  // Inferred unmeasurable commands record an environment gap; explicit declarations must be measurable.
   validationBlockers.push(...validationBaseline.results.flatMap((result): ShipSetupBlockerInput[] => {
-    const command = commandOf(result);
-    if (result.state !== 'launch_error' || iniGap(result) || (command?.provenance?.source !== 'brief' && !noneLaunched)) return [];
+    const command = validationBaseline.discovery.commands
+      .find(candidate => candidate.role === result.role && candidate.display === result.display);
+    if (!unmeasured(result) || command?.provenance?.source !== 'brief') return [];
     return [{
       phase: 'validation',
-      reason: `Cannot launch ${result.role} baseline${result.display ? ` (${result.display})` : ''}${command?.provenance?.source === 'brief' ? ` declared at ${command.provenance.evidencePath}` : ''}: ${result.reason ?? 'command ended without an exit code'}`,
+      reason: `Cannot measure ${result.role} baseline${result.display ? ` (${result.display})` : ''} declared at ${command.provenance.evidencePath}: ${result.reason ?? 'command ended without an exit code'}`,
     }];
   }));
   if (validationBlockers.length > 0) return refuse(validationBlockers);
@@ -2013,12 +1359,6 @@ function renderInputVerification(label: string, verification: BriefInputVerifica
   for (const input of verification.inputs) {
     const reachability = input.exists ? (input.readable ? 'READABLE' : 'UNREADABLE') : 'MISSING';
     writer.write(`  ${reachability} ${input.path}\n`);
-    for (const assertion of input.assertions) {
-      writer.write(`    ${assertion.state.toUpperCase()} ${assertion.kind}: ${assertion.reason}\n`);
-    }
-  }
-  for (const assertion of verification.unboundAssertions) {
-    writer.write(`  NOT_CHECKABLE ${assertion.kind}: ${assertion.reason}\n`);
   }
   for (const input of verification.unresolvedInputs) {
     writer.write(`  UNRESOLVED DECLARED ${JSON.stringify(input.value)} at line ${input.line}: ${input.reason}\n`);
@@ -2037,9 +1377,7 @@ function renderVerification(report: ShipSetupReport, writer: Writer): void {
   renderOutputInventory('Source', report.sourceOutputInventory, writer);
   if (report.targetVerification) renderInputVerification('Target', report.targetVerification, writer);
   if (report.targetOutputInventory) renderOutputInventory('Target', report.targetOutputInventory, writer);
-  for (const warning of report.proseInputWarnings) {
-    writer.write(`  WARNING prose path ${warning.path} at line ${warning.line} is not a declared input\n`);
-  }
+
   for (const link of report.links) writer.write(`  LINK ${link.path} -> ${link.source}\n`);
   for (const copy of report.copies) writer.write(`  COPY ${copy.path} <- ${copy.source}\n`);
 }
@@ -2050,32 +1388,10 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
   writer.write(`Brief digest: ${report.briefDigest}\n`);
   writer.write(`Git: branch ${report.branch} at base ${report.base}\n`);
   renderVerification(report, writer);
-  if (report.testPopulation) {
-    writer.write(
-      `Test population: ${report.testPopulation.state.toUpperCase()}`
-      + `${report.testPopulation.source ? ` source=${report.testPopulation.source.count}` : ''}`
-      + `${report.testPopulation.target ? ` target=${report.testPopulation.target.count}` : ''}\n`,
-    );
-    if (report.testPopulation.runner) {
-      const { source, target } = report.testPopulation.runner;
-      writer.write(`  runner: ${source.display}${source.command === source.display ? '' : ` (invoked as ${source.command})`}\n`);
-      if (target.display !== source.display || target.command !== source.command) {
-        writer.write(`  target runner: ${target.display}${target.command === target.display ? '' : ` (invoked as ${target.command})`}\n`);
-      }
-    }
-    if (report.testPopulation.method) {
-      writer.write(`${'tool' in report.testPopulation.method ? '  collector' : '  evidence'}: ${report.testPopulation.method.display}\n`);
-    }
-    if (report.testPopulation.state === 'matched' && report.testPopulation.extraInTarget.length > 0) {
-      writer.write('  relation: SOURCE-PLUS-ADDITIONS\n');
-      writer.write(`  extra in target: ${report.testPopulation.extraInTarget.join(', ')}\n`);
-    }
-    if (report.testPopulation.reason) writer.write(`  reason: ${report.testPopulation.reason}\n`);
-  }
   if (report.state === 'ready') {
     writer.write(`Validation baseline: ${report.validationBaseline.discovery.state.toUpperCase()}\n`);
     for (const result of report.validationBaseline.results) {
-      writer.write(`  ${result.role}: ${result.state.toUpperCase()}${result.exitCode === undefined ? '' : ` exit=${result.exitCode}`}\n`);
+      writer.write(`  ${result.role}: ${unmeasured(result) ? 'ENVIRONMENT GAP' : result.state.toUpperCase()}${result.exitCode === undefined ? '' : ` exit=${result.exitCode}`}\n`);
     }
     for (const criterion of report.validationBaseline.gateCriteria) {
       writer.write(`  gate ${criterion.role}: ${criterion.rule} — ${criterion.description}\n`);
@@ -2085,8 +1401,7 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
   }
   for (const blocker of report.blockers) {
     const subject = blocker.input ? ` ${blocker.input}` : '';
-    const assertion = blocker.assertion ? ` ${blocker.assertion}` : '';
-    writer.write(`  REFUSED [${blocker.phase}]${subject}${assertion}: ${blocker.reason}\n`);
+    writer.write(`  REFUSED [${blocker.phase}]${subject}: ${blocker.reason}\n`);
     writer.write(`    REPAIR [${blocker.phase}]: ${blocker.repair ?? shipSetupBlockerRepair(blocker)}\n`);
   }
 }
@@ -2110,7 +1425,7 @@ export async function cmdShipSetupWithDeps(
     return report.state === 'ready' ? 0 : 1;
   } catch (error) {
     deps.stderr.write(`ship-setup: ${errorMessage(error)}\n`);
-    deps.stderr.write(`${shipSetupUsage()}\n`);
+    if (!(error instanceof CliUsageError)) deps.stderr.write(`${shipSetupUsage()}\n`);
     return 1;
   }
 }

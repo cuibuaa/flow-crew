@@ -1,4 +1,4 @@
-import { atomicWrite } from '../src/store.js';
+import { atomicWrite } from '../src/engine-fs.js';
 import { stageLiveLogPath } from '../src/stage-live-log.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,10 +14,10 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunResult } from '../src/adapters/base.js';
+import { createRun } from './test-support/create-run.js';
 import {
   beginStageAttempt,
   completeStageAttempt,
-  createRun,
   fcGlobalDir,
   readRunState,
   runDir,
@@ -25,7 +25,7 @@ import {
   writeRunState,
 } from '../src/store.js';
 import { inspectStageExecutionFacts } from '../src/stage-watchdog.js';
-import { runStage } from '../src/worker.js';
+import { beginAttemptEvidenceGeneration, runStage } from '../src/worker.js';
 
 const stageId = 'acceptance_gate';
 const role: AgentConfig = {
@@ -74,6 +74,7 @@ function markRunningAttempt(startedAt = new Date(Date.now() - 60_000).toISOStrin
     attempts: [{ index: 1, startedAt, status: 'running' }],
   };
   writeRunState(projectDir, currentRunId, state);
+  beginAttemptEvidenceGeneration(currentRunDir, stageId, 1, startedAt);
 }
 
 function waitThenReturnOnAbort(cleanDelayMs = 2_500): Adapter {
@@ -113,7 +114,7 @@ function stageOptions() {
 }
 
 describe('current-attempt watchdog facts', () => {
-  it('distinguishes current-attempt verdict, handoff, and commit facts', () => {
+  it('observes current-attempt verdict and handoff without treating them as progress', () => {
     markRunningAttempt();
     writeFileSync(join(currentRunDir, `verdict_${stageId}.json`), '{"pass":false}\n');
     writeFileSync(join(currentRunDir, `handoff_${stageId}.md`), '## Delivered\nchecked\n');
@@ -123,16 +124,13 @@ describe('current-attempt watchdog facts', () => {
       runDir: currentRunDir,
       stageId,
       status,
-      sinceMs: Date.now() - 1_000,
-      commitObserved: true,
     });
 
     expect(facts).toMatchObject({
       attemptIndex: 1,
       verdictObserved: true,
       handoffObserved: true,
-      commitObserved: true,
-      protectedFromIdleAbort: true,
+      protectedFromIdleAbort: false,
       finalizing: false,
     });
   });
@@ -156,7 +154,6 @@ describe('current-attempt watchdog facts', () => {
           { index: 2, startedAt: attemptTwoStart, status: 'running' },
         ],
       },
-      sinceMs: Date.now() - 1_000,
     });
 
     expect(facts.outputObserved).toBe(false);
@@ -210,7 +207,7 @@ describe('attempt-scoped one-shot abort signals', () => {
       attemptIndex: 1,
       reason: 'belongs to attempt one',
       timestamp: '2026-08-01T00:00:00.500Z',
-      source: 'supervisor',
+      source: 'watchdog',
     }));
 
     const rerun = runStage(waitThenReturnOnAbort(), stageOptions());
@@ -225,7 +222,7 @@ describe('attempt-scoped one-shot abort signals', () => {
     expect(liveLog).toContain('observed attempt 1');
   });
 
-  it('keeps an owned archived supervisor signal authoritative when the adapter throws before the next poll', async () => {
+  it('keeps an owned watchdog signal authoritative when the adapter throws before the next poll', async () => {
     const signalPath = join(currentRunDir, 'signals', `abort_${stageId}.json`);
     const adapter: Adapter = {
       run: async () => {
@@ -235,7 +232,7 @@ describe('attempt-scoped one-shot abort signals', () => {
           attemptIndex: 1,
           reason: 'arrived during a crashing adapter call',
           timestamp: new Date().toISOString(),
-          source: 'supervisor',
+          source: 'watchdog',
         }));
         throw new Error('deterministic adapter crash');
       },
@@ -245,7 +242,7 @@ describe('attempt-scoped one-shot abort signals', () => {
     expect(result).toMatchObject({
       exitCode: 137,
       timedOut: false,
-      timeoutTerminationCause: 'stage_abort',
+      terminationCause: 'stage_abort',
     });
     expect(existsSync(signalPath)).toBe(false);
   });

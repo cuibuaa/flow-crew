@@ -1,9 +1,9 @@
 /** Admitted terminal owner/scope lookup and shared normalized stage-write attribution; no terminal state mutation. */
 import { type DispatchAdmissionReport } from '../sched_admission/dispatch.js';
-import { join, posix, isAbsolute, relative } from 'node:path';
+import { join, posix } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { STAGE_STATUS, type StageStatus, type StoreState } from '../../store.js';
-import { normalizedProjectContentPath, parseDeclaredScope, scopeMatchesProjectPath } from '../sched_admission/scope-services.js';
+import { normalizedProjectContentPath, normalizedProjectPath, parseDeclaredScope, scopeMatchesProjectPath } from '../sched_admission/scope-services.js';
 
 /** Static plans and revisions carry the same admission as dispatches in the
  * authoritative plan record. The projection remains a legacy-run fallback. */
@@ -44,16 +44,23 @@ export function terminalProductWrites(
     }).map(parseDeclaredScope);
   const writes = attributedStageStatuses(state, stageId).flatMap((status) => (
     (status.attempts?.length ? status.attempts : [status]).flatMap((attempt) => {
-      let paths = attempt.writes ?? [];
-      if (attempt.constraintAudit) {
-        try {
-          const audit = JSON.parse(readFileSync(join(runDirPath, attempt.constraintAudit.path), 'utf8')) as { durableWrites?: string[] };
-          if (Array.isArray(audit.durableWrites)) paths = audit.durableWrites;
-        } catch { /* Legacy or missing audit: conservatively use attributed writes. */ }
-      }
+      const paths = attempt.writes ?? [];
+      const noReview = new Set<string>();
+      // Publication can repeat identical bytes. Attribution stays with writes;
+      // the existing audit preserves no-ops and review exemptions, including
+      // writes whose content could not be compared.
+      if (attempt.constraintAudit) try {
+        const audit = JSON.parse(readFileSync(join(runDirPath, attempt.constraintAudit.path), 'utf8')) as Record<string, string[]>;
+        for (const path of audit.exemptedWrites ?? []) noReview.add(path);
+        for (const path of audit.unavailableComparisons ?? []) noReview.add(path);
+        const classes = ['appliedWrites', 'exemptedWrites', 'rolledBackWrites', 'rollbackFailures', 'unavailableComparisons'];
+        if (Array.isArray(audit.rawWrites) && classes.every(key => Array.isArray(audit[key]))) {
+          for (const path of audit.rawWrites) if (!classes.some(key => audit[key].includes(path))) noReview.add(path);
+        }
+      } catch { /* Missing or legacy content evidence cannot prove a no-op. */ }
       return paths.flatMap(path => {
-        const projectPath = normalizedProjectContentPath(projectWritePath(state.projectDir, path));
-        return projectPath && !path.startsWith('run:')
+        const projectPath = normalizedProjectContentPath(normalizedProjectPath(path, state.projectDir) ?? '');
+        return projectPath && !path.startsWith('run:') && !noReview.has(projectPath)
           ? [{ path: projectPath, completedAt: Date.parse(attempt.completedAt ?? '') }] : [];
       });
     })
@@ -61,16 +68,9 @@ export function terminalProductWrites(
   return writes.filter(({ path }) => !evidenceScopes.some((scope) => scopeMatchesProjectPath(scope, path)));
 }
 
-function projectWritePath(projectDir: string, raw: string): string {
-  const normalized = raw.replace(/\\/g, '/');
-  return posix.normalize(isAbsolute(normalized)
-    ? relative(projectDir, normalized).replace(/\\/g, '/')
-    : normalized);
-}
-
 function terminalWriteMatcher(projectDir: string, terminalPath: string): (raw: string) => boolean {
-  const wanted = projectWritePath(projectDir, terminalPath);
-  return raw => projectWritePath(projectDir, raw) === wanted;
+  const wanted = normalizedProjectPath(terminalPath, projectDir);
+  return raw => wanted !== undefined && normalizedProjectPath(raw, projectDir) === wanted;
 }
 
 function attributedStageStatuses(state: StoreState, stageId: string): StageStatus[] {
@@ -104,8 +104,8 @@ export function stageAttemptWroteProjectPath(
       .filter((attempt) => attempt.status === settledStatus && !scopeRefused(attempt));
     if (settledAttempts.some((attempt) => (attempt.writes ?? []).some(matches))) return true;
     return status.status === settledStatus && !scopeRefused(status)
-      && (settledStatus !== STAGE_STATUS.FAILED || !status.attempts?.length)
-      && (status.writes ?? status.artifacts ?? []).some(matches);
+      && !status.attempts?.length
+      && (status.writes ?? []).some(matches);
   });
 }
 
@@ -125,7 +125,7 @@ export function lastAttributedStageWriteMs(
         ? [Date.parse(attempt.completedAt)]
         : []
     ));
-    if ((status.writes ?? status.artifacts ?? []).some(matches) && status.completedAt) {
+    if (!status.attempts?.length && (status.writes ?? []).some(matches) && status.completedAt) {
       attempts.push(Date.parse(status.completedAt));
     }
     return attempts.filter(Number.isFinite);
