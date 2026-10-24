@@ -158,7 +158,7 @@ describe('launch identity', () => {
 });
 
 describe('durable delivery and business ACK', () => {
-  it('does not resend an accepted inbox delivery at 2, 4 or 28 minutes, and reminds once at 30 minutes', async () => {
+  it('keeps legacy sessions that never registered a waiter on inbox, with reminders at 30 minutes', async () => {
     const { registry, task } = fixture('claude');
     const started = Date.parse(source.timestamp);
     let now = started;
@@ -184,7 +184,7 @@ describe('durable delivery and business ACK', () => {
     expect(push.pending()).toHaveLength(1);
   });
 
-  it('backs off failing sockets by 2, 4, 8, 16, then at most 30 minutes across restarts', async () => {
+  it('backs off legacy inbox failures by 2, 4, 8, 16, then at most 30 minutes across restarts', async () => {
     const { registry, task } = fixture('claude');
     let now = Date.parse(source.timestamp);
     const claude = vi.fn().mockRejectedValue(new Error('socket closed'));

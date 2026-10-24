@@ -28,16 +28,26 @@ export function claudeWakeCapability(): { supported: boolean; detail: string } {
 
 interface Waiter {
   session: string; pid: number; start: ProcessStartToken;
-  host: number; hostStart: ProcessStartToken; expiresAt: number;
+  host: number; hostStart: ProcessStartToken; expiresAt: number; bootId?: string;
 }
 const directory = (root: string) => join(root, 'waiters');
+// Linux start tokens are ticks since boot, so PID/start pairs alone can recur
+// after a reboot. POSIX lstart tokens already include the calendar date.
+function bootId(): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined; }
+  catch { return undefined; }
+}
 function liveWaiters(root: string, session: string, now: number): Array<{ name: string; waiter: Waiter }> {
   if (!existsSync(directory(root))) return [];
+  const boot = bootId();
+  if (process.platform === 'linux' && !boot) return [];
   return readdirSync(directory(root)).filter(name => name.endsWith('.json')).flatMap(name => {
     let waiter: Waiter;
     try { waiter = JSON.parse(readFileSync(join(directory(root), name), 'utf8')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
-    if (waiter.session !== session || waiter.expiresAt <= now) return [];
+    if (waiter.session !== session || waiter.expiresAt <= now
+        || (process.platform === 'linux' && waiter.bootId !== boot)) return [];
     return processIsAlive(waiter.pid) && processStartTokensMatch(waiter.start, processStartToken(waiter.pid))
       && processIsAlive(waiter.host) && processStartTokensMatch(waiter.hostStart, processStartToken(waiter.host))
       ? [{ name, waiter }] : [];
@@ -62,12 +72,14 @@ export async function waitForClaudeWake(push: SessionPush, session: string, opti
   const expiresAt = now() + (options.lifetimeMs ?? WAKE_LIFETIME_MS);
   const start = processStartToken(process.pid);
   const hostStart = processStartToken(process.ppid);
-  if (!start || !hostStart) return { code: 0 }; // no verifiable owner: gate remains blocking
+  const boot = bootId();
+  if (!start || !hostStart || (process.platform === 'linux' && !boot)) return { code: 0 }; // no verifiable owner: gate remains blocking
+  push.registerClaudeWake(session);
   mkdirSync(directory(push.root), { recursive: true });
   const name = `${process.hrtime.bigint().toString().padStart(24, '0')}-${randomUUID()}.json`;
   const path = join(directory(push.root), name);
   // Waiters are leases tied to two live process identities, not crash recovery records.
-  atomicWrite(path, JSON.stringify({ session, pid: process.pid, start, host: process.ppid, hostStart, expiresAt } satisfies Waiter), { durability: 'replace-only', mode: 0o600 });
+  atomicWrite(path, JSON.stringify({ session, pid: process.pid, start, host: process.ppid, hostStart, expiresAt, bootId: boot } satisfies Waiter), { durability: 'replace-only', mode: 0o600 });
   try {
     for (;;) {
       const live = liveWaiters(push.root, session, now()).sort((a, b) => a.name.localeCompare(b.name));

@@ -219,6 +219,31 @@ export class SessionPush {
       frontend, sessionId, socket: socket ?? previous?.socket, updatedAt: this.now(),
     });
   }
+  private wakeCapabilityPath(session: string): string {
+    return join(this.root, 'sessions', `wake-${key(session)}.json`);
+  }
+  /** One immutable registration fact per session, separate from socket refreshes
+   * so concurrent hooks cannot erase capability while updating an address. */
+  registerClaudeWake(session: string): void {
+    if (!/^[\w-]+$/u.test(session)) throw new Error('Invalid wake session id');
+    publish(this.wakeCapabilityPath(session), { sessionId: session, registeredAt: this.now() }, true);
+  }
+  private claudeWakeCapable(session: string): boolean {
+    if (existsSync(this.wakeCapabilityPath(session))) return true;
+    // Upgrade sessions that already woke before registration facts existed.
+    // Mutable delivery state may since have fallen back to inbox; claims cannot.
+    const claims = join(this.root, 'wake-claims');
+    if (!existsSync(claims)) return false;
+    for (const name of readdirSync(claims)) {
+      const id = /^([a-f0-9]{64})-\d+\.json$/u.exec(name)?.[1];
+      const event = id && load<PushEvent>(this.eventPath(id));
+      if (event && event.target.frontend === 'claude' && event.target.sessionId === session) {
+        this.registerClaudeWake(session);
+        return true;
+      }
+    }
+    return false;
+  }
   private currentTarget(target: LaunchTarget): LaunchTarget {
     const registered = load<{ socket?: string }>(join(this.root, 'sessions', `${key([target.frontend, target.sessionId])}.json`));
     return registered?.socket ? { ...target, socket: registered.socket } : target;
@@ -319,17 +344,22 @@ export class SessionPush {
     const target = this.currentTarget(event.target);
     const targetKey = (value: LaunchTarget) => key([value.frontend, value.sessionId, value.socket]);
     const changedTarget = (state.target ?? targetKey(event.target)) !== targetKey(target);
+    const liveWake = target.frontend === 'claude' && hasClaudeWakeWaiter(this.root, target.sessionId, this.now());
+    const awaitingWaiter = target.frontend === 'claude' && !liveWake && this.claudeWakeCapable(target.sessionId);
+    // A fresh waiter must not inherit an inbox deadline or an already claimed wake.
+    const switchToWake = liveWake && (state.transport !== 'wake'
+      || existsSync(join(this.root, 'wake-claims', `${safeId(event.eventId)}-${state.attempts}.json`)));
     // Old delivery records scheduled accepted sends at the failure cadence.
     if (!state.target && state.sentAt && !state.error) state.nextAttemptAt = Date.parse(state.sentAt) + PUSH_REMINDER_MS;
     const prompt = wrapUpPrompt(event, this.registry.baseDir);
     let dirty = false;
-    if (changedTarget || !state.nextAttemptAt || state.nextAttemptAt <= this.now()) {
+    if (!awaitingWaiter && (switchToWake || changedTarget || !state.nextAttemptAt || state.nextAttemptAt <= this.now())) {
       if (changedTarget) state.failures = 0;
       state.target = targetKey(target);
       state.attempts++;
       state.nextAttemptAt = this.now() + PUSH_RETRY_MS;
       state.transport = target.frontend === 'codex' ? 'queue'
-        : hasClaudeWakeWaiter(this.root, target.sessionId, this.now()) ? 'wake' : 'inbox';
+        : liveWake ? 'wake' : 'inbox';
       // Record the attempt first: an ambiguous crash retries the SAME event id.
       publish(this.deliveryPath(event.eventId), state);
       try {

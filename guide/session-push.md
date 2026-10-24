@@ -42,13 +42,15 @@ missing/outdated hooks or an unsupported version produce a repair command.
 
 Run events are replayed from durable engine records into `FC_HOME/session-push`.
 Terminal, parked, awaiting-approval, and failed-attempt events carry stable IDs.
-Claude delivery selects its live Stop waiter, otherwise its session inbox;
+Claude delivery uses its live Stop waiter once the session has registered wake capability;
+while that session is busy or closed it waits for the next live waiter. Only legacy
+sessions that have never registered a waiter use the session inbox;
 Codex delivery uses `codex queue`. Delivery
 does not require installed hooks. Stop/SessionStart hooks add the turn gate and
 refresh Claude's address after a reopen; they never launch an audit worker.
 A closed session waits for reopening. Claude retries a missing socket; Codex's
 queue persists its input until the session resumes. Once a transport accepts an
-event, unacknowledged reminders wait thirty minutes. Failed sends back off by two,
+event, unacknowledged inbox/queue reminders wait thirty minutes. Failed sends back off by two,
 four, eight, sixteen, then thirty minutes; a changed target is tried immediately.
 After ten minutes without business ACK, the engine also
 calls the existing `notify --source flowcrew --dedup-key <event-id>` notifier.
@@ -59,9 +61,19 @@ Claude's hook wake works in every permission mode without changing inbound polic
 Each retry records exactly one transport before delivery. A live waiter emits the
 fixed wrap-up prompt and exits 2; an immutable event/attempt claim prevents duplicate
 hook wakes across concurrent Stops. That attempt does not also send an inbox frame.
-ACK is shared by both paths. Without a live waiter, inbox delivery still obeys the
-user's inbound policy, which can hold/refuse messages; pending events retain retries
-and notifier fallback. A successful socket write still requires an explicit business ACK.
+ACK is shared by both paths. Registration records one immutable capability fact per
+session in the existing session directory. Unlike the mutable socket address, a
+concurrent hook cannot erase it. Pre-upgrade immutable wake claims also establish
+this fact for their session, even if a later retry overwrote the delivery transport.
+Capability survives waiter exits and reboots; liveness still requires matching
+waiter and host process identities, an unexpired lease, and on Linux the current
+boot ID. Old waiter files without boot identity cannot provide live coverage.
+A wake-capable session never gets an inbox frame, including for new events during
+wrap-up. Its Stop gate already blocks pending events; the engine keeps checking
+for a live waiter without sending or consuming a transport attempt. A new waiter
+bypasses an inbox deadline or a previously claimed wake deadline immediately.
+Legacy inbox delivery obeys the user's inbound policy, which can hold/refuse
+messages. Both paths retain notifier fallback and require an explicit business ACK.
 
 SessionStart re-arms the same waiter when a session reopens; Stop arms it after
 launch and subsequent turns. The waiter polls every second and lives for one hour. Later Stops reuse its coverage
