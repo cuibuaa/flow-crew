@@ -63,6 +63,8 @@ function normalizePushEvent(event: PushEvent & { attempt?: number }): PushEvent 
 }
 interface DeliveryState {
   attempts: number;
+  failures?: number;
+  target?: string;
   transport?: 'inbox' | 'wake' | 'queue';
   nextAttemptAt?: number;
   sentAt?: string;
@@ -70,6 +72,7 @@ interface DeliveryState {
   error?: string;
   fallbackAt?: string;
   fallbackError?: string;
+  fallbackRetryAt?: number;
 }
 export interface DisplayState {
   threadId?: string;
@@ -96,6 +99,7 @@ const key = (value: unknown) => createHash('sha256').update(JSON.stringify(value
 const safeId = (id: string) => { if (!/^[a-f0-9]{64}$/u.test(id)) throw new Error('Invalid event id'); return id; };
 
 export const PUSH_RETRY_MS = 120_000;
+const PUSH_REMINDER_MS = 30 * 60_000;
 export const PUSH_FALLBACK_MS = 10 * 60_000;
 const needsLauncher = (status: unknown) => isTerminalRunStatus(status) || isPausedRunStatus(status);
 
@@ -312,31 +316,56 @@ export class SessionPush {
   async deliver(event: PushEvent): Promise<void> {
     if (this.acknowledged(event.eventId)) return;
     const state = load<DeliveryState>(this.deliveryPath(event.eventId)) ?? { attempts: 0 };
-    if (state.nextAttemptAt && state.nextAttemptAt > this.now()) return;
-    state.attempts++;
-    state.nextAttemptAt = this.now() + PUSH_RETRY_MS;
     const target = this.currentTarget(event.target);
-    state.transport = target.frontend === 'codex' ? 'queue'
-      : hasClaudeWakeWaiter(this.root, target.sessionId, this.now()) ? 'wake' : 'inbox';
-    // Record the attempt first: an ambiguous crash retries the SAME event id.
-    publish(this.deliveryPath(event.eventId), state);
+    const targetKey = (value: LaunchTarget) => key([value.frontend, value.sessionId, value.socket]);
+    const changedTarget = (state.target ?? targetKey(event.target)) !== targetKey(target);
+    // Old delivery records scheduled accepted sends at the failure cadence.
+    if (!state.target && state.sentAt && !state.error) state.nextAttemptAt = Date.parse(state.sentAt) + PUSH_REMINDER_MS;
     const prompt = wrapUpPrompt(event, this.registry.baseDir);
-    try {
-      if (target.frontend === 'codex') state.receipt = await this.queue(target.sessionId, prompt, target.codexHome);
-      else if (state.transport === 'wake') state.receipt = 'asyncRewake waiter selected; awaiting business ACK';
-      else {
-        if (!target.socket) throw new Error('No Claude inbox socket recorded');
-        await this.claude(target.socket, event.eventId, prompt);
+    let dirty = false;
+    if (changedTarget || !state.nextAttemptAt || state.nextAttemptAt <= this.now()) {
+      if (changedTarget) state.failures = 0;
+      state.target = targetKey(target);
+      state.attempts++;
+      state.nextAttemptAt = this.now() + PUSH_RETRY_MS;
+      state.transport = target.frontend === 'codex' ? 'queue'
+        : hasClaudeWakeWaiter(this.root, target.sessionId, this.now()) ? 'wake' : 'inbox';
+      // Record the attempt first: an ambiguous crash retries the SAME event id.
+      publish(this.deliveryPath(event.eventId), state);
+      try {
+        if (target.frontend === 'codex') state.receipt = await this.queue(target.sessionId, prompt, target.codexHome);
+        else if (state.transport === 'wake') state.receipt = 'asyncRewake waiter selected; awaiting business ACK';
+        else {
+          if (!target.socket) throw new Error('No Claude inbox socket recorded');
+          await this.claude(target.socket, event.eventId, prompt);
+        }
+        state.sentAt = new Date(this.now()).toISOString();
+        state.error = undefined;
+        state.failures = 0;
+        state.nextAttemptAt = this.now() + PUSH_REMINDER_MS;
+      } catch (error) {
+        state.error = error instanceof Error ? error.message : String(error);
+        state.failures = (state.failures ?? 0) + 1;
+        state.nextAttemptAt = this.now() + Math.min(PUSH_REMINDER_MS, PUSH_RETRY_MS * 2 ** Math.min(state.failures - 1, 4));
       }
-      state.sentAt = new Date(this.now()).toISOString();
-      state.error = undefined;
-    } catch (error) { state.error = error instanceof Error ? error.message : String(error); }
-    // Neither transport acceptance nor a model reply can publish an ACK.
-    if (!state.fallbackAt && this.now() - Date.parse(event.createdAt) >= PUSH_FALLBACK_MS) {
-      try { await this.notify(prompt, event.eventId); state.fallbackAt = new Date(this.now()).toISOString(); state.fallbackError = undefined; }
-      catch (error) { state.fallbackError = error instanceof Error ? error.message : String(error); }
+      dirty = true;
     }
-    publish(this.deliveryPath(event.eventId), state);
+    // Neither transport acceptance nor a model reply can publish an ACK.
+    // Fallback retains its own deadline even while transport reminders back off.
+    if (!state.fallbackAt && this.now() - Date.parse(event.createdAt) >= PUSH_FALLBACK_MS
+        && (!state.fallbackRetryAt || state.fallbackRetryAt <= this.now())) {
+      try {
+        await this.notify(prompt, event.eventId);
+        state.fallbackAt = new Date(this.now()).toISOString();
+        state.fallbackError = undefined;
+        state.fallbackRetryAt = undefined;
+      } catch (error) {
+        state.fallbackError = error instanceof Error ? error.message : String(error);
+        state.fallbackRetryAt = this.now() + PUSH_RETRY_MS;
+      }
+      dirty = true;
+    }
+    if (dirty) publish(this.deliveryPath(event.eventId), state);
   }
   async sweep(foregroundTaskId?: number): Promise<void> {
     const tasks = this.registry.list({ status: TASK_LIST_STATUS.ALL });

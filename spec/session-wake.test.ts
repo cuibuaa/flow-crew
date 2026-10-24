@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaskRegistry } from '../src/task-registry.js';
-import { SessionPush, PUSH_RETRY_MS, PUSH_FALLBACK_MS, wrapUpPrompt } from '../src/session-push.js';
+import { SessionPush, PUSH_FALLBACK_MS, wrapUpPrompt } from '../src/session-push.js';
 import { sessionGate } from '../src/cli-session-push.js';
 import { hasClaudeWakeWaiter, supportsClaudeWakeVersion, waitForClaudeWake } from '../src/session-wake.js';
 import { createTaskEntry } from '../src/fc-tasks.js';
@@ -83,7 +83,7 @@ describe('Claude async Stop wake', () => {
     const event = f.push.events().find(event => event.eventId === eventId)!;
     expect(f.push.claimWake(event)).toBe(false);
     const retry = await waitForClaudeWake(f.push, f.launcher.sessionId, { sleep: async () => {
-      f.advance(PUSH_RETRY_MS);
+      f.advance(30 * 60_000);
       await f.push.deliver(event);
     } });
     expect(retry.code).toBe(2);
@@ -114,15 +114,21 @@ describe('Claude async Stop wake', () => {
     const event = f.event();
     await f.push.deliver(event);
     expect(f.claude).toHaveBeenCalledTimes(1);
+    let polls = 0;
     const result = await waitForClaudeWake(f.push, f.launcher.sessionId, { now: f.now, sleep: async () => {
       // An inbox attempt is never also claimed by a hook, even if unACKed.
       expect(f.push.claimWake(event)).toBe(false);
-      f.advance(PUSH_FALLBACK_MS);
+      f.advance(++polls === 1 ? PUSH_FALLBACK_MS : 20 * 60_000);
       await f.push.deliver(event);
+      if (polls === 1) {
+        expect(f.push.delivery(event.eventId)).toMatchObject({ attempts: 1, transport: 'inbox' });
+        expect(f.notify).toHaveBeenCalledTimes(1);
+      }
     } });
     expect(result.code).toBe(2);
     expect(f.claude).toHaveBeenCalledTimes(1);
     expect(f.notify).toHaveBeenCalledTimes(1);
+    expect(polls).toBe(2);
     expect(f.push.pending()).toHaveLength(1);
   });
 

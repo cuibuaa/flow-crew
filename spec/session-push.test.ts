@@ -158,12 +158,105 @@ describe('launch identity', () => {
 });
 
 describe('durable delivery and business ACK', () => {
+  it('does not resend an accepted inbox delivery at 2, 4 or 28 minutes, and reminds once at 30 minutes', async () => {
+    const { registry, task } = fixture('claude');
+    const started = Date.parse(source.timestamp);
+    let now = started;
+    const claude = vi.fn().mockResolvedValue(undefined);
+    const dependencies = { now: () => now, claude, notify: vi.fn().mockResolvedValue(undefined) };
+    let push = new SessionPush(registry, dependencies);
+    const event = push.enqueue(task, source)!;
+    await push.deliver(event);
+    for (const minute of [2, 4, 28]) {
+      now = started + minute * 60_000;
+      push = new SessionPush(registry, dependencies); // schedule survives restarts
+      await push.deliver(event);
+      expect(claude).toHaveBeenCalledTimes(1);
+    }
+    now = started + 30 * 60_000;
+    await push.deliver(event);
+    await push.deliver(event);
+    expect(claude).toHaveBeenCalledTimes(2);
+    expect(claude.mock.calls[1]).toEqual(claude.mock.calls[0]);
+    now += 28 * 60_000;
+    await push.deliver(event);
+    expect(claude).toHaveBeenCalledTimes(2);
+    expect(push.pending()).toHaveLength(1);
+  });
+
+  it('backs off failing sockets by 2, 4, 8, 16, then at most 30 minutes across restarts', async () => {
+    const { registry, task } = fixture('claude');
+    let now = Date.parse(source.timestamp);
+    const claude = vi.fn().mockRejectedValue(new Error('socket closed'));
+    const dependencies = { now: () => now, claude, notify: vi.fn().mockResolvedValue(undefined) };
+    let push = new SessionPush(registry, dependencies);
+    const event = push.enqueue(task, source)!;
+    await push.deliver(event);
+    let attempts = 1;
+    for (const minutes of [2, 4, 8, 16, 30, 30]) {
+      now += minutes * 60_000 - 1;
+      push = new SessionPush(registry, dependencies);
+      await push.deliver(event);
+      expect(claude).toHaveBeenCalledTimes(attempts);
+      now++;
+      await push.deliver(event);
+      expect(claude).toHaveBeenCalledTimes(++attempts);
+    }
+    claude.mockResolvedValue(undefined);
+    now += 30 * 60_000;
+    await push.deliver(event);
+    claude.mockRejectedValue(new Error('closed again'));
+    now += 30 * 60_000;
+    await push.deliver(event);
+    expect(push.delivery(event.eventId).nextAttemptAt).toBe(now + 2 * 60_000);
+  });
+
+  it('never resends an ACKed event, even after its deadline or a target change', async () => {
+    const { registry, task, launcher } = fixture('claude');
+    let now = Date.parse(source.timestamp);
+    const claude = vi.fn().mockResolvedValue(undefined);
+    const notify = vi.fn().mockResolvedValue(undefined);
+    const dependencies = { now: () => now, claude, notify };
+    let push = new SessionPush(registry, dependencies);
+    const event = push.enqueue(task, source)!;
+    await push.deliver(event);
+    push.acknowledge(event.eventId, launcher.sessionId);
+    push.refreshSession('claude', launcher.sessionId, join(registry.baseDir, 'new.sock'));
+    for (const minutes of [2, 30, 60, 24 * 60]) {
+      now += minutes * 60_000;
+      push = new SessionPush(registry, dependencies);
+      await push.deliver(event);
+    }
+    expect(claude).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
+    expect(push.pending()).toEqual([]);
+  });
+
+  it('migrates an accepted legacy 120-second schedule without resending it early', async () => {
+    const { root, registry, task } = fixture('claude');
+    const started = Date.parse(source.timestamp);
+    let now = started;
+    const claude = vi.fn().mockResolvedValue(undefined);
+    const push = new SessionPush(registry, { now: () => now, claude, notify: vi.fn().mockResolvedValue(undefined) });
+    const event = push.enqueue(task, source)!;
+    mkdirSync(join(root, 'session-push', 'delivery'), { recursive: true });
+    writeFileSync(join(root, 'session-push', 'delivery', `${event.eventId}.json`), JSON.stringify({
+      attempts: 4, sentAt: new Date(started).toISOString(), nextAttemptAt: started + PUSH_RETRY_MS,
+    }));
+    now += PUSH_RETRY_MS;
+    await push.deliver(event);
+    expect(claude).not.toHaveBeenCalled();
+    now = started + 30 * 60_000;
+    await push.deliver(event);
+    expect(claude).toHaveBeenCalledTimes(1);
+  });
+
   it.each(['claude', 'codex'] as const)('retries %s with the same event id, never infers ACK from transport acceptance, and stops only on explicit ACK', async frontend => {
     const { registry, task, launcher } = fixture(frontend);
     let now = Date.parse(source.timestamp);
     const queue = vi.fn().mockResolvedValue('queued receipt');
     const claude = vi.fn().mockResolvedValue(undefined);
-    const dependencies = { now: () => now, queue, claude };
+    const dependencies = { now: () => now, queue, claude, notify: vi.fn().mockResolvedValue(undefined) };
     let push = new SessionPush(registry, dependencies);
     const event = push.enqueue(task, source)!;
     expect(push.enqueue(task, source)?.eventId).toBe(event.eventId);
@@ -173,6 +266,9 @@ describe('durable delivery and business ACK', () => {
     expect(push.acknowledged(event.eventId)).toBe(false);
     now += PUSH_RETRY_MS;
     push = new SessionPush(registry, dependencies);
+    await push.deliver(event);
+    expect(frontend === 'codex' ? queue : claude).toHaveBeenCalledTimes(1);
+    now += 28 * 60_000;
     await push.deliver(event);
     const deliveries = frontend === 'codex' ? queue.mock.calls : claude.mock.calls;
     expect(deliveries).toHaveLength(2);
@@ -187,36 +283,52 @@ describe('durable delivery and business ACK', () => {
     expect(push.pending()).toEqual([]);
   });
 
-  it('keeps a closed Claude event pending, refreshes only the reopened session address and retries with no headless model', async () => {
+  it.each([true, false])('delivers a changed target immediately after transport acceptance=%s', async accepted => {
     const { registry, task } = fixture('claude');
     let now = Date.parse(source.timestamp);
-    const claude = vi.fn().mockRejectedValueOnce(new Error('ENOENT')).mockResolvedValue(undefined);
+    const claude = vi.fn().mockResolvedValue(undefined);
+    if (!accepted) claude.mockRejectedValueOnce(new Error('ENOENT'));
     let push = new SessionPush(registry, { now: () => now, claude });
     const event = push.enqueue(task, source)!;
     await push.deliver(event);
+    now += 1;
     push = new SessionPush(registry, { now: () => now, claude });
-    push.refreshSession('claude', 'other', '/other/inbox');
-    push.refreshSession('claude', task.launcher!.sessionId, '/reopened/inbox');
-    push.refreshSession('claude', task.launcher!.sessionId); // Stop may have no new address.
-    now += PUSH_RETRY_MS;
+    push.refreshSession('claude', 'other', join(registry.baseDir, 'other.sock'));
     await push.deliver(event);
-    expect(claude.mock.calls[1][0]).toBe('/reopened/inbox');
+    expect(claude).toHaveBeenCalledTimes(1);
+    const reopened = join(registry.baseDir, 'reopened.sock');
+    push.refreshSession('claude', task.launcher!.sessionId, reopened);
+    push.refreshSession('claude', task.launcher!.sessionId); // Stop may have no new address.
+    await push.deliver(event);
+    expect(claude).toHaveBeenCalledTimes(2);
+    expect(claude.mock.calls[1][0]).toBe(reopened);
     expect(claude.mock.calls[1][1]).toBe(event.eventId);
     expect(push.pending()).toHaveLength(1);
   });
 
-  it('falls back within a bounded time, keeps the event unacknowledged and retries a failing notifier', async () => {
+  it.each([true, false])('keeps the 10-minute fallback and 2-minute notifier retry after transport acceptance=%s', async accepted => {
     const { registry, task } = fixture('claude');
     let now = Date.parse(source.timestamp);
     const notify = vi.fn().mockRejectedValueOnce(new Error('notifier unavailable')).mockResolvedValue(undefined);
-    const push = new SessionPush(registry, { now: () => now, claude: vi.fn().mockRejectedValue(new Error('closed')), notify });
+    const claude = accepted ? vi.fn().mockResolvedValue(undefined) : vi.fn().mockRejectedValue(new Error('closed'));
+    const push = new SessionPush(registry, { now: () => now, claude, notify });
     const event = push.enqueue(task, source)!;
     await push.deliver(event);
     expect(notify).not.toHaveBeenCalled();
-    now += PUSH_FALLBACK_MS;
+    // At +6 minutes failed transport is backed off until +14 minutes.
+    for (const minute of [2, 6]) {
+      now = Date.parse(source.timestamp) + minute * 60_000;
+      await push.deliver(event);
+    }
+    const attempts = claude.mock.calls.length;
+    now = Date.parse(source.timestamp) + PUSH_FALLBACK_MS;
     await push.deliver(event);
-    expect(push.delivery(event.eventId)).toMatchObject({ error: 'closed', fallbackError: 'notifier unavailable' });
-    now += PUSH_RETRY_MS;
+    expect(push.delivery(event.eventId)).toMatchObject({ fallbackError: 'notifier unavailable' });
+    expect(claude).toHaveBeenCalledTimes(attempts);
+    now += PUSH_RETRY_MS - 1;
+    await push.deliver(event);
+    expect(notify).toHaveBeenCalledTimes(1);
+    now++;
     await push.deliver(event);
     now += PUSH_RETRY_MS;
     await push.deliver(event);

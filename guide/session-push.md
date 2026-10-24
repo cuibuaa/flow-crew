@@ -47,11 +47,13 @@ Codex delivery uses `codex queue`. Delivery
 does not require installed hooks. Stop/SessionStart hooks add the turn gate and
 refresh Claude's address after a reopen; they never launch an audit worker.
 A closed session waits for reopening. Claude retries a missing socket; Codex's
-queue persists its input until the session resumes. Both retry unacknowledged
-events every two minutes. After ten minutes without business ACK, the engine also
+queue persists its input until the session resumes. Once a transport accepts an
+event, unacknowledged reminders wait thirty minutes. Failed sends back off by two,
+four, eight, sixteen, then thirty minutes; a changed target is tried immediately.
+After ten minutes without business ACK, the engine also
 calls the existing `notify --source flowcrew --dedup-key <event-id>` notifier.
 Configure its FlowCrew route to the operator's notification channel. A missing or
-failing notifier remains retryable; it never closes the event.
+failing notifier retries every two minutes; it never closes the event.
 
 Claude's hook wake works in every permission mode without changing inbound policy.
 Each retry records exactly one transport before delivery. A live waiter emits the
@@ -59,7 +61,7 @@ fixed wrap-up prompt and exits 2; an immutable event/attempt claim prevents dupl
 hook wakes across concurrent Stops. That attempt does not also send an inbox frame.
 ACK is shared by both paths. Without a live waiter, inbox delivery still obeys the
 user's inbound policy, which can hold/refuse messages; pending events retain retries
-and notifier fallback. A successful socket write does not prove acceptance.
+and notifier fallback. A successful socket write still requires an explicit business ACK.
 
 SessionStart re-arms the same waiter when a session reopens; Stop arms it after
 launch and subsequent turns. The waiter polls every second and lives for one hour. Later Stops reuse its coverage
