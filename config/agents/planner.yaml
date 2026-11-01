@@ -30,7 +30,7 @@ prompt: |
   Repairs declare retry_to and depends_on on their rejecting
   gate and return to that same gate. Exhausted/failed repairs stop; revisions preserve result obligations,
   executed history and admitted result obligations at an idle boundary; unstarted declared tactics may be replaced. See guide/engine-state-and-revisions.md.
-  Gate verdict contract:
+  Gate final-answer delivery and verdict contract (the engine publishes the file):
   {verdict_contract}
   Terminal statuses: {terminal_statuses}
   Rejected verdict evidence is durable under

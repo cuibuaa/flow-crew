@@ -650,7 +650,7 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
   appendFileSync(filePath, JSON.stringify(event) + '\n', 'utf-8');
 }
 
-/** The verdict-file contract a gate stage must write to verdict_<stage_id>.json. */
+/** Gate verdict fields returned in the final structured answer and published by the engine. */
 export interface GateVerdict {
   pass: boolean;
   reason?: string;
@@ -658,7 +658,8 @@ export interface GateVerdict {
   /** Engine-only refusal classification; authored fields never populate it. */
   refusal?: { kind: 'repairability' | 'validation_regression' | 'validation_unresolved' | 'declared_output' | 'audit_findings' | 'research_outcome_absent' | 'research_outcome_invalid' | 'contradiction' | 'criterion_evidence' | 'numeric_evidence' | 'score_contract' | 'missing_verdict' };
 }
-export const VERDICT_CONTRACT_DOC = '{"pass": true|false, "reason": "<why>"}  (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>). '
+export const VERDICT_CONTRACT_DOC = 'A gate returns its verdict as the final structured JSON answer matching its active result schema; the engine validates it and publishes verdict_<stage_id>.json. Stage templates must not instruct stages to write verdict files or other engine-owned files. '
+  + 'Verdict fields: {"pass": true|false, "reason": "<why>"} (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>). '
   + 'A rejection may also declare "repairability": {"version":1,"disposition":"repairable"|"irreparable","evidence":"<reproducible evidence>"}. '
   + 'Use irreparable only when no repair or re-plan can undo the observed failure; it ends the run escalated and preserves the rejection. '
   + 'Omitting repairability preserves the legacy repair route. Never declare repairability with pass=true; unknown versions, dispositions, extra fields or empty evidence are refused. Keep failed criteria and their evidence in the verdict.';

@@ -16,7 +16,7 @@ export class EngineStateError extends Error {}
 
 type Entry = { identity: string; stat: string; length?: number; hash?: Hash; backing?: string; link?: string; mode?: number };
 type Snapshot = Map<string, Entry>;
-interface Guard { scan: (read?: typeof entry) => Snapshot; retain: (path: string, previous?: Entry, destination?: string) => Entry | undefined; owns: (path: string) => boolean; expected: Snapshot; error?: EngineStateError }
+interface Guard { scan: (read?: typeof entry) => Snapshot; retain: (path: string, previous?: Entry, destination?: string) => Entry | undefined; owns: (path: string) => boolean; expected: Snapshot; publications: Set<string>; publicationWrites: Set<string>; error?: EngineStateError }
 const guards = new Set<Guard>();
 const activeOutputs = new Set<string>();
 const inside = (root: string, path: string): boolean => {
@@ -75,7 +75,10 @@ function changed(guard: Guard, actual: Snapshot): string[] {
     .filter(path => !same(guard.expected.get(path), actual.get(path)));
 }
 function notice(guard: Guard, paths: string[]): void {
-  if (paths.length) guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; changed engine carrier ${paths[0]}`);
+  for (const path of paths) {
+    if (guard.publications.has(path)) guard.publicationWrites.add(path);
+    else guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; changed engine carrier ${path}`);
+  }
 }
 
 /** Only synchronous parent publications advance the expected record. A child
@@ -168,7 +171,10 @@ export interface EngineExecution {
   stageId: string;
   dynamicDispatch?: boolean;
   artifactContract?: ArtifactContract;
-  structuredResult?: boolean;
+  /** Exact run-relative carriers the worker can publish from this attempt's structured answer. */
+  publicationCarriers?: readonly string[];
+  /** Receives run-relative names after recovery; the worker must confirm publication eligibility. */
+  onPublicationWrite?: (paths: string[]) => void;
 }
 
 /** Storage topology plus an in-memory digest ledger; no child path grants,
@@ -188,8 +194,9 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
   if (engineOwnedDatabasePaths(store).some(file => inside(project, prospectivePhysicalPath(file)))) {
     throw new EngineStateError('ENGINE_STATE_REFUSED: engine database must be outside authored work');
   }
+  const publications = new Set((input.publicationCarriers ?? []).map(path => resolve(run!, path)));
   const outputs = (input.artifactContract?.produces ?? []).filter(a => a.root === 'run'
-    && !(input.structuredResult && (a.path === `verdict_${input.stageId}.json` || a.path === `handoff_${input.stageId}.md`)));
+    && !publications.has(resolve(run!, a.path)));
   if (run) {
     for (const artifact of outputs) {
       if (/^handoff_[^/]+\.md(?:\/|$)/.test(artifact.path) || producesEngineOwnedArtifact(artifact, { id: input.stageId, dynamic_dispatch: input.dynamicDispatch, depends_on: [] }, run, project)) {
@@ -323,11 +330,16 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
       for (const path of exclusions) activeOutputs.delete(path);
       throw new EngineStateError(`ENGINE_STATE_REFUSED: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
-    const guard: Guard = { scan, retain, owns, expected };
+    const guard: Guard = { scan, retain, owns, expected, publications, publicationWrites: new Set() };
     guards.add(guard);
     let result: T | undefined, failure: unknown;
     try { result = await action(); } catch (error) { failure = error; } finally {
-      try { notice(guard, changed(guard, scan())); } catch (error) { guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; ${String(error)}`); }
+      try {
+        const actual = scan();
+        notice(guard, changed(guard, actual));
+        // Record even a same-content rewrite of an existing publication.
+        notice(guard, [...publications].filter(path => !sameStat(expected.get(path), actual.get(path))));
+      } catch (error) { guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; ${String(error)}`); }
       guards.delete(guard);
       for (const path of exclusions) activeOutputs.delete(path);
       for (const other of guards) {
@@ -340,7 +352,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
         }
       }
     }
-    if (guard.error) {
+    if (guard.error || guard.publicationWrites.size) {
       // Rebuild parent directories first; restore the projection last so all
       // acknowledged histories exist before it becomes readable again.
       const records = [...guard.expected].filter(([path]) => run && inside(run, path));
@@ -398,7 +410,12 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
           }
         } catch { /* the surviving guard will fail closed */ }
       }
-      throw guard.error;
+      if (guard.error) throw guard.error;
+      // Recovery used to run only for already-voided attempts. A warning may
+      // succeed only when every protected carrier is back to its trusted bytes.
+      const remaining = changed(guard, scan());
+      if (remaining.length) throw new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; unrestored engine carrier ${remaining[0]}`);
+      input.onPublicationWrite?.([...guard.publicationWrites].map(path => relative(run!, path)));
     }
     if (failure !== undefined) throw failure;
     return result as T;

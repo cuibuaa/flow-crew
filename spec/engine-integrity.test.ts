@@ -52,7 +52,7 @@ beforeEach(() => {
   run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runDirPath;
 });
 afterEach(() => { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); });
-const input = () => ({ projectDir: project, runDir: run, stageId: 'work', artifactContract: contract, structuredResult: true });
+const input = () => ({ projectDir: project, runDir: run, stageId: 'work', artifactContract: contract });
 const write = (path: string, bytes = 'engine record') => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, bytes); };
 const command = (code: string) => execWithStdin(process.execPath, ['-e', code], '', { cwd: project, timeout_ms: 5000 });
 const voided = (action: () => Promise<unknown>) => expect(withEngineIntegrity(input(), action)).rejects.toThrow('ENGINE_STATE_TAMPERED');
@@ -626,7 +626,7 @@ describe('structural engine state protection', () => {
 
   it.each(['handoff_work.md', 'handoff_previous.md'])('refuses a non-structured handoff output through the guard: %s', async path => {
     let called = false;
-    await expect(withEngineIntegrity({ ...input(), structuredResult: false,
+    await expect(withEngineIntegrity({ ...input(),
       artifactContract: { ...contract, produces: [{ id: 'out', root: 'run', path, kind: 'file' }] },
     }, async () => { called = true; })).rejects.toThrow('ENGINE_STATE_REFUSED');
     expect(called).toBe(false);

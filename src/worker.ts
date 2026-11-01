@@ -483,6 +483,15 @@ export async function runStage(
   }
 
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
+  // One list owns both integrity recovery and final-answer publication. A
+  // wrap-up may suppress the verdict when the validated work is unfinished.
+  const publicationCarriers = (record?: Record<string, unknown>): string[] => {
+    if (!opts.outputSchema) return [];
+    const carriers = opts.isGate && (!record || !wrapUpRequestedAt || finishedStageRecord(record)) ? [`verdict_${opts.stageId}.json`] : [];
+    const handoff = `handoff_${opts.stageId}.md`;
+    if (opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === handoff)) carriers.push(handoff);
+    return carriers;
+  };
   if (opts.outputSchema) {
     const judgement = opts.isGate
       ? 'Judge assigned criteria in the context of the full brief, including permitted outcomes and stopping conditions. Stage instructions and extracted criteria cannot narrow or replace the outcomes the brief permits. Pass when an allowed outcome has all required evidence, including a permitted negative or blocked report. Reject missing required attempts, measurements or artifacts. '
@@ -959,14 +968,29 @@ export async function runStage(
         }
       };
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
+      let adapterResult: RunResult | undefined;
       withEngineIntegrity({ projectDir: opts.projectDir, runDir: opts.runDir,
-        stageId: opts.stageId, dynamicDispatch: opts.dynamicDispatch, structuredResult: Boolean(opts.outputSchema), artifactContract: opts.artifactContract! },
-      () => {
+        stageId: opts.stageId, dynamicDispatch: opts.dynamicDispatch, artifactContract: opts.artifactContract!,
+        publicationCarriers: publicationCarriers(),
+        onPublicationWrite: paths => {
+          let eligible: string[] = [];
+          if (adapterResult?.exitCode === 0 && !aggregateAbortSignal.aborted) {
+            try { eligible = publicationCarriers(stageRecord(adapterResult.output)); } catch { /* no valid final answer */ }
+          }
+          if (paths.some(path => !eligible.includes(path))) {
+            throw new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; changed engine carrier without a publishable final answer ${join(opts.runDir, paths[0])}`);
+          }
+          recordRunEvent(opts.projectDir, opts.runId, { type: 'execution_notice', level: 'warning',
+            runId: opts.runId, timestamp: new Date().toISOString(), stageId: opts.stageId,
+            attemptIndex, attemptStartedAt, invocationIndex, source: 'worker', files: paths.map(path => join(opts.runDir, path)),
+            detail: 'Stage wrote engine-published carrier(s); restored engine state before publishing the final answer.' });
+        } },
+      async () => {
         if (!selectedAdapter.capturesInvocationInput) {
           captureInput({ systemPrompt: invocationRole.prompt, userPrompt: effectiveInvocationPrompt,
             resumeSessionId: continuation?.sessionId }, 'adapter');
         }
-        return selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
+        adapterResult = await selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
           timeout_ms: Math.max(1, Math.floor(attemptDeadline.remainingMs())),
           workDir: opts.projectDir,
           runDir: opts.runDir,
@@ -983,6 +1007,7 @@ export async function runStage(
           onInvocationInput: (input) => captureInput(input, 'model'),
           outputSchema: opts.outputSchema,
         });
+        return adapterResult;
       }).then(
         (value) => {
           if (isSessionUuid(value.sessionId)) {
@@ -1235,10 +1260,7 @@ export async function runStage(
       blockedStageResult = record.status === 'blocked';
       stageWorkFinished = finishedStageRecord(record);
       if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
-      const carriers = opts.isGate && (!wrapUpRequestedAt || stageWorkFinished) ? [`verdict_${opts.stageId}.json`] : [];
-      const handoff = `handoff_${opts.stageId}.md`;
-      if (opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === handoff)) carriers.push(handoff);
-      for (const carrier of carriers) {
+      for (const carrier of publicationCarriers(record)) {
         atomicWrite(join(opts.runDir, carrier), `${JSON.stringify(record)}\n`);
         enginePublishedCarriers.push(`run:${carrier}`);
       }
