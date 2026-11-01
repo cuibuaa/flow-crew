@@ -45,7 +45,7 @@ function verdict(pass = true) {
   };
 }
 
-async function launch(options: { pass?: boolean; noAnswer?: boolean; otherCarrier?: boolean; writeOwn?: boolean } = {}) {
+async function launch(options: { pass?: boolean; noAnswer?: boolean; correctAnswer?: boolean; otherCarrier?: boolean; writeOwn?: boolean } = {}) {
   // The planner really authors and dispatches the conflicting template. The
   // adapter writes with node:fs, without an engine publication acknowledgement.
   const plan = { stages: [
@@ -80,7 +80,8 @@ async function launch(options: { pass?: boolean; noAnswer?: boolean; otherCarrie
       prompts.push(prompt);
       if (options.writeOwn !== false) writeFileSync(join(opts.runDir, carrier), '{"pass":true,"reason":"stage-authored counterfeit"}');
       if (options.otherCarrier) writeFileSync(join(opts.runDir, 'verdict_dependent.json'), '{"pass":true}');
-      return { output: options.noAnswer ? 'Review completed, but no structured final answer.' : JSON.stringify(answer, null, 2),
+      return { output: options.noAnswer || options.correctAnswer && prompts.length === 1
+        ? 'Review completed, but no structured final answer.' : JSON.stringify(answer, null, 2),
         exitCode: 0, duration_ms: 1, writes: [
           ...(options.writeOwn !== false ? [`run:${carrier}`] : []),
           ...(options.otherCarrier ? ['run:verdict_dependent.json'] : []),
@@ -136,13 +137,35 @@ it('uses a rejecting final answer instead of a forged passing file, keeping down
 });
 
 it('discards a stage-written verdict when the gate provides no valid final answer', async () => {
+  const control = await launch({ noAnswer: true, writeOwn: false });
   const result = await launch({ noAnswer: true });
-  expect(result.state.status).toBe('failed');
-  expect(result.stage).toMatchObject({ status: 'failed', exitCode: 125 });
-  expect(result.stage.error).toContain('ENGINE_STATE_TAMPERED');
+  expect(result.state.status).toBe(control.state.status);
+  expect(result.stage).toMatchObject({ status: control.stage.status, exitCode: control.stage.exitCode, error: control.stage.error });
+  expect(result.stage.exitCode).toBe(1);
+  expect(result.stage.error).toContain('Stage record refused');
+  expect(result.calls).toEqual(control.calls);
+  expect(result.prompts).toHaveLength(2);
+  expect(result.prompts[1]).toContain('# Stage result correction');
+  expect(result.events).toContainEqual(expect.objectContaining({ type: 'execution_notice', level: 'warning', stageId,
+    files: [join(result.directory, carrier)] }));
+  expect(result.events.some(event => event.detail?.includes('ENGINE_STATE_TAMPERED'))).toBe(false);
   expect(existsSync(join(result.directory, carrier))).toBe(false);
   expect(evaluateCondition(`${stageId}.pass == true`, project, result.state.runId)).toBe(false);
   expect(result.calls).not.toContain('dependent');
+});
+
+it('corrects an invalid first answer in the same attempt after restoring its own verdict write', async () => {
+  const result = await launch({ correctAnswer: true });
+  expect(result.state.status, result.state.failureReason).toBe('complete');
+  expect(result.stage).toMatchObject({ status: 'complete', exitCode: 0 });
+  expect(result.stage.attempts).toHaveLength(1);
+  expect(result.prompts).toHaveLength(2);
+  expect(result.prompts[1]).toContain('# Stage result correction');
+  expect(result.calls).toContain('dependent');
+  expect(readFileSync(join(result.directory, carrier), 'utf8')).toBe(`${JSON.stringify(result.answer)}\n`);
+  expect(result.events).toContainEqual(expect.objectContaining({ type: 'execution_notice', level: 'warning', stageId,
+    files: [join(result.directory, carrier)] }));
+  expect(result.events.some(event => event.detail?.includes('ENGINE_STATE_TAMPERED'))).toBe(false);
 });
 
 it('still voids an attempt that also writes another stage verdict', async () => {
@@ -155,7 +178,7 @@ it('still voids an attempt that also writes another stage verdict', async () => 
   expect(result.calls).not.toContain('dependent');
 });
 
-it('still voids a write to its own verdict when no final-answer carrier publication is configured', async () => {
+it('does not exempt a carrier absent from the worker publication list', async () => {
   const directory = join(root, 'run');
   mkdirSync(directory);
   await expect(withEngineIntegrity({ projectDir: project, runDir: directory, stageId,

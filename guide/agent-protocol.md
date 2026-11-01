@@ -105,8 +105,9 @@ optional kind/when and `source`:
 
 IDs are unique within the stage. Produced locations are unique. Planner scope is an estimate; declared outputs remain completion obligations;
 run outputs cannot overwrite control records or captured engine evidence. Concurrent run
-outputs sharing a location require dependency ordering. A gate publishes its unconditional
-`run:verdict_<id>.json`. A declared directory is a capability, not a recursive freshness proof.
+outputs sharing a location require dependency ordering. The engine publishes a gate's unconditional
+`run:verdict_<id>.json` from the gate's final validated structured answer; stage templates must not
+instruct gates to write that file. A declared directory is a capability, not a recursive freshness proof.
 Stage reads may name members of a producer directory in the same root. Dependency and
 condition admission order execution; settlement and runtime checks use actual producer
 and activation facts to verify required outputs and configured reality reads.

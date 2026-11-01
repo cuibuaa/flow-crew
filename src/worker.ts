@@ -968,29 +968,21 @@ export async function runStage(
         }
       };
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
-      let adapterResult: RunResult | undefined;
       withEngineIntegrity({ projectDir: opts.projectDir, runDir: opts.runDir,
         stageId: opts.stageId, dynamicDispatch: opts.dynamicDispatch, artifactContract: opts.artifactContract!,
         publicationCarriers: publicationCarriers(),
         onPublicationWrite: paths => {
-          let eligible: string[] = [];
-          if (adapterResult?.exitCode === 0 && !aggregateAbortSignal.aborted) {
-            try { eligible = publicationCarriers(stageRecord(adapterResult.output)); } catch { /* no valid final answer */ }
-          }
-          if (paths.some(path => !eligible.includes(path))) {
-            throw new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; changed engine carrier without a publishable final answer ${join(opts.runDir, paths[0])}`);
-          }
           recordRunEvent(opts.projectDir, opts.runId, { type: 'execution_notice', level: 'warning',
             runId: opts.runId, timestamp: new Date().toISOString(), stageId: opts.stageId,
             attemptIndex, attemptStartedAt, invocationIndex, source: 'worker', files: paths.map(path => join(opts.runDir, path)),
-            detail: 'Stage wrote engine-published carrier(s); restored engine state before publishing the final answer.' });
+            detail: 'Stage wrote engine-published carrier(s); restored trusted engine state. Publication uses the final validated answer.' });
         } },
-      async () => {
+      () => {
         if (!selectedAdapter.capturesInvocationInput) {
           captureInput({ systemPrompt: invocationRole.prompt, userPrompt: effectiveInvocationPrompt,
             resumeSessionId: continuation?.sessionId }, 'adapter');
         }
-        adapterResult = await selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
+        return selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
           timeout_ms: Math.max(1, Math.floor(attemptDeadline.remainingMs())),
           workDir: opts.projectDir,
           runDir: opts.runDir,
@@ -1007,7 +999,6 @@ export async function runStage(
           onInvocationInput: (input) => captureInput(input, 'model'),
           outputSchema: opts.outputSchema,
         });
-        return adapterResult;
       }).then(
         (value) => {
           if (isSessionUuid(value.sessionId)) {

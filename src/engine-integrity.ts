@@ -173,7 +173,7 @@ export interface EngineExecution {
   artifactContract?: ArtifactContract;
   /** Exact run-relative carriers the worker can publish from this attempt's structured answer. */
   publicationCarriers?: readonly string[];
-  /** Receives run-relative names after recovery; the worker must confirm publication eligibility. */
+  /** Receives run-relative names only after trusted carriers have been restored and verified. */
   onPublicationWrite?: (paths: string[]) => void;
 }
 
