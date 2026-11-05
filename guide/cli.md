@@ -9,7 +9,7 @@ synopses are syntax references, not recipes to run without selecting real identi
 
 ## Dispatch and help
 
-The current dispatcher has 27 named command routes, including the early `fc_tasks`,
+The current dispatcher has 28 named command routes, including the early `fc_tasks`,
 `plan-check` and `state` paths. Bare invocation, `--help`, `-h` print top-level help;
 `version`, `--version`, `-v` print package version. Unknown commands exit 1. Command help is generated from the same option tables as the parser; `--help` and `-h` return before any engine operation.
 
@@ -17,7 +17,8 @@ The current dispatcher has 27 named command routes, including the early `fc_task
 |---|---|
 | `init`, `adapter`, `doctor` | Is local configuration/runtime ready? |
 | `ship-preflight`, `rehearse`, `plan-check`, `ship-setup` | What can be established before launch? |
-| `quick` | Run or register a saved brief |
+| `brief` | Compose a brief for review without launching |
+| `quick` | Compose if needed, then run or register a brief |
 | `status`, `list`, `state`, `events`, `watch` | What happened or is happening? |
 | `guide`, `interrupt` | Request guidance or stop an active stage command |
 | `daemon`, `task`, `dashboard`, `start` | Operate the orchestrator or dashboard |
@@ -34,6 +35,8 @@ Standing approval rules are retired. Historic usage records remain readable.
 Commands share [one exit-code table](../src/exit-code.ts): 0 means completed, 1 means
 known refusal or failure (including invalid usage), and 2 means the outcome is unknown
 and the request may have taken effect. Inspect recorded state before retrying after 2.
+`brief` and `quick` additionally return 3 when the brief writer has blocking questions;
+no task or run starts, and the printed questions need answers.
 The status probes `daemon status` and `dashboard status` use a separate contract:
 0 fresh, 1 unavailable or invalid usage, 2 stale, nonresponsive or unverified.
 The `session-push hook` and `wake` frontend contract retains blocking errors as 2.
@@ -60,11 +63,49 @@ Sources: [core diagnostics](../src/cli.ts), [maintenance](../src/cli-doctor.ts),
 [preflight parser](../src/cli-ship-preflight.ts), [rehearse parser](../src/rehearse.ts),
 [plan parser](../src/plan-interface.ts), [setup parser](../src/cli-ship-setup.ts).
 
+## Write a brief before running
+
+`brief "<task text>" --project <repository> [--adapter <name>]` uses the same authorship
+code as `quick`, prints only the exact composed brief on stdout, and prints its SHA-256
+digest and evidence location on stderr. `--task <text>` and stdin `-` preserve alternate
+transports. It never registers or launches a run. Example, from the selected target:
+
+```bash
+flowcrew brief "Add a greeting command" --project . > task-brief.md
+flowcrew rehearse task-brief.md --project . --static-only
+```
+
+Review the saved bytes, perform the existing `ship-setup` for that exact brief and target,
+then use `flowcrew quick - --project <target> < task-brief.md`. The original raw command
+also reuses its saved reply in the same `FC_HOME` and canonical repository. Quick has no
+confirmation prompt; it records the composed brief and proceeds through normal admission.
+A missing/refused exact setup record still refuses launch. This step does not create a
+worktree, select a workflow, declare research settings, or replace setup.
+
+Authorship returns exactly `criteria`, `constraints`, `inputs`, `assumptions`, and
+`blocking_questions`, all string arrays, with at least one criterion. Code checks schema,
+input-path existence, `inspectBrief`, and static rehearsal. Correction calls receive the
+validation reasons. Questions stop immediately with exit 3; exhausted invalid output exits 1.
+`ship-preflight`, `ship-setup`, and `rehearse` continue to check authored briefs and report
+missing criteria themselves.
+
+Before a task is registered, durable evidence lives under `FC_HOME/brief-writing/`:
+original bytes, each invocation, complete adapter reply and usage, and per-attempt
+validation/composition. A stopped incomplete invocation is retried on the next identical
+command; completed replies are revalidated without another call. Three completed invalid
+replies exhaust that input; revise the task to correct it. On launch the evidence records
+are copied into the run's `brief-writing/` directory before dispatch. Native credential
+homes are excluded. Repository changes do not silently regenerate a reviewed brief;
+change the task text to request a new composition. Reported usage covers this separate
+pre-admission step; workflow token totals retain their existing meaning.
+
 ## Launch
 
 `quick <brief-path|task-text|->` accepts a path, joined positional text, `--task <text>` or
-stdin `-`. Saved briefs need extractable criteria; warning acknowledgment cannot admit a
-brief with no criteria. Other preflight findings are advisory and printed before project/run mutation.
+stdin `-`. When `extractBriefCriteria` finds no criteria, the read-only `brief_writer`
+authors structured fields in one model call (at most two correction retries). Code appends
+sections to the unchanged original bytes. Existing criteria skip authorship entirely.
+Other preflight findings are advisory and printed before project/run mutation.
 Quick writes the submitted brief to `docs/task_brief.md`
 in the selected project and warns before replacing different content.
 

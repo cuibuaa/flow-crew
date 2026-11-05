@@ -29,6 +29,20 @@ which checkout that link selects with `which flowcrew` before using it. `npm unl
 link; it does not remove copied skills. Neither operation is necessary for the local commands
 above.
 
+## Start from a task
+
+With an installed adapter, `flowcrew brief "Add a greeting command" --project . > task-brief.md`
+reads the repository and writes a brief for you to review. The digest goes to stderr;
+stdout preserves the original request followed by generated criteria, limits, inputs and
+assumptions. A blocking question exits 3 and starts no run. This command uses a model;
+rehearsal below does not.
+
+After review, use the normal rehearsal and `ship-setup` procedure for the exact saved
+brief and selected target, then `flowcrew quick - --project <target> < task-brief.md`.
+You can also give raw text to `quick`: it shares the same authorship step and proceeds
+without a confirmation prompt. Exact setup admission still applies. Briefs that already
+have criteria cost no extra model call. See [brief authoring](cli.md#write-a-brief-before-running).
+
 ## First safe result
 
 Use the exact recipe in [examples](../examples/README.md#rehearse-a-research-contract).

@@ -823,8 +823,8 @@ async function cmdStart() {
   await startDashboard(projectDir, port);
 }
 
-async function cmdQuick() {
-  const parsed = parseCommandArgs('quick', args);
+async function cmdQuick(preview = false) {
+  const parsed = parseCommandArgs(preview ? 'brief' : 'quick', args);
   const value = (name: string) => parsed.values.get(`--${name}`);
   const has = (name: string) => parsed.flags.has(`--${name}`);
   const projectDir = value('project') ? resolve(value('project')!) : detectProjectDir();
@@ -902,6 +902,25 @@ async function cmdQuick() {
     console.error('  -                       Read task from stdin');
     console.error('  --existing-run-id <id>  Resume an existing run (reads task from <run_dir>/task_brief.md)');
     process.exit(EXIT_CODE.failed);
+  }
+
+  const { writeTaskBrief } = await import('./brief-writer.js');
+  const written = await writeTaskBrief(task, {
+    projectDir, adapter: adapter || loadEngineDefaults().adapter,
+  });
+  if (written.evidenceDir) console.error(`Brief writing evidence: ${written.evidenceDir}`);
+  if (written.outcome !== 'ready') {
+    console.error(written.outcome === 'blocking_questions'
+      ? `Brief needs answers:\n${written.questions.map(q => `- ${q}`).join('\n')}`
+      : `Brief writing stopped after at most two retries:\n${written.reasons.join('\n')}`);
+    process.exitCode = written.outcome === 'blocking_questions' ? EXIT_CODE.briefQuestions : EXIT_CODE.failed;
+    return;
+  }
+  task = written.brief;
+  if (preview) {
+    process.stdout.write(task);
+    console.error(`Brief digest: ${written.digest}`);
+    return;
   }
 
   const {
@@ -1699,6 +1718,9 @@ switch (command) {
     break;
   case 'adapter':
     cmdAdapter();
+    break;
+  case 'brief':
+    await cmdQuick(true);
     break;
   case 'quick':
     await cmdQuick();

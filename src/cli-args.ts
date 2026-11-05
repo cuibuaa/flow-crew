@@ -34,6 +34,7 @@ export const CLI_COMMANDS: Record<string, Command> = {
   rehearse: command({ ...flags('static-only keep'), ...values('project target') }, '<brief>', 1),
   'plan-check': command(values('brief run project'), '<dispatch-file>', 1),
   'ship-setup': command({ ...flags('json'), ...values('project'), ...Object.fromEntries(['brief', 'target', 'base', 'branch'].map(name => [name, { required: true }])) }),
+  brief: command(values('project adapter task'), '<task-text|->'),
   quick: command({
     ...values('project adapter workflow campaign task existing-run-id session brief-input-base64 brief-admission-record'),
     ...flags('no-campaign no-inherit-campaign background'),

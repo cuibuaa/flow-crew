@@ -3,6 +3,8 @@ export const EXIT_CODE = {
   completed: 0,
   failed: 1,
   outcomeUnknown: 2,
+  /** Brief writer needs answers; no task or run was launched. */
+  briefQuestions: 3,
 } as const;
 
 // Status probes (daemon/dashboard status): 0 fresh, 1 unavailable/invalid usage,

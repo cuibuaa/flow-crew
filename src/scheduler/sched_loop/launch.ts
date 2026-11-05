@@ -1,3 +1,4 @@
+import { attachBriefWritingEvidence } from '../../brief-writer.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Validate declared launch inputs and claim one run/project owner; preserves cancellation and park/resume transactions before execution.
 import { writeBriefCriteriaArtifact } from '../../brief-criteria.js';
@@ -229,6 +230,7 @@ export function prepareWorkflowLaunch(
       ? readFileSync(briefPath, 'utf-8')
       : (taskDescription ?? '');
     if (exactBrief) {
+      attachBriefWritingEvidence(projectDir, exactBrief, runDirPath);
       writeBriefCriteriaArtifact(runDirPath, exactBrief);
       if (!existsSync(join(runDirPath, RUN_VALIDATION_BASELINE_FILE))) {
         snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
