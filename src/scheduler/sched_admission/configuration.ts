@@ -30,11 +30,12 @@ const AgentConfigSchema = z.object({
   handoff_visibility: z.enum(['full', 'minimal', 'none']).optional(),
 });
 
-export function parseAgent(raw: unknown): AgentConfig {
+/** Pre-admission roles resolve configuration without an execution-stage contract. */
+export function parseAgent(raw: unknown, stageContract = true): AgentConfig {
   const agent = AgentConfigSchema.parse(raw);
   if (agent.model === 'default') agent.model = loadDefaults().model;
   if (agent.reasoning_effort === 'default') agent.reasoning_effort = loadDefaults().reasoning_effort;
-  return applySharedRoleContract(agent);
+  return stageContract ? applySharedRoleContract(agent) : agent;
 }
 
 const StageFields = z.object({

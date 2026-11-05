@@ -40,8 +40,12 @@ rehearsal below does not.
 After review, use the normal rehearsal and `ship-setup` procedure for the exact saved
 brief and selected target, then `flowcrew quick - --project <target> < task-brief.md`.
 You can also give raw text to `quick`: it shares the same authorship step and proceeds
-without a confirmation prompt. Exact setup admission still applies. Briefs that already
-have criteria cost no extra model call. See [brief authoring](cli.md#write-a-brief-before-running).
+without a confirmation prompt. From a clean Git repository, it automatically prepares
+an isolated target through the same `ship-setup` implementation, then launches there.
+The default target is `<source>-wt/brief-<digest-prefix>` beside the source, the branch
+is `brief-<digest-prefix>`, and the base is `HEAD`. Setup refusals still stop launch.
+Briefs that already have criteria cost no extra model call and still require their
+existing exact setup record. See [brief authoring](cli.md#write-a-brief-before-running).
 
 ## First safe result
 

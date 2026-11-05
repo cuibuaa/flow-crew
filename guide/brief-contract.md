@@ -25,8 +25,11 @@ Any blocking question stops launch with exit 3, without guessing or retrying it 
 Generated input references are checked for existence and recorded as prose. Because the
 original bytes stay first, generated sections do not add leading frontmatter or grant
 input-freezing/output-reuse authority. Author such declarations explicitly when needed.
-The model supplies no workflow field. Existing workflow choice, gates, and exact setup
-requirements still apply; research loops still require their authored research block.
+The model supplies no workflow field. When `quick` generates a brief and the supplied
+project has no exact setup record, it requires a clean Git source and prepares a sibling
+worktree from `HEAD` through `ship-setup`, retaining all its admission checks. Target
+and branch names use the composed digest, never model prose. An authored brief keeps
+its existing exact-record requirement. Existing workflow choice and gates still apply; research loops still require their authored research block.
 Static rehearsal and preflight validate generated content, with reasons returned for up
 to two correction retries. Authored briefs passed to inspection/setup/rehearsal keep their
 existing missing-contract diagnostics.

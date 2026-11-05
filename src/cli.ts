@@ -99,7 +99,7 @@ const {
   lstatSync,
   statSync,
 } = fsModule;
-const { join, relative, resolve } = pathModule;
+const { basename, dirname, join, relative, resolve } = pathModule;
 const { execFileSync, execSync } = childProcessModule;
 const { parse: parseYaml, parseDocument } = yamlModule;
 const { projectRunStageHistory } = runStateViewModule;
@@ -827,7 +827,7 @@ async function cmdQuick(preview = false) {
   const parsed = parseCommandArgs(preview ? 'brief' : 'quick', args);
   const value = (name: string) => parsed.values.get(`--${name}`);
   const has = (name: string) => parsed.flags.has(`--${name}`);
-  const projectDir = value('project') ? resolve(value('project')!) : detectProjectDir();
+  let projectDir = value('project') ? resolve(value('project')!) : detectProjectDir();
   let task = value('task') ?? '';
   let adapter = value('adapter') ?? '';
   let workflow = value('workflow') ?? 'planner';
@@ -1033,7 +1033,37 @@ async function cmdQuick(preview = false) {
   const initializedContinuation = Boolean(existingRunId && existsSync(join((await import('./store.js')).runsRoot(), existingRunId, 'run.json')));
   if (!initializedContinuation) {
     const { inspectShipSetupRecord } = await import('./ship-setup-record.js');
-    const setup = inspectShipSetupRecord(projectDir, task);
+    let setup = inspectShipSetupRecord(projectDir, task);
+    if (written.evidenceDir && setup.state === 'missing') {
+      // A generated brief owns a deterministic isolated target, never the source tree.
+      const sourceDir = realpathSync(projectDir);
+      const dirt = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: sourceDir, encoding: 'utf8' });
+      if (dirt.length) {
+        const refusal = 'Launch refused: source working tree is dirty. Commit or remove source changes before automatic setup.';
+        recordLaunchRefusal(refusal);
+        console.error(refusal);
+        process.exitCode = EXIT_CODE.failed;
+        return;
+      }
+      const name = `brief-${written.digest.slice(0, 12)}`;
+      projectDir = join(dirname(sourceDir), `${basename(sourceDir)}-wt`, name);
+      const { runShipSetup } = await import('./cli-ship-setup.js');
+      const report = await runShipSetup(['--project', sourceDir,
+        '--brief', join(written.evidenceDir, 'brief.md'), '--target', projectDir,
+        '--base', 'HEAD', '--branch', name]);
+      fsModule.atomicWrite(join(written.evidenceDir, 'setup.json'), `${JSON.stringify(report, null, 2)}\n`);
+      if (report.state !== 'ready') {
+        const refusal = `Launch refused by ship-setup:\n${report.blockers.map(b => b.reason).join('\n')}`;
+        recordLaunchRefusal(refusal);
+        console.error(refusal);
+        process.exitCode = EXIT_CODE.failed;
+        return;
+      }
+      const { indexBriefWritingEvidence } = await import('./brief-writer.js');
+      indexBriefWritingEvidence(projectDir, task, written.evidenceDir);
+      console.error(`Prepared target: ${projectDir} (branch ${name}, base HEAD)`);
+      setup = inspectShipSetupRecord(projectDir, task);
+    }
     if (setup.state !== 'ready') {
       const detail = setup.state === 'missing'
         ? `no exact setup record exists at ${setup.recordPath}`

@@ -65,9 +65,9 @@ describe('agent run-directory safety contract', () => {
 });
 
 describe('shipped role outcome contracts', () => {
-  it('ships all nine configured roles', () => {
+  it('ships all ten configured roles', () => {
     const roles = readdirSync(directory).filter(file => file.endsWith('.yaml')).map(file => file.slice(0, -5)).sort();
-    expect(roles).toEqual(['ai_detector', 'coder', 'doc_reviewer', 'doc_writer', 'paper_reviewer', 'paper_writer', 'planner', 'qa', 'researcher']);
+    expect(roles).toEqual(['ai_detector', 'brief_writer', 'coder', 'doc_reviewer', 'doc_writer', 'paper_reviewer', 'paper_writer', 'planner', 'qa', 'researcher']);
   });
 
   it('retains paper scores and sourced claims while applying stylistic acceptance only when assigned', () => {

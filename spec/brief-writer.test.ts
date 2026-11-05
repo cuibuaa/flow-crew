@@ -7,7 +7,6 @@ import { pathToFileURL } from 'node:url';
 import { writeTaskBrief, composeBrief, type BriefFields } from '../src/brief-writer.js';
 import { fcGlobalDir } from '../src/store.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
-import { writeReadySetupRecord } from './test-support/ready-setup.js';
 import type { Adapter } from '../src/adapters/base.js';
 
 const roots: string[] = [];
@@ -182,7 +181,8 @@ async run(){writeFileSync(${JSON.stringify(marker)}, 'ready'); setInterval(()=>{
 });
 
 it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with evidence attached', async workflow => {
-  const dir = project();
+  const root = project();
+  const dir = join(root, 'source'); mkdirSync(dir);
   const env = { ...process.env, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock'),
     CODEX_THREAD_ID: undefined, CLAUDE_CODE_SESSION_ID: undefined };
   for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
@@ -192,8 +192,7 @@ it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with ev
   }
   const raw = 'write a greeting';
   const written = await writeTaskBrief(raw, options(dir, replies([fields])));
-  writeReadySetupRecord(dir, written.brief, fcGlobalDir());
-  const fixtures = join(dir, 'fixtures'); mkdirSync(fixtures);
+  const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
   const ids = extractBriefCriteria(written.brief).criteria.map(c => c.id);
   const fixture = (id: string, output: unknown) => writeFileSync(join(fixtures, `${id}.json`),
     JSON.stringify({ output_text: typeof output === 'string' ? output : JSON.stringify(output) }));
@@ -214,8 +213,38 @@ it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with ev
   expect(child.status, child.stdout + child.stderr).toBe(0);
   const runs = readdirSync(join(fcGlobalDir(), 'runs')).map(id => join(fcGlobalDir(), 'runs', id));
   const run = runs.find(path => {
-    try { return JSON.parse(readFileSync(join(path, 'run.json'), 'utf8')).projectDir === dir; } catch { return false; }
+    try { return JSON.parse(readFileSync(join(path, 'run.json'), 'utf8')).projectDir === join(root, 'source-wt', `brief-${written.digest.slice(0, 12)}`); } catch { return false; }
   })!;
+  expect(readFileSync(join(written.evidenceDir!, 'setup.json'), 'utf8')).toContain('\"state\": \"ready\"');
   expect(readFileSync(join(run, 'task_brief.md'), 'utf8')).toBe(written.brief);
   expect(readFileSync(join(run, 'brief-writing', 'original.txt'), 'utf8')).toBe(raw);
+});
+
+it.each(['dirty', 'target_collision', 'authored'])('keeps setup refusals before launch: %s', async refusal => {
+  const root = project();
+  const dir = join(root, 'source'); mkdirSync(dir);
+  const git = (args: string[]) => {
+    const child = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    expect(child.status, child.stderr).toBe(0);
+  };
+  git(['init', '-q']);
+  git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'fixture']);
+  const raw = 'write a greeting';
+  const written = await writeTaskBrief(raw, options(dir, replies([fields])));
+  if (refusal === 'dirty') writeFileSync(join(dir, 'dirty.txt'), 'uncommitted');
+  if (refusal === 'target_collision') mkdirSync(join(root, 'source-wt', `brief-${written.digest.slice(0, 12)}`), { recursive: true });
+  const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
+    'quick', refusal === 'authored' ? written.brief : raw, '--project', dir, '--adapter', 'mock', '--no-campaign'],
+  { env: { ...process.env, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock'),
+    CODEX_THREAD_ID: undefined, CLAUDE_CODE_SESSION_ID: undefined }, encoding: 'utf8' });
+  expect(child.status, child.stdout + child.stderr).toBe(1);
+  expect(child.stderr).toContain(refusal === 'dirty' ? 'source working tree is dirty'
+    : refusal === 'target_collision' ? 'cannot be safely reused' : 'no exact setup record');
+  const runRoot = join(fcGlobalDir(), 'runs');
+  const runs = (() => { try { return readdirSync(runRoot); } catch { return []; } })();
+  expect(runs.some(id => {
+    try { return JSON.parse(readFileSync(join(runRoot, id, 'run.json'), 'utf8')).projectDir.startsWith(root); }
+    catch { return false; }
+  })).toBe(false);
 });

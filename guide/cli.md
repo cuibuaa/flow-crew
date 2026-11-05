@@ -79,8 +79,8 @@ Review the saved bytes, perform the existing `ship-setup` for that exact brief a
 then use `flowcrew quick - --project <target> < task-brief.md`. The original raw command
 also reuses its saved reply in the same `FC_HOME` and canonical repository. Quick has no
 confirmation prompt; it records the composed brief and proceeds through normal admission.
-A missing/refused exact setup record still refuses launch. This step does not create a
-worktree, select a workflow, declare research settings, or replace setup.
+For authored briefs, a missing/refused exact setup record still refuses launch.
+The brief writer does not select a workflow or declare research settings.
 
 Authorship returns exactly `criteria`, `constraints`, `inputs`, `assumptions`, and
 `blocking_questions`, all string arrays, with at least one criterion. Code checks schema,
@@ -98,6 +98,22 @@ are copied into the run's `brief-writing/` directory before dispatch. Native cre
 homes are excluded. Repository changes do not silently regenerate a reviewed brief;
 change the task text to request a new composition. Reported usage covers this separate
 pre-admission step; workflow token totals retain their existing meaning.
+
+For a one-command launch from a clean Git source, use:
+
+```bash
+flowcrew quick "Add a greeting command" --project .
+```
+
+Only when it generates a brief and the supplied project has no exact setup record,
+`quick` prepares `<source>-wt/brief-<first-12-digest-characters>` beside the source,
+on branch `brief-<first-12-digest-characters>` from `HEAD`. This follows the sibling
+worktree convention and gives reruns a stable identity without interpreting task prose.
+It uses the same `ship-setup` implementation, including baseline validation and refusals;
+a dirty source also refuses, because its uncommitted bytes would not reach the target.
+The composed brief and setup receipt are retained before run registration. Existing
+matching setup records are used directly. Authored briefs keep the existing setup
+requirement and cost no brief-writing model call. No confirmation prompt is added.
 
 ## Launch
 

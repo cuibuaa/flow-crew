@@ -55,8 +55,9 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
   if (extractBriefCriteria(original).criteria.length > 0) {
     return { brief: original, digest: hash(original), outcome: 'ready', questions: [], reasons: [] };
   }
+  const startedAt = Date.now();
   const project = realpathSync(resolve(options.projectDir));
-  const role = options.role ?? parseAgent(parse(readFileSync(join(engineConfigDir, 'agents', 'brief_writer.yaml'), 'utf8')));
+  const role = options.role ?? parseAgent(parse(readFileSync(join(engineConfigDir, 'agents', 'brief_writer.yaml'), 'utf8')), false);
   // Read-only is a capability of this step, even if an operator edits the role's tools.
   const reader = { ...role, tools: [] };
   const identity = hash(JSON.stringify([project, original, reader, role.adapter ?? options.adapter, BRIEF_OUTPUT_SCHEMA]));
@@ -67,8 +68,11 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
   const adapter = options.adapterInstance ?? await loadAdapterByName(role.adapter ?? options.adapter);
   const defaults = loadEngineDefaults();
   let reasons: string[] = [];
-  const finish = (brief: string, outcome: WrittenBrief['outcome'], questions: string[]): WrittenBrief =>
-    ({ brief, digest: hash(brief), outcome, questions, reasons, evidenceDir });
+  const finish = (brief: string, outcome: WrittenBrief['outcome'], questions: string[]): WrittenBrief => {
+    const digest = hash(brief);
+    save(join(evidenceDir, `completion-${randomUUID()}.json`), { outcome, digest, duration_ms: Date.now() - startedAt });
+    return { brief, digest, outcome, questions, reasons, evidenceDir };
+  };
   // Incomplete attempts are evidence, never a task reservation or a consumed retry.
   const prior = readdirSync(evidenceDir).filter(name => name.endsWith('.reply.json')).sort();
   let completed = 0;
@@ -82,7 +86,7 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
     if (previous) result = JSON.parse(readFileSync(file('reply.json'), 'utf8')) as RunResult;
     else {
       const prompt = `Read the repository to resolve the task. Return exactly the supplied JSON schema.\nOriginal task (JSON string, authoritative):\n${JSON.stringify(original)}\n`
-        + `Previous validation reasons: ${JSON.stringify(reasons)}\nSchema:\n${JSON.stringify(BRIEF_OUTPUT_SCHEMA)}`;
+        + `Previous validation reasons: ${JSON.stringify(reasons)}`;
       save(file('invocation.json'), { role: reader, adapter: role.adapter ?? options.adapter,
         prompt, outputSchema: BRIEF_OUTPUT_SCHEMA, startedAt: new Date().toISOString() });
       try {
@@ -126,12 +130,18 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
     }
     if (fields && reasons.length === 0) {
       atomicWrite(join(evidenceDir, 'brief.md'), brief);
-      mkdirSync(join(root, 'by-digest'), { recursive: true });
-      save(join(root, 'by-digest', hash(JSON.stringify([project, hash(brief)])) + '.json'), { evidenceDir });
+      indexBriefWritingEvidence(project, brief, evidenceDir);
       return finish(brief, 'ready', []);
     }
   }
   return finish(original, 'invalid', []);
+}
+
+/** Bind the same evidence to a prepared target as well as its source repository. */
+export function indexBriefWritingEvidence(projectDir: string, brief: string, evidenceDir: string): void {
+  const root = join(fcGlobalDir(), 'brief-writing', 'by-digest');
+  mkdirSync(root, { recursive: true });
+  save(join(root, hash(JSON.stringify([realpathSync(resolve(projectDir)), hash(brief)])) + '.json'), { evidenceDir });
 }
 
 /** Attach authored evidence before dispatch, also when a saved preview is supplied later. */
@@ -146,6 +156,14 @@ export function attachBriefWritingEvidence(projectDir: string, brief: string, ru
     // Native homes/scratch may contain credentials. Only our explicit evidence records travel.
     if (name === 'original.txt' || name === 'brief.md' || name.endsWith('.brief.md') || name.endsWith('.json')) {
       atomicWrite(join(dest, name), readFileSync(join(evidenceDir, name)));
+    }
+  }
+  const stages = join(evidenceDir, 'stages');
+  if (existsSync(stages)) for (const id of readdirSync(stages)) {
+    const log = join(stages, id, 'live.log');
+    if (existsSync(log)) {
+      mkdirSync(join(dest, 'stages', id), { recursive: true });
+      atomicWrite(join(dest, 'stages', id, 'live.log'), readFileSync(log));
     }
   }
 }
