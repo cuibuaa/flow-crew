@@ -11,8 +11,6 @@ import { loadAdapterByName } from './adapters/loader.js';
 import { engineConfigDir, loadEngineDefaults } from './config.js';
 import { parseAgent } from './scheduler/sched_admission/configuration.js';
 import { extractBriefCriteria } from './brief-criteria.js';
-import { inspectBrief } from './brief-preflight.js';
-import { rehearseBrief } from './rehearse.js';
 import { fcGlobalDir } from './store.js';
 
 // The transport and local validation derive from this single schema.
@@ -113,13 +111,13 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
       for (const input of fields.inputs) {
         if (!existsSync(resolve(project, input))) reasons.push(`Input does not exist: ${input}`);
       }
-      const preflight = inspectBrief(brief);
-      reasons.push(...preflight.findings.filter(f => f.level === 'fail').map(f => `[${f.code}] ${f.message}`));
+      // Static rehearsal already calls inspectBrief; do not duplicate its findings.
+      const { rehearseBrief } = await import('./rehearse.js');
       const rehearsal = await rehearseBrief(['generated-brief', '--project', project], {
         briefText: brief, staticOnly: true, render: false,
       });
       reasons.push(...rehearsal.findings.filter(f => f.level === 'fail').map(f => f.text));
-      validation({ reasons, questions, preflight, rehearsal });
+      validation({ reasons, questions, rehearsal });
     } else validation({ reasons });
     // A declared question is never repaired into a guess by another model call.
     if (questions.length) {

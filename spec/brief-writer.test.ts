@@ -37,18 +37,27 @@ it('skips the model entirely when structural criteria exist', async () => {
   expect(adapter.run).not.toHaveBeenCalled();
 });
 
-it.each(['plain task', '\uFEFF中文 task\r\n\n', 'task with ``` and $ bytes\t\n'])('preserves the exact prefix on success and retry: %j', async original => {
-  for (const outputs of [[fields], ['{broken', fields]]) {
+it.each(['plain task', '\uFEFF中文 task\r\n\n', 'task with ``` and $ bytes\t\n'])('preserves the exact prefix on every generated exit and retry: %j', async original => {
+  const cases: Array<{ outputs: unknown[]; outcome: string; calls: number; reason?: string }> = [
+    { outputs: [fields], outcome: 'ready', calls: 1 },
+    { outputs: ['{broken', fields], outcome: 'ready', calls: 2, reason: 'Invalid brief JSON' },
+    { outputs: [{ ...fields, inputs: ['absent.txt'] }, fields], outcome: 'ready', calls: 2, reason: 'Input does not exist' },
+    { outputs: ['{broken'], outcome: 'invalid', calls: 3 },
+    { outputs: [{ ...fields, blocking_questions: ['Which greeting?'] }], outcome: 'blocking_questions', calls: 1 },
+  ];
+  for (const { outputs, outcome, calls, reason } of cases) {
     const adapter = replies(outputs);
     const written = await writeTaskBrief(original, options(project(), adapter));
-    expect(written.outcome).toBe('ready');
-    expect(Buffer.from(written.brief).subarray(0, Buffer.byteLength(original))).toEqual(Buffer.from(original));
+    expect(written.outcome).toBe(outcome);
+    const prefix = (value: string) => expect(Buffer.from(value).subarray(0, Buffer.byteLength(original))).toEqual(Buffer.from(original));
+    prefix(written.brief);
     expect(readFileSync(join(written.evidenceDir!, 'original.txt'), 'utf8')).toBe(original);
-    expect(readFileSync(join(written.evidenceDir!, 'brief.md'), 'utf8')).toBe(written.brief);
-    expect(adapter.run).toHaveBeenCalledTimes(outputs.length);
-    if (outputs.length > 1) expect(adapter.run.mock.calls[1][0]).toContain('Invalid brief JSON');
-    const role = adapter.run.mock.calls[0][1];
-    expect(role.tools).toEqual([]);
+    for (const name of readdirSync(written.evidenceDir!).filter(name => name.endsWith('brief.md'))) {
+      prefix(readFileSync(join(written.evidenceDir!, name), 'utf8'));
+    }
+    expect(adapter.run).toHaveBeenCalledTimes(calls);
+    if (reason) expect(adapter.run.mock.calls[1][0]).toContain(reason);
+    expect(adapter.run.mock.calls[0][1].tools).toEqual([]);
     expect(adapter.run.mock.calls[0][2].outputSchema?.required).toEqual(Object.keys(fields));
   }
 });
