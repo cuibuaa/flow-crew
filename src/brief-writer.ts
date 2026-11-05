@@ -78,6 +78,8 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
     const previous = prior[invocation];
     const attempt = previous ? previous.slice(0, -'.reply.json'.length) : `${Date.now()}-${completed}-${randomUUID()}`;
     const file = (suffix: string) => join(evidenceDir, `${attempt}.${suffix}`);
+    const validation = (value: unknown) => save(file(existsSync(file('validation.json'))
+      ? `revalidation-${randomUUID()}.json` : 'validation.json'), value);
     let result: RunResult;
     if (previous) result = JSON.parse(readFileSync(file('reply.json'), 'utf8')) as RunResult;
     else {
@@ -117,8 +119,8 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
         briefText: brief, staticOnly: true, render: false,
       });
       reasons.push(...rehearsal.findings.filter(f => f.level === 'fail').map(f => f.text));
-      save(file('validation.json'), { reasons, questions, preflight, rehearsal });
-    } else save(file('validation.json'), { reasons });
+      validation({ reasons, questions, preflight, rehearsal });
+    } else validation({ reasons });
     // A declared question is never repaired into a guess by another model call.
     if (questions.length) {
       atomicWrite(join(evidenceDir, 'brief.md'), brief);

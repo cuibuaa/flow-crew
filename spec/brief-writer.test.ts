@@ -73,6 +73,21 @@ it('nonexistent input uses the same correction path', async () => {
   expect(adapter.run.mock.calls[1][0]).toContain('Input does not exist: absent.txt');
 });
 
+it('revalidation preserves the original validation evidence', async () => {
+  const dir = project();
+  const adapter = replies([{ ...fields, inputs: ['later.txt'] }]);
+  const first = await writeTaskBrief('use the input', options(dir, adapter));
+  expect(first.outcome).toBe('invalid');
+  const records = readdirSync(first.evidenceDir!).filter(name => name.endsWith('.validation.json'));
+  const bytes = records.map(name => readFileSync(join(first.evidenceDir!, name), 'utf8'));
+  writeFileSync(join(dir, 'later.txt'), 'now present');
+  const later = await writeTaskBrief('use the input', options(dir, adapter));
+  expect(later.outcome).toBe('ready');
+  expect(adapter.run).toHaveBeenCalledTimes(3);
+  expect(records.map(name => readFileSync(join(first.evidenceDir!, name), 'utf8'))).toEqual(bytes);
+  expect(readdirSync(first.evidenceDir!).some(name => name.includes('.revalidation-'))).toBe(true);
+});
+
 it('existing admission and rehearsal failures use the same correction path', async () => {
   const dir = project();
   writeFileSync(join(dir, 'occupied.txt'), 'existing');
