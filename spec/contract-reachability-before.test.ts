@@ -660,14 +660,15 @@ describe('environment refusal precedence', () => {
     '',
   ].join('\n');
 
-  it('refuses the non-Git source before probing a missing adapter', () => {
+  it('names the missing adapter before the non-Git refusal', () => {
     const root = temporaryRoot('adapter-absent');
     const result = runBackgroundQuick(root);
     const output = `${result.stdout}${result.stderr}`;
 
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
-    expect(output).toContain('automatic setup requires a Git working tree with a committed HEAD');
+    expect(output).toContain('No adapter CLI is installed or visible on PATH.');
+    expect(output).toContain('npm i -g @openai/codex');
     expect(result.stderr).not.toContain('[brief_criteria_missing]');
   });
 
