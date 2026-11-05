@@ -1,3 +1,4 @@
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -124,8 +125,8 @@ it('quick prints blocking questions and exits 3 without creating a run', async (
     blocking_questions: ['Which greeting language?'] }])));
   const before = readdirSync(fcGlobalDir());
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
-    'quick', raw, '--project', dir, '--adapter', 'mock'], { encoding: 'utf8',
-    env: { ...process.env, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock') } });
+    'quick', raw, '--project', dir, '--adapter', 'mock'], { cwd: dir, encoding: 'utf8',
+    env: { ...process.env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock') } });
   expect(child.status, child.stdout + child.stderr).toBe(3);
   expect(child.stderr).toContain(written.questions[0]);
   expect(readdirSync(fcGlobalDir())).toEqual(before);
@@ -135,8 +136,8 @@ it('brief prints the shared composition and digest without launching', async () 
   const dir = project();
   const written = await writeTaskBrief('write a greeting', options(dir, replies([fields])));
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
-    'brief', 'write a greeting', '--project', dir, '--adapter', 'mock'], { encoding: 'utf8',
-    env: { ...process.env, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock') } });
+    'brief', 'write a greeting', '--project', dir, '--adapter', 'mock'], { cwd: dir, encoding: 'utf8',
+    env: { ...process.env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock') } });
   expect(child.status, child.stdout + child.stderr).toBe(0);
   expect(child.stdout).toBe(written.brief);
   expect(child.stderr).toContain(written.digest);
@@ -158,7 +159,7 @@ import { writeTaskBrief } from ${JSON.stringify(pathToFileURL(join(process.cwd()
 await writeTaskBrief('write a greeting', {projectDir:${JSON.stringify(dir)}, adapter:'mock', adapterInstance:{
 async run(){writeFileSync(${JSON.stringify(marker)}, 'ready'); setInterval(()=>{}, 1000); await new Promise(()=>{});}}});`);
   const env = { ...process.env, FC_HOME: engine, FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock') };
-  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), script], { env, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), script], { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, stdio: 'ignore' });
   // Poll the durable boundary, not a guessed elapsed time.
   for (let i = 0; i < 200; i++) {
     try { if (readFileSync(marker, 'utf8')) break; } catch { /* not reached */ }
@@ -174,7 +175,7 @@ async run(){writeFileSync(${JSON.stringify(marker)}, 'ready'); setInterval(()=>{
   // Re-execute the same command with the provider now completing.
   writeFileSync(script, readFileSync(script, 'utf8').replace('setInterval(()=>{}, 1000); await new Promise(()=>{});',
     `return {output: ${JSON.stringify(JSON.stringify(fields))}, exitCode:0, duration_ms:1};`));
-  const rerun = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), script], { env, encoding: 'utf8' });
+  const rerun = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), script], { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8' });
   expect(rerun.status, rerun.stderr).toBe(0);
   expect(readFileSync(join(evidence, 'brief.md'), 'utf8').startsWith('write a greeting')).toBe(true);
   expect(readdirSync(engine)).not.toContain('runs');
@@ -187,8 +188,7 @@ it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with ev
     CODEX_THREAD_ID: undefined, CLAUDE_CODE_SESSION_ID: undefined };
   for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
     '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'fixture']]) {
-    const git = spawnSync('git', args, { cwd: dir, env, encoding: 'utf8' });
-    expect(git.status, git.stderr).toBe(0);
+    isolatedProjectCommand('git', args, dir, root);
   }
   const raw = 'write a greeting';
   const written = await writeTaskBrief(raw, options(dir, replies([fields])));
@@ -209,7 +209,7 @@ it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with ev
     audit_findings: { version: 1, findings: [] } });
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
     'quick', raw, '--project', dir, '--adapter', 'mock', '--workflow', workflow, '--no-campaign'],
-  { cwd: dir, env: { ...env, MOCK_FIXTURE_DIR: fixtures }, encoding: 'utf8', timeout: 25000 });
+  { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), MOCK_FIXTURE_DIR: fixtures }, encoding: 'utf8', timeout: 25000 });
   expect(child.status, child.stdout + child.stderr).toBe(0);
   const runs = readdirSync(join(fcGlobalDir(), 'runs')).map(id => join(fcGlobalDir(), 'runs', id));
   const run = runs.find(path => {
@@ -224,8 +224,7 @@ it.each(['dirty', 'target_collision', 'authored'])('keeps setup refusals before 
   const root = project();
   const dir = join(root, 'source'); mkdirSync(dir);
   const git = (args: string[]) => {
-    const child = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
-    expect(child.status, child.stderr).toBe(0);
+    isolatedProjectCommand('git', args, dir, root);
   };
   git(['init', '-q']);
   git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
@@ -236,7 +235,7 @@ it.each(['dirty', 'target_collision', 'authored'])('keeps setup refusals before 
   if (refusal === 'target_collision') mkdirSync(join(root, 'source-wt', `brief-${written.digest.slice(0, 12)}`), { recursive: true });
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
     'quick', refusal === 'authored' ? written.brief : raw, '--project', dir, '--adapter', 'mock', '--no-campaign'],
-  { env: { ...process.env, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock'),
+  { cwd: dir, env: { ...process.env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock'),
     CODEX_THREAD_ID: undefined, CLAUDE_CODE_SESSION_ID: undefined }, encoding: 'utf8' });
   expect(child.status, child.stdout + child.stderr).toBe(1);
   expect(child.stderr).toContain(refusal === 'dirty' ? 'source working tree is dirty'

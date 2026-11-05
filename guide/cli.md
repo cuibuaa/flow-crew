@@ -9,7 +9,7 @@ synopses are syntax references, not recipes to run without selecting real identi
 
 ## Dispatch and help
 
-The current dispatcher has 28 named command routes, including the early `fc_tasks`,
+The current dispatcher has 29 named command routes, including the early `fc_tasks`,
 `plan-check` and `state` paths. Bare invocation, `--help`, `-h` print top-level help;
 `version`, `--version`, `-v` print package version. Unknown commands exit 1. Command help is generated from the same option tables as the parser; `--help` and `-h` return before any engine operation.
 
@@ -264,6 +264,7 @@ Every route accepts `--help` and `-h` without contacting services or creating st
 | `rehearse` | `--static-only`, `--keep`, `--project`, `--target` |
 | `plan-check` | `--brief`, `--run`, `--project` |
 | `ship-setup` | `--json`, `--project`, `--brief`, `--target`, `--base`, `--branch` |
+| `brief` | `--project`, `--adapter`, `--task` |
 | `quick` | `--project`, `--adapter`, `--workflow`, `--campaign`, `--task`, `--existing-run-id`, `--session`, `--brief-input-base64`, `--brief-admission-record`, `--no-campaign`, `--no-inherit-campaign`, `--background`, `--max-iterations`, `--campaign-context`, `--acknowledge-brief-warnings` |
 | `status` | `--all`, `--details`, `--project` |
 | `list` | `--limit` |

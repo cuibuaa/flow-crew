@@ -107,7 +107,7 @@ describe('real brief admission entry points', () => {
   it.each([
     ['frontmatter_invalid', '---\nvalidation: [\n---\n## Requirements\n1. Deliver a result.\n'],
     ['brief_criteria_missing', '# Goal\nDeliver a result.\n'],
-  ])('refuses %s with the shared code, message and exit', async (code, brief) => {
+  ])('keeps authored %s diagnostics while quick writes missing criteria', async (code, brief) => {
     const briefPath = join(root, `${code}.md`);
     writeFileSync(briefPath, brief);
     const finding = inspectBrief(brief).findings.find(finding => finding.code === code)!;
@@ -118,7 +118,10 @@ describe('real brief admission entry points', () => {
       env: { ...process.env, HOME: home, FC_HOME: home, NO_COLOR: '1' },
     });
     expect(quick.status, quick.stderr).toBe(EXIT_CODE.failed);
-    expect(quick.stderr).toContain(`[${code}] ${finding.message}`);
+    if (code === 'brief_criteria_missing') {
+      expect(quick.stderr).toContain('Brief writing stopped after at most two retries');
+      expect(quick.stderr).toContain('Invalid brief JSON');
+    } else expect(quick.stderr).toContain(`[${code}] ${finding.message}`);
     const rehearsal = await rehearseBrief([briefPath, '--static-only']);
     expect(rehearsal.exitCode).toBe(EXIT_CODE.failed);
     expect(rehearsal.findings).toContainEqual({ code, level: 'fail', text: expect.stringContaining(finding.message) });

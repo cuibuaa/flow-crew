@@ -453,13 +453,12 @@ describe('deferred continuation snapshots', () => {
 });
 
 describe('quick and operator entry behavior', () => {
-  it('prints the full report and stops plain text or a wrong digest before project writes', () => {
+  it('stops invalid brief writing or a wrong digest before project writes', () => {
     const isolated = cliFixture();
-    const plain = runQuickSync(isolated, ['quick', 'Fix the race', '--project', isolated.project]);
+    const plain = runQuickSync(isolated, ['quick', 'Fix the race', '--project', isolated.project, '--adapter', 'mock']);
     expect(plain.status).toBe(1);
-    expect(`${plain.stdout}${plain.stderr}`).toContain('Brief preflight');
-    expect(`${plain.stdout}${plain.stderr}`).toContain('[plain_text_input]');
-    expect(plain.stderr).toContain(`[brief_criteria_missing] ${inspectBrief('Fix the race').findings.find(finding => finding.code === 'brief_criteria_missing')!.message}`);
+    expect(plain.stderr).toContain('Brief writing stopped after at most two retries');
+    expect(plain.stderr).toContain('Invalid brief JSON');
     expect(`${plain.stdout}${plain.stderr}`).not.toContain('--acknowledge-brief-warnings=');
     expect(readProjectBrief(isolated.project)).toBeUndefined();
 

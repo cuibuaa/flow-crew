@@ -672,7 +672,7 @@ describe('environment refusal precedence', () => {
     expect(result.stderr).not.toContain('[brief_criteria_missing]');
   });
 
-  it('keeps the zero-criteria refusal when an adapter executable is visible', () => {
+  it('stops invalid brief output when a visible adapter emits no JSON', () => {
     const root = temporaryRoot('adapter-present');
     const codex = join(root, 'bin', 'codex');
     write(codex, '#!/bin/sh\nexit 0\n');
@@ -682,7 +682,8 @@ describe('environment refusal precedence', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('[brief_criteria_missing] No structurally extractable criterion');
+    expect(result.stderr).toContain('Brief writing stopped after at most two retries');
+    expect(result.stderr).toContain('Invalid brief JSON');
     expect(output).not.toContain('No adapter CLI is installed or visible on PATH.');
   });
 
