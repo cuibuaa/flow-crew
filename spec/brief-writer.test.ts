@@ -67,7 +67,6 @@ it.each(['plain task', '\uFEFF中文 task\r\n\n', 'task with ``` and $ bytes\t\n
     expect(adapter.run).toHaveBeenCalledTimes(calls);
     if (reason) expect(adapter.run.mock.calls[1][0]).toContain(reason);
     expect(adapter.run.mock.calls[0][1].tools).toEqual([]);
-    expect(adapter.run.mock.calls[0][2].includeExtensions).toBe(false);
     expect(adapter.run.mock.calls[0][2].outputSchema?.required).toEqual(Object.keys(fields));
   }
 });
@@ -405,15 +404,4 @@ it('keeps native per-request counters and context before successful-home cleanup
   const written = await writeTaskBrief('write a greeting', options(project(), adapter));
   const ledger = readdirSync(written.evidenceDir!).find(n => n.includes('.requests-'))!;
   expect(JSON.parse(readFileSync(join(written.evidenceDir!, ledger), 'utf8'))).toEqual(record);
-});
-
-it('repository-only Codex preparation omits extension caches while keeping the role and effort', async () => {
-  const { writeCodexConfig } = await import('../src/adapters/codex.js');
-  const home = join(project(), 'native');
-  const role = { name: 'brief_writer', description: 'brief', tools: [], prompt: 'outcome properties', model: 'test-model', reasoning_effort: 'low' };
-  const config = readFileSync(writeCodexConfig(home, role, undefined, false), 'utf8');
-  expect(config).toContain('outcome properties');
-  expect(config).toContain('model_reasoning_effort = "low"');
-  expect(readdirSync(home)).not.toContain('skills');
-  expect(readdirSync(home)).not.toContain('.tmp');
 });

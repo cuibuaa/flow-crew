@@ -150,8 +150,6 @@ export interface RunOpts {
     resumeSessionId?: string;
     transport?: { kind: 'stdin' | 'argv' | 'request'; payload: string };
   }) => void;
-  /** Repository-only preparation can omit operator plugin/skill caches. Default: true. */
-  includeExtensions?: boolean;
   /** Opt-in credential-free native request ledger, before adapter cleanup. */
   onRequestEvidence?: (record: unknown) => void;
   /** Complete duties and delivered guidance if an explicit resume is unavailable. */

@@ -106,7 +106,7 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
         const adapter = options.adapterInstance ?? await loadAdapterByName(role.adapter ?? options.adapter);
         result = await adapter.run(prompt, reader, {
           workDir: project, runDir: evidenceDir, stageId: `brief_writer_${attempt}`,
-          timeout_ms: defaults.default_timeout_ms, outputSchema: BRIEF_OUTPUT_SCHEMA, includeExtensions: false,
+          timeout_ms: defaults.default_timeout_ms, outputSchema: BRIEF_OUTPUT_SCHEMA,
           onInvocationInput: input => save(file(`native-${randomUUID()}.json`), input),
           onRequestEvidence: record => save(file(`requests-${randomUUID()}.json`), record),
         });
