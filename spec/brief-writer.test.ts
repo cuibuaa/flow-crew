@@ -484,6 +484,20 @@ it.each([
   if (kind === 'existing_file') expect(existsSync(record)).toBe(false);
 });
 
+it('names the missing agent CLI before any repository refusal', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fc-brief-unborn-')), root = project(), engine = join(root, 'fc');
+  git(dir, ['init', '-q', '.']);
+  const bin = join(root, 'bin'); mkdirSync(bin);
+  symlinkSync('/usr/bin/git', join(bin, 'git'));
+  const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
+    'quick', '--task', '# Goal\nProbe.\n'],
+    { cwd: dir, env: { ...process.env, PATH: bin, HOME: process.env.HOME, FC_HOME: engine,
+      FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock') }, encoding: 'utf8' });
+  expect(child.status, child.stdout + child.stderr).toBe(1);
+  expect(child.stdout + child.stderr).toContain('npm i -g');
+  expect(child.stdout + child.stderr).not.toContain('committed HEAD');
+});
+
 it('brief always calls the model again while raw quick recovery is bound to HEAD', async () => {
   const dir = project();
   const adapter = replies([fields]);

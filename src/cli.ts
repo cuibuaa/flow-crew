@@ -925,7 +925,15 @@ async function cmdQuick(preview = false) {
   const { extractBriefCriteria } = await import('./brief-criteria.js');
   if (!existingRunId && extractBriefCriteria(task).criteria.length === 0) {
     let refusal: string | undefined;
+    // Nothing can run without an agent CLI, so name the install step before any
+    // repository refusal a new user would otherwise have to fix first.
     try {
+      const { loadAdapterByName } = await import('./adapters/loader.js');
+      await loadAdapterByName(adapter || loadEngineDefaults().adapter);
+    } catch (error) {
+      refusal = `Brief writing refused: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    if (!refusal) try {
       const git = (args: string[]) => execFileSync('git', args, {
         cwd: projectDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
       });
