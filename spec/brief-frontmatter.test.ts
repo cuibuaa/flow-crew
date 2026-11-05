@@ -119,8 +119,7 @@ describe('real brief admission entry points', () => {
     });
     expect(quick.status, quick.stderr).toBe(EXIT_CODE.failed);
     if (code === 'brief_criteria_missing') {
-      expect(quick.stderr).toContain('Brief writing stopped after at most two retries');
-      expect(quick.stderr).toContain('Invalid brief JSON');
+      expect(quick.stderr).toContain('automatic setup requires a Git working tree with a committed HEAD');
     } else expect(quick.stderr).toContain(`[${code}] ${finding.message}`);
     const rehearsal = await rehearseBrief([briefPath, '--static-only']);
     expect(rehearsal.exitCode).toBe(EXIT_CODE.failed);

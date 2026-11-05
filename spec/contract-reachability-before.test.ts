@@ -660,19 +660,18 @@ describe('environment refusal precedence', () => {
     '',
   ].join('\n');
 
-  it('names the missing adapter before the zero-criteria refusal', () => {
+  it('refuses the non-Git source before probing a missing adapter', () => {
     const root = temporaryRoot('adapter-absent');
     const result = runBackgroundQuick(root);
     const output = `${result.stdout}${result.stderr}`;
 
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
-    expect(output).toContain('No adapter CLI is installed or visible on PATH.');
-    expect(output).toContain('npm i -g @openai/codex');
+    expect(output).toContain('automatic setup requires a Git working tree with a committed HEAD');
     expect(result.stderr).not.toContain('[brief_criteria_missing]');
   });
 
-  it('stops invalid brief output when a visible adapter emits no JSON', () => {
+  it('refuses the non-Git source before invoking a visible adapter', () => {
     const root = temporaryRoot('adapter-present');
     const codex = join(root, 'bin', 'codex');
     write(codex, '#!/bin/sh\nexit 0\n');
@@ -682,8 +681,7 @@ describe('environment refusal precedence', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('Brief writing stopped after at most two retries');
-    expect(result.stderr).toContain('Invalid brief JSON');
+    expect(result.stderr).toContain('automatic setup requires a Git working tree with a committed HEAD');
     expect(output).not.toContain('No adapter CLI is installed or visible on PATH.');
   });
 

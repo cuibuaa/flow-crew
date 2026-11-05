@@ -861,7 +861,17 @@ async function cmdQuick(preview = false) {
   }
   if (value('brief-admission-record') !== undefined) transportedAdmission = decodeBriefAdmission(value('brief-admission-record')!);
   if (transport === '-') { task = readFileSync(0, 'utf-8'); taskSupplied = true; }
-  if (!task && parsed.positionals.length) { task = parsed.positionals.join(' '); taskSupplied = true; }
+  if (!task && parsed.positionals.length) {
+    if (parsed.positionals.length === 1 && existsSync(resolve(parsed.positionals[0]))
+        && statSync(resolve(parsed.positionals[0])).isFile()) {
+      const refusal = 'Positional arguments are task text. Send an existing file through stdin with -: flowcrew quick - < file';
+      recordLaunchRefusal(refusal);
+      console.error(refusal);
+      process.exitCode = EXIT_CODE.failed;
+      return;
+    }
+    task = parsed.positionals.join(' '); taskSupplied = true;
+  }
 
   // --existing-run-id path: dashboard handing off a rerun/execute to a detached
   // scheduler process. Reuse the existing run state and read the task brief
@@ -885,6 +895,12 @@ async function cmdQuick(preview = false) {
   }
 
   if (!task.trim()) {
+    if (preview) {
+      console.error(commandUsage('brief'));
+      console.error('  --project <path>  Repository (default: cwd)\n  --adapter <name>  Agent backend\n  --task <text>     Task text\n  -                 Read task from stdin');
+      process.exitCode = EXIT_CODE.failed;
+      return;
+    }
     console.error(commandUsage('quick'));
     console.error('');
     console.error('Options:');
@@ -904,6 +920,38 @@ async function cmdQuick(preview = false) {
     process.exit(EXIT_CODE.failed);
   }
 
+  // Refuse source facts before buying authorship. Setup still owns every target
+  // and baseline check once the composed digest supplies its identity.
+  const { extractBriefCriteria } = await import('./brief-criteria.js');
+  if (!preview && !existingRunId && extractBriefCriteria(task).criteria.length === 0) {
+    let refusal: string | undefined;
+    try {
+      const git = (args: string[]) => execFileSync('git', args, {
+        cwd: projectDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      if (git(['rev-parse', '--is-inside-work-tree']).trim() !== 'true') throw new Error('not a worktree');
+      git(['rev-parse', '--verify', 'HEAD']);
+      if (git(['status', '--porcelain', '--untracked-files=normal']).length) {
+        refusal = 'Launch refused: source working tree is dirty. Commit or remove source changes before automatic setup.';
+      }
+    } catch {
+      refusal = 'Launch refused: automatic setup requires a Git working tree with a committed HEAD.';
+    }
+    if (!refusal) {
+      const { rehearseBrief } = await import('./rehearse.js');
+      const report = await rehearseBrief(['raw-task', '--project', projectDir], {
+        briefText: task, staticOnly: true, render: false,
+      });
+      const failures = report.findings.filter(f => f.level === 'fail' && f.code !== 'brief_criteria_missing');
+      if (failures.length) refusal = `Launch refused before brief writing:\n${failures.map(f => f.text).join('\n')}`;
+    }
+    if (refusal) {
+      recordLaunchRefusal(refusal);
+      console.error(refusal);
+      process.exitCode = EXIT_CODE.failed;
+      return;
+    }
+  }
   const { writeTaskBrief } = await import('./brief-writer.js');
   const written = await writeTaskBrief(task, {
     projectDir, adapter: adapter || loadEngineDefaults().adapter,
@@ -912,8 +960,10 @@ async function cmdQuick(preview = false) {
   if (written.outcome !== 'ready') {
     console.error(written.outcome === 'blocking_questions'
       ? `Brief needs answers:\n${written.questions.map(q => `- ${q}`).join('\n')}`
+      : written.outcome === 'provider_error' ? `Brief provider call failed; rerun to try again:\n${written.reasons.join('\n')}`
       : `Brief writing stopped after at most two retries:\n${written.reasons.join('\n')}`);
-    process.exitCode = written.outcome === 'blocking_questions' ? EXIT_CODE.briefQuestions : EXIT_CODE.failed;
+    process.exitCode = written.outcome === 'blocking_questions' ? EXIT_CODE.briefQuestions
+      : written.outcome === 'provider_error' ? EXIT_CODE.briefProviderFailure : EXIT_CODE.failed;
     return;
   }
   task = written.brief;
@@ -1037,14 +1087,6 @@ async function cmdQuick(preview = false) {
     if (written.evidenceDir && setup.state === 'missing') {
       // A generated brief owns a deterministic isolated target, never the source tree.
       const sourceDir = realpathSync(projectDir);
-      const dirt = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: sourceDir, encoding: 'utf8' });
-      if (dirt.length) {
-        const refusal = 'Launch refused: source working tree is dirty. Commit or remove source changes before automatic setup.';
-        recordLaunchRefusal(refusal);
-        console.error(refusal);
-        process.exitCode = EXIT_CODE.failed;
-        return;
-      }
       const name = `brief-${written.digest.slice(0, 12)}`;
       projectDir = join(dirname(sourceDir), `${basename(sourceDir)}-wt`, name);
       const { runShipSetup } = await import('./cli-ship-setup.js');
@@ -1060,7 +1102,7 @@ async function cmdQuick(preview = false) {
         return;
       }
       const { indexBriefWritingEvidence } = await import('./brief-writer.js');
-      indexBriefWritingEvidence(projectDir, task, written.evidenceDir);
+      indexBriefWritingEvidence(task, written.evidenceDir);
       console.error(`Prepared target: ${projectDir} (branch ${name}, base HEAD)`);
       setup = inspectShipSetupRecord(projectDir, task);
     }

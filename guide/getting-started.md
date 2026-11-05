@@ -31,21 +31,22 @@ above.
 
 ## Start from a task
 
-With an installed adapter, `flowcrew brief "Add a greeting command" --project . > task-brief.md`
-reads the repository and writes a brief for you to review. The digest goes to stderr;
+With an installed adapter, `flowcrew brief "Add a greeting command" --project . > ../task-brief.md`
+reads the repository and writes a brief outside it for you to review, keeping the source clean. The digest goes to stderr;
 stdout preserves the original request followed by generated criteria, limits, inputs and
 assumptions. A blocking question exits 3 and starts no run. This command uses a model;
-rehearsal below does not.
+rehearsal below does not. Provider failures exit 4; rerunning tries again.
 
 After review, use the normal rehearsal and `ship-setup` procedure for the exact saved
-brief and selected target, then `flowcrew quick - --project <target> < task-brief.md`.
+brief and selected target, then `flowcrew quick - --project <target> < ../task-brief.md`.
 You can also give raw text to `quick`: it shares the same authorship step and proceeds
 without a confirmation prompt. From a clean Git repository, it automatically prepares
 an isolated target through the same `ship-setup` implementation, then launches there.
 The default target is `<source>-wt/brief-<digest-prefix>` beside the source, the branch
 is `brief-<digest-prefix>`, and the base is `HEAD`. Setup refusals still stop launch.
 Briefs that already have criteria cost no extra model call and still require their
-existing exact setup record. See [brief authoring](cli.md#write-a-brief-before-running).
+existing exact setup record. The saved brief digest carries its authorship evidence to
+any target in the same `FC_HOME`; submitting those exact bytes costs no extra model call. See [brief authoring](cli.md#write-a-brief-before-running).
 
 ## First safe result
 

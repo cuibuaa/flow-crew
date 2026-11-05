@@ -4,7 +4,6 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
 import { writeTaskBrief, composeBrief, type BriefFields } from '../src/brief-writer.js';
 import { fcGlobalDir } from '../src/store.js';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
@@ -12,8 +11,13 @@ import type { Adapter } from '../src/adapters/base.js';
 
 const roots: string[] = [];
 const project = () => {
-  const root = mkdtempSync(join(tmpdir(), 'bw-')); roots.push(root); return root;
+  const root = mkdtempSync(join(tmpdir(), 'bw-')); roots.push(root);
+  git(root, ['init', '-q']);
+  git(root, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'fixture']);
+  return root;
 };
+const git = (dir: string, args: string[]) => isolatedProjectCommand('git', args, dir, dir);
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const fields: BriefFields = { criteria: ['The greeting is available.'], constraints: [], inputs: [],
   assumptions: ['The existing greeting convention applies.'], blocking_questions: [] };
@@ -37,27 +41,33 @@ it('skips the model entirely when structural criteria exist', async () => {
   expect(adapter.run).not.toHaveBeenCalled();
 });
 
-it.each(['plain task', '\uFEFF中文 task\r\n\n', 'task with ``` and $ bytes\t\n'])('preserves the exact prefix on every generated exit and retry: %j', async original => {
+it.each(['plain task', '\uFEFF中文 task\r\n\n', 'task with ``` and $ bytes\t\n', 'task\n```ts\nunfinished', 'task\n~~~\nunfinished\r\n'])('preserves the exact prefix on every generated exit and retry: %j', async original => {
   const cases: Array<{ outputs: unknown[]; outcome: string; calls: number; reason?: string }> = [
     { outputs: [fields], outcome: 'ready', calls: 1 },
     { outputs: ['{broken', fields], outcome: 'ready', calls: 2, reason: 'Invalid brief JSON' },
     { outputs: [{ ...fields, inputs: ['absent.txt'] }, fields], outcome: 'ready', calls: 2, reason: 'Input does not exist' },
     { outputs: ['{broken'], outcome: 'invalid', calls: 3 },
+    { outputs: ['provider unavailable'], outcome: 'provider_error', calls: 1 },
     { outputs: [{ ...fields, blocking_questions: ['Which greeting?'] }], outcome: 'blocking_questions', calls: 1 },
   ];
   for (const { outputs, outcome, calls, reason } of cases) {
     const adapter = replies(outputs);
+    if (outcome === 'provider_error') adapter.run.mockResolvedValueOnce({ output: '', exitCode: 1, duration_ms: 1 });
     const written = await writeTaskBrief(original, options(project(), adapter));
     expect(written.outcome).toBe(outcome);
     const prefix = (value: string) => expect(Buffer.from(value).subarray(0, Buffer.byteLength(original))).toEqual(Buffer.from(original));
     prefix(written.brief);
+    if (outcome === 'ready') expect(extractBriefCriteria(written.brief).criteria).toHaveLength(1);
     expect(readFileSync(join(written.evidenceDir!, 'original.txt'), 'utf8')).toBe(original);
     for (const name of readdirSync(written.evidenceDir!).filter(name => name.endsWith('brief.md'))) {
-      prefix(readFileSync(join(written.evidenceDir!, name), 'utf8'));
+      const composed = readFileSync(join(written.evidenceDir!, name), 'utf8');
+      prefix(composed);
+      expect(extractBriefCriteria(composed).criteria).toHaveLength(1);
     }
     expect(adapter.run).toHaveBeenCalledTimes(calls);
     if (reason) expect(adapter.run.mock.calls[1][0]).toContain(reason);
     expect(adapter.run.mock.calls[0][1].tools).toEqual([]);
+    expect(adapter.run.mock.calls[0][2].includeExtensions).toBe(false);
     expect(adapter.run.mock.calls[0][2].outputSchema?.required).toEqual(Object.keys(fields));
   }
 });
@@ -79,7 +89,7 @@ it('nonexistent input uses the same correction path', async () => {
   const adapter = replies([{ ...fields, inputs: ['absent.txt'] }, fields]);
   const written = await writeTaskBrief('use the source to greet', options(project(), adapter));
   expect(written.outcome).toBe('ready');
-  expect(adapter.run.mock.calls[1][0]).toContain('Input does not exist: absent.txt');
+  expect(adapter.run.mock.calls[1][0]).toContain('Input does not exist in the target Git tree: absent.txt');
 });
 
 it('revalidation preserves the original validation evidence', async () => {
@@ -90,11 +100,13 @@ it('revalidation preserves the original validation evidence', async () => {
   const records = readdirSync(first.evidenceDir!).filter(name => name.endsWith('.validation.json'));
   const bytes = records.map(name => readFileSync(join(first.evidenceDir!, name), 'utf8'));
   writeFileSync(join(dir, 'later.txt'), 'now present');
+  git(dir, ['add', 'later.txt']);
+  git(dir, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'input']);
   const later = await writeTaskBrief('use the input', options(dir, adapter));
   expect(later.outcome).toBe('ready');
-  expect(adapter.run).toHaveBeenCalledTimes(3);
+  expect(adapter.run).toHaveBeenCalledTimes(4);
   expect(records.map(name => readFileSync(join(first.evidenceDir!, name), 'utf8'))).toEqual(bytes);
-  expect(readdirSync(first.evidenceDir!).some(name => name.includes('.revalidation-'))).toBe(true);
+  expect(readdirSync(first.evidenceDir!).filter(name => name.endsWith('.reply.json'))).toHaveLength(4);
 });
 
 it('existing admission and rehearsal failures use the same correction path', async () => {
@@ -123,13 +135,13 @@ it('quick prints blocking questions and exits 3 without creating a run', async (
   const raw = 'write the greeting';
   const written = await writeTaskBrief(raw, options(dir, replies([{ ...fields,
     blocking_questions: ['Which greeting language?'] }])));
-  const before = readdirSync(fcGlobalDir());
+  const shim = mockShim(project(), { ...fields, blocking_questions: written.questions });
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
     'quick', raw, '--project', dir, '--adapter', 'mock'], { cwd: dir, encoding: 'utf8',
-    env: { ...process.env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock') } });
+    env: { ...process.env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock'), NODE_OPTIONS: `--require=${shim}`, MOCK_FIXTURE_DIR: dir } });
   expect(child.status, child.stdout + child.stderr).toBe(3);
   expect(child.stderr).toContain(written.questions[0]);
-  expect(readdirSync(fcGlobalDir())).toEqual(before);
+  expect(readdirSync(dir)).not.toContain('runs');
 });
 
 it('brief prints the shared composition and digest without launching', async () => {
@@ -148,38 +160,85 @@ it('composition cannot turn model newlines into new contract sections', () => {
   expect(extractBriefCriteria(brief).criteria).toHaveLength(1);
 });
 
-// SIGKILL at the adapter boundary proves there is no task/run reservation to repair.
-it('a host stop during writing leaves durable input and reruns without a half-registered task', async () => {
-  const dir = project();
-  const engine = join(dir, 'fc'); mkdirSync(engine);
-  const marker = join(dir, 'called');
-  const script = join(dir, 'crash.mjs');
-  writeFileSync(script, `import { writeFileSync } from 'node:fs';
-import { writeTaskBrief } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/brief-writer.ts')).href)};
-await writeTaskBrief('write a greeting', {projectDir:${JSON.stringify(dir)}, adapter:'mock', adapterInstance:{
-async run(){writeFileSync(${JSON.stringify(marker)}, 'ready'); setInterval(()=>{}, 1000); await new Promise(()=>{});}}});`);
-  const env = { ...process.env, FC_HOME: engine, FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock') };
-  const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), script], { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, stdio: 'ignore' });
-  // Poll the durable boundary, not a guessed elapsed time.
-  for (let i = 0; i < 200; i++) {
-    try { if (readFileSync(marker, 'utf8')) break; } catch { /* not reached */ }
-    await new Promise(resolve => setTimeout(resolve, 25));
+// Interpose only the mock transport and durable-write boundary; execute the real CLI.
+function mockShim(root: string, output = fields, stopAt = ''): string {
+  const path = join(root, 'mock.cjs');
+  writeFileSync(path, `const fs = require('node:fs');
+const read = fs.readFileSync, rename = fs.renameSync;
+const pause = boundary => {
+  if (boundary !== ${JSON.stringify(stopAt)} || fs.existsSync(${JSON.stringify(join(root, 'release'))})) return;
+  fs.writeFileSync(${JSON.stringify(join(root, 'stopped'))}, boundary);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+};
+fs.readFileSync = function(path, ...args) {
+  if (typeof path === 'string' && path.endsWith('.json') && path.includes('/brief_writer_')) {
+    pause('provider');
+    return JSON.stringify({output_text: ${JSON.stringify(JSON.stringify(output))}});
   }
-  expect(readFileSync(marker, 'utf8')).toBe('ready');
-  const stopped = new Promise(resolve => child.once('close', resolve));
-  child.kill('SIGKILL'); await stopped;
-  expect(child.signalCode).toBe('SIGKILL');
-  const evidence = join(engine, 'brief-writing', readdirSync(join(engine, 'brief-writing'))[0]);
+  return read.call(this, path, ...args);
+};
+fs.renameSync = function(from, to) {
+  const result = rename.call(this, from, to);
+  if (String(to).endsWith('.reply.json')) pause('reply');
+  if (String(to).endsWith('/setup.json')) pause('setup');
+  return result;
+};`);
+  return path;
+}
+
+it.each(['provider', 'reply', 'setup'])('host stop at %s reruns the same quick command with one target and one run', async boundary => {
+  const root = project();
+  const dir = join(root, 'source'); mkdirSync(dir);
+  git(dir, ['init', '-q']);
+  git(dir, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'fixture']);
+  const engine = join(root, 'fc'); mkdirSync(engine);
+  const fixtures = launchFixtures(root, composeBrief('write a greeting', fields));
+  const shim = mockShim(root, fields, boundary);
+  const env = { ...process.env, HOME: process.env.HOME, FC_HOME: engine,
+    FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock'), MOCK_FIXTURE_DIR: fixtures, NODE_OPTIONS: `--require=${shim}`,
+    CODEX_THREAD_ID: 'fixture-session', CLAUDE_CODE_SESSION_ID: undefined, FC_TASKS_ROOT: join(root, 'ledger') };
+  const args = ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
+    'quick', 'write a greeting', '--adapter', 'mock'];
+  const child = spawn(process.execPath, args, { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 400; i++) {
+      try { if (readFileSync(join(root, 'stopped'), 'utf8')) break; } catch { /* wait for boundary */ }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    expect(readFileSync(join(root, 'stopped'), 'utf8')).toBe(boundary);
+  } finally {
+    const stopped = new Promise(resolve => child.once('close', resolve));
+    child.kill('SIGKILL'); await stopped;
+  }
+  expect(readdirSync(engine)).not.toContain('runs');
+  const evidence = join(engine, 'brief-writing', readdirSync(join(engine, 'brief-writing')).find(n => n !== 'by-digest')!);
   expect(readFileSync(join(evidence, 'original.txt'), 'utf8')).toBe('write a greeting');
-  expect(readdirSync(engine)).not.toContain('runs');
-  // Re-execute the same command with the provider now completing.
-  writeFileSync(script, readFileSync(script, 'utf8').replace('setInterval(()=>{}, 1000); await new Promise(()=>{});',
-    `return {output: ${JSON.stringify(JSON.stringify(fields))}, exitCode:0, duration_ms:1};`));
-  const rerun = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), script], { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8' });
-  expect(rerun.status, rerun.stderr).toBe(0);
-  expect(readFileSync(join(evidence, 'brief.md'), 'utf8').startsWith('write a greeting')).toBe(true);
-  expect(readdirSync(engine)).not.toContain('runs');
+  writeFileSync(join(root, 'release'), 'continue');
+  const rerun = spawnSync(process.execPath, args, { cwd: dir,
+    env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8', timeout: 25000 });
+  expect(rerun.status, rerun.stdout + rerun.stderr).toBe(0);
+  const runs = readdirSync(join(engine, 'runs'));
+  expect(runs).toHaveLength(1);
+  const run = JSON.parse(readFileSync(join(engine, 'runs', runs[0], 'run.json'), 'utf8'));
+  expect(run.status).toBe('complete');
+  expect(readdirSync(join(root, 'source-wt'))).toHaveLength(1);
+  expect(readdirSync(evidence).filter(n => n.endsWith('.reply.json'))).toHaveLength(1);
+  expect(run.taskDescription).toContain('write a greeting');
+  const tasks = readFileSync(join(engine, 'tasks.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  expect(new Set(tasks.map(task => task.id)).size).toBe(1);
+  expect(tasks.at(-1).run_id).toBe(runs[0]);
+  expect(tasks.at(-1).status).toBe('done');
 });
+
+function launchFixtures(root: string, brief: string): string {
+  const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
+  const ids = extractBriefCriteria(brief).criteria.map(c => c.id);
+  writeFileSync(join(fixtures, 'implement.json'), JSON.stringify({ output_text: 'The greeting is available.' }));
+  writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify({ pass: true, reason: 'Verified.',
+    criteria: Object.fromEntries(ids.map(id => [id, { status: 'pass', evidence: 'The greeting is available.' }])),
+    audit_findings: { version: 1, findings: [] } }) }));
+  return fixtures;
+}
 
 it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with evidence attached', async workflow => {
   const root = project();
@@ -216,6 +275,7 @@ it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with ev
     try { return JSON.parse(readFileSync(join(path, 'run.json'), 'utf8')).projectDir === join(root, 'source-wt', `brief-${written.digest.slice(0, 12)}`); } catch { return false; }
   })!;
   expect(readFileSync(join(written.evidenceDir!, 'setup.json'), 'utf8')).toContain('\"state\": \"ready\"');
+  expect(JSON.parse(readFileSync(join(run, 'run.json'), 'utf8')).workflowName).toBe(workflow);
   expect(readFileSync(join(run, 'task_brief.md'), 'utf8')).toBe(written.brief);
   expect(readFileSync(join(run, 'brief-writing', 'original.txt'), 'utf8')).toBe(raw);
 });
@@ -246,4 +306,114 @@ it.each(['dirty', 'target_collision', 'authored'])('keeps setup refusals before 
     try { return JSON.parse(readFileSync(join(runRoot, id, 'run.json'), 'utf8')).projectDir.startsWith(root); }
     catch { return false; }
   })).toBe(false);
+});
+
+it('provider failure stops once, is not a reply, and the same command tries again', async () => {
+  const dir = project();
+  const run = vi.fn<Adapter['run']>().mockRejectedValueOnce(new Error('login unavailable'))
+    .mockResolvedValueOnce({ output: JSON.stringify(fields), exitCode: 0, duration_ms: 1 });
+  const first = await writeTaskBrief('write a greeting', options(dir, { run }));
+  expect(first.outcome).toBe('provider_error');
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(readdirSync(first.evidenceDir!).filter(n => n.endsWith('.reply.json'))).toHaveLength(0);
+  expect(readdirSync(first.evidenceDir!).some(n => n.endsWith('.failure.json'))).toBe(true);
+  expect((await writeTaskBrief('write a greeting', options(dir, { run }))).outcome).toBe('ready');
+  expect(run).toHaveBeenCalledTimes(2);
+});
+
+it.each(['absent.txt', '/absolute.txt', ['..', 'outside'].join('/'), 'ignored.txt'])('rejects inputs unavailable in the target: %s', async input => {
+  const dir = project();
+  writeFileSync(join(dir, '.gitignore'), 'ignored.txt');
+  writeFileSync(join(dir, 'ignored.txt'), 'only in source');
+  const adapter = replies([{ ...fields, inputs: [input] }, fields]);
+  const result = await writeTaskBrief('use repository inputs', options(dir, adapter));
+  expect(result.outcome).toBe('ready');
+  expect(adapter.run).toHaveBeenCalledTimes(2);
+  expect(adapter.run.mock.calls[1][0]).toContain(input);
+});
+
+it('a saved preview attaches evidence on a different target without another model call', async () => {
+  const source = project(), target = project();
+  const adapter = replies([fields]);
+  const written = await writeTaskBrief('write a greeting', options(source, adapter));
+  const { attachBriefWritingEvidence } = await import('../src/brief-writer.js');
+  const supplied = await writeTaskBrief(written.brief, options(target, adapter));
+  attachBriefWritingEvidence(target, supplied.brief, target);
+  expect(readFileSync(join(target, 'brief-writing', 'original.txt'), 'utf8')).toBe('write a greeting');
+  expect(adapter.run).toHaveBeenCalledTimes(1);
+});
+
+it.each(['existing_file', 'dirty', 'non_git', 'unborn', 'occupied_output', 'no_task'])('refuses before any model call: %s', async kind => {
+  const dir = project();
+  if (kind === 'non_git') rmSync(join(dir, '.git'), { recursive: true });
+  if (kind === 'unborn') { rmSync(join(dir, '.git'), { recursive: true }); git(dir, ['init', '-q']); }
+  if (kind === 'dirty' || kind === 'existing_file') writeFileSync(join(dir, 'task.md'), '## Acceptance criteria\n1. Done.');
+  if (kind === 'occupied_output') {
+    writeFileSync(join(dir, '.gitignore'), 'ignored');
+    git(dir, ['add', '.gitignore']);
+    git(dir, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'input']);
+  }
+  const engine = join(project(), 'private-fc');
+  const refusalRecord = join(project(), 'refusal.json');
+  const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
+    kind === 'no_task' ? 'brief' : 'quick', ...(kind === 'no_task' ? [] : [...(kind === 'occupied_output' ? ['--task'] : []), kind === 'existing_file' ? 'task.md'
+      : kind === 'occupied_output' ? '---\noutputs: [.gitignore]\n---\nwrite a greeting' : 'write a greeting']),
+    '--adapter', 'mock'], { cwd: dir, encoding: 'utf8',
+    env: { ...process.env, HOME: process.env.HOME, FC_HOME: engine, FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock'), FLOWCREW_LAUNCH_RESULT_PATH: refusalRecord } });
+  expect(child.status, child.stdout + child.stderr).toBe(1);
+  expect(child.stderr).toContain(kind === 'existing_file' ? 'through stdin with -'
+    : kind === 'dirty' ? 'source working tree is dirty' : kind === 'no_task' ? 'Usage: flowcrew brief'
+    : kind === 'occupied_output' ? 'Launch refused before brief writing' : 'committed HEAD');
+  if (kind !== 'no_task') expect(JSON.parse(readFileSync(refusalRecord, 'utf8')).kind).toBe('launch_refused');
+  if (kind === 'no_task') expect(child.stderr).not.toContain('--workflow');
+  expect(() => readdirSync(join(engine, 'brief-writing'))).toThrow();
+  expect(child.stderr).not.toContain('Command failed: git');
+});
+
+it('nonzero provider result has its own CLI outcome and never becomes a reply', () => {
+  const dir = project(), engine = join(project(), 'fc');
+  const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
+    'quick', 'write a greeting', '--adapter', 'mock'], { cwd: dir, encoding: 'utf8',
+    env: { ...process.env, HOME: process.env.HOME, FC_HOME: engine, FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock') } });
+  expect(child.status, child.stdout + child.stderr).toBe(4);
+  expect(child.stderr).toContain('Brief provider call failed');
+  const evidence = join(engine, 'brief-writing', readdirSync(join(engine, 'brief-writing'))[0]);
+  expect(readdirSync(evidence).filter(name => name.endsWith('.reply.json'))).toHaveLength(0);
+});
+
+it('keeps native per-request counters and context before successful-home cleanup', async () => {
+  const { codexRequestEvidence } = await import('../src/adapters/codex.js');
+  const events = [
+    { type: 'session_meta', payload: { base_instructions: { text: 'native base' } } },
+    { type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ text: 'role prompt' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ text: 'task' }] } },
+    { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 5 } } } },
+    { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 5 } } } },
+    { type: 'response_item', payload: { type: 'function_call_output', output: 'tool output' } },
+    { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 210, cached_input_tokens: 100, output_tokens: 15 } } } },
+  ];
+  const record = codexRequestEvidence(events.map(event => JSON.stringify(event)).join('\n')) as any;
+  expect(record.request_count).toBe(2);
+  expect(record.requests.map((request: any) => [request.input_tokens, request.cached_input_tokens, request.output_tokens]))
+    .toEqual([[100, 20, 5], [110, 80, 10]]);
+  expect(JSON.stringify(record.requests[1].context)).toContain('tool output');
+  const adapter = replies([fields]);
+  adapter.run.mockImplementationOnce(async (_p, _r, opts) => {
+    opts.onRequestEvidence?.(record);
+    return { output: JSON.stringify(fields), exitCode: 0, duration_ms: 1 };
+  });
+  const written = await writeTaskBrief('write a greeting', options(project(), adapter));
+  const ledger = readdirSync(written.evidenceDir!).find(n => n.includes('.requests-'))!;
+  expect(JSON.parse(readFileSync(join(written.evidenceDir!, ledger), 'utf8'))).toEqual(record);
+});
+
+it('repository-only Codex preparation omits extension caches while keeping the role and effort', async () => {
+  const { writeCodexConfig } = await import('../src/adapters/codex.js');
+  const home = join(project(), 'native');
+  const role = { name: 'brief_writer', description: 'brief', tools: [], prompt: 'outcome properties', model: 'test-model', reasoning_effort: 'low' };
+  const config = readFileSync(writeCodexConfig(home, role, undefined, false), 'utf8');
+  expect(config).toContain('outcome properties');
+  expect(config).toContain('model_reasoning_effort = "low"');
+  expect(readdirSync(home)).not.toContain('skills');
+  expect(readdirSync(home)).not.toContain('.tmp');
 });

@@ -1,6 +1,7 @@
 /** Pre-admission authorship. No task/run is registered until this returns a brief. */
 import { createHash, randomUUID } from 'node:crypto';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { atomicWrite, mkdirSync } from './engine-fs.js';
 import { z } from 'zod';
@@ -29,16 +30,20 @@ export function composeBrief(original: string, fields: BriefFields): string {
     ['Blocking questions', fields.blocking_questions],
   ];
   // JSON string encoding keeps model strings on one list line; they cannot add headings.
-  return original + sections.map(([heading, items]) =>
+  const generated = sections.map(([heading, items]) =>
     `\n\n## ${heading}\n${items.map((item, i) => `${i + 1}. ${JSON.stringify(item)}`).join('\n')}\n`).join('');
+  // Let the existing parser decide whether the task left a fence open. A single
+  // closing fence changes only the suffix; no retry can repair the fixed prefix.
+  const direct = original + generated;
+  return extractBriefCriteria(direct).criteria.length ? direct : original + '\n\n```\n' + generated;
 }
 const hash = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
-const save = (file: string, value: unknown) => atomicWrite(file, `${JSON.stringify(value, null, 2)}\n`);
+const save = (file: string, value: unknown) => atomicWrite(file, `${JSON.stringify(value, null, 2)}\n`, { durability: 'durable' });
 
 export interface WrittenBrief {
   brief: string;
   digest: string;
-  outcome: 'ready' | 'blocking_questions' | 'invalid';
+  outcome: 'ready' | 'blocking_questions' | 'invalid' | 'provider_error';
   questions: string[];
   reasons: string[];
   evidenceDir?: string;
@@ -64,8 +69,7 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
   const root = join(fcGlobalDir(), 'brief-writing');
   const evidenceDir = join(root, identity);
   mkdirSync(evidenceDir, { recursive: true });
-  atomicWrite(join(evidenceDir, 'original.txt'), original);
-  const adapter = options.adapterInstance ?? await loadAdapterByName(role.adapter ?? options.adapter);
+  atomicWrite(join(evidenceDir, 'original.txt'), original, { durability: 'durable' });
   const defaults = loadEngineDefaults();
   let reasons: string[] = [];
   const finish = (brief: string, outcome: WrittenBrief['outcome'], questions: string[]): WrittenBrief => {
@@ -74,7 +78,16 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
     return { brief, digest, outcome, questions, reasons, evidenceDir };
   };
   // Incomplete attempts are evidence, never a task reservation or a consumed retry.
-  const prior = readdirSync(evidenceDir).filter(name => name.endsWith('.reply.json')).sort();
+  const prior = readdirSync(evidenceDir).filter(name => {
+    if (!name.endsWith('.reply.json')) return false;
+    const stem = name.slice(0, -'.reply.json'.length);
+    if (existsSync(join(evidenceDir, `${stem}.registered.json`))
+        || existsSync(join(evidenceDir, `${stem}.rejected.json`))) return false;
+    const validated = join(evidenceDir, `${stem}.validation.json`);
+    if (!existsSync(validated)) return true;
+    const value = JSON.parse(readFileSync(validated, 'utf8'));
+    return value.reasons.length === 0 && value.questions?.length === 0;
+  }).sort().slice(-1);
   let completed = 0;
   for (let invocation = 0; completed < 3; invocation++) {
     const previous = prior[invocation];
@@ -90,13 +103,21 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
       save(file('invocation.json'), { role: reader, adapter: role.adapter ?? options.adapter,
         prompt, outputSchema: BRIEF_OUTPUT_SCHEMA, startedAt: new Date().toISOString() });
       try {
+        const adapter = options.adapterInstance ?? await loadAdapterByName(role.adapter ?? options.adapter);
         result = await adapter.run(prompt, reader, {
           workDir: project, runDir: evidenceDir, stageId: `brief_writer_${attempt}`,
-          timeout_ms: defaults.default_timeout_ms, outputSchema: BRIEF_OUTPUT_SCHEMA,
+          timeout_ms: defaults.default_timeout_ms, outputSchema: BRIEF_OUTPUT_SCHEMA, includeExtensions: false,
           onInvocationInput: input => save(file(`native-${randomUUID()}.json`), input),
+          onRequestEvidence: record => save(file(`requests-${randomUUID()}.json`), record),
         });
       } catch (error) {
         result = { output: '', exitCode: 1, duration_ms: 0, friendlyError: String(error) };
+      }
+      if (result.exitCode !== 0) {
+        reasons = [`Adapter exit ${result.exitCode}: ${result.friendlyError ?? result.output}`];
+        save(file('failure.json'), result);
+        validation({ reasons, outcome: 'provider_error' });
+        return finish(original, 'provider_error', []);
       }
       save(file('reply.json'), result);
     }
@@ -113,7 +134,8 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
       atomicWrite(file('brief.md'), brief);
       questions = fields.blocking_questions;
       for (const input of fields.inputs) {
-        if (!existsSync(resolve(project, input))) reasons.push(`Input does not exist: ${input}`);
+        const reason = inputPathFailure(project, input);
+        if (reason) reasons.push(reason);
       }
       // Static rehearsal already calls inspectBrief; do not duplicate its findings.
       const { rehearseBrief } = await import('./rehearse.js');
@@ -123,6 +145,7 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
       reasons.push(...rehearsal.findings.filter(f => f.level === 'fail').map(f => f.text));
       validation({ reasons, questions, rehearsal });
     } else validation({ reasons });
+    if (reasons.length || questions.length) save(file('rejected.json'), { reasons, questions });
     // A declared question is never repaired into a guess by another model call.
     if (questions.length) {
       atomicWrite(join(evidenceDir, 'brief.md'), brief);
@@ -130,26 +153,31 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
     }
     if (fields && reasons.length === 0) {
       atomicWrite(join(evidenceDir, 'brief.md'), brief);
-      indexBriefWritingEvidence(project, brief, evidenceDir);
+      indexBriefWritingEvidence(brief, evidenceDir);
       return finish(brief, 'ready', []);
     }
   }
   return finish(original, 'invalid', []);
 }
 
-/** Bind the same evidence to a prepared target as well as its source repository. */
-export function indexBriefWritingEvidence(projectDir: string, brief: string, evidenceDir: string): void {
+/** A preview can be launched on any target: its exact bytes own the evidence. */
+export function indexBriefWritingEvidence(brief: string, evidenceDir: string): void {
   const root = join(fcGlobalDir(), 'brief-writing', 'by-digest');
   mkdirSync(root, { recursive: true });
-  save(join(root, hash(JSON.stringify([realpathSync(resolve(projectDir)), hash(brief)])) + '.json'), { evidenceDir });
+  save(join(root, hash(brief) + '.json'), { evidenceDir });
 }
 
 /** Attach authored evidence before dispatch, also when a saved preview is supplied later. */
-export function attachBriefWritingEvidence(projectDir: string, brief: string, runDir: string): void {
-  const project = realpathSync(resolve(projectDir));
-  const index = join(fcGlobalDir(), 'brief-writing', 'by-digest', hash(JSON.stringify([project, hash(brief)])) + '.json');
+export function attachBriefWritingEvidence(_projectDir: string, brief: string, runDir: string): void {
+  const index = join(fcGlobalDir(), 'brief-writing', 'by-digest', hash(brief) + '.json');
   if (!existsSync(index)) return;
   const { evidenceDir } = JSON.parse(readFileSync(index, 'utf8')) as { evidenceDir: string };
+  // The run now owns these replies. Future commands must start fresh; replay is
+  // exclusively recovery before registration, never a permanent reply cache.
+  for (const name of readdirSync(evidenceDir).filter(name => name.endsWith('.reply.json'))) {
+    const stem = name.slice(0, -'.reply.json'.length);
+    save(join(evidenceDir, `${stem}.registered.json`), { runDir });
+  }
   const dest = join(runDir, 'brief-writing');
   mkdirSync(dest, { recursive: true });
   for (const name of readdirSync(evidenceDir)) {
@@ -166,4 +194,20 @@ export function attachBriefWritingEvidence(projectDir: string, brief: string, ru
       atomicWrite(join(dest, 'stages', id, 'live.log'), readFileSync(log));
     }
   }
+}
+
+/** Git's HEAD tree is exactly what automatic setup checks out. */
+function inputPathFailure(project: string, input: string): string | undefined {
+  const path = resolve(project, input);
+  const rel = relative(project, path);
+  if (isAbsolute(input) || rel === '..' || rel.startsWith(`..${sep}`)) return `Input must stay repository-relative: ${input}`;
+  try {
+    const canonical = relative(project, realpathSync(path));
+    if (canonical === '..' || canonical.startsWith(`..${sep}`)) return `Input resolves outside repository: ${input}`;
+    const tracked = execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD'], {
+      cwd: project, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).split('\0').filter(Boolean);
+    if (tracked.some(name => name === rel || name.startsWith(rel ? `${rel}/` : ''))) return;
+  } catch { /* Missing paths and non-Git inputs cannot exist in the target. */ }
+  return `Input does not exist in the target Git tree: ${input}`;
 }

@@ -5,6 +5,8 @@ export const EXIT_CODE = {
   outcomeUnknown: 2,
   /** Brief writer needs answers; no task or run was launched. */
   briefQuestions: 3,
+  /** No usable provider reply; rerunning starts a fresh call. */
+  briefProviderFailure: 4,
 } as const;
 
 // Status probes (daemon/dashboard status): 0 fresh, 1 unavailable/invalid usage,

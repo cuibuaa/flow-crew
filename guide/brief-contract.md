@@ -18,11 +18,15 @@ The model returns five fields in one fixed schema: outcome `criteria` (nonempty)
 `constraints`, existing-path `inputs`, nonblocking `assumptions`, and `blocking_questions`.
 Code preserves the complete original task as an exact prefix and appends those sections;
 JSON string quoting keeps a model's multiline value inside its own list item. The model
-cannot remove or rewrite the request. Criteria describe result properties; the role must
+cannot remove or rewrite the request. The existing structural parser determines whether
+a closing fence is needed before the generated sections; unmatched task fences cannot
+hide criteria or consume correction retries. Criteria describe result properties; the role must
 not add reports or evidence duties unless requested. No wording filter judges model prose.
 Any blocking question stops launch with exit 3, without guessing or retrying it away.
 
-Generated input references are checked for existence and recorded as prose. Because the
+Generated input references must be repository-relative and present in Git's tracked HEAD
+tree, where the prepared target will read them. Absolute, escaping, missing and ignored-only
+paths use the correction path. The references are recorded as prose. Because the
 original bytes stay first, generated sections do not add leading frontmatter or grant
 input-freezing/output-reuse authority. Author such declarations explicitly when needed.
 The model supplies no workflow field. When `quick` generates a brief and the supplied
@@ -32,7 +36,10 @@ and branch names use the composed digest, never model prose. An authored brief k
 its existing exact-record requirement. Existing workflow choice and gates still apply; research loops still require their authored research block.
 Static rehearsal and preflight validate generated content, with reasons returned for up
 to two correction retries. Authored briefs passed to inspection/setup/rehearsal keep their
-existing missing-contract diagnostics.
+existing missing-contract diagnostics. Failed provider calls stop with exit 4, are not
+replies and consume no correction retry. An exhausted invalid invocation can be rerun
+with fresh attempts; all previous evidence remains. Only valid, unregistered replies
+are replayed after a host stop. Preview evidence follows the composed digest across targets.
 
 ## Engineering and workflow selection
 

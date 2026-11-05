@@ -36,7 +36,8 @@ Commands share [one exit-code table](../src/exit-code.ts): 0 means completed, 1 
 known refusal or failure (including invalid usage), and 2 means the outcome is unknown
 and the request may have taken effect. Inspect recorded state before retrying after 2.
 `brief` and `quick` additionally return 3 when the brief writer has blocking questions;
-no task or run starts, and the printed questions need answers.
+no task or run starts, and the printed questions need answers. Exit 4 means a provider,
+network or login failure produced no usable reply; rerun the same command to try again.
 The status probes `daemon status` and `dashboard status` use a separate contract:
 0 fresh, 1 unavailable or invalid usage, 2 stale, nonresponsive or unverified.
 The `session-push hook` and `wake` frontend contract retains blocking errors as 2.
@@ -68,32 +69,35 @@ Sources: [core diagnostics](../src/cli.ts), [maintenance](../src/cli-doctor.ts),
 `brief "<task text>" --project <repository> [--adapter <name>]` uses the same authorship
 code as `quick`, prints only the exact composed brief on stdout, and prints its SHA-256
 digest and evidence location on stderr. `--task <text>` and stdin `-` preserve alternate
-transports. It never registers or launches a run. Example, from the selected target:
+transports. It never registers or launches a run. Save outside the source repository:
 
 ```bash
-flowcrew brief "Add a greeting command" --project . > task-brief.md
-flowcrew rehearse task-brief.md --project . --static-only
+flowcrew brief "Add a greeting command" --project . > ../task-brief.md
+flowcrew rehearse ../task-brief.md --project . --static-only
 ```
 
 Review the saved bytes, perform the existing `ship-setup` for that exact brief and target,
-then use `flowcrew quick - --project <target> < task-brief.md`. The original raw command
-also reuses its saved reply in the same `FC_HOME` and canonical repository. Quick has no
+then use `flowcrew quick - --project <target> < ../task-brief.md`. The exact composed
+digest locates its evidence in the same `FC_HOME`, regardless of the selected target. Quick has no
 confirmation prompt; it records the composed brief and proceeds through normal admission.
 For authored briefs, a missing/refused exact setup record still refuses launch.
 The brief writer does not select a workflow or declare research settings.
 
 Authorship returns exactly `criteria`, `constraints`, `inputs`, `assumptions`, and
 `blocking_questions`, all string arrays, with at least one criterion. Code checks schema,
-input-path existence, `inspectBrief`, and static rehearsal. Correction calls receive the
+repository-relative input paths against Git's tracked HEAD tree (the target contents), `inspectBrief`, and static rehearsal. Correction calls receive the
 validation reasons. Questions stop immediately with exit 3; exhausted invalid output exits 1.
 `ship-preflight`, `ship-setup`, and `rehearse` continue to check authored briefs and report
 missing criteria themselves.
 
 Before a task is registered, durable evidence lives under `FC_HOME/brief-writing/`:
-original bytes, each invocation, complete adapter reply and usage, and per-attempt
+original bytes, each invocation, complete adapter reply and usage, native per-request input/cached/output counters
+and context where the adapter exposes them, and per-attempt
 validation/composition. A stopped incomplete invocation is retried on the next identical
-command; completed replies are revalidated without another call. Three completed invalid
-replies exhaust that input; revise the task to correct it. On launch the evidence records
+command. Only a valid reply that has not reached run registration is replayed and
+revalidated. Three invalid replies stop this invocation; the same command starts fresh
+attempts next time and retains all earlier evidence. Provider failures stop immediately
+with exit 4, are saved as failures rather than replies, and consume no correction retry. On launch the evidence records
 are copied into the run's `brief-writing/` directory before dispatch. Native credential
 homes are excluded. Repository changes do not silently regenerate a reviewed brief;
 change the task text to request a new composition. Reported usage covers this separate
@@ -109,16 +113,19 @@ Only when it generates a brief and the supplied project has no exact setup recor
 `quick` prepares `<source>-wt/brief-<first-12-digest-characters>` beside the source,
 on branch `brief-<first-12-digest-characters>` from `HEAD`. This follows the sibling
 worktree convention and gives reruns a stable identity without interpreting task prose.
-It uses the same `ship-setup` implementation, including baseline validation and refusals;
-a dirty source also refuses, because its uncommitted bytes would not reach the target.
+It uses the same `ship-setup` implementation, including baseline validation and refusals.
+A dirty, non-Git or unborn source refuses before any model call, because automatic
+setup needs committed source bytes. Refusals are recorded like other launch refusals.
 The composed brief and setup receipt are retained before run registration. Existing
 matching setup records are used directly. Authored briefs keep the existing setup
 requirement and cost no brief-writing model call. No confirmation prompt is added.
 
 ## Launch
 
-`quick <brief-path|task-text|->` accepts a path, joined positional text, `--task <text>` or
-stdin `-`. When `extractBriefCriteria` finds no criteria, the read-only `brief_writer`
+`quick <task-text|->` accepts joined positional text, `--task <text>` or stdin `-`.
+Positionals are task text, not a path, on earlier versions as well. A single positional
+that names an existing file refuses before any model call; use `quick - < file` to send
+its exact bytes. When `extractBriefCriteria` finds no criteria, the read-only `brief_writer`
 authors structured fields in one model call (at most two correction retries). Code appends
 sections to the unchanged original bytes. Existing criteria skip authorship entirely.
 Other preflight findings are advisory and printed before project/run mutation.

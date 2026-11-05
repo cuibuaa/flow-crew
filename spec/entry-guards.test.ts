@@ -453,12 +453,11 @@ describe('deferred continuation snapshots', () => {
 });
 
 describe('quick and operator entry behavior', () => {
-  it('stops invalid brief writing or a wrong digest before project writes', () => {
+  it('stops an unprepared raw source or a wrong digest before project writes', () => {
     const isolated = cliFixture();
     const plain = runQuickSync(isolated, ['quick', 'Fix the race', '--project', isolated.project, '--adapter', 'mock']);
     expect(plain.status).toBe(1);
-    expect(plain.stderr).toContain('Brief writing stopped after at most two retries');
-    expect(plain.stderr).toContain('Invalid brief JSON');
+    expect(plain.stderr).toContain('automatic setup requires a Git working tree with a committed HEAD');
     expect(`${plain.stdout}${plain.stderr}`).not.toContain('--acknowledge-brief-warnings=');
     expect(readProjectBrief(isolated.project)).toBeUndefined();
 

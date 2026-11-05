@@ -342,7 +342,7 @@ describe('engine behaviour contracts', () => {
     const rehearsal = await rehearseBriefIsolated(emptyBrief, {
       projectDir: temporaryRoot(), label: 'empty-criteria.md', render: false,
     });
-    const launch = sourceCli(['quick', emptyBrief, '--project', PROJECT_ROOT, '--no-campaign', '--adapter', 'mock'], temporaryRoot());
+    const launch = sourceCli(['quick', emptyBrief, '--project', temporaryRoot(), '--no-campaign', '--adapter', 'mock'], temporaryRoot());
     expect(substantive.criteria).toHaveLength(1);
     expect(hyphenated.criteria).toHaveLength(1);
     expect(illustrative.criteria).toHaveLength(0);
@@ -353,8 +353,7 @@ describe('engine behaviour contracts', () => {
     expect(admission.pass).toBe(false);
     expect(admission.errors).toContainEqual({ code: 'criteria_missing', field: 'criteria', message: 'brief_criteria.json contains zero criteria; dispatch cannot prove coverage' });
     expect(launch.status).toBe(1);
-    expect(launch.stderr).toContain('Brief writing stopped after at most two retries');
-    expect(launch.stderr).toContain('Invalid brief JSON');
+    expect(launch.stderr).toContain('automatic setup requires a Git working tree with a committed HEAD');
   });
 
   it('preserves uncaptured dependency preimages and still removes proven-absent paths', { timeout: 30_000 }, async () => {

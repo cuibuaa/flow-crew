@@ -42,7 +42,7 @@ export const CLI_COMMANDS: Record<string, Command> = {
     'campaign-context': { equalsOnly: true, choices: ['inherit', 'skip'] },
     'acknowledge-brief-warnings': { optional: true },
     timeout: { refusal: 'The --timeout run override was removed; edit the engine config/defaults.yaml::default_timeout_ms instead.' },
-  }, '<brief-path|task-text|->'),
+  }, '<task-text|->'),
   status: command({ ...flags('all details'), ...values('project') }),
   list: command({ limit: count('10') }),
   state: command({ ...values('project run'), ...flags('summary prompts') }),
