@@ -470,7 +470,7 @@ it.each([
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
     command, ...(kind === 'existing_file' ? [task] : ['--task', task]),
     '--adapter', kind === 'unknown_adapter' ? 'nosuch' : kind === 'missing_adapter' ? 'codex' : 'mock', ...extra],
-    { cwd: dir, env, encoding: 'utf8' });
+    { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8' });
   expect(child.status, child.stdout + child.stderr).toBe(1);
   const hint = kind === 'unknown_workflow' ? 'Workflow not found: nosuch'
     : kind === 'direct_research' ? 'direct cannot run the research loop'
@@ -506,7 +506,7 @@ it('two real brief commands each retain a fresh provider reply', () => {
     NODE_OPTIONS: `--require=${shim}`, MOCK_FIXTURE_DIR: root };
   for (let i = 0; i < 2; i++) {
     const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
-      'brief', 'write a greeting', '--adapter', 'mock'], { cwd: dir, env, encoding: 'utf8' });
+      'brief', 'write a greeting', '--adapter', 'mock'], { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8' });
     expect(child.status, child.stderr).toBe(0);
   }
   const evidence = join(engine, 'brief-writing', readdirSync(join(engine, 'brief-writing')).find(n => n !== 'by-digest')!);
@@ -514,7 +514,7 @@ it('two real brief commands each retain a fresh provider reply', () => {
   // A cleanly finished preview is not an interrupted quick reply either.
   mockShim(root, { ...fields, blocking_questions: ['Which greeting language?'] });
   const raw = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
-    'quick', 'write a greeting', '--adapter', 'mock'], { cwd: dir, env, encoding: 'utf8' });
+    'quick', 'write a greeting', '--adapter', 'mock'], { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8' });
   expect(raw.status, raw.stdout + raw.stderr).toBe(3);
   expect(readdirSync(evidence).filter(n => n.endsWith('.reply.json'))).toHaveLength(3);
 });
