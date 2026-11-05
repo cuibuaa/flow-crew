@@ -1,6 +1,6 @@
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, existsSync, symlinkSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -105,7 +105,8 @@ it('revalidation preserves the original validation evidence', async () => {
   expect(later.outcome).toBe('ready');
   expect(adapter.run).toHaveBeenCalledTimes(4);
   expect(records.map(name => readFileSync(join(first.evidenceDir!, name), 'utf8'))).toEqual(bytes);
-  expect(readdirSync(first.evidenceDir!).filter(name => name.endsWith('.reply.json'))).toHaveLength(4);
+  expect(later.evidenceDir).not.toBe(first.evidenceDir);
+  expect(readdirSync(first.evidenceDir!).filter(name => name.endsWith('.reply.json'))).toHaveLength(3);
 });
 
 it('existing admission and rehearsal failures use the same correction path', async () => {
@@ -146,9 +147,11 @@ it('quick prints blocking questions and exits 3 without creating a run', async (
 it('brief prints the shared composition and digest without launching', async () => {
   const dir = project();
   const written = await writeTaskBrief('write a greeting', options(dir, replies([fields])));
+  const shim = mockShim(project());
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
     'brief', 'write a greeting', '--project', dir, '--adapter', 'mock'], { cwd: dir, encoding: 'utf8',
-    env: { ...process.env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock') } });
+    env: { ...process.env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock'),
+      NODE_OPTIONS: `--require=${shim}`, MOCK_FIXTURE_DIR: dir } });
   expect(child.status, child.stdout + child.stderr).toBe(0);
   expect(child.stdout).toBe(written.brief);
   expect(child.stderr).toContain(written.digest);
@@ -191,14 +194,19 @@ it.each(['provider', 'reply', 'setup'])('host stop at %s reruns the same quick c
   git(dir, ['init', '-q']);
   git(dir, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'fixture']);
   const engine = join(root, 'fc'); mkdirSync(engine);
-  const fixtures = launchFixtures(root, composeBrief('write a greeting', fields));
-  const shim = mockShim(root, fields, boundary);
+  const sub = join(dir, 'sub'); mkdirSync(sub);
+  writeFileSync(join(sub, 'foo.txt'), 'tracked input');
+  git(dir, ['add', 'sub/foo.txt']);
+  git(dir, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'input']);
+  const inputFields = { ...fields, inputs: ['sub/foo.txt'] };
+  const fixtures = launchFixtures(root, composeBrief('write a greeting', inputFields));
+  const shim = mockShim(root, inputFields, boundary);
   const env = { ...process.env, HOME: process.env.HOME, FC_HOME: engine,
     FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock'), MOCK_FIXTURE_DIR: fixtures, NODE_OPTIONS: `--require=${shim}`,
     CODEX_THREAD_ID: 'fixture-session', CLAUDE_CODE_SESSION_ID: undefined, FC_TASKS_ROOT: join(root, 'ledger') };
   const args = ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
     'quick', 'write a greeting', '--adapter', 'mock'];
-  const child = spawn(process.execPath, args, { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, stdio: 'ignore' });
+  const child = spawn(process.execPath, args, { cwd: sub, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, stdio: 'ignore' });
   try {
     for (let i = 0; i < 400; i++) {
       try { if (readFileSync(join(root, 'stopped'), 'utf8')) break; } catch { /* wait for boundary */ }
@@ -213,13 +221,15 @@ it.each(['provider', 'reply', 'setup'])('host stop at %s reruns the same quick c
   const evidence = join(engine, 'brief-writing', readdirSync(join(engine, 'brief-writing')).find(n => n !== 'by-digest')!);
   expect(readFileSync(join(evidence, 'original.txt'), 'utf8')).toBe('write a greeting');
   writeFileSync(join(root, 'release'), 'continue');
-  const rerun = spawnSync(process.execPath, args, { cwd: dir,
+  const rerun = spawnSync(process.execPath, args, { cwd: sub,
     env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8', timeout: 25000 });
   expect(rerun.status, rerun.stdout + rerun.stderr).toBe(0);
   const runs = readdirSync(join(engine, 'runs'));
   expect(runs).toHaveLength(1);
   const run = JSON.parse(readFileSync(join(engine, 'runs', runs[0], 'run.json'), 'utf8'));
   expect(run.status).toBe('complete');
+  expect(run.projectDir).toBe(join(root, 'source-wt', readdirSync(join(root, 'source-wt'))[0]));
+  expect(readFileSync(join(run.projectDir, 'sub/foo.txt'), 'utf8')).toBe('tracked input');
   expect(readdirSync(join(root, 'source-wt'))).toHaveLength(1);
   expect(readdirSync(evidence).filter(n => n.endsWith('.reply.json'))).toHaveLength(1);
   expect(run.taskDescription).toContain('write a greeting');
@@ -418,4 +428,102 @@ it('an invalid reply stopped before validation cannot spend the rerun retry budg
   expect(rerun.outcome).toBe('invalid');
   expect(adapter.run).toHaveBeenCalledTimes(3);
   expect(readdirSync(first.evidenceDir!).filter(n => n.endsWith('.reply.json'))).toHaveLength(6);
+});
+
+// These CLI checks use a private engine and assert zero invocation evidence.
+it.each([
+  { command: 'quick', kind: 'unknown_workflow' },
+  { command: 'quick', kind: 'direct_research' },
+  { command: 'brief', kind: 'occupied_output' },
+  { command: 'brief', kind: 'direct_research' },
+  { command: 'quick', kind: 'unknown_adapter' },
+  { command: 'quick', kind: 'missing_adapter' },
+  { command: 'quick', kind: 'continuation' },
+  { command: 'brief', kind: 'existing_file' },
+])('$command refuses $kind at no model cost', ({ command, kind }) => {
+  const dir = project(), root = project(), engine = join(root, 'fc');
+  const record = join(root, 'refusal.json');
+  let task = 'write a greeting';
+  const extra: string[] = [];
+  if (kind === 'unknown_workflow') extra.push('--workflow', 'nosuch');
+  if (kind === 'direct_research') { task = `---\n${command === 'brief' ? 'workflow: direct\n' : ''}research:\n  baseline: 0\n---\nwrite a greeting`;
+    if (command === 'quick') extra.push('--workflow', 'direct'); }
+  if (kind === 'occupied_output') {
+    writeFileSync(join(dir, 'occupied.txt'), 'existing');
+    git(dir, ['add', 'occupied.txt']);
+    git(dir, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'input']);
+    task = '---\noutputs: [occupied.txt]\n---\nwrite a greeting';
+  }
+  if (kind === 'existing_file') { task = 'task.md'; writeFileSync(join(dir, task), 'raw file'); }
+  if (kind === 'continuation') {
+    const run = join(engine, 'runs', 'stored'); mkdirSync(run, { recursive: true });
+    writeFileSync(join(run, 'task_brief.md'), task);
+    extra.push('--existing-run-id', 'stored');
+  }
+  const env = { ...process.env, FC_HOME: engine, FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock'),
+    FLOWCREW_LAUNCH_RESULT_PATH: record };
+  if (kind === 'missing_adapter') {
+    const bin = join(root, 'bin'); mkdirSync(bin);
+    symlinkSync('/usr/bin/git', join(bin, 'git'));
+    env.PATH = bin;
+  }
+  const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
+    command, ...(kind === 'existing_file' ? [task] : ['--task', task]),
+    '--adapter', kind === 'unknown_adapter' ? 'nosuch' : kind === 'missing_adapter' ? 'codex' : 'mock', ...extra],
+    { cwd: dir, env, encoding: 'utf8' });
+  expect(child.status, child.stdout + child.stderr).toBe(1);
+  const hint = kind === 'unknown_workflow' ? 'Workflow not found: nosuch'
+    : kind === 'direct_research' ? 'direct cannot run the research loop'
+    : kind === 'occupied_output' ? 'already occupied'
+    : kind === 'unknown_adapter' ? 'Unknown adapter "nosuch"'
+    : kind === 'missing_adapter' ? 'npm i -g @openai/codex'
+    : kind === 'continuation' ? 'brief_criteria_missing' : 'flowcrew brief - < file';
+  expect(child.stdout + child.stderr).toContain(hint);
+  expect(existsSync(join(engine, 'brief-writing'))).toBe(false);
+  if (command === 'quick') expect(JSON.parse(readFileSync(record, 'utf8')).kind).toBe('launch_refused');
+  if (kind === 'existing_file') expect(existsSync(record)).toBe(false);
+});
+
+it('brief always calls the model again while raw quick recovery is bound to HEAD', async () => {
+  const dir = project();
+  const adapter = replies([fields]);
+  const first = await writeTaskBrief('write a greeting', options(dir, adapter));
+  // Without preview opt-out, a valid interrupted reply is recovered at zero cost.
+  await writeTaskBrief('write a greeting', options(dir, adapter));
+  expect(adapter.run).toHaveBeenCalledTimes(1);
+  await writeTaskBrief('write a greeting', { ...options(dir, adapter), replay: false });
+  expect(adapter.run).toHaveBeenCalledTimes(2);
+  git(dir, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'later HEAD']);
+  const later = await writeTaskBrief('write a greeting', options(dir, adapter));
+  expect(adapter.run).toHaveBeenCalledTimes(3);
+  expect(later.evidenceDir).not.toBe(first.evidenceDir);
+});
+
+it('two real brief commands each retain a fresh provider reply', () => {
+  const dir = project(), root = project(), engine = join(root, 'fc');
+  const shim = mockShim(root);
+  const env = { ...process.env, FC_HOME: engine, FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock'),
+    NODE_OPTIONS: `--require=${shim}`, MOCK_FIXTURE_DIR: root };
+  for (let i = 0; i < 2; i++) {
+    const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
+      'brief', 'write a greeting', '--adapter', 'mock'], { cwd: dir, env, encoding: 'utf8' });
+    expect(child.status, child.stderr).toBe(0);
+  }
+  const evidence = join(engine, 'brief-writing', readdirSync(join(engine, 'brief-writing')).find(n => n !== 'by-digest')!);
+  expect(readdirSync(evidence).filter(n => n.endsWith('.reply.json'))).toHaveLength(2);
+  // A cleanly finished preview is not an interrupted quick reply either.
+  mockShim(root, { ...fields, blocking_questions: ['Which greeting language?'] });
+  const raw = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
+    'quick', 'write a greeting', '--adapter', 'mock'], { cwd: dir, env, encoding: 'utf8' });
+  expect(raw.status, raw.stdout + raw.stderr).toBe(3);
+  expect(readdirSync(evidence).filter(n => n.endsWith('.reply.json'))).toHaveLength(3);
+});
+
+it('CLI guide counts the dispatched named routes', () => {
+  const cli = readFileSync(join(process.cwd(), 'src/cli.ts'), 'utf8');
+  const routes = [...cli.matchAll(/^  case '([^']+)':/gm)].map(match => match[1]);
+  const early = [...cli.matchAll(/bootstrapArgs\[0\] === '([^']+)'/g)].map(match => match[1])
+    .filter(route => !['session-push', 'prune'].includes(route));
+  const named = new Set([...routes, ...early].filter(route => !route.startsWith('-')));
+  expect(readFileSync(join(process.cwd(), 'guide/cli.md'), 'utf8')).toContain(`has ${named.size} named command routes`);
 });

@@ -54,6 +54,8 @@ export interface BriefWriterOptions {
   /** Tests use the same public adapter boundary as production. */
   adapterInstance?: Adapter;
   role?: AgentConfig;
+  /** Preview is always fresh; only interrupted quick commands may replay. */
+  replay?: boolean;
 }
 
 export async function writeTaskBrief(original: string, options: BriefWriterOptions): Promise<WrittenBrief> {
@@ -65,7 +67,12 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
   const role = options.role ?? parseAgent(parse(readFileSync(join(engineConfigDir, 'agents', 'brief_writer.yaml'), 'utf8')), false);
   // Read-only is a capability of this step, even if an operator edits the role's tools.
   const reader = { ...role, tools: [] };
-  const identity = hash(JSON.stringify([project, original, reader, role.adapter ?? options.adapter, BRIEF_OUTPUT_SCHEMA]));
+  const adapterName = role.adapter ?? options.adapter;
+  // Configuration errors are refusals, not failed provider attempts. Resolve
+  // before creating invocation evidence or entering the provider-error catch.
+  const adapter = options.adapterInstance ?? await loadAdapterByName(adapterName);
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim();
+  const identity = hash(JSON.stringify([project, head, original, reader, adapterName, BRIEF_OUTPUT_SCHEMA]));
   const root = join(fcGlobalDir(), 'brief-writing');
   const evidenceDir = join(root, identity);
   mkdirSync(evidenceDir, { recursive: true });
@@ -78,11 +85,13 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
     return { brief, digest, outcome, questions, reasons, evidenceDir };
   };
   // Incomplete attempts are evidence, never a task reservation or a consumed retry.
-  const prior = readdirSync(evidenceDir).filter(name => {
+  const prior = (options.replay === false ? [] : readdirSync(evidenceDir)).filter(name => {
     if (!name.endsWith('.reply.json')) return false;
     const stem = name.slice(0, -'.reply.json'.length);
     if (existsSync(join(evidenceDir, `${stem}.registered.json`))
         || existsSync(join(evidenceDir, `${stem}.rejected.json`))) return false;
+    const invocation = join(evidenceDir, `${stem}.invocation.json`);
+    if (existsSync(invocation) && JSON.parse(readFileSync(invocation, 'utf8')).replay === false) return false;
     const validated = join(evidenceDir, `${stem}.validation.json`);
     if (!existsSync(validated)) return true;
     const value = JSON.parse(readFileSync(validated, 'utf8'));
@@ -101,9 +110,8 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
       const prompt = `Read the repository to resolve the task. Return exactly the supplied JSON schema.\nOriginal task (JSON string, authoritative):\n${JSON.stringify(original)}\n`
         + `Previous validation reasons: ${JSON.stringify(reasons)}`;
       save(file('invocation.json'), { role: reader, adapter: role.adapter ?? options.adapter,
-        prompt, outputSchema: BRIEF_OUTPUT_SCHEMA, startedAt: new Date().toISOString() });
+        prompt, replay: options.replay !== false, outputSchema: BRIEF_OUTPUT_SCHEMA, startedAt: new Date().toISOString() });
       try {
-        const adapter = options.adapterInstance ?? await loadAdapterByName(role.adapter ?? options.adapter);
         result = await adapter.run(prompt, reader, {
           workDir: project, runDir: evidenceDir, stageId: `brief_writer_${attempt}`,
           timeout_ms: defaults.default_timeout_ms, outputSchema: BRIEF_OUTPUT_SCHEMA,

@@ -864,8 +864,8 @@ async function cmdQuick(preview = false) {
   if (!task && parsed.positionals.length) {
     if (parsed.positionals.length === 1 && existsSync(resolve(parsed.positionals[0]))
         && statSync(resolve(parsed.positionals[0])).isFile()) {
-      const refusal = 'Positional arguments are task text. Send an existing file through stdin with -: flowcrew quick - < file';
-      recordLaunchRefusal(refusal);
+      const refusal = `Positional arguments are task text. Send an existing file through stdin with -: flowcrew ${preview ? 'brief' : 'quick'} - < file`;
+      if (!preview) recordLaunchRefusal(refusal);
       console.error(refusal);
       process.exitCode = EXIT_CODE.failed;
       return;
@@ -923,19 +923,27 @@ async function cmdQuick(preview = false) {
   // Refuse source facts before buying authorship. Setup still owns every target
   // and baseline check once the composed digest supplies its identity.
   const { extractBriefCriteria } = await import('./brief-criteria.js');
-  if (!preview && !existingRunId && extractBriefCriteria(task).criteria.length === 0) {
+  if (!existingRunId && extractBriefCriteria(task).criteria.length === 0) {
     let refusal: string | undefined;
     try {
       const git = (args: string[]) => execFileSync('git', args, {
         cwd: projectDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
       });
-      if (git(['rev-parse', '--is-inside-work-tree']).trim() !== 'true') throw new Error('not a worktree');
+      projectDir = git(['rev-parse', '--show-toplevel']).trim();
       git(['rev-parse', '--verify', 'HEAD']);
       if (git(['status', '--porcelain', '--untracked-files=normal']).length) {
         refusal = 'Launch refused: source working tree is dirty. Commit or remove source changes before automatic setup.';
       }
     } catch {
       refusal = 'Launch refused: automatic setup requires a Git working tree with a committed HEAD.';
+    }
+    if (!refusal) {
+      const { parseBriefFrontmatter, autoSelectedWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
+      const route = autoSelectedWorkflow(parseBriefFrontmatter(task), workflowExplicit ? workflow : undefined);
+      if (route.error) refusal = `Launch refused: ${route.error}.`;
+      else if (!existsSync(join(engineConfigDir, 'workflows', `${route.workflow}.yaml`))) {
+        refusal = `Workflow not found: ${route.workflow}.yaml`;
+      }
     }
     if (!refusal) {
       const { rehearseBrief } = await import('./rehearse.js');
@@ -953,11 +961,22 @@ async function cmdQuick(preview = false) {
     }
   }
   const { writeTaskBrief } = await import('./brief-writer.js');
-  const written = await writeTaskBrief(task, {
-    projectDir, adapter: adapter || loadEngineDefaults().adapter,
-  });
-  if (written.evidenceDir) console.error(`Brief writing evidence: ${written.evidenceDir}`);
-  if (written.outcome !== 'ready') {
+  let written: import('./brief-writer.js').WrittenBrief | undefined;
+  if (!existingRunId) {
+    try {
+      written = await writeTaskBrief(task, {
+        projectDir, adapter: adapter || loadEngineDefaults().adapter, replay: !preview,
+      });
+    } catch (error) {
+      const refusal = `Brief writing refused: ${error instanceof Error ? error.message : String(error)}`;
+      if (!preview) recordLaunchRefusal(refusal);
+      console.error(refusal);
+      process.exitCode = EXIT_CODE.failed;
+      return;
+    }
+  }
+  if (written?.evidenceDir) console.error(`Brief writing evidence: ${written.evidenceDir}`);
+  if (written && written.outcome !== 'ready') {
     console.error(written.outcome === 'blocking_questions'
       ? `Brief needs answers:\n${written.questions.map(q => `- ${q}`).join('\n')}`
       : written.outcome === 'provider_error' ? `Brief provider call failed; rerun to try again:\n${written.reasons.join('\n')}`
@@ -966,10 +985,10 @@ async function cmdQuick(preview = false) {
       : written.outcome === 'provider_error' ? EXIT_CODE.briefProviderFailure : EXIT_CODE.failed;
     return;
   }
-  task = written.brief;
+  if (written) task = written.brief;
   if (preview) {
     process.stdout.write(task);
-    console.error(`Brief digest: ${written.digest}`);
+    console.error(`Brief digest: ${written!.digest}`);
     return;
   }
 
@@ -1084,7 +1103,7 @@ async function cmdQuick(preview = false) {
   if (!initializedContinuation) {
     const { inspectShipSetupRecord } = await import('./ship-setup-record.js');
     let setup = inspectShipSetupRecord(projectDir, task);
-    if (written.evidenceDir && setup.state === 'missing') {
+    if (written?.evidenceDir && setup.state === 'missing') {
       // A generated brief owns a deterministic isolated target, never the source tree.
       const sourceDir = realpathSync(projectDir);
       const name = `brief-${written.digest.slice(0, 12)}`;

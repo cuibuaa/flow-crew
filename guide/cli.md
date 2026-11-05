@@ -9,8 +9,9 @@ synopses are syntax references, not recipes to run without selecting real identi
 
 ## Dispatch and help
 
-The current dispatcher has 29 named command routes, including the early `fc_tasks`,
-`plan-check` and `state` paths. Bare invocation, `--help`, `-h` print top-level help;
+The current dispatcher has 28 named command routes, including the early `fc_tasks`,
+`plan-check`, `state` and `clean` paths (excluding the legacy `session-push` entry
+and `prune` alias). Bare invocation, `--help`, `-h` print top-level help;
 `version`, `--version`, `-v` print package version. Unknown commands exit 1. Command help is generated from the same option tables as the parser; `--help` and `-h` return before any engine operation.
 
 | Command | Question answered |
@@ -69,7 +70,8 @@ Sources: [core diagnostics](../src/cli.ts), [maintenance](../src/cli-doctor.ts),
 `brief "<task text>" --project <repository> [--adapter <name>]` uses the same authorship
 code as `quick`, prints only the exact composed brief on stdout, and prints its SHA-256
 digest and evidence location on stderr. `--task <text>` and stdin `-` preserve alternate
-transports. It never registers or launches a run. Save outside the source repository:
+transports. `brief <existing-file>` refuses with a `flowcrew brief - < file` hint.
+It never registers or launches a run. Save outside the source repository:
 
 ```bash
 flowcrew brief "Add a greeting command" --project . > ../task-brief.md
@@ -92,15 +94,15 @@ missing criteria themselves.
 
 Before a task is registered, durable evidence lives under `FC_HOME/brief-writing/`:
 original bytes, each invocation, complete adapter reply and usage, native per-request input/cached/output counters
-and context where the adapter exposes them, and per-attempt
+and context (Codex rollout and Claude message usage), and per-attempt
 validation/composition. A stopped incomplete invocation is retried on the next identical
 command. Only a valid reply that has not reached run registration is replayed and
 revalidated. Three invalid replies stop this invocation; the same command starts fresh
 attempts next time and retains all earlier evidence. Provider failures stop immediately
 with exit 4, are saved as failures rather than replies, and consume no correction retry. On launch the evidence records
 are copied into the run's `brief-writing/` directory before dispatch. Native credential
-homes are excluded. Repository changes do not silently regenerate a reviewed brief;
-change the task text to request a new composition. Reported usage covers this separate
+homes are excluded. `brief` always requests a fresh composition. Raw `quick` recovery
+is bound to the source HEAD as well as the task; a later commit starts fresh attempts. Reported usage covers this separate
 pre-admission step; workflow token totals retain their existing meaning.
 
 For a one-command launch from a clean Git source, use:
@@ -110,12 +112,14 @@ flowcrew quick "Add a greeting command" --project .
 ```
 
 Only when it generates a brief and the supplied project has no exact setup record,
-`quick` prepares `<source>-wt/brief-<first-12-digest-characters>` beside the source,
+`quick` prepares `<source>-wt/brief-<first-12-digest-characters>` beside the source repository top level,
 on branch `brief-<first-12-digest-characters>` from `HEAD`. This follows the sibling
 worktree convention and gives reruns a stable identity without interpreting task prose.
 It uses the same `ship-setup` implementation, including baseline validation and refusals.
 A dirty, non-Git or unborn source refuses before any model call, because automatic
-setup needs committed source bytes. Refusals are recorded like other launch refusals.
+setup needs committed source bytes. Unknown workflows, incompatible workflow overrides
+and declared static failures also refuse before authorship; `brief` shares these checks.
+Missing or unknown adapters refuse with exit 1 before the first attempt. Refusals are recorded like other launch refusals.
 The composed brief and setup receipt are retained before run registration. Existing
 matching setup records are used directly. Authored briefs keep the existing setup
 requirement and cost no brief-writing model call. No confirmation prompt is added.

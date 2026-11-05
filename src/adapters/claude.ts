@@ -10,7 +10,7 @@ import { execWithStdin } from './base.js';
 import { isRetryableAdapterFailure } from './failure.js';
 import { providerDiagnosticReason, providerFailureFromDiagnostic } from '../provider-result.js';
 import { NativeEventSummary, normalizeNativeEvent } from './native-events.js';
-import { NativeUsageAccumulator, sumInvocationUsage, type NativeInvocationUsage } from '../invocation-usage.js';
+import { NativeUsageAccumulator, normalizeNativeUsage, sumInvocationUsage, type NativeInvocationUsage } from '../invocation-usage.js';
 import { generationCompatibleSchema } from '../reality-gate/checks/json-schema-match.js';
 import { AdapterParameterRepair, CLI_BUILTIN_DEFAULT, diagnoseAdapterFailure, resolveAdapterCapabilityIdentity,
   type NativeParameterRejection } from './diagnose.js';
@@ -147,6 +147,11 @@ export class ClaudeAdapter implements Adapter {
           transport: { kind: 'request', payload: JSON.stringify({ executable: 'claude', argv: args, stdin: invocationPrompt, appendedSystemPrompt: role.prompt, model, effort }) } });
         } catch (error) { inputCaptureError = error; }
       };
+      const requestContext: unknown[] = [
+        { role: 'system', content: role.prompt }, { role: 'user', content: invocationPrompt },
+      ];
+      const requests = new Map<string, { input_tokens?: number; cached_input_tokens?: number;
+        cache_creation_input_tokens?: number; output_tokens?: number; context: unknown[] }>();
       let carry = '';
       let eventCount = 0;
       let rejected: NativeParameterRejection | undefined;
@@ -162,7 +167,19 @@ export class ClaudeAdapter implements Adapter {
         summary.observe(normalized);
         if (normalized.sessionId) sessionId = normalized.sessionId;
         if (event.type === 'system' && event.subtype === 'init') captureInput(normalized.model);
-        if (event.type === 'assistant') usage.observe({ usage: event.message?.usage, id: event.message?.id });
+        if (event.type === 'assistant') {
+          usage.observe({ usage: event.message?.usage, id: event.message?.id });
+          if (opts.onRequestEvidence && event.message?.usage) {
+            const counters = normalizeNativeUsage(event.message.usage);
+            const id = event.message.id ?? `event-${eventCount}`;
+            requests.set(id, { input_tokens: counters.tokens_in, cached_input_tokens: counters.tokens_cached,
+              cache_creation_input_tokens: counters.tokens_cache_created, output_tokens: counters.tokens_out,
+              context: requests.get(id)?.context ?? [...requestContext] });
+          }
+        }
+        if (opts.onRequestEvidence && (event.type === 'assistant' || event.type === 'user')) {
+          requestContext.push({ role: event.type, content: event.message?.content });
+        }
         if (event.type === 'result') {
           // Tokens describe this call; cost is a session total. An unknown
           // baseline cannot become a zero-cost continuation.
@@ -200,6 +217,12 @@ export class ClaudeAdapter implements Adapter {
         if (killTimer) clearTimeout(killTimer);
         captureInput();
       }
+      opts.onRequestEvidence?.({ source: 'claude_stream', request_count: requests.size,
+        requests: [...requests.values()],
+        // Stream messages expose counters and visible context, not the CLI's
+        // own system instructions/tool definitions. Do not invent attribution.
+        native_context_unavailable: true,
+      });
       if (inputCaptureError !== undefined) throw inputCaptureError;
 
       // Only our own post-result SIGKILL can turn a failed close into success.

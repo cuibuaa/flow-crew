@@ -10,7 +10,8 @@ an illustrative implementation.
 
 `flowcrew quick "<plain task>"` writes missing criteria using the configured, read-only
 `brief_writer` role before the existing admission path. `flowcrew brief "<plain task>"`
-prints the same composed bytes and digest for review without launching. An existing
+prints composed bytes and digest for review without launching; each preview makes a fresh
+call. Both commands check source facts and static declarations before authorship. An existing
 extractable contract skips the model. See [CLI](cli.md#write-a-brief-before-running)
 for saving, setup, retry evidence and exit codes.
 

@@ -194,3 +194,22 @@ const fs=require('node:fs');process.stdin.resume();process.stdin.on('end',()=>{
     expect(parseStreamJsonToText(codex)).toBe(codex);
   });
 });
+
+it('ClaudeAdapter emits per-request counters once per message through the shared hook', async () => {
+  const records: any[] = [];
+  const first = { type: 'assistant', message: { id: 'one', content: [{ type: 'text', text: 'reading' }],
+    usage: { input_tokens: 10, cache_read_input_tokens: 20, cache_creation_input_tokens: 3, output_tokens: 2 } } };
+  const second = { type: 'assistant', message: { id: 'two', content: [{ type: 'text', text: 'done' }],
+    usage: { input_tokens: 15, cache_read_input_tokens: 30, cache_creation_input_tokens: 0, output_tokens: 4 } } };
+  const result = await invoke(jsonl(first, first,
+    { type: 'user', message: { content: [{ type: 'tool_result', content: 'tracked repository input' }] } }, second,
+    { ...terminal('done'), usage: { input_tokens: 25, cache_read_input_tokens: 50, cache_creation_input_tokens: 3, output_tokens: 6 } }),
+  { split: true, opts: { onRequestEvidence: record => records.push(record) } });
+  expect(result.exitCode).toBe(0);
+  expect(records).toHaveLength(1);
+  expect(records[0]).toMatchObject({ source: 'claude_stream', request_count: 2, native_context_unavailable: true });
+  expect(records[0].requests.map((request: any) => [request.input_tokens, request.cached_input_tokens, request.output_tokens]))
+    .toEqual([[33, 20, 2], [45, 30, 4]]);
+  expect(JSON.stringify(records[0].requests[1].context)).toContain('tracked repository input');
+  expect(JSON.stringify(records[0].requests[0].context)).toContain(role.prompt.replace('\n', '\\n'));
+});
