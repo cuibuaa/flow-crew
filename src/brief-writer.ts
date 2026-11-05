@@ -121,7 +121,6 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
       }
       save(file('reply.json'), result);
     }
-    completed++;
     reasons = [];
     let fields: BriefFields | undefined;
     if (result.exitCode !== 0) reasons.push(`Adapter exit ${result.exitCode}: ${result.friendlyError ?? result.output}`);
@@ -146,6 +145,10 @@ export async function writeTaskBrief(original: string, options: BriefWriterOptio
       validation({ reasons, questions, rehearsal });
     } else validation({ reasons });
     if (reasons.length || questions.length) save(file('rejected.json'), { reasons, questions });
+    // Revalidate a reply interrupted before its verdict, but only adopt it if
+    // it is valid. An invalid old reply must not spend this command's budget.
+    if (previous && (reasons.length || questions.length)) { reasons = []; continue; }
+    completed++;
     // A declared question is never repaired into a guess by another model call.
     if (questions.length) {
       atomicWrite(join(evidenceDir, 'brief.md'), brief);

@@ -405,3 +405,17 @@ it('keeps native per-request counters and context before successful-home cleanup
   const ledger = readdirSync(written.evidenceDir!).find(n => n.includes('.requests-'))!;
   expect(JSON.parse(readFileSync(join(written.evidenceDir!, ledger), 'utf8'))).toEqual(record);
 });
+
+it('an invalid reply stopped before validation cannot spend the rerun retry budget', async () => {
+  const dir = project();
+  const first = await writeTaskBrief('write a greeting', options(dir, replies(['{'])));
+  const last = readdirSync(first.evidenceDir!).filter(n => n.endsWith('.reply.json')).sort().at(-1)!;
+  const stem = last.slice(0, -'.reply.json'.length);
+  rmSync(join(first.evidenceDir!, `${stem}.validation.json`));
+  rmSync(join(first.evidenceDir!, `${stem}.rejected.json`));
+  const adapter = replies(['null']);
+  const rerun = await writeTaskBrief('write a greeting', options(dir, adapter));
+  expect(rerun.outcome).toBe('invalid');
+  expect(adapter.run).toHaveBeenCalledTimes(3);
+  expect(readdirSync(first.evidenceDir!).filter(n => n.endsWith('.reply.json'))).toHaveLength(6);
+});
