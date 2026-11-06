@@ -28,15 +28,16 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { approvalArtifactPath, isStageOwnedApprovalTarget, isValidApprovalRequestId } from './approval-artifacts.js';
 import { readJsonlFile } from './jsonl.js';
-import { runDir, runsRoot, withRunStateLock } from './store.js';
+import { readOperationalRunState, runDir, runsRoot, withRunStateLock } from './store.js';
 import { appendRunEventAtRunDir, readRunEvents } from './run-events.js';
 import { inspectRunScheduler } from './run-lock.js';
 import { publishJsonCreateOnly } from './canonical-json.js';
+import { declaredAuthorization, type ApprovalEffectFields } from './brief-authorizations.js';
 
 /** Only external authority needs a human. Other risks are legacy transport metadata. */
 export type ApprovalRisk = 'external' | 'exec' | 'write' | 'unknown';
 
-export interface ApprovalRequest {
+export interface ApprovalRequest extends ApprovalEffectFields {
   kind: 'request';
   runId: string;
   projectDir: string;
@@ -65,6 +66,8 @@ export interface ApprovalResolution {
   at: string;
   reason?: string;
   source?: 'operator' | 'scheduler';
+  /** Exact frontmatter declaration that supplied this authority. */
+  viaDeclaration?: string;
   /** True when this resolution ALSO minted a standing rule. */
   always?: boolean;
   /** Set when the decision came from a pre-existing standing rule rather than a human. */
@@ -122,6 +125,17 @@ export function recordRequest(req: Omit<ApprovalRequest, 'kind'>): { item: Inbox
   const rec: ApprovalRequest = { kind: 'request', ...req };
   if (!existing) appendJsonl(path, rec);
   let item: InboxItem = existing ?? { ...rec, state: INBOX_ITEM_STATE.PENDING };
+  if (isPendingInboxItemState(item.state) && item.risk === 'external') {
+    // Legacy inbox items can belong to a reservation not yet initialized with
+    // run.json. Such a run has no admitted declaration and must keep waiting.
+    const declaration = existsSync(join(runDir(item.projectDir, item.runId), 'run.json'))
+      ? readOperationalRunState(item.projectDir, item.runId).authorizations : undefined;
+    const viaDeclaration = declaredAuthorization(declaration, item);
+    if (viaDeclaration) item = resolveRequest(item.projectDir, item.runId, item.requestId, 'approve', {
+      by: 'engine', source: 'scheduler', viaDeclaration,
+      reason: `Authorized by brief ${viaDeclaration}: ${JSON.stringify(declaration)}. Only the categorized effect within its declared bound is authorized.`,
+    }).item;
+  }
   if (isPendingInboxItemState(item.state) && item.risk !== 'external') {
     const owned = isStageOwnedApprovalTarget(runDir(item.projectDir, item.runId), item.stageId, item.target);
     item = resolveRequest(item.projectDir, item.runId, item.requestId, owned ? 'approve' : 'deny', {
@@ -144,7 +158,7 @@ export function resolveRequest(
   runId: string,
   requestId: string,
   decision: 'approve' | 'deny',
-  opts: { by?: string; reason?: string; now?: () => Date; source?: 'operator' | 'scheduler' } = {},
+  opts: { by?: string; reason?: string; now?: () => Date; source?: 'operator' | 'scheduler'; viaDeclaration?: string } = {},
 ): { item: InboxItem; won: boolean; error?: string } {
   if (!isValidApprovalRequestId(requestId)) {
     return { item: undefined as unknown as InboxItem, won: false, error: `unsafe request id: ${requestId}` };
@@ -163,6 +177,7 @@ export function resolveRequest(
     by: opts.by ?? 'operator', at,
     ...(opts.reason ? { reason: opts.reason } : {}),
     ...(opts.source ? { source: opts.source } : {}),
+    ...(opts.viaDeclaration ? { viaDeclaration: opts.viaDeclaration } : {}),
   };
   appendJsonl(approvalsPath(projectDir, runId), res);
   // Re-fold so the returned state reflects who actually won the append race.
@@ -189,6 +204,8 @@ export function publishApprovalResolution(item: InboxItem): void {
     publishJsonCreateOnly(decisionPath, {
       requestId: item.requestId, decision: resolution.decision, by: resolution.by,
       reason: resolution.reason ?? '', at: resolution.at,
+      ...(resolution.source ? { source: resolution.source } : {}),
+      ...(resolution.viaDeclaration ? { viaDeclaration: resolution.viaDeclaration } : {}),
     });
     if (!readRunEvents(item.projectDir, item.runId).some(event => event.type === 'approval_resolved' && event.requestId === item.requestId)) {
       appendRunEventAtRunDir(directory, {

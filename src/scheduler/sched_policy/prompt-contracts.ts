@@ -5,6 +5,7 @@ import { type StageConfig } from '../sched_admission/configuration.js';
 import { type ResearchConfig, type TerminalStatesConfig, type StoreState } from '../../store.js';
 import { resolveResearchPaths } from '../../research-paths.js';
 import type { AgentConfig } from '../../adapters/base.js';
+import { ApprovalCategorySchema, type BriefAuthorizations } from '../../brief-authorizations.js';
 
 export const SINGLE_AUTHOR_NOTICE = 'Execution model: every authoring stage runs one author. Requests in brief text or frontmatter for competing candidates run as single-author work under this notice. Independent gates have their own stage budgets.';
 
@@ -26,12 +27,14 @@ export function applySharedRoleContract(agent: AgentConfig): AgentConfig {
   return agent.prompt.includes(SHARED_ROLE_CONTRACT) ? agent : { ...agent, prompt: `${SHARED_ROLE_CONTRACT}\n\n${agent.prompt}` };
 }
 
-export function appendApprovalRequestContract(prompt: string, runDirPath: string, stageId: string): string {
+export function appendApprovalRequestContract(prompt: string, runDirPath: string, stageId: string, authorizations?: BriefAuthorizations): string {
   return `${prompt}\n\nHuman authorization is required only for effects outside this run's authority: other repositories, credentials, outward network effects, deleting user data, shared devices, or git history outside the run branch. `
     + `Admitted writes, private scratch, run-local tool environment setup and framework-owned isolated build/test/lint validation already have execution authority; proceed through their existing owners. Scope and contract errors are decided by the engine. `
-    + `For an external effect, write exactly one JSON request ({id, action, target, risk: "external", title?, body?}) describing the external authority needed to `
+    + `Calls to the run's configured provider are inside the run's authority and never require an approval request. `
+    + `For an external effect, write exactly one JSON request ({id, action, target, risk: "external", category?, amountUsd?, host?, title?, body?}) describing the external authority needed to `
     + `${join(runDirPath, 'stages', stageId, APPROVAL_REQUEST_FILE)} and stop before performing the action. `
-    + `Each stage has its own slot. Non-external requests receive a deterministic decision without parking; an existing scratch acknowledgement grants no external effects. Read approvals/<id>.decision.json before continuing a requested action.`;
+    + `Each stage has its own slot. You own the category judgment: name exactly one of ${ApprovalCategorySchema.options.join(', ')}. For downloads supply host (one exact lowercase hostname); for spend supply amountUsd (the full maximum USD commitment, not an hourly price). Split distinct effects into distinct requests, waiting for each decision; never hide a credential, shared-device or other forbidden effect inside spend or downloads. `
+    + `The engine compares this structured category and bounds with brief authorizations; absent, unknown or malformed categories/bounds require a human. Current brief authorizations: ${JSON.stringify(authorizations ?? {})}. Only provider_calls, downloads and spend can be declared. Credentials, other repositories, deletion of user data, shared devices and git history outside the run branch always require a human. In-declaration requests are answered without parking; check the decision projection before continuing. Non-external requests receive a deterministic decision without parking; an existing scratch acknowledgement grants no external effects. Read approvals/<id>.decision.json before continuing a requested action.`;
 }
 
 export function appendProjectWriteContext(prompt: string, stage: StageConfig): string {

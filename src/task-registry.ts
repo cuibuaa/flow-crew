@@ -214,6 +214,8 @@ export interface RegistryMaintenanceOptions {
 
 export interface TaskRegistryOptions {
   baseDir?: string;
+  /** Observers skip eager directory creation; writers create their own parents. */
+  createDirectories?: boolean;
   now?: () => Date;
   /** Maximum time to wait for an active registry owner. Production default: 5 seconds. */
   lockTimeoutMs?: number;
@@ -341,7 +343,7 @@ export class TaskRegistry {
     this.lockPollMs = opts.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
     this.warn = opts.warn ?? ((message) => console.warn(message));
     this.syncFile = opts.syncFile ?? fsyncSync;
-    mkdirSync(this.tasksDir, { recursive: true });
+    if (opts.createDirectories !== false) mkdirSync(this.tasksDir, { recursive: true });
   }
 
   create(input: TaskCreateInput): TaskEntry {

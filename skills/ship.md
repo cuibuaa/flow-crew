@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 37 -->
+<!-- flowcrew-skill-revision: 38 -->
 
 # Ship a conversation to FlowCrew
 
@@ -33,6 +33,18 @@ frontmatter `inputs:` block. A path in prose or a table is only a reference, not
 Declare gitignored inputs in the block and intentional reuse of existing outputs. Freeze a file
 or tree by declaring a structured input with `frozen: true`; inputs are mutable by default. Prose, headings and input notes do
 not enforce freezing. Explain evidence gaps and dependencies of quantities.
+
+Declare any authorized external effects using the
+[brief-contract authorization schema](../guide/brief-contract.md#declared-authorizations):
+only `provider_calls: true`, `downloads: {hosts: [exact.lowercase.host]}` and
+`spend: {usd: <nonnegative USD cap>}` under `authorizations:`. Spend caps apply to
+each request's full maximum commitment; downloads match exact named hosts.
+Calls to the run's configured provider are already inside run authority and never
+require an approval request. Credentials, other repositories, deletion of user data,
+shared devices and git history outside the run branch cannot be declared. Workers
+name a closed-schema category (and amountUsd or host where required) in a request;
+the engine does not infer authority from prose. Omit the declaration when no external
+effects are authorized; existing briefs retain their behavior.
 
 Choose engineering for a known pass/fail outcome and research for candidate search with an
 allowed supported ceiling. Propose the mode/workflow and explain it to the operator. Use

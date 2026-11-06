@@ -1,0 +1,64 @@
+[
+  {
+    "date": "2026-10-15",
+    "id": "c2-round1-public-qwen3-4b-download",
+    "action": "download_public_checkpoint",
+    "risk": "external",
+    "title": "Authorize public Qwen3-4B checkpoint download for campaign 2 round 1",
+    "target": "https://huggingface.co/Qwen/Qwen3-4B",
+    "category": "downloads",
+    "host": "huggingface.co",
+    "fixtureScope": "Anonymous download effect. Every redirect host needs separate authority."
+  },
+  {
+    "date": "2026-10-16",
+    "id": "c5-round02-owned-runpod-20261016T2300Z",
+    "action": "acquire_cloud_measurement",
+    "risk": "external",
+    "title": "Authorize frozen round2 cloud measurement",
+    "target": "One new owned RunPod pod for the frozen round02 measurement",
+    "category": "spend",
+    "fixtureScope": "Price/maximum USD commitment was explicitly unknown in the source. No amount is invented. This does not cover the source's distinct download effects."
+  },
+  {
+    "date": "2026-10-22",
+    "id": "session-push-live-e2e",
+    "action": "run_configured_provider_launcher_checks",
+    "risk": "external",
+    "title": "Authorize isolated launcher wake-to-ACK checks",
+    "target": "The run's configured providers through their native adapters in private test-created sessions",
+    "category": "provider_calls",
+    "fixtureScope": "Configured-provider call effect; native authentication stays provider-owned. No credential-file access."
+  },
+  {
+    "date": "2026-10-22",
+    "id": "claude-rewake-live-e2e",
+    "action": "run_configured_provider_launcher_check",
+    "risk": "external",
+    "title": "Approve one isolated Haiku launcher check",
+    "target": "The run's configured Claude provider through native Claude Code",
+    "category": "provider_calls",
+    "fixtureScope": "Configured-provider call effect only; no new authentication-storage permission."
+  },
+  {
+    "date": "2026-10-27",
+    "id": "filesys-model-judgments-teacher-v1",
+    "action": "authorize_synthetic_teacher_api_spend",
+    "risk": "external",
+    "title": "Authorize synthetic teacher labelling, shared $50 cap",
+    "target": "https://api.anthropic.com/v1/messages",
+    "category": "spend",
+    "amountUsd": 50,
+    "fixtureScope": "The full $50 spend component. The original combined credential injection is a separate never-declarable effect; this fixture does not authorize that component."
+  },
+  {
+    "date": "2026-11-05",
+    "id": "decision_graph_real_chooser_replays",
+    "action": "run_real_chooser_replays",
+    "risk": "external",
+    "title": "Authorize eight one-shot real chooser replays",
+    "target": "Configured Claude provider through the repository native ClaudeAdapter, using an isolated task-local provider context",
+    "category": "provider_calls",
+    "fixtureScope": "Configured-provider call effect only."
+  }
+]

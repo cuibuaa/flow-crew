@@ -486,6 +486,8 @@ export interface RunStateFormat {
 }
 
 export interface StoreState {
+  /** Validated brief declaration; absent in legacy runs. */
+  authorizations?: import('./brief-authorizations.js').BriefAuthorizations;
   deploymentHold?: import('./deployment-hold.js').RunDeploymentHold;
   continuationFailure?: { at: string; reason: string; generation?: string };
   /** Observed scheduler admissions only; legacy starts are never fabricated. */

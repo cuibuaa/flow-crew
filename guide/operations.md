@@ -176,11 +176,35 @@ outward network effects, deletion of user data, shared devices, or git history o
 the run branch. Admitted writes, private scratch, run-local tool environment setup and
 framework-owned isolated validation proceed under their existing execution owners.
 Contract errors receive engine decisions; approval cannot override engine ownership or frozen-input protections.
+Calls to the run's configured provider are inside the run's authority and never
+require an approval request. Native provider authentication remains owned by the
+provider; reading or injecting credentials is a separate external effect.
+
+The brief may declare `authorizations` in frontmatter (see the
+[brief contract](brief-contract.md#declared-authorizations)). The closed declaration
+set is `provider_calls: true`, `downloads: {hosts: [exact.lowercase.host]}` and
+`spend: {usd: 50}`. Requests within these bounds receive an engine approval through
+the existing append-only transport, with `source: scheduler` and `viaDeclaration`
+naming the frontmatter field. Unknown keys, forbidden categories and invalid bounds
+produce an admission diagnostic and leave the entire declaration unadmitted; the
+run proceeds under its existing authority and external requests still park.
 
 A worker that needs external authorization writes one request to its injected stage slot
 `stages/<id>/approval_request.json` and stops before the action. Required fields are `id`
 (or alias `requestId`), nonblank `action`, and `risk: external`; `target`, `title`, `body`
 describe the external effect and exact authority needed. IDs match `[A-Za-z0-9._-]{1,64}`.
+The worker owns categorization: `category` is one of `provider_calls`, `downloads`,
+`spend`, `credentials`, `other_repositories`, `user_data_deletion`, `shared_devices`,
+`external_git_history`. For downloads also name `host`, one exact lowercase hostname;
+for spend give `amountUsd`, the full maximum USD commitment. Code validates the
+closed schema and compares only membership, `amountUsd <= usd` and exact host equality.
+The cap is per request, not a cumulative spend meter. Split distinct effects into
+separate requests and wait for each decision; a spend category cannot authorize
+credential injection or a shared device. Downloads authorize only the named host;
+redirects to other hosts require separate authority. No wildcard or subdomain matching.
+Missing/unknown categories, malformed bounds, requests outside the declaration,
+and every never-declarable category park. Legacy category-less files still load.
+Code never classifies request titles, targets, bodies or brief prose.
 The stage slot determines the requesting stage, even if its JSON names another stage.
 
 Legacy exec/write/unknown requests receive a deterministic answer without parking.
@@ -198,6 +222,18 @@ workers and closes children before releasing ownership. Requests are idempotent 
 ID; resolutions are append-only, first-responder-wins. The decision is projected at
 `approvals/<id>.decision.json`; read it before acting. An external approval authorizes
 that effect; its denial forbids it. An engine answer changes no existing capabilities.
+An engine answer under `viaDeclaration` acknowledges the brief's authority for that
+categorized bounded effect. The legacy scratch answer grants no external authority.
+
+Session push stores one event and renders it for two audiences. Synchronous Claude
+and Codex Stop hooks put the human summary in `systemMessage` and the event identity,
+duties and exact ACK command in `reason`. Claude asyncRewake stderr is model-only;
+the synchronous Stop hook supplies the human warning. Session-push list, watch,
+frontend user-message transports and notifier fallback use the human summary.
+At selection, wake claim and send, resolved approval pushes are superseded by their
+decision projection. The run-linked `session-push/delivery/<event>.json` receipt
+records the decision, its time and `ackRequired: false`; no business ACK is fabricated.
+An unresolved request remains deliverable. Other wrap-up obligations remain open.
 
 CLI approve and deny both resume a parked run through daemon registration by default,
 preserving run/DAG/iteration identity. `--no-resume` records a decision without relaunch.

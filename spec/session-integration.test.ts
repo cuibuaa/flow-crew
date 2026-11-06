@@ -67,6 +67,57 @@ function fixtureTrust(root: string, codexHome: string) {
 }
 
 describe('installer-owned front-end integration', () => {
+  it.each(['claude', 'codex'] as const)('%s generated Stop hook separates the documented human warning and model continuation; list/watch use the human text', frontend => {
+    const f = fixture();
+    const frontendRoot = frontend === 'claude' ? join(f.home, '.claude') : f.codexHome;
+    expect(integrate('install', frontend, frontendRoot, f.env).status).toBe(0);
+    const registry = new TaskRegistry({ baseDir: f.env.FC_HOME });
+    const task = registry.create({ name: 'Readable task', projectDir: f.project, status: 'parked', run_id: 'fixture-run', launcher: {
+      frontend, sessionId: 'own-session', cwd: f.project, ledgerRoot: join(f.root, 'ledger'),
+    } });
+    const requests = join(f.env.FC_HOME!, 'runs/fixture-run/approvals'); mkdirSync(requests, { recursive: true });
+    writeFileSync(join(requests, 'request.request.json'), JSON.stringify({ title: 'Download public checkpoint', target: 'huggingface.co' }));
+    const push = new SessionPush(registry);
+    const event = push.enqueue(task, { type: 'approval_parked', runId: 'fixture-run', requestId: 'request', timestamp: '2026-11-06T01:23:04.190Z' })!;
+    const hook = join(frontendRoot, 'hooks/flowcrew-session.mjs');
+    const stop = command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'own-session', hook_event_name: 'Stop' }));
+    expect(stop.status, stop.stderr).toBe(0);
+    const output = JSON.parse(stop.stdout);
+    const evidence = process.env.PUSH_AUTH_EVIDENCE ? join(process.env.PUSH_AUTH_EVIDENCE, 'frontends', frontend) : undefined;
+    if (evidence) {
+      mkdirSync(evidence, { recursive: true });
+      writeFileSync(join(evidence, 'stop.json'), JSON.stringify(output, null, 2));
+      writeFileSync(join(evidence, 'installed-template.mjs'), readFileSync(hook));
+    }
+    // Claude: systemMessage "Warning message shown to the user."; reason
+    // "Tells Claude why it should continue." (code.claude.com/docs/en/hooks).
+    // Codex: systemMessage "Surfaced as a warning in the UI or event stream";
+    // Stop uses reason as the continuation prompt (developers.openai.com/codex/hooks/).
+    expect(output.systemMessage).toContain('Readable task: needs approval. Request: Download public checkpoint. Target: huggingface.co.');
+    expect(output.systemMessage).toContain("flowcrew inbox approve 'request' --run 'fixture-run' (use deny to decline)");
+    expect(output.systemMessage).not.toMatch(/[a-f0-9]{64}/u);
+    expect(output.systemMessage).not.toContain('Read the report and run state');
+    expect(output.reason).toContain(`event=${event.eventId}`);
+    expect(output.reason).toContain(`FC_HOME='${f.env.FC_HOME}' flowcrew session-push ack --event ${event.eventId} --session 'own-session'`);
+    expect(output.reason).toContain('Deduplicate by event id');
+    for (const args of [['session-push', 'list', '--session', 'own-session'], ['watch', '--once']]) {
+      const result = command(process.execPath, [join(packageRoot, 'dist/cli.js'), ...args], f.env);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain(output.systemMessage);
+      expect(result.stdout).not.toContain(event.eventId);
+      expect(result.stdout).not.toContain('Deduplicate by event id');
+      if (evidence) writeFileSync(join(evidence, args[0] === 'watch' ? 'watch.txt' : 'list.txt'), result.stdout);
+    }
+    writeFileSync(join(requests, 'request.decision.json'), JSON.stringify({ decision: 'approve', at: '2026-11-06T03:14:53.337Z' }));
+    const observed = command(process.execPath, [join(packageRoot, 'dist/cli.js'), 'watch', '--once'], f.env);
+    expect(observed.status, observed.stderr).toBe(0);
+    expect(observed.stdout).not.toContain('needs approval');
+    expect(existsSync(join(f.env.FC_HOME!, 'session-push/delivery', `${event.eventId}.json`))).toBe(false);
+    const resolvedStop = command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'own-session', hook_event_name: 'Stop' }));
+    expect(resolvedStop.status, resolvedStop.stderr).toBe(0);
+    expect(resolvedStop.stdout).not.toContain('needs approval');
+    expect(push.delivery(event.eventId).superseded).toMatchObject({ decision: 'approve', at: '2026-11-06T03:14:53.337Z', ackRequired: false });
+  });
   it('an interrupted native hook loses coverage immediately and its worker retires without leaving a background process', async () => {
     const f = fixture();
     const root = join(f.home, '.claude');

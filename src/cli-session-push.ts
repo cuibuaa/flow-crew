@@ -4,11 +4,11 @@ import { readFileSync } from 'node:fs';
 import { fcGlobalDir } from './store.js';
 import { TaskRegistry } from './task-registry.js';
 import { defaultFcTasksRoot, publicTaskEntries, readTaskLedger } from './fc-tasks.js';
-import { SessionPush, estimateProgress, progressLine, wrapUpPrompt, PUSH_RETRY_MS, type LaunchTarget } from './session-push.js';
+import { SessionPush, estimateProgress, progressLine, renderPushEvent, PUSH_RETRY_MS, type LaunchTarget } from './session-push.js';
 import { claudeWakeCapability, hasClaudeWakeWaiter, waitForClaudeWake } from './session-wake.js';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-export function sessionGate(push: SessionPush, frontend: LaunchTarget['frontend'], session: string): { decision?: 'block'; reason?: string } {
+export function sessionGate(push: SessionPush, frontend: LaunchTarget['frontend'], session: string): { decision?: 'block'; reason?: string; systemMessage?: string } {
   const tasks = push.sessionTasks(frontend, session);
   const pending = push.pending(session).filter(event => event.target.frontend === frontend);
   const wakeCovered = frontend === 'claude' && hasClaudeWakeWaiter(push.root, session);
@@ -16,9 +16,9 @@ export function sessionGate(push: SessionPush, frontend: LaunchTarget['frontend'
   if (!pending.length && !open.length) return {};
   const event = pending[0];
   const missingDisplay = tasks.filter(task => task.launcher?.frontend === 'codex' && !push.display(task.id).threadId);
-  return { decision: 'block', reason: [
+  return { decision: 'block', ...(event ? { systemMessage: renderPushEvent(event, push.registry.baseDir).human } : {}), reason: [
     `FlowCrew wrap-up is open: tasks ${open.map(t => `#${t.id}`).join(', ') || '(ledger closed)'}, ${pending.length} unacknowledged event(s).`,
-    event ? wrapUpPrompt(event, push.registry.baseDir)
+    event ? renderPushEvent(event, push.registry.baseDir).agent
       : 'Execution is still in flight or wrap-up has not been acknowledged. Wait for its event; inspect the task with flowcrew task show. Keep working until wrap-up and explicit event ACK are complete.',
     ...missingDisplay.map(task => `FlowCrew #${task.id} display thread is missing: ${push.display(task.id).error || 'creation pending'}. Create one standalone thread using the front end, then bind it with flowcrew session-push bind-display --task ${task.id} --thread <new-thread-id> --session ${session}.`),
   ].join('\n') };
@@ -83,7 +83,7 @@ export async function cmdSessionPush(args: string[]): Promise<number> {
         return EXIT_CODE.completed;
       }
       case 'list':
-        process.stdout.write(`${JSON.stringify(push.pending(value('--session')).map(event => ({ ...event, delivery: push.delivery(event.eventId) })), null, 2)}\n`);
+        for (const event of push.pending(value('--session'))) process.stdout.write(`${renderPushEvent(event, push.registry.baseDir).human}\n`);
         return EXIT_CODE.completed;
       case 'bind-display': {
         const task = push.registry.get(Number(value('--task')));

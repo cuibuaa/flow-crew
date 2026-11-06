@@ -27,6 +27,8 @@ try {
     const events = join(root, 'events');
     idle = (existsSync(join(root, 'task-index', 'ready')) || !existsSync(join(root, '..', 'tasks.jsonl'))) && Array.isArray(tasks) && tasks.length === 0 && (!existsSync(events) || !readdirSync(events).filter(name => /^[a-f0-9]{64}\.json$/u.test(name)).some(name => {
       if (existsSync(join(root, 'acks', name))) return false;
+      const delivery = join(root, 'delivery', name);
+      if (existsSync(delivery) && JSON.parse(readFileSync(delivery, 'utf8')).superseded?.ackRequired === false) return false;
       const event = JSON.parse(readFileSync(join(events, name), 'utf8'));
       return event.target.frontend === settings.frontend && event.target.sessionId === session;
     }));
@@ -44,6 +46,9 @@ const result = spawnSync(process.execPath, [settings.cli, 'session-push',
   ...(wake ? ['wake'] : statusline ? ['statusline', '--json'] : ['hook', '--frontend', settings.frontend, '--event', process.argv[2] || 'Stop']),
 ], { input, encoding: 'utf8', timeout: wake ? 3650_000 : 10_000, maxBuffer: 2 * 1024 * 1024 });
 if (!statusline) {
+  // Synchronous Stop JSON: systemMessage is the human warning; reason is the
+  // model continuation. Preserve these fields separately. asyncRewake stderr
+  // is model-only; it cannot surface a human systemMessage (frontend contract).
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   if (result.error) process.stderr.write(`FlowCrew hook failed: ${result.error.message}. Inspect pending events and end the turn to renew wake coverage.\n`);

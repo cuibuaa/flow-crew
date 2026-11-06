@@ -248,10 +248,10 @@ export async function executeSingleStage(
 /** Prompt-only enrichment shared by ordinary execution and gate repair. */
 export function appendStageExecutionContracts(
   resolvedPrompt: string, stage: StageConfig, allStages: StageConfig[],
-  state: Pick<StoreState, 'research' | 'terminalStates' | 'workflowName'>,
+  state: Pick<StoreState, 'research' | 'terminalStates' | 'workflowName' | 'authorizations'>,
   projectDir: string, runId: string, runDirPath: string,
 ): string {
-  resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id);
+  resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id, state.authorizations);
   resolvedPrompt = appendProjectWriteContext(resolvedPrompt, stage);
   resolvedPrompt = appendResearchPathContract(resolvedPrompt, state.research, state.terminalStates);
   if (stage.dynamic_dispatch) {

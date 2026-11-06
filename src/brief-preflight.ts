@@ -236,6 +236,10 @@ export function inspectBrief(
   const findings: BriefPreflightFinding[] = [];
   const add = (finding: Omit<BriefPreflightFinding, 'fingerprint'>) => findings.push(makeFinding(finding));
   const route = autoSelectedWorkflow(parsed);
+  if (parsed.authorizationsError) add({
+    code: 'brief_authorizations', level: 'warn',
+    message: `${parsed.authorizationsError} The entire declaration is ignored; external requests still require a human.`, consequential: false,
+  });
   add({
     code: 'brief_workflow', level: route.error ? 'fail' : 'ok',
     message: `Workflow without --workflow: ${route.workflow} (${route.reason})${route.error ? `; refused: ${route.error}` : ''}`,
