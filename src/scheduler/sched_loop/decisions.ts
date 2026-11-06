@@ -132,9 +132,11 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     const stage = { ...source, decision: declaration };
     let choice: ReturnType<typeof validateDecision>;
     let unconfirmedRejection = false;
+    let gateAccepted: boolean | undefined;
     if (source.is_gate) {
       const facts = collectGateRuntimeFacts([source], state, project, run);
       const fact = facts.evaluations[0];
+      gateAccepted = fact?.effectiveVerdict?.pass === true;
       if (fact?.rejectionKind === 'irreparable_rejection' || facts.contractRefusals.length) {
         if (terminateForGateContractRefusal(state, facts, project, run, iteration)) return state;
       }
@@ -158,7 +160,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
       try { raw = JSON.parse(readStageOutput(project, run, source.id)); } catch { /* schema failure already creates questions */ }
       if (raw.metric_search === true && !state.research) choice = { ...choice, outcome: 'questions', questions: [{ missing: 'research.baseline, research.policy, research.stop', question: 'Supply the measured baseline, research policy and finite stop conditions in a research declaration. These are author-owned facts.' }] };
     }
-    const record: DecisionRecord = { ...choice, planRevision: state.queryState?.planRevision?.revision, declaredSuccessors: declaration.successors, key, stageId: source.id, iteration };
+    const record: DecisionRecord = { ...choice, ...(gateAccepted === undefined ? {} : { gateAccepted }), planRevision: state.queryState?.planRevision?.revision, declaredSuccessors: declaration.successors, key, stageId: source.id, iteration };
     for (const [target, owner] of Object.entries(graph.enabled)) if (owner === source.id) delete graph.enabled[target];
     if (choice.questions?.length) {
       const requestId = `decision_${source.id}_${graph.records.length}`;

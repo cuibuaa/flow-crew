@@ -106,16 +106,20 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const unmeasured = validation?.filter(result => result.measurement === 'not_measured') ?? [];
   const loadNote = unmeasured.length ? ` Validation not measured (${unmeasured.map(result => result.display ?? result.role).join(', ')}): neither pass nor failure; no author action required.` : '';
   const { findings: _findings, validation: _validation, ...authored } = verdict;
-  // The rejection archive owns obligations across a repair's review choices;
-  // unrelated later gates do not reopen an already completed repair.
+  // Rejections survive review-depth changes. Effective acceptance binds a
+  // closure to its reviewed tree, so later independent work cannot reopen it.
   const state = verdict.pass && existsSync(join(base, 'run.json')) ? readRunState(projectDir, runId) : undefined;
   const gateIds = [stageId, ...(state?.planControl?.stages ?? []).flatMap(stage => stage.retry_to?.includes(stageId) ? stage.retry_to : [])];
   const required = verdict.pass ? confirmedRepairFindings(base, [...new Set(gateIds)]) : [];
+  const accepted = ledger.filter(entry => entry.kind === 'attempt' && gateIds.includes(entry.stageId)
+    && entry.status === STAGE_STATUS.COMPLETE && entry.exitCode === 0 && state?.decisionGraph?.records.some(record => record.gateAccepted === true
+      && record.key === `${record.iteration}/${entry.stageId}/${entry.attemptIndex}/${entry.attemptStartedAt}`));
   const closureFailed = required.some(finding => {
     const original = ledger.find(entry => entry.sequence === finding.record.sequence);
     const closure = ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf === finding.record.sequence).at(-1);
     return original?.kind !== 'command' || !original.context || closure?.kind !== 'command' || closure.owner !== 'code'
-      || closure.exitCode !== 0 || !closure.outputDigest || !treeHash || closure.treeHash !== treeHash || closure.treeAfterHash !== treeHash
+      || closure.exitCode !== 0 || !closure.outputDigest || !treeHash || !closure.treeHash || closure.treeAfterHash !== closure.treeHash
+      || !(closure.treeHash === treeHash || accepted.some(entry => entry.kind === 'attempt' && entry.sequence > closure.sequence && entry.treeHash === closure.treeHash))
       || closure.command !== original.command || closure.context?.cwd !== original.context.cwd || closure.context?.shell !== original.context.shell;
   });
   const reason = `${closureFailed ? 'Repair reproduction remains open or does not cover the repaired tree; a passing verdict cannot close it. ' : ''}${verdict.reason ?? ''}${findings.unconfirmed.length ? ` Unconfirmed observations: ${findings.unconfirmed.map(finding => finding.id).join(', ')}; no repair requested for these.` : ''}${loadNote}`;
