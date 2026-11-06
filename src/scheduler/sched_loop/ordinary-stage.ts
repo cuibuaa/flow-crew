@@ -1,5 +1,4 @@
 import { unlinkSync } from '../../engine-fs.js';
-import { recordGateValidationDelta } from '../sched_settlement/gate-validation.js';
 import { decisionSchema } from '../../decision-graph.js';
 import { decisionInput, focusedReviewInput } from '../../decision-context.js';
 import { buildGateFixCorrectionContract, gateArchiveCoordinate, appendGateEvidenceInstruction } from '../sched_settlement/gate-archives.js';
@@ -149,17 +148,15 @@ export async function executeOrdinaryStage(
         resolvedPrompt = `${buildRetryPreamble(currentRetries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`;
       }
       resolvedPrompt = appendAttemptDeadlineContract(resolvedPrompt, prepared.budgetMs);
-      if (stage.decision?.kind === 'review') await recordGateValidationDelta(projectDir, runId, stage.id);
       const coordinate = state.gateRetryRound;
       const roundDiffPath = coordinate ? join(runDirPath, 'gate_reevaluation', `iteration_${coordinate.iteration}`, `round_${coordinate.round}`, 'repair_diff.json') : undefined;
       let fixStageIds: string[] | undefined;
       if (roundDiffPath && existsSync(roundDiffPath)) fixStageIds = JSON.parse(readFileSync(roundDiffPath, 'utf8')).repairStageIds;
       const reviewDecision = sorted.find(s => s.decision?.kind === 'review' && s.decision.successors.includes(stage.id));
-      if (reviewDecision?.decision?.successors[1] === stage.id) resolvedPrompt += `\n\n${focusedReviewInput(projectDir, runDirPath, state, reviewDecision.id, stage)}\nPerform the full independent review; these risks do not narrow coverage.`;
+      if (reviewDecision) resolvedPrompt += `\n\n${focusedReviewInput(projectDir, runDirPath, state, reviewDecision.id, stage)}${reviewDecision.decision?.successors[1] === stage.id ? '\nPerform the full independent review; these risks do not narrow coverage.' : ''}`;
       const isolatedInput = stage.decision?.kind === 'shape' || stage.decision?.kind === 'review'
         ? decisionInput(stage, projectDir, runDirPath, state)
-        : reviewDecision?.decision?.successors[0] === stage.id
-          ? { system: 'You are an independent read-only reviewer. Run independent targeted experiments in private scratch, evaluate every assigned brief criterion, and return the gate verdict. Do not durably modify the reviewed project. Never read author transcripts, sessions or self-assessment.', user: focusedReviewInput(projectDir, runDirPath, state, reviewDecision.id, stage) } : undefined;
+        : undefined;
       const result = await runStage(stageAdapter, {
         stageId: stage.id,
         role: ['shape', 'review'].includes(stage.decision?.kind ?? '') ? { ...agent, tools: [] } : agent,

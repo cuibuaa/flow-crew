@@ -199,7 +199,7 @@ describe('direct workflow', () => {
 
   it('refuses at admission a brief its fixed plan cannot satisfy, before any stage runs', async () => {
     const refusals: Array<[string, string]> = [
-      ['workflow: direct\nresearch:\n  baseline: 0.5', 'workflow frontmatter field no longer exists'],
+      ['workflow: direct\nplanner_policies: [not_a_policy]\nresearch:\n  baseline: 0.5', 'PLANNER_POLICY_INVALID'],
     ];
     for (const [frontmatter, reason] of refusals) {
       const calls: string[] = [];

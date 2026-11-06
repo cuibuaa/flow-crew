@@ -173,7 +173,7 @@ export function gateRetryDiagnosticSnapshot(
 
 export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): GateRuntimeFacts {
   const stagesById = new Map(allStages.map(stage => [stage.id, stage]));
-  const gateStages = uniqueGateStages(allStages).filter(stage => !isStageInSkippedBranch(stage.id, stagesById, state));
+  const gateStages = uniqueGateStages(allStages).filter(stage => !isStageInSkippedBranch(stage.id, stagesById, state, 'settlement'));
   if (gateStages.length === 0) {
     return { allPass: true, failedGateIds: [], rejectedGateIds: [], contractRefusals: [], evaluations: [] };
   }

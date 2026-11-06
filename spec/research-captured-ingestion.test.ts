@@ -165,11 +165,11 @@ describe('captured research evidence is the ingestion source', () => {
     state.stages[gate.id] = { status: 'pending', retries: 0 };
     state.maxIterations = 1;
     writeRunState(project, runId, state);
-    const brief = '---\nworkflow: direct\nresearch:\n  baseline: 0\n---\n# Synthetic goal';
+    const brief = '---\nworkflow: direct\nplanner_policies: [not_a_policy]\nresearch:\n  baseline: 0\n---\n# Synthetic goal';
     const settled = await runWorkflow({ ...workflow, name: 'direct' }, 'name: captured-research\nstages: []\n', project, new ScriptedAdapter({}),
       new Map(), undefined, join(repository, 'config/agents'), runId, brief);
     expect(settled.status).toBe('failed');
-    expect(settled.failureReason).toContain('field no longer exists');
+    expect(settled.failureReason).toContain('PLANNER_POLICY_INVALID');
     expect(readResearchGateCandidate(directory, gate.id)?.settlement).toMatchObject({
       disposition: 'rejected', reason: expect.stringContaining('Run ended failed'),
     });

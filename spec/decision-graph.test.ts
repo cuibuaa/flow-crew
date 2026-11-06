@@ -19,6 +19,8 @@ import { resolveRequest } from '../src/inbox.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { inspectBrief, createBriefAdmission } from '../src/brief-preflight.js';
 import { createReadyFinder, isStageInSkippedBranch } from '../src/scheduler/sched_admission/frontier.js';
+import { readEvidence, VALIDATION_FACT_VERSION } from '../src/evidence-ledger.js';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 
 let root: string, project: string, old: string;
 const agents = join(import.meta.dirname, '../config/agents');
@@ -78,11 +80,12 @@ describe('declared successor execution', () => {
 });
 
 describe('one entry and concrete clarification', () => {
-  it('removes both routing overrides with one legacy-field diagnostic', () => {
+  it('refuses the CLI override and treats legacy workflow metadata as inert on the single entry', () => {
     expect(() => parseCommandArgs('quick', ['--workflow', 'direct'])).toThrow(/unknown/i);
     for (const value of ['direct', 'planner', 'anything']) {
       const parsed = parseBriefFrontmatter(`---\nworkflow: ${value}\n---\nTask`);
-      expect(entryWorkflow(parsed)).toMatchObject({ workflow: 'entry', error: expect.stringContaining('field no longer exists') });
+      expect(entryWorkflow(parsed)).toEqual({ workflow: 'entry', reason: expect.any(String) });
+      expect(parsed.stripped).toBe('Task');
     }
     expect(entryWorkflow(parseBriefFrontmatter(task)).workflow).toBe('entry');
   });
@@ -175,6 +178,97 @@ describe('one entry and concrete clarification', () => {
 });
 
 describe('independent post-author routing', () => {
+  it('renders the base implement/review contracts with only risk and validation facts added for the two entry decisions', async () => {
+    const captured = new Map<string, Record<string, { system: string; user: string }>>();
+    for (const selected of ['base', 'review', 'review_full']) {
+      project = join(root, selected); mkdirSync(project);
+      isolatedProjectCommand('git', ['init', '-q'], project, root);
+      isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, root);
+      const seen: Record<string, { system: string; user: string }> = {};
+      const calls: string[] = [];
+      const { config } = loadWorkflow(join(import.meta.dirname, `../config/workflows/${selected === 'base' ? 'direct' : 'entry'}.yaml`));
+      const adapter: Adapter = { async run(user, role, opts) {
+        calls.push(opts.stageId);
+        seen[opts.stageId] = { system: role.prompt, user };
+        let output = delivered;
+        if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One output.', metric_search: false, questions: [] });
+        if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Greeting.\n'); output = JSON.stringify({ status: 'delivered', summary: 'PRIVATE_AUTHOR_TRANSCRIPT', caveats: [], remaining_work: [] }); }
+        if (opts.stageId === 'assess') output = JSON.stringify({ successor: selected, reason: 'Independent review.', risk_areas: [{ file: 'docs/report.md', risk: 'Declared greeting risk.', experiment: 'Read and compare the greeting.' }] });
+        if (['review', 'review_full'].includes(opts.stageId)) output = gate(opts);
+        return { output, exitCode: 0, duration_ms: 1 };
+      } };
+      const state = await execute(config, adapter, task);
+      expect(state.status, state.failureReason).toBe('complete');
+      expect(calls).toEqual(selected === 'base' ? ['implement', 'review'] : ['choose', 'implement', 'assess', selected]);
+      expect(state.stages.repair.status).toBe('skipped');
+      for (const id of ['implement', selected === 'base' ? 'review' : selected]) {
+        const prompt = seen[id];
+        expect(prompt.system).toContain('## Review contract');
+        expect(prompt.user).toContain('Engine state query');
+        expect(prompt.user).not.toContain('PRIVATE_AUTHOR_TRANSCRIPT');
+        expect(prompt.user).not.toContain('Context from stage:');
+        expect(prompt.user).not.toContain('handoff_implement');
+        // Compare the rendered contracts, allowing only their actual runtime
+        // coordinates, clocks, ledger facts and read-only decision audits.
+        prompt.user = prompt.user.replaceAll(runDir(project, state.runId), '<RUN>').replaceAll(project, '<PROJECT>').replaceAll(state.runId, '<RUN_ID>')
+          .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '<TIME>')
+          .replace(/remaining \d+ ms/g, 'remaining <MS> ms')
+          .replace(/[a-f0-9]{64}/g, '<HASH>')
+          .replace(/Ledger facts:\n[\s\S]*?\nDiff:\n/, 'Ledger facts: <ENGINE_FACTS>\nDiff:\n')
+          .replace(/^- (choose|assess) attempt 1: .*\n/gm, '')
+          .replaceAll('review_full', 'review');
+        if (selected !== 'base' && id !== 'implement') {
+          const facts = prompt.user.match(/\n\n# Independent review facts\n([^\n]+)\nRun your own targeted experiments[^\n]+/)![0];
+          const value = JSON.parse(facts.split('\n')[3]);
+          expect(Object.keys(value).sort()).toEqual(['diff', 'files', 'output_groups', 'required_outputs', 'risk_areas', 'task', 'validation']);
+          expect(value.risk_areas).toEqual([{ file: 'docs/report.md', risk: 'Declared greeting risk.', experiment: 'Read and compare the greeting.' }]);
+          expect(value.validation).toEqual({ status: 'No configured validation facts have been recorded.' });
+          prompt.user = prompt.user.replace(facts, '').replace('\nPerform the full independent review; these risks do not narrow coverage.', '');
+        }
+      }
+      captured.set(selected, seen);
+    }
+    const base = captured.get('base')!;
+    for (const selected of ['review', 'review_full']) {
+      const entry = captured.get(selected)!;
+      expect(entry.implement).toEqual(base.implement);
+      expect(entry[selected]).toEqual(base.review);
+    }
+  });
+
+  it.each([
+    ['review', 'review_full'], ['review_full', 'review'],
+    ['review', 'review'], ['review_full', 'review_full'],
+  ])('settles repaired work through the current read-only review choice (%s → %s), retaining the rejection', async (first, second) => {
+    isolatedProjectCommand('git', ['init', '-q'], project, root);
+    isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, root);
+    const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
+    const calls: string[] = [];
+    let assessments = 0;
+    const adapter: Adapter = { async run(_user, _role, opts) {
+      calls.push(opts.stageId);
+      let output = delivered;
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One output.', metric_search: false, questions: [] });
+      if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Wrong greeting.\n'); }
+      if (opts.stageId === 'assess') output = JSON.stringify({ successor: ++assessments === 1 ? first : second, reason: 'Review the current output independently.', risk_areas: [] });
+      if (opts.stageId === 'repair') { writeFileSync(join(project, 'docs/report.md'), 'Required greeting.\n'); output = choice('assess'); }
+      if (['review', 'review_full'].includes(opts.stageId)) {
+        output = gate(opts, readFileSync(join(project, 'docs/report.md'), 'utf8') === 'Required greeting.\n');
+      }
+      return { output, exitCode: 0, duration_ms: 1 };
+    } };
+    const state = await execute(config, adapter, task);
+    expect(state.status, state.failureReason).toBe('complete');
+    expect(readFileSync(join(project, 'docs/report.md'), 'utf8')).toBe('Required greeting.\n');
+    expect(calls).toEqual(['choose', 'implement', 'assess', first, 'repair', 'assess', second]);
+    const directory = runDir(project, state.runId);
+    const rejection = JSON.parse(readFileSync(join(directory, `gate_reevaluation/iteration_1/round_1/rejected_verdict_${first}.json`), 'utf8'));
+    expect(rejection).toMatchObject({ pass: false, reason: 'Concrete defect.' });
+    expect(state.stages[first].attempts![0]).toMatchObject({ status: 'complete', exitCode: 0 });
+    if (first !== second) expect(state.stages[first].gate?.pass).toBe(false);
+    expect(state.stages[second].gate?.pass).toBe(true);
+  });
+
   it('checks the rendered router and focused reviewer inputs, closed risk schema and full alternative', async () => {
     execFileSync(process.execPath, ['--input-type=module', '-e', `import {execFileSync} from 'node:child_process'; for (const args of [['init','-q'],['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','base']]) execFileSync('git', args);`], { cwd: project, env: { ...process.env, HOME: root, FC_HOME: join(root, 'fc') }, timeout: 5000 });
     const seen: Record<string, string> = {};
@@ -195,8 +289,10 @@ describe('independent post-author routing', () => {
       expect(seen[id]).toContain('validation'); expect(seen[id]).not.toContain('AUTHOR_TRANSCRIPT_SECRET_MARKER');
       expect(seen[id]).not.toContain('output_attempt_'); expect(seen[id]).not.toContain('handoff_implement');
       expect(seen[id]).not.toContain('Context from stage:');
-      expect(seen[id]).not.toContain('Engine state query');
-      expect(seen[id]).not.toContain('flowcrew state');
+      if (id === 'assess') {
+        expect(seen[id]).not.toContain('Engine state query');
+        expect(seen[id]).not.toContain('flowcrew state');
+      }
     }
     expect(seen.review).toContain('Greeting content could be wrong.');
     expect(seen.review).toContain('Read output and compare it to task.');
@@ -210,6 +306,63 @@ describe('independent post-author routing', () => {
 });
 
 describe('in-iteration replanning through the revision authority', () => {
+  it.each([false, true])('validates only authors and repairs across decisions, a replan and a review-depth switch, and binds gates to their final trees (declared ignored output=%s)', async ignored => {
+    if (ignored) writeFileSync(join(project, '.gitignore'), 'docs/\n');
+    writeFileSync(join(project, 'package.json'), JSON.stringify({ name: 'decision-ledger-fixture', version: '1.0.0', scripts: { build: 'node check.cjs', test: 'node check.cjs', lint: 'node check.cjs' } }));
+    writeFileSync(join(project, 'package-lock.json'), JSON.stringify({ name: 'decision-ledger-fixture', version: '1.0.0', lockfileVersion: 3, packages: { '': { name: 'decision-ledger-fixture', version: '1.0.0' } } }));
+    writeFileSync(join(project, 'check.cjs'), "console.log('configured check passed');\n");
+    for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) isolatedProjectCommand('git', args, project, root);
+    const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
+    const proposal = [
+      { ...decisionStage('work', ['replan', 'review'], 'review', ['plan']), scope: ['docs/'] },
+      { id: 'review', role: 'qa', scope: [], depends_on: ['work'], is_gate: true, artifact_contract: contract },
+      { id: 'repair', role: 'coder', scope: ['docs/'], depends_on: ['review'], retry_to: ['review'], artifact_contract: contract },
+    ];
+    let plans = 0, assessments = 0;
+    const calls: string[] = [];
+    const gateReceipts: Array<{ gate: string; sequence: number; treeHash: string | null }> = [];
+    const adapter: Adapter = { async run(user, _role, opts) {
+      calls.push(opts.stageId);
+      let output = delivered;
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Separate revision and review duties.', metric_search: false, questions: [] });
+      if (opts.stageId === 'plan') {
+        const candidate = ++plans === 1 ? proposal : readRunState(project, opts.runDir.split('/').at(-1)!).planControl!.stages.filter(stage => !stage.dynamic_dispatch && stage.decision?.kind !== 'shape');
+        writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: candidate }));
+      }
+      if (opts.stageId === 'work') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Wrong greeting.\n'); output = choice('replan'); }
+      if (opts.stageId === 'review_assess') {
+        const validation = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation').at(-1)!;
+        expect(JSON.parse(user.split('\n')[0]).validation).toEqual(validation);
+        output = JSON.stringify({ successor: ++assessments === 1 ? 'review' : 'review_full', reason: 'Review the current tree.', risk_areas: [] });
+      }
+      if (opts.stageId === 'repair') { writeFileSync(join(project, 'docs/report.md'), 'Required greeting.\n'); output = choice('review_assess'); }
+      if (['review', 'review_full'].includes(opts.stageId)) {
+        const reference = JSON.parse(readFileSync(join(opts.runDir, `validation_delta_${opts.stageId}.json`), 'utf8'));
+        gateReceipts.push({ gate: opts.stageId, sequence: reference.ledgerSequence, treeHash: reference.treeHash });
+        output = gate(opts, readFileSync(join(project, 'docs/report.md'), 'utf8') === 'Required greeting.\n');
+      }
+      return { output, exitCode: 0, duration_ms: 1,
+        ...(opts.stageId === 'plan' ? { writes: ['run:dispatch.yaml'], writeAttribution: 'structured' as const } : {}) };
+    } };
+    const state = await execute(config, adapter, `---\noutputs: [docs/report.md]\n---\n${task}`);
+    expect(state.status, state.failureReason).toBe('complete');
+    expect(calls).toEqual(['choose', 'plan', 'work', 'plan', 'review_assess', 'review', 'repair', 'review_assess', 'review_full']);
+    expect(plans).toBe(2); expect(state.queryState!.planRevision!.revision).toBe(1);
+    const ledger = readEvidence(runDir(project, state.runId));
+    const validations = ledger.filter(entry => entry.kind === 'validation');
+    expect(validations.map(entry => [entry.stageId, entry.attemptIndex])).toEqual([['work', 1], ['repair', 1]]);
+    expect(validations[0].treeHash).not.toBe(validations[1].treeHash);
+    for (const [index, receipt] of gateReceipts.entries()) {
+      const validation = validations[index];
+      expect(validation).toMatchObject({ validationVersion: VALIDATION_FACT_VERSION, sequence: receipt.sequence, treeHash: receipt.treeHash, pass: true });
+      expect(validation.executions).toHaveLength(1);
+      expect(validation.executions[0].commands.map(command => [command.role, command.exitCode])).toEqual([['build', 0], ['test', 0], ['lint', 0]]);
+      for (const id of [validation.stageId, receipt.gate]) {
+        expect(ledger.find(entry => entry.kind === 'attempt' && entry.stageId === id && entry.attemptIndex === 1)).toMatchObject({ treeHash: receipt.treeHash });
+      }
+    }
+  });
+
   it.each([false, true])('appends a revision without changing prior bytes, iterations, spent attempts or executed duties (legacy committed gap=%s)', async legacyGap => {
     const { config: workflow } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const stages = [
@@ -286,6 +439,31 @@ describe('in-iteration replanning through the revision authority', () => {
 });
 
 describe('decision descendants and joins', () => {
+  it('selects completed review alternatives only for settlement, never to release rejected descendants or failed work', () => {
+    const stages = WorkflowConfigSchema.parse({ name: 'review-settlement', stages: [
+      { ...decisionStage('route', ['left', 'right'], 'left'), decision: { kind: 'review', successors: ['left', 'right'], default: 'left' } },
+      { id: 'left', role: 'qa', depends_on: ['route'], scope: [], is_gate: true },
+      { id: 'right', role: 'qa', depends_on: ['route'], scope: [], is_gate: true },
+      { id: 'tail', role: 'coder', depends_on: ['right'], scope: [] },
+      { id: 'join', role: 'coder', depends_on: ['left', 'right'], scope: [] },
+    ] }).stages;
+    const created = createRun(project, 'review-settlement', 'name: review-settlement', stages.map(stage => stage.id));
+    const state = readRunState(project, created.runId);
+    for (const id of ['route', 'left', 'right']) state.stages[id].status = 'complete';
+    state.decisionGraph = { ...emptyDecisionGraph(), records: [{ key: 'current', stageId: 'route', iteration: 1, successor: 'left', outcome: 'chosen', reason: 'Review repaired work.' }] };
+    const byId = new Map(stages.map(stage => [stage.id, stage]));
+    expect(isStageInSkippedBranch('right', byId, state, 'settlement')).toBe(true);
+    for (const id of ['right', 'tail', 'join']) expect(isStageInSkippedBranch(id, byId, state)).toBe(false);
+    const ready = createReadyFinder({ loadGateContract: () => null, readGateEvaluation: (_project, id) => ({ pass: id !== 'right' }) })(stages, state);
+    expect(ready).toEqual([]);
+    state.stages.right.status = 'failed';
+    expect(isStageInSkippedBranch('right', byId, state, 'settlement')).toBe(false);
+    state.stages.right.status = 'complete'; byId.get('right')!.scope = ['docs/'];
+    expect(isStageInSkippedBranch('right', byId, state, 'settlement')).toBe(false);
+    byId.get('right')!.scope = []; byId.get('route')!.decision!.kind = 'successor';
+    expect(isStageInSkippedBranch('right', byId, state, 'settlement')).toBe(false);
+  });
+
   it('does not discard executed branch duties when a later choice selects another alternative', () => {
     const stages = WorkflowConfigSchema.parse({ name: 'retained-work', stages: [
       decisionStage('route', ['left', 'right'], 'left'),

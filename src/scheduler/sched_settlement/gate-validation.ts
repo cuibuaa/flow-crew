@@ -148,7 +148,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
   const brief = briefAt(base), executions: ValidationExecution[] = [];
   const execute = async (cwd: string, target: 'attempt' | 'base', commit?: string): Promise<ProjectValidationBaseline> => {
     const tree = captureProjectTree(cwd, brief);
-    const commandTrees: Array<{ treeHash: string | null; treeAfterHash: string | null }> = [];
+    const commandFacts: Array<{ treeHash: string | null; treeAfterHash: string | null; output: string }> = [];
     const measured = await runProjectValidationBaseline(cwd, {
       ...dependencies, commands: plan.baseline.discovery.commands.map(command => {
         // A declared absolute project path follows the isolated base tree.
@@ -166,7 +166,10 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
         const result = await (dependencies.runCommand ?? (input => runValidationCommand({ ...input, runDir: base,
           // Base output must not be attributed as an author's project write.
           ...(target === 'attempt' ? { execution: { stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt } } : {}) })))(request);
-        commandTrees.push({ treeHash: before.hash, treeAfterHash: captureProjectTree(cwd, brief).hash });
+        // Retain the command's full transport output before prompt/identity
+        // bounding. Large stderr must not erase stdout's suite totals.
+        commandFacts.push({ treeHash: before.hash, treeAfterHash: captureProjectTree(cwd, brief).hash,
+          output: [result.stdout, result.stderr].filter(value => Boolean(value)).join('\n') });
         return result;
       },
     });
@@ -176,9 +179,10 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
       if (!command) return [];
       const outputPath = `stage_evidence/${stageId}/validation-${attempt.index}-${target}-${commandIndex}.log`;
       mkdirSync(dirname(join(base, outputPath)), { recursive: true });
-      writeFileSync(join(base, outputPath), result.output);
+      const { output = result.output, ...tree } = commandFacts[commandIndex++] ?? {};
+      writeFileSync(join(base, outputPath), output);
       return [{ ...result, output: '', outputPath, command: command.command, args: command.args,
-        ...commandTrees[commandIndex++] }];
+        ...tree }];
     });
     executions.push({ target, cwd, commit, treeHash: tree.hash, treeAfterHash: captureProjectTree(cwd, brief).hash, commands });
     return measured;

@@ -63,7 +63,8 @@ validation:
 
 Follow it with the goal, constraints and extractable acceptance criteria. Every brief enters the same
 model chooser, which chooses a coherent author/review/repair shape or a decomposition. The operator
-does not name a shape. Legacy workflow fields are refused with a removed-field diagnostic.
+does not name a shape. Legacy `workflow:` metadata is accepted but has no routing effect;
+every value still enters the chooser. The CLI shape override remains unavailable.
 The chooser asks concrete scope or research-declaration questions when needed; answer them in the
 run inbox with `inbox approve <request> --reason <answer>`, then resume the same run. A JSON
 answer containing a `research` object can supply the missing research declaration. Questions and

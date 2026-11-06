@@ -290,9 +290,15 @@ export async function runStage(
     handoffVisibility: opts.role.handoff_visibility,
   });
 
-  const attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch
+  // Isolated decisions are read-only consumers. A repair can also return a
+  // decision, but keeps the ordinary author boundary and its one validation.
+  const attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch && !(opts.decisionResult && opts.isolatedInput)
     ? ensureAttemptValidationPlan(opts.projectDir, opts.runId) : undefined;
-  const evidenceTreeBefore = captureProjectTree(opts.projectDir, opts.taskDescription ?? '');
+  // Use the same raw declarations as configured validation, including ignored
+  // artifacts. The rendered task description has already lost frontmatter.
+  const evidenceBriefPath = join(opts.runDir, 'task_brief.md');
+  const evidenceBrief = existsSync(evidenceBriefPath) ? readFileSync(evidenceBriefPath, 'utf8') : opts.taskDescription ?? '';
+  const evidenceTreeBefore = captureProjectTree(opts.projectDir, evidenceBrief);
 
   const attribution = opts.attribution ?? {
     role: opts.role.name,
@@ -1461,7 +1467,7 @@ export async function runStage(
       },
     });
   }
-  const evidenceTreeAfter = captureProjectTree(opts.projectDir, opts.taskDescription ?? '');
+  const evidenceTreeAfter = captureProjectTree(opts.projectDir, evidenceBrief);
   appendEvidence(opts.runDir, { kind: 'attempt', stageId: opts.stageId, attemptIndex, attemptStartedAt,
     exitCode: result.exitCode, status: final.status, treeHash: evidenceTreeAfter.hash,
     files: changedTreeFiles(evidenceTreeBefore, evidenceTreeAfter),

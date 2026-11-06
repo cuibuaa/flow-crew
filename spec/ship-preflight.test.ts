@@ -104,7 +104,7 @@ function commonDeps(overrides: ShipPreflightDependencies = {}): ShipPreflightDep
   };
 }
 
-it('reports the single entry and refuses removed workflow metadata', async () => {
+it('reports the single entry even with inert legacy workflow metadata', async () => {
   const path = join(fixture.project, 'brief.md');
   const output = new Capture();
   const args = ['ship-preflight', '--brief', 'brief.md'];
@@ -114,8 +114,8 @@ it('reports the single entry and refuses removed workflow metadata', async () =>
   expect(await cmdShipPreflightWithDeps(args, deps)).toBe(0);
   expect(output.value).toContain('Entry workflow: entry');
   writeFileSync(path, brief.replace('---\n---', '---\nworkflow: direct\n---'));
-  expect(await cmdShipPreflightWithDeps(args, deps)).toBe(1);
-  expect(output.value).toContain('field no longer exists');
+  expect(await cmdShipPreflightWithDeps(args, deps)).toBe(0);
+  expect(output.value).not.toContain('refused:');
 });
 
 function writeRun(id: string, state: Record<string, unknown>, mtime: number): string {

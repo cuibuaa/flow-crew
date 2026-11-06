@@ -144,10 +144,8 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
     const reason = error instanceof Error ? error.message : String(error);
     return { stripped, frontmatterError: reason, workflowError: reason };
   }
-  const workflow = (parsed as Record<string, unknown>).workflow;
-  if (workflow !== undefined) {
-    out.workflowError = 'The workflow frontmatter field no longer exists; remove it. The entry chooser selects the shape from the brief.';
-  }
+  // Legacy workflow metadata is inert, like other unconsumed metadata. It
+  // neither selects a shape nor prevents an old brief entering the chooser.
   // Terminal-state, research-result, and report-directory paths have their own
   // lifecycle contracts. Only the brief's explicit output collection belongs
   // to the terminal archive added for `outputs:`; otherwise a consumed mutable

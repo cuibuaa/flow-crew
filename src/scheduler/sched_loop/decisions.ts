@@ -145,7 +145,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     } else if (source.retry_to?.length && !source.decision) {
       choice = validateDecision(stage, JSON.stringify({ successor: declaration.default, reason: 'Completed repair returns to its rejecting gate.' }));
     } else {
-      choice = validateDecision(stage, readStageOutput(project, run, source.id), source.decision?.kind === 'review' ? reviewFacts(project, directory, state, source.id).files : []);
+      choice = validateDecision(stage, readStageOutput(project, run, source.id), source.decision?.kind === 'review' ? reviewFacts(project, directory, state).files : []);
     }
     if (source.decision?.kind === 'shape' && !choice.questions?.length) {
       let raw: Record<string, unknown> = {};

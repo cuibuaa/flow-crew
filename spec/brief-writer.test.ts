@@ -439,7 +439,7 @@ it.each([
   { command: 'quick', kind: 'unknown_workflow' },
   { command: 'quick', kind: 'direct_research' },
   { command: 'brief', kind: 'occupied_output' },
-  { command: 'brief', kind: 'direct_research' },
+  { command: 'brief', kind: 'invalid_policy' },
   { command: 'quick', kind: 'unknown_adapter' },
   { command: 'quick', kind: 'missing_adapter' },
   { command: 'quick', kind: 'continuation' },
@@ -450,8 +450,11 @@ it.each([
   let task = 'write a greeting';
   const extra: string[] = [];
   if (kind === 'unknown_workflow') extra.push('--workflow', 'nosuch');
-  if (kind === 'direct_research') { task = `---\n${command === 'brief' ? 'workflow: direct\n' : ''}research:\n  baseline: 0\n---\nwrite a greeting`;
-    if (command === 'quick') extra.push('--workflow', 'direct'); }
+  if (kind === 'direct_research') {
+    task = '---\nresearch:\n  baseline: 0\n---\nwrite a greeting';
+    extra.push('--workflow', 'direct');
+  }
+  if (kind === 'invalid_policy') task = '---\nworkflow: direct\nplanner_policies: [not_a_policy]\nresearch:\n  baseline: 0\n---\nwrite a greeting';
   if (kind === 'occupied_output') {
     writeFileSync(join(dir, 'occupied.txt'), 'existing');
     git(dir, ['add', 'occupied.txt']);
@@ -477,7 +480,8 @@ it.each([
     { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8' });
   expect(child.status, child.stdout + child.stderr).toBe(1);
   const hint = kind === 'unknown_workflow' ? 'Unknown quick option: --workflow'
-    : kind === 'direct_research' ? command === 'quick' ? 'Unknown quick option: --workflow' : 'field no longer exists'
+    : kind === 'direct_research' ? 'Unknown quick option: --workflow'
+    : kind === 'invalid_policy' ? 'PLANNER_POLICY_INVALID'
     : kind === 'occupied_output' ? 'already occupied'
     : kind === 'unknown_adapter' ? 'Unknown adapter "nosuch"'
     : kind === 'missing_adapter' ? 'npm i -g @openai/codex'

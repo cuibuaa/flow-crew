@@ -25,7 +25,7 @@ const reading = { version: 1, testsRun: 1, complete: true,
   failures: [{ testId: 'fixture test', file: 'case.test', messageClass: 'assertion' }] };
 
 async function fixture(options: { noValidation?: boolean; nativeCommands?: boolean; baseRed?: boolean; introduce?: boolean; invalidReading?: boolean;
-  rejectFirstReview?: boolean; mutateValidation?: boolean; unchanged?: boolean; suiteError?: 'suite' | 'diagnostic' | 'unhandled'; input?: 'introduced' | 'mixed'; readonlyInput?: boolean } = {}) {
+  rejectFirstReview?: boolean; mutateValidation?: boolean; unchanged?: boolean; verbose?: boolean; suiteError?: 'suite' | 'diagnostic' | 'unhandled'; input?: 'introduced' | 'mixed'; readonlyInput?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'ledger-spec-')); roots.push(root);
   const source = join(root, 'source'), target = join(root, 'target'); mkdirSync(source);
   const counter = join(root, 'executions.jsonl');
@@ -37,6 +37,10 @@ fs.appendFileSync(${JSON.stringify(counter)},JSON.stringify({cwd:process.cwd(),v
 const fail=${Boolean(options.baseRed)}||fs.readFileSync('value.txt','utf8').startsWith('introduced');
 ${options.mutateValidation ? "fs.writeFileSync('value.txt','changed by validation\\n');" : ''}
 console.log(fail?'FAIL case.test > fixture test 0.375s\\nTests 1 failed':'Tests 1 passed');process.exitCode=fail?1:0;`);
+  if (options.verbose) writeFileSync(join(source, 'check.mjs'), `import fs from 'node:fs';
+fs.appendFileSync(${JSON.stringify(counter)},JSON.stringify({cwd:process.cwd(),value:fs.readFileSync('value.txt','utf8')})+'\\n');
+console.log('Test Files 1 passed (1)\\nTests 1 passed (1)');
+process.stderr.write('diagnostic '.repeat(10000));`);
   if (options.suiteError) {
     const packageURL = import.meta.resolve('vitest/package.json');
     const cli = fileURLToPath(new URL(JSON.parse(readFileSync(new URL(packageURL), 'utf8')).bin.vitest, packageURL));
@@ -120,6 +124,23 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
 }
 
 describe('one evidence lifecycle through the real scheduler and scripted adapter', () => {
+  it('retains the complete configured command log including totals before large stderr, without another validation', async () => {
+    const result = await fixture({ verbose: true });
+    expect(result.final.status).toBe('complete');
+    expect(result.executions).toHaveLength(1);
+    expect(result.validations).toHaveLength(1);
+    const [command] = result.validations[0].executions[0].commands;
+    expect(command.exitCode).toBe(0);
+    expect(command.output).toBe('');
+    const output = readFileSync(join(result.rd, command.outputPath!), 'utf8');
+    expect(output).toContain('Test Files 1 passed (1)\nTests 1 passed (1)');
+    expect(output).not.toContain('earlier bytes omitted');
+    expect(Buffer.byteLength(output)).toBeGreaterThanOrEqual(command.outputBytes!.stdout + command.outputBytes!.stderr);
+    // Unstructured totals remain human evidence; they do not become failure identities.
+    expect(command.testsRun).toBeNull();
+    expect(command.identityOwner).toBe('unknown');
+  });
+
   it.each(['suite', 'diagnostic', 'unhandled'] as const)('does not accept a new native Vitest %s failure as an unchanged pre-existing assertion', async suiteError => {
     const result = await fixture({ suiteError });
     expect(result.final.status).toBe('failed'); expect(result.executions).toHaveLength(2);
