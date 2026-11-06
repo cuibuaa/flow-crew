@@ -104,9 +104,9 @@ describe('shipped role outcome contracts', () => {
 
   it('uses relevant post-change baseline evidence and retains exact rejected repair checks', () => {
     const loaded = prompt('coder').replace(/\s+/g, ' ');
-    expect(loaded).toContain('After the last change, supply relevant evidence covering the change under the admitted baseline comparison');
-    expect(loaded).toContain('existing failures may remain when the admitted rule is no new regression');
-    expect(loaded).toContain('Repairs include the exact rejected check');
+    expect(loaded).toContain('After the last change, supply relevant evidence for acceptance properties not established by engine records.');
+    expect(loaded).toContain('Existing failures may remain when the admitted rule is no new regression');
+    expect(loaded).toContain('Repairs reproduce the rejected property with targeted checks');
   });
 
   it('grounds research claims in verified retrievable evidence with sufficient authority', () => {

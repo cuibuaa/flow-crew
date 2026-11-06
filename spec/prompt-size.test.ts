@@ -263,88 +263,53 @@ function dependencyContext(prompt: string): string {
   return prompt.slice(0, bodyOffset);
 }
 
-describe('whole-predecessor UTF-8 context bound', () => {
-  it('switches only after the complete rendered block exceeds 8,000 bytes', () => {
+describe('one bounded evidence context replaces predecessor narratives', () => {
+  it('ignores author narrative size across the old 8,000-byte threshold', () => {
     const fixture = contextFixture();
     writePredecessor(fixture.depDir, ['artifact.ts'], '');
-    const fixedBytes = Buffer.byteLength(dependencyContext(renderPrompt(fixture)), 'utf8');
-
-    for (const targetBytes of [MAX_PREDECESSOR_CONTEXT_BYTES - 1, MAX_PREDECESSOR_CONTEXT_BYTES]) {
-      writePredecessor(fixture.depDir, ['artifact.ts'], 'x'.repeat(targetBytes - fixedBytes));
+    const baseline = dependencyContext(renderPrompt(fixture));
+    for (const bytes of [7999, 8000, 8001, 100000]) {
+      writePredecessor(fixture.depDir, ['artifact.ts'], 'AUTHOR-TRANSCRIPT-' + 'x'.repeat(bytes));
       const context = dependencyContext(renderPrompt(fixture));
-      expect(Buffer.byteLength(context, 'utf8')).toBe(targetBytes);
-      expect(context).toContain('Artifacts: artifact.ts');
-      expect(context).not.toContain('Inline predecessor block:');
+      expect(context).toBe(baseline);
+      expect(context).toContain('evidence-ledger.jsonl');
+      expect(context).toContain('change.diff');
+      expect(context).not.toContain('AUTHOR-TRANSCRIPT-');
+      expect(context).not.toContain('output.md');
     }
-
-    writePredecessor(fixture.depDir, ['artifact.ts'], 'x'.repeat(
-      MAX_PREDECESSOR_CONTEXT_BYTES + 1 - fixedBytes,
-    ));
-    const bounded = dependencyContext(renderPrompt(fixture));
-    expect(Buffer.byteLength(bounded, 'utf8')).toBeLessThanOrEqual(MAX_PREDECESSOR_CONTEXT_BYTES);
-    expect(bounded).toContain(`Inline predecessor block: ${MAX_PREDECESSOR_CONTEXT_BYTES + 1} UTF-8 bytes`);
-    expect(bounded).toContain(fixture.depDir);
-    expect(bounded).toContain('status.json');
-    expect(bounded).toContain('output.md');
   });
 
-  it('bounds artifact and multibyte output overflow in full and minimal visibility', () => {
+  it('keeps UTF-8 facts bounded and complete facts inspectable for every visibility setting', () => {
     const fixture = contextFixture();
-    const artifacts = Array.from(
-      { length: 18_000 },
-      (_, index) => `ui/node_modules/package-${index}/deep/file.js`,
-    );
-    const output = `HEAD-${'界🧪'.repeat(6_000)}-TAIL`;
-    writePredecessor(fixture.depDir, artifacts, output);
-    expect(existsSync(fixture.depDir)).toBe(true);
-
-    for (const visibility of ['full', 'minimal'] as const) {
+    const ledger = join(fixture.runDir, 'evidence-ledger.jsonl');
+    const fact = { version: 1, sequence: 1, at: 'fixture', kind: 'declaration', owner: 'declaration',
+      stageId: 'upstream', attemptIndex: 1, status: 'blocked', reason: 'HEAD-' + '界🧪'.repeat(6000) + '-TAIL', caveats: [] };
+    writeFileSync(ledger, JSON.stringify(fact) + '\n');
+    writePredecessor(fixture.depDir, ['artifact.ts'], 'AUTHOR-PRIVATE-HISTORY');
+    for (const visibility of ['full', 'minimal', 'none'] as const) {
       const context = dependencyContext(renderPrompt(fixture, visibility));
-      expect(Buffer.byteLength(context, 'utf8')).toBeLessThanOrEqual(MAX_PREDECESSOR_CONTEXT_BYTES);
-      expect(context.split(fixture.depDir)).toHaveLength(2);
-      expect(context).toContain('Artifact names omitted from this prompt: 18000');
-      expect(context).toContain('status.json');
-      expect(context).toContain('output.md');
+      expect(Buffer.byteLength(context)).toBeLessThan(8000);
+      expect(context).toContain(ledger);
       expect(context).toContain('HEAD-');
       expect(context).toContain('-TAIL');
-      expect(context).toMatch(/\d+ UTF-8 output bytes omitted/);
-      expect(context).not.toContain(artifacts.at(-1));
+      expect(context).toContain('[excerpt; read the complete artifact above]');
+      expect(context).not.toContain('AUTHOR-PRIVATE-HISTORY');
       expect(context).not.toContain('\uFFFD');
-      expect(Buffer.from(context, 'utf8').toString('utf8')).toBe(context);
+      expect(JSON.parse(readFileSync(ledger, 'utf8')).reason).toBe(fact.reason);
     }
-
-    writePredecessor(fixture.depDir, ['small-artifact.ts'], 'small complete summary');
-    const full = dependencyContext(renderPrompt(fixture, 'full'));
-    const minimal = dependencyContext(renderPrompt(fixture, 'minimal'));
-    expect(full).toContain('small-artifact.ts');
-    expect(full).toContain('small complete summary');
-    expect(minimal).toContain('small-artifact.ts');
-    expect(minimal).not.toContain('small complete summary');
-    expect(renderPrompt(fixture, 'none')).not.toContain('## Context from stage:');
-    expect(renderPrompt(fixture, 'none')).not.toContain('## Previous stage:');
   });
 
-  it('caps each dependency independently and only adds two-byte separators', () => {
+  it('uses one ledger and diff for multiple dependencies without repeating predecessor blocks', () => {
     const fixture = contextFixture();
-    const secondDepDir = join(fixture.runDir, 'stages', 'upstream_two');
-    mkdirSync(secondDepDir, { recursive: true });
-    const artifacts = Array.from({ length: 18_000 }, (_, index) => `artifact-${index}.js`);
-    writePredecessor(fixture.depDir, artifacts, `FIRST-HEAD-${'界'.repeat(8_000)}-FIRST-TAIL`);
-    writePredecessor(secondDepDir, artifacts, `SECOND-HEAD-${'🧪'.repeat(8_000)}-SECOND-TAIL`);
-
-    const context = dependencyContext(renderPrompt(
-      fixture,
-      'full',
-      ['upstream', 'upstream_two'],
-    ));
-    expect(Buffer.byteLength(context, 'utf8')).toBeLessThanOrEqual(
-      2 * MAX_PREDECESSOR_CONTEXT_BYTES + 2,
-    );
-    expect(context).toContain(fixture.depDir);
-    expect(context).toContain(secondDepDir);
-    expect(context).toContain('FIRST-HEAD');
-    expect(context).toContain('FIRST-TAIL');
-    expect(context).toContain('SECOND-HEAD');
-    expect(context).toContain('SECOND-TAIL');
+    const second = join(fixture.runDir, 'stages', 'upstream_two');
+    mkdirSync(second, { recursive: true });
+    writePredecessor(fixture.depDir, ['a.js'], 'FIRST-AUTHOR-PRIVATE');
+    writePredecessor(second, ['b.js'], 'SECOND-AUTHOR-PRIVATE');
+    const one = dependencyContext(renderPrompt(fixture, 'full', ['upstream']));
+    const two = dependencyContext(renderPrompt(fixture, 'full', ['upstream', 'upstream_two']));
+    expect(two).toBe(one);
+    expect(two.split('## Evidence ledger and diff')).toHaveLength(2);
+    expect(two).not.toContain('FIRST-AUTHOR-PRIVATE');
+    expect(two).not.toContain('SECOND-AUTHOR-PRIVATE');
   });
 });

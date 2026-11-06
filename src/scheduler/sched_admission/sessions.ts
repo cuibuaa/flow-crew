@@ -1,6 +1,6 @@
 /** Stage/session reuse and gate continuation lifecycle; reads/writes only the supplied run directory. */
-import { type StageStatus, STAGE_STATUS, type StoreState } from '../../store.js';
-import { type SessionMetadata, readSession, finalizeStageSessions } from '../../adapter-session.js';
+import { type StageStatus, type StoreState } from '../../store.js';
+import { type SessionMetadata, finalizeStageSessions } from '../../adapter-session.js';
 import { join } from 'node:path';
 import { unlinkSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -13,86 +13,16 @@ export function isValidationStage(stage: StageConfig): boolean {
     || /(^|[\s_-])(gate|verify|verification)(?=$|[\s_-])/i.test(tagged);
 }
 
-function reusableDirectSuccessors(stage: StageConfig, allStages: StageConfig[]): StageConfig[] {
-  if (isValidationStage(stage)) return [];
-  return allStages.filter((candidate) =>
-    candidate.depends_on.length === 1
-    && candidate.depends_on[0] === stage.id
-    && !isValidationStage(candidate),
-  );
-}
-
-/**
- * The author a repair continues: its retry route names exactly one gate, that gate has no other repair route, and the
- * gate reviewed exactly one non-validation stage of the repair's role. The repair resumes that author's session, so the
- * stage that wrote the change fixes it with the context it already has. Gates never take part.
- */
-function repairedAuthor(stage: StageConfig, allStages: StageConfig[]): StageConfig | undefined {
-  if (isValidationStage(stage) || stage.retry_to?.length !== 1) return undefined;
-  const gate = allStages.find((candidate) => candidate.id === stage.retry_to![0] && candidate.is_gate === true);
-  if (!gate || allStages.filter((candidate) => candidate.retry_to?.includes(gate.id)).length !== 1) return undefined;
-  const authors = allStages.filter((candidate) => gate.depends_on.includes(candidate.id) && !isValidationStage(candidate));
-  return authors.length === 1 && authors[0].role === stage.role ? authors[0] : undefined;
-}
-
-export function canReuseSession(input: {
-  stage: StageConfig;
-  predecessor: StageConfig;
-  allStages: StageConfig[];
-  predecessorStatus: StageStatus | undefined;
-  destinationStatus: StageStatus | undefined;
+/** Compatibility entry points: opt-in reuse no longer carries conversations.
+ * Every stage starts with current duties, the evidence ledger and the diff. */
+export function canReuseSession(_input: {
+  stage: StageConfig; predecessor: StageConfig; allStages: StageConfig[];
+  predecessorStatus: StageStatus | undefined; destinationStatus: StageStatus | undefined;
   session: SessionMetadata | undefined;
-}): boolean {
-  const { stage, predecessor, allStages, predecessorStatus, destinationStatus, session } = input;
-  if (stage.depends_on.length !== 1 || stage.depends_on[0] !== predecessor.id) return false;
-  if (isValidationStage(stage) || isValidationStage(predecessor)) return false;
-  const successors = reusableDirectSuccessors(predecessor, allStages);
-  if (successors.length !== 1 || successors[0].id !== stage.id) return false;
-  if (!session) return false;
-  if (predecessorStatus?.status !== STAGE_STATUS.COMPLETE) return false;
-  const attempts = predecessorStatus.attempts ?? [];
-  if (attempts.length !== 1 || attempts[0].status !== STAGE_STATUS.COMPLETE) return false;
-  if ((predecessorStatus.retries ?? 0) !== 0 || (predecessorStatus.reruns ?? 0) !== 0) return false;
-  if ((destinationStatus?.retries ?? 0) !== 0 || (destinationStatus?.attempts?.length ?? 0) !== 0) return false;
-  return true;
-}
-
-export function sessionResumeForStage(
-  stage: StageConfig,
-  allStages: StageConfig[],
-  state: StoreState,
-  runDirPath: string,
-  enabled: boolean,
-  adapter?: string,
-): { sessionId: string; ownerStageId: string } | undefined {
-  // Own-stage continuation does not inherit another role's reasoning. It is
-  // independent of the opt-in predecessor reuse experiment. Gates use their
-  // correction-aware continuation path instead.
-  const own = readSession(runDirPath, stage.id, adapter);
-  if (!stage.is_gate && own?.ownerStageId === stage.id
-      && (state.stages[stage.id]?.attempts?.length ?? 0) > 0) {
-    return { sessionId: own.sessionId, ownerStageId: stage.id };
-  }
-  const author = repairedAuthor(stage, allStages);
-  if (author) {
-    const authored = readSession(runDirPath, author.id, adapter);
-    return authored?.ownerStageId === author.id && state.stages[author.id]?.status === STAGE_STATUS.COMPLETE
-      ? { sessionId: authored.sessionId, ownerStageId: author.id }
-      : undefined;
-  }
-  if (!enabled || stage.depends_on.length !== 1) return undefined;
-  const predecessor = allStages.find((candidate) => candidate.id === stage.depends_on[0]);
-  if (!predecessor) return undefined;
-  const session = readSession(runDirPath, predecessor.id, adapter);
-  if (!canReuseSession({
-    stage,
-    predecessor,
-    allStages,
-    predecessorStatus: state.stages[predecessor.id],
-    destinationStatus: state.stages[stage.id],
-    session,
-  })) return undefined;
-  return { sessionId: session!.sessionId, ownerStageId: session!.ownerStageId };
+}): boolean { return false; }
+export function sessionResumeForStage(_stage: StageConfig, _allStages: StageConfig[], _state: StoreState,
+  _runDirPath: string, _enabled: boolean, _adapter?: string): { sessionId: string; ownerStageId: string } | undefined {
+  return undefined;
 }
 
 export const GATE_VERDICT_CORRECTION_VERSION = 1;
@@ -133,16 +63,8 @@ function readAndConsumeGateVerdictCorrection(runDirPath: string, gateId: string)
   }
 }
 
-export function canResumeOwnGateSession(
-  stage: StageConfig,
-  session: SessionMetadata | undefined,
-  previousVerdictWrong: boolean,
-): boolean {
-  return stage.is_gate === true
-    && previousVerdictWrong === false
-    && session !== undefined
-    && session.ownerStageId === stage.id;
-}
+export function canResumeOwnGateSession(_stage: StageConfig, _session: SessionMetadata | undefined,
+  _previousVerdictWrong: boolean): boolean { return false; }
 
 function clearContinuationArtifacts(runDirPath: string, gateId: string): void {
   finalizeStageSessions(runDirPath, gateId);
@@ -151,48 +73,14 @@ function clearContinuationArtifacts(runDirPath: string, gateId: string): void {
 }
 
 export function clearGateContinuationsForStages(runDirPath: string, stages: StageConfig[]): void {
-  for (const gate of stages) {
-    if (gate.is_gate && stages.some((candidate) => candidate.retry_to?.includes(gate.id))) {
-      clearContinuationArtifacts(runDirPath, gate.id);
-    }
-  }
-  // The bounded repair loop is over, so no repair will continue an author kept for it.
-  for (const stage of stages) {
-    const author = repairedAuthor(stage, stages);
-    if (author) clearContinuationArtifacts(runDirPath, author.id);
-  }
+  // Historical native homes are never selected again; retire this run's homes
+  // when the enclosing stage lifecycle ends.
+  for (const stage of stages) clearContinuationArtifacts(runDirPath, stage.id);
 }
 
-export function gateContinuationSessionForStage(
-  stage: StageConfig,
-  runDirPath: string,
-  isReevaluation: boolean,
-  adapter?: string,
-): { sessionId: string; ownerStageId: string } | undefined {
-  if (!isReevaluation || stage.is_gate !== true) return undefined;
-  const correction = readAndConsumeGateVerdictCorrection(runDirPath, stage.id);
-  if (correction) {
-    // Persisting a disproved line of reasoning is worse than rebuilding it.
-    clearContinuationArtifacts(runDirPath, stage.id);
-    return undefined;
-  }
-  const session = readSession(runDirPath, stage.id, adapter);
-  if (!canResumeOwnGateSession(stage, session, false)) return undefined;
-  return { sessionId: session!.sessionId, ownerStageId: stage.id };
+export function gateContinuationSessionForStage(stage: StageConfig, runDirPath: string,
+  _isReevaluation: boolean, _adapter?: string): { sessionId: string; ownerStageId: string } | undefined {
+  if (stage.is_gate && readAndConsumeGateVerdictCorrection(runDirPath, stage.id)) clearContinuationArtifacts(runDirPath, stage.id);
+  return undefined;
 }
-
-export function shouldPreserveSession(stage: StageConfig, allStages: StageConfig[], enabled: boolean): boolean {
-  // Gate continuation is deliberately independent of ordinary predecessor
-  // reuse. It retains only this gate's own isolated home when a fix loop can
-  // bring the same gate back; validation still never inherits a builder home.
-  if (stage.is_gate === true) {
-    return allStages.some((candidate) => candidate.retry_to?.includes(stage.id));
-  }
-  // An author keeps its session while a repair may continue it, and that repair keeps it while its gate may send the
-  // work back; clearGateContinuationsForStages removes it when the repair loop ends.
-  if (repairedAuthor(stage, allStages) || allStages.some((candidate) => repairedAuthor(candidate, allStages)?.id === stage.id)) return true;
-  if (!enabled || isValidationStage(stage)) return false;
-  // Dynamic children do not exist until this stage returns; retain its home
-  // provisionally, then the eligibility check still requires exactly one child.
-  return stage.dynamic_dispatch || reusableDirectSuccessors(stage, allStages).length === 1;
-}
+export function shouldPreserveSession(_stage: StageConfig, _allStages: StageConfig[], _enabled: boolean): boolean { return false; }

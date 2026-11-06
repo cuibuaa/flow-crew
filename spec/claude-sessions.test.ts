@@ -573,17 +573,17 @@ describe('G02: session ownership, admission and cleanup', () => {
     expect(readSession(directory, 'author', 'claude')).toBeUndefined();
   });
 
-  it('admits own retries only with owned Claude metadata', async () => {
+  it('starts own retries fresh even with owned Claude metadata', async () => {
     await seed('work');
     const work = stage('work'), state = { stages: { work: successfulStatus({ status: 'pending', retries: 1 }) } } as StoreState;
-    expect(sessionResumeForStage(work, [work], state, directory, false, 'claude')).toEqual({ sessionId: UUID, ownerStageId: 'work' });
+    expect(sessionResumeForStage(work, [work], state, directory, false, 'claude')).toBeUndefined();
     expect(sessionResumeForStage(work, [work], state, directory, false, 'codex')).toBeUndefined();
     expect(sessionResumeForStage({ ...work, is_gate: true }, [work], state, directory, false, 'claude')).toBeUndefined();
     rmSync(join(directory, 'stages', 'work', 'session.json'));
     expect(sessionResumeForStage(work, [work], state, directory, false, 'claude')).toBeUndefined();
   });
 
-  it('admits author repair without predecessor opt-in and retires retained Claude homes after the repair loop', async () => {
+  it('keeps repair fresh and retires retained Claude homes after the repair loop', async () => {
     await seed('author');
     await seed('review');
     // Session metadata names the latest adapter. Native homes retained by an
@@ -595,11 +595,11 @@ describe('G02: session ownership, admission and cleanup', () => {
     const author = stage('author'), review = stage('review', { role: 'qa', is_gate: true, depends_on: ['author'] });
     const repair = stage('repair', { depends_on: ['review'], retry_to: ['review'] });
     const all = [author, review, repair], state = { stages: { author: successfulStatus() } } as StoreState;
-    expect(sessionResumeForStage(repair, all, state, directory, false, 'claude')).toEqual({ sessionId: UUID, ownerStageId: 'author' });
+    expect(sessionResumeForStage(repair, all, state, directory, false, 'claude')).toBeUndefined();
     expect(sessionResumeForStage(review, all, state, directory, false, 'claude')).toBeUndefined();
-    expect(shouldPreserveSession(author, all, false)).toBe(true);
-    expect(shouldPreserveSession(review, all, false)).toBe(true);
-    expect(shouldPreserveSession(repair, all, false)).toBe(true);
+    expect(shouldPreserveSession(author, all, false)).toBe(false);
+    expect(shouldPreserveSession(review, all, false)).toBe(false);
+    expect(shouldPreserveSession(repair, all, false)).toBe(false);
     clearGateContinuationsForStages(directory, all);
     expect(existsSync(stageSessionHome(directory, 'author', 'claude'))).toBe(false);
     expect(existsSync(stageSessionHome(directory, 'review', 'claude'))).toBe(false);
@@ -610,21 +610,21 @@ describe('G02: session ownership, admission and cleanup', () => {
     expect(sessionResumeForStage(repair, all, state, directory, false, 'claude')).toBeUndefined();
   });
 
-  it('admits a sole successful predecessor only when opt-in is enabled and excludes validation', async () => {
+  it('keeps opt-in predecessors and validation fresh', async () => {
     await seed('author');
     const author = stage('author'), next = stage('next', { depends_on: ['author'] });
     const all = [author, next], state = { stages: { author: successfulStatus(), next: { status: 'pending', retries: 0 } } } as StoreState;
     expect(sessionResumeForStage(next, all, state, directory, false, 'claude')).toBeUndefined();
-    expect(sessionResumeForStage(next, all, state, directory, true, 'claude')).toEqual({ sessionId: UUID, ownerStageId: 'author' });
+    expect(sessionResumeForStage(next, all, state, directory, true, 'claude')).toBeUndefined();
     expect(sessionResumeForStage({ ...next, role: 'qa', is_gate: true }, all, state, directory, true, 'claude')).toBeUndefined();
     expect(sessionResumeForStage(next, all, { stages: { ...state.stages, author: successfulStatus({ retries: 1 }) } } as StoreState, directory, true, 'claude')).toBeUndefined();
   });
 
-  it('continues only an own gate session and retires a disproved verdict before starting fresh', async () => {
+  it('keeps re-review fresh and retires a disproved verdict', async () => {
     await seed('review');
     const review = stage('review', { role: 'qa', is_gate: true });
     expect(gateContinuationSessionForStage(review, directory, false, 'claude')).toBeUndefined();
-    expect(gateContinuationSessionForStage(review, directory, true, 'claude')).toEqual({ sessionId: UUID, ownerStageId: 'review' });
+    expect(gateContinuationSessionForStage(review, directory, true, 'claude')).toBeUndefined();
     const correction = gateVerdictCorrectionPath(directory, 'review');
     mkdirSync(join(directory, 'gate_reevaluation'), { recursive: true });
     writeFileSync(correction, JSON.stringify({ version: 1, gateId: 'review', previousVerdictWrong: true, reason: 'Synthetic verdict disproved.', evidence: 'Recorded synthetic check.' }));

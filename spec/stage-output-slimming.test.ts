@@ -28,21 +28,21 @@ describe('author results and reports carry only what the brief and readers need'
     }
   });
 
-  it('asks delivered authors only for status and summary while blocked results and repairs keep structured checks', () => {
+  it('asks for status and summary while configured checks live in the ledger', () => {
     const coder = loaded('coder');
     expect(coder).toContain('Return delivered or blocked status and a short summary, including any material caveat');
-    expect(coder).toContain('Blocked results and repairs list checks with literal commands, direct exit codes and evidence references, and caveats; other delivered results may leave both empty');
+    expect(coder).toContain('omit duplicate command lists and prose verification reports');
     expect(coder).toContain('If blocked, include the attempted approach, exact error/path, suspected cause and a different next approach');
     // Empty arrays already validate, so the schema keeps every key required and
     // closed: removing them from `required` would end constrained generation.
     expect(generationCompatibleSchema(HANDOFF_SCHEMA)).toBe(true);
-    expect(parseStageRecord(JSON.stringify({ status: 'delivered', summary: 'Done.', checks: [], caveats: [], remaining_work: [] }), HANDOFF_SCHEMA))
-      .toEqual({ status: 'delivered', summary: 'Done.', checks: [], caveats: [], remaining_work: [] });
+    expect(parseStageRecord(JSON.stringify({ status: 'delivered', summary: 'Done.', caveats: [], remaining_work: [] }), HANDOFF_SCHEMA))
+      .toEqual({ status: 'delivered', summary: 'Done.', caveats: [], remaining_work: [] });
   });
 
   it('asks authors for one citable final test log instead of raw evidence sets', () => {
     const coder = loaded('coder');
-    expect(coder).toContain('Use engine records for properties they establish; one final test log at a declared run path that a gate can cite is enough');
+    expect(coder).toContain('The engine records changed-file hashes, command exits and configured validation in the evidence ledger');
     expect(coder).not.toContain('raw evidence');
   });
 });
@@ -91,7 +91,7 @@ describe('stage result contract', () => {
     let seen = '';
     await runStage({ async run(prompt) {
       seen = prompt;
-      return { output: JSON.stringify({ status: 'delivered', summary: 'Done.', checks: [], caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      return { output: JSON.stringify({ status: 'delivered', summary: 'Done.', caveats: [], remaining_work: [] }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
     } }, {
       stageId: 'work', projectDir: project, runDir: directory, runId,
       role: { name: 'coder', description: '', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Deliver.' },

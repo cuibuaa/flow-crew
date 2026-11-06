@@ -88,11 +88,6 @@ export async function executeOrdinaryStage(
         if (admittedTask && !stage.prompt_template?.trim()) {
           resolvedPrompt = admittedTask + '\nProject: ' + projectDir;
         }
-        // On re-plan, include iteration_log.md reference
-        const iterLogPath = join(runDirPath, 'iteration_log.md');
-        if (existsSync(iterLogPath)) {
-          resolvedPrompt += `\n\nRead ${runDirPath}/iteration_log.md for previous iteration results. Fix the issues identified there.`;
-        }
         // Campaign context: prepend only fresh, non-terminal, active-phase history.
         // --campaign-context=skip (and its legacy alias) suppresses this verbose block;
         // campaign ownership, telemetry and the compact tried-direction ledger remain intact.
@@ -104,7 +99,7 @@ export async function executeOrdinaryStage(
             const summaryPaths: string[] = [];
             for (const previousRunId of selection.summaryRunIds) {
               const prevRunDir = runDir(projectDir, previousRunId);
-              const iterLog = join(prevRunDir, 'iteration_log.md');
+              const iterLog = join(prevRunDir, 'evidence-ledger.jsonl');
               if (existsSync(iterLog) && !summaryPaths.includes(iterLog)) summaryPaths.push(iterLog);
             }
             const alert = checkCampaignHealth(selection.entries);

@@ -64,7 +64,7 @@ describe('each retained execution owns one immutable hard stop', () => {
     expect(observed[2].id).not.toBe(observed[1].id);
     expect(observed.map(entry => entry.budgetMs)).toEqual([budget, budget, budget]);
     expect(observed[2].remaining).toBe(budget);
-    expect(observed[2].resume).toBe('123e4567-e89b-42d3-a456-426614174000');
+    expect(observed[2].resume).toBeUndefined();
     expect(observed[2].prompt).toContain('Own-stage continuation evidence');
     expect(observed[2].prompt).not.toContain('# Stage budget wrap-up');
     const status = readStageStatus(project, created.runId, 'work');

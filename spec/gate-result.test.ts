@@ -1,4 +1,7 @@
 import './test-support/policy-runtime.js';
+import { seedAttemptValidation } from './test-support/attempt-validation.js';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
+import { captureProjectTree, projectCommit } from '../src/evidence-ledger.js';
 import { writeCampaignEntry, parseDispatchedStageConfig } from '../src/scheduler.js';
 import { collectGateRuntimeFacts, findGateRecoveryStages } from '../src/scheduler/sched_settlement/gate-recovery.js';
 import { findCampaignPhaseMetadata } from '../src/scheduler/sched_policy/campaign.js';
@@ -53,15 +56,17 @@ function writeVerdict(verdict: Record<string, unknown>): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function writeValidation(state: 'pass' | 'regression' | 'unresolved'): void {
+function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = true): void {
   const baselineBytes = JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline: {
-    version: 1, projectDir, discovery: { state: 'configured', configPath: 'fixture', commands: [], missingRoles: [] }, results: [], gateCriteria: [],
+    version: 1, projectDir, discovery: { state: 'configured', configPath: 'fixture', commands: [{ role: 'test', command: 'fixture', args: [], display: 'npm run test' }], missingRoles: [] }, results: [], gateCriteria: [],
   } });
   writeFileSync(join(runDirPath, 'validation_baseline.json'), baselineBytes);
   const reason = state === 'unresolved'
     ? 'Green baseline no longer passes, but current failure identity/count is unavailable'
     : state === 'regression' ? 'A green baseline no longer passes' : 'Green baseline remains green';
+  const fact = seed ? seedAttemptValidation(projectDir, runId, [], { delta: [{ role: 'test', display: 'npm run test', state, reason, newFailureIdentifiers: state === 'regression' ? ['spec/retained-failure.test.ts'] : [] }] }) : undefined;
   writeFileSync(join(runDirPath, `validation_delta_${gateId}.json`), JSON.stringify({
+    treeHash: captureProjectTree(projectDir).hash, ...(fact ? { ledgerSequence: fact.sequence } : {}),
     version: 2, stageId: gateId, checkedAt: completedAt, pass: state === 'pass',
     baselineSha256: createHash('sha256').update(baselineBytes).digest('hex'),
     attemptIndex: 1, attemptStartedAt: startedAt, attemptCompletedAt: completedAt,
@@ -207,7 +212,7 @@ describe('settled gate results', () => {
     const original = readStageStatus(projectDir, runId, gateId).gate;
     expect(original).toMatchObject({ pass: initial === 'pass', verdictSha256 });
     writeVerdict({ pass: initial !== 'pass', reason: 'Later alias replacement' });
-    writeValidation(initial === 'pass' ? 'regression' : 'pass');
+    writeValidation(initial === 'pass' ? 'regression' : 'pass', false);
     expect(readGateEvaluation(projectDir, gateId, runId)).toEqual(original);
     settleGateEvaluation(projectDir, runId, gateId);
     expect(readStageStatus(projectDir, runId, gateId).gate).toEqual(original);
@@ -329,6 +334,10 @@ describe('stage group settlement boundaries', () => {
         attempts: [{ index: 1, status: 'complete', startedAt, completedAt, exitCode: 0,
           writes: stage.id === 'deferred' ? ['product.ts'] : [], writeAttribution: 'snapshot' }],
       });
+      if (stage.id === 'deferred') {
+        const measured = await projectValidation.runProjectValidationBaseline(projectDir, { commands: baseline.discovery.commands, runCommand: request => projectValidation.runValidationCommand(request) });
+        seedAttemptValidation(projectDir, runId, measured.results, { stageId: 'deferred' });
+      }
     };
     return { stages, runner, execute, executed, commands, bind, retry };
   }
@@ -369,6 +378,7 @@ describe('stage group settlement boundaries', () => {
 
 describe('validation at the review boundary', () => {
   it.each(['repaired', 'exhausted', 'launch_error'] as const)('routes a green baseline failure through the bounded gate loop: %s', async outcome => {
+    for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
     const baseline: projectValidation.ProjectValidationBaseline = {
       version: 1, projectDir,
       discovery: { state: 'partial', configPath: 'fixture', missingRoles: ['build', 'lint'],
@@ -379,15 +389,15 @@ describe('validation at the review boundary', () => {
     };
     vi.spyOn(gateValidation, 'snapshotShipSetupValidationBaseline').mockImplementation((_project, _brief, directory) => {
       const artifact: gateValidation.RunValidationBaselineArtifact = {
-        version: 1, source: 'ship-setup-ready-record', capturedAt: startedAt, baseline,
+        version: 1, source: 'ship-setup-ready-record', capturedAt: startedAt, baseCommit: projectCommit(projectDir), baseline,
       };
       writeFileSync(join(directory, 'validation_baseline.json'), JSON.stringify(artifact));
       return artifact;
     });
     const commands = vi.spyOn(projectValidation, 'runValidationCommand')
-      .mockImplementation(() => outcome === 'launch_error'
+      .mockImplementation(request => outcome === 'launch_error'
         ? { exitCode: null, error: 'spawn validation ENOENT' }
-        : outcome === 'repaired' && adapter.calls.some(call => call.stageId === 'repair')
+        : request.cwd !== projectDir ? { exitCode: 0 } : outcome === 'repaired' && adapter.calls.some(call => call.stageId === 'repair')
           ? { exitCode: 0 }
           : { exitCode: 1, stderr: 'Serialized Error: { code: \'ENOENT\', syscall: \'open\', path: \'fixture.json\' }' });
     const workflow = WorkflowConfigSchema.parse({ name: 'validation-review',

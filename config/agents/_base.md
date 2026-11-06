@@ -12,11 +12,11 @@ Explain test changes and preserve brief-required coverage and honest expectation
 ## Result and evidence
 Return the scheduler's schema-validated final result. The engine publishes run records and the terminal
 summary; write terminal deliverables at declared paths and any supporting documents at admitted evidence paths.
-Downstream context is bounded to about 8,000 characters (beginning and end retained).
+Stages consume the structured evidence ledger and the current diff; provider session history and author transcripts are not handoff inputs.
 
 ## Retry context
-RETRY (attempt N) continues the partial output at the supplied path; empty/error-only output is a fresh start.
-RETRY FIX (attempt N) supplies the rejecting gate's verdict and output plus your previous attempt.
+RETRY (attempt N) continues current artifacts using the ledger and diff. Unknown evidence stays unknown.
+RETRY FIX (attempt N) supplies the rejecting gate's structured verdict, the ledger and repair diff.
 
 ## Safety
 - Never modify files outside the project directory except at explicitly authorized task-local run paths and the invocation's private $TMPDIR for ephemeral evidence. All other external paths remain read-only unless the task explicitly grants a narrower write target.

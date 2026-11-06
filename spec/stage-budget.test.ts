@@ -438,7 +438,8 @@ async function finishWorkflowAtWrap(stageId: 'work' | 'review', duringWrap: bool
     }
     if (opts.stageId === 'work') writeFileSync(join(project, 'work.txt'), 'unit 1\nunit 2\n');
     if (opts.stageId === 'review') {
-      expect(prompt).toContain('Both units and all assigned checks are complete.');
+      expect(prompt).toContain('evidence-ledger.jsonl');
+      expect(prompt).not.toContain('Both units and all assigned checks are complete.');
       expect(readFileSync(join(project, 'work.txt'), 'utf8')).toContain('unit 2');
     }
     return withRemaining(completed(opts, 'Both units and all assigned checks are complete.'), []);

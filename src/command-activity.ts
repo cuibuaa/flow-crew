@@ -134,7 +134,7 @@ export class CommandActivityTracker {
     });
   }
 
-  completed(id: string): void {
+  completed(id: string, exitCode?: number): void {
     const normalizedId = id.trim();
     if (!normalizedId || this.completedIds.has(normalizedId)) return;
     this.completedIds.add(normalizedId);
@@ -142,7 +142,8 @@ export class CommandActivityTracker {
     this.completedCount++;
     const timestamp = this.now();
     this.persist();
-    this.input.onLifecycle?.({ phase: 'completed', id: normalizedId, timestamp });
+    this.input.onLifecycle?.({ phase: 'completed', id: normalizedId, timestamp,
+      ...(exitCode === undefined ? {} : { exitCode }) });
   }
 
   private consumeLine(line: string): void {
@@ -151,7 +152,7 @@ export class CommandActivityTracker {
     try { event = JSON.parse(line) as Record<string, unknown>; } catch { return; }
     for (const command of normalizeNativeEvent(event).commands) {
       if (command.phase === 'started') this.started(command.id, command.command);
-      else this.completed(command.id);
+      else this.completed(command.id, command.exitCode);
     }
   }
 

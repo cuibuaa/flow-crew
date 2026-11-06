@@ -16,6 +16,7 @@ import {
   shipSetupReadyRecordPath,
 } from '../src/ship-setup-record.js';
 
+const encoded = (id: string) => JSON.stringify([id, null, 'fixture-failure']);
 const portableProject = resolve('portable-partial-evidence-audit');
 const temporaryRoots: string[] = [];
 
@@ -25,7 +26,7 @@ afterEach(() => {
 
 async function baselineFor(
   response: ValidationRunResponse,
-  options: { projectDir?: string; maxOutputBytes?: number } = {},
+  options: { projectDir?: string; maxOutputBytes?: number; ids?: string[]; complete?: boolean } = {},
 ): Promise<ProjectValidationBaseline> {
   return runProjectValidationBaseline(options.projectDir ?? portableProject, {
     fs: {
@@ -39,6 +40,8 @@ async function baselineFor(
       evidencePath: 'portable-brief.md#validation.commands.test',
     }],
     runCommand: () => response,
+    ...(options.ids ? { readFailureIdentity: () => ({ version: 1, testsRun: null, complete: options.complete ?? true,
+      failures: options.ids!.map(testId => ({ testId, file: null, messageClass: 'fixture-failure' })) }) } : {}),
     ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
   });
 }
@@ -68,7 +71,7 @@ describe('partial failure evidence audit', () => {
       'Tests  1 failed | 1665 passed | 4 skipped (1670)',
     ].join('\n');
 
-    const baseline = await baselineFor({ exitCode: 1, stdout: output });
+    const baseline = await baselineFor({ exitCode: 1, stdout: output }, { ids: [identifier], complete: false });
     const result = testResult(baseline);
     const criterion = baseline.gateCriteria.find(({ role }) => role === 'test');
 
@@ -76,36 +79,34 @@ describe('partial failure evidence audit', () => {
       state: 'failed',
       failureIdentity: 'known',
       failureEvidence: 'partial',
-      failureIdentifiers: [identifier],
+      failureIdentifiers: [encoded(identifier)],
       failureCount: 1,
-      reason: expect.stringMatching(/recovered.*partial.*truncated/i),
+      reason: expect.stringContaining('partial'),
     });
     expect(criterion).toMatchObject({
       rule: 'no_regression_from_baseline',
       baselineFailureEvidence: 'partial',
-      baselineFailureIdentifiers: [identifier],
+      baselineFailureIdentifiers: [encoded(identifier)],
       baselineFailureCount: 1,
       description: expect.stringMatching(/lower bound.*not a proven whole-run count.*unresolved/i),
     });
     expect(testDelta(baseline, result)).toMatchObject({ state: 'unresolved' });
   });
 
-  it('marks a count-only fact recovered after truncation as observed partial evidence', async () => {
+  it('keeps a count-only line unknown without a permitted identity owner', async () => {
     const result = testResult(await baselineFor({
       exitCode: 1,
       stdout: '[... 128 earlier bytes omitted ...]\nTests 4 failed | 20 passed (24)',
     }));
 
     expect(result).toMatchObject({
-      failureIdentity: 'known',
-      failureEvidence: 'partial',
+      failureIdentity: 'unknown',
       failureIdentifiers: [],
-      failureCount: 4,
-      reason: expect.stringContaining('truncated'),
+      reason: expect.stringContaining('No structured report or closed-schema model reading'),
     });
   });
 
-  it('keeps complete TAP complete even when only its separately persisted output is bounded', async () => {
+  it('bounds TAP before the model and keeps an incomplete reading partial', async () => {
     const rawOutput = [
       'TAP version 13',
       'not ok 1 - actual failure',
@@ -118,16 +119,16 @@ describe('partial failure evidence audit', () => {
 
     const result = testResult(await baselineFor(
       { exitCode: 1, stdout: rawOutput },
-      { maxOutputBytes: 128 },
+      { maxOutputBytes: 128, ids: ['actual failure'] },
     ));
 
     expect(result).toMatchObject({
       failureIdentity: 'known',
-      failureEvidence: 'complete',
-      failureIdentifiers: ['actual failure'],
+      failureEvidence: 'partial',
+      failureIdentifiers: [encoded('actual failure')],
       failureCount: 1,
     });
-    expect(result.reason).toBeUndefined();
+    expect(result.reason).toContain('partial');
     expect(result.output).toMatch(/^\[\.\.\. \d+ earlier bytes omitted \.\.\.\]/);
   });
 
@@ -145,11 +146,11 @@ describe('partial failure evidence audit', () => {
     ];
 
     for (const fixture of cases) {
-      const result = testResult(await baselineFor({ exitCode: 1, stdout: fixture.output }));
+      const result = testResult(await baselineFor({ exitCode: 1, stdout: fixture.output }, { ids: [fixture.identifier] }));
       expect(result, fixture.identifier).toMatchObject({
         failureIdentity: 'known',
         failureEvidence: 'complete',
-        failureIdentifiers: [fixture.identifier],
+        failureIdentifiers: [encoded(fixture.identifier)],
         failureCount: 1,
       });
       expect(result.reason, fixture.identifier).toBeUndefined();
@@ -192,7 +193,7 @@ describe('partial failure evidence audit', () => {
       expect(result, fixture.label).toMatchObject({
         failureIdentity: 'unknown',
         failureIdentifiers: [],
-        reason: expect.stringMatching(fixture.cause),
+        reason: expect.stringContaining('No structured report or closed-schema model reading'),
       });
       expect(result.failureCount, fixture.label).toBeUndefined();
       expect(result.failureEvidence, fixture.label).toBeUndefined();
@@ -204,22 +205,22 @@ describe('partial failure evidence audit', () => {
     const partialBaseline = await baselineFor({
       exitCode: 1,
       stdout: '[... 64 earlier bytes omitted ...]\nFAIL spec/existing.test.ts\nTests 1 failed',
-    });
+    }, { ids: ['spec/existing.test.ts'], complete: false });
     const completeBaseline = await baselineFor({
       exitCode: 1,
       stdout: 'FAIL spec/existing.test.ts\nTests 1 failed',
-    });
+    }, { ids: ['spec/existing.test.ts'] });
     const unknownBaseline = await baselineFor({ exitCode: 1, stdout: 'opaque stop' });
     const greenBaseline = await baselineFor({ exitCode: 0 });
     const partialCurrent = testResult(await baselineFor({
       exitCode: 1,
       stdout: '[... 64 earlier bytes omitted ...]\nFAIL spec/new.test.ts\nTests 1 failed',
-    }));
+    }, { ids: ['spec/new.test.ts'], complete: false }));
     const completeSame = testResult(completeBaseline);
     const completeNew = testResult(await baselineFor({
       exitCode: 1,
       stdout: 'FAIL spec/new.test.ts\nTests 1 failed',
-    }));
+    }, { ids: ['spec/new.test.ts'] }));
     const completeCountIncrease = { ...completeSame, failureCount: 2 };
     const passed: ValidationCommandResult = {
       role: 'test', state: 'passed', exitCode: 0, durationMs: 1, output: '',
@@ -232,14 +233,14 @@ describe('partial failure evidence audit', () => {
       state: 'unresolved', reason: 'Baseline failure identity/count was unavailable',
     });
     expect(testDelta(unknownBaseline, testResult(unknownBaseline))).toMatchObject({
-      state: 'pass', reason: expect.stringContaining('cannot show a regression'),
+      state: 'unresolved',
     });
     const unlaunched: ValidationCommandResult = {
       role: 'test', state: 'launch_error', exitCode: 127, durationMs: 1, output: 'sh: karma: not found',
       failureIdentifiers: [], failureIdentity: 'unknown',
     };
     const unlaunchedBaseline = { ...unknownBaseline, results: [unlaunched] };
-    expect(testDelta(unlaunchedBaseline, unlaunched)).toMatchObject({ state: 'pass', reason: expect.stringContaining('cannot show a regression') });
+    expect(testDelta(unlaunchedBaseline, unlaunched)).toMatchObject({ state: 'unresolved' });
     expect(testDelta(unlaunchedBaseline, passed)).toMatchObject({ state: 'pass' });
     expect(testDelta(unlaunchedBaseline, completeNew)).toMatchObject({ state: 'unresolved', reason: 'Baseline was not executable/configured' });
     expect(testDelta(greenBaseline, unlaunched)).toMatchObject({ state: 'unresolved' });
@@ -248,7 +249,7 @@ describe('partial failure evidence audit', () => {
     });
     expect(testDelta(completeBaseline, completeSame)).toMatchObject({ state: 'pass' });
     expect(testDelta(completeBaseline, completeNew)).toMatchObject({
-      state: 'regression', newFailureIdentifiers: ['spec/new.test.ts'],
+      state: 'regression', newFailureIdentifiers: [encoded('spec/new.test.ts')],
     });
     expect(testDelta(completeBaseline, completeCountIncrease)).toMatchObject({
       state: 'regression', reason: 'Known failure count increased',
@@ -273,7 +274,7 @@ describe('partial failure evidence audit', () => {
     const partial = await baselineFor({
       exitCode: 1,
       stdout: '[... 64 earlier bytes omitted ...]\nFAIL spec/retained.test.ts\nTests 1 failed',
-    }, { projectDir: canonicalProject });
+    }, { projectDir: canonicalProject, ids: ['spec/retained.test.ts'], complete: false });
     const writeRecord = (validationBaseline: ProjectValidationBaseline) => {
       mkdirSync(dirname(recordPath), { recursive: true });
       writeFileSync(recordPath, `${JSON.stringify({

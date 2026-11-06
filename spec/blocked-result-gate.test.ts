@@ -57,7 +57,7 @@ describe('a blocked author result goes to its gate', () => {
     expect(calls).toEqual(['implement', 'review']);
     expect(final.stages.implement).toMatchObject({ status: 'complete', attempts: [{ status: 'complete' }] });
     for (const told of ['REPORTED BLOCKER', 'rejects merge sequences longer than 100 entries', 'https://example.invalid/upstream-commit',
-      'node docs/experiment.mjs blockers', 'docs/v5-blockers.json', join('stages', 'implement', 'output.md'), '"irreparable"']) {
+      'node docs/experiment.mjs blockers', 'docs/v5-blockers.json', 'evidence-ledger.jsonl', '"irreparable"']) {
       expect(reviews[0]).toContain(told);
     }
     expect(final.status).toBe('escalated');
@@ -90,7 +90,8 @@ describe('a blocked author result goes to its gate', () => {
   it('returns a repair that reports the blocker again to the same gate, which may then confirm it', async () => {
     const { final, calls, reviews } = await run([REPAIRABLE, IRREPARABLE], { implement: [BLOCKED], repair: [BLOCKED] });
     expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
-    expect(reviews[1]).toContain('- repair: The new parser rejects merge sequences longer than 100 entries.');
+    expect(reviews[1]).toContain('The new parser rejects merge sequences longer than 100 entries.');
+    expect(reviews[1]).toContain('\"stageId\":\"repair\"');
     expect(final.status).toBe('escalated');
   });
 
@@ -106,7 +107,8 @@ describe('a blocked author result goes to its gate', () => {
     writeFileSync(workflow, direct.replace('  - id: implement\n', '  - id: inventory\n    role: coder\n    scope: ["docs/"]\n  - id: implement\n    depends_on: [inventory]\n'));
     const { final, calls, reviews } = await run([IRREPARABLE], { inventory: [BLOCKED] }, workflow);
     expect(calls).toEqual(['inventory', 'implement', 'review']);
-    expect(reviews[0]).toContain(join('stages', 'inventory', 'output.md'));
+    expect(reviews[0]).toContain('evidence-ledger.jsonl');
+    expect(reviews[0]).toContain('\"stageId\":\"inventory\"');
     expect(final.status).toBe('escalated');
   });
 

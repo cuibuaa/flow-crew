@@ -88,14 +88,14 @@ describe('engine boundaries from recorded runs', () => {
         commands: [command], runCommand: () => ({ exitCode: 0, stdout: '1 passed', durationMs: 1 }),
       });
       writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline }));
-      const readable = await recordGateValidationDelta(projectDir, runId, 'qa_readonly');
-      expect(readable?.pass, JSON.stringify(readable)).toBe(true);
-      expect(readable?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
+      const readable = await runProjectValidationBaseline(projectDir, { commands: [command] });
+      expect(readable?.results.every(result => result.state === 'passed' || result.state === 'not_configured'), JSON.stringify(readable)).toBe(true);
+      expect(readable?.results.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
 
       writeFileSync(join(projectDir, 'test.cjs'), "require('node:fs').writeFileSync('linked/ledger.txt', 'changed');\n");
-      const blocked = await recordGateValidationDelta(projectDir, runId, 'qa');
-      expect(blocked?.pass).toBe(true);
-      expect(blocked?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
+      const blocked = await runProjectValidationBaseline(projectDir, { commands: [command] });
+      expect(blocked?.results.every(result => result.state === 'passed' || result.state === 'not_configured')).toBe(true);
+      expect(blocked?.results.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
       expect(readFileSync(join(external, 'ledger.txt'), 'utf8')).toBe('changed');
 
       writeFileSync(join(projectDir, 'test.cjs'), [
@@ -104,9 +104,9 @@ describe('engine boundaries from recorded runs', () => {
         "if (remount.status === 0) process.exit(88);",
         "require('node:fs').writeFileSync('linked/ledger.txt', 'changed');",
       ].join('\n'));
-      const attemptedRemount = await recordGateValidationDelta(projectDir, runId, 'qa_remount');
-      expect(attemptedRemount?.pass).toBe(true);
-      expect(attemptedRemount?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
+      const attemptedRemount = await runProjectValidationBaseline(projectDir, { commands: [command] });
+      expect(attemptedRemount?.results.every(result => result.state === 'passed' || result.state === 'not_configured')).toBe(true);
+      expect(attemptedRemount?.results.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
       expect(readFileSync(join(external, 'ledger.txt'), 'utf8')).toBe('changed');
 
       const secondLive = join(root, 'second-live');
@@ -118,9 +118,9 @@ describe('engine boundaries from recorded runs', () => {
         `fs.symlinkSync(${JSON.stringify(secondLive)}, 'linked', 'dir');`,
         "fs.writeFileSync('linked/ledger.txt', 'changed');",
       ].join('\n'));
-      const retargeted = await recordGateValidationDelta(projectDir, runId, 'qa_retarget');
-      expect(retargeted?.pass).toBe(true);
-      expect(retargeted?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
+      const retargeted = await runProjectValidationBaseline(projectDir, { commands: [command] });
+      expect(retargeted?.results.every(result => result.state === 'passed' || result.state === 'not_configured')).toBe(true);
+      expect(retargeted?.results.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
       expect(readFileSync(join(secondLive, 'ledger.txt'), 'utf8')).toBe('changed');
       expect(readFileSync(join(external, 'ledger.txt'), 'utf8')).toBe('changed');
       unlinkSync(join(projectDir, 'linked'));
@@ -131,17 +131,17 @@ describe('engine boundaries from recorded runs', () => {
       writeFileSync(join(nestedTarget, 'ledger.txt'), 'nested-original');
       symlinkSync(nestedTarget, join(external, 'forward'));
       writeFileSync(join(projectDir, 'test.cjs'), "if (require('node:fs').readFileSync('linked/forward/ledger.txt', 'utf8') !== 'nested-original') process.exit(1);\n");
-      const nested = await recordGateValidationDelta(projectDir, runId, 'qa_nested');
-      expect(nested?.pass).toBe(true);
-      expect(nested?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
+      const nested = await runProjectValidationBaseline(projectDir, { commands: [command] });
+      expect(nested?.results.every(result => result.state === 'passed' || result.state === 'not_configured')).toBe(true);
+      expect(nested?.results.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });
       expect(readFileSync(join(nestedTarget, 'ledger.txt'), 'utf8')).toBe('nested-original');
 
       unlinkSync(join(projectDir, 'linked'));
       mkdirSync(join(projectDir, 'linked'));
       writeFileSync(join(projectDir, 'test.cjs'), "require('node:fs').writeFileSync('linked/ledger.txt', 'local'); process.exit(1);\n");
-      const realFailure = await recordGateValidationDelta(projectDir, runId, 'qa_real_failure');
-      expect(realFailure?.pass).toBe(false);
-      expect(realFailure?.current.find((entry) => entry.role === 'test')).toMatchObject({ state: 'failed', exitCode: 1 });
+      const realFailure = await runProjectValidationBaseline(projectDir, { commands: [command] });
+      expect(realFailure?.results.every(result => result.state === 'passed' || result.state === 'not_configured')).toBe(false);
+      expect(realFailure?.results.find((entry) => entry.role === 'test')).toMatchObject({ state: 'failed', exitCode: 1 });
       expect(readFileSync(join(projectDir, 'linked/ledger.txt'), 'utf8')).toBe('local');
     } finally {
       setFcGlobalDir(previousHome);

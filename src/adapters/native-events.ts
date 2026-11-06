@@ -11,7 +11,7 @@ export interface NativeEvent {
   terminal?: boolean;
   diagnostic?: string;
   providerFailure?: ProviderFailure;
-  commands: Array<{ phase: 'started' | 'completed'; id: string; command?: string }>;
+  commands: Array<{ phase: 'started' | 'completed'; id: string; command?: string; exitCode?: number }>;
   tools: Array<{ id: string; name: string; path?: string }>;
   results: Array<{ id: string; success: boolean }>;
   writes: string[];
@@ -60,7 +60,8 @@ export function normalizeNativeEvent(event: RecordValue, provider?: ProviderFail
   if (item?.type === 'command_execution' && (event.type === 'item.started' || event.type === 'item.completed')) {
     const id = [item.id, event.item_id, event.id].find(value => typeof value === 'string' && value.trim());
     if (id) result.commands.push({ phase: event.type === 'item.started' ? 'started' : 'completed', id,
-      command: [item.command, item.cmd, item.text].find(value => typeof value === 'string' && value.trim()) });
+      command: [item.command, item.cmd, item.text].find(value => typeof value === 'string' && value.trim()),
+      ...(Number.isInteger(item.exit_code) ? { exitCode: item.exit_code } : {}) });
   }
   const delta = event.type === 'stream_event' ? event.event : event;
   if (delta?.type === 'content_block_delta' && typeof delta.delta?.text === 'string' && !event.parent_tool_use_id) result.delta = delta.delta.text;

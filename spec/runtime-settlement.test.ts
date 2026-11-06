@@ -52,8 +52,9 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
         const priorLog = readStageLiveLogPath(created.runDirPath, 'work', 1);
         console.log('RUNTIME_RETRY ' + JSON.stringify({ resume, promptHasProgress: prompt.includes(priorLog), attempts: readStageStatus(project, created.runId, 'work').attempts?.map(x => x.status) }));
         expect(calls).toBe(4);
-        expect(resume).toBe(uuid);
-        expect(prompt).toContain(priorLog);
+        expect(resume).toBeUndefined();
+        expect(prompt).toContain('evidence-ledger.jsonl');
+        expect(prompt).not.toContain(priorLog);
         expect(prompt).not.toContain('timed out');
     });
     it.each([true, false])('retains own progress after provider refusal with session available=%s', async (hasSession) => {
@@ -82,8 +83,9 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
         console.log('RUNTIME_REFUSAL ' + JSON.stringify({ hasSession, status: final.status, resume, promptHasProgress: prompt.includes(priorLog), attempts: readStageStatus(project, created.runId, 'work').attempts?.map(x => x.status) }));
         expect(final.status).toBe('complete');
         expect(calls).toBe(2);
-        expect(resume).toBe(hasSession ? uuid : undefined);
-        expect(prompt).toContain(priorLog);
+        expect(resume).toBeUndefined();
+        expect(prompt).toContain('evidence-ledger.jsonl');
+        expect(prompt).not.toContain(priorLog);
         expect(prompt).not.toContain('timed out');
         expect(prompt).toContain('write the declared product after scope admission');
         expect(readStageStatus(project, created.runId, 'work').attempts?.[0].providerFailure).toEqual(failure);

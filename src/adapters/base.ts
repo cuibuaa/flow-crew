@@ -134,6 +134,8 @@ export type CommandLifecyclePhase = 'started' | 'completed';
  * prose. */
 export interface CommandLifecycleEvent {
   phase: CommandLifecyclePhase;
+  /** Only a native structured exit field, never inferred from tool text. */
+  exitCode?: number;
   id: string;
   command?: string;
   timestamp: string;

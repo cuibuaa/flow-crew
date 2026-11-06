@@ -121,7 +121,7 @@ describe('record correction uses the existing attempt', () => {
         expect(prompt).toContain('Stage result correction');
         expect(prompt).toContain(original);
         expect(prompt).toContain('Do not repeat the completed work');
-        expect(opts.resumeSessionId).toBe(sessionId);
+        expect(opts.resumeSessionId).toBeUndefined();
       }
       return { output: invocations.length === 1 ? original : JSON.stringify(rejected()), exitCode: 0, duration_ms: 1, sessionId, tokens_in: 10, tokens_out: 20, writes: ['docs/report.md'], writeAttribution: 'structured' };
     } };

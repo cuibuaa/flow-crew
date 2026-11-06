@@ -42,8 +42,9 @@ describe('author result reuses the engine write record', () => {
     expect(readStageStatus(project, runId, 'work').attempts?.[0]).toMatchObject({ writes: ['report.md'], writeAttribution: 'structured' });
   });
 
-  it('keeps literal checks while the response schema excludes a duplicate file list', () => {
-    expect(parseStageRecord(JSON.stringify(record()), HANDOFF_SCHEMA)).toEqual(record());
+  it('keeps historical literal checks readable while generation drops duplicate check and file lists', () => {
+    expect(parseStageRecord(JSON.stringify(record()), RECORDED_HANDOFF_SCHEMA)).toEqual(record());
+    expect(HANDOFF_SCHEMA.properties).not.toHaveProperty('checks');
     expect(() => parseStageRecord(JSON.stringify({ ...record(), files_modified: ['report.md'] }), HANDOFF_SCHEMA)).toThrow('unknown field');
     expect(parseStageRecord(JSON.stringify({ ...record(), files_modified: ['old.md'] }), RECORDED_HANDOFF_SCHEMA)).toHaveProperty('files_modified', ['old.md']);
   });

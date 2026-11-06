@@ -14,7 +14,8 @@ import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isRunningStage
 import { IterationDisposition } from './iteration-outcome.js';
 import { executeIteration } from './iteration.js';
 import { appendIterationLog, concludeRepeatedBlockage, tryAdvanceResearch, writeCampaignEntry } from './services.js';
-import { hashRollbackFileSync } from '../../rollback-content-store.js';
+import { readEvidence } from '../../evidence-ledger.js';
+import { createHash } from 'node:crypto';
 import { unlinkSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -127,8 +128,8 @@ export async function advanceSettledResearch(
             stageId: finalizer.id,
             detail: finalized.stages[finalizer.id]?.error ?? 'terminal finalizer failed',
             evidenceDigest: (() => {
-              const path = join(runDirPath, 'stages', finalizer.id, 'output.md');
-              try { return hashRollbackFileSync(path).sha256; } catch { return undefined; }
+              const fact = readEvidence(runDirPath).filter(entry => entry.kind === 'attempt' && entry.stageId === finalizer.id).at(-1);
+              return fact?.kind === 'attempt' ? createHash('sha256').update(JSON.stringify([fact.stageId, fact.exitCode, fact.treeHash])).digest('hex') : undefined;
             })(),
           });
           const repeatedFinalizer = concludeRepeatedBlockage(

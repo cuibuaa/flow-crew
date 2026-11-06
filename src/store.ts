@@ -154,7 +154,7 @@ export interface StageStatus extends InvocationUsage {
   admissionFailure?: { code: 'dispatch_refused'; attemptIndex: number };
   /** Acceptance already settled in an isolated child; no local gate execution. */
   acceptedFrom?: { runId: string; verdict: GateVerdict };
-  gate?: GateVerdict & { kind: NonNullable<GateVerdict['refusal']>['kind'] | 'pass' | 'repairable' | 'irreparable'; verdictSha256: string | null };
+  gate?: GateVerdict & { validationRequired?: boolean; kind: NonNullable<GateVerdict['refusal']>['kind'] | 'pass' | 'repairable' | 'irreparable'; verdictSha256: string | null };
   status: StageState;
   exitCode?: number;
   processExitCode?: number | null;

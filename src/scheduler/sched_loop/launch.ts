@@ -242,6 +242,7 @@ export function prepareWorkflowLaunch(
         snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
       }
     }
+    if (!existsSync(join(runDirPath, RUN_VALIDATION_BASELINE_FILE))) snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
   } catch (error) {
     throw new Error(`Cannot materialize brief_criteria.json before dispatch: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }

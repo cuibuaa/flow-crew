@@ -5,9 +5,9 @@ import { type Adapter } from '../../adapters/base.js';
 import { type ProjectValidationDependencies } from '../../project-validation.js';
 import { type StoreState, isContinuingStage, RUN_STATUS, STAGE_STATUS, rependStageStatus, writeRunState, writeStageStatus, isPendingStageStatus, terminalArtifactSnapshotName, isSuccessfulRunStatus } from '../../store.js';
 import { createHash } from 'node:crypto';
-import { hashRollbackFileSync, updateFileHashSync } from '../../rollback-content-store.js';
+import { updateFileHashSync } from '../../rollback-content-store.js';
 import { renameSync, copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
 import { evaluateTerminalFloor } from '../sched_admission/brief-contract.js';
@@ -24,7 +24,8 @@ import { reconcileUnresolvedStageObligations } from '../sched_settlement/complet
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { runPostTerminateHook } from './research.js';
 
-import type { GateValidationDeltaArtifact } from '../sched_settlement/gate-validation.js';
+import { currentAuthorValidationRefusal, readRunValidationBaseline } from '../sched_settlement/gate-validation.js';
+import { readEvidence } from '../../evidence-ledger.js';
 
 export interface TerminalEvaluationServices {
   validationDeltaMatchesExecution: typeof import('../sched_settlement/gate-validation.js').validationDeltaMatchesExecution;
@@ -40,8 +41,8 @@ export interface TerminalEvaluationContext {
   runDirPath: string;
   iteration: number;
   adapter: Adapter;
-  /** Testable boundary for the terminal freshness revalidation. Production
-   * callers omit this and execute the setup-recorded commands normally. */
+  /** Compatibility/test boundary for proving terminal decisions never execute
+   * the configured suite. Validation belongs to the author/repair attempt. */
   validationDependencies?: ProjectValidationDependencies;
 }
 
@@ -117,7 +118,7 @@ function terminalDagHasNoRemainingTransition(
 export const RUN_VALIDATION_BASELINE_FILE = 'validation_baseline.json';
 
 export function createTerminalEvaluator(services: TerminalEvaluationServices) {
-  const { validationDeltaMatchesExecution, settledGateValidationExecution, validationExecutionId, writeCampaignEntry, concludeRepeatedBlockage } = services;
+  const { writeCampaignEntry, concludeRepeatedBlockage } = services;
 
   async function ensureTerminalArtifactValidation(input: {
     projectDir: string;
@@ -142,52 +143,19 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
       return { required: false, pass: true, disposition: 'no_baseline', writeAt };
     }
 
-    const validationStageId = `terminal_${input.ownerStageId.replace(/[^A-Za-z0-9_-]+/g, '_')}`;
-    const baselineSha256 = hashRollbackFileSync(baselinePath).sha256;
-    const laterDeltas: GateValidationDeltaArtifact[] = [];
-    for (const file of readdirSync(input.runDirPath)) {
-      if (!/^validation_delta_.+\.json$/.test(file)) continue;
-      try {
-        const delta = JSON.parse(readFileSync(join(input.runDirPath, file), 'utf-8')) as GateValidationDeltaArtifact;
-        const checkedAtMs = Date.parse(delta.checkedAt);
-        // Only the terminal owner may select a synthetic execution. A stage
-        // name cannot exempt a normal gate from its settled attempt identity.
-        const execution = delta.stageId === validationStageId && delta.attemptIndex === 0
-          && typeof delta.attemptStartedAt === 'string' && typeof delta.attemptCompletedAt === 'string'
-          ? { attemptIndex: 0, attemptStartedAt: delta.attemptStartedAt, attemptCompletedAt: delta.attemptCompletedAt,
-              executionId: validationExecutionId(input.runId, validationStageId, 0, delta.attemptStartedAt, delta.attemptCompletedAt) }
-          : settledGateValidationExecution(input.projectDir, input.runId, delta.stageId);
-        if (delta.version !== 2 || delta.baselineSha256 !== baselineSha256
-            || !validationDeltaMatchesExecution(delta, execution)
-            || !Number.isFinite(checkedAtMs) || checkedAtMs < writeAtMs) continue;
-        laterDeltas.push(delta);
-      } catch { /* malformed deltas cannot bless a terminal write */ }
-    }
-    laterDeltas.sort((left, right) => Date.parse(left.checkedAt) - Date.parse(right.checkedAt));
-    const latest = laterDeltas.at(-1);
-    if (latest) {
-      return latest.pass
-        ? {
-            required: true,
-            pass: true,
-            disposition: 'already_blessed',
-            writeAt,
-            validationStageId: latest.stageId,
-            checkedAt: latest.checkedAt,
-          }
-        : {
-            required: true,
-            pass: false,
-            disposition: 'rejected',
-            writeAt,
-            validationStageId: latest.stageId,
-            checkedAt: latest.checkedAt,
-            reason: `validation delta ${latest.stageId} recorded a regression after the terminal write`,
-          };
-    }
+    const plan = readRunValidationBaseline(input.runDirPath);
+    if (plan && plan.baseline.discovery.commands.length === 0) return { required: false, pass: true, disposition: 'no_baseline', writeAt };
+    const facts = readEvidence(input.runDirPath);
+    const validation = facts.filter(entry => entry.kind === 'validation').at(-1);
+    // Gate and terminal decisions share receipt semantics, tree/attempt binding
+    // and unknown handling. Only coverage of the terminal write is additional.
+    const refusal = currentAuthorValidationRefusal(input.projectDir, input.runId);
+    const matches = validation?.kind === 'validation' && !refusal && Date.parse(validation.at) >= writeAtMs;
+    if (!matches) return { required: true, pass: false, disposition: 'rejected', writeAt,
+      reason: refusal?.reason ?? 'no settled author validation in the evidence ledger covers the terminal write/tree' };
+    return { required: true, pass: true, disposition: 'already_blessed', writeAt,
+      validationStageId: validation.stageId, checkedAt: validation.at };
 
-    return { required: true, pass: false, disposition: 'rejected', writeAt,
-      validationStageId, reason: 'no settled gate validation receipt covers the terminal write' };
   }
 
   async function tryTerminateOnTerminalState(

@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { artifacts, coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
@@ -135,6 +136,9 @@ describe('independent engine-remediation verification', () => {
     write(join(projectDir, 'validation-probe.mjs'), 'process.stderr.write("FAIL spec/new.test.ts\\n"); process.exit(1);\n');
     const agentsDir = writeRole(projectDir, 'qa');
     setFcGlobalDir(globalRoot);
+    write(join(projectDir, 'validation-probe.mjs'), 'process.exit(0);\n');
+    for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
+    write(join(projectDir, 'validation-probe.mjs'), 'process.exit(1);\n');
     const brief = '# Goal\n## What the report must show\n1. Audit the validation delta.\n';
     const readyPath = writeReadySetupRecord(projectDir, brief, globalRoot);
     const ready = JSON.parse(readFileSync(readyPath, 'utf-8')) as {
@@ -159,7 +163,8 @@ describe('independent engine-remediation verification', () => {
       new Map(), undefined, agentsDir, undefined, brief, true,
     );
     const runDirectory = runDir(projectDir, final.runId);
-    expect(gatePrompt).toBe('');
+    expect(gatePrompt).toContain('evidence-ledger.jsonl');
+    expect(gatePrompt).toContain('change.diff');
     expect(existsSync(join(runDirectory, 'validation_baseline.json'))).toBe(true);
     const producedByScheduler = existsSync(join(runDirectory, 'validation_delta_qa.json'));
     if (!producedByScheduler) await recordGateValidationDelta(projectDir, final.runId, 'qa');
@@ -178,12 +183,12 @@ describe('independent engine-remediation verification', () => {
       attemptIndex: 1,
       executionId: expect.any(String),
       immutablePath: expect.any(String),
-      delta: [{ state: 'regression' }],
+      delta: expect.arrayContaining([{ role: 'build', display: 'node -e process.exit(0)', state: 'regression', reason: 'A green baseline no longer passes', newFailureIdentifiers: [] }]),
     });
     expect(existsSync(join(runDirectory, delta.immutablePath))).toBe(true);
     expect(readGateEvaluation(projectDir, 'qa', final.runId)).toMatchObject({
       pass: false,
-      reason: expect.stringContaining('spec/new.test.ts'),
+      reason: expect.stringContaining('Introduced validation failures'),
     });
     expect({
       producedByScheduler,
