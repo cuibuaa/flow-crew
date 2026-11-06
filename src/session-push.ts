@@ -6,11 +6,13 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { RunEvent } from './run-events.js';
 import type { StoreState } from './store.js';
+import type { ApprovalRequest } from './inbox.js';
 import { isPausedRunStatus, isTerminalRunStatus, isSuccessfulRunStatus } from './lifecycle-status.js';
 import { TaskRegistry, TASK_LIST_STATUS, isActiveTaskStatus, hasLiveForegroundOwner, sessionTaskIndexPath, type TaskEntry } from './task-registry.js';
 import { codexRequest, queueCodex, sendClaude, notifyFallback } from './session-push-transport.js';
 import { publicTaskEntries, readTaskLedger } from './fc-tasks.js';
 import { hasClaudeWakeWaiter } from './session-wake.js';
+import { approvalArtifactPath, isValidApprovalRequestId } from './approval-artifacts.js';
 
 export interface LaunchTarget {
   frontend: 'claude' | 'codex';
@@ -53,6 +55,14 @@ export interface PushEvent {
   createdAt: string;
   occurredAt: string;
   target: LaunchTarget;
+  taskTitle?: string;
+  requestId?: string;
+  requestTitle?: string;
+  requestTarget?: string;
+  runStatus?: string;
+  lastStage?: string;
+  reportPath?: string;
+  failureIdentity?: string;
 }
 function normalizePushEvent(event: PushEvent & { attempt?: number }): PushEvent {
   const { attempt, ...current } = event;
@@ -62,6 +72,7 @@ function normalizePushEvent(event: PushEvent & { attempt?: number }): PushEvent 
   };
 }
 interface DeliveryState {
+  superseded?: { runId: string; requestId: string; decision: 'approve' | 'deny'; at: string; observedAt: string; ackRequired: false };
   attempts: number;
   failures?: number;
   target?: string;
@@ -141,7 +152,7 @@ export class SessionPush {
   /** Exactly one hook completion for an engine-selected wake attempt. The
    * immutable claim is separate from mutable delivery state and business ACK. */
   claimWake(event: PushEvent): boolean {
-    if (this.acknowledged(event.eventId)) return false;
+    if (this.acknowledged(event.eventId) || this.superseded(event)) return false;
     const state = this.delivery(event.eventId);
     if (state.transport !== 'wake' || state.attempts < 1) return false;
     const claimed = publish(join(this.root, 'wake-claims', `${safeId(event.eventId)}-${state.attempts}.json`),
@@ -155,8 +166,67 @@ export class SessionPush {
     return readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/u.test(name))
       .map(name => load<PushEvent>(join(directory, name))!).filter(Boolean).map(normalizePushEvent);
   }
-  pending(session?: string): PushEvent[] {
-    return this.events().filter(event => (!session || event.target.sessionId === session) && !this.acknowledged(event.eventId));
+  pending(session?: string, recordSupersession = true): PushEvent[] {
+    return this.events().filter(event => (!session || event.target.sessionId === session)
+      && !this.acknowledged(event.eventId) && !this.superseded(event, recordSupersession)).map(event => this.describe(event));
+  }
+  /** A delivery disposition retires the obligation without forging a business ACK.
+   * The push service observes run records; it never writes into another run. */
+  private superseded(event: PushEvent, record = true): boolean {
+    if (this.delivery(event.eventId).superseded) return true;
+    if (!['approval_parked', 'approval_attempt_suspended'].includes(event.kind)) return false;
+    const described = this.describe(event);
+    if (!described.requestId || !isValidApprovalRequestId(described.requestId)) return false;
+    const directory = this.runDirectory(event);
+    if (!directory) return false;
+    const decision = load<{ decision?: string; at?: string }>(approvalArtifactPath(directory, described.requestId, 'decision'));
+    if ((decision?.decision !== 'approve' && decision?.decision !== 'deny')
+      || !decision.at || !Number.isFinite(Date.parse(decision.at))) return false;
+    if (record) publish(this.deliveryPath(event.eventId), { ...this.delivery(event.eventId), superseded: {
+      runId: event.runId, requestId: described.requestId, decision: decision.decision, at: decision.at,
+      observedAt: new Date(this.now()).toISOString(), ackRequired: false,
+    } });
+    return true;
+  }
+  private runDirectory(event: PushEvent): string | undefined {
+    return /^[\w.-]+$/u.test(event.runId) && event.runId !== '.' && event.runId !== '..'
+      ? join(this.registry.baseDir, 'runs', event.runId) : undefined;
+  }
+  /** Enrich from structured records, including legacy events. Never parse detail. */
+  describe(event: PushEvent): PushEvent {
+    const task = event.taskTitle ? undefined : this.registry.get(event.taskId);
+    const directory = this.runDirectory(event);
+    const state = directory && load<StoreState>(join(directory, 'run.json'));
+    const approval = ['approval_parked', 'approval_attempt_suspended'].includes(event.kind);
+    const failure = ['attempt_failed', 'stage_failed'].includes(event.kind);
+    const needsOriginal = approval && !event.requestId || failure && !event.failureIdentity;
+    const original = directory && needsOriginal && readOptionalJsonlFile<RunEvent>(join(directory, 'events.jsonl'))
+      .find(source => source.type === event.kind && source.timestamp === event.occurredAt
+        && source.stageId === event.stageId
+        && (event.attemptIndex === undefined || source.attemptIndex === event.attemptIndex));
+    const samePark = approval && state && state.parked?.pausedAt === event.occurredAt;
+    const requestId = event.requestId || (original && original.requestId)
+      || (samePark && state && state.parked?.requestId) || undefined;
+    const request = directory && requestId && isValidApprovalRequestId(requestId)
+      ? load<{ title?: string; target?: string }>(approvalArtifactPath(directory, requestId, 'request')) : undefined;
+    const normalizedRequest = approval && directory && requestId
+      ? readOptionalJsonlFile<ApprovalRequest>(join(directory, 'approvals.jsonl'))
+        .find(record => record.kind === 'request' && record.requestId === requestId) : undefined;
+    const sameRequest = approval && requestId && state && state.parked?.requestId === requestId;
+    const stages = state ? Object.entries(state.stages ?? {}).filter(([, stage]) => stage.startedAt || stage.completedAt)
+      .sort((a, b) => (a[1].completedAt || a[1].startedAt || '').localeCompare(b[1].completedAt || b[1].startedAt || '')) : [];
+    return { ...event, taskTitle: event.taskTitle || task?.name, requestId,
+      requestTitle: event.requestTitle || normalizedRequest?.title
+        || (typeof request?.title === 'string' && request.title ? request.title : undefined)
+        || (sameRequest && state && state.parked?.reason) || undefined,
+      requestTarget: event.requestTarget || normalizedRequest?.target
+        || (typeof request?.target === 'string' && request.target ? request.target : undefined),
+      failureIdentity: event.failureIdentity || (original && (providerFailureIdentity(original) || original.adapterFailureKind
+        || (original.exitCode === undefined ? undefined : `exit ${original.exitCode}`))) || undefined,
+      runStatus: event.runStatus || (state && state.status) || undefined,
+      lastStage: event.lastStage || stages.at(-1)?.[0],
+      reportPath: event.reportPath || (directory && existsSync(join(directory, 'summary.md')) ? join(directory, 'summary.md') : undefined),
+    };
   }
   sessionTasks(frontend: LaunchTarget['frontend'], sessionId: string): TaskEntry[] {
     if (!existsSync(join(this.root, 'task-index', 'ready'))) this.registry.ensureSessionTaskIndexes();
@@ -172,7 +242,7 @@ export class SessionPush {
         if (ledger.issues.length) return true;
         if (isActiveTaskStatus(task.status)) return !allowExecuting;
         return entry?.status !== 'completed' || !this.events().some(event => event.taskId === task.id
-          && event.runId === (task.run_id || `task-${task.id}`) && this.acknowledged(event.eventId));
+          && event.runId === (task.run_id || `task-${task.id}`) && (this.acknowledged(event.eventId) || this.superseded(event)));
       });
   }
   deliveryReady(task: TaskEntry): boolean {
@@ -184,7 +254,7 @@ export class SessionPush {
     return this.pending(target.sessionId).filter(event => event.taskId === task.id)
       .every(event => !load<DeliveryState>(this.deliveryPath(event.eventId))?.error);
   }
-  enqueue(task: TaskEntry, source: Pick<RunEvent, 'type' | 'timestamp' | 'runId' | 'attemptIndex' | 'detail' | 'stageId' | 'attemptStartedAt'>, identity: unknown = source): PushEvent | undefined {
+  enqueue(task: TaskEntry, source: Pick<RunEvent, 'type' | 'timestamp' | 'runId' | 'attemptIndex' | 'detail' | 'stageId' | 'attemptStartedAt' | 'requestId' | 'runStatus' | 'providerFailure' | 'adapterFailureKind' | 'exitCode'>, identity: unknown = source): PushEvent | undefined {
     if (!task.launcher) return undefined;
     const eventId = key([task.id, source.runId, identity]);
     const existing = load<PushEvent>(this.eventPath(eventId))
@@ -192,12 +262,15 @@ export class SessionPush {
       ?? (Array.isArray(identity) ? load<PushEvent>(this.eventPath(key([task.id, source.runId,
         identity.map(value => typeof value === 'number' ? value - 1 : value)]))) : undefined);
     if (existing) return normalizePushEvent(existing);
-    const event: PushEvent = {
+    const event: PushEvent = this.describe({
       version: 1, eventId, taskId: task.id,
       runId: source.runId, launch: task.launch, attemptIndex: source.attemptIndex, kind: source.type,
       stageId: source.stageId, attemptStartedAt: source.attemptStartedAt,
       detail: source.detail, createdAt: new Date(this.now()).toISOString(), occurredAt: source.timestamp, target: task.launcher,
-    };
+      taskTitle: task.name, requestId: source.requestId, runStatus: source.runStatus,
+      failureIdentity: providerFailureIdentity(source) || source.adapterFailureKind
+        || (source.exitCode === undefined ? undefined : `exit ${source.exitCode}`),
+    });
     publish(this.eventPath(event.eventId), event, true);
     return event;
   }
@@ -339,7 +412,8 @@ export class SessionPush {
     publish(this.displayPath(task.id), display);
   }
   async deliver(event: PushEvent): Promise<void> {
-    if (this.acknowledged(event.eventId)) return;
+    if (this.acknowledged(event.eventId) || this.superseded(event)) return;
+    event = this.describe(event);
     const state = load<DeliveryState>(this.deliveryPath(event.eventId)) ?? { attempts: 0 };
     const target = this.currentTarget(event.target);
     const targetKey = (value: LaunchTarget) => key([value.frontend, value.sessionId, value.socket]);
@@ -351,7 +425,7 @@ export class SessionPush {
       || existsSync(join(this.root, 'wake-claims', `${safeId(event.eventId)}-${state.attempts}.json`)));
     // Old delivery records scheduled accepted sends at the failure cadence.
     if (!state.target && state.sentAt && !state.error) state.nextAttemptAt = Date.parse(state.sentAt) + PUSH_REMINDER_MS;
-    const prompt = wrapUpPrompt(event, this.registry.baseDir);
+    const { human } = renderPushEvent(event, this.registry.baseDir);
     let dirty = false;
     if (!awaitingWaiter && (switchToWake || changedTarget || !state.nextAttemptAt || state.nextAttemptAt <= this.now())) {
       if (changedTarget) state.failures = 0;
@@ -363,11 +437,11 @@ export class SessionPush {
       // Record the attempt first: an ambiguous crash retries the SAME event id.
       publish(this.deliveryPath(event.eventId), state);
       try {
-        if (target.frontend === 'codex') state.receipt = await this.queue(target.sessionId, prompt, target.codexHome);
+        if (target.frontend === 'codex') state.receipt = await this.queue(target.sessionId, human, target.codexHome);
         else if (state.transport === 'wake') state.receipt = 'asyncRewake waiter selected; awaiting business ACK';
         else {
           if (!target.socket) throw new Error('No Claude inbox socket recorded');
-          await this.claude(target.socket, event.eventId, prompt);
+          await this.claude(target.socket, event.eventId, human);
         }
         state.sentAt = new Date(this.now()).toISOString();
         state.error = undefined;
@@ -385,7 +459,7 @@ export class SessionPush {
     if (!state.fallbackAt && this.now() - Date.parse(event.createdAt) >= PUSH_FALLBACK_MS
         && (!state.fallbackRetryAt || state.fallbackRetryAt <= this.now())) {
       try {
-        await this.notify(prompt, event.eventId);
+        await this.notify(human, event.eventId);
         state.fallbackAt = new Date(this.now()).toISOString();
         state.fallbackError = undefined;
         state.fallbackRetryAt = undefined;
@@ -416,7 +490,7 @@ export class SessionPush {
         const events = this.events().filter(event => event.taskId === task.id);
         const currentRun = task.run_id || `task-${task.id}`;
         if (closed && events.some(event => event.runId === currentRun)
-            && events.every(event => this.acknowledged(event.eventId)) && !isActiveTaskStatus(task.status)) continue;
+            && events.every(event => this.acknowledged(event.eventId) || this.superseded(event)) && !isActiveTaskStatus(task.status)) continue;
         const run = this.run(task);
         this.collect(task, run);
         await this.ensureDisplay(task, run, history);
@@ -430,13 +504,44 @@ export class SessionPush {
 }
 
 const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+function providerFailureIdentity(event: Pick<RunEvent, 'providerFailure'>): string | undefined {
+  const failure = event.providerFailure;
+  return failure ? `${failure.provider} ${failure.kind} (${failure.diagnosticSha256.slice(0, 12)})` : undefined;
+}
 export function wrapUpPrompt(event: PushEvent, engineRoot: string): string {
   return [
-    `FlowCrew wrap-up event=${event.eventId} run=${event.runId} task=${event.taskId} stage=${event.stageId ?? 'run'} launch=${event.launch ?? 'see-task-state'} attemptIndex=${event.attemptIndex ?? 'see-run-state'} started=${event.attemptStartedAt ?? 'see-run-state'} kind=${event.kind}.`,
+    [`FlowCrew wrap-up event=${event.eventId} run=${event.runId} task=${event.taskId}`,
+      ...Object.entries({ stage: event.stageId, launch: event.launch, attemptIndex: event.attemptIndex, started: event.attemptStartedAt })
+        .filter(([, value]) => value !== undefined).map(([name, value]) => `${name}=${value}`), `kind=${event.kind}.`].join(' '),
     'This event is not acceptance. Check the current run/attempt first; a late event must not authorize work on a superseded attempt.',
     'Read the report and run state; independently verify the result; archive unique output; reclaim the worktree and branch only when authorized and safe; then close the session ledger for a terminal run.',
     'For a parked run, approval request, or failed attempt, inspect and resolve or surface the decision needed; do not bypass approval. Keep its task ledger open while work remains.',
     'Deduplicate by event id: if already acknowledged, do not repeat wrap-up. Delivery or a reply is not completion.',
     `Only after handling this event, acknowledge it explicitly: FC_HOME=${quote(engineRoot)} flowcrew session-push ack --event ${event.eventId} --session ${quote(event.target.sessionId)}`,
   ].join('\n');
+}
+
+/** One event, two audiences. Unknown structured facts are omitted. */
+export function renderPushEvent(event: PushEvent, engineRoot: string): { human: string; agent: string } {
+  const task = `FlowCrew #${event.taskId}${event.taskTitle ? ` ${event.taskTitle}` : ''}`;
+  const kind: Record<string, string> = {
+    approval_parked: 'needs approval', approval_attempt_suspended: 'attempt suspended for approval',
+    attempt_failed: 'attempt failed', stage_failed: 'stage failed',
+    run_status_changed: 'run status changed', operator_wrap_up_required: 'wrap-up required',
+  };
+  const parts = [`${task}: ${kind[event.kind] || 'run event'}.`];
+  if (event.kind === 'approval_parked' || event.kind === 'approval_attempt_suspended') {
+    if (event.requestTitle) parts.push(`Request: ${event.requestTitle}.`);
+    if (event.requestTarget) parts.push(`Target: ${event.requestTarget}.`);
+    if (event.requestId) parts.push(`Decide: FC_HOME=${quote(engineRoot)} flowcrew inbox approve ${quote(event.requestId)} --run ${quote(event.runId)} (use deny to decline).`);
+  } else if (event.kind === 'attempt_failed' || event.kind === 'stage_failed') {
+    if (event.stageId) parts.push(`Stage: ${event.stageId}.`);
+    if (event.attemptIndex !== undefined) parts.push(`Attempt: ${event.attemptIndex}.`);
+    if (event.failureIdentity) parts.push(`Failure: ${event.failureIdentity}.`);
+  } else {
+    if (event.runStatus) parts.push(`Status: ${event.runStatus}.`);
+    if (event.lastStage) parts.push(`Last stage: ${event.lastStage}.`);
+    if (event.reportPath) parts.push(`Report: ${event.reportPath}`);
+  }
+  return { human: parts.join(' '), agent: wrapUpPrompt(event, engineRoot) };
 }

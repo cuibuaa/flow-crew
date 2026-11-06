@@ -2,6 +2,9 @@ import { errorMessage } from './source_services/cli-inputs.js';
 import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { createWatchState, pollWatch, type WatchAlert, type WatchPollDependencies, type WatchPollResult } from './watch.js';
 import { formatRunDriftRow } from './run-drift.js';
+import { SessionPush, renderPushEvent } from './session-push.js';
+import { TaskRegistry } from './task-registry.js';
+import { fcGlobalDir } from './store.js';
 
 type Writer = { write(chunk: string): unknown };
 
@@ -15,6 +18,7 @@ interface ParsedWatchArgs {
 }
 
 export interface CliWatchDependencies extends WatchPollDependencies {
+  pendingPushLines?: () => string[];
   stdout?: Writer;
   stderr?: Writer;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -150,6 +154,7 @@ export async function cmdWatchWithDeps(args: string[], overrides: CliWatchDepend
     const result = pollWatch(state, parsed.all ? { ...overrides, candidateRunIds: () => null } : overrides);
     state = result.state;
     for (const line of formatWatchPoll(result)) stdout.write(`${line}\n`);
+    for (const line of overrides.pendingPushLines?.() ?? []) stdout.write(`${line}\n`);
     if (parsed.once) polling = false;
     else await wait(parsed.pollMs);
   }
@@ -157,5 +162,15 @@ export async function cmdWatchWithDeps(args: string[], overrides: CliWatchDepend
 }
 
 export async function cmdWatch(args: string[]): Promise<number> {
-  return cmdWatchWithDeps(args, {});
+  let push: SessionPush | undefined;
+  const shown = new Set<string>();
+  return cmdWatchWithDeps(args, { pendingPushLines: () => {
+    push ??= new SessionPush(new TaskRegistry({ baseDir: fcGlobalDir(), createDirectories: false }));
+    // Watch observes liveness without publishing delivery dispositions.
+    return push.pending(undefined, false).flatMap(event => {
+      if (shown.has(event.eventId)) return [];
+      shown.add(event.eventId);
+      return [renderPushEvent(event, push!.registry.baseDir).human];
+    });
+  } });
 }

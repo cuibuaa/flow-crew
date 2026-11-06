@@ -151,6 +151,9 @@ export function createApprovalMonitor(services: ApprovalMonitorServices) {
         body?: unknown;
         stageId?: unknown;
         requestedAt?: unknown;
+        category?: unknown;
+        amountUsd?: unknown;
+        host?: unknown;
       };
       const requestIdRaw = typeof raw.requestId === 'string' ? raw.requestId : typeof raw.id === 'string' ? raw.id : '';
       const requestId = requestIdRaw.trim();
@@ -177,6 +180,9 @@ export function createApprovalMonitor(services: ApprovalMonitorServices) {
         action,
         ...(target ? { target } : {}),
         risk,
+        ...(typeof raw.category === 'string' ? { category: raw.category } : {}),
+        ...(raw.amountUsd !== undefined ? { amountUsd: raw.amountUsd as number } : {}),
+        ...(raw.host !== undefined ? { host: raw.host as string } : {}),
         title: typeof raw.title === 'string' && raw.title.trim()
           ? raw.title.trim()
           : `${action}${target ? ` → ${target}` : ''}`,

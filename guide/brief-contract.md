@@ -81,6 +81,56 @@ validation for a pass/fail task.
 Sources: [frontmatter](../src/scheduler/sched_admission/brief-contract.ts),
 [criteria extraction](../src/brief-criteria.ts), [preflight](../src/brief-preflight.ts).
 
+## Declared authorizations
+
+An optional frontmatter declaration supplies bounded external authority:
+
+```yaml
+authorizations:
+  provider_calls: true
+  downloads:
+    hosts: [huggingface.co, cdn.example.org]
+  spend:
+    usd: 50
+```
+
+This is a closed set: only `provider_calls`, `downloads` and `spend` are declarable.
+Each nested object is closed too. `provider_calls` accepts only `true`; downloads
+require a nonempty list of exact lowercase DNS hostnames (no scheme, port, path,
+wildcard or implicit subdomains); spend requires a finite nonnegative USD cap.
+Unknown/forbidden keys or invalid bounds leave the entire declaration unadmitted,
+with an `Invalid authorizations declaration` diagnostic in preflight and run events.
+The run can proceed under its existing authority; external requests still park.
+A brief without this field is unchanged.
+Workflow/research, inputs/outputs, write scopes and independent read-only gates retain
+their existing meanings; an authorization does not expand a stage's write scope.
+
+Calls to the run's configured provider are inside run authority and never require a
+request. `provider_calls` permits the engine to answer a categorized legacy or
+misdirected request for that same authority; it grants no credential access or arbitrary
+provider spend. The worker must identify the configured-provider category explicitly.
+
+External requests name `category`: `provider_calls`, `downloads`, `spend`,
+`credentials`, `other_repositories`, `user_data_deletion`, `shared_devices` or
+`external_git_history`. The requesting model owns this judgment. For downloads it
+also supplies `host`; for spend it supplies `amountUsd`, the full maximum commitment.
+Code validates that closed schema and answers only when category membership and its
+bound match the declaration: exact hostname equality or `amountUsd <= usd`.
+The cap is per request, not a cumulative budget meter; authors needing an aggregate
+budget must declare an aggregate maximum in one request and enforce its accounting
+in the task. Redirect hosts need their own named authority.
+
+The engine records an approval with `source: scheduler` and `viaDeclaration` naming
+the authorizing field in the existing append-only first-responder-wins transport.
+Absent/unknown categories or invalid bounds, requests outside the declaration, and
+credentials, other repositories, deletion of user data, shared devices and git history
+outside the run branch keep parking. Split multiple effects into separate requests;
+a spend grant never covers a credential or device effect. A wrong category is repaired
+in the request or stage contract, never by interpreting its title, target, body or brief prose.
+
+Sources: [schema and bounded comparison](../src/brief-authorizations.ts),
+[inbox transport](../src/inbox.ts), [stage contract](../src/scheduler/sched_policy/prompt-contracts.ts).
+
 ## Inputs, outputs and validation
 
 Declare inputs in leading YAML frontmatter. Project-relative directory names are accepted

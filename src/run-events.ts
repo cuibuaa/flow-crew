@@ -223,6 +223,8 @@ export function recordStageOutcome(
     iteration,
     stageId,
     status: status.status,
+    ...(settledAttempt?.exitCode === undefined ? {} : { exitCode: settledAttempt.exitCode }),
+    ...(settledAttempt?.providerFailure ? { providerFailure: settledAttempt.providerFailure } : {}),
     ...(status.gate ? { gate: status.gate } : {}),
     ...(settledAttempt ? attemptEventFields(settledAttempt) : {}),
   };

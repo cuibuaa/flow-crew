@@ -8,7 +8,7 @@ import { afterEach, expect, it } from 'vitest';
 import { extractBriefCriteria } from '../src/brief-criteria.js';
 import { createEngineTaskRunResolver, publicTaskEntries, readTaskLedger, updateTaskEntry } from '../src/fc-tasks.js';
 import { renderSessionProgress, sessionGate } from '../src/cli-session-push.js';
-import { SessionPush } from '../src/session-push.js';
+import { SessionPush, renderPushEvent } from '../src/session-push.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { writeReadySetupRecord } from './test-support/ready-setup.js';
 
@@ -138,7 +138,17 @@ it.each(['claude', 'codex'] as const)('foreground %s quick completes locally wit
   expect(push.pending()).toHaveLength(events.length);
   for (const event of events) {
     expect(push.delivery(event.eventId)).toMatchObject({ attempts: 1, sentAt: expect.any(String) });
-    expect(frontend === 'codex' ? readFileSync(queueFile, 'utf8') : frames.join('')).toContain(event.eventId);
+    const message = renderPushEvent(push.describe(event), engine).human;
+    if (frontend === 'codex') {
+      const queued = JSON.parse(readFileSync(queueFile, 'utf8'));
+      expect(queued).toContain(message);
+      expect(queued.join(' ')).not.toContain(event.eventId);
+    } else {
+      const frame = frames.join('').trim().split('\n').map(line => JSON.parse(line))
+        .find(value => value.msg_id === event.eventId);
+      expect(frame?.message.content).toBe(message);
+    }
+    expect(sessionGate(push, frontend, 'own-session').reason).toContain(`--event ${push.pending()[0].eventId}`);
   }
   expect(push.display(task.id).progress?.status).toBe('complete');
   expect(renderSessionProgress(push, 'own-session', Date.now(), frontend).text).toContain('elapsed');

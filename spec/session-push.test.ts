@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTaskEntry, updateTaskEntry } from '../src/fc-tasks.js';
 import { sessionGate, renderSessionProgress } from '../src/cli-session-push.js';
-import { SessionPush, captureLauncher, estimateProgress, progressLine, PUSH_FALLBACK_MS, PUSH_RETRY_MS, wrapUpPrompt, type LaunchTarget } from '../src/session-push.js';
+import { SessionPush, captureLauncher, estimateProgress, progressLine, PUSH_FALLBACK_MS, PUSH_RETRY_MS, wrapUpPrompt, renderPushEvent, type LaunchTarget } from '../src/session-push.js';
 import { codexRequest, queueCodex, sendClaude } from '../src/session-push-transport.js';
 import { TaskRegistry, hasLiveForegroundOwner } from '../src/task-registry.js';
 import { processStartToken } from '../src/run-lock.js';
@@ -272,7 +272,13 @@ describe('durable delivery and business ACK', () => {
     await push.deliver(event);
     const deliveries = frontend === 'codex' ? queue.mock.calls : claude.mock.calls;
     expect(deliveries).toHaveLength(2);
-    expect(JSON.stringify(deliveries[0])).toContain(event.eventId);
+    // User-message transports carry the human rendering. Claude's transport
+    // frame retains msg_id; agent identity/ACK lives in the Stop reason.
+    expect(deliveries[0][frontend === 'codex' ? 1 : 2]).toContain('Tiny task: attempt failed');
+    expect(deliveries[0][frontend === 'codex' ? 1 : 2]).not.toContain(event.eventId);
+    if (frontend === 'claude') expect(deliveries[0][1]).toBe(event.eventId);
+    expect(deliveries[0][frontend === 'codex' ? 1 : 2]).toBe(renderPushEvent(event, registry.baseDir).human);
+    expect(dependencies.notify).toHaveBeenCalledWith(renderPushEvent(event, registry.baseDir).human, event.eventId);
     expect(deliveries[1]).toEqual(deliveries[0]);
     expect(() => push.acknowledge(event.eventId, 'wrong-session')).toThrow('different');
     push.acknowledge(event.eventId, launcher.sessionId);
@@ -351,6 +357,55 @@ describe('durable delivery and business ACK', () => {
     runFile(root, 'complete');
     await push.sweep();
     expect(push.events().length).toBeGreaterThan(ids.length);
+  });
+
+  it('emits the task title, terminal status, last executed stage and existing report from structured state', () => {
+    const { root, registry, task } = fixture('claude');
+    runFile(root, 'complete', {
+      implement: { status: 'complete', startedAt: '2020-01-01T00:00:00Z', completedAt: '2020-01-01T00:01:00Z' },
+      review: { status: 'complete', startedAt: '2020-01-01T00:01:00Z', completedAt: '2020-01-01T00:02:00Z' },
+      repair: { status: 'skipped' },
+    });
+    const report = join(root, 'runs/own-run/summary.md'); writeFileSync(report, 'Completed report.');
+    const push = new SessionPush(registry);
+    const event = push.enqueue(task, { type: 'operator_wrap_up_required', runId: 'own-run', timestamp: source.timestamp })!;
+    expect(renderPushEvent(event, root).human).toBe(`FlowCrew #${task.id} Tiny task: wrap-up required. Status: complete. Last stage: review. Report: ${report}`);
+  });
+
+  it.each(['inbox', 'same-request', 'unknown', 'different-request'])('enriches delayed suspension from %s metadata only when the request identity matches', context => {
+    const { root, registry, task } = fixture('claude');
+    runFile(root, 'parked');
+    const directory = join(root, 'runs/own-run');
+    const state = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
+    state.parked = { requestId: context === 'same-request' ? 'original' : 'newer',
+      pausedAt: '2020-01-01T00:00:00Z', reason: context === 'same-request' ? 'Known normalized title' : 'Unrelated newer title' };
+    writeFileSync(join(directory, 'run.json'), JSON.stringify(state));
+    if (context === 'inbox') {
+      writeFileSync(join(directory, 'approvals.jsonl'), [
+        { kind: 'request', requestId: 'original', title: 'Known normalized title', target: 'Known target' },
+        { kind: 'request', requestId: 'original', title: 'Losing duplicate title' },
+      ].map(record => JSON.stringify(record)).join('\n') + '\n');
+    }
+    const event = new SessionPush(registry).enqueue(task, { type: 'approval_attempt_suspended', runId: 'own-run',
+      timestamp: '2020-01-01T00:00:01Z', ...(context === 'unknown' ? {} : { requestId: 'original' }) })!;
+    const known = context === 'inbox' || context === 'same-request';
+    expect(event.requestTitle).toBe(known ? 'Known normalized title' : undefined);
+    expect(event.requestTarget).toBe(context === 'inbox' ? 'Known target' : undefined);
+    const human = renderPushEvent(event, root).human;
+    expect(human).not.toContain('Unrelated newer title');
+    expect(human.includes('Request:')).toBe(known);
+  });
+
+  it('emits a provider failure identity without disclosing the diagnostic or a full hash', () => {
+    const { root, registry, task } = fixture('claude');
+    const event = new SessionPush(registry).enqueue(task, { ...source, stageId: 'work', exitCode: 1, providerFailure: {
+      provider: 'claude', kind: 'rate_limit', source: 'native_stdout', eventType: 'error',
+      diagnosticSha256: 'a'.repeat(64), reason: 'Private diagnostic omitted from human text',
+    } })!;
+    const { human } = renderPushEvent(event, root);
+    expect(human).toContain('Stage: work. Attempt: 1. Failure: claude rate_limit (aaaaaaaaaaaa).');
+    expect(human).not.toContain('Private diagnostic');
+    expect(human).not.toMatch(/[a-f0-9]{64}/u);
   });
 
   it('the daemon sweeps terminal task outboxes even without hooks', async () => {
