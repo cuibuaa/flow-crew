@@ -163,7 +163,7 @@ describe('portable supervised lifecycle through the real CLI', () => {
     expect(shown.status, output).toBe(0);
     expect(output).toContain(`Status: ${terminal.state.status}`);
     expect(output).not.toContain('Status: running');
-    const tailed = runCliSync(harness, task.project, ['task', 'tail', String(task.id)]);
+    const tailed = runCliSync(harness, task.project, ['task', 'tail', String(task.id), '--tail', '1000']);
     expect(tailed.status, tailed.stderr).toBe(0);
     expect(tailed.stdout).toContain(MOCK_OUTPUT_SENTINEL);
   });
@@ -197,6 +197,8 @@ async function createHarness(): Promise<Harness> {
     tokens_in: 0,
     tokens_out: 0,
   }), 'utf-8');
+  writeFileSync(join(mockDir, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single coherent fixture task.', metric_search: false, questions: [] }) }));
+  writeFileSync(join(mockDir, 'assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Bounded fixture change.', risk_areas: [] }) }));
   writeFileSync(join(mockDir, 'review.json'), JSON.stringify({
     output_text: 'portable fixture gate passed', exit_code: 0,
     write_files: { 'verdict_review.json': JSON.stringify({ pass: true, reason: 'deterministic lifecycle evidence' }) },
@@ -286,8 +288,7 @@ function registerBackgroundTask(harness: Harness, project: string, marker: strin
     '--acknowledge-brief-warnings',
     '--project', project,
     '--adapter', 'mock',
-    '--workflow', 'direct',
-    '--no-campaign',
+        '--no-campaign',
     '--task', brief,
   ]);
   const output = `${result.stdout}${result.stderr}`;

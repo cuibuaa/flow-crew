@@ -724,7 +724,6 @@ export interface DashboardOptions {
 const DashboardTaskCreateSchema = z.object({
   brief: z.string().refine((value) => value.trim().length > 0, 'brief must not be blank'),
   projectDir: z.string().trim().min(1).optional(),
-  workflow: z.string().trim().min(1).optional(),
   maxIterations: z.number().int().min(1).optional(),
   noCampaign: z.boolean().optional(),
   campaign: z.string().trim().min(1).optional(),
@@ -1343,10 +1342,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         receipt: admission.receipt,
       });
     }
-    const workflowName = body.workflow;
-    if (workflowName && !isSafeId(workflowName)) {
-      return reply.code(400).send({ error: 'invalid workflow name' });
-    }
+
     const targetProjectDir = body.projectDir ?? projectDir;
 
     const requestedCampaign = body.campaignId
@@ -1360,7 +1356,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       brief_admission: admission.admission,
       projectDir: targetProjectDir,
       launch_options: {
-        workflow: workflowName,
         maxIterations: body.maxIterations,
         ...(body.noCampaign ? { noCampaign: true } : requestedCampaign ? { campaign: requestedCampaign } : {}),
       },

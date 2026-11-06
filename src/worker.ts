@@ -89,6 +89,9 @@ export function plannerCriterionAssignmentContext(brief: string): string {
 export interface StageOpts {
   /** Scheduled stages return JSON; standalone legacy workers remain readable. */
   outputSchema?: Schema;
+  /** Engine-built allowlist input; excludes handoffs, guidance and previous sessions. */
+  isolatedInput?: { system: string; user: string };
+  decisionResult?: boolean;
   artifactContract?: ArtifactContract;
   planRevision?: { revision: number; digest: string };
   artifactStatuses?: Record<string, StageStatus>;
@@ -263,7 +266,7 @@ export async function runStage(
     ? readRunState(opts.projectDir, opts.runId) : undefined;
   const direct = runState?.workflowName === 'direct';
   const skillNames = opts.stageSkills ?? [];
-  let prompt = buildStagePrompt({
+  let prompt = opts.isolatedInput?.user ?? buildStagePrompt({
     dependsOn: opts.dependsOn,
     promptTemplate: opts.promptTemplate,
     projectDir: opts.projectDir,
@@ -321,11 +324,11 @@ export async function runStage(
     evaluationRound: runningStatus.attempts!.length, priorAttemptCount: runningStatus.attempts!.length - 1,
     ...opts.gateContext,
   })}\n\n${prompt}`;
-  const guidanceBeforePrompt = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex);
+  const guidanceBeforePrompt = opts.isolatedInput ? [] : readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex);
   // Retain delivered, targeted notices across execution boundaries. Their
   // original attempt identity remains explicit; only re-admission grants scope.
   try {
-    const priorReceipt = readFileSync(join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md'), 'utf-8');
+    const priorReceipt = opts.isolatedInput ? '' : readFileSync(join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md'), 'utf-8');
     for (const attempt of runningStatus.attempts ?? []) {
       for (const entry of guidanceForStageFromText(priorReceipt, opts.stageId, attempt.index)) {
         if (!guidanceBeforePrompt.some((current) => current.id === entry.id)) guidanceBeforePrompt.push(entry);
@@ -374,6 +377,7 @@ export async function runStage(
     boundaryInvocationIndex?: number,
     commandEvent?: Pick<CommandLifecycleEvent, 'id' | 'command'>,
   ): ReturnType<typeof readGuidanceForStage> => {
+    if (opts.isolatedInput) return [];
     let entries: ReturnType<typeof readGuidanceForStage> = [];
     let checkFailed = false;
     try {
@@ -482,6 +486,10 @@ export async function runStage(
     if (policies) resolvedSystemPrompt += `\n\n${policies}`;
   }
 
+  if (opts.isolatedInput) {
+    resolvedSystemPrompt = opts.isolatedInput.system;
+    prompt = opts.isolatedInput.user;
+  }
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
   // One list owns both integrity recovery and final-answer publication. A
   // wrap-up may suppress the verdict when the validated work is unfinished.
@@ -801,8 +809,8 @@ export async function runStage(
     const continuation = continuations.get(selectedAdapter);
     // A fresh child (including a failed-resume fallback) needs both its duties
     // and the current local correction; the thread only carries the former.
-    const additionalGuidance = deliveredGuidance.filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
-    const stateContext = runStateContext(opts.projectDir, opts.runId, opts.planRevision);
+    const additionalGuidance = (opts.isolatedInput ? [] : deliveredGuidance).filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
+    const stateContext = opts.isolatedInput ? '' : runStateContext(opts.projectDir, opts.runId, opts.planRevision);
     const fullPrompt = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`;
     const effectiveInvocationPrompt = continuation && invocationPrompt !== prompt
       ? `${invocationPrompt}\n\n${guidanceBlock(deliveredGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`
@@ -1065,6 +1073,7 @@ export async function runStage(
   const stageRecord = (output: string): Record<string, unknown> => {
     // Older native/fixture answers remain readable; only the response schema
     // advertises new output. Admission still checks every executable field.
+    if (opts.decisionResult) return {}; // Scheduler validates once and owns defaults/questions.
     const record = parseStageRecord(output, opts.outputSchema === HANDOFF_SCHEMA ? RECORDED_HANDOFF_SCHEMA : opts.outputSchema!);
     if (opts.isGate) {
       const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)
@@ -1078,7 +1087,7 @@ export async function runStage(
   const finishedStageRecord = (record: Record<string, unknown>): boolean => {
     // A completed rejection keeps its existing authority. Otherwise require an
     // explicit empty list: delivered/pass alone can also describe partial work.
-    return opts.isGate && record.pass === false
+    return Boolean(opts.decisionResult) || opts.isGate && record.pass === false
       || Array.isArray(record.remaining_work) && record.remaining_work.length === 0
         && (opts.isGate ? record.pass === true : record.status === 'delivered');
   };
@@ -1140,7 +1149,7 @@ export async function runStage(
         } catch { /* event/guidance ledgers remain authoritative */ }
         continue;
       }
-      if (combined.exitCode !== 0 || !opts.outputSchema) return combined;
+      if (combined.exitCode !== 0 || !opts.outputSchema || opts.decisionResult) return combined;
       let recordError: string;
       try { stageRecord(combined.output); return combined; }
       catch (error) { recordError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`; }

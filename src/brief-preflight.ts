@@ -1,7 +1,7 @@
 import { parseBriefFrontmatterDocument, splitBriefFrontmatter } from './brief-frontmatter.js';
 import { createHash } from 'node:crypto';
 import { parseBriefFrontmatter } from './scheduler.js';
-import { autoSelectedWorkflow } from './scheduler/sched_admission/brief-contract.js';
+import { entryWorkflow } from './scheduler/sched_admission/brief-contract.js';
 import { hasRealityChecksHeading, parseChecksFromMarkdown } from './reality-gate/index.js';
 import { isNegatedRequirementLine, isNegatedRequirementMention } from './brief-negation.js';
 import { extractBriefCriteria } from './brief-criteria.js';
@@ -235,10 +235,10 @@ export function inspectBrief(
       : { status: 'absent' };
   const findings: BriefPreflightFinding[] = [];
   const add = (finding: Omit<BriefPreflightFinding, 'fingerprint'>) => findings.push(makeFinding(finding));
-  const route = autoSelectedWorkflow(parsed);
+  const route = entryWorkflow(parsed);
   add({
     code: 'brief_workflow', level: route.error ? 'fail' : 'ok',
-    message: `Workflow without --workflow: ${route.workflow} (${route.reason})${route.error ? `; refused: ${route.error}` : ''}`,
+    message: `Entry workflow: ${route.workflow} (${route.reason})${route.error ? `; refused: ${route.error}` : ''}`,
     consequential: false,
   });
 

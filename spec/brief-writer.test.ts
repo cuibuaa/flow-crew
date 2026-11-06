@@ -241,6 +241,8 @@ it.each(['provider', 'reply', 'setup'])('host stop at %s reruns the same quick c
 
 function launchFixtures(root: string, brief: string): string {
   const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
+  writeFileSync(join(fixtures, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Fixture declares separate work and evidence duties.', metric_search: false, questions: [] }) }));
+  writeFileSync(join(fixtures, 'assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Fixture bounded risk.', risk_areas: [] }) }));
   const ids = extractBriefCriteria(brief).criteria.map(c => c.id);
   writeFileSync(join(fixtures, 'implement.json'), JSON.stringify({ output_text: 'The greeting is available.' }));
   writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify({ pass: true, reason: 'Verified.',
@@ -249,7 +251,7 @@ function launchFixtures(root: string, brief: string): string {
   return fixtures;
 }
 
-it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with evidence attached', async workflow => {
+it('raw text reaches the single entry with evidence attached', async () => {
   const root = project();
   const dir = join(root, 'source'); mkdirSync(dir);
   const env = { ...process.env, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(dir, 'd.sock'),
@@ -261,6 +263,8 @@ it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with ev
   const raw = 'write a greeting';
   const written = await writeTaskBrief(raw, options(dir, replies([fields])));
   const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
+  writeFileSync(join(fixtures, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'plan', reason: 'Fixture declares separate work and evidence duties.', metric_search: false, questions: [] }) }));
+  writeFileSync(join(fixtures, 'review_assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Fixture bounded risk.', risk_areas: [] }) }));
   const ids = extractBriefCriteria(written.brief).criteria.map(c => c.id);
   const fixture = (id: string, output: unknown) => writeFileSync(join(fixtures, `${id}.json`),
     JSON.stringify({ output_text: typeof output === 'string' ? output : JSON.stringify(output) }));
@@ -276,7 +280,7 @@ it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with ev
     criteria: Object.fromEntries(ids.map(id => [id, { status: 'pass', evidence: 'The greeting is available.' }])),
     audit_findings: { version: 1, findings: [] } });
   const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), join(process.cwd(), 'src/cli.ts'),
-    'quick', raw, '--project', dir, '--adapter', 'mock', '--workflow', workflow, '--no-campaign'],
+    'quick', raw, '--project', dir, '--adapter', 'mock', '--no-campaign'],
   { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: fcGlobalDir(), MOCK_FIXTURE_DIR: fixtures }, encoding: 'utf8', timeout: 25000 });
   expect(child.status, child.stdout + child.stderr).toBe(0);
   const runs = readdirSync(join(fcGlobalDir(), 'runs')).map(id => join(fcGlobalDir(), 'runs', id));
@@ -284,7 +288,7 @@ it.each(['direct', 'planner'])('raw text reaches the unchanged %s launch with ev
     try { return JSON.parse(readFileSync(join(path, 'run.json'), 'utf8')).projectDir === join(root, 'source-wt', `brief-${written.digest.slice(0, 12)}`); } catch { return false; }
   })!;
   expect(readFileSync(join(written.evidenceDir!, 'setup.json'), 'utf8')).toContain('\"state\": \"ready\"');
-  expect(JSON.parse(readFileSync(join(run, 'run.json'), 'utf8')).workflowName).toBe(workflow);
+  expect(JSON.parse(readFileSync(join(run, 'run.json'), 'utf8')).workflowName).toBe('entry');
   expect(readFileSync(join(run, 'task_brief.md'), 'utf8')).toBe(written.brief);
   expect(readFileSync(join(run, 'brief-writing', 'original.txt'), 'utf8')).toBe(raw);
 });
@@ -472,15 +476,15 @@ it.each([
     '--adapter', kind === 'unknown_adapter' ? 'nosuch' : kind === 'missing_adapter' ? 'codex' : 'mock', ...extra],
     { cwd: dir, env: { ...env, HOME: process.env.HOME, FC_HOME: engine }, encoding: 'utf8' });
   expect(child.status, child.stdout + child.stderr).toBe(1);
-  const hint = kind === 'unknown_workflow' ? 'Workflow not found: nosuch'
-    : kind === 'direct_research' ? 'direct cannot run the research loop'
+  const hint = kind === 'unknown_workflow' ? 'Unknown quick option: --workflow'
+    : kind === 'direct_research' ? command === 'quick' ? 'Unknown quick option: --workflow' : 'field no longer exists'
     : kind === 'occupied_output' ? 'already occupied'
     : kind === 'unknown_adapter' ? 'Unknown adapter "nosuch"'
     : kind === 'missing_adapter' ? 'npm i -g @openai/codex'
     : kind === 'continuation' ? 'brief_criteria_missing' : 'flowcrew brief - < file';
   expect(child.stdout + child.stderr).toContain(hint);
   expect(existsSync(join(engine, 'brief-writing'))).toBe(false);
-  if (command === 'quick') expect(JSON.parse(readFileSync(record, 'utf8')).kind).toBe('launch_refused');
+  if (command === 'quick' && !['unknown_workflow', 'direct_research'].includes(kind)) expect(JSON.parse(readFileSync(record, 'utf8')).kind).toBe('launch_refused');
   if (kind === 'existing_file') expect(existsSync(record)).toBe(false);
 });
 

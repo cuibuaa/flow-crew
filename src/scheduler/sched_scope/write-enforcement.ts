@@ -12,6 +12,7 @@ export function settleProjectWrites(input: {
   snapshot: RepairRoundSnapshot;
   rawWrites: string[];
   definiteWrites: ReadonlySet<string>;
+  readOnly?: boolean;
 }) {
   const rawWrites = [...new Set(input.rawWrites.map(normalizedProjectContentPath).filter((path): path is string => path !== undefined))];
   const appliedWrites: string[] = [], exemptedWrites: string[] = [], rolledBackWrites: string[] = [];
@@ -29,8 +30,9 @@ export function settleProjectWrites(input: {
   });
   for (const rawPath of new Set(orderedFrozen.concat(rawWrites))) {
     const path = normalizedProjectPath(rawPath)!;
-    const frozen = frozenPaths.has(path);
-    const before = frozen ? baseline.frozenImages.get(path) ?? { exists: false, provenance: 'observed' as const }
+    const taskFrozen = frozenPaths.has(path);
+    const frozen = taskFrozen || input.readOnly === true;
+    const before = taskFrozen ? baseline.frozenImages.get(path) ?? { exists: false, provenance: 'observed' as const }
       : input.snapshot.files.get(path) ?? baselineImage(baseline, path);
     const current = readRollbackCurrentImage(baseline, input.projectDir, path, before);
     const comparison = compareRepairFileContents(before, current);
@@ -43,7 +45,7 @@ export function settleProjectWrites(input: {
       if (!rawWrites.includes(path)) rawWrites.push(path);
       violations.push({ path, certainty: input.definiteWrites.has(path) ? 'definite' : 'unverified',
         reason: comparison === 'unavailable' ? 'task-frozen evidence cannot be verified; preimage remains unknown'
-          : 'task-frozen evidence content changed' });
+          : taskFrozen ? 'task-frozen evidence content changed' : 'read-only decision/review changed project content' });
       const restoration = restoreProjectPath(input.projectDir, path, before,
         baseline.runDirPath ? join(baseline.runDirPath, 'rollback-retained') : undefined);
       if (restoration.retainedPath) retainedReplacements[path] = restoration.retainedPath;

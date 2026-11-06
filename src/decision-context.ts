@@ -1,0 +1,44 @@
+/** Review routing receives facts from engine/git authorities, never author narrative. */
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { StoreState } from './store.js';
+import { POST_AUTHOR_PROMPT, CHOOSER_PROMPT } from './decision-graph.js';
+import type { StageConfig } from './scheduler/sched_admission/configuration.js';
+
+export function reviewFacts(projectDir: string, directory: string, state: StoreState, validationStage = 'assess'): { files: string[]; diff: string; validation: unknown } {
+  const git = (args: string[]) => execFileSync('git', args, { cwd: projectDir, encoding: 'utf8', timeout: 15_000, maxBuffer: 8_000_000 });
+  let diff = '', files: string[] = [];
+  try {
+    const base = state.baseCommit ?? 'HEAD';
+    files = git(['diff', '--name-only', '-z', base, '--']).split('\0').filter(Boolean);
+    diff = git(['diff', '--no-ext-diff', '--no-textconv', base, '--']);
+    const untracked = git(['ls-files', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean);
+    for (const file of untracked) {
+      files.push(file);
+      // Git no-index includes added file bytes without custom diff parsing.
+      try { diff += git(['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', '/dev/null', file]); }
+      catch (error) { diff += (error as { stdout?: string }).stdout ?? ''; }
+    }
+  } catch { diff = 'Diff unavailable; choose full review and investigate independently.'; }
+  const baseline = join(directory, 'validation_baseline.json');
+  let validation: unknown = { status: 'No configured validation facts have been recorded.' };
+  if (existsSync(baseline)) {
+    // This is engine-owned command evidence, not the author's checks/self-assessment.
+    validation = JSON.parse(readFileSync(baseline, 'utf8'));
+  }
+  const current = join(directory, `validation_delta_${validationStage}.json`);
+  if (existsSync(current)) validation = JSON.parse(readFileSync(current, 'utf8'));
+  return { files: [...new Set(files)], diff, validation };
+}
+export function decisionInput(stage: StageConfig, projectDir: string, directory: string, state: StoreState): { system: string; user: string } {
+  if (stage.decision?.kind === 'shape') return { system: CHOOSER_PROMPT,
+    user: JSON.stringify({ task: state.taskDescription, research: state.research ?? null, declarations: state.decisionGraph?.declarations ?? [] }) };
+  const facts = reviewFacts(projectDir, directory, state, stage.id);
+  const system = POST_AUTHOR_PROMPT.replaceAll('review_full', stage.decision!.successors[1]).replaceAll('Select review (', `Select ${stage.decision!.successors[0]} (`);
+  return { system, user: JSON.stringify({ task: state.taskDescription, ...facts }) };
+}
+export function focusedReviewInput(projectDir: string, directory: string, state: StoreState, assessmentId?: string, reviewer?: StageConfig): string {
+  const risk = state.decisionGraph?.records.filter(record => assessmentId ? record.stageId === assessmentId : record.risk_areas).at(-1);
+  return `# Independent review facts\n${JSON.stringify({ task: state.taskDescription, ...reviewFacts(projectDir, directory, state, risk?.stageId ?? 'assess'), risk_areas: risk?.risk_areas ?? [], required_outputs: reviewer?.artifact_contract?.produces ?? [], output_groups: reviewer?.artifact_contract?.groups ?? [] })}\nRun your own targeted experiments for these risks. Evaluate every assigned criterion. The risks guide exploration; they do not prove correctness or narrow the brief. Do not read author transcripts or adopt author self-assessment.`;
+}

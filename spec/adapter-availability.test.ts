@@ -106,7 +106,6 @@ function quickUntilWorkflowLookup(fixture: CliFixture) {
   return runCli(fixture, [
     'quick',
     '--project', fixture.project,
-    '--workflow', 'intentionally-missing',
     '--task', brief,
   ]);
 }
@@ -271,7 +270,8 @@ describe('CLI adapter behavior', () => {
 
     const result = quickUntilWorkflowLookup(fixture);
 
-    expect(result.status).toBe(1);
+    expect(result.status).toBe(0); // Invalid chooser output pauses for operator input.
+    expect(`${result.stdout}${result.stderr}`).toContain('parked');
     expect(`${result.stdout}${result.stderr}`).toContain(`Adapter resolution: ${adapter}`);
     expect(`${result.stdout}${result.stderr}`).toContain(`only installed CLI, ${adapter}`);
   });
@@ -391,6 +391,7 @@ describe('CLI adapter behavior', () => {
     const mockDir = join(fixture.root, 'mock');
     const brief = structuredBrief();
     mkdirSync(mockDir);
+    writeFileSync(join(mockDir, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single fixture change.', metric_search: false, questions: [] }) }));
     writeFileSync(join(mockDir, 'implement.json'), JSON.stringify({
       output_text: 'fixture stage failure detail',
       exit_code: 1,
@@ -403,8 +404,7 @@ describe('CLI adapter behavior', () => {
     const before = projectSnapshot(fixture.project);
     writeReadySetupRecord(fixture.project, brief, fixture.fcHome);
     const result = runCli(fixture, [
-      'quick', '--project', fixture.project, '--adapter', 'mock', '--workflow', 'direct',
-      '--no-campaign', '--task', brief,
+      'quick', '--project', fixture.project, '--adapter', 'mock',       '--no-campaign', '--task', brief,
     ], { MOCK_FIXTURE_DIR: mockDir });
     const output = `${result.stdout}${result.stderr}`;
 

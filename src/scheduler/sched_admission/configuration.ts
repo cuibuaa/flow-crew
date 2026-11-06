@@ -53,6 +53,11 @@ const StageFields = z.object({
   dynamic_dispatch: z.boolean().optional().default(false),
   is_gate: z.boolean().optional().default(false),
   retry_to: z.array(z.string()).optional(),
+  /** Declared run-time edges. continue releases ordinary dependencies; replan retains this iteration. */
+  decision: z.object({
+    successors: z.array(z.string().min(1)).min(1), default: z.string().min(1),
+    kind: z.enum(['successor', 'shape', 'review']).optional(),
+  }).strict().refine(value => value.successors.includes(value.default), 'default must be a declared successor').optional(),
   /** Canonical IDs from the run-local brief_criteria.json artifact. */
   criterion_refs: z.array(z.string()).optional().default([]),
   /** Versioned exact outputs and reads; an explicit empty contract is meaningful. */
@@ -142,6 +147,7 @@ export function parseDispatchedStageConfig(raw: unknown): StageConfig {
   const stage = StageConfigSchema.parse(raw);
   // Live omission is a closed capability, never the legacy ungoverned scope state.
   stage.scope ??= [];
+  if (stage.decision?.kind === 'shape') throw new Error('shape decisions belong to the single entry workflow');
   if (stage.is_gate && stage.retry_to?.length) throw new Error('gate stages cannot declare retry_to; repairs own retry_to edges');
   normalizeStageContracts([stage]);
   delete stage.max_retries;

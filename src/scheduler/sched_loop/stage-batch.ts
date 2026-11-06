@@ -48,7 +48,7 @@ export async function executeReadyBatch(
           continue;
         }
       }
-      if (stage.dynamic_dispatch && workflow.dispatch) {
+      if (stage.dynamic_dispatch && workflow.dispatch && !sorted.some(s => s.decision?.kind === 'shape')) {
         answerWithFixedPlan(stage, workflow.dispatch, state, projectDir, runId, runDirPath);
         continue;
       }

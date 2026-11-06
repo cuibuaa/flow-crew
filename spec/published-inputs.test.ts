@@ -94,7 +94,7 @@ describe('published declaration inputs', () => {
       for (const block of blocks) {
         if (/^---\s*\n/.test(block)) {
           const parsed = parseBriefFrontmatter(block);
-          expect(parsed.workflow).toBe('direct');
+          expect(parsed).not.toHaveProperty('workflow');
           expect(parsed.research).toBeUndefined();
           expect(parsed.frontmatterError).toBeUndefined();
           expect(parsed.workflowError).toBeUndefined();

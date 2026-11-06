@@ -830,8 +830,7 @@ async function cmdQuick(preview = false) {
   let projectDir = value('project') ? resolve(value('project')!) : detectProjectDir();
   let task = value('task') ?? '';
   let adapter = value('adapter') ?? '';
-  let workflow = value('workflow') ?? 'planner';
-  const workflowExplicit = value('workflow') !== undefined;
+  let workflow = 'entry';
   const maxIterations = value('max-iterations') === undefined ? undefined : Number(value('max-iterations'));
   const campaignArg = value('campaign');
   const campaignDisabled = has('no-campaign');
@@ -905,7 +904,6 @@ async function cmdQuick(preview = false) {
     console.error('');
     console.error('Options:');
     console.error('  --adapter auto|codex|claude|mock  Agent backend (defaults to engine config/defaults.yaml)');
-    console.error('  --workflow <name>       Workflow to use (default: direct; research/program use planner loops)');
     console.error('  --max-iterations <n>    Override engine config/defaults.yaml for this run');
     console.error('  --campaign <name>       Attach run to campaign (default: slug of the main worktree)');
     console.error('  --no-campaign           Run un-attached to any campaign (opt-out)');
@@ -946,8 +944,8 @@ async function cmdQuick(preview = false) {
       refusal = 'Launch refused: automatic setup requires a Git working tree with a committed HEAD.';
     }
     if (!refusal) {
-      const { parseBriefFrontmatter, autoSelectedWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
-      const route = autoSelectedWorkflow(parseBriefFrontmatter(task), workflowExplicit ? workflow : undefined);
+      const { parseBriefFrontmatter, entryWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
+      const route = entryWorkflow(parseBriefFrontmatter(task));
       if (route.error) refusal = `Launch refused: ${route.error}.`;
       else if (!existsSync(join(engineConfigDir, 'workflows', `${route.workflow}.yaml`))) {
         refusal = `Workflow not found: ${route.workflow}.yaml`;
@@ -1009,9 +1007,9 @@ async function cmdQuick(preview = false) {
   } = await import('./brief-preflight.js');
   const preflight = inspectBrief(task);
   console.log(`${formatBriefPreflightReport(preflight)}\n`);
-  const { parseBriefFrontmatter, autoSelectedWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
+  const { parseBriefFrontmatter, entryWorkflow } = await import('./scheduler/sched_admission/brief-contract.js');
   const parsedBrief = parseBriefFrontmatter(task);
-  const auto = autoSelectedWorkflow(parsedBrief, workflowExplicit ? workflow : undefined);
+  const auto = entryWorkflow(parsedBrief);
   // Nothing about the brief matters if nothing can execute it. A newcomer whose
   // adapter CLI is not installed must be told the install command, not sent to
   // fix a brief they cannot run either way, so environment refusals precede
@@ -1032,7 +1030,7 @@ async function cmdQuick(preview = false) {
   if (refusalFindings.length) {
     const refusal = refusalFindings.map(finding => `[${finding.code}] ${finding.message}`).join('\n');
     recordLaunchRefusal(refusal);
-    console.error(refusal);
+    if (!refusalFindings.some(finding => finding.code === 'brief_workflow')) console.error(refusal);
     process.exitCode = EXIT_CODE.failed;
     return;
   }
@@ -1099,13 +1097,8 @@ async function cmdQuick(preview = false) {
     );
   }
 
-  // Auto-select the workflow only after the shared report is visible. The canonical frontmatter parser owns this
-  // decision, quick has no YAML regex, and rehearse reports the same choice.
+  // One entry owns shape selection; frontmatter supplies declarations only.
   workflow = auto.workflow;
-  launchOptions.workflow = workflow;
-  if (!workflowExplicit && workflow !== 'planner') {
-    console.error(`Note: ${auto.reason} -> auto-selected --workflow ${workflow} (pass --workflow to override).`);
-  }
 
   const initializedContinuation = Boolean(existingRunId && existsSync(join((await import('./store.js')).runsRoot(), existingRunId, 'run.json')));
   if (!initializedContinuation) {

@@ -69,6 +69,8 @@ export function guardPlainCompletionWithStageObligations(
     state.currentIteration ?? iteration,
     runDir(projectDir, runId),
   );
+  const latestChoices = new Map((state.decisionGraph?.records ?? []).map(record => [record.stageId, record]));
+  reconciled.stageIds = [...new Set([...reconciled.stageIds, ...[...latestChoices.values()].filter(record => record.outcome === 'refused' && !record.successor).map(record => record.stageId)])];
   if (reconciled.changed) writeRunState(projectDir, runId, state);
   if (reconciled.stageIds.length > 0) {
     log.warn({

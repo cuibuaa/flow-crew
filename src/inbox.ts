@@ -47,6 +47,8 @@ export interface ApprovalRequest {
   /** The exact object of the action, e.g. "binance-mainnet" */
   target?: string;
   risk: ApprovalRisk;
+  /** Information request carried by the same durable inbox, grants no authority. */
+  questions?: Array<{ missing: string; question: string }>;
   title: string;
   body?: string;
   createdAt: string;
@@ -122,7 +124,7 @@ export function recordRequest(req: Omit<ApprovalRequest, 'kind'>): { item: Inbox
   const rec: ApprovalRequest = { kind: 'request', ...req };
   if (!existing) appendJsonl(path, rec);
   let item: InboxItem = existing ?? { ...rec, state: INBOX_ITEM_STATE.PENDING };
-  if (isPendingInboxItemState(item.state) && item.risk !== 'external') {
+  if (isPendingInboxItemState(item.state) && item.risk !== 'external' && !item.questions?.length) {
     const owned = isStageOwnedApprovalTarget(runDir(item.projectDir, item.runId), item.stageId, item.target);
     item = resolveRequest(item.projectDir, item.runId, item.requestId, owned ? 'approve' : 'deny', {
       by: 'engine', source: 'scheduler',
@@ -153,10 +155,11 @@ export function resolveRequest(
   const item = items.get(requestId);
   if (!item) return { item: undefined as unknown as InboxItem, won: false, error: `unknown request: ${requestId}` };
   if (!isPendingInboxItemState(item.state)) return { item, won: false, error: `already ${item.state} by ${item.resolution?.by ?? 'unknown'}` };
-  if (item.risk !== 'external' && opts.source !== 'scheduler') {
+  if (item.risk !== 'external' && !item.questions?.length && opts.source !== 'scheduler') {
     return { item: recordRequest(item).item, won: false, error: 'this request has an engine-owned decision' };
   }
 
+  if (item.questions?.length && (decision !== 'approve' || !opts.reason?.trim())) return { item, won: false, error: 'Answer the questions with approve --reason <answer>; a declaration is required.' };
   const at = (opts.now ?? (() => new Date()))().toISOString();
   const res: ApprovalResolution = {
     kind: 'resolution', runId, requestId, resolutionId: randomUUID(), decision,

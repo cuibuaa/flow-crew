@@ -1,8 +1,9 @@
+import { declareReviewChoices } from '../../decision-graph.js';
 /** Native dispatch transport parsing, admission and persistence; receives admission, declared-input and scope-disposition services. */
 import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { type DispatchAdmissionReport, type DispatchAdmissionError, admissionError, collectTransitiveDependents, formatDispatchStageSchemaFailure, readBriefCriteriaForAdmission, resolveDispatchDependencies, shadowStageWithoutInvalidFields, validatedCriterionDischarges } from '../sched_admission/dispatch.js';
 import { STAGE_STATUS, type StageStatus, type StoreState, isPendingStageStatus, resetStageLiveAttemptAliases, runDir, stageDir, writeRunState } from '../../store.js';
-import { type StageConfig, parseDispatchedStageConfig, refreshRunQueryState } from '../sched_admission/configuration.js';
+import { type StageConfig, parseDispatchedStageConfig, refreshRunQueryState, normalizeStageContracts } from '../sched_admission/configuration.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -11,7 +12,7 @@ import { join } from 'node:path';
 import { log } from '../sched_admission/shared.js';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { promoteAdmittedRealityChecks } from '../sched_admission/dispatch-retry.js';
-import { recordAdmittedPlan } from '../../plan-revisions.js';
+import { applyPlanRevision, recordAdmittedPlan, planDigest } from '../../plan-revisions.js';
 import { recordRunEvent } from '../../run-events.js';
 import { readDispatchDocument } from '../../dispatch-document.js';
 import { parseRealityChecks } from '../../reality-gate/index.js';
@@ -103,6 +104,10 @@ export function inspectDispatchProposal(
   }
   if (itemList.length === 0) skippedReasons.push(admissionError('dispatch_stages_empty', 'dispatch contains no stages', 'stages'));
 
+  if (state.workflowName === 'entry') {
+    try { declareReviewChoices(dispatched); } catch (error) { schemaReasons.push(admissionError('stage_graph', String(error), 'stages')); }
+  }
+  normalizeStageContracts(dispatched);
   resolveDispatchDependencies(dispatched, dispatchStageId);
   let criteria: BriefCriteriaArtifact | undefined;
   try {
@@ -189,8 +194,10 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
     } catch {
       return [];
     }
+    const revising = state.decisionGraph?.replan?.stageId === dispatchStageId && Boolean(state.planControl);
+    const bootstrap = revising ? sorted.filter(stage => stage.dynamic_dispatch || stage.decision?.kind === 'shape') : sorted;
     const { report: admission, dispatched, items } = inspectDispatchProposal(services, {
-      rawDispatchText, dispatchStageId, roleRegistry, sorted, state, projectDir, runDirPath,
+      rawDispatchText, dispatchStageId, roleRegistry, sorted: bootstrap, state, projectDir, runDirPath,
     });
     if (!publishAdmission(admission)) {
       log.warn({ errors: admission.errors }, 'Dynamic dispatch refused before any proposed stage was injected');
@@ -200,6 +207,51 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
 
     // Inspection stops before every state/workflow mutation.
     if (inspectOnly) return dispatched;
+    if (revising) {
+      const prior = state.planControl!.stages;
+      const attempt = state.stages[dispatchStageId].attempts!.at(-1)!;
+      const current = state.queryState!.planRevision!;
+      // Older committed runs may still carry the consumed replan projection.
+      // Reuse the journaled request's base, never reinterpret its ID at a newer revision.
+      const previous = state.planRevisionDecisions?.[`${dispatchStageId}:replan_${attempt.index}`];
+      const base = previous ? state.queryState!.planHistory?.find(entry => entry.revision === previous.baseRevision) : current;
+      if (!base) throw new Error('PLAN_REVISION_DECISION_UNBOUND: replan base is absent from admitted history');
+      let requestBootstrap = bootstrap;
+      if (previous) {
+        if (!base.path) throw new Error('PLAN_REVISION_DECISION_UNBOUND: replan base carrier is absent');
+        const original = JSON.parse(readFileSync(join(runDirPath, base.path), 'utf8'));
+        if (!Array.isArray(original.stages) || planDigest(original.stages) !== base.digest) throw new Error('PLAN_HISTORY_CONFLICT: replan base bytes differ');
+        requestBootstrap = (original.stages as StageConfig[]).filter(stage => stage.dynamic_dispatch || stage.decision?.kind === 'shape');
+      }
+      const candidate = [...requestBootstrap, ...dispatched];
+      const result = applyPlanRevision({ projectDir, runId, request: {
+        version: 1, requestId: `replan_${attempt.index}`, runId, stageId: dispatchStageId,
+        attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
+        baseRevision: base.revision, baseDigest: base.digest,
+        reason: state.decisionGraph!.replan!.reason,
+        stages: candidate.map(stage => prior.find(old => old.id === stage.id && JSON.stringify(old) === JSON.stringify(stage)) ?? stage),
+      }, parseStage: parseDispatchedStageConfig, admit: (stages, latest) => {
+        const report = services.inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId,
+          terminalStates: latest.terminalStates, research: latest.research, projectDir, runDir: runDirPath,
+          criteria: readBriefCriteriaForAdmission(runDirPath),
+        });
+        return { pass: report.pass, errors: report.errors.map(error => error.message) };
+      } });
+      Object.assign(state, result.state);
+      if (!result.decision.accepted || !result.stages) {
+        admission.pass = false;
+        admission.errors.push(admissionError('stage_schema_invalid', result.decision.errors.join('; '), 'stages'));
+        publishAdmission(admission);
+        return [];
+      }
+      sorted.splice(0, sorted.length, ...result.stages);
+      for (const stage of sorted) mkdirSync(stageDir(projectDir, runId, stage.id), { recursive: true });
+      refreshRunQueryState(state, sorted);
+      writeFileSync(join(runDirPath, 'workflow.yaml'), stringifyYaml({ ...parseYaml(readFileSync(join(runDirPath, 'workflow.yaml'), 'utf8')), stages: sorted }));
+      writeRunState(projectDir, runId, state);
+      recordRunEvent(projectDir, runId, { type: 'plan_revision_decided', runId, timestamp: result.decision.at, stageId: dispatchStageId, detail: JSON.stringify(result.decision), source: 'scheduler' });
+      return dispatched;
+    }
 
 
     for (const s of dispatched) {
@@ -225,16 +277,6 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
     // Add dispatched stages to sorted list
     sorted.push(...dispatched);
 
-    // Update stored workflow.yaml
-    const wfPath = join(runDir(projectDir, runId), 'workflow.yaml');
-    try {
-      const wfRaw = readFileSync(wfPath, 'utf-8');
-      const wfParsed = parseYaml(wfRaw) ?? {};
-      if (!Array.isArray(wfParsed.stages)) wfParsed.stages = [];
-      wfParsed.stages.push(...dispatched);
-      writeFileSync(wfPath, stringifyYaml(wfParsed), 'utf-8');
-    } catch { /* best effort */ }
-
     // Readers of the admitted dispatch (including verdict controls) need the
     // same derived criterion and artifact facts as workflow/state readers.
     writeFileSync(dispatchPath, stringifyYaml(Array.isArray(items) ? dispatched : { ...items as object, stages: dispatched }), 'utf-8');
@@ -252,6 +294,16 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
     promoteAdmittedRealityChecks(runDirPath, state);
 
     writeRunState(projectDir, runId, state);
+
+    // Update stored workflow.yaml
+    const wfPath = join(runDir(projectDir, runId), 'workflow.yaml');
+    try {
+      const wfRaw = readFileSync(wfPath, 'utf-8');
+      const wfParsed = parseYaml(wfRaw) ?? {};
+      if (!Array.isArray(wfParsed.stages)) wfParsed.stages = [];
+      wfParsed.stages.push(...dispatched);
+      writeFileSync(wfPath, stringifyYaml(wfParsed), 'utf-8');
+    } catch { /* best effort */ }
 
     return dispatched;
   }

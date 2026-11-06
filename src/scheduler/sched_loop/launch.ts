@@ -1,3 +1,4 @@
+import { getItem } from '../../inbox.js';
 import { attachBriefWritingEvidence } from '../../brief-writer.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Validate declared launch inputs and claim one run/project owner; preserves cancellation and park/resume transactions before execution.
@@ -100,6 +101,11 @@ export function prepareWorkflowLaunch(
     }
     if (hasRunState) {
       let archived = readRunState(projectDir, runId);
+      if (archived.decisionGraph?.pendingQuestion) {
+        const question = archived.decisionGraph.pendingQuestion;
+        const answer = getItem(runId, question.requestId)?.resolution;
+        if (answer?.decision !== 'approve' || !answer.reason?.trim()) return { kind: 'settled', state: archived };
+      }
       requireKnownRunStatus(archived.status, `resume run ${runId}`);
       if (!launchUnchanged(archived)) return { kind: 'settled', state: archived };
       // Run initialization prepares a running projection before dispatch. Every consumer

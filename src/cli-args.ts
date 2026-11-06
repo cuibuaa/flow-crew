@@ -36,7 +36,7 @@ export const CLI_COMMANDS: Record<string, Command> = {
   'ship-setup': command({ ...flags('json'), ...values('project'), ...Object.fromEntries(['brief', 'target', 'base', 'branch'].map(name => [name, { required: true }])) }),
   brief: command(values('project adapter task'), '<task-text|->'),
   quick: command({
-    ...values('project adapter workflow campaign task existing-run-id session brief-input-base64 brief-admission-record'),
+    ...values('project adapter campaign task existing-run-id session brief-input-base64 brief-admission-record'),
     ...flags('no-campaign no-inherit-campaign background'),
     'max-iterations': { integer: 1 },
     'campaign-context': { equalsOnly: true, choices: ['inherit', 'skip'] },

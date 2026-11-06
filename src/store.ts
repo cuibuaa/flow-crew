@@ -512,6 +512,7 @@ export interface StoreState {
    * `pausedAt` freezes the elapsed clock so a park that waits a day does not
    * render as a 24h hang.
    */
+  decisionGraph?: import('./decision-graph.js').DecisionGraphState;
   parked?: {
     requestId: string;
     action: string;
@@ -1302,8 +1303,18 @@ function mergeImmutableHistory<T>(name: string, current: T[], incoming: T[] | un
 }
 
 function mergeStateHistories(current: StoreState | undefined, incoming: StoreState): StoreState {
+  const currentGraph = current?.decisionGraph, incomingGraph = incoming.decisionGraph;
+  let graph = incomingGraph ?? currentGraph;
+  if (currentGraph && incomingGraph) {
+    const records = mergeImmutableHistory('decisionGraph.records', currentGraph.records, incomingGraph.records);
+    const declarations = mergeImmutableHistory('decisionGraph.declarations', currentGraph.declarations, incomingGraph.declarations);
+    graph = { ...(records.length > incomingGraph.records.length || declarations.length > incomingGraph.declarations.length ? currentGraph : incomingGraph), records, declarations,
+      visits: Object.fromEntries([...new Set([...Object.keys(currentGraph.visits), ...Object.keys(incomingGraph.visits)])].map(key => [key, Math.max(currentGraph.visits[key] ?? 0, incomingGraph.visits[key] ?? 0)])),
+      maxVisits: currentGraph.maxVisits === undefined ? incomingGraph.maxVisits : incomingGraph.maxVisits === undefined ? currentGraph.maxVisits : Math.min(currentGraph.maxVisits, incomingGraph.maxVisits) };
+  }
   return {
     ...incoming,
+    ...(graph ? { decisionGraph: graph } : {}),
     retiredStageUsage: mergeImmutableHistory(
       'retiredStageUsage',
       current?.retiredStageUsage ?? [],

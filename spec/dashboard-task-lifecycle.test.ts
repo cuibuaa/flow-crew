@@ -427,7 +427,7 @@ describe('dashboard daemon-backed task creation', () => {
       name: 'Registered task',
       projectDir,
       status: TASK_STATUS.PENDING,
-      launch_options: { workflow: 'research', maxIterations: 4, campaign: 'operator-campaign' },
+      launch_options: { maxIterations: 4, campaign: 'operator-campaign' },
     });
     expect(readFileSync(task!.brief_path!, 'utf-8')).toBe('# Registered task\n\nDo the work.');
     expect(existsSync(runsRoot())).toBe(false);

@@ -57,6 +57,33 @@ export interface GateReadServices {
   readGateEvaluation(projectDir: string, stageId: string, runId?: string, contract?: GateContract | null, requireValidationDelta?: boolean): { pass: boolean; reason?: string } | null;
 }
 
+/** Deferred entry targets belong to the fixed shape; a decomposition may reuse the same stage IDs. */
+function decisionControls(source: StageConfig, target: string, state: StoreState): boolean {
+  if (source.id === target || !source.decision?.successors.includes(target)) return false;
+  const dispatched = (state.dispatchedStages as StageConfig[] | undefined)?.some(stage => stage.id === target);
+  const latest = state.decisionGraph?.records.filter(record => record.stageId === source.id).at(-1);
+  // A replan edge is consumed by its admitted revision; history cannot suppress that revision's remaining duties.
+  if (latest?.successor === 'replan' && latest.planRevision !== undefined
+    && (state.queryState?.planRevision?.revision ?? latest.planRevision) > latest.planRevision) return false;
+  return !(source.decision.kind === 'shape' && dispatched && latest?.successor !== target);
+}
+
+/** A join may name the ends of alternatives, not only their immediate targets. */
+function unchosenJoinDependency(stage: StageConfig, dependency: string, stages: ReadonlyMap<string, StageConfig>, state: StoreState): boolean {
+  return [...stages.values()].some(source => {
+    const targets = source.decision?.successors.filter(id => stages.has(id)) ?? [];
+    if (targets.length < 2) return false;
+    const record = state.decisionGraph?.records.filter(record => record.stageId === source.id).at(-1);
+    const choice = record?.outcome === 'questions' ? undefined : record?.successor;
+    const descendsFrom = (id: string, target: string) => id === target || transitivelyDependsOn(id, target, stages);
+    return Boolean(choice && targets.includes(choice)
+      && targets.every(target => stage.depends_on.some(id => descendsFrom(id, target)))
+      && !descendsFrom(dependency, choice)
+      && targets.some(target => target !== choice && descendsFrom(dependency, target))
+      && isStageInSkippedBranch(dependency, stages, state));
+  });
+}
+
 /** Follow observed conditional skips upstream, without re-evaluating conditions.
  * A gate skipping itself does not verify its producer's work. Completed,
  * running and failed work still needs settlement even if an ancestor was skipped. */
@@ -68,8 +95,13 @@ export function isStageInSkippedBranch(stageId: string, stages: ReadonlyMap<stri
     const stage = stages.get(id);
     const status = state.stages[id]?.status;
     if (!stage || (status !== STAGE_STATUS.PENDING && status !== STAGE_STATUS.SKIPPED)) return false;
+    const incoming = [...stages.values()].filter(source => decisionControls(source, id, state) && !transitivelyDependsOn(source.id, id, stages));
+    if (incoming.length && incoming.every(source => {
+      const record = state.decisionGraph?.records.filter(record => record.stageId === source.id).at(-1);
+      return record?.outcome !== 'questions' && record?.successor && record.successor !== id;
+    }) && !state.decisionGraph?.enabled[id]) return true;
     if (id !== stageId && status === STAGE_STATUS.SKIPPED && stage.condition?.trim()) return true;
-    return (stage.depends_on ?? []).some(visit);
+    return (stage.depends_on ?? []).some(dependency => !unchosenJoinDependency(stage, dependency, stages, state) && visit(dependency));
   };
   return visit(stageId);
 }
@@ -77,12 +109,24 @@ export function isStageInSkippedBranch(stageId: string, stages: ReadonlyMap<stri
 export function createReadyFinder({ loadGateContract, readGateEvaluation }: GateReadServices) {
   return (function findAllReady(stages: StageConfig[], state: StoreState): StageConfig[] {
     const ready: StageConfig[] = [];
+    const records = state.decisionGraph?.records ?? [];
     const stagesById = new Map(stages.map((stage) => [stage.id, stage]));
     let contract: ReturnType<typeof loadGateContract> | undefined;
     for (const s of stages) {
       const ss = state.stages[s.id];
       if (!ss || !isPendingStageStatus(ss.status)) continue;
+      const enabledBy = state.decisionGraph?.enabled[s.id];
+      const incoming = stages.filter(source => decisionControls(source, s.id, state) && !transitivelyDependsOn(source.id, s.id, stagesById));
+      if (incoming.length && !enabledBy && !incoming.some(source => records.filter(record => record.stageId === source.id).at(-1)?.successor === s.id)) continue;
+      if (s.retry_to?.length && !enabledBy) continue;
+
       const depsReady = (s.depends_on ?? []).every((d) => {
+        if (unchosenJoinDependency(s, d, stagesById, state)) return true;
+        if (s.retry_to?.includes(d) && isStageInSkippedBranch(d, stagesById, state)) return true;
+        let owner = enabledBy;
+        const grants = new Set<string>();
+        while (owner && !grants.has(owner)) { grants.add(owner); owner = state.decisionGraph?.enabled[owner]; }
+        if (grants.has(d)) return true; // Only this admitted edge can release a rejecting predecessor.
         const ds = state.stages[d];
         if (!ds || ds.continuation || !isSatisfiedStageDependencyStatus(ds.status)) return false;
         const dependency = stagesById.get(d);

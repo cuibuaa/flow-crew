@@ -9,6 +9,7 @@ import type { ProviderFailure } from './provider-result.js';
 import { isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
+  | 'decision_chosen' | 'decision_defaulted' | 'decision_refused' | 'decision_questions' | 'decision_declaration'
   | 'execution_notice'
   | 'stage_wrap_up_requested'
   | 'stage_wrap_up_delivered'

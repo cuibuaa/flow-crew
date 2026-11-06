@@ -622,7 +622,7 @@ describe('quick and operator entry behavior', () => {
 
     const missing = runQuickSync(isolated, [
       'quick', '--existing-run-id', runId, '--project', isolated.project,
-      '--adapter', 'mock', '--workflow', 'p11-missing',
+      '--adapter', 'mock',
     ]);
     expect(missing.status).toBe(1);
     expect(`${missing.stdout}${missing.stderr}`).toContain('Launch paused before run creation');
@@ -632,10 +632,10 @@ describe('quick and operator entry behavior', () => {
     writeFileSync(join(runPath, 'run.json'), JSON.stringify(state), 'utf-8');
     const valid = runQuickSync(isolated, [
       'quick', '--existing-run-id', runId, '--project', isolated.project,
-      '--adapter', 'mock', '--workflow', 'p11-missing',
+      '--adapter', 'mock',
     ]);
     expect(valid.status).toBe(1);
-    expect(`${valid.stdout}${valid.stderr}`).toContain('Workflow not found: p11-missing.yaml');
+    expect(`${valid.stdout}${valid.stderr}`).toContain('Entry workflow: entry');
     expect(`${valid.stdout}${valid.stderr}`).not.toContain('Launch paused before run creation');
   });
 
@@ -752,12 +752,11 @@ describe('quick and operator entry behavior', () => {
       '--existing-run-id', runId,
       '--project', isolated.project,
       '--adapter', 'mock',
-      '--workflow', 'p11-transported-missing',
     ]);
 
     expect(result.status).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain(`Digest: ${inspectBrief(brief).digest}`);
-    expect(`${result.stdout}${result.stderr}`).toContain('Workflow not found: p11-transported-missing.yaml');
+    expect(`${result.stdout}${result.stderr}`).toContain('Entry workflow: entry');
     expect(`${result.stdout}${result.stderr}`).not.toContain('Launch paused before run creation');
   });
 

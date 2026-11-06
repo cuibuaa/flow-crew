@@ -3,16 +3,32 @@ import { concludeRun } from '../sched_policy/run-completion.js';
 import { BriefAdmissionRecord } from '../../brief-preflight.js';
 import { resolveCampaignStorageKey } from '../../campaigns.js';
 import { recordRunEvent } from '../../run-events.js';
-import { assessResearchIterationBudget, autoSelectedWorkflow, parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
+import { assessResearchIterationBudget, entryWorkflow, parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
 import { WorkflowConfig, loadDefaults } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
-import { StoreState, readRunState, writeRunState } from '../../store.js';
+import { StoreState, type ResearchConfig, readRunState, writeRunState } from '../../store.js';
 import { writeCampaignEntry } from './services.js';
 import { writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { terminalArtifactIdentity } from '../../terminal-artifact-status.js';
 import { beginResearchInputGeneration } from '../../research-candidate.js';
+
+/** The same bounded budget admission applies at entry and to later declarations. */
+export function refuseResearchBudget(state: StoreState, research: ResearchConfig | undefined, maxIterations: number): boolean {
+  const defaults = loadDefaults();
+  const assessment = assessResearchIterationBudget(research, maxIterations, {
+    attemptTimeoutMs: defaults.default_timeout_ms, technicalRetries: defaults.stage_technical_retries,
+  });
+  if (assessment.pass) return false;
+  delete state.parked;
+  if (state.decisionGraph) delete state.decisionGraph.pendingQuestion;
+  concludeRun(state, { status: 'failed', reasonCode: 'admission_refused',
+    detail: `Research budget admission refused: ${assessment.reason}. Adjust the named authored budget or its named engine binding before launch.` });
+  recordRunEvent(state.projectDir, state.runId, { type: 'admission_rejected', runId: state.runId,
+    timestamp: state.completedAt!, detail: state.failureReason });
+  return true;
+}
 
 export function configureWorkflowBrief(
   workflow: WorkflowConfig, projectDir: string, runId: string, runDirPath: string,
@@ -59,7 +75,7 @@ export function configureWorkflowBrief(
       // An already selected library workflow retains its recorded metadata
       // tolerance; the command entrances validate the full brief before launch.
       const { frontmatterError, ...workflowDeclaration } = parsed;
-      const route = autoSelectedWorkflow(workflowDeclaration, workflow.name);
+      const route = entryWorkflow(workflowDeclaration);
       const error = route.error ?? (workflow.name === 'research' ? frontmatterError : undefined);
       if (error) {
         const state = readRunState(projectDir, runId);
@@ -84,31 +100,10 @@ export function configureWorkflowBrief(
         if (terminalStates) log.info({ runId, statuses: Object.keys(terminalStates) }, 'Terminal-state config loaded from brief frontmatter');
         if (research) log.info({ runId, policy: research.policy, baseline: research.baseline }, 'Research config loaded from brief frontmatter');
       }
-      // Consistency check: the `--workflow research` flag and the `research:`
-      // frontmatter block should agree. The block is the precise expression of
-      // intent, so we WARN on mismatch rather than fail.
-      const isResearchWorkflow = workflow.name === 'research';
-      if (isResearchWorkflow && !research) {
-        log.warn({ runId }, 'workflow=research but brief has no `research:` block — research loop needs baseline+policy; falling back to plain dispatch');
-      } else if (research && !isResearchWorkflow) {
-        log.warn({ runId, workflow: workflow.name }, 'brief has a `research:` block but workflow is not `research` — research advance gate still active, but consider --workflow research for clarity');
-      } else if (parsed.frontmatterError) {
-        log.warn({ runId, frontmatterError: parsed.frontmatterError }, 'brief frontmatter failed to parse — any terminal_states/research config in it was ignored');
-      }
-      const budgetDefaults = loadDefaults();
-      const budgetAssessment = assessResearchIterationBudget(research, maxIterations, {
-        attemptTimeoutMs: budgetDefaults.default_timeout_ms,
-        technicalRetries: budgetDefaults.stage_technical_retries,
-      });
-      if (briefAdmission && !budgetAssessment.pass) {
+      if (parsed.frontmatterError) log.warn({ runId, frontmatterError: parsed.frontmatterError }, 'brief frontmatter failed to parse — any terminal_states/research config in it was ignored');
+      if (briefAdmission) {
         const s = readRunState(projectDir, runId);
-        concludeRun(s, { status: 'failed', reasonCode: 'admission_refused',
-          detail: `Research budget admission refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding before launch.` });
-        recordRunEvent(projectDir, runId, {
-          type: 'admission_rejected', runId, timestamp: s.completedAt!,
-          detail: s.failureReason,
-        });
-        return { kind: 'settled', state: s };
+        if (refuseResearchBudget(s, research, maxIterations)) return { kind: 'settled', state: s };
       }
     }
   }

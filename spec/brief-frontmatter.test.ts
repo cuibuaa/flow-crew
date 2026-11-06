@@ -13,7 +13,7 @@ import { parseBriefFrontmatterDocument } from '../src/brief-frontmatter.js';
 import { parseBriefValidationCommands } from '../src/cli-ship-setup.js';
 import { collectShipPreflight } from '../src/cli-ship-preflight.js';
 import { inspectBrief } from '../src/brief-preflight.js';
-import { autoSelectedWorkflow, parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
+import { entryWorkflow, parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
 import { rehearseBrief } from '../src/rehearse.js';
 
 const root = mkdtempSync(join(tmpdir(), 'frontmatter-contract-'));
@@ -36,7 +36,7 @@ describe('shared frontmatter contract', () => {
     const error = parseBriefFrontmatterDocument(brief)?.error;
     expect(error).toBeTruthy();
     // quick uses this exact workflow selection after rendering inspectBrief.
-    expect(autoSelectedWorkflow(parseBriefFrontmatter(brief)).error).toBe(error);
+    expect(entryWorkflow(parseBriefFrontmatter(brief)).error).toBe(error);
     expect(parseBriefValidationCommands(brief, briefPath).error).toBe(error);
     const { report } = await collectShipPreflight(['ship-preflight', '--brief', briefPath], deps);
     expect(report.workflow?.error).toBe(error);
@@ -55,7 +55,7 @@ describe('shared frontmatter contract', () => {
     expect(parseBriefFrontmatterDocument(brief)).toBeUndefined();
     expect(inspectBrief(brief).frontmatter.status).toBe('absent');
     expect(inspectBrief(brief).contractReady).toBe(true);
-    expect(autoSelectedWorkflow(parseBriefFrontmatter(brief)).error).toBeUndefined();
+    expect(entryWorkflow(parseBriefFrontmatter(brief)).error).toBeUndefined();
     expect(parseBriefValidationCommands(brief, 'brief.md')).toEqual({ commands: [] });
     const briefPath = join(root, 'unclosed.md');
     writeFileSync(briefPath, brief);
@@ -113,7 +113,7 @@ describe('real brief admission entry points', () => {
     const finding = inspectBrief(brief).findings.find(finding => finding.code === code)!;
     const home = join(root, `${code}-home`);
     const quick = spawnSync(process.execPath, ['--import', 'tsx', join(process.cwd(), 'src/cli.ts'),
-      'quick', '--project', root, '--adapter', 'mock', '--workflow', 'direct', '--no-campaign', '--task', brief], {
+      'quick', '--project', root, '--adapter', 'mock', '--no-campaign', '--task', brief], {
       cwd: process.cwd(), encoding: 'utf8', timeout: 20000,
       env: { ...process.env, HOME: home, FC_HOME: home, NO_COLOR: '1' },
     });

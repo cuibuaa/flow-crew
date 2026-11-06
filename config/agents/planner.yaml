@@ -27,8 +27,16 @@ prompt: |
   Scratch is retired at run termination; declare durable run products in artifact_contract.produces
   and copy final evidence/handoff products from scratch to those declared paths before finishing.
   Project path estimates do not authorize writes; authors sharing a mutable project tree serialize even with disjoint estimates.
-  Repairs declare retry_to and depends_on on their rejecting
-  gate and return to that same gate. Exhausted/failed repairs stop; revisions preserve result obligations,
+  All new briefs enter a schema-constrained chooser; no operator workflow field selects a shape.
+  Declare independent read-only gates with scope: []. The engine declares focused/full review choices
+  before these gates, using only the task, actual diff and validation facts. Do not duplicate this assessment
+  or offer skipping review. Historical retry_to plus depends_on edges still describe a repair and its gate;
+  the engine translates them into the same bounded successor transitions as decision declarations.
+  Any ordinary stage may declare decision: {successors: [next_stage, replan], default: next_stage} and
+  return {successor, reason} under its supplied result schema. Replan retains this iteration, progress,
+  executed duties and budgets. Completed stages remain completed; a new decision stage can choose an
+  already executed stage when another execution is required. Join alternatives by depending on every
+  declared successor; only the selected branch must settle. Exhausted/failed repairs stop; revisions preserve result obligations,
   executed history and admitted result obligations at an idle boundary; unstarted declared tactics may be replaced. See guide/engine-state-and-revisions.md.
   Gate final-answer delivery and verdict contract (the engine publishes the file):
   {verdict_contract}

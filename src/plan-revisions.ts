@@ -53,9 +53,9 @@ function publishImmutable(path: string, content: string): void {
 }
 
 /** Called only after whole-plan admission; the carrier precedes its committed reference. */
-export function recordAdmittedPlan(state: StoreState, stages: StageConfig[], directory: string, reason: string, establishCapability = false, admission?: object): void {
+export function recordAdmittedPlan(state: StoreState, stages: StageConfig[], directory: string, reason: string, establishCapability = false, admission?: object, forceRevision = false): void {
   const digest = planDigest(stages);
-  if (state.queryState?.planRevision?.digest === digest) return;
+  if (!forceRevision && state.queryState?.planRevision?.digest === digest) return;
   const revision = (state.queryState?.planRevision?.revision ?? -1) + 1;
   const admittedAt = new Date().toISOString();
   const path = `plan_history/revision_${revision}_${randomUUID()}.json`;
@@ -85,6 +85,11 @@ export function applyPlanRevision(input: {
   const journalKey = `${request.stageId}:${request.requestId}`;
   let candidate: StageConfig[] | undefined;
   const state = updateRunState(input.projectDir, input.runId, (state) => {
+    const consumeReplan = () => {
+      const latest = state.stages[request.stageId]?.attempts?.at(-1);
+      if (state.decisionGraph?.replan?.stageId === request.stageId
+        && latest?.index === request.attemptIndex && latest.startedAt === request.attemptStartedAt) delete state.decisionGraph.replan;
+    };
     // The run-state transaction is the authority. A crash after its commit but
     // before decision-file publication must not turn acceptance into staleness.
     const previous = state.planRevisionDecisions?.[journalKey];
@@ -95,6 +100,7 @@ export function applyPlanRevision(input: {
       decision = previous;
       state.planRevisionDecisions = { ...state.planRevisionDecisions, [journalKey]: decision };
       candidate = previous.accepted ? state.planControl?.stages : undefined;
+      if (previous.accepted) consumeReplan();
       return;
     }
     const fail = (message: string) => decision.errors.push(message);
@@ -126,11 +132,16 @@ export function applyPlanRevision(input: {
       candidate = request.stages.map((raw) => {
         const id = raw && typeof raw === 'object' ? (raw as { id?: unknown }).id : undefined;
         const previous = typeof id === 'string' ? original.get(id) : undefined;
-        if (previous && canonicalJson(raw) === canonicalJson(previous)) return previous;
+        if (previous && canonicalJson(raw) === canonicalJson(previous)) return structuredClone(previous);
         return input.parseStage(raw);
       });
       const ids = new Set(candidate.map((stage) => stage.id));
       if (ids.size !== candidate.length) fail('PLAN_REVISION_DUPLICATE_ID: every stage ID must be unique');
+      // Admission may fill declarations for new work. It must not mutate the
+      // current authority or change an executed duty after its identity check.
+      const admission = input.admit(candidate, state);
+      decision.errors.push(...admission.errors);
+      if (!admission.pass && !admission.errors.length) fail('PLAN_REVISION_ADMISSION_FAILED: candidate was not admitted');
       const candidateDuties = new Set(candidate.flatMap(resultDuties));
       for (const previous of original.values()) {
         const next = candidate.find((stage) => stage.id === previous.id);
@@ -149,11 +160,8 @@ export function applyPlanRevision(input: {
           if (!contract.success) fail(`ARTIFACT_DECLARATION_REQUIRED: new stage ${stage.id} must declare artifact_contract {version:1,produces:[],reads:[]}`);
         }
       }
-      const admission = input.admit(candidate, state);
-      decision.errors.push(...admission.errors);
-      if (!admission.pass && !admission.errors.length) fail('PLAN_REVISION_ADMISSION_FAILED: candidate was not admitted');
       if (!decision.errors.length) {
-        recordAdmittedPlan(state, candidate, directory, request.reason, false, admission);
+        recordAdmittedPlan(state, candidate, directory, request.reason, false, admission, true);
         for (const id of original.keys()) if (!ids.has(id)) delete state.stages[id];
         state.unresolvedStageObligations = state.unresolvedStageObligations?.filter((entry) => entry.declaredIteration !== state.currentIteration || !original.has(entry.stageId) || ids.has(entry.stageId));
         for (const stage of candidate) state.stages[stage.id] ??= { status: 'pending', retries: 0 };
@@ -162,6 +170,10 @@ export function applyPlanRevision(input: {
         decision.accepted = true;
         decision.revision = state.queryState!.planRevision!.revision;
         decision.digest = state.queryState!.planRevision!.digest;
+        // Consuming the pending choice is part of the same commit as its revision.
+        // A crash before workflow/decision projections publish must not rerun the
+        // accepted request against a different base or spend another plan attempt.
+        consumeReplan();
       }
     } catch (error) { fail(`PLAN_REVISION_INVALID: ${error instanceof Error ? error.message : String(error)}`); }
     state.planRevisionDecisions = { ...state.planRevisionDecisions, [journalKey]: decision };

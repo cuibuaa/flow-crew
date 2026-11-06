@@ -74,6 +74,7 @@ export async function prepareWorkflowIteration(
       }
     }
 
+    if (state.currentIteration !== iteration && !continuingBudget && !isResumedIteration && state.decisionGraph) state.decisionGraph.enabled = {};
     state.currentIteration = iteration;
     const campaignStorageKey = resolveCampaignStorageKey(state);
     if (campaignStorageKey) {

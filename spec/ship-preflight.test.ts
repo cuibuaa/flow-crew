@@ -104,18 +104,18 @@ function commonDeps(overrides: ShipPreflightDependencies = {}): ShipPreflightDep
   };
 }
 
-it('reports the authored workflow and refuses an impossible direct loop', async () => {
+it('reports the single entry and refuses removed workflow metadata', async () => {
   const path = join(fixture.project, 'brief.md');
   const output = new Capture();
   const args = ['ship-preflight', '--brief', 'brief.md'];
   const deps = commonDeps({ stdout: output.writer });
-  const brief = '---\nworkflow: direct\n---\n# Goal\n\n## Acceptance criteria\n1. Deliver the coherent change.\n';
+  const brief = '---\n---\n# Goal\n\n## Acceptance criteria\n1. Deliver the coherent change.\n';
   writeFileSync(path, brief);
   expect(await cmdShipPreflightWithDeps(args, deps)).toBe(0);
-  expect(output.value).toContain('Workflow without --workflow: direct (brief declares workflow: direct)');
-  writeFileSync(path, brief.replace('workflow: direct', 'workflow: direct\nresearch:\n  baseline: 0.5'));
+  expect(output.value).toContain('Entry workflow: entry');
+  writeFileSync(path, brief.replace('---\n---', '---\nworkflow: direct\n---'));
   expect(await cmdShipPreflightWithDeps(args, deps)).toBe(1);
-  expect(output.value).toContain('direct cannot run the research loop');
+  expect(output.value).toContain('field no longer exists');
 });
 
 function writeRun(id: string, state: Record<string, unknown>, mtime: number): string {

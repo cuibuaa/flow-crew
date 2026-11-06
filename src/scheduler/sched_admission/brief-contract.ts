@@ -29,7 +29,6 @@ export function recordConfirmNotRun(runDirPath: string, confirm: ResearchConfirm
 export interface ParsedBriefFrontmatter {
   /** Task authoring requirements; independent of engine admission. */
   plannerPolicies?: PlannerPolicyName[];
-  workflow?: 'direct' | 'planner';
   workflowError?: string;
   terminalStates?: TerminalStatesConfig;
   /** Metric-loop config. A numeric baseline is the sole activator. */
@@ -122,21 +121,10 @@ export function assessResearchIterationBudget(
   return assessment;
 }
 
-/** Resolve an authored choice or use the fixed author/review/repair plan.
- * Research loops still require their planner workflows. */
-export function autoSelectedWorkflow(
-  parsed: ParsedBriefFrontmatter,
-  override?: string,
-): { workflow: string; reason: string; error?: string } {
-  const workflow = (override === 'default' ? 'planner' : override) ?? (parsed.workflow === 'direct' ? 'direct'
-    : parsed.research ? 'research'
-      : parsed.workflow === 'planner' || parsed.frontmatterError ? 'planner' : 'direct');
-  const reason = override ? `explicit --workflow ${override}`
-    : `${parsed.workflow ? `brief declares workflow: ${parsed.workflow}` : `no workflow choice; ${workflow === 'direct' ? 'fixed author/review/repair' : 'planner'} default`}${parsed.research ? '; research requires the research loop' : ''}`;
-  const loop = parsed.research ? 'research' : undefined;
-  const error = (parsed.frontmatterErrorKind === 'yaml' ? parsed.frontmatterError : undefined) ?? parsed.workflowError ?? (workflow === 'direct' && loop
-    ? `direct cannot run the ${loop} loop; choose workflow: planner` : undefined);
-  return { workflow, reason, ...(error ? { error } : {}) };
+/** All new briefs enter the same model chooser; frontmatter only supplies declarations. */
+export function entryWorkflow(parsed: ParsedBriefFrontmatter): { workflow: string; reason: string; error?: string } {
+  const error = (parsed.frontmatterErrorKind === 'yaml' ? parsed.frontmatterError : undefined) ?? parsed.workflowError;
+  return { workflow: 'entry', reason: 'The model chooser selects the shape from the task and declarations.', ...(error ? { error } : {}) };
 }
 
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
@@ -158,8 +146,7 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
   }
   const workflow = (parsed as Record<string, unknown>).workflow;
   if (workflow !== undefined) {
-    if (workflow === 'direct' || workflow === 'planner') out.workflow = workflow;
-    else out.workflowError = 'workflow must be direct or planner';
+    out.workflowError = 'The workflow frontmatter field no longer exists; remove it. The entry chooser selects the shape from the brief.';
   }
   // Terminal-state, research-result, and report-directory paths have their own
   // lifecycle contracts. Only the brief's explicit output collection belongs

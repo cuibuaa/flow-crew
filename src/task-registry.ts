@@ -32,7 +32,6 @@ export function hasLiveForegroundOwner(task: TaskEntry): boolean {
 /** Startup settings are data; retired CLI spellings are consumed only at ingress. */
 export interface TaskLaunchOptions {
   adapter?: string;
-  workflow?: string;
   maxIterations?: number;
   campaign?: string;
   noCampaign?: boolean;
@@ -47,7 +46,6 @@ export function normalizeLaunchOptions(args: string[]): TaskLaunchOptions {
     const [flag, inline] = args[i].split(/=(.*)/s);
     const value = () => inline ?? args[++i];
     if (flag === '--adapter') launch.adapter = value();
-    else if (flag === '--workflow') launch.workflow = value();
     else if (flag === '--max-iterations') launch.maxIterations = Number(value());
     else if (flag === '--campaign') launch.campaign = value();
     else if (flag === '--no-campaign') launch.noCampaign = true;
@@ -55,7 +53,6 @@ export function normalizeLaunchOptions(args: string[]): TaskLaunchOptions {
     else if (flag === '--no-inherit-campaign') launch.campaignContext = 'skip';
     else if (['--timeout', '--existing-run-id', '--task', '--brief-input-base64', '--project', '--brief-admission-record'].includes(flag)) value();
   }
-  if (launch.workflow === 'default') launch.workflow = 'planner';
   return launch;
 }
 
@@ -69,7 +66,7 @@ export function normalizeTaskEntry(raw: TaskEntry & {
     launch: task.launch ?? (launch_seq ?? (task.attempt ?? 1) - 1) + 1,
     max_attempts: task.max_attempts ?? max_retries ?? DEFAULT_MAX_ATTEMPTS,
     launch_options: task.launch_options
-      ? { ...task.launch_options, ...(task.launch_options.workflow === 'default' ? { workflow: 'planner' } : {}) }
+      ? { ...task.launch_options }
       : normalizeLaunchOptions(launch_args ?? []),
   };
 }

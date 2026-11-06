@@ -233,6 +233,16 @@ export function createDispatchAdmission() {
     errors.push(...artifactDeclarationFindings({ stages: all, projectDir: input.projectDir, runDir: input.runDir }));
     errors.push(...inspectStageGraph(all).errors);
     for (const stage of input.dispatched) {
+      if (stage.decision) {
+        if (stage.decision.kind === 'review' && (stage.decision.successors.length !== 2
+          || new Set(stage.decision.successors).size !== 2
+          || stage.decision.successors.some(id => !byId.get(id)?.is_gate || byId.get(id)?.scope?.length !== 0))) {
+          errors.push(admissionError('stage_graph', `${stage.id}.decision: focused/full review requires two distinct independent read-only gate successors`, 'decision.successors', stage.id));
+        }
+        for (const successor of stage.decision.successors) if (!['continue', 'replan'].includes(successor) && !byId.has(successor) && stage.decision.kind !== 'shape') {
+          errors.push(admissionError('stage_graph', `${stage.id}.decision: unknown successor ${successor}`, 'decision.successors', stage.id));
+        }
+      }
       if (stage.is_gate && !all.some((repair) => !repair.is_gate && !repair.dynamic_dispatch && repair.retry_to?.includes(stage.id))) {
         errors.push(admissionError('stage_retry_to', `${stage.id}: missing repair route; declare an ordinary repair stage with retry_to: [${stage.id}], depends_on: [${stage.id}], and scope for the permitted repairs. The engine bounds repair rounds by gate_retry_loops without re-planning.`, 'retry_to', stage.id));
       }
@@ -353,7 +363,7 @@ export function createDispatchAdmission() {
     // Empty refs mean conservative whole-brief responsibility. Explicit subsets
     // keep large plans precise without making small plans repeat generated IDs.
     for (const stage of input.dispatched) {
-      if (!stage.dynamic_dispatch && !stage.retry_to?.length && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
+      if (!stage.dynamic_dispatch && stage.decision?.kind !== 'shape' && !stage.retry_to?.length && !stage.criterion_refs?.length) stage.criterion_refs = [...criterionIds];
     }
     for (const stage of input.dispatched) {
       for (const ref of stage.criterion_refs ?? []) {

@@ -77,17 +77,17 @@ async function quick(args: string[] = [], env: NodeJS.ProcessEnv = {}, input = b
 }
 
 describe('quick registration ledger', () => {
-  it.each([
-    { input: brief, args: [], workflow: 'direct', note: true },
-    { input: `---\nworkflow: planner\n---\n${brief}`, args: [], workflow: 'planner', note: false },
-    { input: brief, args: ['--workflow', 'planner'], workflow: 'planner', note: false },
-    { input: brief, args: ['--workflow', 'default'], workflow: 'planner', note: false },
-  ])('records $workflow with auto-selection note=$note for $args', async ({ input, args, workflow, note }) => {
-    writeReadySetupRecord(project, input, engine);
-    const result = await quick(args, {}, input);
+  it('records the single entry without a shape override', async () => {
+    writeReadySetupRecord(project, brief, engine);
+    const result = await quick([], {}, brief);
     expect(result.code, result.stdout + result.stderr).toBe(0);
-    expect(registry.list()[0].launch_options?.workflow).toBe(workflow);
-    expect(result.stderr.includes('auto-selected --workflow')).toBe(note);
+    expect(registry.list()[0].launch_options).not.toHaveProperty('workflow');
+  });
+  it.each([['--workflow', 'planner'], ['--workflow', 'default']])('refuses removed CLI overrides %s', async (...args) => {
+    const result = await quick(args, {}, brief);
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toMatch(/unknown/i);
+    expect(registry.list()).toHaveLength(0);
   });
 
   it.each([

@@ -59,7 +59,7 @@ import { assertDistFresh } from './build-manifest.js';
 import { briefDeclarationFailures, type BriefPreflightFinding } from './brief-preflight.js';
 import { extractBriefCriteria, type BriefCriteriaArtifact } from './brief-criteria.js';
 import { assessCampaignHygiene } from './campaign-hygiene.js';
-import { autoSelectedWorkflow, parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
+import { entryWorkflow, parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
 
 
 type Writer = { write(chunk: string): unknown };
@@ -173,7 +173,7 @@ export type BriefInputReport = VerifiedBriefInput;
 
 export interface ShipPreflightReport {
   version: 1;
-  workflow?: ReturnType<typeof autoSelectedWorkflow>;
+  workflow?: ReturnType<typeof entryWorkflow>;
   project: {
     requestedPath: string;
     canonicalPath: string;
@@ -737,7 +737,7 @@ export async function collectShipPreflight(
       briefInputs,
       outputInventory,
       briefCriteria,
-      ...(briefCriteria.briefPath ? { briefErrors: briefDeclarationFailures(deps.readText(briefCriteria.briefPath)), workflow: autoSelectedWorkflow(parseBriefFrontmatter(deps.readText(briefCriteria.briefPath))) } : {}),
+      ...(briefCriteria.briefPath ? { briefErrors: briefDeclarationFailures(deps.readText(briefCriteria.briefPath)), workflow: entryWorkflow(parseBriefFrontmatter(deps.readText(briefCriteria.briefPath))) } : {}),
       validationBaseline,
     },
   };
@@ -750,9 +750,9 @@ function renderEvidence(writer: Writer, label: string, evidence: unknown): void 
 
 function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   writer.write(`Ship preflight: ${report.project.canonicalPath}\n`);
-  if (report.workflow) writer.write(`Workflow without --workflow: ${report.workflow.workflow} (${report.workflow.reason})${report.workflow.error ? `; refused: ${report.workflow.error}` : ''}\n`);
+  if (report.workflow) writer.write(`Entry workflow: ${report.workflow.workflow} (${report.workflow.reason})${report.workflow.error ? `; refused: ${report.workflow.error}` : ''}\n`);
   for (const finding of report.briefErrors ?? []) {
-    if (finding.level === 'fail') writer.write(`[${finding.code}] ${finding.message}\n`);
+    if (finding.level === 'fail' && finding.code !== 'brief_workflow') writer.write(`[${finding.code}] ${finding.message}\n`);
   }
   if (report.briefCriteria.state === 'checked') {
     writer.write(`Brief criteria: ${report.briefCriteria.artifact?.criteria.length ?? 0} extracted from ${report.briefCriteria.briefPath}\n`);

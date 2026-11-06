@@ -169,7 +169,7 @@ describe('captured research evidence is the ingestion source', () => {
     const settled = await runWorkflow({ ...workflow, name: 'direct' }, 'name: captured-research\nstages: []\n', project, new ScriptedAdapter({}),
       new Map(), undefined, join(repository, 'config/agents'), runId, brief);
     expect(settled.status).toBe('failed');
-    expect(settled.failureReason).toContain('direct cannot run the research loop');
+    expect(settled.failureReason).toContain('field no longer exists');
     expect(readResearchGateCandidate(directory, gate.id)?.settlement).toMatchObject({
       disposition: 'rejected', reason: expect.stringContaining('Run ended failed'),
     });

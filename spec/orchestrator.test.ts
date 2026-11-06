@@ -674,7 +674,7 @@ describe('Orchestrator', () => {
     expect(registry.get(task.id)).toMatchObject({ status: 'running', attempt: 4, run_id: runId });
     expect(systemd.runs).toHaveLength(1);
     expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
-    expect(systemd.runs[0].command).toContain("'--workflow' 'planner'");
+    expect(systemd.runs[0].command).not.toContain('--workflow');
     expect(systemd.runs[0].command).toContain("'--campaign-context=skip'");
     expect(systemd.runs[0].command).not.toMatch(/--supervise|--timeout/);
     expect(registry.get(task.id)).toMatchObject({ launch: 4, max_attempts: 3 });

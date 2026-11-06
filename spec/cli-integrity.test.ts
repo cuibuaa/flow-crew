@@ -93,7 +93,7 @@ it.each(['missing', 'invalid'])('continues an admitted run when the current work
     }) }));
 
     const result = spawnSync(process.execPath, [join(repositoryRoot, 'dist/cli.js'), 'quick',
-      '--project', project, '--existing-run-id', created.runId, '--workflow', 'changed', '--adapter', 'mock', '--no-campaign'], {
+      '--project', project, '--existing-run-id', created.runId, '--adapter', 'mock', '--no-campaign'], {
       cwd: project, encoding: 'utf8', timeout: 30_000,
       env: { ...process.env, HOME: isolated.home, FC_HOME: isolated.fcHome, TMPDIR: isolated.temp, MOCK_FIXTURE_DIR: mockFixtures },
     });

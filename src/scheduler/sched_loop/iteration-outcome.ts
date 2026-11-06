@@ -16,6 +16,7 @@ import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isPendingStageStatus, runDir, writeStageStatus } from '../../store.js';
 import { createResearchBudgetFinalizer } from './research-terminal.js';
 import { archiveDeclaredOutputsBeforePlainCompletion, concludeDeclaredTerminalAtQuiescence, concludeRepeatedBlockage, terminateForGateContractRefusal, writeCampaignEntry } from './services.js';
+import { isStageInSkippedBranch } from '../sched_admission/frontier.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -33,6 +34,12 @@ export async function concludeWorkflowIteration(
     // pending and not falsely complete.
     const terminalContract = loadGateContract(projectDir, runId, state.campaignStorageKey);
     const stageById = new Map(sorted.map((stage) => [stage.id, stage]));
+    for (const stage of sorted) {
+      if (state.stages[stage.id]?.status === STAGE_STATUS.PENDING && isStageInSkippedBranch(stage.id, stageById, state)) {
+        state.stages[stage.id] = { ...state.stages[stage.id], status: STAGE_STATUS.SKIPPED };
+        writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
+      }
+    }
     for (const repair of sorted) {
       if (repair.is_gate || !repair.retry_to?.length) continue;
       const repairStatus = state.stages[repair.id];
@@ -42,7 +49,7 @@ export async function concludeWorkflowIteration(
         .filter((gate): gate is StageConfig => gate?.is_gate === true);
       const allRelatedGatesPassed = relatedGates.length === repair.retry_to.length
         && relatedGates.every((gate) => (
-          state.stages[gate.id]?.status === STAGE_STATUS.COMPLETE
+          isStageInSkippedBranch(gate.id, stageById, state) || state.stages[gate.id]?.status === STAGE_STATUS.COMPLETE
           && readGateEvaluation(projectDir, gate.id, runId, terminalContract)?.pass === true
         ));
       if (!allRelatedGatesPassed) continue;

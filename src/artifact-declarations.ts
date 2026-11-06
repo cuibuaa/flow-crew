@@ -93,6 +93,7 @@ export interface ArtifactPlanStage {
   retry_to?: string[];
   is_gate?: boolean;
   dynamic_dispatch?: boolean;
+  decision?: { successors: string[] };
   artifact_contract?: ArtifactContract;
 }
 
@@ -196,6 +197,11 @@ export function artifactDeclarationFindings(input: {
       if (frameworkOwned) add(`ARTIFACT_FRAMEWORK_PATH: ${stage.id}.${artifact.id} cannot produce engine-owned evidence ${artifact.path}`, artifactField(artifact, 'produces'));
       if (artifact.root === 'run') for (const other of input.stages) {
         if (other.id === stage.id || ancestor(stage, other.id) || ancestor(other, stage.id)) continue;
+        // Immediate alternatives owned solely by one declared choice cannot run concurrently.
+        const controllers = (id: string) => input.stages.filter(owner => owner.decision?.successors.includes(id));
+        const owners = controllers(stage.id), otherOwners = controllers(other.id);
+        if (owners.length === 1 && otherOwners.length === 1 && owners[0].id === otherOwners[0].id
+          && ancestor(stage, owners[0].id) && ancestor(other, owners[0].id)) continue;
         if (other.artifact_contract?.produces.some((output) => output.root === 'run' && (output.path === artifact.path || (output.kind === 'directory' && artifact.path.startsWith(`${output.path}/`)) || (artifact.kind === 'directory' && output.path.startsWith(`${artifact.path}/`))))) {
           add(`ARTIFACT_OUTPUT_CONCURRENT_OWNERS: ${stage.id}.${artifact.id} run:${artifact.path} overlaps ${other.id}; declare a dependency ordering before sharing a run output`, artifactField(artifact, 'produces'));
         }

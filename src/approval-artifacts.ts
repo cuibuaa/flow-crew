@@ -42,10 +42,9 @@ export function approvalResumeLaunch(state: {
   workflowName?: string; maxIterations?: number;
   campaignId?: string; campaignStorageKey?: string; adapter?: unknown;
 }): import('./task-registry.js').TaskLaunchOptions {
-  const workflow = state.workflowName === 'default' ? 'planner' : state.workflowName;
   const campaign = state.campaignId ?? state.campaignStorageKey;
   return {
-    workflow: workflow || 'planner', maxIterations: state.maxIterations,
+    maxIterations: state.maxIterations,
     ...(typeof state.adapter === 'string' ? { adapter: state.adapter } : {}),
     ...(campaign ? { campaign } : { noCampaign: true }),
   };

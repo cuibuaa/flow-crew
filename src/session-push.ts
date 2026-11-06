@@ -270,7 +270,7 @@ export class SessionPush {
           lifecycleRecorded = event.runStatus === run?.status
             && (event.type === 'operator_wrap_up_required' || !isTerminalRunStatus(event.runStatus));
         }
-        if (['operator_wrap_up_required', 'attempt_failed', 'stage_failed', 'approval_parked', 'approval_attempt_suspended'].includes(event.type)
+        if (['operator_wrap_up_required', 'attempt_failed', 'stage_failed', 'approval_parked', 'approval_attempt_suspended', 'decision_questions'].includes(event.type)
             || (event.type === 'run_status_changed' && isPausedRunStatus(event.runStatus))) this.enqueue(task, event);
       }
       // A crash between the status commit and event append must still wake the

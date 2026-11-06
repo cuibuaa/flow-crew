@@ -6,7 +6,7 @@ import { REALITY_CHECK_REGISTRY } from './registry.js';
 import { inspectRealityHandlerReads } from './declared-reads.js';
 import { ArtifactReadSchema } from '../artifact-declarations.js';
 import { inspectDeclaredStageReads } from '../declared-artifact-audit.js';
-import type { StageStatus } from '../store.js';
+import type { StageStatus, StoreState } from '../store.js';
 import type {
   CheckContext,
   CheckDecl,
@@ -164,12 +164,13 @@ export async function runAllChecks(decls: CheckDecl[], context: CheckContext): P
       if (decl.reads === undefined) throw new Error(`REALITY_READ_DECLARATION_REQUIRED: reality check ${JSON.stringify(decl.name)}.reads: declare exact rooted inputs and sources, or reads: [] explicitly; script/prose paths cannot supply this declaration`);
       if (decl.reads !== undefined) {
         let statuses: Record<string, StageStatus> | undefined;
+        let state: StoreState | undefined;
         if (decl.reads.some((read) => read.source.kind === 'stage' || read.when)) {
-          const run = JSON.parse(readFileSync(join(context.taskDir, 'run.json'), 'utf8')) as { runId?: string; projectDir?: string; stages?: Record<string, StageStatus> };
+          const run = JSON.parse(readFileSync(join(context.taskDir, 'run.json'), 'utf8')) as StoreState;
           if (run.runId !== basename(context.taskDir) || !run.projectDir || resolve(run.projectDir) !== resolve(context.projectDir) || !run.stages) throw new Error('ARTIFACT_READ_FACTS_UNBOUND: reality reads require this run\'s settled producer facts');
-          statuses = run.stages;
+          statuses = run.stages; state = run;
         }
-        const errors = [...inspectRealityHandlerReads(decl, context.projectDir, context.taskDir), ...inspectDeclaredStageReads({ artifactContract: { version: 1, produces: [], reads: decl.reads, groups: [] }, projectDir: context.projectDir, runDir: context.taskDir, statuses })];
+        const errors = [...inspectRealityHandlerReads(decl, context.projectDir, context.taskDir), ...inspectDeclaredStageReads({ artifactContract: { version: 1, produces: [], reads: decl.reads, groups: [] }, projectDir: context.projectDir, runDir: context.taskDir, statuses, state })];
         if (errors.length) {
           results.push({ name: decl.name, type: decl.type, ...checkResult(false, `${errors.join('; ')}. Create each missing file or fix the named declared inputs, then rerun Reality-Gate.`), ...(decl.advisory === true ? { advisory: true } : {}) });
           continue;

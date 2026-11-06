@@ -12,6 +12,7 @@ export const PLAN_STAGE_SCHEMA: Schema = {
     id: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,63}$' },
     role: { type: 'string', minLength: 1 }, scope: strings, depends_on: strings,
     prompt_template: { type: 'string' }, task: { type: 'string' }, condition: { type: 'string' },
+    decision: { type: 'object', required: ['successors', 'default'], additionalProperties: false, properties: { successors: strings, default: { type: 'string' }, kind: { type: 'string', enum: ['successor', 'review'] } } },
     is_gate: { type: 'boolean' }, retry_to: strings, criterion_refs: strings,
     skills: strings, dynamic_dispatch: { type: 'boolean' },
     // Optional output/input locations supply write capabilities and ownership metadata.

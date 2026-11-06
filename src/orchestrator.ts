@@ -1667,7 +1667,6 @@ export function buildCommand(task: TaskEntry, cliPath: string): string {
   const launch = task.launch_options ?? {};
   const userArgs = [
     ...(launch.adapter ? ['--adapter', launch.adapter] : []),
-    ...(launch.workflow ? ['--workflow', launch.workflow] : []),
     ...(launch.maxIterations !== undefined ? ['--max-iterations', String(launch.maxIterations)] : []),
     ...(launch.campaign ? ['--campaign', launch.campaign] : []),
     ...(launch.noCampaign ? ['--no-campaign'] : []),

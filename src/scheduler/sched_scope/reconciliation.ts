@@ -1,7 +1,7 @@
 // Project the settlement content decision into the durable audit and stage summary.
 import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
-import { attachStageConstraintAudit, readStageStatus, runDir, writeStageStatus, isRunningStageStatus } from '../../store.js';
+import { attachStageConstraintAudit, readRunState, readStageStatus, runDir, writeStageStatus, isRunningStageStatus } from '../../store.js';
 import { join } from 'node:path';
 import { normalizedProjectPath } from '../sched_admission/scope-services.js';
 import { type ScopeBatchContext } from './scope-batch.js';
@@ -25,7 +25,8 @@ export function createScopeReconciler() {
     }));
     const definiteWrites = new Set(rawWrites);
     const enforcement = settleProjectWrites({ projectDir: input.projectDir, snapshot: input.context.snapshot,
-      rawWrites, definiteWrites });
+      rawWrites, definiteWrites, readOnly: ['shape', 'review'].includes(input.stage.decision?.kind ?? '')
+        || input.stage.is_gate && readRunState(input.projectDir, input.runId).workflowName === 'entry' });
     attempt.writes = canonicalProjectWriteUnion(rawWrites, enforcement.rawWrites);
     writeStageStatus(input.projectDir, input.runId, input.stage.id, status);
     const root = runDir(input.projectDir, input.runId);

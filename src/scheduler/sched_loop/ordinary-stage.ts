@@ -1,4 +1,8 @@
-import { appendGateEvidenceInstruction } from '../sched_settlement/gate-archives.js';
+import { unlinkSync } from '../../engine-fs.js';
+import { recordGateValidationDelta } from '../sched_settlement/gate-validation.js';
+import { decisionSchema } from '../../decision-graph.js';
+import { decisionInput, focusedReviewInput } from '../../decision-context.js';
+import { buildGateFixCorrectionContract, gateArchiveCoordinate, appendGateEvidenceInstruction } from '../sched_settlement/gate-archives.js';
 // Boundary: Prepare and execute one ordinary stage with admitted prompt/context, shared attempt budgets, session rules and a supplied live write guard.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { loadAdapterByName } from '../../adapters/loader.js';
@@ -12,7 +16,7 @@ import { listCheckTypes } from '../../reality-gate/index.js';
 import { StageConfig, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, loadBasePrompt } from '../sched_admission/dispatch.js';
-import { sessionResumeForStage, shouldPreserveSession } from '../sched_admission/sessions.js';
+import { gateContinuationSessionForStage, sessionResumeForStage, shouldPreserveSession } from '../sched_admission/sessions.js';
 import { log } from '../sched_admission/shared.js';
 import { checkCampaignHealth } from '../sched_policy/campaign.js';
 import { appendAttemptDeadlineContract } from '../sched_policy/prompt-contracts.js';
@@ -41,6 +45,7 @@ export async function executeOrdinaryStage(
         agents.set(stage.role, applyBasePrompt(parseAgent(raw), loadBasePrompt(resolvedAgentsDir)));
       }
       const agent = agents.get(stage.role)!;
+      if (stage.is_gate && state.decisionGraph?.enabled[stage.id] && existsSync(join(runDirPath, `verdict_${stage.id}.json`))) unlinkSync(join(runDirPath, `verdict_${stage.id}.json`));
       const initialTimeout = stageInitialTimeout();
       let technicalRetry = technicalRetries.get(stage.id);
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
@@ -114,11 +119,19 @@ export async function executeOrdinaryStage(
         }
       }
 
+      if (stage.dynamic_dispatch && state.decisionGraph?.replan) {
+        resolvedPrompt += `\n\n# Replan within this iteration\n${JSON.stringify({ current_revision: state.queryState?.planRevision, admitted_stages: state.planControl?.stages,
+          progress: Object.fromEntries(Object.entries(state.stages).map(([id, status]) => [id, { status: status.status, attempts: status.attempts?.map(attempt => ({ index: attempt.index, startedAt: attempt.startedAt, completedAt: attempt.completedAt, status: attempt.status, tokenUsage: attempt.tokenUsage })) }])),
+          decisions: state.decisionGraph.records, budgets: { iteration: state.currentIteration, maximum_iterations: state.maxIterations, started_at: state.startedAt }, reason: state.decisionGraph.replan.reason })}\nReturn the complete non-bootstrap plan in dispatch.yaml. Retain every executed stage exactly as admitted and preserve all result duties. This is a new revision, not a new iteration; all spent work and clocks carry over.`;
+      }
       // Pivot context: inject into planner prompt when research injection is active
       if (state.researchInjection && (stage.depends_on ?? []).length === 0) {
         resolvedPrompt = `⚠️ PIVOT REQUIRED: The previous approach failed. Campaign health detected: ${state.researchInjection.alertType}. ${state.researchInjection.message}. You MUST plan a research stage to explore new directions before attempting implementation.\n\n` + resolvedPrompt;
       }
 
+      if (!stage.is_gate && stage.retry_to?.length && state.gateRetryRound?.iteration === (state.currentIteration ?? 1)) {
+        resolvedPrompt = `${buildGateFixCorrectionContract(runDirPath, stage.retry_to, gateArchiveCoordinate(state.currentIteration ?? 1, state.gateRetryRound.round))}\n\n${resolvedPrompt}`;
+      }
       resolvedPrompt = appendStageExecutionContracts(resolvedPrompt, stage, sorted, state, projectDir, runId, runDirPath);
 
       if (stage.is_gate) {
@@ -127,7 +140,7 @@ export async function executeOrdinaryStage(
 
       const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
       const sessionReuseEnabled = isSessionReuseEnabled();
-      const resumeSession = sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled, stageAdapter.sessionKind);
+      const resumeSession = gateContinuationSessionForStage(stage, runDirPath, (state.stages[stage.id]?.attempts?.length ?? 0) > 0, stageAdapter.sessionKind) ?? sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled, stageAdapter.sessionKind);
       if (!technicalRetry) {
         technicalRetry = createSchedulerTechnicalRetryState(
           initialTimeout,
@@ -141,14 +154,27 @@ export async function executeOrdinaryStage(
         resolvedPrompt = `${buildRetryPreamble(currentRetries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)}\n\n${resolvedPrompt}`;
       }
       resolvedPrompt = appendAttemptDeadlineContract(resolvedPrompt, prepared.budgetMs);
+      if (stage.decision?.kind === 'review') await recordGateValidationDelta(projectDir, runId, stage.id);
+      const coordinate = state.gateRetryRound;
+      const roundDiffPath = coordinate ? join(runDirPath, 'gate_reevaluation', `iteration_${coordinate.iteration}`, `round_${coordinate.round}`, 'repair_diff.json') : undefined;
+      let fixStageIds: string[] | undefined;
+      if (roundDiffPath && existsSync(roundDiffPath)) fixStageIds = JSON.parse(readFileSync(roundDiffPath, 'utf8')).repairStageIds;
+      const reviewDecision = sorted.find(s => s.decision?.kind === 'review' && s.decision.successors.includes(stage.id));
+      if (reviewDecision?.decision?.successors[1] === stage.id) resolvedPrompt += `\n\n${focusedReviewInput(projectDir, runDirPath, state, reviewDecision.id, stage)}\nPerform the full independent review; these risks do not narrow coverage.`;
+      const isolatedInput = stage.decision?.kind === 'shape' || stage.decision?.kind === 'review'
+        ? decisionInput(stage, projectDir, runDirPath, state)
+        : reviewDecision?.decision?.successors[0] === stage.id
+          ? { system: 'You are an independent read-only reviewer. Run independent targeted experiments in private scratch, evaluate every assigned brief criterion, and return the gate verdict. Do not durably modify the reviewed project. Never read author transcripts, sessions or self-assessment.', user: focusedReviewInput(projectDir, runDirPath, state, reviewDecision.id, stage) } : undefined;
       const result = await runStage(stageAdapter, {
         stageId: stage.id,
-        role: agent,
+        role: ['shape', 'review'].includes(stage.decision?.kind ?? '') ? { ...agent, tools: [] } : agent,
         dependsOn: stage.depends_on ?? [],
         promptTemplate: resolvedPrompt,
         artifactObligationTemplate: stage.prompt_template,
         artifactContract: stage.artifact_contract,
-        outputSchema: stageRecordSchema({ isGate: stage.is_gate,
+        isolatedInput,
+        decisionResult: Boolean(stage.decision && !stage.is_gate),
+        outputSchema: stage.decision && !stage.is_gate ? decisionSchema(stage) : stageRecordSchema({ isGate: stage.is_gate,
           criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
         planRevision: state.queryState?.planRevision,
         artifactStatuses: state.stages,
@@ -168,14 +194,14 @@ export async function executeOrdinaryStage(
         ledgerDigest,
         taskDescription: taskDescription || state.taskDescription,
         isGate: stage.is_gate,
-        gateContext: { authorIds: gateReviewedAuthorIds(stage, sorted) },
+        gateContext: { authorIds: fixStageIds ?? gateReviewedAuthorIds(stage, sorted), fixStageIds, roundDiffPath },
         gateReviewed: isGateReviewed(stage, sorted),
         dynamicDispatch: stage.dynamic_dispatch,
         researchOutcomeGate: isResearchOutcomeGate(stage, sorted, state.research),
         criterionRefs: stage.criterion_refs,
-        resumeSessionId: resumeSession?.sessionId,
-        sessionOwnerStageId: resumeSession?.ownerStageId,
-        preserveSession: shouldPreserveSession(stage, sorted, sessionReuseEnabled),
+        resumeSessionId: isolatedInput ? undefined : resumeSession?.sessionId,
+        sessionOwnerStageId: isolatedInput ? undefined : resumeSession?.ownerStageId,
+        preserveSession: isolatedInput ? false : shouldPreserveSession(stage, sorted, sessionReuseEnabled),
         settlementBoundary,
       });
       recordSchedulerTechnicalAttemptResult(technicalRetry, result, prepared.budgetMs);

@@ -13,6 +13,7 @@ import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-
 import * as iteration from '../src/scheduler/sched_loop/iteration.js';
 import { advanceSettledResearch } from '../src/scheduler/sched_loop/research-progress.js';
 import * as services from '../src/scheduler/sched_loop/services.js';
+import * as stageBatch from '../src/scheduler/sched_loop/stage-batch.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import type { SupervisorBackend } from '../src/supervision.js';
@@ -39,9 +40,9 @@ afterEach(() => {
 
 function fixture() {
   const workflow = WorkflowConfigSchema.parse({ name: 'cancel-repend-paths', defaults: { max_iterations: 3, max_retries: 1 }, stages: [
-    { id: 'repair', role: 'coder', scope: [], depends_on: [], retry_to: ['review'], prompt_template: 'Repair fixture.',
+    { id: 'repair', role: 'coder', scope: [], depends_on: ['review'], retry_to: ['review'], prompt_template: 'Repair fixture.',
       artifact_contract: { version: 1, produces: [], reads: [] } },
-    { id: 'review', role: 'coder', scope: [], depends_on: ['repair'], is_gate: true, prompt_template: 'Review fixture.',
+    { id: 'review', role: 'coder', scope: [], depends_on: [], is_gate: true, prompt_template: 'Review fixture.',
       artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_review.json' }], reads: [] } },
   ] });
   const yaml = stringify(workflow);
@@ -89,15 +90,16 @@ it('continues after the actual next-iteration reset with settled retry ledgers',
   await cancelAndContinue(run, 'repair');
 });
 
-it.each(['repair', 'review'] as const)('continues cancellation at the actual gate-loop %s repend boundary', async stageId => {
+it.each(['repair', 'review'] as const)('continues cancellation at the ordinary scheduler %s successor boundary', async stageId => {
   const run = fixture();
   const interrupted = new Error('Fixture scheduler stopped at cancellation boundary');
-  const dispatch = services.runScopeSafeStageGroup;
+  const dispatch = stageBatch.executeReadyBatch;
   const calls: string[][] = [];
-  vi.spyOn(services, 'runScopeSafeStageGroup').mockImplementation(async (...args) => {
-    calls.push(args[0].map(stage => stage.id));
-    if (args[0].some(stage => stage.id === stageId)) {
-      await cancelAndContinue(run, stageId);
+  vi.spyOn(stageBatch, 'executeReadyBatch').mockImplementation(async (...args) => {
+    const ready = services.findAllReady(args[0], args[1]);
+    calls.push(ready.map(stage => stage.id));
+    if (ready.some(stage => stage.id === stageId)) {
+      await cancelAndContinue(run, stageId, true);
       // A cancelled scheduler cannot continue past this dispatch boundary.
       throw interrupted;
     }
