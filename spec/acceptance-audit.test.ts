@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { emptyArtifactContract, gateArtifactContract, planArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -114,7 +115,7 @@ describe('append-only gate history under a technical retry', () => {
       workflow,
       yaml,
       projectDir,
-      adapter,
+      withConfirmedRejections(adapter),
       new Map(),
       undefined,
       writeRoles(),

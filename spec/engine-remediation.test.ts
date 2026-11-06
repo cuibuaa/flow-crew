@@ -611,7 +611,7 @@ describe('engine behaviour contracts', () => {
     const omitted = findGateRecoveryStages([producer, gate, repair], ['qa'], research, { qa: { gateId: 'qa', authoredVerdict: { pass: true }, effectiveVerdict: { pass: false, refusal: { kind: 'research_outcome_absent' } }, rejectionKind: 'omitted_research_outcome' } });
     const quality = findGateRecoveryStages([producer, gate, repair], ['qa'], research);
     expect(omitted.map((stage) => stage.id)).toEqual(['measure']);
-    expect(quality.map((stage) => stage.id)).toEqual(['repair_report']);
+    expect(quality.map((stage) => stage.id)).toEqual([]);
   });
 
   it('installs follow interrupt handlers before emitting the first event', () => {

@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { emptyArtifactContract, gateArtifactContract, planArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -125,7 +126,7 @@ describe('repair-stage retry ledger reevaluation', () => {
     };
 
     const final = await runWorkflow(
-      config, yaml, projectDir, adapter, new Map(), undefined,
+      config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined,
       writeRoles(), created.runId, 'repair retry ledger', true,
     );
     const repair = final.stages.fix_release;

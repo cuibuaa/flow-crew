@@ -131,6 +131,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     if (graph.records.some(record => record.key === key)) continue;
     const stage = { ...source, decision: declaration };
     let choice: ReturnType<typeof validateDecision>;
+    let unconfirmedRejection = false;
     if (source.is_gate) {
       const facts = collectGateRuntimeFacts([source], state, project, run);
       const fact = facts.evaluations[0];
@@ -142,6 +143,11 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
       const successor = facts.allPass ? 'continue' : recoveries[0]?.id ?? declaration.default;
       choice = validateDecision(stage, JSON.stringify({ successor, reason: facts.allPass ? 'Effective independent gate accepted.' : fact?.effectiveVerdict?.reason ?? 'Invalid or absent gate result; take the declared default without accepting work.' }));
       if (!fact?.effectiveVerdict && !facts.allPass) choice.outcome = 'defaulted';
+      if (fact?.effectiveVerdict?.pass === false && !fact.effectiveVerdict.findings?.confirmed.length && !recoveries.length && !facts.contractRefusals.length) {
+        unconfirmedRejection = true;
+        choice.outcome = 'refused';
+        choice.reason = `Gate criteria rejected; no confirmed finding authorizes repair. ${choice.reason}`;
+      }
     } else if (source.retry_to?.length && !source.decision) {
       choice = validateDecision(stage, JSON.stringify({ successor: declaration.default, reason: 'Completed repair returns to its rejecting gate.' }));
     } else {
@@ -174,10 +180,10 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     const limit = graph.maxVisits;
     const resumed = destination && isPendingStageStatus(state.stages[target]?.status ?? '') && (state.stages[target]?.attempts?.length ?? 0) > 0;
     const revisiting = Boolean(destination && (state.stages[target]?.attempts?.length || state.stages[target]?.status === STAGE_STATUS.COMPLETE));
-    if (wallExhausted || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
+    if (unconfirmedRejection || wallExhausted || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
       || source.decision && destination?.is_gate && (destination.scope === undefined || destination.scope.length !== 0)
       || target !== 'continue' && (revisiting || source.is_gate) && !resumed && used >= limit) {
-      record.outcome = 'refused'; record.reason = `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${choice.reason}`;
+      record.outcome = 'refused'; record.reason = unconfirmedRejection ? choice.reason : `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${choice.reason}`;
       delete record.successor;
     } else if (target === 'replan') {
       const planner = sorted.find(s => s.dynamic_dispatch);

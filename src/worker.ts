@@ -1,3 +1,5 @@
+import { runProjectCommand } from './project-validation.js';
+import { startCommandRecorder } from './recorded-command.js';
 import { listProjectFiles } from './scheduler/sched_scope/path-capabilities.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { isRetryableAdapterFailure } from './adapters/failure.js';
@@ -134,6 +136,7 @@ export interface StageOpts {
   isGate?: boolean;
   gateContext?: Pick<Parameters<typeof buildGateDispatchPreamble>[0], 'authorIds' | 'fixStageIds' | 'roundDiffPath'>;
   /** A gate reviews this author's result, so a blocked result settles the stage for that gate to confirm or reject. */
+  repairFindings?: import('./scoped-audit-repair.js').FindingAssessment['confirmed'];
   gateReviewed?: boolean;
   dynamicDispatch?: boolean;
   researchOutcomeGate?: boolean;
@@ -856,11 +859,16 @@ export async function runStage(
     activeInvocationAbortController = invocationAbortController;
     activeInvocationIndex = invocationIndex;
     const invocationAbortSignal = AbortSignal.any([aggregateAbortSignal, invocationAbortController.signal]);
+    const commandTrees = new Map<string, string | null>();
     const onCommandLifecycle = (event: CommandLifecycleEvent): void => {
       if (event.phase === 'completed') appendEvidence(opts.runDir, { kind: 'command', stageId: opts.stageId, attemptIndex, invocationIndex,
-        commandId: event.id, command: event.command ?? activeCommands.get(event.id)?.command ?? null,
-        exitCode: event.exitCode ?? null, owner: 'adapter-event' });
+        commandId: event.id, command: activeCommands.get(event.id)?.command ?? event.command ?? null,
+        context: activeCommands.get(event.id)?.context,
+        exitCode: event.exitCode ?? null, owner: 'adapter-event',
+        ...(opts.isGate ? { treeHash: commandTrees.get(event.id) ?? null, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief).hash,
+          ...(event.output === undefined ? {} : { outputDigest: createHash('sha256').update(event.output).digest('hex') }) } : {}) });
       if (event.phase === 'started') {
+        if (opts.isGate) commandTrees.set(event.id, captureProjectTree(opts.projectDir, evidenceBrief).hash);
         activeCommands.set(event.id, event);
         const startGuidance = consumeNewGuidance(
           'tool_call_start', invocationIndex, { id: event.id, command: event.command },
@@ -959,6 +967,7 @@ export async function runStage(
       if (commandBoundaryControl?.kind === 'guidance' && activeCommands.size === 0
         && !invocationAbortController.signal.aborted) invocationAbortController.abort('guidance_delivery_at_tool_completion');
     };
+    let recordedCommandIndex = 0;
     const invocation = new Promise<RunResult>((resolvePromise, rejectPromise) => {
       let settled = false;
       let closeObservationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1000,12 +1009,28 @@ export async function runStage(
             attemptIndex, attemptStartedAt, invocationIndex, source: 'worker', files: paths.map(path => join(opts.runDir, path)),
             detail: 'Stage wrote engine-published carrier(s); restored trusted engine state. Publication uses the final validated answer.' });
         } },
-      () => {
+      async () => {
+        const recorder = opts.isGate ? await startCommandRecorder(opts.runDir, async (request, signal) => {
+          const before = captureProjectTree(opts.projectDir, evidenceBrief);
+          const response = await runProjectCommand({ role: 'test', command: request.shell, args: ['-c', request.command],
+            display: request.command, cwd: request.cwd, runDir: opts.runDir,
+            timeoutMs: Math.max(1, Math.min(60_000, attemptDeadline.remainingMs())),
+            abortSignal: AbortSignal.any([invocationAbortSignal, signal]) });
+          const record = appendEvidence(opts.runDir, { kind: 'command', owner: 'code', stageId: opts.stageId, attemptIndex, invocationIndex,
+            commandId: `recorded-${invocationIndex}-${++recordedCommandIndex}`, command: request.command,
+            context: { cwd: request.cwd, shell: request.shell }, exitCode: response.error ? null : response.exitCode,
+            outputDigest: createHash('sha256').update(JSON.stringify([response.stdout ?? '', response.stderr ?? ''])).digest('hex'),
+            treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief).hash });
+          return { record, stdout: response.stdout ?? '', stderr: response.stderr ?? '', ...(response.error ? { error: response.error } : {}) };
+        }) : undefined;
+        const recordingInstruction = recorder ? `\n\n## Engine-recorded command\nRun ${recorder.command} '<JSON>' through your native shell tool, replacing <JSON> with {"command":"your targeted command","cwd":"${opts.projectDir}","shell":"/bin/bash"} (properly shell-quoted). The engine executes shell -c command in that cwd with its isolated command environment and a maximum 60-second bound, returns the output and records command, context, exit, digest and tree hashes in the ledger. Read the returned record.sequence and cite it as reproduction. Use this path when native command events omit execution context. The endpoint closes with this invocation. This is a targeted experiment, never configured validation.\n` : '';
+        const recordedPrompt = effectiveInvocationPrompt + recordingInstruction;
+        try {
         if (!selectedAdapter.capturesInvocationInput) {
-          captureInput({ systemPrompt: invocationRole.prompt, userPrompt: effectiveInvocationPrompt,
+          captureInput({ systemPrompt: invocationRole.prompt, userPrompt: recordedPrompt,
             resumeSessionId: continuation?.sessionId }, 'adapter');
         }
-        return selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
+        return await selectedAdapter.run(recordedPrompt, invocationRole, {
           timeout_ms: Math.max(1, Math.floor(attemptDeadline.remainingMs())),
           workDir: opts.projectDir,
           runDir: opts.runDir,
@@ -1016,12 +1041,13 @@ export async function runStage(
           sessionOwnerStageId: continuation?.ownerStageId,
           // The worker owns final cleanup; an adapter call may be corrected.
           preserveSession: true,
-          freshSessionPrompt: fullPrompt,
+          freshSessionPrompt: fullPrompt + recordingInstruction,
           abortSignal: invocationAbortSignal,
           onCommandLifecycle,
           onInvocationInput: (input) => captureInput(input, 'model'),
           outputSchema: opts.outputSchema,
         });
+        } finally { await recorder?.close(); }
       }).then(
         (value) => {
           if (!opts.isGate && isSessionUuid(value.sessionId)) {
@@ -1466,6 +1492,20 @@ export async function runStage(
         } finally { scratch.cleanup(); }
       },
     });
+  }
+  if (result.exitCode === 0 && !result.continuation && !result.suspended) {
+    for (const finding of opts.repairFindings ?? []) {
+      const before = captureProjectTree(opts.projectDir, evidenceBrief);
+      // Old records without native context cannot authorize an assumed replay.
+      if (!finding.record.context) continue;
+      const replay = await runProjectCommand({ role: 'test', command: finding.record.context.shell, args: ['-c', finding.record.command!],
+        display: finding.record.command!, cwd: finding.record.context.cwd, runDir: opts.runDir,
+        timeoutMs: Math.max(1, Math.min(60_000, attemptDeadline.remainingMs())), abortSignal: aggregateAbortSignal });
+      appendEvidence(opts.runDir, { kind: 'command', owner: 'code', stageId: opts.stageId, attemptIndex,
+        commandId: `closure-${finding.id}`, command: finding.record.command, context: finding.record.context, exitCode: replay.exitCode,
+        outputDigest: createHash('sha256').update(JSON.stringify([replay.stdout ?? '', replay.stderr ?? ''])).digest('hex'),
+        treeHash: before.hash, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief).hash, reproductionOf: finding.record.sequence });
+    }
   }
   const evidenceTreeAfter = captureProjectTree(opts.projectDir, evidenceBrief);
   appendEvidence(opts.runDir, { kind: 'attempt', stageId: opts.stageId, attemptIndex, attemptStartedAt,

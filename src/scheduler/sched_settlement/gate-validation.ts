@@ -1,3 +1,4 @@
+import { validationMeasurement } from '../../project-validation.js';
 // Configured validation belongs to authors. Gates only bind and consume facts.
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -190,7 +191,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
   const current = await execute(projectDir, 'attempt');
   let baseline: ProjectValidationBaseline | undefined;
   let baseError: string | undefined;
-  if (current.results.some(result => result.state === 'failed' || result.state === 'launch_error')) {
+  if (current.results.some(result => validationMeasurement(result) !== 'not_measured' && (result.state === 'failed' || result.state === 'launch_error'))) {
     const scratch = mkdtempSync(join(tmpdir(), 'flowcrew-base-')), checkout = join(scratch, 'tree');
     let added = false;
     try {
@@ -228,19 +229,19 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
   }
   let delta: ValidationDeltaResult[] = baseline ? evaluateValidationDelta(baseline, current.results)
     : current.results.map(result => ({ role: result.role, display: result.display,
-      state: result.state === 'passed' || result.state === 'not_configured' ? 'pass' : 'unresolved',
-      reason: result.state === 'passed' ? 'Author attempt passed; no base execution required'
+      state: validationMeasurement(result) === 'not_measured' ? 'not_measured' : result.state === 'passed' || result.state === 'not_configured' ? 'pass' : 'unresolved',
+      reason: validationMeasurement(result) === 'not_measured' ? 'Validation not measured: host load exceeded the declared ceiling; neither pass nor failure, no author action required' : result.state === 'passed' ? 'Author attempt passed; no base execution required'
         : result.state === 'not_configured' ? 'Role is not configured' : baseError ?? 'Base result unavailable', newFailureIdentifiers: [] }));
   const bindingValid = executions.every(execution => execution.treeHash !== null && execution.treeHash === execution.treeAfterHash);
   if (!bindingValid) {
     delta = delta.map(entry => ({ ...entry, state: 'unresolved', reason: 'Source tree changed or became unreadable during configured validation' }));
   }
-  const failures: ValidationFact['failures'] = current.results.filter(result => result.state === 'failed').flatMap(result => {
+  const failures: ValidationFact['failures'] = current.results.filter(result => result.state === 'failed' && validationMeasurement(result) !== 'not_measured').flatMap(result => {
     const prior = baseline?.results.find(item => item.role === result.role && item.display === result.display);
     return (result.failureIdentifiers.length ? result.failureIdentifiers : [null]).map(identifier => {
       let classification: 'pre-existing' | 'introduced' | 'unknown' = 'unknown';
-      if (bindingValid && prior?.state === 'passed') classification = 'introduced';
-      else if (bindingValid && identifier !== null && prior?.failureIdentity === 'known' && result.failureIdentity === 'known') {
+      if (bindingValid && prior && validationMeasurement(prior) !== 'not_measured' && prior.state === 'passed') classification = 'introduced';
+      else if (bindingValid && prior && validationMeasurement(prior) !== 'not_measured' && identifier !== null && prior.failureIdentity === 'known' && result.failureIdentity === 'known') {
         // Positive membership is meaningful even in a partial population.
         // Absence proves introduction only when the base population is complete.
         if (prior.failureIdentifiers.includes(identifier)) classification = 'pre-existing';
@@ -317,7 +318,7 @@ export function currentAuthorValidationRefusal(projectDir: string, runId: string
     || owner?.index !== fact.attemptIndex || owner.startedAt !== fact.attemptStartedAt || owner.status !== STAGE_STATUS.COMPLETE) {
     return refuse('No settled author validation covers the changed tree; no suite is rerun by a decision');
   }
-  if (fact.pass) return undefined;
+  if (fact.pass || fact.delta.every(entry => entry.state === 'pass' || entry.state === 'not_measured')) return undefined;
   const regressions = fact.delta.filter(entry => entry.state === 'regression');
   if (regressions.length) return { pass: false,
     reason: `Introduced validation failures: ${regressions.map(entry => `${entry.display ?? entry.role}: ${entry.newFailureIdentifiers.join(', ') || entry.reason}`).join('; ')}`,

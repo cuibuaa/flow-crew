@@ -91,7 +91,8 @@ describe('informational citations preserve independent refusals', () => {
     expect(AuditFindingsSchema.parse(record.audit_findings)).toEqual(record.audit_findings);
     expect(JSON.parse(readFileSync(join(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
     // Accepting the citation must preserve the real unmet-outcome rejection.
-    expect(readGateEvaluation(projectDir, 'review', runId)).toMatchObject({ pass: false, reason: record.reason });
+    expect(readGateEvaluation(projectDir, 'review', runId)).toMatchObject({ pass: false, reason: expect.stringContaining(record.reason),
+      findings: { confirmed: [], unconfirmed: [expect.objectContaining({ reason: record.reason })] } });
     expect(readRunEvents(projectDir, runId).filter(event => event.type === 'attempt_failed')).toHaveLength(0);
     // The same string remains unusable as a writable artifact capability.
     expect(ArtifactPathSchema.safeParse(path).success).toBe(false);

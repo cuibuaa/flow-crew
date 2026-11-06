@@ -68,8 +68,11 @@ export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionR
   const audit_findings = object({ version: { type: 'integer', enum: [1] }, findings: { type: 'array', items: object({
     id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,80}$' },
     paths: { type: 'array', minItems: 1, items: text }, reason: text,
+    reproduction: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }] },
     criterion_ids: strings, invalidates_plan: { type: 'boolean' }, repair_role: text,
   }) } });
+  const findingSchema = audit_findings.properties!.findings.items as Schema;
+  findingSchema.required = findingSchema.required!.filter(key => key !== 'reproduction');
   const pass = object({ reason: text, criteria: criteria(true), audit_findings: { ...audit_findings,
     properties: { ...audit_findings.properties, findings: { ...audit_findings.properties!.findings, maxItems: 0 } },
   }, pass: { type: 'boolean', enum: [true] } }, completion);
@@ -157,6 +160,7 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     body,
     criterionBlock,
     researchCandidateBlock,
+    opts.isGate ? '## Reproduced findings and validation\nA finding to be repaired must cite its reproduction record: set reproduction to the integer sequence in evidence-ledger.jsonl. Run a targeted command with exit 0 meaning the defect is absent and a positive exit meaning it is present. Use the injected engine-recorded command endpoint through your native shell tool, supplying command, absolute cwd and shell as JSON; the engine executes and records it and returns record.sequence. This works even when a native transport omits cwd and shell. Native commands are also eligible when their structured events include explicit absolute cwd and shell, exit and output. The recorded command is replayed with that shell (-c) in that cwd and the same engine command environment. Include any required shell options in an explicit executable invocation in the command. The engine records the complete command, context, structured exit code, output digest and tree hash; read the ledger after the command completes and cite its sequence. Missing execution context, a missing citation, a passing command or a changed tree is an unconfirmed observation and opens no repair. Do not run configured validation inside the gate. Receipts classified not_measured are not measured, neither pass nor failure; ask nothing of the author on their account. Receipts without load fields are load unknown. Keep independent read-only scope [] and run your own experiments.' : '',
     anchor,
     skillsContent,
   ].filter(Boolean);

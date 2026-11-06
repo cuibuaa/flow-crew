@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -67,7 +68,7 @@ describe('terminal outcome waits for required settlement', () => {
       repair: { output: 'repaired', projectFiles: { 'results/report.md': 'corrected report' } },
       _summary: { output: 'summary' },
     });
-    const final = await runWorkflow(workflow, '', project, adapter, new Map(), undefined, join(root, 'config/agents'), undefined, brief, true);
+    const final = await runWorkflow(workflow, '', project, withConfirmedRejections(adapter), new Map(), undefined, join(root, 'config/agents'), undefined, brief, true);
     expect(final.status, final.failureReason).toBe(outcome);
     expect(adapter.calls.filter(call => !call.stageId.startsWith('_')).map(call => call.stageId)).toEqual(reject ? ['implement', 'review', 'repair', 'review'] : ['implement', 'review']);
     expect(final.stages.review.status).toBe('complete');
@@ -85,7 +86,7 @@ describe('terminal outcome waits for required settlement', () => {
     const repair = stage({ id: 'repair', role: 'coder', scope: work.scope, depends_on: ['review'], retry_to: ['review'] });
     const workflow = WorkflowConfigSchema.parse({ name: 'skippable-review', defaults: { max_iterations: 1, max_retries: 0 }, stages: [work, optional, review, repair, stage({ id: 'settle', role: 'coder', scope: [], depends_on: ['work'] })] });
     const adapter = new ScriptedAdapter({ work: { output: 'product', projectFiles: { 'report.md': 'candidate report', 'value.json': '{}' } }, settle: { output: 'settled' }, _summary: { output: 'summary' } });
-    const final = await runWorkflow(workflow, '', project, adapter, new Map(), undefined, join(root, 'config/agents'), undefined,
+    const final = await runWorkflow(workflow, '', project, withConfirmedRejections(adapter), new Map(), undefined, join(root, 'config/agents'), undefined,
       '---\nterminal_states:\n  complete:\n    paths: [report.md]\n---\n# Review the product.\n', true);
     expect(final.status).not.toBe('complete');
     expect(final.failureReason).toContain('unreviewed product writes (value.json)');

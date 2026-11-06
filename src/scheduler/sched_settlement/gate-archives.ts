@@ -133,6 +133,8 @@ export function archiveGateRoundEvidence(
             kind: effective?.refusal?.kind ?? (effective?.pass ? 'pass' : effective?.repairability?.disposition ?? 'repairable'),
             engine_rejection_reason: effective?.reason ?? null,
             ...(effective?.repairability ? { repairability: effective.repairability } : {}),
+            ...(effective?.findings ? { findings: effective.findings } : {}),
+            ...(effective?.validation ? { validation: effective.validation } : {}),
             note: 'The engine\'s conclusion. If engine_effective_pass is false while '
               + 'written_verdict_pass is true, the gate file is not the thing to fix — '
               + 'engine_rejection_reason is.',
@@ -211,10 +213,12 @@ export function archivedGateRejections(runDirPath: string, gateId: string): Arch
   ): ArchivedGateRejection[] => coordinates.flatMap(({ iteration, round, directory }) => {
     const verdictPath = join(directory, `rejected_verdict_${gateId}.json`);
     const effectiveVerdictPath = join(directory, `engine_verdict_${gateId}.json`);
-    // The scheduler owns this basename and writes it only for a rejected gate.
-    // Its preserved bytes may be pass:true when the engine rejected a metric
-    // contradiction.
-    const rejected = existsSync(verdictPath);
+    // Metadata is also archived after interruption. The scheduler-owned
+    // rejected-verdict basename remains evidence even when the effective
+    // conclusion is lost (its authored pass may be true after a metric refusal).
+    let effectivePass: unknown;
+    try { effectivePass = JSON.parse(readFileSync(effectiveVerdictPath, 'utf8')).engine_effective_pass; } catch { /* legacy archive */ }
+    const rejected = effectivePass === false || (effectivePass !== true && existsSync(verdictPath));
     if (!rejected) return [];
     return [{
       iteration,
@@ -297,14 +301,29 @@ function gateEvaluationFraming(input: {
   ].join('\n');
 }
 
+export function confirmedRepairFindings(runDirPath: string, gateIds: string[], through?: GateArchiveCoordinate): NonNullable<GateVerdict['findings']>['confirmed'] {
+  const findings = gateIds.flatMap(gateId => archivedGateRejections(runDirPath, gateId)
+    .filter(coordinate => !through || coordinate.iteration < through.iteration || coordinate.iteration === through.iteration && coordinate.round <= through.round)
+    .flatMap(coordinate => {
+      try { return JSON.parse(readFileSync(gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'effectiveVerdict'), 'utf8')).findings?.confirmed ?? []; }
+      catch { return []; } // A missing archive never creates repair authority.
+    })) as NonNullable<GateVerdict['findings']>['confirmed'];
+  // Later repairs must replay earlier obligations on their new tree too.
+  return [...new Map(findings.map(finding => [finding.record.sequence, finding])).values()];
+}
+
 export function buildGateFixCorrectionContract(
   runDirPath: string,
   gateIds: string[],
   coordinate: GateArchiveCoordinate,
 ): string {
   return [
-    `Gate repair round ${coordinate.round}: resolve the structured rejected findings.`,
-    ...gateIds.map(gateId => `- Gate ${gateId}: archived rejected verdict: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'verdict')}`),
+    `Gate repair round ${coordinate.round}: resolve only the confirmed findings below. Unconfirmed observations in the ledger and original verdict are not repair requests.`,
+    ...gateIds.map(gateId => {
+      const effectivePath = gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'effectiveVerdict');
+      const confirmed = confirmedRepairFindings(runDirPath, [gateId], coordinate);
+      return `- Gate ${gateId}: confirmed findings and reproductions: ${JSON.stringify(confirmed)}. Close each by the same reproduction passing on the repaired tree; the engine records the replay. Evidence: ${effectivePath}. Original archived rejected verdict: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'verdict')}`;
+    }),
     `Retained facts: ${join(runDirPath, 'evidence-ledger.jsonl')}; inspect the current diff.`,
     'A fresh independent gate will check the repair and every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence. Never treat an author summary as proof.',
   ].join('\n');

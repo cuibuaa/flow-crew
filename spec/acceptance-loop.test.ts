@@ -1,6 +1,7 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { readInvocationInput } from '../src/run-state-view.js';
-import { gateArchiveArtifactPath } from '../src/scheduler/sched_settlement/gate-archives.js';
+import { archiveGateRoundEvidence, archivedGateRejections, gateArchiveArtifactPath } from '../src/scheduler/sched_settlement/gate-archives.js';
 import { createHash } from 'node:crypto';
 import { buildGateReevaluationPreamble } from './test-support/gate-reevaluation.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
@@ -204,7 +205,7 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
     config,
     yaml,
     projectDir,
-    adapter,
+    withConfirmedRejections(adapter),
     new Map(),
     undefined,
     writeRoles(),
@@ -410,6 +411,28 @@ describe('compressed acceptance loop', () => {
       expect(legacy).toContain('INTERRUPTED EVALUATION (round 2)');
       expect(legacy).toContain('evidence ledger and current diff');
     });
+
+  it('does not turn an interrupted archive into rejection evidence, while retaining explicit and legacy rejections', () => {
+    const directory = join(root, 'interrupted-archive');
+    mkdirSync(directory, { recursive: true });
+    archiveGateRoundEvidence(directory, { iteration: 1, round: 1 }, ['review']);
+    const archive = join(directory, 'gate_reevaluation/iteration_1/round_1');
+    const metadata = join(archive, 'engine_verdict_review.json');
+    expect(JSON.parse(readFileSync(metadata, 'utf8'))).toMatchObject({ written_verdict_pass: null, engine_effective_pass: null });
+    expect(archivedGateRejections(directory, 'review')).toEqual([]);
+    expect(buildGateDispatchPreamble({ evaluationRound: 2, priorAttemptCount: 1, runDirPath: directory,
+      gateId: 'review', fixStageIds: ['repair'] })).toContain('INTERRUPTED EVALUATION');
+    // An engine rejection survives even without an authored verdict copy.
+    writeFileSync(metadata, JSON.stringify({ engine_effective_pass: false }));
+    expect(archivedGateRejections(directory, 'review')).toHaveLength(1);
+    // A settled observation-only acceptance is not a rejection on re-read.
+    writeFileSync(join(archive, 'rejected_verdict_review.json'), JSON.stringify({ pass: false }));
+    writeFileSync(metadata, JSON.stringify({ engine_effective_pass: true }));
+    expect(archivedGateRejections(directory, 'review')).toEqual([]);
+    writeFileSync(join(archive, 'rejected_verdict_review.json'), JSON.stringify({ pass: true }));
+    rmSync(metadata);
+    expect(archivedGateRejections(directory, 'review')).toHaveLength(1);
+  });
 
   it('prefers canonical evidence over stale legacy artifacts when both layouts exist', () => {
     const runDirPath = join(root, 'canonical-precedence-run');

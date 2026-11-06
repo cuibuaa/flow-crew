@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,8 @@ import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { declaredDispatch, fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
+import { readEvidence } from '../src/evidence-ledger.js';
+import { runProjectCommand } from '../src/project-validation.js';
 
 let root: string, project: string, roles: string, previousStore: string;
 beforeEach(() => {
@@ -54,7 +57,7 @@ function fixture(dynamic: boolean, repairs: number, iterations = 3, withRepair =
     return fixtureResult({ output, exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } };
   const admission = createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
-  const run = (id?: string) => runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles, id, brief, false, undefined, true, admission);
+  const run = (id?: string) => runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, id, brief, false, undefined, true, admission);
   const seedPrematureIncomplete = async () => {
     // Build settled execution evidence with one iteration, then explicitly
     // seed the premature incomplete projection produced by older schedulers.
@@ -90,7 +93,19 @@ it.each([false, true])('continues a rejected gate in the next iteration, retaini
 
   const after = await f.run(before.runId);
 
-  expect(after.status, after.failureReason).toBe('complete');
+  // The dynamic plan retains a confirmed synthetic external predicate from
+  // its last rejection. Changing the model's readiness flag does not replay
+  // that command or close its ledger obligation on the current tree.
+  expect(after.status, after.failureReason).toBe(dynamic ? 'incomplete' : 'complete');
+  if (dynamic) {
+    expect(after.stages.review.gate?.reason).toContain('Repair reproduction remains open');
+    const original = readEvidence(join(root, 'state', 'runs', before.runId))
+      .filter(entry => entry.kind === 'command' && entry.owner === 'adapter-event').at(-1);
+    if (original?.kind !== 'command' || !original.command || !original.context) throw Error('Missing synthetic reproduction');
+    const replay = await runProjectCommand({ role: 'test', command: original.context.shell, args: ['-c', original.command],
+      display: original.command, cwd: original.context.cwd, timeoutMs: 5000 });
+    expect(replay.exitCode).toBe(1);
+  }
   expect(f.calls).toEqual([{ stage: 'review', iteration: 2 }]);
   expect(after).toMatchObject({ runId: before.runId, startedAt: before.startedAt, currentIteration: 2, maxIterations: 3 });
   expect(after.planControl).toEqual(before.planControl);

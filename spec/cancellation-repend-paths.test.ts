@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { stringify } from 'yaml';
+import { appendEvidence, captureProjectTree } from '../src/evidence-ledger.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { assertContinuationCompatible } from '../src/engine-continuation.js';
 import { RunCancellationCoordinator } from '../src/run-control.js';
@@ -58,7 +59,14 @@ function fixture() {
     beginStageAttempt(project, run.runId, id, 1);
     completeStageAttempt(project, run.runId, id, 1, { exitCode: 0, duration_ms: 1 });
   }
-  writeFileSync(join(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'Fixture requires a repair.' }));
+  // Trusted pre-settled ledger input for the cancellation boundary. Native
+  // reproduction execution is covered by gate-repair-confirmation.test.ts.
+  const treeHash = captureProjectTree(project).hash;
+  const reproduction = appendEvidence(run.runDirPath, { kind: 'command', owner: 'adapter-event', stageId: 'review', attemptIndex: 2,
+    commandId: 'prior-fixture-reproduction', command: 'true', context: { cwd: project, shell: '/bin/sh' }, exitCode: 1, outputDigest: 'a'.repeat(64), treeHash, treeAfterHash: treeHash });
+  writeFileSync(join(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'Fixture requires a repair.',
+    audit_findings: { version: 1, findings: [{ id: 'fixture', paths: ['fixture'], reason: 'Retained fixture rejection',
+      criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction: reproduction.sequence }] } }));
   const roles = join(root, 'roles'); mkdirSync(roles);
   writeFileSync(join(roles, 'coder.yaml'), 'name: coder\nprompt: Complete fixture.\ntools: []\n');
   return { ...run, workflow, yaml, roles };

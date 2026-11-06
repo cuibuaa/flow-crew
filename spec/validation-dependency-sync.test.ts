@@ -1,7 +1,8 @@
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { runProjectValidationBaseline, runValidationCommand, type ProjectValidationBaseline } from '../src/project-validation.js';
 import {
   gateValidationRefusal,
@@ -169,3 +170,5 @@ describe('validation dependencies follow the current lockfile', () => {
     expect(live?.current.some(result => result.output.includes('locked dependency validation passed'))).toBe(false);
   });
 });
+
+beforeEach(() => setEngineDefaults({ validation_load_wait_seconds: 0, validation_load_ceiling_per_cpu: 100 }));

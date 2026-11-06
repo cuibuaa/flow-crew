@@ -5,7 +5,8 @@ import { stripVTControlCharacters } from 'node:util';
 import { projectRunStageHistory } from './run-state-view.js';
 import { RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from './handoff.js';
 import { RECORDED_PLAN_SCHEMA } from './plan-interface.js';
-import type { ValidationCommandResult } from './project-validation.js';
+import { validationMeasurement, type ValidationCommandResult } from './project-validation.js';
+import { readEvidence } from './evidence-ledger.js';
 import {
   STAGE_STATUS,
 } from './store.js';
@@ -15,6 +16,7 @@ import { readOptionalJsonlFile } from './jsonl.js';
 import type { RunEvent } from './run-events.js';
 import { RUN_STATUS, resolveRunStatus, TERMINAL_STATUSES as STORE_TERMINAL_STATUSES } from './lifecycle-status.js';
 import { archivedGateRejections } from './scheduler/sched_settlement/gate-archives.js';
+import { projectLegacyFindings } from './scoped-audit-repair.js';
 // Statuses for which a human-readable summary is worth generating. Note this
 // now includes the research terminal states (`shipped`, `ceiling_hit`) — those
 // runs previously produced no summary at all.
@@ -319,7 +321,7 @@ function renderStageRecords(runDir: string, state: StoreState): { details: strin
           const files = record.files_modified as string[] | undefined;
           if (files?.length) lines.push(`Reported files: ${files.map(file => `\`${file}\``).join(', ')}`);
           const checks = record.checks as Array<{ command: string; exit_code: number; evidence: string }>;
-          if (checks.length) lines.push('Stage-reported checks:\n' + checks.map(check =>
+          if (checks?.length) lines.push('Stage-reported checks:\n' + checks.map(check =>
             `- \`${check.command}\` — exit ${check.exit_code}; evidence: ${check.evidence}`).join('\n'));
           else lines.push('No stage-reported checks.');
           const caveats = record.caveats as string[];
@@ -348,6 +350,17 @@ function renderStageRecords(runDir: string, state: StoreState): { details: strin
  * verdict, including after a repair or replan succeeds. */
 function renderEngineGateConclusions(runDir: string, state: StoreState): string {
   const sections: string[] = [];
+  for (const [id, status] of Object.entries(state.stages)) {
+    const verdict = status.gate ?? status.acceptedFrom?.verdict;
+    if (!verdict) continue;
+    const authored = readJson<{ audit_findings?: unknown }>(join(runDir, `verdict_${id}.json`));
+    const findings = projectLegacyFindings(verdict, authored?.audit_findings).findings;
+    for (const finding of findings?.confirmed ?? []) sections.push(`- ${id}: confirmed finding ${finding.id}; reproduction ledger #${finding.record.sequence}.`);
+    for (const finding of findings?.unconfirmed ?? []) sections.push(`- ${id}: unconfirmed observation ${finding.id}: ${finding.reason}; no repair requested.`);
+  }
+  for (const record of readEvidence(runDir)) if (record.kind === 'command' && record.reproductionOf !== undefined) {
+    sections.push(`- Repair closure ledger #${record.sequence} replays #${record.reproductionOf}: ${record.exitCode === 0 && record.treeHash && record.treeHash === record.treeAfterHash ? 'passed' : 'not closed'}; exit ${record.exitCode}; tree ${record.treeHash}; output digest ${record.outputDigest}.`);
+  }
   const ids = new Set([...Object.keys(state.stages),
     ...(state.stageEvidence ?? []).map(entry => entry.stageId),
     ...(state.retiredStageUsage ?? []).map(entry => entry.stageId)]);
@@ -378,9 +391,13 @@ function renderValidation(runDir: string): string {
   const sections: string[] = [];
   const seen = new Set<string>();
   for (const name of readdirSync(runDir).filter(name => /^validation_delta_.+\.json$/.test(name)).sort()) {
-    const receipt = readJson<{ stageId: string; checkedAt: string; pass: boolean;
+    const receipt = readJson<{ stageId: string; checkedAt: string; pass: boolean; ledgerSequence?: number;
       immutablePath?: string; current: ValidationCommandResult[];
       delta: Array<{ role: string; display?: string; state: string; reason: string }> }>(join(runDir, name));
+    if (receipt?.ledgerSequence !== undefined) {
+      const fact = readEvidence(runDir).find(entry => entry.sequence === receipt.ledgerSequence);
+      receipt.current = fact?.kind === 'validation' ? fact.executions.find(entry => entry.target === 'attempt')?.commands ?? [] : [];
+    }
     if (!receipt || !Array.isArray(receipt.current) || !Array.isArray(receipt.delta)) {
       sections.push(`- ${name}: validation receipt unavailable or invalid.`);
       continue;
@@ -388,14 +405,14 @@ function renderValidation(runDir: string): string {
     const identity = JSON.stringify([receipt.stageId, receipt.checkedAt, receipt.current, receipt.delta]);
     if (seen.has(identity)) continue;
     seen.add(identity);
-    const lines = [`### ${receipt.stageId} — comparison ${receipt.pass ? 'passed' : 'failed/unresolved'}`,
+    const lines = [`### ${receipt.stageId} — comparison ${receipt.delta.some(entry => entry.state === 'not_measured') ? 'not measured (neither pass nor failure)' : receipt.pass ? 'passed' : 'failed/unresolved'}`,
       `Checked: ${receipt.checkedAt ?? 'unknown'}; receipt: \`${receipt.immutablePath || name}\`.`];
     for (const result of receipt.current) {
       if (!result || typeof result.output !== 'string' || !Array.isArray(result.failureIdentifiers)) {
         lines.push('Command receipt unavailable or invalid; no exit or totals inferred.');
         continue;
       }
-      lines.push(`- \`${result.display ?? result.role}\` — ${result.state}; direct exit ${Number.isInteger(result.exitCode) ? result.exitCode : 'unknown'}; ${result.durationMs}ms${result.reason ? `; ${result.reason}` : ''}`);
+      lines.push(`- \`${result.display ?? result.role}\` — ${validationMeasurement(result) === 'not_measured' ? 'not measured (neither pass nor failure; no author action)' : `${result.state} (${validationMeasurement(result).replaceAll('_', ' ')})`}; direct exit ${Number.isInteger(result.exitCode) ? result.exitCode : 'unknown'}; ${result.durationMs}ms${result.reason ? `; ${result.reason}` : ''}`);
       // These are labelled raw collector excerpts, never a synthesized total.
       const totals = stripVTControlCharacters(result.output).split('\n').filter(line => /^(?:\s*(?:Test Files|Tests)\s+\d|# (?:tests|pass|fail|cancelled|skipped|todo) \d|.*\b\d+ (?:passed|failed|skipped).* in [\d.]+s)/.test(line));
       if (totals.length) lines.push('Collector test totals:\n```text\n' + totals.join('\n') + '\n```');

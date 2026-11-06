@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from '../test-support/confirmed-rejection.js';
 import { setEngineDefaults } from '../test-support/engine-defaults-fixture.js';
 import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
@@ -247,7 +248,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
       async spawnInteractive() { throw new Error('unused'); },
     } as unknown as Adapter;
 
-    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
+    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, agentsDir, runId);
     expect(final.status).toBe('incomplete');
     expect(final.currentIteration).toBe(1);
     expect([plans, repairs, gates]).toEqual([1, 1, 2]);

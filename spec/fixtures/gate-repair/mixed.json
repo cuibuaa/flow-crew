@@ -1,0 +1,65 @@
+{
+  "implement": {
+    "projectFiles": {
+      "docs/report.md": "NEEDS_REPAIR\n",
+      "docs/details.md": "# Verified greeting\nHello from the frozen evidence.\n"
+    }
+  },
+  "review": [
+    {
+      "commands": [
+        "node -e \"process.exit(require('node:fs').readFileSync('docs/report.md','utf8').includes('NEEDS_REPAIR')?1:0)\""
+      ],
+      "output": {
+        "pass": false,
+        "reason": "Greeting defect and one unconfirmed observation",
+        "criteria": {
+          "criterion_what_the_report_must_sho_1_9dacb934": {
+            "status": "fail",
+            "evidence": "Read both greeting files and frozen sources"
+          },
+          "criterion_what_the_report_must_sho_2_6693a51c": {
+            "status": "pass",
+            "evidence": "Read both greeting files and frozen sources"
+          }
+        },
+        "audit_findings": {
+          "version": 1,
+          "findings": [
+            {
+              "id": "confirmed",
+              "paths": [
+                "docs/report.md"
+              ],
+              "reason": "Greeting needs correction",
+              "criterion_ids": [
+                "criterion_what_the_report_must_sho_1_9dacb934"
+              ],
+              "invalidates_plan": false,
+              "repair_role": "coder",
+              "reproduction": "last_command"
+            },
+            {
+              "id": "unconfirmed",
+              "paths": [
+                "docs/report.md"
+              ],
+              "reason": "Greeting needs correction",
+              "criterion_ids": [
+                "criterion_what_the_report_must_sho_1_9dacb934"
+              ],
+              "invalidates_plan": false,
+              "repair_role": "coder"
+            }
+          ]
+        },
+        "repairability": {
+          "version": 1,
+          "disposition": "repairable",
+          "evidence": "Native targeted greeting reproduction"
+        }
+      }
+    },
+    {}
+  ]
+}

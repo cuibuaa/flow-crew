@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -403,7 +404,7 @@ describe('campaign cost honesty', () => {
       },
     };
 
-    const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('planner', 'coder', 'qa'), created.runId, 're-plan cost fixture', true);
+    const final = await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, writeRoles('planner', 'coder', 'qa'), created.runId, 're-plan cost fixture', true);
     const cost = deriveRunTokenCost(final);
     const replanEvents = readRunEvents(projectDir, created.runId).filter((event) => event.type === 'supervisor_replan');
     const observation = { status: final.status, stageIds: Object.keys(final.stages), planCalls, cost, replanEvents };
@@ -485,7 +486,7 @@ describe('gate-aware DAG ordering', () => {
       },
     };
 
-    const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('planner', 'qa', 'repair', 'coder'), created.runId, 'gate ordering fixture', true);
+    const final = await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, writeRoles('planner', 'qa', 'repair', 'coder'), created.runId, 'gate ordering fixture', true);
     console.info(`[P6_BASELINE_45] ${JSON.stringify({ status: final.status, calls })}`);
     expect(final.status).toBe('complete');
     expect(calls).toEqual(['plan', 'gate:fail', 'repair', 'gate:pass', 'downstream']);

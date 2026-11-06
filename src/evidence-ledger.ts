@@ -10,6 +10,7 @@ import { readContentIdentity, type ContentIdentity } from './content-identity.js
 import { listProjectFiles, listProjectFilesAt } from './scheduler/sched_scope/path-capabilities.js';
 import { extractBriefOutputDeclarations, parseBriefInputs } from './ship-inputs.js';
 import type { ValidationCommandResult, ValidationDeltaResult } from './project-validation.js';
+import type { CommandContext } from './adapters/base.js';
 
 export const EVIDENCE_LEDGER = 'evidence-ledger.jsonl';
 export const VALIDATION_FACT_VERSION = 2;
@@ -48,7 +49,11 @@ export type EvidenceFact = ValidationFact | {
   caveats: string[]; owner: 'declaration';
 } | {
   kind: 'command'; stageId: string; attemptIndex: number; invocationIndex?: number; commandId: string; command: string | null;
-  exitCode: number | null; owner: 'adapter-event' | 'declaration'; evidence?: string;
+  exitCode: number | null; owner: 'adapter-event' | 'declaration' | 'code'; evidence?: string;
+  context?: CommandContext;
+  outputDigest?: string; treeHash?: string | null; treeAfterHash?: string | null;
+  /** A repair replay cites the original failed command, using the same ledger primitive. */
+  reproductionOf?: number;
 } | {
   kind: 'decision'; stageId: string; attemptIndex: number; verdict: Record<string, unknown>; owner: 'closed-schema-model';
 } | {

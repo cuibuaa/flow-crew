@@ -655,6 +655,8 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
 
 /** Gate verdict fields returned in the final structured answer and published by the engine. */
 export interface GateVerdict {
+  findings?: import('./scoped-audit-repair.js').FindingAssessment;
+  validation?: Array<{ role: string; display?: string; measurement: import('./project-validation.js').ValidationMeasurement }>;
   pass: boolean;
   reason?: string;
   repairability?: { version: 1; disposition: 'repairable' | 'irreparable'; evidence: string };
@@ -665,7 +667,7 @@ export const VERDICT_CONTRACT_DOC = 'A gate returns its verdict as the final str
   + 'Verdict fields: {"pass": true|false, "reason": "<why>"} (scored gates may also set "score": <number>, "metric": "<name>", "threshold": <number>). '
   + 'A rejection may also declare "repairability": {"version":1,"disposition":"repairable"|"irreparable","evidence":"<reproducible evidence>"}. '
   + 'Use irreparable only when no repair or re-plan can undo the observed failure; it ends the run escalated and preserves the rejection. '
-  + 'Omitting repairability preserves the legacy repair route. Never declare repairability with pass=true; unknown versions, dispositions, extra fields or empty evidence are refused. Keep failed criteria and their evidence in the verdict.';
+  + 'A repair requires a finding citing a failed reviewer command in the evidence ledger; observations without a confirmed reproduction never admit repair. Never declare repairability with pass=true; unknown versions, dispositions, extra fields or empty evidence are refused. Keep failed criteria and their evidence in the verdict.';
 
 /** Field names a campaign multi-phase gate verdict may carry (consumed by campaign code). */
 export const PHASE_METADATA_FIELDS = 'phase, phaseComplete, nextPhase, outcome, artifactSummary, reason';

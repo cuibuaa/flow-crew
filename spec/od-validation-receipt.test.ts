@@ -1,3 +1,4 @@
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -146,3 +147,5 @@ describe('configured validation has one attempt owner and read-only gate binding
     expect(gateValidationRefusal(project, f.runId, 'review')).toMatchObject({ pass: false, reason: expect.stringContaining('test_missing_result') });
   });
 });
+
+beforeEach(() => setEngineDefaults({ validation_load_wait_seconds: 0, validation_load_ceiling_per_cpu: 100 }));

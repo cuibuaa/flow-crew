@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -91,7 +92,7 @@ async function reproduce(options: { workflow?: 'planner' | 'direct'; status?: 'b
   const workflow = join(project, 'workflow.yaml');
   writeFileSync(workflow, 'name: bounded-result\ndefaults: {max_iterations: 1, max_retries: 0}\nstages:\n  - id: plan\n    role: planner\n    dynamic_dispatch: true\n    artifact_contract: {version: 1, produces: [], reads: [], groups: []}\n');
   const { config, raw } = loadWorkflow(options.workflow === 'direct' ? join(repository, 'config/workflows/direct.yaml') : workflow);
-  const final = await runWorkflow(config, raw, project, adapter, new Map(), undefined, join(repository, 'config/agents'), undefined, task, true);
+  const final = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, join(repository, 'config/agents'), undefined, task, true);
   return { final, calls, gateInputs, directory: runDir(project, final.runId), criteria };
 }
 

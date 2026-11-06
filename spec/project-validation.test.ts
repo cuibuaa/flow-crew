@@ -64,7 +64,9 @@ describe('project command environment and observer authority', () => {
     try {
       const result = await runValidationCommand({ role: 'test', command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], display: 'deadline probe', cwd: project, timeoutMs: 30 });
       expect(result.exitCode).not.toBe(0);
-      expect(result.error).toMatch(/30ms/);
+      expect(result.error).toMatch(/Validation command timed out after [\d.]+ms/);
+      const budget = Number(result.error!.match(/after ([\d.]+)ms/)![1]);
+      expect(budget).toBeGreaterThan(0); expect(budget).toBeLessThanOrEqual(30);
     } finally { clock.mockRestore(); rmSync(project, { recursive: true, force: true }); }
   });
   it('keeps project inputs and explicit home reads while isolating control and credential settings', () => {

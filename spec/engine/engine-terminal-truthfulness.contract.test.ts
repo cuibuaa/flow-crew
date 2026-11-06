@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from '../test-support/confirmed-rejection.js';
 import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 import { artifacts } from '../spec_contracts/declared-fixtures.js';
 /**
@@ -219,7 +220,7 @@ describe('rejected research rounds settle their repair before the journal advanc
       researchWorkflow.config,
       researchWorkflow.yaml,
       projectDir,
-      adapter,
+      withConfirmedRejections(adapter),
       new Map(),
       undefined,
       writeRoles(),

@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -82,7 +83,7 @@ async function scenario(options: { denied?: boolean; failed?: boolean; rejectAga
     }
     return fixtureResult({ output, exitCode, duration_ms: 1, writes, writeAttribution: 'structured' }, opts);
   } };
-  const state = await runWorkflow(workflow, stringify(workflow), project, adapter, agents, undefined, agentsDir, undefined, undefined, true);
+  const state = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), agents, undefined, agentsDir, undefined, undefined, true);
   const directory = runDir(project, state.runId);
   const decisionPath = join(directory, 'stages/repair/plan_revision_decision_measurement_continuation.json');
   return { state, calls, directory, decision: existsSync(decisionPath) ? JSON.parse(readFileSync(decisionPath, 'utf8')) : undefined };

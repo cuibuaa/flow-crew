@@ -129,6 +129,13 @@ export interface ExecResult extends RunResult {
 
 export type CommandLifecyclePhase = 'started' | 'completed';
 
+/** Explicit native shell context. Missing context is unknown, never the
+ * provider's initial working directory or an assumed shell. */
+export interface CommandContext {
+  cwd: string;
+  shell: string;
+}
+
 /** Adapter-owned proof that an executable tool command crossed a lifecycle
  * boundary. The worker treats this as control-plane evidence, never as agent
  * prose. */
@@ -136,8 +143,10 @@ export interface CommandLifecycleEvent {
   phase: CommandLifecyclePhase;
   /** Only a native structured exit field, never inferred from tool text. */
   exitCode?: number;
+  output?: string;
   id: string;
   command?: string;
+  context?: CommandContext;
   timestamp: string;
 }
 

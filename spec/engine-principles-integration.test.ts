@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
@@ -157,7 +158,7 @@ describe('proven restart recovery', () => {
     beginStageAttempt(project, runId, 'writer', 0);
     updateRunState(project, runId, (state) => { state.currentIteration = 2; state.maxIterations = 4; state.engineCheckpoint = { version: 2, runId, projectDir: project, bootId: 'prior-owned-fixture-boot', generation: engineGeneration(), pid: 99999999, at: new Date().toISOString() }; state.stages.writer = readStageStatus(project, runId, 'writer'); });
     const adapter: Adapter = { async run(_prompt, _role, opts) { if (opts.stageId === 'writer') calls++; return fixtureResult({ output: 'resumed', exitCode: 0, duration_ms: 1, tokens_in: 7, tokens_out: 3 }, opts); } };
-    const result = await runWorkflow(workflow, yaml(workflow), project, adapter, agents, undefined, undefined, runId);
+    const result = await runWorkflow(workflow, yaml(workflow), project, withConfirmedRejections(adapter), agents, undefined, undefined, runId);
     expect(result.status).toBe('complete'); expect(calls).toBe(1); expect(result.currentIteration).toBe(2); expect(result.maxIterations).toBe(4);
     expect(result.stages.writer.attempts?.[0]).toMatchObject({ status: 'failed', exitCode: 143 });
     const settled = readRunState(project, runId);
@@ -174,7 +175,7 @@ describe('proven restart recovery', () => {
     const workflow = { name: 'resume', description: 'Unknown-consumer fixture', defaults: { max_iterations: 1 }, stages: [stage('writer')] };
     writeFileSync(join(directory, 'workflow.yaml'), yaml(workflow));
     const adapter: Adapter = { async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { calls++; return fixtureResult({ output: 'unsafe', exitCode: 0, duration_ms: 1 }, recordOpts); } };
-    await expect(runWorkflow(workflow, yaml(workflow), project, adapter, agents, undefined, undefined, runId)).rejects.toThrow('RECOVERY_FATE_UNKNOWN');
+    await expect(runWorkflow(workflow, yaml(workflow), project, withConfirmedRejections(adapter), agents, undefined, undefined, runId)).rejects.toThrow('RECOVERY_FATE_UNKNOWN');
     expect(calls).toBe(0); expect(readRunState(project, runId).recovery?.kind).toBe('blocked');
   });
   it('preserves work, closes interrupted attempts as infrastructure failures and resumes the same budget', () => {
@@ -218,7 +219,7 @@ describe('real scheduler boundaries', () => {
         return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' }, opts);
       } };
       const workflow = { name: 'execution-duty', description: 'Retain existing duties', defaults: { max_iterations: 1 }, stages: [first, owed] };
-      const result = await runWorkflow(workflow, yaml(workflow), project, adapter, agents);
+      const result = await runWorkflow(workflow, yaml(workflow), project, withConfirmedRejections(adapter), agents);
       const decision = JSON.parse(readFileSync(join(runDir(project, result.runId), 'stages/first/plan_revision_decision_revise_execution.json'), 'utf8'));
       expect(result.status).toBe('complete'); expect(owedCalls).toBe(1);
       expect(readFileSync(join(runDir(project, result.runId), 'owed.txt'), 'utf8')).toBe('Fresh owed outcome.');
@@ -238,7 +239,7 @@ describe('real scheduler boundaries', () => {
       return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1 }, opts);
     } };
     const workflow = { name: 'rolling', description: 'Rolling-plan fixture', defaults: { max_iterations: 1 }, stages: initial };
-    const result = await runWorkflow(workflow, yaml(workflow), project, adapter, agents);
+    const result = await runWorkflow(workflow, yaml(workflow), project, withConfirmedRejections(adapter), agents);
     expect(result.status).toBe('complete'); expect(firstCalls).toBe(1); expect(extraCalls).toBe(1); expect(result.queryState?.planHistory).toHaveLength(2);
   });
 
@@ -260,7 +261,7 @@ describe('real scheduler boundaries', () => {
       return fixtureResult({ output: 'done', exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' }, opts);
     } };
     const workflow = { name: 'repair', description: 'Plan-repair fixture', defaults: { max_iterations: 1 }, stages: [plan] };
-    const result = await runWorkflow(workflow, yaml(workflow), project, adapter, agents);
+    const result = await runWorkflow(workflow, yaml(workflow), project, withConfirmedRejections(adapter), agents);
     expect(result.status).toBe('complete'); expect(writerCalls).toBe(1); expect(gateCalls).toBe(2); expect(repairCalls).toBe(1);
     expect(result.planControl!.stages.filter((stage) => stage.retry_to?.length).map(stage => stage.id)).toEqual(['repair']);
     expect(result.currentIteration).toBe(1);

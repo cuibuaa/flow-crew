@@ -42,7 +42,9 @@ export function createInvocationScratch(runDir?: string): { path: string; cleanu
       const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as { status?: unknown };
       if (isTerminalRunStatus(state.status)) return createInvocationScratch();
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    const root = resolve(runDir, 'scratch');
+    // Storage settles through physical run identity. All command paths must
+    // derive the same alias even when reached through a parent's scratch link.
+    const root = resolve(realpathSync(runDir), 'scratch');
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const record = join(root, '.tmpdir');
     let alias = join(scratchParent(), aliasName(root));
@@ -68,6 +70,7 @@ export function createInvocationScratch(runDir?: string): { path: string; cleanu
  * retirement can be retried by explicit cleanup.
  * Run records and final artifacts have their own, longer history lifetime. */
 export function retireRunScratch(runDir: string): void {
+  try { runDir = realpathSync(runDir); } catch { /* deleted owners retain their supplied identity */ }
   const root = resolve(runDir, 'scratch');
   let alias: string;
   try { alias = readFileSync(join(root, '.tmpdir'), 'utf8'); }

@@ -1,3 +1,5 @@
+import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,6 +22,7 @@ let fixtureRoot: string;
 let previousStore: string;
 
 beforeEach(() => {
+  setEngineDefaults({ validation_load_ceiling_per_cpu: 100, validation_load_wait_seconds: 0 });
   fixtureRoot = mkdtempSync(join(tmpdir(), 'flowcrew-direct-'));
   projectDir = join(fixtureRoot, 'project');
   mkdirSync(projectDir);
@@ -60,7 +63,7 @@ function adapter(calls: string[], rejectFirstReview: boolean, observe?: (prompt:
 
 async function runDirect(task: string, calls: string[], rejectFirstReview = false, observe?: (prompt: string, role: AgentConfig, opts: RunOpts) => void) {
   const { config, raw } = loadWorkflow(join(root, 'config', 'workflows', 'direct.yaml'));
-  return runWorkflow(config, raw, projectDir, adapter(calls, rejectFirstReview, observe), new Map(), undefined, agentsDir, undefined, task, true);
+  return runWorkflow(config, raw, projectDir, withConfirmedRejections(adapter(calls, rejectFirstReview, observe)), new Map(), undefined, agentsDir, undefined, task, true);
 }
 
 describe('direct workflow', () => {
@@ -110,7 +113,7 @@ describe('direct workflow', () => {
     }
   });
 
-  it('rejects a model acceptance on an engine-observed regression and repairs the concrete failure', async () => {
+  it('rejects a model acceptance on a measured regression without inferring an uncited repair', async () => {
     const task = brief('outputs:\n  - docs/report.md');
     const readyPath = writeReadySetupRecord(projectDir, task, fcGlobalDir());
     const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
@@ -132,9 +135,9 @@ describe('direct workflow', () => {
 
       }
     });
-    expect(final.status, final.failureReason).toBe('complete');
-    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
-    expect(receipts).toHaveLength(2);
+    expect(final.status, final.failureReason).toBe('incomplete');
+    expect(calls).toEqual(['implement', 'review']);
+    expect(receipts).toHaveLength(1);
   });
 
   // A no-regression receipt can still carry commands that failed or never ran
