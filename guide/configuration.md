@@ -129,12 +129,24 @@ sharing a mutable project tree wait for the active author to settle. Settlement 
 task-declared immutable evidence, with exact task outputs taking precedence.
 See [scope reconciliation](../src/scheduler/sched_scope/reconciliation.ts).
 
-The shipped `default` and `research` workflows begin with a dynamic planner. `direct` supplies
-a fixed author, independent read-only gate and conditional repair plan, and is selected for
-ordinary tasks without an explicit workflow choice. Research briefs retain their
-planner loops; `workflow: planner` or `--workflow default` requests dynamic planning. Direct has broad author
-scope; a dedicated workspace and the brief's constraints still matter. Brief `workflow`
-selection and refusal of direct research loops belong to [brief contract](brief-contract.md).
+All new runs enter `entry.yaml`. Its model chooser selects a fixed author/review/repair shape or
+releases the dynamic planner; declarations never select a shape. The fixed author's result routes
+through a read-only assessment to focused or full independent review. Full review remains available.
+Historical workflow files remain readable for admitted runs and library fixtures.
+
+Any stage can declare `decision: {successors: [next_stage, replan], default: next_stage}`.
+A decision returns one JSON object with `successor` and `reason`; review decisions also return
+closed risk-area objects and the chooser returns concrete `questions` plus `metric_search`.
+The default must belong to the declared set. `continue` releases ordinary dependencies; `replan`
+reruns planning at an idle boundary in the same iteration. Invalid ordinary outputs take the
+declared default and record why; invalid chooser outputs pause for a declaration. Outside-set
+choices are refused and recorded. Declared paths remain subject to full plan, scope, result-duty
+and finite-budget admission. Replanning cannot change executed duties or discard result obligations.
+Gate verdicts and historical repair edges translate to these same bounded successor transitions.
+Unstarted descendants of an unchosen alternative are skipped. A dependency join covering all
+alternatives (including their descendant stages) waits for the selected work; it cannot hide an
+unfinished selected result. Revision acceptance consumes its pending replan in the same durable
+transaction, so recovery does not spend another revision or plan attempt.
 
 Sources: [schemas](../src/scheduler/sched_admission/configuration.ts),
 [workflows](../config/workflows/planner.yaml), [direct](../config/workflows/direct.yaml),

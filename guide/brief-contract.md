@@ -34,7 +34,7 @@ The model supplies no workflow field. When `quick` generates a brief and the sup
 project has no exact setup record, it requires a clean Git source and prepares a sibling
 worktree from `HEAD` through `ship-setup`, retaining all its admission checks. Target
 and branch names use the composed digest, never model prose. An authored brief keeps
-its existing exact-record requirement. Existing workflow choice and gates still apply; research loops still require their authored research block.
+its existing exact-record requirement. The entry chooser and independent gates apply; research loops still require their authored research block.
 Static rehearsal and preflight validate generated content, with reasons returned for up
 to two correction retries. Authored briefs passed to inspection/setup/rehearsal keep their
 existing missing-contract diagnostics. Failed provider calls stop with exit 4, are not
@@ -48,7 +48,6 @@ This is an illustrative engineering envelope, not a complete launch-ready task:
 
 ```yaml
 ---
-workflow: direct
 inputs:
   - src/
 outputs:
@@ -62,14 +61,16 @@ validation:
 ---
 ```
 
-Follow it with the goal, constraints and extractable acceptance criteria. `workflow: direct`
-selects a fixed author/gate/repair plan, also used when the choice is omitted for an
-ordinary task. `workflow: planner` requests dynamic planning; `--workflow <name>`
-preserves an explicit CLI choice, including `--workflow default` for the planner.
-Numeric research selects the research workflow unless an explicit CLI workflow overrides it.
-Direct research loops are refused.
-Input/output count does not choose the workflow. The fixed plan uses the same admission,
-isolated author writes, independent review, repair and re-review, and brief/report duties.
+Follow it with the goal, constraints and extractable acceptance criteria. Every brief enters the same
+model chooser, which chooses a coherent author/review/repair shape or a decomposition. The operator
+does not name a shape. Legacy workflow fields are refused with a removed-field diagnostic.
+The chooser asks concrete scope or research-declaration questions when needed; answer them in the
+run inbox with `inbox approve <request> --reason <answer>`, then resume the same run. A JSON
+answer containing a `research` object can supply the missing research declaration. Questions and
+answers survive restart. No rule over brief words chooses a shape.
+Research supplied in an answer passes the same round/wall budget admission as frontmatter before
+any author work is released. An over-budget declaration is recorded and refused; answering does
+not increase the run's iteration or wall allowance.
 
 `objective:` is an exact alias for `research:`, with `research` winning when both exist.
 A numeric `baseline` activates the metric loop. An engineering `objective` containing only

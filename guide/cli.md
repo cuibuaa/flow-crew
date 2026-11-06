@@ -117,7 +117,7 @@ on branch `brief-<first-12-digest-characters>` from `HEAD`. This follows the sib
 worktree convention and gives reruns a stable identity without interpreting task prose.
 It uses the same `ship-setup` implementation, including baseline validation and refusals.
 A dirty, non-Git or unborn source refuses before any model call, because automatic
-setup needs committed source bytes. Unknown workflows, incompatible workflow overrides
+setup needs committed source bytes. Removed workflow overrides
 and declared static failures also refuse before authorship; `brief` shares these checks.
 Missing or unknown adapters refuse with exit 1 before the first attempt. Refusals are recorded like other launch refusals.
 The composed brief and setup receipt are retained before run registration. Existing
@@ -140,7 +140,6 @@ in the selected project and warns before replacing different content.
 |---|---|
 | `--project <path>` | Select launch project |
 | `--adapter <name>` | Override backend; registered auto/codex/claude/mock routing |
-| `--workflow <name>` | Explicit workflow file name |
 | `--max-iterations <n>` | Run iteration override |
 | `--campaign <name>`, `--no-campaign` | Campaign selection/opt-out |
 | `--campaign-context=inherit\|skip` | Context policy; equals form required |
@@ -276,7 +275,7 @@ Every route accepts `--help` and `-h` without contacting services or creating st
 | `plan-check` | `--brief`, `--run`, `--project` |
 | `ship-setup` | `--json`, `--project`, `--brief`, `--target`, `--base`, `--branch` |
 | `brief` | `--project`, `--adapter`, `--task` |
-| `quick` | `--project`, `--adapter`, `--workflow`, `--campaign`, `--task`, `--existing-run-id`, `--session`, `--brief-input-base64`, `--brief-admission-record`, `--no-campaign`, `--no-inherit-campaign`, `--background`, `--max-iterations`, `--campaign-context`, `--acknowledge-brief-warnings` |
+| `quick` | `--project`, `--adapter`, `--campaign`, `--task`, `--existing-run-id`, `--session`, `--brief-input-base64`, `--brief-admission-record`, `--no-campaign`, `--no-inherit-campaign`, `--background`, `--max-iterations`, `--campaign-context`, `--acknowledge-brief-warnings` |
 | `status` | `--all`, `--details`, `--project` |
 | `list` | `--limit` |
 | `state` | `--project`, `--run`, `--summary`, `--prompts` |

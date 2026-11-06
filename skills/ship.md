@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 37 -->
+<!-- flowcrew-skill-revision: 38 -->
 
 # Ship a conversation to FlowCrew
 
@@ -34,11 +34,12 @@ Declare gitignored inputs in the block and intentional reuse of existing outputs
 or tree by declaring a structured input with `frozen: true`; inputs are mutable by default. Prose, headings and input notes do
 not enforce freezing. Explain evidence gaps and dependencies of quantities.
 
-Choose engineering for a known pass/fail outcome and research for candidate search with an
-allowed supported ceiling. Propose the mode/workflow and explain it to the operator. Use
-`workflow: direct` for coherent author-plus-review work and `workflow: planner` for decomposable
-work or loops. Do not create an acceptance-only `objective.confirm` envelope. Map writable
-paths for authored stages; leave schema details in the canonical references.
+State whether the goal is a known pass/fail outcome or candidate research with an allowed supported
+ceiling. Do not name a workflow or shape: the entry chooser reads the brief and asks concrete
+questions when information is missing. A metric search needs the author's research declaration
+(baseline, policy and stop conditions). Do not invent those fields or create an acceptance-only
+`objective.confirm` envelope. Map writable paths for authored stages; leave schema details in the
+canonical references.
 
 Require the complete configured validation with direct exits/totals after the last relevant
 write. Separate an operator numeric expectation from measured evidence; use exact fields
@@ -100,7 +101,7 @@ run declared shell confirmation; review that text first.
 If bytes change, repeat preflight and rehearsal.
 
 Show the final brief, complete findings, exact 64-hex digest and launch identity: source,
-target, base, new branch, workflow/mode, adapter, foreground/background, campaign/context,
+target, base, new branch, research declarations, adapter, foreground/background, campaign/context,
 iteration bound and stage deadline read from engine configuration (`max_iterations`
 and `default_timeout_ms`). Do not hardcode defaults.
 Explain unattended shell authority and the scope-versus-host-isolation boundary.
@@ -145,7 +146,7 @@ flowcrew quick --background --project <target> - < docs/task_brief.md
 flowcrew quick --project <target> - < docs/task_brief.md
 ```
 
-Choose the approved one. Add only approved adapter/workflow/campaign/iteration flags and,
+Choose the approved one. Add only approved adapter/campaign/iteration flags and,
 for changed-run continuation, `--acknowledge-brief-warnings=<digest>`. Do not use command substitution to
 transport brief text or acknowledge a new digest automatically. A changed brief/settings
 requires returning to confirmation. A zero background exit means registration succeeded,
