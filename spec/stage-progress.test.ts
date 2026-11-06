@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, readRunState, readStageStatus, writeRunState } from '../src/store.js';
-import { recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { runProjectValidationBaseline, runValidationCommand } from '../src/project-validation.js';
 import { inspectStageExecutionFacts, StageWatchdog } from '../src/stage-watchdog.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
 import { runWorkflow, type WorkflowConfig } from '../src/scheduler.js';
@@ -21,7 +21,7 @@ const stageId = 'review';
 const config = { pollIntervalMs: 100, idleThresholdMs: 600_000 };
 const role: AgentConfig = { name: 'qa', description: 'fixture', tools: [], prompt: 'review' };
 let cancel: AbortController;
-let validation: ReturnType<typeof recordGateValidationDelta> | undefined;
+let validation: ReturnType<typeof runProjectValidationBaseline> | undefined;
 
 beforeEach(() => {
   project = join(process.env.FLOWCREW_VITEST_ROOT!, 'project');
@@ -62,7 +62,11 @@ async function startValidation(code: string) {
       results: commands.map(command => ({ role: command.role, display: command.display, state: 'passed', exitCode: 0,
         durationMs: 0, output: '', failureIdentifiers: [], failureIdentity: 'none' })) },
   }));
-  validation = recordGateValidationDelta(project, run.runId, stageId, { abortSignal: cancel.signal });
+  const attempt = readStageStatus(project, run.runId, stageId).attempts!.at(-1)!;
+  validation = runProjectValidationBaseline(project, { commands, abortSignal: cancel.signal,
+    runCommand: request => runValidationCommand({ ...request, runDir: run.runDirPath,
+      execution: { stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt } }),
+  });
   // Wait for the owned fixture to execute, without relying on provider tools.
   await waitForPathEvent(project, () => existsSync(join(project, 'ready')) ? true : undefined);
 }

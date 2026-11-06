@@ -8,7 +8,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { validationEnvironment } from './validation-environment.js';
 import { dirname, join, resolve } from 'node:path';
-import { parseTapOutput } from './tap-output.js';
+import { decodeRunnerReport, identityFacts, type FailureReader, type IdentityFacts } from './validation-identity.js';
+import { prospectivePhysicalPath, safeEvidencePath } from './engine-owned-carriers.js';
+import { statSync } from 'node:fs';
 import { loadEngineDefaults } from './config.js';
 import { spawnSync } from 'node:child_process';
 import { listProjectFiles } from './scheduler/sched_scope/path-capabilities.js';
@@ -56,7 +58,14 @@ export interface ValidationCommandProvenance {
   corroboratedBy?: string[];
 }
 
+export interface ValidationReport {
+  format: 'vitest-json';
+  /** Omit for a JSON-only stdout reporter. Paths are project-relative, freshly written report files. */
+  path?: string;
+}
+
 export interface ValidationCommand {
+  report?: ValidationReport;
   role: ValidationRole;
   command: string;
   args: string[];
@@ -66,6 +75,7 @@ export interface ValidationCommand {
 }
 
 export interface BriefValidationCommand {
+  report?: ValidationReport;
   role: ValidationRole;
   command: string;
   args: string[];
@@ -100,10 +110,14 @@ export interface ValidationRunRequest extends ValidationCommand {
 }
 
 export interface ValidationRunResponse {
+  report?: string;
+  reportError?: string;
   dependencyPreparationFailed?: boolean;
   exitCode: number | null;
   stdout?: string;
   stderr?: string;
+  /** Child stream bytes only; engine diagnostics may also appear in stderr. */
+  outputBytes?: { stdout: number; stderr: number };
   error?: string;
   durationMs?: number;
 }
@@ -113,6 +127,10 @@ export type ValidationCommandRunner = (
 ) => Promise<ValidationRunResponse> | ValidationRunResponse;
 
 export interface ValidationCommandResult {
+  outputBytes?: { stdout: number; stderr: number };
+  identityOwner?: IdentityFacts['owner'];
+  failures?: import('./validation-identity.js').FailureReading['failures'];
+  testsRun?: number | null;
   role: ValidationRole;
   display?: string;
   state: 'passed' | 'failed' | 'launch_error' | 'not_configured' | 'unresolved';
@@ -156,6 +174,8 @@ export interface ProjectValidationDependencies {
   now?: () => number;
   maxOutputBytes?: number;
   skipExecution?: boolean;
+  skipReason?: string;
+  readFailureIdentity?: FailureReader;
 }
 
 export interface ValidationDeltaResult {
@@ -567,6 +587,7 @@ export function reconcileProjectValidation(
           `Validation command conflict for ${role}: project declaration at ${projectEvidence} specifies ${JSON.stringify(argv(projectCommand))}, but brief declaration at ${declaration.evidencePath} specifies ${JSON.stringify(argv(declaration))}. Project configuration governs; remove the overlapping brief declaration or make its argv exactly agree.`,
         );
       }
+      if (declaration.report) matching.report = declaration.report;
       matching.provenance = { source: 'project', evidencePath: matching.evidencePath ?? discovery.configPath, corroboratedBy: [declaration.evidencePath] };
     }
     if (!declaration || projectCommand) {
@@ -575,6 +596,7 @@ export function reconcileProjectValidation(
     }
     commands.push({
       role,
+      ...(declaration.report ? { report: declaration.report } : {}),
       command: declaration.command,
       args: [...declaration.args],
       display: argv(declaration).join(' '),
@@ -628,15 +650,22 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
     );
   };
   let stdout = '';
+  const outputBytes = { stdout: 0, stderr: 0 };
   let stderr = environment.removed.length
     ? `FlowCrew validation environment: suppressed engine/control or credential settings: ${environment.removed.join(', ')}. Supply ordinary project inputs through the command environment; reserved settings are isolated.\n`
     : '';
+  const stdoutDecoder = new TextDecoder('utf-8', { fatal: true });
+  const stderrDecoder = new TextDecoder('utf-8', { fatal: true });
+  let outputEncodingError: string | undefined;
+  const decodeOutput = (decoder: TextDecoder, chunk?: Buffer | string): string => {
+    if (outputEncodingError) return '';
+    try { return decoder.decode(typeof chunk === 'string' ? Buffer.from(chunk) : chunk, { stream: chunk !== undefined }); }
+    catch { outputEncodingError = 'Validation output is not valid UTF-8'; return ''; }
+  };
   let settled = false;
   let timedOut = false;
   let spawnError: string | undefined;
-  // A project's suite grows as rounds add tests, and ship-setup runs it twice.
-  // Hardcoding this meant the refusal named the timeout while the cause was the
-  // suite's size plus whatever else the machine was doing.
+  // Keep the configured suite bound; the enclosing attempt may narrow it.
   let timeoutMs = 45 * 60 * 1000;
   try {
     const configured = loadEngineDefaults().validation_timeout_ms;
@@ -661,6 +690,8 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
       exitCode,
       stdout,
       stderr,
+      outputBytes,
+      ...(outputEncodingError ? { reportError: outputEncodingError } : {}),
       durationMs: Date.now() - started,
       ...(error ? { error } : request.abortSignal?.aborted ? { error: 'Validation cancelled by enclosing stage' } : {}),
       ...(!error && timedOut ? { error: `Validation command timed out after ${timeoutMs}ms` } : {}),
@@ -668,15 +699,19 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
     });
   };
   child.stdout?.on('data', (chunk: Buffer | string) => {
-    const value = chunk.toString();
+    outputBytes.stdout += Buffer.byteLength(chunk);
+    const value = decodeOutput(stdoutDecoder, chunk);
     stdout += value;
     publishOutput(value);
   });
   child.stderr?.on('data', (chunk: Buffer | string) => {
-    const value = chunk.toString();
+    outputBytes.stderr += Buffer.byteLength(chunk);
+    const value = decodeOutput(stderrDecoder, chunk);
     stderr += value;
     publishOutput(value);
   });
+  child.stdout?.once('end', () => { const value = decodeOutput(stdoutDecoder); stdout += value; if (value) publishOutput(value); });
+  child.stderr?.once('end', () => { const value = decodeOutput(stderrDecoder); stderr += value; if (value) publishOutput(value); });
   child.once('error', (error) => { spawnError = error.message; });
   child.once('close', (code, signal) => {
     settle(code, signal, spawnError);
@@ -732,100 +767,60 @@ export const runValidationCommand: ValidationCommandRunner = (request) => withEn
         error: `Dependency preparation refused: ${errorMessage(error)}`, durationMs: Date.now() - started };
     }
   }
+  let reportPath: string | undefined;
+  let before: string | undefined;
+  if (request.report?.path) {
+    try {
+      if (!safeEvidencePath(request.report.path)) throw new Error('Report path is a credential/control path');
+      reportPath = prospectivePhysicalPath(resolve(request.cwd, request.report.path));
+      if (!safeEvidencePath(reportPath)) throw new Error('Report resolves to a credential/control path');
+      if (!reportPath.startsWith(`${resolve(request.cwd)}/`)) throw new Error('Report path escapes project');
+      try { const stat = statSync(reportPath); before = JSON.stringify([stat.ino, stat.mtimeMs, stat.ctimeMs, stat.size]); } catch { /* expected new report */ }
+    } catch (error) { return { exitCode: null, error: errorMessage(error) }; }
+  }
   const response = await executeValidationCommand({ ...request, timeoutMs: remaining() });
+  if (reportPath) {
+    try {
+      if (prospectivePhysicalPath(resolve(request.cwd, request.report!.path!)) !== reportPath) throw new Error('Report path changed');
+      const stat = statSync(reportPath);
+      if (!stat.isFile() || stat.size > 1024 * 1024 || before === JSON.stringify([stat.ino, stat.mtimeMs, stat.ctimeMs, stat.size])) throw new Error('Report absent, stale, invalid or exceeds 1 MiB');
+      response.report = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(reportPath));
+    } catch (error) { response.reportError = errorMessage(error); }
+  }
   return { ...response, durationMs: Date.now() - started };
 });
 
-interface FailureFacts {
-  count?: number;
-  identifiers: string[];
-  evidence?: FailureEvidence;
-  reason?: string;
+/** No test-output rules. Invalid reporter/model evidence remains unknown. */
+function validationOutputBytes(response: ValidationRunResponse): { stdout: number; stderr: number } {
+  return { stdout: response.outputBytes?.stdout ?? Buffer.byteLength(response.stdout ?? ''),
+    stderr: response.outputBytes?.stderr ?? Buffer.byteLength(response.stderr ?? '') };
 }
 
-function legacyFailureFacts(output: string): { count?: number; identifiers: string[] } {
-  const identifiers = new Set<string>();
-  const lines = output.split(/\r?\n/);
-  for (const raw of lines) {
-    const line = raw.trim();
-    let match = /^(?:FAIL|FAILED)\s+([^\s].*)$/i.exec(line);
-    if (match) identifiers.add(match[1].replace(/\s+\[.*$/, '').trim());
-    match = /^(?:×|✗|✘)\s+(.+)$/.exec(line);
-    if (match) identifiers.add(match[1].replace(/\s+\d+ms$/, '').trim());
-    match = /^(.+?\.(?:[cm]?[jt]sx?|json))(?::\d+(?::\d+)?|\(\d+,\d+\))\s*[-:]?\s*error\s+(TS\d+)?/i.exec(line);
-    if (match) identifiers.add(`${match[1]}${match[2] ? ` ${match[2]}` : ''}`);
-    if (identifiers.size >= 100) break;
+async function failureFacts(command: ValidationCommand, response: ValidationRunResponse, output: string,
+  root: string, dependencies: ProjectValidationDependencies): Promise<IdentityFacts> {
+  const failed = response.exitCode !== 0;
+  if (response.reportError) return { identifiers: [], owner: 'unknown', reason: `Invalid validation identity evidence: ${response.reportError}` };
+  if (command.report) {
+    try {
+      const bytes = response.report ?? (command.report.path ? undefined : response.stdout);
+      if (bytes === undefined || Buffer.byteLength(bytes) > 1024 * 1024) throw new Error('Structured report missing or exceeds 1 MiB');
+      const facts = identityFacts(decodeRunnerReport(bytes, command.report.format, root), 'runner-json', failed);
+      // A reporter cannot account for diagnostics carried outside its JSON.
+      // Withhold completeness using transport metadata, never message spelling.
+      const sizes = validationOutputBytes(response);
+      const extraOutput = sizes.stderr > 0 || Boolean(command.report.path || response.report !== undefined) && sizes.stdout > 0;
+      return failed && facts.owner !== 'unknown' && extraOutput ? { ...facts, evidence: 'partial',
+        reason: 'Additional unstructured output is not accounted for by the structured report' } : facts;
+    } catch (error) { return { identifiers: [], owner: 'unknown', reason: `Invalid structured report: ${errorMessage(error)}` }; }
   }
-  const terminalPytestCount = [...lines].reverse().flatMap((raw) => {
-    const line = raw.trim();
-    if (!/\bin\s+\d+(?:\.\d+)?s(?:\s|=|$)/i.test(line)) return [];
-    const match = /\b(\d+)\s+failed\b/i.exec(line);
-    return match ? [Number(match[1])] : [];
-  }).find((value) => Number.isSafeInteger(value) && value > 0);
-  const countPatterns = [
-    /\bTests?\s+(\d+)\s+failed\b/i,
-    /\b(\d+)\s+fail(?:ed|ing|ures?)\b/i,
-    /\b(\d+)\s+errors?\b/i,
-  ];
-  const lastReportedCount = [...lines].reverse().flatMap((line) => countPatterns.flatMap((pattern) => {
-    const match = pattern.exec(line);
-    return match ? [Number(match[1])] : [];
-  })).find((value) => Number.isSafeInteger(value) && value > 0);
-  const count = terminalPytestCount ?? lastReportedCount ?? (identifiers.size > 0 ? identifiers.size : undefined);
-  return { count, identifiers: [...identifiers].sort() };
-}
-
-function failureFacts(output: string): FailureFacts {
-  if (output.trim().length === 0) {
-    return {
-      identifiers: [],
-      reason: 'Failure identity is unavailable because the validation command produced no output',
-    };
-  }
-
-  const tap = parseTapOutput(output);
-  if (tap.state === 'complete') {
-    const failed = tap.records
-      .filter((record) => record.status === 'not_ok' && record.directive === undefined);
-    if (failed.length === 0) {
-      return {
-        identifiers: [],
-        reason: 'Failure identity is unavailable because complete TAP reported no failing top-level records despite the nonzero exit',
-      };
-    }
-    return {
-      count: tap.failureCount,
-      identifiers: [...new Set(failed.map((record) => record.name))],
-      evidence: 'complete',
-    };
-  }
-  if (tap.state === 'invalid') {
-    const legacy = legacyFailureFacts(output);
-    if (legacy.count !== undefined || legacy.identifiers.length > 0) {
-      return {
-        ...legacy,
-        evidence: tap.cause === 'truncated' ? 'partial' : 'complete',
-        reason: tap.cause === 'truncated'
-          ? `Failure identity was recovered from retained lines as partial evidence because validation output was truncated before structural TAP parsing: ${tap.reason}`
-          : `Failure identity was recovered from line-oriented output after structural TAP parsing could not conclude: ${tap.reason}`,
-      };
-    }
-    return {
-      identifiers: [],
-      reason: tap.cause === 'truncated'
-        ? `Failure identity is unavailable because validation output was truncated before parsing: ${tap.reason}`
-        : `Failure identity is unavailable because TAP output is structurally incomplete or inconsistent: ${tap.reason}`,
-    };
-  }
-
-  const legacy = legacyFailureFacts(output);
-  if (legacy.count !== undefined || legacy.identifiers.length > 0) {
-    return { ...legacy, evidence: 'complete' };
-  }
-  return {
-    identifiers: [],
-    reason: 'Failure identity is unavailable because the non-TAP output format is not recognized',
-  };
+  if (!failed) return { identifiers: [], owner: 'unknown' };
+  if (!dependencies.readFailureIdentity) return { identifiers: [], owner: 'unknown', reason: 'No structured report or closed-schema model reading is available' };
+  const bounded = boundedOutput(output, dependencies.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
+  const truncated = bounded !== output;
+  try {
+    return identityFacts(await dependencies.readFailureIdentity({ command: command.display,
+      exitCode: response.exitCode!, output: bounded, truncated }), 'closed-schema-model', true, truncated);
+  } catch (error) { return { identifiers: [], owner: 'unknown', reason: `Invalid model reading: ${errorMessage(error)}` }; }
 }
 
 function criterionFor(result: ValidationCommandResult): ValidationGateCriterion {
@@ -920,7 +915,7 @@ export async function runProjectValidationBaseline(
         output: '',
         failureIdentifiers: [],
         failureIdentity: 'unknown',
-        reason: 'Baseline execution was skipped by operator request (--no-baseline)',
+        reason: dependencies.skipReason ?? 'Baseline execution was skipped by operator request (--no-baseline)',
       });
       continue;
     }
@@ -942,6 +937,7 @@ export async function runProjectValidationBaseline(
       .filter((value): value is string => Boolean(value))
       .join('\n');
     const output = boundedOutput(rawOutput, maxOutputBytes);
+    const outputBytes = validationOutputBytes(response);
     if (response.dependencyPreparationFailed || response.error || response.exitCode === null) {
       results.push({
         role,
@@ -949,6 +945,7 @@ export async function runProjectValidationBaseline(
         state: 'launch_error',
         durationMs,
         output,
+        outputBytes,
         failureIdentifiers: [],
         failureIdentity: 'unknown',
         exitCode: response.exitCode ?? undefined,
@@ -966,23 +963,28 @@ export async function runProjectValidationBaseline(
         exitCode: response.exitCode,
         durationMs,
         output,
+        outputBytes,
         failureIdentifiers: [],
         failureIdentity: 'unknown',
         reason: 'Validation command could not run in the target environment (exit 127)',
       });
       continue;
     }
-    const facts: FailureFacts = response.exitCode === 0 ? { identifiers: [] } : failureFacts(rawOutput);
+    const facts = await failureFacts(command, response, rawOutput, root, dependencies);
     const failureIdentity = response.exitCode === 0
       ? 'none'
       : facts.count !== undefined || facts.identifiers.length > 0 ? 'known' : 'unknown';
     results.push({
       role,
+      identityOwner: facts.owner,
+      ...(facts.failures ? { failures: facts.failures } : {}),
+      testsRun: facts.testsRun ?? null,
       display: command.display,
       state: response.exitCode === 0 ? 'passed' : 'failed',
       exitCode: response.exitCode,
       durationMs,
       output,
+      outputBytes,
       ...(facts.count === undefined ? {} : { failureCount: facts.count }),
       failureIdentifiers: facts.identifiers,
       failureIdentity,
@@ -1041,16 +1043,6 @@ export function evaluateValidationDelta(
     if (next.state === 'passed') {
       return { role: prior.role, state: 'pass', reason: 'The red baseline improved to green', newFailureIdentifiers: [] };
     }
-    if (unmeasured(prior) && unmeasured(next)) {
-      // Neither run produced a comparable result, so nothing here can show a regression; treating it as unresolved
-      // parked every run whose environment cannot run the command at all, such as a browser suite without a browser.
-      return {
-        role: prior.role,
-        state: 'pass',
-        reason: 'Could not run or failed without identifiable failures at baseline and now, so this command cannot show a regression here; the gate judges the change by its own checks',
-        newFailureIdentifiers: [],
-      };
-    }
     if (prior.state !== FAILED_VALIDATION_STATE) {
       return { role: prior.role, state: 'unresolved', reason: 'Baseline was not executable/configured', newFailureIdentifiers: [] };
     }
@@ -1068,6 +1060,7 @@ export function evaluateValidationDelta(
         newFailureIdentifiers: [],
       };
     }
+    if (!prior.failureIdentifiers.length || !next.failureIdentifiers.length) return { role: prior.role, state: 'unresolved', reason: 'Failure identities are missing', newFailureIdentifiers: [] };
     const priorIds = new Set(prior.failureIdentifiers);
     const newFailureIdentifiers = next.failureIdentifiers.filter((identifier) => !priorIds.has(identifier));
     const countIncreased = prior.failureCount !== undefined

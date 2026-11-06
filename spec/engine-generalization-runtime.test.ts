@@ -1,4 +1,8 @@
 import './test-support/policy-runtime.js';
+import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
+import { seedAttemptValidation } from './test-support/attempt-validation.js';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
+import { projectCommit, VALIDATION_FACT_VERSION } from '../src/evidence-ledger.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { artifacts, stageArtifacts } from './spec_contracts/declared-fixtures.js';
@@ -27,6 +31,7 @@ import { createRun } from './test-support/create-run.js';
 import {
   fcGlobalDir,
   readRunState,
+  readStageStatus,
   runDir,
   setFcGlobalDir,
   writeStageStatus,
@@ -104,15 +109,18 @@ function researchBrief(maxRounds = 3): string {
 function writeValidationSnapshot(
   runDirPath: string,
   baseline: ProjectValidationBaseline,
+  seed = true,
 ): { bytes: string; sha256: string } {
   const artifact = {
     version: 1,
     capturedAt: new Date().toISOString(),
     source: 'ship-setup-ready-record',
+    baseCommit: projectCommit(baseline.projectDir),
     baseline,
   };
   const bytes = `${JSON.stringify(artifact, null, 2)}\n`;
   writeFileSync(join(runDirPath, 'validation_baseline.json'), bytes);
+  if (seed) seedAttemptValidation(baseline.projectDir, basename(runDirPath), baseline.results);
   return { bytes, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
 
@@ -186,23 +194,30 @@ describe('engine generalization runtime bindings', () => {
     workflow.stages.push(...workflow.stages.filter(item => item.is_gate).map(item => stage({
       id: `repair_${item.id}`, role: 'coder', scope: [], depends_on: [item.id], retry_to: [item.id],
     })));
+    workflow.stages.unshift(stage({ id: 'author', role: 'coder' }));
+    for (const item of workflow.stages) if (item.id === 'qa' || item.id === 'peer') { item.depends_on = ['author']; item.dependency_reasons = { author: 'Inspect the settled author attempt' }; }
     expect(inspectDispatchAdmission({ dispatched: workflow.stages, baseStages: [], dispatchStageId: 'plan' }).pass).toBe(true);
     const created = createRun(projectDir, workflow.name, `name: ${workflow.name}`, workflow.stages.map(item => item.id));
     const command = join(projectDir, 'validation.cjs');
     writeFileSync(command, failure === 'regression'
       ? 'console.log("FAIL spec/regression.test.ts");process.exitCode=1'
       : 'console.log("ok")');
+    writeFileSync(command, 'console.log("ok")');
+    for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, dirname(projectDir));
+    if (failure === 'regression') writeFileSync(command, 'process.exitCode=1');
     const baseline = await runProjectValidationBaseline(projectDir, {
       commands: (['build', 'test', 'lint'] as const).map(role => ({ role, command: process.execPath, args: [command], display: `private ${role}` })),
       runCommand: validationRunner(0),
     });
-    writeValidationSnapshot(created.runDirPath, baseline);
+    writeValidationSnapshot(created.runDirPath, baseline, false);
     let reviews = 0;
     let reviewStarted!: () => void, peerFinished!: () => void;
     const reviewing = new Promise<void>(resolve => { reviewStarted = resolve; });
     const peerDone = new Promise<void>(resolve => { peerFinished = resolve; });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       const summary = summaryResult(opts); if (summary) return fixtureResult(summary, opts);
+      if (opts.stageId === '_validation_identity') return { output: JSON.stringify({ version: 1, complete: true, testsRun: 1, failures: [{ testId: 'regression', file: 'spec/regression.test.ts', messageClass: 'test-failure' }] }), exitCode: 0, duration_ms: 1 };
+      if (opts.stageId === 'author' || opts.stageId.startsWith('repair_')) return fixtureResult({ output: 'Author attempt complete', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       if (opts.stageId === 'peer_review') return { output: JSON.stringify({ pass: true, reason: 'Peer reviewed', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       if (opts.stageId === 'peer') {
         await reviewing;
@@ -221,67 +236,43 @@ describe('engine generalization runtime bindings', () => {
     expect(receipt.pass).toBe(failure !== 'regression');
     if (failure === 'peer-regression') expect(final.stages.peer_review.gate).toMatchObject({ pass: false, kind: 'validation_regression' });
     expect(final.stages.qa.status).toBe('complete');
-    expect(reviews).toBe(failure === 'regression' ? 0 : 1);
+    expect(reviews).toBe(1);
     expect(final.stages.qa.attempts).toHaveLength(1);
   });
   it.each(['regression', 'regression-with-report', 'post-write-regression', 'persistent-unknown', 'transient-unknown', 'semantic'])
-  ('settles %s before spending gate review and preserves semantic repair', async (failure) => {
-    const { projectDir, agentsDir } = seedProject('validation-routing', 'qa', 'coder');
-    const regression = failure.includes('regression') || failure.endsWith('unknown');
-    const gate = stage({ id: 'qa', role: 'qa', is_gate: true,
-      ...(failure === 'regression-with-report' ? { artifact_contract: artifacts([
-        { id: 'verdict', root: 'run', path: 'verdict_qa.json' }, { id: 'report', root: 'project', path: 'docs/review.md' },
-      ], [], []) } : {}),
-      ...(failure === 'post-write-regression' ? { scope: ['validation.cjs'] } : {}),
+  ('preserves independent review and fails closed without rerunning the suite: %s', async failure => {
+    const { projectDir } = seedProject('validation-routing');
+    const created = createRun(projectDir, 'routing', 'name: routing', ['qa']);
+    const baseline = await configuredBaseline(projectDir);
+    writeValidationSnapshot(created.runDirPath, baseline);
+    const unknown = failure.endsWith('unknown');
+    const semantic = failure === 'semantic';
+    const current = baseline.results.map(result => result.state === 'not_configured' || semantic ? result : {
+      ...result, state: 'failed' as const, exitCode: 1,
+      failureIdentity: unknown ? 'unknown' as const : 'known' as const,
+      failureIdentifiers: unknown ? [] : ['declared-test-identity'],
     });
-    const repair = stage({ id: 'repair', role: 'coder', depends_on: ['qa'], retry_to: ['qa'] });
-    const workflow: WorkflowConfig = { name: 'validation-routing', defaults: { max_iterations: 1, max_retries: 0 }, stages: [gate, repair] };
-    const created = createRun(projectDir, workflow.name, 'name: validation-routing', ['qa', 'repair']);
-    const command = join(projectDir, 'validation.cjs'), marker = join(dirname(projectDir), 'validated-once');
-    writeFileSync(command, failure.startsWith('regression') ? 'console.log("FAIL spec/regression.test.ts"); process.exitCode=1'
-      : failure.endsWith('unknown') ? `const fs=require('node:fs'); const marker=${JSON.stringify(marker)};
-        if (${failure === 'persistent-unknown'} || !fs.existsSync(marker)) {
-          fs.writeFileSync(marker,'retry'); console.log('opaque failure'); process.exitCode=1;
-        } else console.log('ok');` : 'console.log("ok")');
-    writeValidationSnapshot(created.runDirPath, await runProjectValidationBaseline(projectDir, {
-      commands: [{ role: 'test', command: process.execPath, args: [command], display: 'configured test' }],
-      runCommand: validationRunner(0),
-    }));
-    const state = readRunState(projectDir, created.runId); state.maxRetries = 1;
-    writeRunState(projectDir, created.runId, state);
-    const calls: string[] = [];
-    let reviews = 0;
-    const final = await runWorkflow(workflow, 'name: validation-routing', projectDir, { async run(_prompt, _role, opts) {
-      const summary = summaryResult(opts); if (summary) return fixtureResult(summary, opts);
-      calls.push(opts.stageId);
-      if (opts.stageId === 'qa') {
-        if (failure === 'post-write-regression') writeFileSync(command, 'console.log("FAIL spec/regression.test.ts"); process.exitCode=1');
-        const pass = failure !== 'semantic' || ++reviews > 1;
-        return fixtureResult({ output: JSON.stringify({ pass, reason: pass ? 'Work verified' : 'Required behavior absent',
-          criteria: {}, audit_findings: { version: 1, findings: [] },
-          ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Independent behavior probe' } } : {}),
-        }), exitCode: 0, duration_ms: 1, writes: failure === 'post-write-regression' ? ['validation.cjs'] : [], writeAttribution: 'structured' }, opts);
-      }
-      const rejection = readGateEvaluation(projectDir, 'qa', created.runId);
-      expect(rejection?.reason).toContain(failure.endsWith('unknown') ? 'A green baseline no longer passes'
-        : regression ? 'spec/regression.test.ts' : 'Required behavior absent');
-      expect(rejection?.repairability?.evidence).toBeTruthy();
-      return fixtureResult({ output: 'Repair completed', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
-    } }, new Map(), undefined, agentsDir, created.runId, '# Independently verify the work.', true);
-    expect(calls).toEqual(failure === 'semantic' ? ['qa', 'repair', 'qa']
-      : failure === 'transient-unknown' ? ['repair', 'qa'] : failure === 'post-write-regression' ? ['qa', 'repair'] : regression ? ['repair'] : []);
-    expect(final.status).toBe(failure === 'semantic' || failure === 'transient-unknown' ? 'complete' : 'incomplete');
-    if (regression && failure !== 'transient-unknown') {
-      expect(readGateEvaluation(projectDir, 'qa', created.runId)?.pass).toBe(false);
-      expect(final.stages.qa.attempts).toHaveLength(2);
-    }
-    if (failure === 'persistent-unknown') {
-      expect(final.stages.qa).toMatchObject({ status: 'complete', exitCode: 0, gate: { pass: false, kind: 'validation_regression' } });
-      expect(final.failureReason).toContain('exhausted');
-    }
-    const receipts = readdirSync(created.runDirPath).filter(name => /^validation_delta_qa_attempt_/.test(name));
-    if (failure === 'transient-unknown') expect(receipts.map(name => JSON.parse(readFileSync(join(created.runDirPath, name), 'utf8')).pass))
-      .toEqual(expect.arrayContaining([false, true]));
+    seedAttemptValidation(projectDir, created.runId, current, { delta: current.filter(result => result.state !== 'not_configured').map(result => ({
+      role: result.role, display: result.display, state: semantic ? 'pass' as const : unknown ? 'unresolved' as const : 'regression' as const,
+      reason: unknown ? 'Identity reading unavailable' : 'Declared attempt result', newFailureIdentifiers: unknown || semantic ? [] : ['declared-test-identity'],
+    })) });
+    const at = new Date().toISOString();
+    writeStageStatus(projectDir, created.runId, 'qa', { status: 'complete', retries: 0,
+      attempts: [{ index: 1, status: 'complete', startedAt: at, completedAt: at, exitCode: 0 }] });
+    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: !semantic, reason: 'Independent behavioral review',
+      ...{} }));
+    let commands = 0;
+    const dependencies = { runCommand: () => { commands++; throw Error('A gate cannot execute configured validation'); } };
+    await recordGateValidationDelta(projectDir, created.runId, 'qa', dependencies);
+    if (failure === 'post-write-regression') writeFileSync(join(projectDir, 'peer.ts'), 'changed after measurement');
+    const verdict = readGateEvaluation(projectDir, 'qa', created.runId);
+    expect(verdict?.pass).toBe(false);
+    const kind = failure === 'post-write-regression' || unknown ? 'validation_unresolved' : semantic ? undefined : 'validation_regression';
+    expect(verdict?.refusal?.kind).toBe(kind);
+    for (let read = 0; read < 3; read++) await settleGateValidationEvidence(projectDir, created.runId, 'qa', dependencies);
+    expect(commands).toBe(0);
+    expect(readStageStatus(projectDir, created.runId, 'qa').attempts).toHaveLength(1);
+    if (kind === 'validation_regression') expect(verdict?.repairability?.disposition).toBe('repairable');
   });
   it('reads settled validation without another command execution or authored review', async () => {
     const { projectDir, agentsDir } = seedProject('gate-settlement-parity');
@@ -308,10 +299,11 @@ describe('engine generalization runtime bindings', () => {
     await settleGateRetries(state, [gate], 1, new Set(), projectDir, created.runId, created.runDirPath,
       workflow, adapter, new Map(), agentsDir, new Map());
     const settled = JSON.parse(readFileSync(join(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
-    expect(settled).toEqual(first);
-    expect(settled.pass).toBe(false); expect(settled.validationAttemptIndex).toBe(1);
+    const { current: _current, ...reference } = first!;
+    expect(settled).toEqual(reference);
+    expect(settled.pass).toBe(true); expect(settled.validationAttemptIndex).toBe(1);
     expect(readFileSync(join(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
-    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('validation runner unavailable');
+    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('ledgerSequence');
     expect(readRunState(projectDir, created.runId).stages.qa.attempts).toEqual(status.attempts);
   });
   it('does not let green validation approve a failed gate execution', async () => {
@@ -333,24 +325,24 @@ describe('engine generalization runtime bindings', () => {
     const created = createRun(projectDir, 'fixture', 'name: fixture', [gate.id]);
     writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
     const synthetic = await recordGateValidationDelta(projectDir, created.runId, gate.id, { runCommand: validationRunner(0) });
-    expect(synthetic).toMatchObject({ pass: true, attemptIndex: 0 });
-    const receiptTime = Date.parse(synthetic!.checkedAt);
+    expect(synthetic).toBeUndefined();
+    const receiptTime = Date.now();
     writeStageStatus(projectDir, created.runId, gate.id, { status: 'complete', retries: 0, attempts: [{
       index: 1, status: 'complete', startedAt: new Date(receiptTime + 1000).toISOString(),
       completedAt: new Date(receiptTime + 2000).toISOString(), exitCode: 0,
     }] });
     const verdict = JSON.stringify({ pass: true, reason: 'Authored work passes' });
     writeFileSync(join(created.runDirPath, `verdict_${gate.id}.json`), verdict);
-    expect(gateValidationRefusal(projectDir, created.runId, gate.id)?.reason).toMatch(/attempt 0.*attempt 1/);
+    expect(gateValidationRefusal(projectDir, created.runId, gate.id)?.reason).toContain('missing, stale');
     expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: false });
     let commands = 0;
     expect(await settleGateValidationEvidence(projectDir, created.runId, gate.id, {
       runCommand: request => { commands++; return validationRunner(0)(request); },
-    })).toEqual({ kind: 'replayed' });
-    expect(commands).toBe(3);
-    expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: true });
+    })).toMatchObject({ kind: 'refused' });
+    expect(commands).toBe(0);
+    expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: false });
     expect(readFileSync(join(created.runDirPath, `verdict_${gate.id}.json`), 'utf8')).toBe(verdict);
-    expect(JSON.parse(readFileSync(join(created.runDirPath, synthetic!.immutablePath!), 'utf8'))).toEqual(synthetic);
+    expect(readdirSync(created.runDirPath).some(name => name.startsWith('validation_delta_terminal_author_attempt_0'))).toBe(false);
   });
 
   it.each([
@@ -366,51 +358,94 @@ describe('engine generalization runtime bindings', () => {
     const receipt = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: validationRunner(0) });
     expect(receipt?.pass).toBe(true);
     writeFileSync(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'Authored work passes' }));
-    expect(gateValidationRefusal(projectDir, created.runId, 'qa')?.reason).toContain('belongs to execution');
+    expect(gateValidationRefusal(projectDir, created.runId, 'qa')?.reason).toContain('missing, stale');
     expect(readGateEvaluation(projectDir, 'qa', created.runId)).toMatchObject({ pass: false });
   });
 
-  it('requires an identity-bound receipt and never launches terminal validation', async () => {
+  it('requires an attempt-bound ledger fact and never launches terminal validation', async () => {
     const { projectDir } = seedProject('terminal-receipt');
     const created = createRun(projectDir, 'fixture', 'name: fixture', []);
-    writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    const baseline = await configuredBaseline(projectDir);
+    writeValidationSnapshot(created.runDirPath, baseline, false);
     const input = { projectDir, runId: created.runId, runDirPath: created.runDirPath,
       state: readRunState(projectDir, created.runId), ownerStageId: 'author', terminalPath: 'docs/final.md',
-      artifactMtimeMs: Date.now() - 1000, dependencies: { runCommand: validationRunner(0) } };
+      artifactMtimeMs: Date.now() - 1000,
+      dependencies: { runCommand: () => { throw Error('Terminal decisions cannot execute configured validation'); } } };
     expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: false, disposition: 'rejected' });
-    await recordGateValidationDelta(projectDir, created.runId, 'terminal_author', input.dependencies);
-    const noCommands = { runCommand: () => { throw new Error('A bound terminal receipt must be reused'); } };
-    expect(await ensureTerminalArtifactValidation({ ...input, dependencies: noCommands }))
-      .toMatchObject({ pass: true, disposition: 'already_blessed', validationStageId: 'terminal_author' });
-    expect(await ensureTerminalArtifactValidation({ ...input, ownerStageId: 'other', dependencies: noCommands }))
-      .toMatchObject({ pass: false, disposition: 'rejected' });
-    const path = join(created.runDirPath, 'validation_delta_terminal_author.json');
-    const receipt = JSON.parse(readFileSync(path, 'utf8'));
-    writeFileSync(path, JSON.stringify({ ...receipt, executionId: 'wrong-execution' }));
-    // The immutable original remains valid, so remove it to isolate the bad carrier.
-    rmSync(join(created.runDirPath, receipt.immutablePath));
-    expect(await ensureTerminalArtifactValidation({ ...input, dependencies: noCommands }))
-      .toMatchObject({ pass: false, disposition: 'rejected' });
+    seedAttemptValidation(projectDir, created.runId, baseline.results);
+    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'already_blessed', validationStageId: 'author' });
+    writeFileSync(join(projectDir, 'later.ts'), 'later source change');
+    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: false, disposition: 'rejected' });
+    expect(existsSync(join(created.runDirPath, 'validation_delta_terminal_author.json'))).toBe(false);
   });
 
-  it('retries a validation launch failure once without replacing its authored gate review', async () => {
+  it.each([undefined, 99, VALIDATION_FACT_VERSION])('uses supported receipt semantics before terminal completion without rerunning validation (version=%s)', async (version) => {
+    const { projectDir } = seedProject('terminal-receipt-version');
+    const terminalPath = 'docs/final.md';
+    mkdirSync(dirname(join(projectDir, terminalPath)), { recursive: true });
+    writeFileSync(join(projectDir, terminalPath), '# delivered bytes\n');
+    const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalizer']);
+    const state = terminalState(projectDir, created.runId, terminalPath, new Date(Date.now() - 200).toISOString());
+    writeRunState(projectDir, created.runId, state);
+    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+      version: 1, pass: true, errors: [], terminalOwners: { [terminalPath]: 'finalizer' },
+    }));
+    const baseline = await configuredBaseline(projectDir);
+    writeValidationSnapshot(created.runDirPath, baseline, false);
+    seedAttemptValidation(projectDir, created.runId, baseline.results, { stageId: 'finalizer' });
+    // Declared legacy/future receipt fixtures; keep all facts and their binding
+    // identical so only supported semantics can authorize the terminal result.
+    const ledgerPath = join(created.runDirPath, 'evidence-ledger.jsonl');
+    const fact = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    if (version === undefined) delete fact.validationVersion;
+    else fact.validationVersion = version;
+    const receiptBytes = `${JSON.stringify(fact)}\n`;
+    writeFileSync(ledgerPath, receiptBytes);
+    let validationCalls = 0;
+    const dependencies: ProjectValidationDependencies = { runCommand: () => {
+      validationCalls++;
+      throw new Error('Terminal receipt consumption must not execute configured validation');
+    } };
+    const accepted = version === VALIDATION_FACT_VERSION;
+    for (let decision = 0; decision < 2; decision++) {
+      expect(await ensureTerminalArtifactValidation({
+        projectDir, runId: created.runId, runDirPath: created.runDirPath, state,
+        ownerStageId: 'finalizer', terminalPath, artifactMtimeMs: Date.now() - 1000, dependencies,
+      })).toMatchObject({ required: true, pass: accepted, disposition: accepted ? 'already_blessed' : 'rejected' });
+    }
+    const result = await tryTerminateOnTerminalState(state, {
+      projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 1,
+      adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) },
+      validationDependencies: dependencies,
+    });
+    expect(result.decision).toBe(accepted ? 'matched' : 'deferred');
+    expect(state.status).toBe(accepted ? 'complete' : 'running');
+    expect(validationCalls).toBe(0);
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(receiptBytes);
+    expect(existsSync(join(created.runDirPath, 'validation_delta_terminal_finalizer.json'))).toBe(false);
+  });
+
+  it('retains an unknown attempt launch failure without retrying it or replacing independent review', async () => {
     const { projectDir } = seedProject('validation-only');
     const created = createRun(projectDir, 'validation-only', 'name: validation-only', ['qa']);
     const at = new Date().toISOString();
     writeStageStatus(projectDir, created.runId, 'qa', { status: 'complete', retries: 0,
       attempts: [{ index: 1, startedAt: at, completedAt: at, status: 'complete', exitCode: 0 }] });
     writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    const measured = await runProjectValidationBaseline(projectDir, { commands: (await configuredBaseline(projectDir)).discovery.commands,
+      runCommand: () => ({ exitCode: null, error: 'validation runner unavailable' }) });
+    seedAttemptValidation(projectDir, created.runId, measured.results);
     const verdict = JSON.stringify({ pass: true, reason: 'Authored review remains valid' });
     writeFileSync(join(created.runDirPath, 'verdict_qa.json'), verdict);
     const first = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: () => ({ exitCode: null, error: 'validation runner unavailable' }) });
     expect(first?.pass).toBe(false);
     expect(first?.delta.every((entry) => entry.state === 'unresolved')).toBe(true);
     let commands = 0;
-    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: (request) => { commands++; return validationRunner(0)(request); } })).toEqual({ kind: 'replayed' });
-    expect(commands).toBe(3);
+    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: (request) => { commands++; return validationRunner(0)(request); } })).toMatchObject({ kind: 'refused' });
+    expect(commands).toBe(0);
     expect(readFileSync(join(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
-    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('validation runner unavailable');
-    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: () => { throw new Error('settled validation must not repeat'); } })).toEqual({ kind: 'unchanged' });
+    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('ledgerSequence');
+    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: () => { throw new Error('settled validation must not repeat'); } })).toMatchObject({ kind: 'refused' });
   });
   it('keeps persistent validation launch failures fail-closed and bounds mechanical retries across calls', async () => {
     const { projectDir } = seedProject('validation-unresolved');
@@ -419,13 +454,16 @@ describe('engine generalization runtime bindings', () => {
     writeStageStatus(projectDir, created.runId, 'qa', { status: 'complete', retries: 0,
       attempts: [{ index: 1, startedAt: at, completedAt: at, status: 'complete', exitCode: 0 }] });
     writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
+    const measured = await runProjectValidationBaseline(projectDir, { commands: (await configuredBaseline(projectDir)).discovery.commands,
+      runCommand: () => ({ exitCode: null, error: 'validation runner unavailable' }) });
+    seedAttemptValidation(projectDir, created.runId, measured.results);
     let commands = 0;
     const deps = { runCommand: () => { commands++; return { exitCode: null, error: 'validation runner unavailable' }; } };
     await recordGateValidationDelta(projectDir, created.runId, 'qa', deps);
     expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('refused');
-    expect(commands).toBe(6);
+    expect(commands).toBe(0);
     expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('refused');
-    expect(commands).toBe(6);
+    expect(commands).toBe(0);
   });
   it('9 — routes authored/effective rejection facts to the responsible producer', async () => {
     const measure = stage({ id: 'measure', scope: ['artifacts/round.json'] });
@@ -563,10 +601,12 @@ describe('engine generalization runtime bindings', () => {
         terminalOwners: { [terminalPath]: 'finalizer' },
       }));
       const baseline = await configuredBaseline(projectDir);
-      const snapshot = writeValidationSnapshot(created.runDirPath, baseline);
+      const snapshot = writeValidationSnapshot(created.runDirPath, baseline, false);
       const oldCheckedAt = new Date(Date.parse(completedAt) - 200).toISOString();
       let validationCalls = 0;
       if (laterBlessing === 'current') {
+        const measured = await runProjectValidationBaseline(projectDir, { commands: baseline.discovery.commands, runCommand: validationRunner(laterBlessingPass ? 0 : 1) });
+        seedAttemptValidation(projectDir, created.runId, measured.results, { stageId: 'finalizer' });
         const attemptStartedAt = new Date(Date.parse(completedAt) + 50).toISOString();
         const attemptCompletedAt = new Date(Date.parse(completedAt) + 100).toISOString();
         writeStageStatus(projectDir, created.runId, 'qa', {

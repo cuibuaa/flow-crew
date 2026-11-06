@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { execFileSync } from 'node:child_process';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
 import { fcGlobalDir, runDir, setFcGlobalDir } from '../src/store.js';
+import { readEvidence } from '../src/evidence-ledger.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { writeReadySetupRecord } from './test-support/ready-setup.js';
 
@@ -36,6 +38,7 @@ function adapter(calls: string[], rejectFirstReview: boolean, observe?: (prompt:
   let reviews = 0;
   return {
     async run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
+      if (opts.stageId === '_validation_identity') return { output: JSON.stringify({ version: 1, testsRun: 1, complete: true, failures: [{ testId: 'new test', file: 'spec/new.test.ts', messageClass: 'assertion' }] }), exitCode: 0, duration_ms: 1 };
       if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       calls.push(opts.stageId);
       observe?.(prompt, role, opts);
@@ -71,7 +74,8 @@ describe('direct workflow', () => {
         expect(opts.resumeSessionId).not.toBe(authorSession);
         if (captured.filter(call => call.id === 'review').length === 1) {
           expect(opts.resumeSessionId).not.toBeDefined();
-          expect(user).toContain('Previous stage: implement');
+          expect(user).toContain('evidence-ledger.jsonl');
+          expect(user).toContain('change.diff');
         } else if (opts.resumeSessionId) {
           expect(opts.resumeSessionId).toBe(reviewerSession);
           expect(opts.sessionOwnerStageId).toBe('review');
@@ -112,23 +116,25 @@ describe('direct workflow', () => {
     const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
     ready.validationBaseline.discovery.commands[0].args = ['validation-probe.mjs'];
     writeFileSync(readyPath, JSON.stringify(ready));
+    writeFileSync(join(projectDir, 'validation-probe.mjs'), 'process.exit(0);\n');
+    for (const args of [['init', '-q'], ['config', 'user.name', 'Fixture'], ['config', 'user.email', 'fixture@example.invalid'], ['add', '.'], ['commit', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, fixtureRoot);
     const calls: string[] = [];
     const receipts: string[] = [];
     const final = await runDirect(task, calls, false, (prompt, _role, opts) => {
       if (opts.stageId === 'implement') writeFileSync(join(projectDir, 'validation-probe.mjs'), 'process.stderr.write("FAIL spec/new.test.ts\\n"); process.exit(1);\n');
       if (opts.stageId === 'repair') writeFileSync(join(projectDir, 'validation-probe.mjs'), 'process.exit(0);\n');
       if (opts.stageId === 'review') {
-        expect(prompt).toContain('Engine validation:');
-        expect(prompt).toContain('exit=');
-        const receipt = prompt.match(/Receipt: (.+?\.json)/)?.[1];
-        expect(receipt).toBeDefined();
-        receipts.push(receipt!);
-        expect(JSON.parse(readFileSync(receipt!, 'utf8')).current[0].exitCode).toBe(0);
+        expect(prompt).toContain('evidence-ledger.jsonl');
+        expect(prompt).toContain('change.diff');
+        const ledger = readEvidence(opts.runDir);
+        const validation = ledger.filter(entry => entry.kind === 'validation').at(-1)!;
+        receipts.push(String(validation.sequence));
+
       }
     });
     expect(final.status, final.failureReason).toBe('complete');
-    expect(calls).toEqual(['implement', 'repair', 'review']);
-    expect(receipts).toHaveLength(1);
+    expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(receipts).toHaveLength(2);
   });
 
   // A no-regression receipt can still carry commands that failed or never ran
@@ -136,7 +142,7 @@ describe('direct workflow', () => {
   it.each([
     { state: 'passed', probe: 'process.exit(0);\n', rerunAdvised: false },
     { state: 'failed', probe: 'process.exit(1);\n', rerunAdvised: true },
-  ])('advises against rerunning configured commands only when they $state', async ({ state, probe, rerunAdvised }) => {
+  ])('consumes recorded commands without a gate rerun when the attempt is $state', async ({ state, probe, rerunAdvised }) => {
     const task = brief('outputs:\n  - docs/report.md');
     const readyPath = writeReadySetupRecord(projectDir, task, fcGlobalDir());
     const ready = JSON.parse(readFileSync(readyPath, 'utf8'));
@@ -149,12 +155,12 @@ describe('direct workflow', () => {
     writeFileSync(join(projectDir, 'validation-probe.mjs'), probe);
     const prompts: string[] = [];
     const final = await runDirect(task, [], false, (prompt, _role, opts) => { if (opts.stageId === 'review') prompts.push(prompt); });
-    expect(final.status, final.failureReason).toBe('complete');
+    expect(final.status, final.failureReason).toBe(state === 'passed' ? 'complete' : 'failed');
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain('Engine validation: pass=true');
-    expect(prompts[0]).toContain(`exit=${state === 'passed' ? 0 : 1}, state=${state}`);
-    expect(prompts[0]).toContain("(each command's result and output tail)");
-    expect(prompts[0].includes('Do not rerun configured commands')).toBe(!rerunAdvised);
+    expect(prompts[0]).toContain('evidence-ledger.jsonl');
+    expect(prompts[0]).toContain('change.diff');
+    expect(prompts[0]).toContain('decisions consume its tree-bound results without rerunning the suite');
+
   });
 
   it('cannot accept a missing declared output even when the reviewer accepts', async () => {

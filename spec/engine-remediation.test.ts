@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { hashRollbackFileSync } from '../src/rollback-content-store.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
@@ -178,10 +179,12 @@ describe('engine behaviour contracts', () => {
       dependsOn: [], promptTemplate: 'audit', projectDir, runId: created.runId,
       runDir: created.runDirPath, taskDescription: '# fixture', isGate: true, stageId: 'qa',
     });
+    seedAttemptValidation(projectDir, created.runId, baseline.results);
     const unchanged = await recordGateValidationDelta(projectDir, created.runId, 'qa', {
       runCommand: () => ({ exitCode: 1, stdout: 'FAIL spec/existing.test.ts\nTests 1 failed' }),
     });
     const unchangedVerdict = readGateEvaluation(projectDir, 'qa', created.runId);
+    seedAttemptValidation(projectDir, created.runId, [validationResult('test', 'failed', ['spec/existing.test.ts', 'spec/new.test.ts'])]);
     const regressed = await recordGateValidationDelta(projectDir, created.runId, 'qa', {
       runCommand: () => ({ exitCode: 1, stdout: 'FAIL spec/existing.test.ts\nFAIL spec/new.test.ts\nTests 2 failed' }),
     });
@@ -196,7 +199,7 @@ describe('engine behaviour contracts', () => {
     expect(regressed?.immutablePath).not.toBe(unchanged?.immutablePath);
     expect(existsSync(join(created.runDirPath, unchanged!.immutablePath!))).toBe(true);
     expect(existsSync(join(created.runDirPath, regressed!.immutablePath!))).toBe(true);
-    expect(regressedVerdict).toMatchObject({ pass: false, reason: expect.stringContaining('recorded regressions') });
+    expect(regressedVerdict).toMatchObject({ pass: false, reason: expect.stringContaining('Introduced validation failures') });
     expect(noBaselineVerdict?.pass).toBe(true);
   });
 

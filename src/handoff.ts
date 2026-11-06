@@ -1,7 +1,7 @@
 // Module: handoff
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStageOutput, readStageStatus } from './store.js';
+import { evidenceContext } from './evidence-ledger.js';
 import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 import { validate, type Schema } from './reality-gate/checks/json-schema-match.js';
 import { captureResearchGateCandidate } from './research-candidate.js';
@@ -41,7 +41,6 @@ const object = (properties: Record<string, Schema>, optional: Record<string, Sch
 const completion = { remaining_work: strings };
 export const HANDOFF_SCHEMA = object({
   status: { type: 'string', enum: ['delivered', 'blocked'] }, summary: text,
-  checks: { type: 'array', items: object({ command: text, exit_code: { type: 'integer' }, evidence: text }) },
   caveats: strings, ...completion,
 });
 
@@ -50,6 +49,7 @@ export const HANDOFF_SCHEMA = object({
 export const RECORDED_HANDOFF_SCHEMA: Schema = { ...HANDOFF_SCHEMA,
   required: HANDOFF_SCHEMA.required!.filter(key => key !== 'remaining_work'), properties: {
   ...HANDOFF_SCHEMA.properties, files_modified: strings,
+  checks: { type: 'array', items: object({ command: text, exit_code: { type: 'integer' }, evidence: text }) },
 } };
 
 /** Ordinary verdicts are closed record variants. Optional legacy
@@ -87,41 +87,9 @@ export function parseStageRecord(output: string, schema: Schema): Record<string,
   return record as Record<string, unknown>;
 }
 
-/** A bounded excerpt keeps old prose and new JSON records readable. Iterating
- * code points handles UTF-8 without the separate head/tail implementations. */
-function utf8Slice(value: string, budget: number, tail = false): string {
-  const points = [...value];
-  if (tail) points.reverse();
-  const kept: string[] = [];
-  for (const point of points) {
-    budget -= Buffer.byteLength(point);
-    if (budget < 0) break;
-    kept.push(point);
-  }
-  return (tail ? kept.reverse() : kept).join('');
-}
-
+/** Kept as an API for callers; verbosity never grants transcript access. */
 export function buildDependencyContext(opts: Pick<HandoffOpts, 'dependsOn' | 'handoffVisibility' | 'projectDir' | 'runId' | 'runDir'>): string {
-  const visibility = opts.handoffVisibility ?? 'full';
-  if (visibility === 'none') return '';
-  return opts.dependsOn.map(depId => {
-    let status = 'unknown';
-    let artifacts: string[] = [];
-    try { const source = readStageStatus(opts.projectDir, opts.runId, depId); status = source.status; artifacts = source.artifacts ?? []; } catch { /* absent history */ }
-    const output = readStageOutput(opts.projectDir, opts.runId, depId);
-    const heading = visibility === 'minimal' ? `## Previous stage: ${depId}` : `## Context from stage: ${depId}`;
-    const candidate = `${heading}\nStatus: ${status}\nArtifacts: ${artifacts.join(', ') || 'none'}\n${visibility === 'minimal' ? 'Review the change against the brief.' : `Summary:\n${output}`}`;
-    if (Buffer.byteLength(candidate) <= MAX_PREDECESSOR_CONTEXT_BYTES) return candidate;
-    const header = `${heading}\nStatus: ${status}\nInline predecessor block: ${Buffer.byteLength(candidate)} UTF-8 bytes; limit: ${MAX_PREDECESSOR_CONTEXT_BYTES} bytes.\nComplete predecessor stage directory: ${join(opts.runDir, 'stages', depId)}\nArtifact names omitted from this prompt: ${artifacts.length}. Read status.json for complete status and artifacts.\nComplete output: output.md (${Buffer.byteLength(output)} UTF-8 bytes).\nInline output excerpt (head and tail when truncated):`;
-    const budget = Math.min(visibility === 'minimal' ? 512 : MAX_PREDECESSOR_CONTEXT_BYTES, Math.max(0, MAX_PREDECESSOR_CONTEXT_BYTES - Buffer.byteLength(header) - 1));
-    const marker = `\n...[${Buffer.byteLength(output)} UTF-8 output bytes omitted; read output.md for the complete output]...\n`;
-    const content = Math.max(0, budget - Buffer.byteLength(marker));
-    const tail = Math.min(2000, Math.floor(content / 4));
-    const head = utf8Slice(output, content - tail), ending = utf8Slice(output, tail, true);
-    const omission = Buffer.byteLength(output) - Buffer.byteLength(head) - Buffer.byteLength(ending);
-    const excerpt = Buffer.byteLength(output) <= budget ? output : `${head}${marker.replace(String(Buffer.byteLength(output)), String(omission))}${ending}`;
-    return utf8Slice(`${header}\n${excerpt}`, MAX_PREDECESSOR_CONTEXT_BYTES);
-  }).join('\n\n');
+  return evidenceContext(opts.projectDir, opts.runDir, opts.dependsOn.join('-') || 'initial');
 }
 
 function substituteTemplate(template: string, vars: Record<string, string>): string {
@@ -161,7 +129,7 @@ export function buildStagePrompt(opts: HandoffOpts): string {
       return '## Canonical brief criteria assigned to this stage\nThe criterion artifact is unreadable; stop and report the contract failure.';
     }
   })();
-  const context = opts.dependsOn.length > 0 ? buildDependencyContext(opts) : '';
+  const context = evidenceContext(opts.projectDir, opts.runDir, opts.stageId ?? 'initial');
   const skillsContent = loadSkills(opts.skillNames || [], opts.projectDir);
   const anchor = skillsContent
     ? '\n\n---\nThe skill below provides methodology guidance for HOW to approach your task. Do NOT let it change WHAT you are doing — the task above takes absolute priority.\n'

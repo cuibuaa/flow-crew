@@ -1,8 +1,8 @@
 // Boundary: Canonical iteration/round coordinates, archived-record reads, evidence copies and gate framing; no live verdict policy or provider execution.
-import { GATE_VERDICT_CORRECTION_VERSION, gateVerdictCorrectionPath } from '../sched_admission/sessions.js';
 import { copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { readEvidence } from '../../evidence-ledger.js';
 import type { GateRuntimeFacts } from './gate-recovery.js';
 import { readArchivedRunStateFromDirectory, type GateVerdict } from '../../store.js';
 import { latestInvocationInput } from '../../run-state-view.js';
@@ -232,33 +232,16 @@ export function archivedGateRejections(runDirPath: string, gateId: string): Arch
 
 /** Frame a gate's evaluation, and name any blocker reported by the authors it reviews (by default its fix stages). */
 export function buildGateDispatchPreamble(input: Parameters<typeof gateEvaluationFraming>[0] & { authorIds?: readonly string[] }): string {
-  return [gateEvaluationFraming(input), reportedBlockerNotice(input.runDirPath, input.authorIds ?? input.fixStageIds ?? [])]
-    .filter(Boolean).join('\n\n');
+  const authors = input.authorIds ?? input.fixStageIds ?? [];
+  const blocked = readEvidence(input.runDirPath).some(entry => entry.kind === 'declaration' && authors.includes(entry.stageId));
+  return [gateEvaluationFraming(input), ...(blocked ? [
+    'REPORTED BLOCKER: unverified author declarations and declared checks are recorded in the evidence ledger. Judge each blocker from your own reproduction.',
+    'A confirmed blocker does not establish irreparability. If a repair or accepted scope revision can resolve it, reject with repairability "repairable" and findings showing that route. Engine enforcement or a scope denial alone is not evidence that delivery is impossible.',
+    'Use repairability "irreparable" only with reproduced evidence that no available repair can meet the brief. Pass only when every assigned criterion holds, including any explicitly permitted blocked outcome.',
+  ] : [])].join('\n\n');
 }
 
 /** An author may answer "blocked" instead of delivering; its gate is the independent check of that claim. */
-function reportedBlockerNotice(runDirPath: string, authorIds: readonly string[]): string {
-  const reports = authorIds.flatMap((id) => {
-    const path = join(runDirPath, 'stages', id, 'output.md');
-    try {
-      const record = JSON.parse(readFileSync(path, 'utf-8')) as {
-        status?: unknown; summary?: string; caveats?: string[]; checks?: Array<{ command: string; exit_code: number; evidence: string }>;
-      };
-      return record.status !== 'blocked' ? [] : [`- ${id}: ${record.summary} (complete record: ${path})`,
-        ...(record.caveats ?? []).map((caveat) => `  - ${caveat}`),
-        ...(record.checks ?? []).map((check) => `  - \`${check.command}\` exited ${check.exit_code}: ${check.evidence}`)];
-    } catch { return []; }
-  });
-  return reports.length === 0 ? '' : [
-    'REPORTED BLOCKER: each author below answered "blocked" instead of delivering, with this stated reason and evidence:',
-    ...reports,
-    'Judge each blocker from your own reproduction, not from the author\'s account:',
-    '- A confirmed blocker does not establish irreparability. If the brief is unmet and a repair or accepted scope revision can resolve the blocker, reject with repairability "repairable" and findings showing that route. Engine enforcement or a scope denial alone is not evidence that delivery is impossible.',
-    '- Use repairability "irreparable" only with reproduced evidence that no available repair can meet the brief; explain why the blocker needs operator action. The run then ends escalated for the operator.',
-    '- Pass only if every assigned criterion holds, for instance because the brief explicitly accepts a blocked report as a valid outcome.',
-  ].join('\n');
-}
-
 function gateEvaluationFraming(input: {
   runDirPath: string;
   gateId: string;
@@ -271,8 +254,6 @@ function gateEvaluationFraming(input: {
 }): string {
   const rejections = archivedGateRejections(input.runDirPath, input.gateId);
   const latest = rejections.at(-1);
-  const fixOutputs = (input.fixStageIds ?? [])
-    .map((id) => `- ${join(input.runDirPath, 'stages', id, 'output.md')}`).join('\n');
   if (!latest) {
     const liveVerdictPass = readWrittenVerdictPass(join(input.runDirPath, `verdict_${input.gateId}.json`));
     if (liveVerdictPass === true) {
@@ -285,48 +266,32 @@ function gateEvaluationFraming(input: {
       return [
         `INTERRUPTED EVALUATION (round ${input.evaluationRound}): A prior execution ended without a durable rejected verdict; run the gate as an initial evaluation, not as a re-evaluation of a rejection.`,
         '',
-        'Evidence retained from the interrupted attempt:',
-        ...(input.interruptedInputPath && existsSync(input.interruptedInputPath)
-          ? [`- Exact input seen by the interrupted gate: ${input.interruptedInputPath}`]
-          : ['- Exact input seen by the interrupted gate: unavailable']),
-        ...(input.interruptedOutputPath && existsSync(input.interruptedOutputPath)
-          ? [`- Partial prior gate output: ${input.interruptedOutputPath}`]
-          : []),
+        `Use the evidence ledger and current diff in ${input.runDirPath}; prior transcripts are not decision input.`,
         'No rejected verdict was recorded, so there is no prior decision to reproduce or repair.',
-        'Review as a first evaluation: check every assigned criterion against the change in proportion to its size and risk. The engine runs the configured validation for this gate.',
+        'Review as a first evaluation: check every assigned criterion against the change in proportion to its size and risk. The engine records configured validation once per author attempt; consume the ledger without rerunning it.',
       ].join('\n');
     }
     return [
       `FIRST EVALUATION (round ${input.evaluationRound}): No prior execution or durable rejected verdict exists for gate ${input.gateId}.`,
-      'Check every assigned criterion against the change in proportion to its size and risk. The engine runs the configured validation for this gate.',
+      'Check every assigned criterion against the change in proportion to its size and risk. The engine records configured validation once per author attempt; consume the ledger without rerunning it.',
     ].join('\n');
   }
 
-  const firstCoverageOutput = rejections.find((entry) => existsSync(entry.outputPath))?.outputPath
-    ?? latest.outputPath;
   return [
     `RE-EVALUATION (round ${input.evaluationRound}): Continue the same gate's audit after a durable rejection.`,
     '',
     'Evidence you must read:',
     `- Rejected verdict: ${latest.verdictPath}`,
-    ...(existsSync(latest.inputPath)
-      ? [`- Exact input evaluated by the rejected gate: ${latest.inputPath}`]
-      : ['- Exact input evaluated by the rejected gate: unavailable (this round predates input archiving or did not retain an input)']),
     `- The engine's own conclusion and rejection reason: ${latest.effectiveVerdictPath}`,
     '  If that file shows engine_effective_pass=false while written_verdict_pass=true, the',
     '  verdict file is not the defect — engine_rejection_reason names what the engine',
     '  objected to, and that is what must change.',
     ...(existsSync(latest.metricPath) ? [`- Historical metric artifact: ${latest.metricPath}`] : []),
-    `- Original first-pass gate output: ${firstCoverageOutput}`,
-    ...(existsSync(latest.outputPath) && latest.outputPath !== firstCoverageOutput
-      ? [`- Immediately previous gate output: ${latest.outputPath}`]
-      : []),
     ...(input.roundDiffPath
       ? [`- Complete, untruncated repair-round diff: ${input.roundDiffPath}`]
-      : ['- Complete repair-round diff: unavailable on this dispatch route; inspect the archived input/output and current repository diff.']),
-    ...(fixOutputs ? ['- Fix stage output(s):', fixOutputs] : []),
+      : ['- Complete repair-round diff: inspect the evidence ledger and current repository diff.']),
     '',
-    'Check each rejected finding against the repair diff, and re-check earlier conclusions only where the diff touches them. The engine re-runs the configured validation for this gate.',
+    'Check each rejected finding against the repair diff, and re-check earlier conclusions only where the diff touches them. Consume the repair attempt\'s configured validation from the ledger without rerunning it.',
     'Reject again only for a rejected finding the repair did not resolve, a regression the repair introduced, or a failure that a user of the outcome the brief describes would meet; record any other difference you find as a stated limitation in the verdict and pass.',
     'Do not treat a repair summary or the existence of changed code as proof.',
   ].join('\n');
@@ -337,25 +302,10 @@ export function buildGateFixCorrectionContract(
   gateIds: string[],
   coordinate: GateArchiveCoordinate,
 ): string {
-  const entries = gateIds.map((gateId) => {
-    const evaluatedInput = gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'input');
-    return [
-      `- Gate ${gateId}:`,
-      `  - archived rejected verdict: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'verdict')}`,
-      existsSync(evaluatedInput)
-        ? `  - archived evaluated input: ${evaluatedInput}`
-        : '  - archived evaluated input: unavailable (this round predates input archiving or did not retain an input)',
-      `  - archived evaluated metric: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'metric')}`,
-      `  - archived QA output: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'output')}`,
-      `  - optional correction marker: ${gateVerdictCorrectionPath(runDirPath, gateId)}`,
-    ].join('\n');
-  }).join('\n');
   return [
-    `Gate repair round ${coordinate.round}: read the archived rejection evidence before changing anything:`,
-    entries,
-    '',
-    'Wrong-verdict cold-start contract: only if reproducible evidence proves the previous rejection itself was wrong (rather than an implementation defect being repaired), write that gate\'s optional correction marker with exactly this JSON shape:',
-    `{"version":${GATE_VERDICT_CORRECTION_VERSION},"gateId":"<exact gate id>","previousVerdictWrong":true,"reason":"<why the prior reasoning was wrong>","evidence":"<reproducible command/probe and result>"}`,
-    'Do not write a correction marker for an ordinary fix. The marker invalidates only the prior validator session; it never changes the gate verdict or acceptance criteria.',
+    `Gate repair round ${coordinate.round}: resolve the structured rejected findings.`,
+    ...gateIds.map(gateId => `- Gate ${gateId}: archived rejected verdict: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'verdict')}`),
+    `Retained facts: ${join(runDirPath, 'evidence-ledger.jsonl')}; inspect the current diff.`,
+    'A fresh independent gate will check the repair and every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence. Never treat an author summary as proof.',
   ].join('\n');
 }

@@ -42,7 +42,7 @@ export function runStateContext(projectDir: string, runId: string, revision?: { 
   const outputs = existsSync(join(runDir(projectDir, runId), 'run.json')) ? declaredOutputFacts(projectDir, runId) : [];
   return `# Engine state query\nRun binding: ${JSON.stringify({ runId })}.\n${revision ? `Admitted plan revision ${revision.revision}, digest ${revision.digest}.\n` : ''}`
     + `Read current state with flowcrew state --project ${shellQuote(projectDir)} --run ${shellQuote(runId)}. `
-    + 'Use --summary for a bounded view or --prompts for immutable invocation bytes. '
+    + 'Use --summary for current engine state; use the evidence ledger and diff for stage decisions. '
     + 'An observation grants no permission and is not a successful verdict.'
     + (outputs.length ? `\n\n# Required declared outputs (current engine facts)\n${JSON.stringify(outputs)}\n`
       + 'These products must remain available with the declared type. Guidance cannot remove these obligations. '

@@ -1,0 +1,179 @@
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { join, relative, resolve, isAbsolute } from 'node:path';
+import { safeEvidencePath } from './engine-owned-carriers.js';
+export { safeEvidencePath } from './engine-owned-carriers.js';
+import { fcGlobalDir } from './store.js';
+import { appendFileSync, mkdirSync, writeFileSync } from './engine-fs.js';
+import { readContentIdentity, type ContentIdentity } from './content-identity.js';
+import { listProjectFiles, listProjectFilesAt } from './scheduler/sched_scope/path-capabilities.js';
+import { extractBriefOutputDeclarations, parseBriefInputs } from './ship-inputs.js';
+import type { ValidationCommandResult, ValidationDeltaResult } from './project-validation.js';
+
+export const EVIDENCE_LEDGER = 'evidence-ledger.jsonl';
+export const VALIDATION_FACT_VERSION = 2;
+export interface TreeFile { path: string; mode: number; content: ContentIdentity; targetContent?: ContentIdentity }
+export interface ProjectTree { hash: string | null; files: TreeFile[]; reason?: string }
+export interface ValidationExecution {
+  target: 'attempt' | 'base';
+  cwd: string;
+  commit?: string;
+  treeHash: string | null;
+  treeAfterHash: string | null;
+  commands: Array<ValidationCommandResult & { command: string; args: string[]; outputPath?: string }>;
+}
+export interface ValidationFact {
+  kind: 'validation';
+  /** Missing/unsupported versions remain readable, but cannot authorize gates. */
+  validationVersion?: number;
+  stageId: string;
+  attemptIndex: number;
+  attemptStartedAt: string;
+  treeHash: string | null;
+  executions: ValidationExecution[];
+  delta: ValidationDeltaResult[];
+  failures: Array<{ role: string; display?: string; identifier: string | null; classification: 'pre-existing' | 'introduced' | 'unknown' }>;
+  pass: boolean;
+  baseInputSnapshot?: { manifestSha256: string; files: number; bytes: number; durationMs: number; error?: string };
+}
+export type EvidenceFact = ValidationFact | {
+  kind: 'attempt'; stageId: string; attemptIndex: number; attemptStartedAt: string;
+  exitCode: number; status: string; treeHash: string | null;
+  files: TreeFile[];
+  remainingWork?: string[] | null; continuation?: boolean;
+  measurements: { inputTokens: number | null; outputTokens: number | null; durationMs: number; provenance: 'adapter-reported' };
+} | {
+  kind: 'declaration'; stageId: string; attemptIndex: number; status: 'blocked'; reason: string;
+  caveats: string[]; owner: 'declaration';
+} | {
+  kind: 'command'; stageId: string; attemptIndex: number; invocationIndex?: number; commandId: string; command: string | null;
+  exitCode: number | null; owner: 'adapter-event' | 'declaration'; evidence?: string;
+} | {
+  kind: 'decision'; stageId: string; attemptIndex: number; verdict: Record<string, unknown>; owner: 'closed-schema-model';
+} | {
+  kind: 'identity-reading'; stageId: string; attemptIndex: number; command: string;
+  inputSha256: string; inputBytes: number; truncated: boolean; valid: boolean;
+  inputTokens: number | null; outputTokens: number | null; owner: 'closed-schema-model';
+};
+export type EvidenceEntry = EvidenceFact & { version: 1; sequence: number; at: string; owner?: string };
+
+/** All publications pass through the existing engine filesystem/integrity owner.
+ * This single channel replaces predecessor output and native session history. */
+export function appendEvidence(runDir: string, fact: EvidenceFact): EvidenceEntry {
+  const entries = readEvidence(runDir);
+  const entry = { version: 1 as const, sequence: entries.length + 1, at: new Date().toISOString(), owner: 'code', ...fact };
+  appendFileSync(join(runDir, EVIDENCE_LEDGER), `${JSON.stringify(entry)}\n`);
+  return entry;
+}
+
+export function readEvidence(runDir: string): EvidenceEntry[] {
+  const path = join(runDir, EVIDENCE_LEDGER);
+  if (!existsSync(path)) return [];
+  return readFileSync(path, 'utf8').split('\n').filter(Boolean).map((line, index) => {
+    const value = JSON.parse(line) as EvidenceEntry;
+    if (value.version !== 1 || value.sequence !== index + 1
+      || !['validation', 'attempt', 'command', 'decision', 'identity-reading', 'declaration'].includes(value.kind)) throw new Error('EVIDENCE_LEDGER_INVALID');
+    return value;
+  });
+}
+
+
+/** Identity covers Git's source inventory, plus explicitly declared ignored
+ * inputs. Generated ignored outputs are not source. Unreadable members fail closed. */
+export function captureProjectTree(projectDir: string, brief = ''): ProjectTree {
+  try {
+    const stateRoot = resolve(fcGlobalDir());
+    const ordinary = (path: string) => {
+      const member = relative(stateRoot, resolve(projectDir, path));
+      return member !== '' && (isAbsolute(member) || member === '..' || member.startsWith('../') || member.startsWith('..\\'));
+    };
+    const paths = new Set(listProjectFiles(projectDir, { skipDirectory: path => !ordinary(path) || !safeEvidencePath(path) }).filter(path => ordinary(path) && safeEvidencePath(path)));
+    const declaredInputs = new Set(parseBriefInputs(brief).references.map(input => input.path));
+    for (const path of [...declaredInputs, ...extractBriefOutputDeclarations(brief).map(output => output.path)]) {
+      if (!ordinary(path) || !safeEvidencePath(path)) continue;
+      for (const member of listProjectFilesAt(projectDir, path, declaredInputs.has(path), { complete: true, skipDirectory: path => !safeEvidencePath(path) })) {
+        if (safeEvidencePath(member) && !lstatSync(join(projectDir, member)).isDirectory()) paths.add(member);
+      }
+    }
+    const files: TreeFile[] = [...paths].sort().map(path => {
+      const content = readContentIdentity(join(projectDir, path));
+      const file: TreeFile = { path, mode: content.state === 'present' ? lstatSync(join(projectDir, path)).mode & 0o777 : 0, content };
+      if (declaredInputs.has(path) && content.state === 'present' && content.type === 'symlink') {
+        const target = realpathSync(join(projectDir, path));
+        if (!safeEvidencePath(target)) throw new Error('Declared input resolves to a credential/control path');
+        if (lstatSync(target).isFile()) file.targetContent = readContentIdentity(target);
+      }
+      return file;
+    }).filter(file => file.content.state !== 'absent');
+    if (files.some(file => file.content.state === 'unavailable' || file.targetContent?.state === 'unavailable')) return { hash: null, files, reason: 'Source inventory contains unavailable content' };
+    return { hash: createHash('sha256').update(JSON.stringify(files)).digest('hex'), files };
+  } catch (error) { return { hash: null, files: [], reason: String(error) }; }
+}
+
+export function changedTreeFiles(before: ProjectTree, after: ProjectTree): TreeFile[] {
+  const left = new Map(before.files.map(file => [file.path, file]));
+  const right = new Map(after.files.map(file => [file.path, file]));
+  return [...new Set([...left.keys(), ...right.keys()])].sort().flatMap(path => {
+    const current = right.get(path) ?? { path, mode: 0, content: { state: 'absent' as const } };
+    return JSON.stringify(left.get(path)) === JSON.stringify(right.get(path)) ? [] : [current];
+  });
+}
+
+export function projectCommit(projectDir: string): string | undefined {
+  const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD^{commit}'], {
+    cwd: projectDir, encoding: 'utf8', timeout: 15_000, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  });
+  return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+/** Diff is a separate inspectable artifact, never a summary by the author. Git
+ * supplies the patch; structured file identities also include untracked writes. */
+export function evidenceContext(projectDir: string, runDir: string, _stageId: string): string {
+  if (!existsSync(join(runDir, EVIDENCE_LEDGER))) writeFileSync(join(runDir, EVIDENCE_LEDGER), '', { flag: 'wx' });
+  const entries = readEvidence(runDir);
+  const validation = entries.filter((entry): entry is EvidenceEntry & ValidationFact => entry.kind === 'validation').at(-1);
+  const baselinePath = join(runDir, 'validation_baseline.json');
+  let commit: string | undefined;
+  try { commit = JSON.parse(readFileSync(baselinePath, 'utf8')).baseCommit; } catch { /* no Git baseline */ }
+  const diff = commit ? spawnSync('git', ['diff', '--no-ext-diff', '--no-textconv', '--binary', commit, '--', '.', ':(exclude)**/.env*', ':(exclude)**/auth.json', ':(exclude)**/credentials.json', ':(exclude)**/installation_id'], {
+    cwd: projectDir, encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  }) : undefined;
+  let patch = diff?.status === 0 ? diff.stdout : 'Git patch unavailable; inspect current files and structured changed-file identities in the ledger.\n';
+  if (commit) {
+    const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: projectDir,
+      encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+    if (untracked.status !== 0) patch += '\nUntracked inventory unavailable; inspect current files.\n';
+    else for (const path of untracked.stdout.split('\0').filter(path => path && safeEvidencePath(path))) {
+      const added = spawnSync('git', ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--binary', '--', '/dev/null', path], {
+        cwd: projectDir, encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
+      });
+      patch += added.status === 0 || added.status === 1 ? added.stdout : `\nPatch unavailable for ${JSON.stringify(path)}; inspect the current file.\n`;
+    }
+  }
+  const directory = join(runDir, 'stage_evidence', 'diffs', createHash('sha256').update(patch).digest('hex'));
+  mkdirSync(directory, { recursive: true });
+  const diffPath = join(directory, 'change.diff');
+  try { writeFileSync(diffPath, patch, { flag: 'wx' }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || readFileSync(diffPath, 'utf8') !== patch) throw error;
+  }
+  const excerpt = (value: string) => {
+    const bytes = Buffer.from(value);
+    if (bytes.length <= 3000) return value;
+    let head = 1500, tail = bytes.length - 1500;
+    while ((bytes[head] & 0xc0) === 0x80) head--;
+    while ((bytes[tail] & 0xc0) === 0x80) tail++;
+    return `${bytes.subarray(0, head).toString('utf8')}\n[excerpt; read the complete artifact above]\n${bytes.subarray(tail).toString('utf8')}`;
+  };
+  const ledgerText = entries.map(entry => JSON.stringify(entry)).join('\n');
+  const patchText = readFileSync(diffPath, 'utf8');
+  return `## Evidence ledger and diff\nRead ${join(runDir, EVIDENCE_LEDGER)} (version 1 append-only structured facts; latest validation sequence ${validation?.sequence ?? 'none'}).\n`
+    + `Inspect the diff (including untracked additions; any unavailable patch is explicitly marked): ${diffPath}\nChanged-file hashes, including untracked files, are recorded in the ledger's attempt facts.\n`
+    + 'Use these facts and current artifacts for every decision. Do not read author transcripts, stage output narratives or provider session history. '
+    + 'Configured validation belongs to the completed author/repair attempt; decisions consume its tree-bound results without rerunning the suite. '
+    + 'A solely pre-existing configured failure cannot justify repair; unknown identity remains unknown. '
+    + 'Independent experiments and every assigned acceptance criterion remain required. Read complete artifacts when an excerpt is truncated.\n'
+    + `Ledger facts:\n${excerpt(ledgerText) || '(no settled facts yet)'}\nDiff:\n${excerpt(patchText)}`;
+}

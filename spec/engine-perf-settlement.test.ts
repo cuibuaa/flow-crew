@@ -1,3 +1,4 @@
+import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -229,14 +230,16 @@ describe('mixed language validation retains all measured commands', () => {
     writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline }));
     const attempt = { index: 1, startedAt: 'fixture-start', writes: [], writeAttribution: 'structured' as const };
     writeStageStatus(project, runId, 'review', { status: 'running', retries: 0, attempts: [{ ...attempt, status: 'running' }] });
-    const receipt = await recordGateValidationDelta(project, runId, 'review', { runCommand: () => ({ exitCode: 0 }) });
+    seedAttemptValidation(project, runId, baseline.results);
+    const receipt = await recordGateValidationDelta(project, runId, 'review', { runCommand: () => { throw new Error('gate must consume recorded results'); } });
     expect(receipt?.delta.filter(result => result.role === 'test').map(result => result.display)).toEqual(['npm run test', 'python -m pytest']);
     writeStageStatus(project, runId, 'review', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', completedAt: 'fixture-end' }] });
     expect(bindReviewedGateValidation(project, runId, 'review')).toBe(true);
     expect(await settleGateValidationEvidence(project, runId, 'review', { runCommand: () => { throw new Error('settled read-only review must not rerun'); } })).toEqual({ kind: 'unchanged' });
     const durable = JSON.parse(readFileSync(join(runDirPath, 'validation_delta_review.json'), 'utf8'));
     expect(durable.delta).toHaveLength(baseline.results.length);
-    expect(durable.current.filter((result: { role: string }) => result.role === 'test')).toHaveLength(2);
+    expect(durable).not.toHaveProperty('current');
+    expect(receipt?.current.filter(result => result.role === 'test')).toHaveLength(2);
   });
   it('does not let a passing JS result substitute for an absent or renamed Python command', async () => {
     mixed('pyproject');

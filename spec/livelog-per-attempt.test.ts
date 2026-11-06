@@ -137,10 +137,10 @@ describe('native logs belong to scheduler attempts', () => {
       { pass: false, reason: 'native attempt 1' },
       { pass: true, reason: 'native attempt 2' },
     ]);
-    // Native costs remain cumulative in the logs; each ledger entry holds its interval.
+    // Each fresh review reports its own cost; no resumed-session subtraction applies.
     if (kind === 'claude') {
-      expect(status.cost_usd).toBeCloseTo(0.02);
-      expect(status.attempts?.map(attempt => attempt.cost_usd)).toEqual([0.01, 0.01]);
+      expect(status.cost_usd).toBeCloseTo(0.03);
+      expect(status.attempts?.map(attempt => attempt.cost_usd)).toEqual([0.01, 0.02]);
       expect(status.attempts?.every(attempt => attempt.costUsage === 'known')).toBe(true);
     }
     for (const n of [1, 2]) {

@@ -661,12 +661,9 @@ describe('ship-setup fail-closed worktree transaction', () => {
       base: 'release-base',
       branch: 'autonomous-result',
     });
-    expect(runner).toHaveBeenCalledTimes(3);
-    expect(runner.mock.calls.map(([request]) => request)).toEqual([
-      expect.objectContaining({ role: 'build', command: 'npm', args: ['run', 'build'], cwd: fixture.target }),
-      expect.objectContaining({ role: 'test', command: 'npm', args: ['run', 'test'], cwd: fixture.target }),
-      expect.objectContaining({ role: 'lint', command: 'npm', args: ['run', 'lint'], cwd: fixture.target }),
-    ]);
+    expect(runner).toHaveBeenCalledTimes(0);
+    expect(runner).not.toHaveBeenCalled();
+
 
     const linkedFile = join(fixture.target, 'data', 'frozen.csv');
     const linkedDirectory = join(fixture.target, 'node_modules', 'revision-generator');
@@ -698,14 +695,14 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(record.sourceVerification.inputs).toHaveLength(3);
     expect(record.targetVerification.inputs).toHaveLength(3);
     expect(record.validationBaseline.results).toContainEqual(expect.objectContaining({
-      role: 'test', state: 'failed', exitCode: 1, failureCount: 1,
+      role: 'test', state: 'unresolved', failureIdentity: 'unknown',
     }));
     expect(record.validationBaseline.gateCriteria).toContainEqual(expect.objectContaining({
-      role: 'test', rule: 'no_regression_from_baseline', baselineFailureCount: 1,
+      role: 'test', rule: 'baseline_unresolved',
     }));
   });
 
-  it('executes and records both configured test commands for a mixed JavaScript/Python project', async () => {
+  it('discovers both configured test commands without executing them for a mixed JavaScript/Python project', async () => {
     const python = '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n';
     writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({ scripts: { test: 'check' } }));
     writeFileSync(join(fixture.project, 'pyproject.toml'), python);
@@ -716,25 +713,25 @@ describe('ship-setup fail-closed worktree transaction', () => {
       runValidationCommand: runner,
     });
     expect(report.state).toBe('ready');
-    expect(runner.mock.calls.map(([request]) => [request.display, request.cwd]))
-      .toEqual([['npm run test', fixture.target], ['python -m pytest', fixture.target]]);
+    expect(report.validationBaseline?.discovery.commands.map(command => command.display)).toEqual(['npm run test', 'python -m pytest']);
+    expect(runner).not.toHaveBeenCalled();
     expect(report.validationBaseline?.gateCriteria.filter(criterion => criterion.role === 'test')).toHaveLength(2);
   });
 
   it.each([
     ['TAP version 13\nok 1 - passes\nnot ok 2 - fails\n1..2', 'known', ['fails']],
     ['custom runner stopped', 'unknown', []],
-  ])('retains target red baseline failure evidence and its delta rule (%s)', async (output, identity, failures) => {
+  ])('defers target failure evidence until an author attempt (%s)', async (output, identity, failures) => {
     writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({ scripts: { test: 'custom-test-runner' } }));
     writeBrief(['# Goal', 'Record existing test failures.']);
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 1, stdout: output as string }));
     const report = await runShipSetup(setupArgs(), { createWorktree: successfulGit(), runValidationCommand: runner });
     expect(report).toMatchObject({ state: 'ready', validationBaseline: {
-      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'failed', exitCode: 1,
-        failureIdentity: identity, failureIdentifiers: failures })]),
-      gateCriteria: expect.arrayContaining([expect.objectContaining({ role: 'test', rule: 'no_regression_from_baseline' })]),
+      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unresolved',
+        failureIdentity: 'unknown', failureIdentifiers: [] })]),
+      gateCriteria: expect.arrayContaining([expect.objectContaining({ role: 'test', rule: 'baseline_unresolved' })]),
     } });
-    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ role: 'test', cwd: fixture.target }));
+    expect(runner).not.toHaveBeenCalled();
   });
 
   it('reaches READY for a Python worktree using pyproject-inferred validation argv', async () => {
@@ -769,7 +766,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       state: 'ready',
       validationBaseline: { discovery: { state: 'configured', missingRoles: [] } },
     });
-    expect(runner.mock.calls.map(([request]) => [request.command, request.args])).toEqual([
+    expect(report.validationBaseline?.discovery.commands.map(command => [command.command, command.args])).toEqual([
       ['python', ['-m', 'build']],
       ['python', ['-m', 'pytest']],
       ['python', ['-m', 'ruff', 'check', '.']],
@@ -778,7 +775,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(existsSync(report.readyRecordPath)).toBe(true);
   });
 
-  it('measures a brief-declared pytest command, records provenance, and persists regression gates', async () => {
+  it('discovers a brief-declared pytest command with provenance and deferred measurement', async () => {
     rmSync(join(fixture.project, 'package.json'));
     rmSync(join(fixture.project, 'package-lock.json'));
     const declaredPython = '/opt/research-environment/bin/python';
@@ -823,19 +820,15 @@ describe('ship-setup fail-closed worktree transaction', () => {
         },
         results: [
           expect.objectContaining({ role: 'build', state: 'not_configured' }),
-          expect.objectContaining({ role: 'test', state: 'passed' }),
+          expect.objectContaining({ role: 'test', state: 'unresolved' }),
           expect.objectContaining({ role: 'lint', state: 'not_configured' }),
         ],
         gateCriteria: expect.arrayContaining([
-          expect.objectContaining({ role: 'test', rule: 'must_remain_green' }),
+          expect.objectContaining({ role: 'test', rule: 'baseline_unresolved' }),
         ]),
       },
     });
-    expect(baseline).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      command: declaredPython,
-      args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
-      cwd: fixture.target,
-    }));
+    expect(baseline).not.toHaveBeenCalled();
     if (report.state !== 'ready') throw new Error('declared-validation setup unexpectedly refused');
     const record = JSON.parse(readFileSync(report.readyRecordPath, 'utf-8')) as Record<string, any>;
     expect(record.validationBaseline.discovery.commands[0].provenance).toEqual({
@@ -859,7 +852,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
         discovery: { state: 'configured', missingRoles: [] },
       },
     });
-    expect(runner.mock.calls.map(([request]) => [request.command, request.args])).toEqual([
+    expect(report.validationBaseline?.discovery.commands.map(command => [command.command, command.args])).toEqual([
       ['npm', ['run', 'build']],
       ['npm', ['run', 'test']],
       ['npm', ['run', 'lint']],
@@ -940,7 +933,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     }
   });
 
-  it('names a missing brief-declared command in its launch refusal and writes no ready record', async () => {
+  it('records a missing brief-declared command for the author attempt without eager execution', async () => {
     rmSync(join(fixture.project, 'package.json'));
     rmSync(join(fixture.project, 'package-lock.json'));
     writeBrief([
@@ -965,31 +958,12 @@ describe('ship-setup fail-closed worktree transaction', () => {
       runValidationCommand: runner,
     });
 
-    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      role: 'build', command: 'executable-that-does-not-exist', args: ['--verify'], cwd: fixture.target,
-    }));
-    expect(report).toMatchObject({
-      state: 'refused',
-      validationBaseline: {
-        discovery: {
-          state: 'partial',
-          commands: [expect.objectContaining({
-            provenance: {
-              source: 'brief',
-              evidencePath: `${fixture.brief}#validation.commands.build`,
-            },
-          })],
-        },
-      },
-      blockers: [expect.objectContaining({
-        phase: 'validation',
-        reason: expect.stringContaining(`${fixture.brief}#validation.commands.build`),
-        repair: expect.stringMatching(/install|correct|declare|run/i),
-      })],
-    });
-    expect(report.blockers[0].reason).toContain('executable-that-does-not-exist --verify');
-    expect(report.blockers[0].reason).toContain('spawn ENOENT');
-    expect(noReadyRecord()).toBe(true);
+    expect(runner).not.toHaveBeenCalled();
+    expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
+      execution: 'skipped', discovery: { commands: [expect.objectContaining({ role: 'build', command: 'executable-that-does-not-exist', args: ['--verify'] })] },
+      results: expect.arrayContaining([expect.objectContaining({ role: 'build', state: 'unresolved', failureIdentity: 'unknown' })]),
+    } });
+    expect(noReadyRecord()).toBe(false);
   });
 
   it('refuses disagreement between project and brief commands without measuring either baseline', async () => {
@@ -1063,8 +1037,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
         },
       },
     });
-    expect(runner).toHaveBeenCalledTimes(3);
-    expect(runner.mock.calls.map(([request]) => [request.command, request.args])).toEqual([
+    expect(runner).toHaveBeenCalledTimes(0);
+    expect(report.validationBaseline?.discovery.commands.map(command => [command.command, command.args])).toEqual([
       ['npm', ['run', 'build']],
       ['npm', ['run', 'test']],
       ['npm', ['run', 'lint']],
@@ -1127,8 +1101,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
       branch: 'default-project-result',
     }));
     expect(stdout.value).toContain('Ship setup: READY');
-    expect(stdout.value).toContain('gate build: must_remain_green');
-    expect(stdout.value).toContain('gate test: must_remain_green');
+    expect(stdout.value).toContain('gate build: baseline_unresolved');
+    expect(stdout.value).toContain('gate test: baseline_unresolved');
     expect(noReadyRecord()).toBe(false);
   });
 
@@ -1354,7 +1328,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       fs: { ...nodeShipSetupFileSystem, writeAtomic },
     });
 
-    expect(runner).toHaveBeenCalledTimes(3);
+    expect(runner).toHaveBeenCalledTimes(0);
     // The ready write fails, then the fail-closed path makes one best-effort
     // attempt to persist the distinct refused outcome for launch diagnostics.
     expect(writeAtomic).toHaveBeenCalledTimes(2);
@@ -1378,10 +1352,10 @@ describe('ship-setup fail-closed worktree transaction', () => {
     writeBrief(['---', 'inputs: [{path: package.json}]', '---', '# Goal', 'Use the declared input.']);
     const runner = vi.fn<ValidationCommandRunner>(() => response);
     const report = await runShipSetup(setupArgs(), { createWorktree: successfulGit(), runValidationCommand: runner });
-    expect(runner).toHaveBeenCalledTimes(3);
+    expect(runner).toHaveBeenCalledTimes(0);
     expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
       results: expect.arrayContaining([expect.objectContaining({ role: 'test', failureIdentity: 'unknown',
-        output: expect.stringContaining(response.stderr ?? ''), reason: expect.any(String) })]),
+        output: '', state: 'unresolved', reason: expect.stringContaining('deferred') })]),
     } });
     expect(noReadyRecord()).toBe(false);
   });
@@ -1394,11 +1368,11 @@ describe('ship-setup fail-closed worktree transaction', () => {
       createWorktree: successfulGit(), runValidationCommand: runner, stdout: stdout.writer,
     });
     expect(code).toBe(0);
-    expect(stdout.value).toContain('test: ENVIRONMENT GAP exit=1');
+    expect(stdout.value).toContain('test: UNRESOLVED');
     expect(noReadyRecord()).toBe(false);
   });
 
-  it('refuses an unidentifiable brief-declared failure as unmeasurable', async () => {
+  it('defers identity judgment on a brief-declared command until an author attempt', async () => {
     rmSync(join(fixture.project, 'package.json'));
     rmSync(join(fixture.project, 'package-lock.json'));
     writeBrief(['---', 'validation:', '  commands:', '    test:', '      command: python',
@@ -1408,10 +1382,10 @@ describe('ship-setup fail-closed worktree transaction', () => {
       createWorktree: request => { mkdirSync(request.targetDir, { recursive: true }); return { exitCode: 0 }; },
       runValidationCommand: runner,
     });
-    expect(report).toMatchObject({ state: 'refused', blockers: [expect.objectContaining({
-      phase: 'validation', reason: expect.stringContaining(`${fixture.brief}#validation.commands.test`),
-    })] });
-    expect(noReadyRecord()).toBe(true);
+    expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
+      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unresolved', failureIdentity: 'unknown' })]),
+    } });
+    expect(runner).not.toHaveBeenCalled(); expect(noReadyRecord()).toBe(false);
   });
 
   it('records a project command that cannot run here while the others run, and reaches READY', async () => {
@@ -1430,8 +1404,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
       blockers: [],
       validationBaseline: {
         results: expect.arrayContaining([
-          expect.objectContaining({ role: 'build', state: 'passed' }),
-          expect.objectContaining({ role: 'test', state: 'launch_error', exitCode: 127 }),
+          expect.objectContaining({ role: 'build', state: 'unresolved' }),
+          expect.objectContaining({ role: 'test', state: 'unresolved', failureIdentity: 'unknown' }),
         ]),
       },
     });
@@ -1455,7 +1429,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report).toMatchObject({
       state: 'ready',
       blockers: [],
-      validationBaseline: { results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'launch_error' })]) },
+      validationBaseline: { results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unresolved' })]) },
     });
     expect(noReadyRecord()).toBe(false);
   });
@@ -1545,7 +1519,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report.state, JSON.stringify(report.blockers)).toBe('ready');
     expect(readFileSync(target).equals(contents)).toBe(true);
     expect(readBytes.mock.calls.some(([path]) => path === source || path === target)).toBe(false);
-    expect(runner).toHaveBeenCalledTimes(3);
+    expect(runner).toHaveBeenCalledTimes(0);
   });
 
   it('does not blame materialization for an independent source membership update', async () => {
@@ -1564,7 +1538,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report.state).toBe('ready');
     expect(readFileSync(join(fixture.target, 'data', 'a.txt'), 'utf8')).toBe('A');
     expect(existsSync(join(fixture.target, 'data', 'added.txt'))).toBe(false);
-    expect(runner).toHaveBeenCalledTimes(3);
+    expect(runner).toHaveBeenCalledTimes(0);
   });
 
   it('reconciles missing descendants when a declared directory already has tracked target content', async () => {
@@ -1594,7 +1568,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     writeFileSync(join(fixture.target, 'checks', 'private.test.ts'), 'target-only edit\n');
     expect(readFileSync(join(fixture.project, 'checks', 'private.test.ts'), 'utf-8'))
       .toContain('privateTest = true');
-    expect(baseline).toHaveBeenCalledTimes(3);
+    expect(baseline).toHaveBeenCalledTimes(0);
   });
 
   it('refuses a content collision inside a declared directory without overwriting the target', async () => {

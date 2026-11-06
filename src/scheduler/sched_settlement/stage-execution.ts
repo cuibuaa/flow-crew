@@ -131,10 +131,10 @@ export async function executeSingleStage(
     if (!stage.is_gate && innerRetry > 0) {
       // Build references to the gate verdicts and outputs that triggered this retry
       const gateRefs = activeRetryGateIds.map(gid =>
-        `- Verdict: ${gateArchiveArtifactPath(runDirPath, archiveCoordinate, gid, 'verdict')}\n- QA output: ${gateArchiveArtifactPath(runDirPath, archiveCoordinate, gid, 'output')}`
+        `- Verdict: ${gateArchiveArtifactPath(runDirPath, archiveCoordinate, gid, 'verdict')}`
       ).join('\n');
       const gateContext = gateRefs ? `\nRead the latest gate results first:\n${gateRefs}\n` : '';
-      resolvedPrompt = `RETRY FIX (attempt ${innerRetry + 1}): Previous fix attempt did not resolve all issues.${gateContext}\nRead your previous output at ${runDirPath}/stages/${stage.id}/output_attempt_${innerRetry}.md (falling back to output.md if that file is absent, which is the case for runs recorded before attempt-scoped outputs existed) to see what you already tried. Try a DIFFERENT approach — do not repeat the same fix.\n\n${resolvedPrompt}`;
+      resolvedPrompt = `RETRY FIX (attempt ${innerRetry + 1}): Previous fix attempt did not resolve all issues.${gateContext}\nUse ${runDirPath}/evidence-ledger.jsonl and the current diff for retained facts. Verify existing artifacts and resolve the rejected findings.\n\n${resolvedPrompt}`;
     }
     if (!stage.is_gate && activeRetryGateIds.length) {
       resolvedPrompt = `${buildGateFixCorrectionContract(runDirPath, activeRetryGateIds, archiveCoordinate)}\n\n${resolvedPrompt}`;

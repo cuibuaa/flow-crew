@@ -242,19 +242,16 @@ afterEach(() => {
 });
 
 describe('compressed acceptance loop', () => {
-  it('resumes the same gate with its own explicit UUID and never uses global recency', async () => {
+  it('keeps re-review fresh and never uses author or reviewer session history', async () => {
     const result = await runScenario();
     expect(result.finalStatus).toBe('complete');
     expect(result.gateOpts).toHaveLength(2);
     expect(result.gateOpts[0].resumeSessionId).toBeUndefined();
-    expect(result.gateOpts[1]).toMatchObject({
-      resumeSessionId: GATE_UUID,
-      sessionOwnerStageId: GATE_ID,
-      preserveSession: true,
-    });
+    expect(result.gateOpts[1].resumeSessionId).toBeUndefined();
+    expect(result.gateOpts[1].sessionOwnerStageId).toBeUndefined();
     const args = buildCodexExecArgs('continue audit', result.gateOpts[1].resumeSessionId);
-    expect(args.slice(0, 3)).toEqual(['exec', 'resume', '--json']);
-    expect(args).toContain(GATE_UUID);
+    expect(args.slice(0, 2)).toEqual(['exec', '--json']);
+    expect(args).not.toContain(GATE_UUID);
     expect(args).not.toContain(['--', 'last'].join(''));
     expect(existsSync(join(result.runDirPath, 'stages', GATE_ID, 'session.json'))).toBe(false);
   });
@@ -316,7 +313,7 @@ describe('compressed acceptance loop', () => {
     expect(result.finalStatus).toBe('complete');
     expect(touchedCheckProbe).toHaveBeenCalledExactlyOnceWith('fixture-marker-check');
     expect(result.gatePrompts[1]).toContain('re-check earlier conclusions only where the diff touches them');
-    expect(result.gatePrompts[1]).toContain('The engine re-runs the configured validation for this gate');
+    expect(result.gatePrompts[1]).toContain('Consume the repair attempt\'s configured validation from the ledger without rerunning it');
   });
 
   it('keeps round evidence distinct while carrying same-gate rejection history across outer iterations', { timeout: 20_000 }, async () => {
@@ -361,15 +358,16 @@ describe('compressed acceptance loop', () => {
       const fixPrompt = result.fixPrompts[iteration - 1];
       for (const prompt of [reevaluationPrompt, fixPrompt]) {
         expect(prompt).toContain(join(roundDir, `rejected_verdict_${GATE_ID}.json`));
-        expect(prompt).toContain(join(result.runDirPath, 'stages', GATE_ID, 'output_attempt_1.md'));
-        expect(prompt).toContain(evaluatedInputPath);
+        expect(prompt).not.toContain(join(result.runDirPath, 'stages', GATE_ID, 'output_attempt_1.md'));
+        expect(prompt).toContain('evidence-ledger.jsonl');
+        expect(prompt).not.toContain(evaluatedInputPath);
         expect(prompt).not.toContain(join(archiveRoot, 'round_1'));
       }
       expect(reevaluationPrompt).toContain(join(roundDir, 'repair_diff.json'));
       if (iteration === 1) {
         expect(reevaluationPrompt).not.toContain(join(archiveRoot, 'iteration_2'));
       } else {
-        expect(reevaluationPrompt).toContain(gateArchiveArtifactPath(result.runDirPath, { iteration: 1, round: 1 }, GATE_ID, 'output'));
+        expect(reevaluationPrompt).not.toContain(gateArchiveArtifactPath(result.runDirPath, { iteration: 1, round: 1 }, GATE_ID, 'output'));
       }
     }
 
@@ -406,10 +404,11 @@ describe('compressed acceptance loop', () => {
         roundDiffPath: join(roundDir, 'repair_diff.json'),
       });
       expect(present).toContain('INTERRUPTED EVALUATION (round 2)');
-      expect(present).toContain(`Exact input seen by the interrupted gate: ${inputPath}`);
+      expect(present).not.toContain(inputPath);
+      expect(present).toContain('evidence ledger and current diff');
       expect(present).toContain('No rejected verdict was recorded');
       expect(legacy).toContain('INTERRUPTED EVALUATION (round 2)');
-      expect(legacy).toContain('Exact input seen by the interrupted gate: unavailable');
+      expect(legacy).toContain('evidence ledger and current diff');
     });
 
   it('prefers canonical evidence over stale legacy artifacts when both layouts exist', () => {
@@ -440,7 +439,7 @@ describe('compressed acceptance loop', () => {
     });
 
     expect(preamble).toContain(`Rejected verdict: ${canonicalVerdict}`);
-    expect(preamble).toContain(`Original first-pass gate output: ${canonicalOutput}`);
+    expect(preamble).not.toContain(canonicalOutput);
     expect(preamble).not.toContain(legacyVerdict);
     expect(preamble).not.toContain(legacyOutput);
   });
@@ -492,7 +491,7 @@ describe('compressed acceptance loop', () => {
     expect(qa).toContain('brief\'s intended outcome');
     expect(preamble).toContain('Check each rejected finding against the repair diff');
     expect(preamble).toContain('Reject again only for a rejected finding the repair did not resolve');
-    expect(preamble).toContain('The engine re-runs the configured validation for this gate');
+    expect(preamble).toContain('Consume the repair attempt\'s configured validation from the ledger without rerunning it');
     expect(preamble).toContain('untruncated repair-round diff');
   });
 });

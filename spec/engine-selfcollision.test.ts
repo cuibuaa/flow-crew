@@ -1,3 +1,4 @@
+import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { artifacts, inputFile, stageArtifacts } from './spec_contracts/declared-fixtures.js';
 import { createBuildManifest, BUILD_MANIFEST_FILENAME } from '../src/build-manifest.js';
 import { readCampaignEntries } from '../src/campaigns.js';
@@ -313,6 +314,7 @@ describe('engine self-collision after-state replays and controls', () => {
       completedAt: new Date(Date.now() - 30).toISOString(),
     };
     settleGateAttempt(projectDir, created.runId, [first]);
+    seedAttemptValidation(projectDir, created.runId, validationBaseline(projectDir).results.map(result => ({ ...result, state: 'failed', exitCode: 1, failureIdentity: 'known', failureIdentifiers: ['spec/regression-a.test.ts', 'spec/regression-b.test.ts', 'spec/regression-c.test.ts'], failureCount: 3 })));
     const failed = await recordGateValidationDelta(projectDir, created.runId, 'qa', {
       runCommand: () => ({
         exitCode: 1,
@@ -321,7 +323,7 @@ describe('engine self-collision after-state replays and controls', () => {
       }),
     });
     const currentRegression = readGateEvaluation(projectDir, 'qa', created.runId);
-    expect(currentRegression).toMatchObject({ pass: false, reason: expect.stringContaining('recorded regressions') });
+    expect(currentRegression).toMatchObject({ pass: false, reason: expect.stringContaining('Introduced validation failures') });
     const immutableFailure = readFileSync(join(created.runDirPath, failed!.immutablePath!), 'utf-8');
     const second = {
       index: 2,
@@ -335,9 +337,10 @@ describe('engine self-collision after-state replays and controls', () => {
       recordedAt: new Date().toISOString(),
     })}\n`);
     const stale = readGateEvaluation(projectDir, 'qa', created.runId);
-    expect(stale).toMatchObject({ pass: false, reason: expect.stringContaining('not current execution') });
-    expect(stale?.reason).toContain('run configured validation for the current gate attempt');
+    expect(stale).toMatchObject({ pass: false, reason: expect.stringContaining('missing, stale') });
+    expect(stale?.reason).toContain('no suite is rerun by a decision');
 
+    seedAttemptValidation(projectDir, created.runId, validationBaseline(projectDir).results.map(result => ({ ...result, state: 'passed', exitCode: 0, failureIdentity: 'none', failureIdentifiers: [], failureCount: 0 })));
     const passing = await recordGateValidationDelta(projectDir, created.runId, 'qa', {
       runCommand: () => ({
         exitCode: 0,

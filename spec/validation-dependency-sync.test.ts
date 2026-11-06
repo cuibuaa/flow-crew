@@ -1,3 +1,4 @@
+import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -115,13 +116,16 @@ describe('validation dependencies follow the current lockfile', () => {
     const run = gate(project.project, baseline);
     await project.addDependency();
 
+    const measured = await runProjectValidationBaseline(project.project);
+    seedAttemptValidation(project.project, run.runId, measured.results);
     const live = await recordGateValidationDelta(project.project, run.runId, 'review');
     expect(live?.pass, JSON.stringify(live?.current)).toBe(true);
-    expect(live?.current.every(result => result.output.includes('locked dependency validation passed'))).toBe(true);
+    expect(measured.results.filter(result => result.state !== 'not_configured').every(result => result.output.includes('locked dependency validation passed'))).toBe(true);
 
     rmSync(join(project.packageDir, 'node_modules'), { recursive: true, force: true });
     run.complete();
-    expect(await settleGateValidationEvidence(project.project, run.runId, 'review')).toEqual({ kind: 'replayed' });
+    await recordGateValidationDelta(project.project, run.runId, 'review');
+    expect(await settleGateValidationEvidence(project.project, run.runId, 'review')).toEqual({ kind: 'unchanged' });
     expect(gateValidationRefusal(project.project, run.runId, 'review')).toBeUndefined();
   });
 
@@ -139,10 +143,12 @@ describe('validation dependencies follow the current lockfile', () => {
     writeFileSync(join(project.packageDir, 'verify.mjs'), "import { value } from 'fixture-value';\nconsole.log(value);\n");
     run.complete();
 
+    const measured = await runProjectValidationBaseline(project.project);
+    seedAttemptValidation(project.project, run.runId, measured.results);
     const live = await recordGateValidationDelta(project.project, run.runId, 'review');
     expect(live?.pass).toBe(false);
     expect(live?.current.every(result => result.state === 'failed'), JSON.stringify(live?.current)).toBe(true);
-    expect(gateValidationRefusal(project.project, run.runId, 'review')?.reason).toContain('recorded regressions');
+    expect(gateValidationRefusal(project.project, run.runId, 'review')?.reason).toContain('Introduced validation failures');
   });
 
   it('refuses an inconsistent manifest and lockfile despite a previously installed dependency', async () => {
@@ -155,6 +161,8 @@ describe('validation dependencies follow the current lockfile', () => {
     writeFileSync(join(project.packageDir, 'package-lock.json'), project.originalLock);
     run.complete();
 
+    const measured = await runProjectValidationBaseline(project.project);
+    seedAttemptValidation(project.project, run.runId, measured.results);
     const live = await recordGateValidationDelta(project.project, run.runId, 'review');
     expect(live?.pass).toBe(false);
     expect(live?.current.every(result => result.state !== 'passed')).toBe(true);

@@ -9,7 +9,6 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
 import { briefDeclarationFailures } from './brief-preflight.js';
 import {
-  reconcileProjectValidation,
   runProjectValidationBaseline,
   unmeasured,
   type BriefValidationCommand,
@@ -26,7 +25,7 @@ import {
 } from './ship-inputs.js';
 import { loadEngineDefaults } from './config.js';
 import { fcGlobalDir } from './store.js';
-import { reuseShipSetupBaseline, shipSetupReadyRecordPath } from './ship-setup-record.js';
+import { shipSetupReadyRecordPath } from './ship-setup-record.js';
 import { requireDiskCapacity } from './disk-admission.js';
 
 export { shipSetupReadyRecordPath } from './ship-setup-record.js';
@@ -536,7 +535,7 @@ export function parseBriefValidationCommands(brief: string, briefPath: string): 
       return validationDeclarationError(briefPath, `${evidencePath} must be a mapping with \`command\` and \`args\``);
     }
     const commandRecord = value as Record<string, unknown>;
-    const unknownField = Object.keys(commandRecord).find((field) => field !== 'command' && field !== 'args');
+    const unknownField = Object.keys(commandRecord).find((field) => field !== 'command' && field !== 'args' && field !== 'report');
     if (unknownField) {
       return validationDeclarationError(
         briefPath,
@@ -556,8 +555,16 @@ export function parseBriefValidationCommands(brief: string, briefPath: string): 
     if (controlArgument !== undefined) {
       return validationDeclarationError(briefPath, `${evidencePath}.args must not contain a control character`);
     }
+    const report = commandRecord.report;
+    if (report !== undefined && (!report || typeof report !== 'object' || Array.isArray(report)
+      || (report as Record<string, unknown>).format !== 'vitest-json'
+      || Object.keys(report).some(key => key !== 'format' && key !== 'path')
+      || ('path' in report && (typeof report.path !== 'string' || !report.path || isAbsolute(report.path) || report.path.split('/').includes('..'))))) {
+      return validationDeclarationError(briefPath, `${evidencePath}.report requires {format: vitest-json, path?: <project-relative file>}`);
+    }
     declarations.push({
       role,
+      ...(report ? { report: report as import('./project-validation.js').ValidationReport } : {}),
       command: commandRecord.command,
       args: [...commandRecord.args] as string[],
       evidencePath,
@@ -1298,17 +1305,11 @@ export async function runShipSetup(
   }
 
   const validationFs = { exists: deps.fs.exists, readText: deps.fs.readText };
-  const discovery = reconcileProjectValidation(targetDir, declaredValidation.commands, validationFs);
-  const { validationBaseline, baselineReuse } = await reuseShipSetupBaseline(
-    projectDir, targetDir, parsed.base as string, discovery,
-    targetVerification.inputs.map(input => input.path), deps.globalDir(),
-    () => runProjectValidationBaseline(targetDir, {
-      fs: validationFs,
-      ...(deps.runValidationCommand ? { runCommand: deps.runValidationCommand } : {}),
-      declaredCommands: declaredValidation.commands,
-    }),
-  );
-  facts = { ...facts, validationBaseline, baselineReuse };
+  const validationBaseline = await runProjectValidationBaseline(targetDir, {
+    fs: validationFs, declaredCommands: declaredValidation.commands, skipExecution: true,
+    skipReason: 'Configured validation is deferred to the end of each author/repair attempt',
+  });
+  facts = { ...facts, validationBaseline };
 
   const validationBlockers: ShipSetupBlockerInput[] = validationBaseline.discovery.state === 'unknown'
       && declaredValidation.commands.length > 0
@@ -1317,16 +1318,6 @@ export async function runShipSetup(
         reason: `Validation baseline is unknown: ${validationBaseline.discovery.reason ?? 'no build, test, or lint command could be inferred'}`,
       }]
     : [];
-  // Inferred unmeasurable commands record an environment gap; explicit declarations must be measurable.
-  validationBlockers.push(...validationBaseline.results.flatMap((result): ShipSetupBlockerInput[] => {
-    const command = validationBaseline.discovery.commands
-      .find(candidate => candidate.role === result.role && candidate.display === result.display);
-    if (!unmeasured(result) || command?.provenance?.source !== 'brief') return [];
-    return [{
-      phase: 'validation',
-      reason: `Cannot measure ${result.role} baseline${result.display ? ` (${result.display})` : ''} declared at ${command.provenance.evidencePath}: ${result.reason ?? 'command ended without an exit code'}`,
-    }];
-  }));
   if (validationBlockers.length > 0) return refuse(validationBlockers);
   const readyRecordPath = shipSetupReadyRecordPath(
     targetCanonicalDir,

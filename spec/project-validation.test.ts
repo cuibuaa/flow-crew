@@ -158,7 +158,7 @@ describe('configuration-driven project validation baseline', () => {
       durationMs: 7,
     }));
 
-    const baseline = await runProjectValidationBaseline(root, { fs, runCommand: runner });
+    const baseline = await runProjectValidationBaseline(root, { fs, runCommand: runner, readFailureIdentity: () => ({ version: 1, testsRun: 1, complete: true, failures: [{ testId: 'spec/existing.test.ts', file: null, messageClass: 'test-failure' }] }) });
 
     expect(baseline.discovery).toMatchObject({
       state: 'configured',
@@ -177,7 +177,7 @@ describe('configuration-driven project validation baseline', () => {
       state: 'failed',
       exitCode: 1,
       failureCount: 1,
-      failureIdentifiers: ['spec/existing.test.ts'],
+      failureIdentifiers: [JSON.stringify(['spec/existing.test.ts', null, 'test-failure'])],
     }));
     expect(baseline.gateCriteria).toContainEqual(expect.objectContaining({
       role: 'test',
@@ -590,8 +590,9 @@ describe('configuration-driven project validation baseline', () => {
         await recordGateValidationDelta(projectDir, runId, 'review', { runCommand: () => ({ exitCode: 0 }) });
         writeStageStatus(projectDir, runId, 'review', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', completedAt: 'fixture-end' }] });
         for (const writes of [['input.txt'], []]) {
+          if (writes.length) writeFileSync(join(projectDir, 'input.txt'), `peer write ${role}`);
           writeStageStatus(projectDir, runId, 'peer', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', writes }] });
-          expect(bindReviewedGateValidation(projectDir, runId, 'review', ['review', 'peer'])).toBe(writes.length === 0);
+          expect(bindReviewedGateValidation(projectDir, runId, 'review', ['review', 'peer'])).toBe(false);
         }
         configure(JSON.stringify(join(projectDir, `missing-${role}`)));
         const current = await runProjectValidationBaseline(projectDir);
@@ -669,7 +670,7 @@ describe('configuration-driven project validation baseline', () => {
 
   it('keeps pytest red-to-red comparison sensitive to new ids with the same failure count', async () => {
     const fs = memoryFs({ [`${root}/pyproject.toml`]: '[tool.pytest.ini_options]\ntestpaths = ["tests"]' });
-    const measure = (id: string) => runProjectValidationBaseline(root, { fs, runCommand: () => ({
+    const measure = (id: string) => runProjectValidationBaseline(root, { fs, readFailureIdentity: () => ({ version: 1, testsRun: 1, complete: true, failures: [{ testId: id, file: 'tests/test_check.py', messageClass: 'assertion' }] }), runCommand: () => ({
       exitCode: 1, stdout: `FAILED tests/test_check.py::${id} - AssertionError\n================ 1 failed in 0.1s ================`,
     }) });
     const baseline = await measure('test_existing');
@@ -678,7 +679,7 @@ describe('configuration-driven project validation baseline', () => {
     expect(evaluateValidationDelta(baseline, unchanged.results).find(entry => entry.role === 'test'))
       .toMatchObject({ state: 'pass' });
     expect(evaluateValidationDelta(baseline, changed.results).find(entry => entry.role === 'test'))
-      .toMatchObject({ state: 'regression', newFailureIdentifiers: ['tests/test_check.py::test_new - AssertionError'] });
+      .toMatchObject({ state: 'regression', newFailureIdentifiers: [JSON.stringify(['test_new', 'tests/test_check.py', 'assertion'])] });
   });
 
   it('keeps an unparseable red baseline unresolved rather than treating it as zero failures', async () => {
@@ -694,7 +695,7 @@ describe('configuration-driven project validation baseline', () => {
     expect(test).toMatchObject({
       state: 'failed',
       failureIdentity: 'unknown',
-      reason: expect.stringContaining('non-TAP output format is not recognized'),
+      reason: expect.stringContaining('No structured report or closed-schema model reading'),
     });
     if (!test?.reason) throw new Error('unknown failure cause was not recorded');
     expect(test?.failureCount).toBeUndefined();
@@ -704,13 +705,17 @@ describe('configuration-driven project validation baseline', () => {
     });
   });
 
-  it('uses the terminal pytest summary instead of an incidental earlier failure-like count', async () => {
+  it('uses a closed model reading of the terminal pytest result instead of counting incidental text', async () => {
     const fs = memoryFs({
       [`${root}/package.json`]: JSON.stringify({ scripts: { test: 'pytest' } }),
       [`${root}/package-lock.json`]: '{}',
     });
     const baseline = await runProjectValidationBaseline(root, {
       fs,
+      readFailureIdentity: () => ({ version: 1, testsRun: 5, complete: true, failures: [
+        { testId: 'test_alpha', file: 'checks/test_alpha.py', messageClass: 'assertion' },
+        { testId: 'test_beta', file: 'checks/test_beta.py', messageClass: 'assertion' },
+      ] }),
       runCommand: () => ({
         exitCode: 1,
         stdout: [

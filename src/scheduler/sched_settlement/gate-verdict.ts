@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { GateContract, loadGateContract, validateVerdictAgainstContract } from './gate-contract.js';
 import { projectGateVerdict, readGateVerdictDocument, GateVerdictDocument, validateSettledGateVerdict, explicitPassContradiction, validateGateCriterionEvidence, validateGateRepairability } from './gate-evidence.js';
 import { archivedGateRejections } from './gate-archives.js';
-import { gateValidationRefusal } from './gate-validation.js';
+import { currentAuthorValidationRefusal, readRunValidationBaseline, gateValidationRefusal } from './gate-validation.js';
 
 export function readTerminalStudyCompletionEvidence(projectDir: string, runId: string, stageId: string): Record<string, unknown> | null {
   const base = runDir(projectDir, runId);
@@ -43,8 +43,11 @@ export function readGateEvaluation(
   catch { /* Legacy authored verdicts remain readable without run state. */ }
   if (accepted?.continuation) return null;
   if (accepted?.status === STAGE_STATUS.COMPLETE || accepted?.status === STAGE_STATUS.FAILED) {
-    if (accepted.gate) return accepted.gate;
-    if (accepted.status === STAGE_STATUS.COMPLETE && accepted.acceptedFrom) return accepted.acceptedFrom.verdict;
+    if (accepted.gate) return accepted.gate.pass && runId && requireValidationDelta
+      ? (accepted.gate.validationRequired === true ? currentAuthorValidationRefusal(projectDir, runId)
+        : accepted.gate.validationRequired === false ? undefined : gateValidationRefusal(projectDir, runId, stageId)) ?? accepted.gate : accepted.gate;
+    if (accepted.status === STAGE_STATUS.COMPLETE && accepted.acceptedFrom) return accepted.acceptedFrom.verdict.pass && runId && requireValidationDelta
+      ? gateValidationRefusal(projectDir, runId, stageId) ?? accepted.acceptedFrom.verdict : accepted.acceptedFrom.verdict;
   }
   const base = runId ? runDir(projectDir, runId) : join(projectDir, 'docs');
   const document = readGateVerdictDocument(base, stageId);
@@ -71,7 +74,7 @@ export function settleGateEvaluation(projectDir: string, runId: string, stageId:
     : evaluateGateVerdict(document, projectDir, stageId, runId, loadGateContract(projectDir, runId, state.campaignStorageKey)))
     ?? { pass: false, refusal: { kind: 'missing_verdict' as const }, reason: 'Gate did not produce a verdict' };
   if (status.status === STAGE_STATUS.FAILED && verdict.refusal?.kind !== 'validation_regression') return;
-  status.gate = { ...projectGateVerdict(verdict as unknown as Record<string, unknown>), ...(verdict.refusal ? { refusal: verdict.refusal } : {}), kind: verdict.refusal?.kind ?? (verdict.pass ? 'pass' : verdict.repairability?.disposition ?? 'repairable'), verdictSha256: document?.digest ?? null };
+  status.gate = { validationRequired: Boolean(readRunValidationBaseline(runDir(projectDir, runId))?.baseline.discovery.commands.length), ...projectGateVerdict(verdict as unknown as Record<string, unknown>), ...(verdict.refusal ? { refusal: verdict.refusal } : {}), kind: verdict.refusal?.kind ?? (verdict.pass ? 'pass' : verdict.repairability?.disposition ?? 'repairable'), verdictSha256: document?.digest ?? null };
   writeStageStatus(projectDir, runId, stageId, status);
 }
 

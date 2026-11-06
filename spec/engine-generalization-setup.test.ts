@@ -26,7 +26,7 @@ import {
   type GitCommandRunner,
   type GitWorktreeCreator,
 } from '../src/cli-ship-setup.js';
-import type { ValidationCommandRunner } from '../src/project-validation.js';
+import { runProjectValidationBaseline, type ValidationCommandRunner } from '../src/project-validation.js';
 import { rehearseBriefIsolated } from './test-support/rehearse.js';
 
 
@@ -253,6 +253,8 @@ describe('declared-input materialization and live producers', () => {
       runValidationCommand: runner, globalDir: () => fixture.state,
     });
     expect(setup.state, JSON.stringify(setup.blockers)).toBe('ready');
+    expect(runner).not.toHaveBeenCalled();
+    await runProjectValidationBaseline(target, { runCommand: runner });
     expect(runner.mock.calls).toContainEqual([expect.objectContaining({
       role: 'test', command: 'make', args: ['test'], cwd: target,
     })]);
@@ -412,6 +414,8 @@ describe('declared-input materialization and live producers', () => {
 
     expect(mutated.state).toBe('ready');
     expect(mutated.blockers).toEqual([]);
+    expect(mutatingRunner).not.toHaveBeenCalled();
+    await runProjectValidationBaseline(mutatingTarget, { runCommand: mutatingRunner });
     expect(readFileSync(frozenFile, 'utf8')).toContain('producer update');
     expect(readFileSync(join(mutatingTarget, 'data', 'frozen.csv'), 'utf8')).toContain('original');
     expect(existsSync(join(mutatingTarget, 'fixtures', 'frozen', 'added.json'))).toBe(false);
@@ -431,6 +435,8 @@ describe('declared-input materialization and live producers', () => {
     });
 
     expect(stable.state).toBe('ready');
+    expect(outputOnlyRunner).not.toHaveBeenCalled();
+    await runProjectValidationBaseline(stableTarget, { runCommand: outputOnlyRunner });
     expect(readFileSync(frozenFile, 'utf8')).toContain('original');
     expect(readFileSync(join(stableTarget, 'generated', 'cache.txt'), 'utf8')).toBe('generated\n');
   });
@@ -472,6 +478,8 @@ describe('declared-input materialization and live producers', () => {
     });
 
     expect(report.state).toBe('ready');
+    expect(runner).not.toHaveBeenCalled();
+    await runProjectValidationBaseline(target, { runCommand: runner });
     expect(runner).toHaveBeenCalledTimes(3);
     expect(runner.mock.calls.every(([request]) => request.cwd === target)).toBe(true);
     expect(readFileSync(join(fixture.project, 'data', 'frozen.csv'), 'utf8')).toBe('original\n');

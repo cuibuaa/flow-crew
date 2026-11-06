@@ -137,7 +137,7 @@ describe('UUID-only Codex sessions', () => {
     expect(parsed.providerFailure).toBeUndefined();
   });
 
-  it('resumes only one successful non-validation dependency edge', () => {
+  it('keeps even a successful dependency edge cold with ledger handoff', () => {
     const build = stage('build');
     const continueStage = stage('continue', { depends_on: ['build'] });
     expect(canReuseSession({
@@ -147,7 +147,7 @@ describe('UUID-only Codex sessions', () => {
       predecessorStatus: successfulStatus(),
       destinationStatus: { status: 'pending', retries: 0 },
       session,
-    })).toBe(true);
+    })).toBe(false);
   });
 
   it('forces cold start for validation roles and failed/retried predecessors', () => {
@@ -205,7 +205,7 @@ describe('UUID-only Codex sessions', () => {
 
 
 describe('own-stage continuation', () => {
-  it('retains a settled stage UUID independently of predecessor reuse, without inheriting foreign or gate reasoning', () => {
+  it('does not resume settled stage UUIDs or foreign reasoning', () => {
     const root = mkdtempSync(join(tmpdir(), 'fc-own-session-'));
     try {
       const subject = stage('work');
@@ -213,7 +213,7 @@ describe('own-stage continuation', () => {
       const writeSession = (record: object) => { mkdirSync(join(root, 'stages', 'work'), { recursive: true }); writeFileSync(join(root, 'stages', 'work', 'session.json'), JSON.stringify(record)); };
       writeSession({ version: 1, sessionId: UUID, ownerStageId: 'work', capturedAt: new Date().toISOString() });
       // Native session storage is CLI-owned; admitted UUID metadata is sufficient.
-      expect(sessionResumeForStage(subject, [subject], state, root, false)).toEqual({ sessionId: UUID, ownerStageId: 'work' });
+      expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
       expect(sessionResumeForStage({ ...subject, is_gate: true }, [subject], state, root, false)).toBeUndefined();
       writeSession({ version: 1, sessionId: UUID, ownerStageId: 'builder', capturedAt: new Date().toISOString() });
       expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
@@ -222,7 +222,7 @@ describe('own-stage continuation', () => {
 });
 
 describe('repair continues its author', () => {
-  it('resumes the reviewed author only for a sole same-role repair route, keeps both homes for the loop, and clears them after it', () => {
+  it('keeps repairs cold even with a sole same-role author route', () => {
     const root = mkdtempSync(join(tmpdir(), 'fc-repair-session-'));
     try {
       const implement = stage('implement');
@@ -234,10 +234,10 @@ describe('repair continues its author', () => {
       writeFileSync(join(root, 'stages', 'implement', 'session.json'), JSON.stringify({ version: 1, sessionId: UUID, ownerStageId: 'implement', capturedAt: new Date().toISOString() }));
 
       // Independent of the predecessor-reuse opt-in, and never for the gate.
-      expect(sessionResumeForStage(repair, all, state, root, false)).toEqual({ sessionId: UUID, ownerStageId: 'implement' });
+      expect(sessionResumeForStage(repair, all, state, root, false)).toBeUndefined();
       expect(sessionResumeForStage(review, all, state, root, false)).toBeUndefined();
-      expect(shouldPreserveSession(implement, all, false)).toBe(true);
-      expect(shouldPreserveSession(repair, all, false)).toBe(true);
+      expect(shouldPreserveSession(implement, all, false)).toBe(false);
+      expect(shouldPreserveSession(repair, all, false)).toBe(false);
       expect(shouldPreserveSession(implement, [implement, review], false)).toBe(false);
 
       // Ambiguous or foreign continuations start fresh.

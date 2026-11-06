@@ -47,12 +47,12 @@ process.stdin.on('end', () => {
   if (process.env.FC_INPUT_MODE === 'repair' && count === 1) {
     const owner = path.join(home, '..', '..', 'owner', 'codex_home');
     if (fs.existsSync(path.join(home, 'state_5.sqlite'))) throw Error('source index with absolute paths was copied');
-    if (!fs.existsSync(path.join(home, 'sessions', 'closed.jsonl'))) throw Error('conversation lost');
+    if (fs.existsSync(path.join(home, 'sessions', 'closed.jsonl'))) throw Error('predecessor conversation copied');
     fs.writeFileSync(path.join(owner, 'witness'), 'ordinary filesystem access');
-    process.stderr.write('Error: thread/resume: no rollout found for thread id (code -32600)\n');
+    process.stderr.write('error: reasoning effort is not supported with tools for this model\n');
     process.exit(1);
   }
-  if (process.env.FC_INPUT_MODE === 'repair' && count === 2) {
+  if (process.env.FC_INPUT_MODE === 'unused-resume-repair' && count === 2) {
     process.stderr.write('error: reasoning effort is not supported with tools for this model\n');
     process.exit(1);
   }
@@ -102,14 +102,14 @@ describe('one recoverable record per native invocation', () => {
     const result = await runStage(new CodexAdapter(), { ...options(), resumeSessionId: UUID, sessionOwnerStageId: 'owner', preserveSession: true });
     expect(result.exitCode, result.output).toBe(0);
     const inputs = view().prompts.invocations;
-    expect(inputs).toHaveLength(3);
+    expect(inputs).toHaveLength(2);
     expect(inputs.every(entry => entry.integrity === 'verified' && entry.attemptBinding === 'matched' && entry.record?.boundary === 'model')).toBe(true);
     const transports = inputs.map(entry => JSON.parse(entry.record!.transport!.payload!));
-    expect(transports[0].argv).toContain('resume');
+    expect(transports[0].argv).not.toContain('resume');
     expect(transports[1].argv).not.toContain('resume');
     expect(transports[0].configToml).toContain('model_reasoning_effort = "high"');
-    expect(transports[2].configToml).not.toContain('model_reasoning_effort');
-    expect(transports[2].outputSchema).toBe(JSON.stringify(HANDOFF_SCHEMA));
+    expect(transports[1].configToml).not.toContain('model_reasoning_effort');
+    expect(transports[1].outputSchema).toBe(JSON.stringify(HANDOFF_SCHEMA));
     for (const [index, entry] of inputs.entries()) {
       expect(entry.record!.userPrompt).toBe(transports[index].stdin);
       const developerInstructions = transports[index].configToml.match(/^developer_instructions = (.+)$/m)[1];
@@ -133,7 +133,7 @@ describe('one recoverable record per native invocation', () => {
     expect(inputs).toHaveLength(2);
     expect(inputs.every(entry => entry.integrity === 'verified' && entry.attemptBinding === 'matched')).toBe(true);
     expect(inputs.map(entry => entry.record!.attemptIndex)).toEqual([1, 2]);
-    expect(inputs[1].record?.resumeSessionId).toBe(freshUUID);
+    expect(inputs[1].record?.resumeSessionId).toBeUndefined();
     expect(readFileSync(join(directory, 'stages', 'writer', 'codex_home', 'call-count'), 'utf8')).toBe('2');
   });
 

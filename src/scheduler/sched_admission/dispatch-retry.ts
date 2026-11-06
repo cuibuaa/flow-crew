@@ -42,7 +42,7 @@ export function buildRetryPreamble(
   stageId: string,
   timeoutContext?: { previousBudgetMs: number; nextBudgetMs: number },
 ): string {
-  const partialPath = `${runDirPath}/stages/${stageId}/output.md`;
+  const partialPath = `${runDirPath}/evidence-ledger.jsonl`;
   let prevError: string | undefined;
   let admissionFailed = false;
   try {
@@ -78,7 +78,7 @@ export function buildRetryPreamble(
   } else {
     cause = `Previous attempt timed out after ${Math.ceil(timeoutMs / 1000)}s.`;
   }
-  return withMonotoneContext(`RETRY (attempt ${retries + 1}): ${cause} Read partial output at ${partialPath}. Preserve valid work and recorded evidence; repair or redo invalid partial work to complete the admitted result within the current scope and deadline.`);
+  return withMonotoneContext(`RETRY (attempt ${retries + 1}): ${cause} Read structured evidence at ${partialPath} and inspect the current diff. Preserve valid work and recorded evidence; repair or redo invalid partial work to complete the admitted result within the current scope and deadline.`);
 }
 
 export function diagnoseEmptyDispatch(

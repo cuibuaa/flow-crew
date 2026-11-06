@@ -1,6 +1,12 @@
 import { lstatSync, readlinkSync, readdirSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 
+
+/** Shared exclusion for source evidence and declared runner report paths. */
+export function safeEvidencePath(path: string): boolean {
+  return !path.split('/').some(part => ['.fc', '.codex', '.claude', 'codex_home', 'auth.json', 'credentials.json', 'installation_id'].includes(part) || part === '.env' || part.startsWith('.env.'));
+}
+
 /** Resolve components, including links whose final target does not yet exist.
  * Do not collapse a link's '..' before expanding preceding component links. */
 export function prospectivePhysicalPath(path: string, fs: {
@@ -96,7 +102,7 @@ export function engineOwnedGlobalCarriers(storeRoot: string): string[] {
 export function isEngineOwnedRunPath(path: string, stage: { id: string; is_gate?: boolean; dynamic_dispatch?: boolean }): boolean {
   if (path === 'scratch' || path === 'scratch/.tmpdir') return true;
   if (!path || /^run-history(?:[./]|$)/.test(path) || /^(?:\.run-reservation\.json|\.run-state\.lock)(?:\/|$)/.test(path)) return true;
-  if (/^(?:run\.json|events\.jsonl|workflow\.yaml|task_brief\.md|brief_criteria\.json|validation_baseline\.json|validation_delta_[^/]+\.json|dispatch_admission\.json|plan_history|audit_findings|signals|stage_watchdog\.json)(?:\/|$)/.test(path)) return true;
+  if (/^(?:run\.json|evidence-ledger\.jsonl|events\.jsonl|workflow\.yaml|task_brief\.md|brief_criteria\.json|validation_baseline\.json|validation_delta_[^/]+\.json|dispatch_admission\.json|plan_history|audit_findings|signals|stage_watchdog\.json)(?:\/|$)/.test(path)) return true;
   if (/^(?:stage_evidence|gate_reevaluation|dispatch_rejections|plan_retry|declared_outputs|terminal_snapshots|guidance_history|supervisor_rejections|discarded|approvals|\.rollback-preimages)(?:\/|$)/.test(path)
     || /^(?:iteration_log\.md|run_event_status\.json|supervisor_guidance\.md|scheduler\.pid|scheduler\.identity\.json|scheduler-heartbeat\.json|scheduler-loop-stall\.json|\.reality-gate\.json|\.reality-gate\.failures\.md|approvals\.jsonl|user_input\.md|blockage_ledger\.json|repeated_blockage\.json|plan_retry_state\.json|gate_contract\.json|summary\.md|verdict\.json)(?:\/|$)/.test(path)) return true;
   if (/^(?:research_round_input_error\.json|research_round_contract_repair\.json|research_integrity_rejections\.json|research_terminal_ready\.json|research_continue\.json|research_gate_exhausted\.json|goal_met\.json|repair_diff\.json|post_terminate_hook\.log)(?:\/|$)/.test(path)) return true;

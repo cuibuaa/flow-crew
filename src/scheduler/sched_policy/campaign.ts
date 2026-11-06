@@ -142,7 +142,7 @@ export function createCampaignWriters(services: CampaignWriterServices) {
       const ss = state.stages[sid];
       if (!ss) continue;
       lines.push(`## ${sid} (${ss.status})`);
-      lines.push(`Output: ${runDirPath}/stages/${sid}/output.md`);
+      lines.push(`Evidence: ${runDirPath}/evidence-ledger.jsonl`);
       if (ss.error) lines.push(`Error: ${ss.error}`);
       if (ss.duration_ms !== undefined) lines.push(`Duration: ${Math.round(ss.duration_ms / 1000)}s`);
       // Include actual gate verdict if available

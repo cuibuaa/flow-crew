@@ -1,3 +1,4 @@
+import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -36,12 +37,13 @@ async function fixture() {
     runCommand: () => ({ exitCode: 0 }),
   });
   writeFileSync(join(created.runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline }));
+  seedAttemptValidation(project, created.runId, baseline.results);
   const state = readRunState(project, created.runId); state.status = 'running'; writeRunState(project, created.runId, state);
   return { ...created, stage, workflow, state, counter };
 }
 
-describe('configured validation has one wave settlement owner', () => {
-  it('executes once per unchanged review, including repeated inner-loop reviews', async () => {
+describe('configured validation has one attempt owner and read-only gate bindings', () => {
+  it('never executes at unchanged reviews, including repeated inner-loop reviews', async () => {
     const f = await fixture();
     const runner = createScopeSafeStageRunner({
       monitorApprovalRequests: async () => null,
@@ -59,11 +61,11 @@ describe('configured validation has one wave settlement owner', () => {
       const status = readStageStatus(project, f.runId, 'review');
       expect(status.status, JSON.stringify(status)).toBe('complete');
       expect(gateValidationRefusal(project, f.runId, 'review')).toBeUndefined();
-      const total = readFileSync(f.counter, 'utf8').trim().split('\n').length;
+      const total = readFileSync(f.counter, 'utf8').trim().split('\n').filter(Boolean).length;
       counts.push(total - counts.reduce((sum, count) => sum + count, 0));
     }
     console.log('VALIDATION_EXECUTIONS_PER_REVIEW', JSON.stringify(counts));
-    expect(counts).toEqual([1, 1, 1]);
+    expect(counts).toEqual([0, 0, 0]);
     const receipts = readdirSync(f.runDirPath).filter(name => /^validation_delta_review_attempt_/.test(name))
       .map(name => JSON.parse(readFileSync(join(f.runDirPath, name), 'utf8')));
     // Immutable bind copies are evidence, not additional command executions.
@@ -90,6 +92,9 @@ describe('configured validation has one wave settlement owner', () => {
         await reviewClosed;
         writeFileSync(join(project, 'product.ts'), 'regressed');
         completeStageAttempt(project, f.runId, peer.id, 0, { exitCode: 0, duration_ms: 1, writes: ['product.ts'], writeAttribution: 'snapshot' });
+        const measured = await runProjectValidationBaseline(project, { commands: JSON.parse(readFileSync(join(f.runDirPath, 'validation_baseline.json'), 'utf8')).baseline.discovery.commands,
+          readFailureIdentity: () => ({ version: 1, complete: true, testsRun: 1, failures: [{ testId: 'test_missing_result', file: 'product.ts', messageClass: 'test-failure' }] }) });
+        seedAttemptValidation(project, f.runId, measured.results, { stageId: peer.id });
         return;
       }
       const result = await executeSingleStage(stage, project, f.runId, f.runDirPath, f.workflow, adapter,
@@ -97,7 +102,7 @@ describe('configured validation has one wave settlement owner', () => {
       releasePeer();
       return result;
     });
-    expect(readFileSync(f.counter, 'utf8').trim().split('\n')).toHaveLength(2);
+    expect(readFileSync(f.counter, 'utf8').trim().split('\n').filter(Boolean)).toHaveLength(1);
     expect(gateValidationRefusal(project, f.runId, 'review')).toMatchObject({ pass: false, reason: expect.stringContaining('test_missing_result') });
   });
 
@@ -118,11 +123,14 @@ describe('configured validation has one wave settlement owner', () => {
         { ...prior, startedAt: start, completedAt: end, writeAttribution: kind === 'peer-unknown' ? 'unknown' : 'snapshot' },
         { ...current, status: 'complete', startedAt: end, completedAt: end },
       ] });
+      if (kind !== 'prior-write' && kind !== 'baseline-change') writeFileSync(join(project, kind === 'generated-write' ? 'generated.js' : 'product.ts'), 'actual bytes changed');
       if (kind === 'baseline-change') appendFileSync(join(f.runDirPath, 'validation_baseline.json'), '\n');
       const bound = bindReviewedGateValidation(project, f.runId, 'review', kind.startsWith('peer-') ? ['review', 'peer'] : ['review']);
       expect(bound).toBe(kind === 'prior-write');
       if (!bound) await recordGateValidationDelta(project, f.runId, 'review');
-      expect(readFileSync(f.counter, 'utf8').trim().split('\n')).toHaveLength(kind === 'prior-write' ? 1 : 2);
+      expect(readFileSync(f.counter, 'utf8')).toBe('');
+      if (kind !== 'prior-write' && kind !== 'baseline-change') expect(gateValidationRefusal(project, f.runId, 'review')?.pass).toBe(false);
+      if (kind === 'baseline-change') expect(gateValidationRefusal(project, f.runId, 'review')).toBeUndefined();
     },
   );
 
@@ -130,7 +138,11 @@ describe('configured validation has one wave settlement owner', () => {
     const f = await fixture();
     const attempt = { index: 1, startedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z', status: 'complete', writes: [], writeAttribution: 'snapshot' as const };
     writeStageStatus(project, f.runId, 'review', { status: 'complete', retries: 0, attempts: [attempt] });
-    await recordGateValidationDelta(project, f.runId, 'review', { runCommand: () => ({ exitCode: 1, stdout: 'FAILED tests/test_product.py::test_missing_result\n1 failed' }) });
+    const plan = JSON.parse(readFileSync(join(f.runDirPath, 'validation_baseline.json'), 'utf8')).baseline;
+    seedAttemptValidation(project, f.runId, plan.results.map((result: import('../src/project-validation.js').ValidationCommandResult) => result.role !== 'test' ? result : {
+      ...result, state: 'failed', exitCode: 1, failureIdentifiers: ['test_missing_result'], failureIdentity: 'known',
+    }));
+    await recordGateValidationDelta(project, f.runId, 'review', { runCommand: () => { throw Error('Decisions cannot run the suite'); } });
     expect(gateValidationRefusal(project, f.runId, 'review')).toMatchObject({ pass: false, reason: expect.stringContaining('test_missing_result') });
   });
 });

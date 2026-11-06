@@ -1,5 +1,5 @@
 import { listProjectFiles } from './scheduler/sched_scope/path-capabilities.js';
-import { stageLiveLogPath, readStageLiveLogPath } from './stage-live-log.js';
+import { stageLiveLogPath } from './stage-live-log.js';
 import { isRetryableAdapterFailure } from './adapters/failure.js';
 import { atomicWrite, writeFileSync, appendFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
 
@@ -18,9 +18,14 @@ import { join, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 import { runProcessAbortSignal } from './adapters/base.js';
 export { classifyAdapterFailure } from './adapters/failure.js';
+import { appendEvidence, captureProjectTree, changedTreeFiles } from './evidence-ledger.js';
+import { FAILURE_READING_JSON_SCHEMA, FailureReadingSchema, failureReadingPrompt } from './validation-identity.js';
+import { createInvocationScratch } from './invocation-scratch.js';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { buildStagePrompt, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
-import { recordGateValidationDelta, settleGateValidationEvidence } from './scheduler/sched_settlement/gate-validation.js';
+import { recordGateValidationDelta, ensureAttemptValidationPlan, recordAttemptValidation } from './scheduler/sched_settlement/gate-validation.js';
 import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
 import { AuditFindingsSchema } from './scoped-audit-repair.js';
 import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
@@ -282,6 +287,10 @@ export async function runStage(
     handoffVisibility: opts.role.handoff_visibility,
   });
 
+  const attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch
+    ? ensureAttemptValidationPlan(opts.projectDir, opts.runId) : undefined;
+  const evidenceTreeBefore = captureProjectTree(opts.projectDir, opts.taskDescription ?? '');
+
   const attribution = opts.attribution ?? {
     role: opts.role.name,
     iteration: existsSync(join(opts.runDir, 'run.json'))
@@ -338,9 +347,7 @@ export async function runStage(
     .replace(/<current execution index>/g, String(attemptIndex))
     .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
   const priorAttempt = runningStatus.attempts?.at(-2);
-  if (priorAttempt && (priorAttempt.status === RUN_STATUS.FAILED || priorAttempt.status === 'suspended' || priorAttempt.continuation)) {
-    prompt += `\n\n# Own-stage continuation evidence\nRead ${opts.runDir}/stages/${opts.stageId}/output_attempt_${priorAttempt.index}.md and ${readStageLiveLogPath(opts.runDir, opts.stageId, priorAttempt.index)} for the previous execution's progress. Its attributed writes were ${JSON.stringify(priorAttempt.writes ?? [])}.${priorAttempt.continuation?.summary ? `\nEngine continuation handoff: ${priorAttempt.continuation.summary}\n` : ' '} Verify these existing artifacts and continue the declared duties; do not infer success from the prior attempt. An unavailable thread uses the full current duties and these same evidence references.`;
-  }
+  if (priorAttempt) prompt += `\n\n# Own-stage continuation evidence\nContinue from the evidence ledger and current diff. Previous attempt: ${priorAttempt.index}; remaining duties are not certified complete. Recheck existing artifacts against the brief.`;
   // buildStagePrompt ran before the execution index existed and intentionally
   // included only run-wide guidance. Add notices bound to this execution now.
   const scopedAtStart = guidanceBeforePrompt.filter((entry) => entry.attemptIndex !== undefined);
@@ -781,9 +788,8 @@ export async function runStage(
   let invocationIndex = 0;
   let inputRecordIndex = 0;
   const continuations = new Map<Adapter, { sessionId: string; ownerStageId: string }>();
-  if (opts.resumeSessionId && isSessionUuid(opts.resumeSessionId)) {
-    continuations.set(adapter, { sessionId: opts.resumeSessionId, ownerStageId: opts.sessionOwnerStageId ?? opts.stageId });
-  }
+  // Cross-attempt context is the ledger and diff, even for opt-in reuse callers.
+
   const deadlineContext = (): string => `# Execution clock\nExecution ${attemptIndex}: started ${attemptDeadline.attemptStartedAt}; stage budget ends ${attemptDeadline.budgetDeadlineAt}; wrap-up warning ${attemptDeadline.wrapUpAt}; absolute deadline (hard stop) ${attemptDeadline.deadlineAt}; remaining ${Math.floor(attemptDeadline.remainingMs())} ms at ${new Date(attemptDeadline.wallNow()).toISOString()}. This deadline is immutable. Retries, backoff and fallback consume that same budget; corrections share this hard stop. Query UTC time with node -e "console.log(new Date().toISOString())".`;
   const invokeAdapter = async (
     selectedAdapter: Adapter,
@@ -798,7 +804,7 @@ export async function runStage(
     invocationIndex++;
     const invocationRole = selectedRole;
     consumeNewGuidance('adapter_invocation', invocationIndex);
-    const continuation = continuations.get(selectedAdapter);
+    const continuation = opts.isGate ? undefined : continuations.get(selectedAdapter);
     // A fresh child (including a failed-resume fallback) needs both its duties
     // and the current local correction; the thread only carries the former.
     const additionalGuidance = deliveredGuidance.filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
@@ -837,6 +843,9 @@ export async function runStage(
     activeInvocationIndex = invocationIndex;
     const invocationAbortSignal = AbortSignal.any([aggregateAbortSignal, invocationAbortController.signal]);
     const onCommandLifecycle = (event: CommandLifecycleEvent): void => {
+      if (event.phase === 'completed') appendEvidence(opts.runDir, { kind: 'command', stageId: opts.stageId, attemptIndex, invocationIndex,
+        commandId: event.id, command: event.command ?? activeCommands.get(event.id)?.command ?? null,
+        exitCode: event.exitCode ?? null, owner: 'adapter-event' });
       if (event.phase === 'started') {
         activeCommands.set(event.id, event);
         const startGuidance = consumeNewGuidance(
@@ -1001,7 +1010,7 @@ export async function runStage(
         });
       }).then(
         (value) => {
-          if (isSessionUuid(value.sessionId)) {
+          if (!opts.isGate && isSessionUuid(value.sessionId)) {
             const recorded = readSession(opts.runDir, opts.stageId, selectedAdapter.sessionKind);
             continuations.set(selectedAdapter, {
               sessionId: value.sessionId,
@@ -1034,6 +1043,9 @@ export async function runStage(
       // Adapter settlement closes every command it owned, including one whose
       // stream ended without a trustworthy completion record. A later
       // interrupt must never bind to stale in-memory activity.
+      for (const command of activeCommands.values()) appendEvidence(opts.runDir, { kind: 'command', stageId: opts.stageId, attemptIndex, invocationIndex,
+        commandId: command.id, command: command.command ?? null, exitCode: null, owner: 'adapter-event',
+        evidence: 'Native stream closed without a completion exit; outcome unknown' });
       activeCommands.clear();
       if (activeInvocationAbortController === invocationAbortController) {
         activeInvocationAbortController = undefined;
@@ -1083,6 +1095,7 @@ export async function runStage(
         && (opts.isGate ? record.pass === true : record.status === 'delivered');
   };
   let stageWorkFinished = false;
+  let validatedStageRecord: Record<string, unknown> | undefined;
   let correctionReinvocations = 0;
   const invokeAdapterWithCorrection = async (
     selectedAdapter: Adapter,
@@ -1179,44 +1192,16 @@ export async function runStage(
   };
 
   let result: RunResult;
-  let validationFailure: RunResult | undefined;
   // All adapter work shares one immutable attempt boundary.
   try {
   try {
     const preflightErrors = artifactDeclarationErrors(opts.artifactContract, opts.stageId);
     if (!preflightErrors.length && opts.isGate && !aggregateAbortSignal.aborted) {
-      const dependencies = {
-        remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
-      };
-      let validation = await recordGateValidationDelta(opts.projectDir, opts.runId, opts.stageId, dependencies);
-      if (validation && !validation.pass && !validation.delta.some(entry => entry.state === 'regression')) {
-        await settleGateValidationEvidence(opts.projectDir, opts.runId, opts.stageId, dependencies);
-        // Settlement owns the replay and its receipt; do not run commands again.
-        validation = JSON.parse(readFileSync(join(opts.runDir, `validation_delta_${opts.stageId}.json`), 'utf8'));
-      }
-      // A no-regression pass can still carry failed or unlaunchable commands;
-      // only commands that themselves passed make a rerun redundant.
-      const configured = validation?.current.filter(command => command.state !== 'not_configured') ?? [];
-      const commandsPassed = configured.length > 0 && configured.every(command => command.state === 'passed');
-      if (validation?.pass) prompt += `\n\nEngine validation: pass=true; ${validation.current.map(command => `${command.display ?? command.role}: exit=${command.exitCode ?? 'unavailable'}, state=${command.state}`).join('; ')}. Receipt: ${join(opts.runDir, validation.immutablePath ?? `validation_delta_${opts.stageId}.json`)} (each command's result and output tail). The engine enforces this comparison. Review every assigned criterion lacking a prior independent conclusion; validation receipts contain no semantic conclusions.${commandsPassed ? ' Do not rerun configured commands without a concrete evidence gap.' : ''} Project writes require post-write validation.`;
-      const regressions = validation?.delta.filter(entry => entry.state === 'regression') ?? [];
-      if (validation && !validation.pass) {
-        // Use the existing verdict carrier and repair path without a model decision.
-        const evidence = join(opts.runDir, validation.immutablePath!);
-        const reason = validation.delta.filter(entry => entry.state !== 'pass').map(entry => `${entry.display ?? entry.role}: ${entry.newFailureIdentifiers.join(', ') || entry.reason}`).join('; ');
-        validationFailure = { exitCode: 0, duration_ms: Math.round(attemptElapsedMs()), writes: [], writeAttribution: 'structured', output: JSON.stringify({
-          pass: false, reason,
-          criteria: Object.fromEntries((opts.criterionRefs ?? []).map(id => [id, { status: 'fail', evidence }])),
-          audit_findings: { version: 1, findings: [] },
-          ...(regressions.length ? { repairability: { version: 1, disposition: 'repairable', evidence } } : {}),
-        }) };
-      } else if (direct && opts.isGate && !opts.resumeSessionId) {
-        prompt += '\nThis is a fresh independent review. Evaluate the entire brief, including after an engine validation failure was repaired.';
-      }
+      await recordGateValidationDelta(opts.projectDir, opts.runId, opts.stageId);
     }
     result = aggregateAbortSignal.aborted ? { ...cancelledResult(), output: preflightErrors.join('\n') }
       : preflightErrors.length ? { output: preflightErrors.join('\n'), exitCode: 1, duration_ms: Math.round(attemptElapsedMs()), friendlyError: preflightErrors.join('; ') }
-      : validationFailure ?? await invokeAdapterWithCorrection(adapter, resolvedRole);
+      : await invokeAdapterWithCorrection(adapter, resolvedRole);
 
     // Adapter error detection + exponential backoff retry on the SAME adapter.
     if (result.exitCode !== 0 && result.providerFailure !== undefined && isRetryableAdapterFailure(result.providerFailure?.kind)) {
@@ -1247,7 +1232,8 @@ export async function runStage(
   let blockedStageResult = false;
   if (result.exitCode === 0 && opts.outputSchema) {
     try {
-      const record = validationFailure ? JSON.parse(result.output) as Record<string, unknown> : stageRecord(result.output);
+      const record = stageRecord(result.output);
+      validatedStageRecord = record;
       blockedStageResult = record.status === 'blocked';
       stageWorkFinished = finishedStageRecord(record);
       if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
@@ -1273,7 +1259,7 @@ export async function runStage(
         artifactContract: opts.artifactContract,
         statuses: opts.artifactStatuses,
       };
-      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || Boolean(validationFailure) || Boolean(wrapUpRequestedAt && !stageWorkFinished) || result.exitCode !== 0);
+      const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || Boolean(wrapUpRequestedAt && !stageWorkFinished) || result.exitCode !== 0);
       const productFacts = existsSync(join(opts.runDir, 'run.json')) ? declaredOutputFacts(opts.projectDir, opts.runId) : [];
       // A single direct author owns the whole brief. Split plans settle each
       // stage's artifact contract; completion still requires every run product.
@@ -1438,6 +1424,56 @@ export async function runStage(
     boundaryError = error;
     final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, false,
       { exitCode: 1, error: error instanceof Error ? error.message : String(error) });
+  }
+  if (attemptValidationPlan?.baseline.discovery.commands.length && !result.engineVoid && !childCloseUnverified && !result.suspended && !result.continuation) {
+    await recordAttemptValidation(opts.projectDir, opts.runId, opts.stageId, {
+      remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
+      readFailureIdentity: async input => {
+        // A fresh bounded reading has no author home, conversation, or project.
+        const scratch = createInvocationScratch();
+        try {
+          const initialized = spawnSync('git', ['init', '-q', scratch.path], { timeout: 15_000 });
+          if (initialized.status !== 0) return undefined;
+          const reading = await withEngineIntegrity({ projectDir: scratch.path, runDir: opts.runDir, stageId: '_validation_identity' }, () => adapter.run(failureReadingPrompt(input), { ...resolvedRole, name: '_validation_identity',
+            prompt: 'Return only the supplied closed-schema validation reading.', tools: [] }, {
+            stageId: '_validation_identity', workDir: scratch.path, runDir: opts.runDir,
+            outputSchema: FAILURE_READING_JSON_SCHEMA, timeout_ms: Math.max(1, Math.min(60_000, attemptDeadline.remainingMs())),
+            abortSignal: aggregateAbortSignal, preserveSession: false,
+          }));
+          let parsed: unknown;
+          try { parsed = JSON.parse(reading.output); } catch { /* invalid evidence stays unknown */ }
+          appendEvidence(opts.runDir, { kind: 'identity-reading', stageId: opts.stageId, attemptIndex,
+            command: input.command, inputSha256: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
+            inputBytes: Buffer.byteLength(JSON.stringify(input)), truncated: input.truncated,
+            valid: reading.exitCode === 0 && FailureReadingSchema.safeParse(parsed).success,
+            inputTokens: reading.tokens_in ?? null, outputTokens: reading.tokens_out ?? null, owner: 'closed-schema-model' });
+          return reading.exitCode === 0 ? parsed : undefined;
+        } finally { scratch.cleanup(); }
+      },
+    });
+  }
+  const evidenceTreeAfter = captureProjectTree(opts.projectDir, opts.taskDescription ?? '');
+  appendEvidence(opts.runDir, { kind: 'attempt', stageId: opts.stageId, attemptIndex, attemptStartedAt,
+    exitCode: result.exitCode, status: final.status, treeHash: evidenceTreeAfter.hash,
+    files: changedTreeFiles(evidenceTreeBefore, evidenceTreeAfter),
+    remainingWork: Array.isArray(validatedStageRecord?.remaining_work) ? validatedStageRecord.remaining_work as string[] : null,
+    continuation: Boolean(result.continuation), measurements: {
+      inputTokens: result.tokens_in ?? null, outputTokens: result.tokens_out ?? null,
+      durationMs: result.duration_ms, provenance: 'adapter-reported',
+    } });
+  if (validatedStageRecord?.status === 'blocked') {
+    appendEvidence(opts.runDir, { kind: 'declaration', stageId: opts.stageId, attemptIndex, status: 'blocked',
+      reason: String(validatedStageRecord.summary).slice(0, 2000),
+      caveats: (validatedStageRecord.caveats as string[] ?? []).slice(0, 10), owner: 'declaration' });
+    for (const [index, check] of ((validatedStageRecord.checks ?? []) as Array<{ command: string; exit_code: number; evidence: string }>).entries()) {
+      appendEvidence(opts.runDir, { kind: 'command', stageId: opts.stageId, attemptIndex, commandId: `declaration-${index}`,
+        command: check.command, exitCode: check.exit_code, evidence: check.evidence, owner: 'declaration' });
+    }
+  }
+  if (result.exitCode === 0 && opts.isGate && !result.continuation && !result.suspended) {
+    const verdict = stageRecord(result.output);
+    appendEvidence(opts.runDir, { kind: 'decision', stageId: opts.stageId, attemptIndex,
+      verdict, owner: 'closed-schema-model' });
   }
   {
     const settled = final.attempts?.at(-1);
