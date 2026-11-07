@@ -104,7 +104,7 @@ export interface ResearchGateCandidate {
 
 export const RESEARCH_GATE_CANDIDATE_FILE = 'research_gate_candidate.json';
 
-function candidateFile(gateStageId?: string): string {
+export function researchGateCandidateFile(gateStageId?: string): string {
   if (!gateStageId) return RESEARCH_GATE_CANDIDATE_FILE;
   const binding = createHash('sha256').update(gateStageId, 'utf8').digest('hex').slice(0, 16);
   return `research_gate_candidate_${binding}.json`;
@@ -141,7 +141,7 @@ export function captureResearchGateCandidate(
   runDir: string,
   gateStageId?: string,
 ): ResearchGateCandidate {
-  const destination = join(runDir, candidateFile(gateStageId));
+  const destination = join(runDir, researchGateCandidateFile(gateStageId));
   const previous = readResearchGateCandidate(runDir, gateStageId);
   if (previous && !previous.settlement) {
     settleResearchGateCandidate(projectDir, runDir, previous, 'rejected', 'Gate was re-evaluated before this captured outcome was ingested');
@@ -178,7 +178,7 @@ export function captureResearchGateCandidate(
 
 export function readResearchGateCandidate(runDir: string, gateStageId?: string): ResearchGateCandidate | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(join(runDir, candidateFile(gateStageId)), 'utf-8')) as ResearchGateCandidate;
+    const parsed = JSON.parse(readFileSync(join(runDir, researchGateCandidateFile(gateStageId)), 'utf-8')) as ResearchGateCandidate;
     if (parsed.version !== 1) return undefined;
     if (gateStageId && parsed.gateStageId !== gateStageId) return undefined;
     return parsed;
@@ -192,7 +192,7 @@ export function settleResearchGateCandidate(
 ): void {
   if (candidate.settlement) return;
   candidate.settlement = { disposition, reason };
-  writeFileSync(join(runDir, candidateFile(candidate.gateStageId)), `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
+  writeFileSync(join(runDir, researchGateCandidateFile(candidate.gateStageId)), `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
   const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as StoreState;
   recordRunEvent(projectDir, state.runId, {
     type: 'research_gate_candidate_settled', runId: state.runId,

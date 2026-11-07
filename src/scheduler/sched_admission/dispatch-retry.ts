@@ -1,6 +1,5 @@
 import { concludeRun } from '../sched_policy/run-completion.js';
 /** Planner artifact retry decisions; run/campaign/guidance effects enter through typed callbacks. */
-import { renderPlanInterface } from '../../plan-interface.js';
 import { type StageStatus, type StoreState, runDir, RUN_STATUS } from '../../store.js';
 import { join, posix } from 'node:path';
 import { writeFileSync, unlinkSync, mkdirSync, copyFileSync } from '../../engine-fs.js';
@@ -31,10 +30,6 @@ export function promoteAdmittedRealityChecks(runDirPath: string, state: StoreSta
   };
 }
 
-// Canonical dispatch.yaml schema reminder, single-sourced for the re-prompt so
-// the planner re-emits a well-formed file. Generic mechanism (no task content).
-const DISPATCH_SCHEMA_REMINDER = renderPlanInterface();
-
 export function buildRetryPreamble(
   retries: number,
   timeoutMs: number,
@@ -55,30 +50,17 @@ export function buildRetryPreamble(
     prevError = status.error ?? status.attempts?.filter(attempt => attempt.status !== RUN_STATUS.RUNNING).at(-1)?.error;
   } catch { /* status not readable; fall through to generic message */ }
   const monotoneContext = buildMonotonePlanRetryContext(runDirPath, stageId);
-  const withMonotoneContext = (message: string): string => monotoneContext
-    ? `${message}\n\n${monotoneContext}`
-    : message;
   const retryState = readMonotonePlanRetryState(runDirPath, stageId);
-  if (admissionFailed && retryState && !retryState.terminal) {
-    return withMonotoneContext([
-      `RE-PLAN (attempt ${retryState.attempts.length + 1}): dispatch admission rejected the previous complete proposal before any proposed work stage ran.`,
-      prevError ?? retryState.unsatisfied.map(requirement => `${requirement.id}: ${requirement.detail}`).join('\n'),
-      DISPATCH_SCHEMA_REMINDER,
-      `Address the observed requirements in a complete replacement at ${runDirPath}/dispatch.yaml. The archived proposal/report remain read-only evidence.`,
-    ].join('\n\n'));
-  }
-  let cause: string;
-  if (prevError && prevError.startsWith('aborted by engine')) {
-    cause = `Previous execution was ${prevError}. The engine stopped the execution. Inspect its recorded reason and produce the required result within the current deadline.`;
-  } else if (timeoutContext) {
-    cause = `Previous attempt timed out with an effective budget of ${timeoutContext.previousBudgetMs}ms. `
-      + `This new attempt has a strictly larger immutable budget of ${timeoutContext.nextBudgetMs}ms.`;
-  } else if (prevError) {
-    cause = `Previous execution failed: ${prevError}. Verify its partial work and complete the current duties.`;
-  } else {
-    cause = `Previous attempt timed out after ${Math.ceil(timeoutMs / 1000)}s.`;
-  }
-  return withMonotoneContext(`RETRY (attempt ${retries + 1}): ${cause} Read structured evidence at ${partialPath} and inspect the current diff. Preserve valid work and recorded evidence; repair or redo invalid partial work to complete the admitted result within the current scope and deadline.`);
+  const replan = admissionFailed && retryState && !retryState.terminal;
+  return [
+    `# ${replan ? 'RE-PLAN' : 'RETRY'} facts\n${JSON.stringify({ stageId, attemptIndex: retries + 1,
+      budgetMs: timeoutMs, previousError: prevError, ...timeoutContext,
+      ledgerPath: partialPath, statusPath: join(runDirPath, 'stages', stageId, 'status.json'),
+      ...(replan ? { dispatchPath: join(runDirPath, 'dispatch.yaml') } : {}),
+    })}`,
+    monotoneContext,
+    'Preserve valid work and recorded evidence; complete the admitted duties within the current scope and immutable deadline. The system contract owns the result schema.',
+  ].filter(Boolean).join('\n\n');
 }
 
 export function diagnoseEmptyDispatch(

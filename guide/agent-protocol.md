@@ -41,6 +41,27 @@ Sources: [live schema/checker](../src/plan-interface.ts),
 [normalization](../src/scheduler/sched_admission/configuration.ts),
 [dispatch admission](../src/scheduler/sched_admission/dispatch.ts).
 
+### Evidence handoff
+
+Every gate and repair receives one stage contract, structured ledger facts with their
+recorded tree/attempt identities, the current diff against the run’s admitted base,
+and readable repository/run artifact paths. The projection retains the latest attempt
+for each stage and its matching validation, plus earlier verdict records. Diff excerpts
+keep the existing byte bound and name the full immutable patch; structured records are
+never clipped into invalid JSON. The full brief appears once in the system
+contract; criterion assignments name IDs and `brief_criteria.json` instead of printing
+the requests again. Review risk areas are structured decision records. Earlier gate
+verdicts and engine conclusions remain structured records, including for old runs
+whose rejection archives predate the ledger. Missing fields are omitted, never inferred
+or summarized. Author final records are visible only to the same stage’s continuation;
+other stages receive engine attempt facts and declared blocker status. Retry and replan
+preambles carry observed errors, budgets and admission requirements as JSON records;
+the result and dispatch schemas remain single-sourced in the stage contract.
+When the admitted brief exists, `{task_description}` names its readable path instead
+of printing a second copy; standalone callers without a brief retain inline text. The ledger on
+disk retains its append-only audit data. Guidance remains stage-addressed and retains
+its existing delivery receipts and scope semantics. Each invocation has private scratch.
+
 ### Single-author execution and history
 
 Every authoring stage runs one author. New workflow and dispatch competition fields are refused before unknown metadata is
@@ -64,9 +85,11 @@ No numeric default changed: the three-hour default now includes the finishing tu
 
 The worker persists an attempt-bound guidance envelope, retires the current invocation
 through its existing control path and invokes the same adapter with the actionable
-wrap-up instruction. Both Codex and Claude use this path. A captured same-attempt UUID
-may resume; otherwise the full duties and guidance are supplied to a fresh child.
-No cross-stage session reuse is required. The 5.5-second closure window reserves the
+wrap-up instruction. Both Codex and Claude start a fresh provider session with the full
+current contract, ledger and diff, the predecessor’s structured final record (when
+available), its validation fact and delivered guidance IDs. Same-attempt corrections
+and guidance interruptions also start fresh and receive the preceding invocation’s
+structured final record and delivery IDs. No situation retains a live-session exception. The 5.5-second closure window reserves the
 existing five-second process-group escalation plus observation. Once that child retires
 within the window, at least `W` remains for the finishing turn under a responsive scheduler.
 An unresponsive scheduler cannot deliver a timely warning; monotonic settlement still
@@ -84,8 +107,9 @@ a wrap-up does not reset its progress clock.
 A completed budget slice is not completed duty or gate acceptance. It cannot release
 consumers or publish a passing gate verdict. The next workflow iteration preserves the
 admitted DAG, files and completed predecessors, and reopens the unfinished slice and its
-consumers. The next author receives its own previous output, live log and attributed
-writes. Each slice spends one of the existing finite `max_iterations`; exhaustion is
+consumers. The next author receives its own predecessor’s structured final record,
+validation fact and delivered guidance IDs through the evidence ledger, plus the current
+diff and repository paths. Transcripts and live logs are never handoff input. Each slice spends one of the existing finite `max_iterations`; exhaustion is
 `incomplete` with retained work, without timeout retry growth. A configured research wall
 ceiling also prevents another slice at a budget boundary. Cancel/resume preserves spent
 iterations. Gates and configured validation run in independent stage boundaries with
@@ -210,3 +234,5 @@ receives the combined repair diff from the start of the round. Failed work does 
 release its successors or clear the rejection.
 
 Sources: [content settlement](../src/scheduler/sched_scope/write-enforcement.ts), [plan revisions](../src/plan-revisions.ts).
+
+Research gates retain their existing captured outcome record and settlement owner. Their prompt names that record by path and content identity; it does not inline candidate labels or author reasons, including consumed earlier-round outcomes.

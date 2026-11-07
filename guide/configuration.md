@@ -28,7 +28,7 @@ Parser field names are listed exactly.
 | `adapter` | `auto` | Runtime backend choice |
 | `model` | `default` | Inherit adapter configuration unless pinned |
 | `reasoning_effort` | `default` | Inherit adapter effort unless pinned |
-| `session_reuse` | `false` | Opt into compatible cross-stage Codex UUID continuation |
+| `session_reuse` | `false` | Legacy configuration field; managed stages always start fresh |
 
 Git ignore rules own ordinary disposable-output inventory. Tracked files and task-frozen
 evidence retain content protection regardless of spelling. Idle, heartbeat, observer and
@@ -67,8 +67,9 @@ value and source (`role`, `local-default`, `user-settings`, or `cli-default`), w
 Both adapters keep model choice an operator policy: they do not force a cheaper model or
 translate another provider's model name. Rejected model/effort parameters can be removed by
 bounded native-error repair; that does not verify the suitability of the resulting model.
-Session reuse can be overridden per process
-by `FC_SESSION_REUSE=0` or `1`. Validation stages do not inherit an author's session.
+Managed stages, retries and continuations start fresh. Retained context comes from the
+evidence ledger and current diff, with the exact same-stage predecessor record when available.
+Legacy session-reuse settings do not select a provider conversation.
 
 `--max-iterations` wins over engine/workflow launch defaults. Campaign selection and context
 precedence belong to [operations](operations.md#campaigns). A stage deadline is immutable
@@ -85,7 +86,8 @@ Claude disables ambient customizations, user/project/local settings and MCP serv
 stage execution, and removes nested-CLI launch markers. Authentication, provider variables and
 HOME remain owned by the CLI. CLAUDE_CONFIG_DIR points to the stage's private session
 home; CLAUDE_SECURESTORAGE_CONFIG_DIR retains the operator-selected credential source.
-Claude copies only native conversation state for an admitted resume, never OAuth credentials. Settings isolation is not OS filesystem confinement.
+The standalone adapter's explicit resume API copies only native conversation state, never OAuth credentials;
+managed execution does not use that API. Settings isolation is not OS filesystem confinement.
 
 Source: [role parser](../src/scheduler/sched_admission/configuration.ts),
 [availability](../src/adapters/availability.ts), [Codex adapter](../src/adapters/codex.ts),
@@ -95,8 +97,8 @@ Source: [role parser](../src/scheduler/sched_admission/configuration.ts),
 
 A role YAML accepts `name` and `prompt` (required), `description` (default empty),
 `model` and `reasoning_effort` (default `default`), `tools` (default empty list), optional
-`adapter`, and `handoff_visibility: full|minimal|none`. Visibility selects predecessor
-context. Use `tools: [default]` for normal adapter execution. An empty list selects read-only
+`adapter`, and `handoff_visibility: full|minimal|none`. All visibility values use the
+structured ledger and diff; none grants transcript access. Use `tools: [default]` for normal adapter execution. An empty list selects read-only
 inspection: Codex's native read-only sandbox, or Claude's restricted Read/Glob/Grep tools
 in plan mode with permission prompts denied. These Claude arguments are covered by local
 transport fixtures; no live-provider confinement proof is claimed. Any nonempty list selects
@@ -160,7 +162,7 @@ Sources: [schemas](../src/scheduler/sched_admission/configuration.ts),
 | `PROJECT_DIR` | Default project selection in core CLI/dashboard startup |
 | `PORT` | Dashboard port, default 3000 |
 | `FLOWCREW_DAEMON_SOCKET` | Ignored; select a private state root with `FC_HOME` or an explicit endpoint with `--socket` |
-| `FC_SESSION_REUSE` | Literal 0/1 session-reuse override |
+| `FC_SESSION_REUSE` | Legacy literal 0/1 setting; managed execution always starts fresh |
 | `FC_TASKS_ROOT`, `CODEX_THREAD_ID` | Optional ledger selection; see [ledger](fc_tasks.md) |
 | `MOCK_FIXTURE_DIR` | Mock fixture input directory |
 | `CODEX_HOME` | Source adapter configuration/home location |

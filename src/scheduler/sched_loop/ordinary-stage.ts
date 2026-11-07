@@ -9,13 +9,11 @@ import { AttemptDeadlineClock, TechnicalRetryBudgetState } from '../../attempt-d
 import { formatCampaignContextBlock, selectRelevantCampaignContext } from '../../campaign-context.js';
 import { summarizeLedger } from '../../campaign-ledger.js';
 import { readCampaignEntries, resolveCampaignStorageKey } from '../../campaigns.js';
-import { isSessionReuseEnabled } from '../../config.js';
 import { summarizeContext } from '../../context-inventory.js';
 import { listCheckTypes } from '../../reality-gate/index.js';
 import { StageConfig, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, loadBasePrompt } from '../sched_admission/dispatch.js';
-import { gateContinuationSessionForStage, sessionResumeForStage, shouldPreserveSession } from '../sched_admission/sessions.js';
 import { log } from '../sched_admission/shared.js';
 import { checkCampaignHealth } from '../sched_policy/campaign.js';
 import { appendAttemptDeadlineContract } from '../sched_policy/prompt-contracts.js';
@@ -73,20 +71,10 @@ export async function executeOrdinaryStage(
       }
 
       let resolvedPrompt = stage.prompt_template;
-      if (!resolvedPrompt) {
-        resolvedPrompt = (stage.depends_on ?? []).length === 0
-          ? (taskDescription?.trim() || taskDescription || '') + '\nProject: ' + projectDir
-          : (taskDescription ?? '');
-      }
+      // The admitted brief is already in the system contract.
+      resolvedPrompt ||= '';
 
-      // Entry stages consume the task text captured and parsed at admission.
-      // Re-reading task_brief.md here would let a later sidecar edit replace
-      // the exact bytes that the launcher already admitted.
       if (stage.dynamic_dispatch && (stage.depends_on ?? []).length === 0) {
-        const admittedTask = taskDescription?.trim();
-        if (admittedTask && !stage.prompt_template?.trim()) {
-          resolvedPrompt = admittedTask + '\nProject: ' + projectDir;
-        }
         // Campaign context: prepend only fresh, non-terminal, active-phase history.
         // --campaign-context=skip (and its legacy alias) suppresses this verbose block;
         // campaign ownership, telemetry and the compact tried-direction ledger remain intact.
@@ -119,7 +107,7 @@ export async function executeOrdinaryStage(
           decisions: state.decisionGraph.records, budgets: { iteration: state.currentIteration, maximum_iterations: state.maxIterations, started_at: state.startedAt }, reason: state.decisionGraph.replan.reason })}\nReturn the complete non-bootstrap plan in dispatch.yaml. Retain every executed stage exactly as admitted and preserve all result duties. This is a new revision, not a new iteration; all spent work and clocks carry over.`;
       }
       // Pivot context: inject into planner prompt when research injection is active
-      if (state.researchInjection && (stage.depends_on ?? []).length === 0) {
+      if (!stage.is_gate && !stage.retry_to?.length && state.researchInjection && (stage.depends_on ?? []).length === 0) {
         resolvedPrompt = `⚠️ PIVOT REQUIRED: The previous approach failed. Campaign health detected: ${state.researchInjection.alertType}. ${state.researchInjection.message}. You MUST plan a research stage to explore new directions before attempting implementation.\n\n` + resolvedPrompt;
       }
 
@@ -133,8 +121,6 @@ export async function executeOrdinaryStage(
       }
 
       const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
-      const sessionReuseEnabled = isSessionReuseEnabled();
-      const resumeSession = gateContinuationSessionForStage(stage, runDirPath, (state.stages[stage.id]?.attempts?.length ?? 0) > 0, stageAdapter.sessionKind) ?? sessionResumeForStage(stage, sorted, state, runDirPath, sessionReuseEnabled, stageAdapter.sessionKind);
       if (!technicalRetry) {
         technicalRetry = createSchedulerTechnicalRetryState(
           initialTimeout,
@@ -191,9 +177,6 @@ export async function executeOrdinaryStage(
         dynamicDispatch: stage.dynamic_dispatch,
         researchOutcomeGate: isResearchOutcomeGate(stage, sorted, state.research),
         criterionRefs: stage.criterion_refs,
-        resumeSessionId: isolatedInput ? undefined : resumeSession?.sessionId,
-        sessionOwnerStageId: isolatedInput ? undefined : resumeSession?.ownerStageId,
-        preserveSession: isolatedInput ? false : shouldPreserveSession(stage, sorted, sessionReuseEnabled),
         settlementBoundary,
       });
       recordSchedulerTechnicalAttemptResult(technicalRetry, result, prepared.budgetMs);

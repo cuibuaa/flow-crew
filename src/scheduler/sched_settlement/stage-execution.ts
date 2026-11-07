@@ -4,21 +4,19 @@ import { appendGateEvidenceInstruction } from './gate-archives.js';
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { loadAdapterByName } from '../../adapters/loader.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, nextTechnicalRetryBudget, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
-import { isSessionReuseEnabled } from '../../config.js';
 import { RUN_STATUS, StageAttemptSettlementError, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
 import { stageRecordSchema } from '../../handoff.js';
 import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit, loadDefaults, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, buildRoleRegistry, loadBasePrompt } from '../sched_admission/dispatch.js';
-import { gateContinuationSessionForStage, sessionResumeForStage, shouldPreserveSession } from '../sched_admission/sessions.js';
 import { log } from '../sched_admission/shared.js';
 import { appendApprovalRequestContract, appendAttemptDeadlineContract, appendGateConstraintAuditContext, appendPlannerAdmissionContract, appendResearchPathContract, appendProjectWriteContext } from '../sched_policy/prompt-contracts.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { appendUnresolvedStageObligationContext } from './completion.js';
-import { gateArchiveArtifactPath, buildGateFixCorrectionContract, gateArchiveCoordinate } from './gate-archives.js';
+import { buildGateFixCorrectionContract, gateArchiveCoordinate } from './gate-archives.js';
 import { isGateReviewed, isResearchOutcomeGate } from './gate-recovery.js';
 
 export function stageInitialTimeout(): number {
@@ -120,25 +118,9 @@ export async function executeSingleStage(
   const roleRegistry = buildRoleRegistry(resolvedAgentsDir);
 
   let resolvedPrompt = stage.prompt_template || '';
-  if (!resolvedPrompt) resolvedPrompt = taskDescription ?? '';
-
-  // Inject inner retry context so the agent knows this is a repeated attempt
-  if (innerRetry !== undefined) {
-    const archiveCoordinate = gateArchiveCoordinate(state.currentIteration ?? 1, innerRetry + 1);
-    const activeRetryGateIds = (stage.retry_to ?? []).filter((gateId) =>
-      existsSync(gateArchiveArtifactPath(runDirPath, archiveCoordinate, gateId, 'output')),
-    );
-    if (!stage.is_gate && innerRetry > 0) {
-      // Build references to the gate verdicts and outputs that triggered this retry
-      const gateRefs = activeRetryGateIds.map(gid =>
-        `- Verdict: ${gateArchiveArtifactPath(runDirPath, archiveCoordinate, gid, 'verdict')}`
-      ).join('\n');
-      const gateContext = gateRefs ? `\nRead the latest gate results first:\n${gateRefs}\n` : '';
-      resolvedPrompt = `RETRY FIX (attempt ${innerRetry + 1}): Previous fix attempt did not resolve all issues.${gateContext}\nUse ${runDirPath}/evidence-ledger.jsonl and the current diff for retained facts. Verify existing artifacts and resolve the rejected findings.\n\n${resolvedPrompt}`;
-    }
-    if (!stage.is_gate && activeRetryGateIds.length) {
-      resolvedPrompt = `${buildGateFixCorrectionContract(runDirPath, activeRetryGateIds, archiveCoordinate)}\n\n${resolvedPrompt}`;
-    }
+  if (!stage.is_gate && stage.retry_to?.length && innerRetry !== undefined) {
+    resolvedPrompt = `${buildGateFixCorrectionContract(runDirPath, stage.retry_to,
+      gateArchiveCoordinate(state.currentIteration ?? 1, innerRetry + 1))}\n\n${resolvedPrompt}`;
   }
 
   resolvedPrompt = appendStageExecutionContracts(resolvedPrompt, stage, allStages, state, projectDir, runId, runDirPath);
@@ -155,9 +137,7 @@ export async function executeSingleStage(
   const maxTechnicalRetries = configuredTechnicalRetryLimit();
   const maxFailureRetries = failureRetryLimit(stage, workflow);
 
-  const sessionReuseEnabled = isSessionReuseEnabled();
   const stageAdapter = agent.adapter ? await loadAdapterByName(agent.adapter) : adapter;
-  const gateSession = gateContinuationSessionForStage(stage, runDirPath, innerRetry !== undefined, stageAdapter.sessionKind);
   let result: RunResult | undefined;
   const technicalRetry = createSchedulerTechnicalRetryState(initialTimeout, state.stages[stage.id], true);
 
@@ -178,7 +158,6 @@ export async function executeSingleStage(
     writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
     writeRunState(projectDir, runId, state);
 
-    const resumeSession = gateSession ?? sessionResumeForStage(stage, allStages, state, runDirPath, sessionReuseEnabled, stageAdapter.sessionKind);
     result = await runStage(stageAdapter, {
       stageId: stage.id,
       role: agent,
@@ -210,9 +189,6 @@ export async function executeSingleStage(
       dynamicDispatch: stage.dynamic_dispatch,
       researchOutcomeGate: isResearchOutcomeGate(stage, allStages, state.research),
       criterionRefs: stage.criterion_refs,
-      resumeSessionId: resumeSession?.sessionId,
-      sessionOwnerStageId: resumeSession?.ownerStageId,
-      preserveSession: shouldPreserveSession(stage, allStages, sessionReuseEnabled),
       settlementBoundary,
     });
 

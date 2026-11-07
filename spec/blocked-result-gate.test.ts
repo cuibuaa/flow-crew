@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
 import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { runDir } from '../src/store.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 
 const root = join(import.meta.dirname, '..');
@@ -48,18 +49,23 @@ async function run(verdicts: Array<Record<string, unknown>>, answers: Record<str
   };
   const { config, raw } = loadWorkflow(workflow);
   const final = await runWorkflow(config, raw, projectDir, adapter, new Map(), undefined, join(root, 'config', 'agents'), undefined, brief, true);
-  return { final, calls, reviews: prompts.review ?? [], repairs: prompts.repair ?? [] };
+  const ledger = readFileSync(join(runDir(projectDir, final.runId), 'evidence-ledger.jsonl'), 'utf8');
+  return { final, calls, reviews: prompts.review ?? [], repairs: prompts.repair ?? [], ledger };
 }
 
 describe('a blocked author result goes to its gate', () => {
-  it('settles the author without a retry, tells the gate its reason and evidence, and ends escalated when the gate confirms', async () => {
-    const { final, calls, reviews } = await run([IRREPARABLE]);
+  it('settles a blocked author once, names structured blocker facts and retains its declaration for independent reading', async () => {
+    const { final, calls, reviews, ledger } = await run([IRREPARABLE]);
     expect(calls).toEqual(['implement', 'review']);
     expect(final.stages.implement).toMatchObject({ status: 'complete', attempts: [{ status: 'complete' }] });
-    for (const told of ['REPORTED BLOCKER', 'rejects merge sequences longer than 100 entries', 'https://example.invalid/upstream-commit',
-      'node docs/experiment.mjs blockers', 'docs/v5-blockers.json', 'evidence-ledger.jsonl', '"irreparable"']) {
-      expect(reviews[0]).toContain(told);
+    for (const retained of ['rejects merge sequences longer than 100 entries', 'https://example.invalid/upstream-commit',
+      'node docs/experiment.mjs blockers', 'docs/v5-blockers.json']) {
+      expect(ledger).toContain(retained);
+      expect(reviews[0]).not.toContain(retained);
     }
+    expect(reviews[0]).toContain('"kind":"declaration","stageId":"implement","attemptIndex":1,"status":"blocked"');
+    expect(reviews[0]).toContain('evidence-ledger.jsonl');
+    expect(reviews[0]).toContain('"irreparable"');
     expect(final.status).toBe('escalated');
     expect(final.failureReason).toContain('Blocker confirmed by reproduction');
   });
@@ -67,9 +73,10 @@ describe('a blocked author result goes to its gate', () => {
   it('sends a blocker the gate rejects to the bounded repair, whose work the gate reviews again', async () => {
     const { final, calls, reviews, repairs } = await run([REPAIRABLE, { pass: true, reason: 'repaired' }]);
     expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
-    expect(reviews[0]).toContain('REPORTED BLOCKER');
+    expect(reviews[0]).toContain('\"kind\":\"declaration\"');
     expect(repairs[0]).toContain('rejected_verdict_review.json');
-    expect(reviews[1]).not.toContain('REPORTED BLOCKER');
+    expect(reviews[1]).toContain('\"stageId\":\"repair\"');
+    expect(reviews[1]).not.toContain('The new parser rejects merge sequences');
     expect(final.status).toBe('complete');
   });
 
@@ -80,8 +87,8 @@ describe('a blocked author result goes to its gate', () => {
     const { final, calls, reviews } = await run([{ pass: false, reason: 'Confirmed blocker has a recovery route',
       repairability: { version: 1, disposition: 'repairable', evidence: 'exact recorded paths can request scope readmission' } },
     { pass: true, reason: 'cleanup and delivery verified' }], { implement: [blocked] });
-    expect(reviews[0]).toContain('A confirmed blocker does not establish irreparability');
-    expect(reviews[0]).toContain('Engine enforcement or a scope denial alone is not evidence that delivery is impossible');
+    expect(reviews[0]).toContain('A reported blocker needs independent reproduction; it does not establish irreparability');
+    expect(reviews[0]).toContain('Use repairability \"irreparable\" only with reproduced evidence that no available repair can meet the brief');
     expect(reviews[0]).not.toContain('Real, and the brief does not accept a blocked report');
     expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
     expect(final.status).toBe('complete');
@@ -90,7 +97,8 @@ describe('a blocked author result goes to its gate', () => {
   it('returns a repair that reports the blocker again to the same gate, which may then confirm it', async () => {
     const { final, calls, reviews } = await run([REPAIRABLE, IRREPARABLE], { implement: [BLOCKED], repair: [BLOCKED] });
     expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
-    expect(reviews[1]).toContain('The new parser rejects merge sequences longer than 100 entries.');
+    expect(reviews[1]).not.toContain('The new parser rejects merge sequences longer than 100 entries.');
+    expect(reviews[1]).toContain('\"kind\":\"declaration\",\"stageId\":\"repair\"');
     expect(reviews[1]).toContain('\"stageId\":\"repair\"');
     expect(final.status).toBe('escalated');
   });

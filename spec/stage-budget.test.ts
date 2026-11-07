@@ -177,7 +177,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(readStageStatus(project, created.runId, 'work').timeout?.wrapUpDeliveredAt).toBeUndefined();
     expect(readRunEvents(project, created.runId).some(event => event.type === 'stage_wrap_up_delivered')).toBe(false);
   });
-  it.each(['codex', 'claude'] as const)('B02 %s can resume an attested same-attempt UUID for wrap-up', async (provider) => {
+  it.each(['codex', 'claude'] as const)('B02 %s starts a cold wrap-up even when the preceding child attested a UUID', async (provider) => {
     const time = manualClock();
     const fixture = nativeFixture(provider, time, 'cooperate', true);
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
@@ -187,7 +187,11 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect((await runStage(fixture.adapter, options(created, time))).exitCode).toBe(0);
     const calls = fixture.calls();
     expect(calls).toHaveLength(2);
-    expect(calls[1].argv).toContain('11111111-1111-4111-8111-111111111111');
+    expect(calls[1].argv).not.toContain('11111111-1111-4111-8111-111111111111');
+    expect(calls[1].argv).not.toContain('resume');
+    expect(calls[1].argv).not.toContain('--resume');
+    expect(calls[1].input).toContain('Complete two units and retain unit 1 for continuation.');
+    expect(calls[1].input).toContain('# Previous invocation record');
     expect(calls[1].input).toContain('# Stage budget wrap-up');
     expect(readFileSync(join(retainedHome, 'retained-session.txt'), 'utf8')).toBe('unfinished session evidence');
   });

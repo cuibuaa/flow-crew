@@ -67,8 +67,10 @@ describe('brief policy selection is explicit and does not replace core admission
     expect(received.planner.system).toContain('# Brief planning policies');
     expect(received.planner.system).toContain('method_was_not_adjusted_to_match_expectation');
     expect(received.coder.system).not.toContain('# Brief planning policies');
-    for (const { user } of Object.values(received)) {
-      expect(user).toContain(parseBriefFrontmatter(task).stripped.trim());
+    for (const { user, system } of Object.values(received)) {
+      expect(system).toContain(task.trim());
+      expect(user).not.toContain(parseBriefFrontmatter(task).stripped.trim());
+      expect(user).toContain('task_brief.md');
       expect(user).not.toContain('planner_policies:');
     }
   });

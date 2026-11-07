@@ -131,7 +131,9 @@ describe('ordinary failure in the gate loop', () => {
         expect(calls).toBe(limit + 1);
         expect(readStageStatus(project, created.runId, 'work').status).toBe(limit ? 'complete' : 'failed');
         if (limit) {
-            expect(prompt).toContain('Previous execution failed');
+            expect(prompt).toContain('# RETRY facts');
+            expect(prompt).toContain('\"previousError\"');
+            expect(prompt).not.toContain('Previous execution failed');
             expect(prompt).not.toContain('timed out');
         }
     });

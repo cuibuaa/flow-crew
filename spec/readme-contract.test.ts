@@ -61,9 +61,10 @@ describe('G7 bounded README and canonical reference contract', () => {
     expect(compact(onboarding)).toContain('Neither operation is necessary for the local commands');
   });
 
-  it('preserves opt-in session reuse and compatible predecessor requirements at configuration', () => {
-    expect(configuration).toMatch(/`session_reuse` \| `false` \| Opt into compatible/);
-    expect(compact(architecture)).toContain('explicit compatible UUID binding and never grants scope');
+  it('documents cold managed attempts and scope-independent retained evidence', () => {
+    expect(configuration).toMatch(/`session_reuse` \| `false` \| Legacy configuration field; managed stages always start fresh/);
+    expect(compact(configuration)).toContain('Legacy session-reuse settings do not select a provider conversation');
+    expect(compact(architecture)).toContain('structured predecessor records and never grants scope');
   });
 
   it('documents the complete source-defined outcome vocabulary without universal success promises', () => {

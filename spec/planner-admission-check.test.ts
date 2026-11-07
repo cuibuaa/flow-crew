@@ -125,7 +125,8 @@ describe('planner checks real admission before its first result', () => {
     recordPlanRetryRefusal({ runDirPath: ctx.directory, prepared: preparePlanRetryCandidate({ runDirPath: ctx.directory, stageId: 'plan', iteration: 1, attemptIndex: 1 }), maxAttempts: 3, unsatisfied: planRetryRequirementsFromAdmission(report) });
     const retry = buildRetryPreamble(1, 1000, ctx.directory, 'plan');
     expect(retry).toContain('RE-PLAN');
-    for (const error of report.errors) expect(retry).toContain(error.message);
+    const facts = JSON.parse(retry.split('# Plan retry facts\n')[1].split('\n')[0]);
+    for (const error of report.errors) expect(facts.unsatisfied).toEqual(expect.arrayContaining([expect.objectContaining({ detail: error.message })]));
   });
 
   it('lets the planner correct a missing repair route within its own read-only plan-check', async () => {

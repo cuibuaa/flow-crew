@@ -187,11 +187,11 @@ describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-p
     writeFileSync(join(rd, 'stages', 'work', 'status.json'), JSON.stringify({ error: 'command failed' }));
     const prompt = buildRetryPreamble(1, 1000, rd, 'work');
     expect(prompt).toContain('Preserve valid work and recorded evidence');
-    expect(prompt).toContain('repair or redo invalid partial work');
-    expect(prompt).toContain('within the current scope and deadline');
+    expect(prompt).toContain('complete the admitted duties within the current scope and immutable deadline');
+    expect(JSON.parse(prompt.split('\n')[1])).toMatchObject({ stageId: 'work', attemptIndex: 2, budgetMs: 1000, previousError: 'command failed', ledgerPath: join(rd, 'evidence-ledger.jsonl') });
   });
 
-  it('emits the dispatch failure, detail, schema, and incumbent-replacement instruction', () => {
+  it('emits structured dispatch refusal facts and the replacement duty without reprinting the schema', () => {
     const rd = join(projectDir, 'rd'); mkdirSync(join(rd, 'stages', 'plan'), { recursive: true });
     writeFileSync(join(rd, 'stages', 'plan', 'status.json'),
       JSON.stringify({ status: 'pending', retries: 1, admissionFailure: { code: 'dispatch_refused', attemptIndex: 0 }, error: 'invalid dispatch.yaml: some stages referenced unknown role(s): "wizard". Available roles: planner.' }));
@@ -199,9 +199,12 @@ describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-p
     recordPlanRetryRefusal({ runDirPath: rd, prepared: preparePlanRetryCandidate({ runDirPath: rd, stageId: 'plan', iteration: 1, attemptIndex: 1 }), maxAttempts: 3,
       unsatisfied: [planRetryRequirement({ code: 'role_unknown', field: 'role', stageId: 'cast', message: 'Unknown role wizard; available roles: planner.' })] });
     const p = buildRetryPreamble(1, 1000, rd, 'plan');
-    expect(p).toContain('dispatch admission rejected');
+    expect(p).toContain('# RE-PLAN facts');
+    expect(JSON.parse(p.split('\n')[1])).toMatchObject({ stageId: 'plan', attemptIndex: 2, budgetMs: 1000, dispatchPath: join(rd, 'dispatch.yaml') });
     expect(p).toContain('wizard');
-    expect(p).toMatch(/dispatch\.yaml interface/);
+    expect(p).not.toMatch(/dispatch\.yaml interface/);
+    const admission = JSON.parse(p.split('# Plan retry facts\n')[1].split('\n')[0]);
+    expect(admission.unsatisfied).toContainEqual({ id: 'role_unknown:cast:role', detail: 'Unknown role wizard; available roles: planner.', source: 'admission' });
     expect(p).toContain('complete replacement');
     expect(p).not.toMatch(/continue from where you left off/);
   });

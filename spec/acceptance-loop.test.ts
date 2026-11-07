@@ -289,7 +289,7 @@ describe('compressed acceptance loop', () => {
     const result = await runScenario({
       writeOutsideScope: true,
       onSecondGatePrompt(prompt) {
-        const match = prompt.match(/Complete, untruncated repair-round diff: (.+repair_diff\.json)/);
+        const match = prompt.match(/"repairDiffPath":"([^"]+repair_diff\.json)"/);
         expect(match?.[1]).toBeTruthy();
         const artifact = JSON.parse(readFileSync(match![1], 'utf-8')) as {
           truncated: boolean;
@@ -371,7 +371,7 @@ describe('compressed acceptance loop', () => {
       }
     }
 
-    expect(result.gatePrompts[2]).toContain('RE-EVALUATION');
+    expect(result.gatePrompts[2]).toContain('# Gate evaluation facts');
     expect(result.gatePrompts[2]).toContain(join(roundDirs[0], `rejected_verdict_${GATE_ID}.json`));
 
     expect(existsSync(join(archiveRoot, 'round_1'))).toBe(false);
@@ -403,12 +403,10 @@ describe('compressed acceptance loop', () => {
         fixStageIds: ['repair'],
         roundDiffPath: join(roundDir, 'repair_diff.json'),
       });
-      expect(present).toContain('INTERRUPTED EVALUATION (round 2)');
+      expect(present).toContain('\"priorAttemptCount\":1');
+      expect(present).toContain('\"rejections\":[]');
       expect(present).not.toContain(inputPath);
-      expect(present).toContain('evidence ledger and current diff');
-      expect(present).toContain('No rejected verdict was recorded');
-      expect(legacy).toContain('INTERRUPTED EVALUATION (round 2)');
-      expect(legacy).toContain('evidence ledger and current diff');
+      expect(legacy).toBe(present);
     });
 
   it('prefers canonical evidence over stale legacy artifacts when both layouts exist', () => {
@@ -438,7 +436,7 @@ describe('compressed acceptance loop', () => {
       roundDiffPath: join(canonicalRoundDir, 'repair_diff.json'),
     });
 
-    expect(preamble).toContain(`Rejected verdict: ${canonicalVerdict}`);
+    expect(preamble).toContain(JSON.stringify(canonicalVerdict));
     expect(preamble).not.toContain(canonicalOutput);
     expect(preamble).not.toContain(legacyVerdict);
     expect(preamble).not.toContain(legacyOutput);

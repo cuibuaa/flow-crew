@@ -119,7 +119,7 @@ describe('record correction uses the existing attempt', () => {
       expect(existsSync(join(runDir, 'verdict_review.json'))).toBe(false);
       if (invocations.length === 2) {
         expect(prompt).toContain('Stage result correction');
-        expect(prompt).toContain(original);
+        expect(prompt).toContain(JSON.stringify(original));
         expect(prompt).toContain('Do not repeat the completed work');
         expect(opts.resumeSessionId).toBeUndefined();
       }

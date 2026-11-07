@@ -344,21 +344,21 @@ describe('live guidance and command controls', () => {
     const result = await runStage(adapter, { ...stageOptions(created, 'qa'), isGate: true });
     expect(result.exitCode).toBe(1);
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain({ first: 'FIRST EVALUATION', passing: 'INITIAL EVALUATION', rejected: 'RE-EVALUATION' }[history]);
+    expect(prompts[0]).toContain('# Gate evaluation facts');
     if (history === 'rejected') {
       expect(prompts[0]).toContain(join(archive, 'rejected_verdict_qa.json'));
       expect(prompts[0]).toContain('Reject again only for a rejected finding the repair did not resolve');
       expect(prompts[0]).toContain('record any other difference you find as a stated limitation');
     } else {
-      expect(prompts[0]).not.toContain('RE-EVALUATION');
-      if (history === 'passing') expect(prompts[0]).toContain('Run a complete initial evaluation');
+      expect(prompts[0]).toContain('\"rejections\":[]');
+      expect(prompts[0]).toContain('run a complete initial evaluation');
     }
   });
 
 });
 
 describe('continuation at closed tool boundaries', () => {
-  it('keeps the stage UUID and all delivered guidance, with complete duties for a fresh fallback', async () => {
+  it('starts fresh with complete duties and all delivered guidance at closed tool boundaries', async () => {
     const created = makeRun(['work']);
     const uuid = '123e4567-e89b-42d3-a456-426614174000';
     const calls: Array<{ prompt: string; resume?: string; fresh?: string }> = [];
@@ -374,15 +374,13 @@ describe('continuation at closed tool boundaries', () => {
     } };
     const result = await runStage(adapter, stageOptions(created));
     expect(result.exitCode).toBe(0);
-    expect(calls.map((call) => call.resume)).toEqual([undefined, uuid, uuid]);
+    expect(calls.map((call) => call.resume)).toEqual([undefined, undefined, undefined]);
     expect(calls[2].prompt).toContain('Keep correction 1.');
     expect(calls[2].prompt).toContain('Keep correction 2.');
-    expect(calls[2].prompt).not.toContain('Do the fixture work.');
-    expect(calls[2].fresh).toContain('Do the fixture work.');
-    expect(calls[2].fresh).toContain('Keep correction 1.');
-    expect(calls[2].fresh).toContain('Keep correction 2.');
+    expect(calls[2].prompt).toContain('Do the fixture work.');
+    expect(calls[2].fresh).toBeUndefined();
+    expect(calls[2].prompt).toContain('# Previous invocation record');
     expect(calls[2].prompt).toContain('# Live guidance delivered at tool completion');
-    expect(calls[2].fresh).toContain('# Live guidance delivered at tool completion');
     expect(calls[2].prompt).toContain('hard stop');
   });
 

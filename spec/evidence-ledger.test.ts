@@ -255,7 +255,9 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(result.calls[0].schema?.properties).not.toHaveProperty('checks');
     expect(result.calls[0].schema?.properties).not.toHaveProperty('files_modified');
     const ledgerText = readFileSync(join(result.rd, 'evidence-ledger.jsonl'), 'utf8');
-    expect(ledgerText).not.toContain('AUTHOR_TRANSCRIPT_SENTINEL');
+    expect(ledgerText).toContain('AUTHOR_TRANSCRIPT_SENTINEL');
+    const ownRecord = result.ledger.find(entry => entry.kind === 'attempt' && entry.stageId === 'implement');
+    expect(ownRecord?.kind === 'attempt' && ownRecord.finalRecord?.summary).toBe('AUTHOR_TRANSCRIPT_SENTINEL');
     const changes = result.ledger.filter(entry => entry.kind === 'attempt' && entry.stageId === 'implement');
     expect(changes).toEqual([expect.objectContaining({ files: [expect.objectContaining({ path: 'value.txt', content: expect.objectContaining({ sha256: expect.any(String) }) })] })]);
   });

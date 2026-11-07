@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { evidenceContext } from './evidence-ledger.js';
 import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 import { validate, type Schema } from './reality-gate/checks/json-schema-match.js';
-import { captureResearchGateCandidate } from './research-candidate.js';
+import { captureResearchGateCandidate, researchGateCandidateFile } from './research-candidate.js';
 
 export const MAX_PREDECESSOR_CONTEXT_BYTES = 8_000;
 const SKILLS_DIR = 'config/skills';
@@ -89,7 +89,7 @@ export function parseStageRecord(output: string, schema: Schema): Record<string,
 
 /** Kept as an API for callers; verbosity never grants transcript access. */
 export function buildDependencyContext(opts: Pick<HandoffOpts, 'dependsOn' | 'handoffVisibility' | 'projectDir' | 'runId' | 'runDir'>): string {
-  return evidenceContext(opts.projectDir, opts.runDir, opts.dependsOn.join('-') || 'initial');
+  return evidenceContext(opts.projectDir, opts.runDir);
 }
 
 function substituteTemplate(template: string, vars: Record<string, string>): string {
@@ -104,32 +104,22 @@ function substituteTemplate(template: string, vars: Record<string, string>): str
  * @param opts - The handoff configuration options.
  * @returns The assembled prompt string.
  */
-export function buildStagePrompt(opts: HandoffOpts): string {
+export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(opts.projectDir, opts.runDir, opts.stageId)): string {
   const vars: Record<string, string> = {
     project: opts.projectDir,
     run_dir: opts.runDir,
     skills: opts.skills ?? '',
     available_roles: opts.availableRoles ?? '',
     available_skills: opts.availableSkills ?? '',
-    task_description: opts.taskDescription ?? '',
+    task_description: existsSync(join(opts.runDir, 'task_brief.md'))
+      ? join(opts.runDir, 'task_brief.md') : opts.taskDescription ?? '',
   };
   const body = substituteTemplate(opts.promptTemplate, vars);
   const criterionBlock = (() => {
     if (!opts.criterionRefs?.length) return '';
-    try {
-      const artifact = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf-8')) as {
-        criteria?: Array<{ id?: string; text?: string }>;
-      };
-      const byId = new Map((artifact.criteria ?? [])
-        .filter((criterion): criterion is { id: string; text: string } => typeof criterion.id === 'string' && typeof criterion.text === 'string')
-        .map((criterion) => [criterion.id, criterion.text]));
-      const rows = opts.criterionRefs.map((id) => `- [${id}] ${byId.get(id) ?? '(missing canonical criterion — dispatch admission should have refused this stage)'}`);
-      return `## Canonical brief criteria assigned to this stage\n${rows.join('\n')}`;
-    } catch {
-      return '## Canonical brief criteria assigned to this stage\nThe criterion artifact is unreadable; stop and report the contract failure.';
-    }
+    return `## Canonical brief criteria assigned to this stage\n${JSON.stringify({ criterion_refs: opts.criterionRefs,
+      path: join(opts.runDir, 'brief_criteria.json') })}\nRead the assigned criteria at this path; the system brief owns their full context.`;
   })();
-  const context = evidenceContext(opts.projectDir, opts.runDir, opts.stageId ?? 'initial');
   const skillsContent = loadSkills(opts.skillNames || [], opts.projectDir);
   const anchor = skillsContent
     ? '\n\n---\nThe skill below provides methodology guidance for HOW to approach your task. Do NOT let it change WHAT you are doing — the task above takes absolute priority.\n'
@@ -143,12 +133,11 @@ export function buildStagePrompt(opts: HandoffOpts): string {
     if (!opts.isGate || !opts.researchOutcomeGate || !opts.stageId) return '';
     const candidate = captureResearchGateCandidate(opts.projectDir, opts.runDir, opts.stageId);
     if (candidate.kind === 'absent' && candidate.reason === 'run is not in research mode') return '';
-    const detail = candidate.kind === 'no_candidate'
-      ? `label=${JSON.stringify(candidate.label)}; reason=${JSON.stringify(candidate.reason)}`
-      : candidate.kind === 'measured'
-        ? `label=${JSON.stringify(candidate.label)}; result=${candidate.result}`
-        : candidate.reason ?? 'no outcome detail';
-    return `## Framework-captured research round outcome\nKind: ${candidate.kind}\nSource: ${candidate.source}\n${detail}\nJudge the assigned criteria against this declared outcome. A no_candidate round is not a measured candidate and must not be rejected merely for lacking a numeric candidate measurement.`;
+    return `## Framework-captured research round outcome\n${JSON.stringify({
+      version: candidate.version, kind: candidate.kind,
+      path: join(opts.runDir, researchGateCandidateFile(opts.stageId)),
+      ...(candidate.sha256 ? { sha256: candidate.sha256 } : {}),
+    })}\nRead the captured structured outcome at this path. A no_candidate round is not a measured candidate and must not be rejected merely for lacking a numeric candidate measurement.`;
   })();
 
   const parts = [

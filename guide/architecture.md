@@ -140,8 +140,8 @@ Its history ref owns the format version and carrier path. New runs use `run-hist
 history records have no version field, and readers and resumed writers follow the ref's path.
 Built-in adapters record compressed immutable invocation inputs before each native transport
 call, including retry inputs. Unknown provider defaults/hidden instructions remain unresolved.
-Private adapter homes isolate invocations; session continuation needs explicit compatible UUID
-binding and never grants scope. [State and operations](operations.md#inspect-guide-and-stop)
+Private adapter homes isolate invocations; managed continuation uses identity-bound
+structured predecessor records and never grants scope. [State and operations](operations.md#inspect-guide-and-stop)
 explain the read surfaces and archived aliases.
 
 Build compilation stages a complete backend/UI generation and publishes with a manifest-last

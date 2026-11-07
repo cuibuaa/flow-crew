@@ -279,7 +279,7 @@ describe('one bounded evidence context replaces predecessor narratives', () => {
     }
   });
 
-  it('keeps UTF-8 facts bounded and complete facts inspectable for every visibility setting', () => {
+  it('omits author blocker narrative and preserves structured facts for every visibility setting', () => {
     const fixture = contextFixture();
     const ledger = join(fixture.runDir, 'evidence-ledger.jsonl');
     const fact = { version: 1, sequence: 1, at: 'fixture', kind: 'declaration', owner: 'declaration',
@@ -290,9 +290,10 @@ describe('one bounded evidence context replaces predecessor narratives', () => {
       const context = dependencyContext(renderPrompt(fixture, visibility));
       expect(Buffer.byteLength(context)).toBeLessThan(8000);
       expect(context).toContain(ledger);
-      expect(context).toContain('HEAD-');
-      expect(context).toContain('-TAIL');
-      expect(context).toContain('[excerpt; read the complete artifact above]');
+      expect(context).not.toContain('HEAD-');
+      expect(context).not.toContain('-TAIL');
+      expect(context).toContain('\"status\":\"blocked\"');
+      expect(context).not.toContain('[excerpt; read the complete artifact above]');
       expect(context).not.toContain('AUTHOR-PRIVATE-HISTORY');
       expect(context).not.toContain('\uFFFD');
       expect(JSON.parse(readFileSync(ledger, 'utf8')).reason).toBe(fact.reason);

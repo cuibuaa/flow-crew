@@ -540,7 +540,7 @@ describe('engine behaviour contracts', () => {
     expect(fits.pass).toBe(true);
   });
 
-  it('captures the current research outcome into the QA prompt', () => {
+  it('names the captured research record without author narrative in the QA prompt', () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     const directory = join(root, 'run');
@@ -560,8 +560,11 @@ describe('engine behaviour contracts', () => {
     expect(captured?.kind).toBe('no_candidate');
     expect(captured?.gateStageId).toBe('qa');
     expect(prompt).toContain('Framework-captured research round outcome');
-    expect(prompt).toContain('no-safe-candidate');
-    expect(prompt).toContain('all candidates failed safety');
+    expect(prompt).not.toContain('no-safe-candidate');
+    expect(prompt).not.toContain('all candidates failed safety');
+    const locator = JSON.parse(prompt.split('Framework-captured research round outcome\n')[1].split('\n')[0]);
+    expect(JSON.parse(readFileSync(locator.path, 'utf8'))).toMatchObject(captured!);
+    expect(locator).toMatchObject({ version: 1, kind: 'no_candidate', sha256: captured?.sha256 });
 
     const currentDirectory = join(root, 'current-run');
     mkdirSync(currentDirectory);
@@ -584,7 +587,9 @@ describe('engine behaviour contracts', () => {
     });
     const current = readResearchGateCandidate(currentDirectory, 'qa-current');
     expect(current).toMatchObject({ kind: 'measured', gateStageId: 'qa-current', label: 'current', result: 42 });
-    expect(measuredPrompt).toContain('label="current"; result=42');
+    expect(measuredPrompt).not.toContain('label="current"; result=42');
+    const measuredLocator = JSON.parse(measuredPrompt.split('Framework-captured research round outcome\n')[1].split('\n')[0]);
+    expect(JSON.parse(readFileSync(measuredLocator.path, 'utf8'))).toMatchObject(current!);
 
     const closeoutPrompt = buildStagePrompt({
       dependsOn: [], promptTemplate: 'audit closeout only', projectDir, runId: 'fixture', runDir: directory,

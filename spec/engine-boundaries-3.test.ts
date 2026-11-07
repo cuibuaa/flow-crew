@@ -131,8 +131,9 @@ describe('C — retry context', () => {
     const run = root();
     write(join(run, 'stages', 'work', 'status.json'), JSON.stringify({ error: 'attempt timeout exceeded' }));
     const preamble = buildRetryPreamble(1, 1000, run, 'work', { previousBudgetMs: 1000, nextBudgetMs: 2000 });
-    expect(preamble).toContain('timed out with an effective budget of 1000ms');
-    expect(preamble).toContain('strictly larger immutable budget of 2000ms');
+    expect(preamble).toContain('\"previousError\":\"attempt timeout exceeded\"');
+    expect(preamble).toContain('\"previousBudgetMs\":1000');
+    expect(preamble).toContain('\"nextBudgetMs\":2000');
   });
 });
 

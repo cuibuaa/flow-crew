@@ -146,7 +146,8 @@ it.each(['attempt_timeout', 'exit'])('uses ordinary guidance after a %s inside a
     ? { previousBudgetMs: 1000, nextBudgetMs: 2000 } : undefined);
   expect(prompt).toContain('RETRY');
   expect(prompt).not.toContain('dispatch admission rejected');
-  expect(prompt).toContain(cause === 'attempt_timeout' ? 'strictly larger immutable budget' : 'adapter crashed');
+  expect(prompt).toContain(cause === 'attempt_timeout' ? '\"nextBudgetMs\":2000' : 'adapter crashed');
+  expect(prompt).not.toContain('Previous execution');
 });
 
 it('keeps admission identities when unrelated stages, dependencies and artifact errors reorder', () => {

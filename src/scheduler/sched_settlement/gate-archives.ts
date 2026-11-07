@@ -2,7 +2,6 @@
 import { copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { readEvidence } from '../../evidence-ledger.js';
 import type { GateRuntimeFacts } from './gate-recovery.js';
 import { readArchivedRunStateFromDirectory, type GateVerdict } from '../../store.js';
 import { latestInvocationInput } from '../../run-state-view.js';
@@ -230,82 +229,40 @@ export function archivedGateRejections(runDirPath: string, gateId: string): Arch
     .sort((left, right) => left.iteration - right.iteration || left.round - right.round);
 }
 
-/** Frame a gate's evaluation, and name any blocker reported by the authors it reviews (by default its fix stages). */
-export function buildGateDispatchPreamble(input: Parameters<typeof gateEvaluationFraming>[0] & { authorIds?: readonly string[] }): string {
-  const authors = input.authorIds ?? input.fixStageIds ?? [];
-  const blocked = readEvidence(input.runDirPath).some(entry => entry.kind === 'declaration' && authors.includes(entry.stageId));
-  return [gateEvaluationFraming(input), ...(blocked ? [
-    'REPORTED BLOCKER: unverified author declarations and declared checks are recorded in the evidence ledger. Judge each blocker from your own reproduction.',
-    'A confirmed blocker does not establish irreparability. If a repair or accepted scope revision can resolve it, reject with repairability "repairable" and findings showing that route. Engine enforcement or a scope denial alone is not evidence that delivery is impossible.',
-    'Use repairability "irreparable" only with reproduced evidence that no available repair can meet the brief. Pass only when every assigned criterion holds, including any explicitly permitted blocked outcome.',
-  ] : [])].join('\n\n');
+/** Gate and repair handoffs carry records, never earlier prompts or outputs.
+ * Archives remain a read compatibility source for runs predating the ledger. */
+export function buildGateDispatchPreamble(input: {
+  runDirPath: string; gateId: string; evaluationRound: number; priorAttemptCount: number;
+  authorIds?: readonly string[]; fixStageIds?: string[]; roundDiffPath?: string;
+  interruptedInputPath?: string; interruptedOutputPath?: string;
+}): string {
+  return `# Gate evaluation facts\n${JSON.stringify({
+    gateId: input.gateId, evaluationRound: input.evaluationRound,
+    priorAttemptCount: input.priorAttemptCount,
+    rejections: archivedGateRejections(input.runDirPath, input.gateId).map(rejection => rejectionRecord(rejection)),
+    ...(input.roundDiffPath ? { repairDiffPath: input.roundDiffPath } : {}),
+  })}\nCheck every assigned criterion against the current tree using your own experiments. Consume configured validation from the ledger without rerunning it. A reported blocker needs independent reproduction; it does not establish irreparability. Use repairability "irreparable" only with reproduced evidence that no available repair can meet the brief.
+When structured rejections exist: Check each rejected finding against the repair diff, and re-check earlier conclusions only where the diff touches them. Consume the repair attempt's configured validation from the ledger without rerunning it.
+Reject again only for a rejected finding the repair did not resolve, a regression the repair introduced, or a failure that a user of the outcome the brief describes would meet; record any other difference you find as a stated limitation in the verdict and pass.
+The repairDiffPath names the complete, untruncated repair-round diff. With no structured rejection, run a complete initial evaluation.`;
 }
 
-/** An author may answer "blocked" instead of delivering; its gate is the independent check of that claim. */
-function gateEvaluationFraming(input: {
-  runDirPath: string;
-  gateId: string;
-  evaluationRound: number;
-  priorAttemptCount: number;
-  fixStageIds?: string[];
-  roundDiffPath?: string;
-  interruptedInputPath?: string;
-  interruptedOutputPath?: string;
-}): string {
-  const rejections = archivedGateRejections(input.runDirPath, input.gateId);
-  const latest = rejections.at(-1);
-  if (!latest) {
-    const liveVerdictPass = readWrittenVerdictPass(join(input.runDirPath, `verdict_${input.gateId}.json`));
-    if (liveVerdictPass === true) {
-      return [
-        `INITIAL EVALUATION (round ${input.evaluationRound}): A prior passing verdict exists for gate ${input.gateId}, but no durable rejected verdict exists.`,
-        'Run a complete initial evaluation; a passing decision is not a rejected decision to reproduce or repair.',
-      ].join('\n');
-    }
-    if (input.priorAttemptCount > 0) {
-      return [
-        `INTERRUPTED EVALUATION (round ${input.evaluationRound}): A prior execution ended without a durable rejected verdict; run the gate as an initial evaluation, not as a re-evaluation of a rejection.`,
-        '',
-        `Use the evidence ledger and current diff in ${input.runDirPath}; prior transcripts are not decision input.`,
-        'No rejected verdict was recorded, so there is no prior decision to reproduce or repair.',
-        'Review as a first evaluation: check every assigned criterion against the change in proportion to its size and risk. The engine records configured validation once per author attempt; consume the ledger without rerunning it.',
-      ].join('\n');
-    }
-    return [
-      `FIRST EVALUATION (round ${input.evaluationRound}): No prior execution or durable rejected verdict exists for gate ${input.gateId}.`,
-      'Check every assigned criterion against the change in proportion to its size and risk. The engine records configured validation once per author attempt; consume the ledger without rerunning it.',
-    ].join('\n');
-  }
-
-  return [
-    `RE-EVALUATION (round ${input.evaluationRound}): Continue the same gate's audit after a durable rejection.`,
-    '',
-    'Evidence you must read:',
-    `- Rejected verdict: ${latest.verdictPath}`,
-    `- The engine's own conclusion and rejection reason: ${latest.effectiveVerdictPath}`,
-    '  If that file shows engine_effective_pass=false while written_verdict_pass=true, the',
-    '  verdict file is not the defect — engine_rejection_reason names what the engine',
-    '  objected to, and that is what must change.',
-    ...(existsSync(latest.metricPath) ? [`- Historical metric artifact: ${latest.metricPath}`] : []),
-    ...(input.roundDiffPath
-      ? [`- Complete, untruncated repair-round diff: ${input.roundDiffPath}`]
-      : ['- Complete repair-round diff: inspect the evidence ledger and current repository diff.']),
-    '',
-    'Check each rejected finding against the repair diff, and re-check earlier conclusions only where the diff touches them. Consume the repair attempt\'s configured validation from the ledger without rerunning it.',
-    'Reject again only for a rejected finding the repair did not resolve, a regression the repair introduced, or a failure that a user of the outcome the brief describes would meet; record any other difference you find as a stated limitation in the verdict and pass.',
-    'Do not treat a repair summary or the existence of changed code as proof.',
-  ].join('\n');
+function rejectionRecord(rejection: ArchivedGateRejection): object {
+  return {
+    iteration: rejection.iteration, round: rejection.round,
+    verdictPath: rejection.verdictPath,
+    effectiveVerdictPath: rejection.effectiveVerdictPath,
+    ...(existsSync(rejection.metricPath) ? { metricPath: rejection.metricPath } : {}),
+  };
 }
 
 export function buildGateFixCorrectionContract(
-  runDirPath: string,
-  gateIds: string[],
-  coordinate: GateArchiveCoordinate,
+  runDirPath: string, gateIds: string[], coordinate: GateArchiveCoordinate,
 ): string {
-  return [
-    `Gate repair round ${coordinate.round}: resolve the structured rejected findings.`,
-    ...gateIds.map(gateId => `- Gate ${gateId}: archived rejected verdict: ${gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'verdict')}`),
-    `Retained facts: ${join(runDirPath, 'evidence-ledger.jsonl')}; inspect the current diff.`,
-    'A fresh independent gate will check the repair and every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence. Never treat an author summary as proof.',
-  ].join('\n');
+  return `# Gate repair facts\n${JSON.stringify({ ...coordinate, gateIds,
+    rejections: gateIds.flatMap(gateId => archivedGateRejections(runDirPath, gateId)
+      .filter(rejection => rejection.iteration === coordinate.iteration && rejection.round === coordinate.round)
+      .map(rejection => rejectionRecord(rejection))),
+    ledgerPath: join(runDirPath, 'evidence-ledger.jsonl'),
+  })}\nResolve the structured rejected findings against the current diff. A fresh independent gate checks every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence.`;
 }

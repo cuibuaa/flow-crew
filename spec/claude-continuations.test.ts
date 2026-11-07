@@ -13,7 +13,6 @@ import { fcGlobalDir, readStageStatus, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 
-const sessionId = '11111111-1111-4111-8111-111111111111';
 const duties = 'Unique original duties: inspect the synthetic evidence and report the completed work.';
 const guidance = 'Keep the measured evidence and report the bounded result.';
 const role: AgentConfig = {
@@ -73,8 +72,8 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe('Claude same-attempt native session continuations (G03)', () => {
-  it.each(['correction', 'guidance', 'interrupt'] as const)('resumes after %s without resending original duties', async mode => {
+describe('Claude cold same-attempt continuations (G03)', () => {
+  it.each(['correction', 'guidance', 'interrupt'] as const)('starts fresh after %s with original duties and structured predecessor evidence', async mode => {
     process.env.FC_CLAUDE_CONTINUATION_MODE = mode;
     const created = createRun(project, 'fixture', 'name: fixture\nstages:\n  - id: work\n    role: coder\n', ['work']);
     mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
@@ -112,8 +111,9 @@ describe('Claude same-attempt native session continuations (G03)', () => {
     expect(calls).toHaveLength(2);
     expect(calls[0].argv).not.toContain('--resume');
     expect(calls[0].stdin).toContain(duties);
-    expect(calls[1].argv[calls[1].argv.indexOf('--resume') + 1]).toBe(sessionId);
-    expect(calls[1].stdin).not.toContain(duties);
+    expect(calls[1].argv).not.toContain('--resume');
+    expect(calls[1].stdin).toContain(duties);
+    expect(calls[1].stdin).toContain('# Previous invocation record');
     expect(calls[1].stdin).toContain(mode === 'correction' ? '# Stage result correction'
       : mode === 'guidance' ? '# Live guidance delivered at tool completion' : '# Operator command interrupt');
     if (mode !== 'correction') expect(calls[1].stdin).toContain(guidance);
@@ -130,7 +130,7 @@ describe('Claude same-attempt native session continuations (G03)', () => {
     expect(inputs).toHaveLength(2);
     expect(inputs.map(input => input.record?.attemptIndex)).toEqual([1, 1]);
     expect(inputs.map(input => input.record?.model)).toEqual(['synthetic-resolved-model', 'synthetic-resolved-model']);
-    expect(inputs[1].record?.resumeSessionId).toBe(sessionId);
+    expect(inputs[1].record?.resumeSessionId).toBeUndefined();
     expect(inputs[1].record?.userPrompt).toBe(calls[1].stdin);
     expect(inputs.every(input => input.integrity === 'verified')).toBe(true);
     if (mode !== 'correction') {

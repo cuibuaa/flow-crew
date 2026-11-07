@@ -8,7 +8,7 @@ import { atomicWrite, writeFileSync, appendFileSync, mkdirSync, unlinkSync } fro
 import { EngineStateError, withEngineIntegrity } from './engine-integrity.js';
 import { existsSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
 import { recordInvocationInput } from './run-state-view.js';
-import { finalizeStageSessions, isSessionUuid, readSession } from './adapter-session.js';
+import { finalizeStageSessions } from './adapter-session.js';
 import { declaredOutputFacts, runStateContext } from './run-state-access.js';
 import { providerFailureDetail } from './provider-result.js';
 import { invocationUsageFields, sumInvocationUsage } from './invocation-usage.js';
@@ -18,7 +18,7 @@ import { join, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 import { runProcessAbortSignal } from './adapters/base.js';
 export { classifyAdapterFailure } from './adapters/failure.js';
-import { appendEvidence, captureProjectTree, changedTreeFiles } from './evidence-ledger.js';
+import { appendEvidence, captureProjectTree, changedTreeFiles, evidenceContext } from './evidence-ledger.js';
 import { FAILURE_READING_JSON_SCHEMA, FailureReadingSchema, failureReadingPrompt } from './validation-identity.js';
 import { createInvocationScratch } from './invocation-scratch.js';
 import { createHash } from 'node:crypto';
@@ -81,13 +81,14 @@ import { SINGLE_AUTHOR_NOTICE } from './scheduler/sched_policy/prompt-contracts.
 import { buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 
 /** Put the canonical IDs beside the planner's first proposal instructions. */
-export function plannerCriterionAssignmentContext(brief: string): string {
+export function plannerCriterionAssignmentContext(brief: string, runDir: string): string {
   const criteria = extractBriefCriteria(brief).criteria;
   if (criteria.length === 0) return '';
   return [
     '# First-proposal criterion assignments',
     'Empty/omitted criterion_refs assign all criteria conservatively. Use these exact IDs only when assigning explicit subsets. Ordinary work needs a downstream independent gate.',
-    ...criteria.map((criterion) => `- ${criterion.id}: ${criterion.text}`),
+    JSON.stringify({ criterion_refs: criteria.map(criterion => criterion.id), path: join(runDir, 'brief_criteria.json') }),
+    'Read criterion text at this path; the system brief owns its full context.',
   ].join('\n');
 }
 
@@ -288,7 +289,7 @@ export async function runStage(
     stageId: opts.stageId,
     role: opts.role.name,
     handoffVisibility: opts.role.handoff_visibility,
-  });
+  }, '');
 
   // Isolated decisions are read-only consumers. A repair can also return a
   // decision, but keeps the ordinary author boundary and its one validation.
@@ -355,10 +356,7 @@ export async function runStage(
   prompt = prompt
     .replace(/<current execution index>/g, String(attemptIndex))
     .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
-  const priorAttempt = runningStatus.attempts?.at(-2);
-  if (priorAttempt) prompt += `\n\n# Own-stage continuation evidence\nContinue from the evidence ledger and current diff. Previous attempt: ${priorAttempt.index}; remaining duties are not certified complete. Recheck existing artifacts against the brief.`;
-  // buildStagePrompt ran before the execution index existed and intentionally
-  // included only run-wide guidance. Add notices bound to this execution now.
+  // Add notices bound to this execution; run-wide guidance is in the stage body.
   const scopedAtStart = guidanceBeforePrompt.filter((entry) => entry.attemptIndex !== undefined);
   if (scopedAtStart.length > 0) prompt += `\n\n${guidanceBlock(scopedAtStart)}`;
   beginAttemptEvidenceGeneration(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
@@ -490,7 +488,7 @@ export async function runStage(
         }
       }
     } catch { /* non-critical */ }
-    const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '');
+    const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '', opts.runDir);
     if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
     if (opts.dynamicDispatch) resolvedSystemPrompt += `\n\n${renderPlanInterface()}\n\n${renderPlannerAdmissionCheck(opts.projectDir, opts.runDir)}`;
     const briefPath = join(opts.runDir, 'task_brief.md');
@@ -801,8 +799,9 @@ export async function runStage(
   let childCloseUnverified = false;
   let invocationIndex = 0;
   let inputRecordIndex = 0;
-  const continuations = new Map<Adapter, { sessionId: string; ownerStageId: string }>();
-  // Cross-attempt context is the ledger and diff, even for opt-in reuse callers.
+  // No live-session exceptions: all continuation state is reconstructible from
+  // the ledger, current files, delivered guidance and the last final record.
+  let previousInvocation: object | undefined;
 
   const deadlineContext = (): string => `# Execution clock\nExecution ${attemptIndex}: started ${attemptDeadline.attemptStartedAt}; stage budget ends ${attemptDeadline.budgetDeadlineAt}; wrap-up warning ${attemptDeadline.wrapUpAt}; absolute deadline (hard stop) ${attemptDeadline.deadlineAt}; remaining ${Math.floor(attemptDeadline.remainingMs())} ms at ${new Date(attemptDeadline.wallNow()).toISOString()}. This deadline is immutable. Retries, backoff and fallback consume that same budget; corrections share this hard stop. Query UTC time with node -e "console.log(new Date().toISOString())".`;
   const invokeAdapter = async (
@@ -818,15 +817,12 @@ export async function runStage(
     invocationIndex++;
     const invocationRole = selectedRole;
     consumeNewGuidance('adapter_invocation', invocationIndex);
-    const continuation = opts.isGate ? undefined : continuations.get(selectedAdapter);
-    // A fresh child (including a failed-resume fallback) needs both its duties
-    // and the current local correction; the thread only carries the former.
     const additionalGuidance = (opts.isolatedInput ? [] : deliveredGuidance).filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
     const stateContext = opts.isolatedInput ? '' : runStateContext(opts.projectDir, opts.runId, opts.planRevision);
-    const fullPrompt = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`;
-    const effectiveInvocationPrompt = continuation && invocationPrompt !== prompt
-      ? `${invocationPrompt}\n\n${guidanceBlock(deliveredGuidance)}\n\n${deadlineContext()}\n\n${stateContext}`
-      : fullPrompt;
+    // Fresh children read current facts and bytes. The own-stage predecessor
+    // stays bound to the attempt that preceded this execution, not its children.
+    const currentEvidence = opts.isolatedInput ? '' : evidenceContext(opts.projectDir, opts.runDir, opts.stageId, previous ?? null);
+    const effectiveInvocationPrompt = `${currentEvidence ? `${currentEvidence}\n\n` : ''}${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${previousInvocation ? `# Previous invocation record\n${JSON.stringify(previousInvocation)}\n\n` : ''}${deadlineContext()}\n\n${stateContext}`;
     const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
       // The public standalone worker API predates initialized run projections.
       // Keep it usable, but do not manufacture an authenticated run carrier.
@@ -1002,8 +998,7 @@ export async function runStage(
         } },
       () => {
         if (!selectedAdapter.capturesInvocationInput) {
-          captureInput({ systemPrompt: invocationRole.prompt, userPrompt: effectiveInvocationPrompt,
-            resumeSessionId: continuation?.sessionId }, 'adapter');
+          captureInput({ systemPrompt: invocationRole.prompt, userPrompt: effectiveInvocationPrompt }, 'adapter');
         }
         return selectedAdapter.run(effectiveInvocationPrompt, invocationRole, {
           timeout_ms: Math.max(1, Math.floor(attemptDeadline.remainingMs())),
@@ -1012,11 +1007,8 @@ export async function runStage(
           stageId: opts.stageId,
           attemptIndex,
           attemptStartedAt,
-          resumeSessionId: continuation?.sessionId,
-          sessionOwnerStageId: continuation?.ownerStageId,
           // The worker owns final cleanup; an adapter call may be corrected.
           preserveSession: true,
-          freshSessionPrompt: fullPrompt,
           abortSignal: invocationAbortSignal,
           onCommandLifecycle,
           onInvocationInput: (input) => captureInput(input, 'model'),
@@ -1024,14 +1016,10 @@ export async function runStage(
         });
       }).then(
         (value) => {
-          if (!opts.isGate && isSessionUuid(value.sessionId)) {
-            const recorded = readSession(opts.runDir, opts.stageId, selectedAdapter.sessionKind);
-            continuations.set(selectedAdapter, {
-              sessionId: value.sessionId,
-              ownerStageId: recorded?.sessionId === value.sessionId ? recorded.ownerStageId
-                : value.sessionId === continuation?.sessionId ? continuation.ownerStageId : opts.stageId,
-            });
-          }
+          let finalRecord: unknown;
+          try { finalRecord = JSON.parse(value.output); } catch { /* no structured final record */ }
+          previousInvocation = { invocationIndex, exitCode: value.exitCode, finalRecord,
+            guidanceIds: [...deliveredGuidanceIds] };
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
           // Cancellation changes the attempt outcome, not telemetry already
@@ -1172,7 +1160,7 @@ export async function runStage(
       let recordError: string;
       try { stageRecord(combined.output); return combined; }
       catch (error) { recordError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`; }
-      const instruction = `# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct only the final JSON document using the retained work and evidence. Preserve the substantive result; never invent evidence or change a rejection to pass to satisfy the format.\nSchema: ${JSON.stringify(opts.outputSchema)}\nRejected answer:\n${combined.output}`;
+      const instruction = `# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct only the final JSON document using the retained work and evidence. Preserve the substantive result; never invent evidence or change a rejection to pass to satisfy the format.\n${JSON.stringify({ error: recordError, rejectedAnswer: combined.output })}`;
       if (correctionReinvocations >= 1 || aggregateAbortSignal.aborted) {
         return {
           ...combined,
@@ -1468,11 +1456,17 @@ export async function runStage(
     });
   }
   const evidenceTreeAfter = captureProjectTree(opts.projectDir, evidenceBrief);
+  let finalRecord: Record<string, unknown> | undefined;
+  try {
+    const value: unknown = JSON.parse(result.output);
+    if (value && typeof value === 'object' && !Array.isArray(value)) finalRecord = value as Record<string, unknown>;
+  } catch { /* No structured final answer; never substitute transcript or summary. */ }
   appendEvidence(opts.runDir, { kind: 'attempt', stageId: opts.stageId, attemptIndex, attemptStartedAt,
     exitCode: result.exitCode, status: final.status, treeHash: evidenceTreeAfter.hash,
     files: changedTreeFiles(evidenceTreeBefore, evidenceTreeAfter),
     remainingWork: Array.isArray(validatedStageRecord?.remaining_work) ? validatedStageRecord.remaining_work as string[] : null,
-    continuation: Boolean(result.continuation), measurements: {
+    continuation: Boolean(result.continuation), finalRecord,
+    guidanceIds: [...deliveredGuidanceIds], measurements: {
       inputTokens: result.tokens_in ?? null, outputTokens: result.tokens_out ?? null,
       durationMs: result.duration_ms, provenance: 'adapter-reported',
     } });
@@ -1523,9 +1517,7 @@ export async function runStage(
     // Final classification and durable settlement, rather than a raw child zero,
     // determine whether the successful-home cleanup policy applies.
     if (final.status === RUN_STATUS.COMPLETE && !result.continuation && !opts.preserveSession && !suspended) {
-      for (const stageId of new Set([opts.stageId, ...[...continuations.values()].map(session => session.ownerStageId)])) {
-        finalizeStageSessions(opts.runDir, stageId);
-      }
+      finalizeStageSessions(opts.runDir, opts.stageId);
     }
   }
   if (boundaryError !== undefined) throw new StageAttemptSettlementError(opts.stageId, attemptIndex, boundaryError);

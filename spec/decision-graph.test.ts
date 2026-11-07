@@ -178,7 +178,7 @@ describe('one entry and concrete clarification', () => {
 });
 
 describe('independent post-author routing', () => {
-  it('renders the base implement/review contracts with only risk and validation facts added for the two entry decisions', async () => {
+  it('renders one base contract and supplies only the structured assessment record to its reviewer', async () => {
     const captured = new Map<string, Record<string, { system: string; user: string }>>();
     for (const selected of ['base', 'review', 'review_full']) {
       project = join(root, selected); mkdirSync(project);
@@ -220,9 +220,9 @@ describe('independent post-author routing', () => {
         if (selected !== 'base' && id !== 'implement') {
           const facts = prompt.user.match(/\n\n# Independent review facts\n([^\n]+)\nRun your own targeted experiments[^\n]+/)![0];
           const value = JSON.parse(facts.split('\n')[3]);
-          expect(Object.keys(value).sort()).toEqual(['diff', 'files', 'output_groups', 'required_outputs', 'risk_areas', 'task', 'validation']);
-          expect(value.risk_areas).toEqual([{ file: 'docs/report.md', risk: 'Declared greeting risk.', experiment: 'Read and compare the greeting.' }]);
-          expect(value.validation).toEqual({ status: 'No configured validation facts have been recorded.' });
+          expect(Object.keys(value)).toEqual(['assessment']);
+          expect(value.assessment.risk_areas).toEqual([{ file: 'docs/report.md', risk: 'Declared greeting risk.', experiment: 'Read and compare the greeting.' }]);
+          expect(value.assessment.stageId).toBe('assess');
           prompt.user = prompt.user.replace(facts, '').replace('\nPerform the full independent review; these risks do not narrow coverage.', '');
         }
       }
@@ -344,7 +344,11 @@ describe('in-iteration replanning through the revision authority', () => {
       return { output, exitCode: 0, duration_ms: 1,
         ...(opts.stageId === 'plan' ? { writes: ['run:dispatch.yaml'], writeAttribution: 'structured' as const } : {}) };
     } };
-    const state = await execute(config, adapter, `---\noutputs: [docs/report.md]\n---\n${task}`);
+    // Each role runs the same real check directly; package/lockfile dependency
+    // preparation and all routing/receipt assertions retain their normal owner.
+    const validation = { commands: Object.fromEntries(['build', 'test', 'lint'].map(role => [role,
+      { command: process.execPath, args: ['check.cjs'] }])) };
+    const state = await execute(config, adapter, `---\nvalidation: ${JSON.stringify(validation)}\noutputs: [docs/report.md]\n---\n${task}`);
     expect(state.status, state.failureReason).toBe('complete');
     expect(calls).toEqual(['choose', 'plan', 'work', 'plan', 'review_assess', 'review', 'repair', 'review_assess', 'review_full']);
     expect(plans).toBe(2); expect(state.queryState!.planRevision!.revision).toBe(1);
@@ -608,7 +612,7 @@ describe('full review remains an independent successor', () => {
     expect(state.stages.review.status).toBe('skipped');
     expect(state.decisionGraph!.records.find(record => record.stageId === 'assess')).toMatchObject({ outcome: 'defaulted', successor: 'review_full' });
     expect(fullInput).toContain('Independent review facts'); expect(fullInput).toContain('validation');
-    expect(fullInput).toContain('"risk_areas":[]'); expect(fullInput).not.toContain('STALE_RISK_MARKER');
+    expect(fullInput).toContain('"outcome":"defaulted"'); expect(fullInput).not.toContain('STALE_RISK_MARKER');
     expect(fullInput).toContain('full independent review');
   });
 });
@@ -644,7 +648,7 @@ describe('review alternatives preserve result duties and joins', () => {
     else { expect(state.status, state.failureReason).toBe('complete'); expect(state.stages.publish.status).toBe('complete'); }
     expect(published).toBe(!omit);
     expect(state.planControl!.stages.find(stage => stage.id === selected)!.artifact_contract!.produces).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'review-note.md', nonempty: true })]));
-    expect(reviewerInput).toContain('review-note.md'); expect(reviewerInput).toContain('required_outputs');
+    expect(reviewerInput).toContain('review-note.md'); expect(reviewerInput).toContain('# Declared output and input locations');
   });
 
   it('translates only the framework verdict name and retains independent artifact predicates', () => {

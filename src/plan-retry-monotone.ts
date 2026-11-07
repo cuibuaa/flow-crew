@@ -353,15 +353,6 @@ export function buildMonotonePlanRetryContext(
   // Reading through the digest verifier makes a corrupt/stale incumbent fail
   // before its paths are advertised to another planner attempt.
   readPairRef(runDirPath, state.incumbent);
-  const used = state.attempts.length;
-  const remaining = Math.max(0, state.maxAttempts - used);
-  return [
-    'PLAN-RETRY OBSERVATION (scheduler-owned, digest-bound):',
-    `- last refused dispatch: ${join(runDirPath, state.incumbent.dispatchPath)} (sha256 ${state.incumbent.dispatchSha256})`,
-    `- last observed pair digest: ${state.incumbent.pairDigest}`,
-    `- remaining planner calls in this bounded chain: ${remaining}`,
-    'Observed refusal requirements:',
-    ...state.unsatisfied.map((requirement) => `- ${requirement.id}: ${requirement.detail}`),
-    'Write a complete replacement dispatch.yaml, including its reality_checks. Each replacement passes every admission rule independently; no prior component is merged or locked.',
-  ].join('\n');
+  return `# Plan retry facts\n${JSON.stringify({ path: statePath(runDirPath), ...state,
+    remainingCalls: Math.max(0, state.maxAttempts - state.attempts.length) })}\nWrite a complete replacement dispatch.yaml, including its reality_checks. Each replacement passes every admission rule independently; no prior component is merged or locked.`;
 }

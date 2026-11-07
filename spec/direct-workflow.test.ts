@@ -72,14 +72,9 @@ describe('direct workflow', () => {
       expect(opts.outputSchema).toBeDefined();
       if (opts.stageId === 'review') {
         expect(opts.resumeSessionId).not.toBe(authorSession);
-        if (captured.filter(call => call.id === 'review').length === 1) {
-          expect(opts.resumeSessionId).not.toBeDefined();
-          expect(user).toContain('evidence-ledger.jsonl');
-          expect(user).toContain('change.diff');
-        } else if (opts.resumeSessionId) {
-          expect(opts.resumeSessionId).toBe(reviewerSession);
-          expect(opts.sessionOwnerStageId).toBe('review');
-        }
+        expect(opts.resumeSessionId).toBeUndefined();
+        expect(user).toContain('evidence-ledger.jsonl');
+        expect(user).toContain('change.diff');
       }
     });
     expect(result.status).toBe('complete');
@@ -89,8 +84,8 @@ describe('direct workflow', () => {
       expect(call.system).toContain('## Review contract');
       expect(call.system).toContain('Never read or expose secrets');
       if (call.id === 'repair') {
-        expect(call.user).toContain('archived rejected verdict:');
-        expect(call.user).toContain('Gate repair round 1');
+        expect(call.user).toContain('rejected_verdict_review.json');
+        expect(call.user).toContain('# Gate repair facts');
       } else {
         expect(call.user).toContain('Canonical brief criteria assigned to this stage');
       }

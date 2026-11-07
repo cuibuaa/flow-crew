@@ -42,6 +42,7 @@ export type EvidenceFact = ValidationFact | {
   exitCode: number; status: string; treeHash: string | null;
   files: TreeFile[];
   remainingWork?: string[] | null; continuation?: boolean;
+  finalRecord?: Record<string, unknown>; guidanceIds?: string[];
   measurements: { inputTokens: number | null; outputTokens: number | null; durationMs: number; provenance: 'adapter-reported' };
 } | {
   kind: 'declaration'; stageId: string; attemptIndex: number; status: 'blocked'; reason: string;
@@ -78,6 +79,16 @@ export function readEvidence(runDir: string): EvidenceEntry[] {
   });
 }
 
+
+/** Same-stage context comes only from its last settled structured fact. */
+export function stagePredecessor(entries: EvidenceEntry[], stageId: string, previous?: { index: number; startedAt: string }) {
+  if (!previous) return undefined;
+  const attempt = entries.find((entry): entry is EvidenceEntry & { kind: 'attempt' } => entry.kind === 'attempt' && entry.stageId === stageId
+    && entry.attemptIndex === previous.index && entry.attemptStartedAt === previous.startedAt);
+  if (!attempt) return undefined;
+  return { attempt, validation: entries.find(entry => entry.kind === 'validation' && entry.stageId === stageId
+    && entry.attemptIndex === attempt.attemptIndex && entry.attemptStartedAt === attempt.attemptStartedAt) };
+}
 
 /** Identity covers Git's source inventory, plus explicitly declared ignored
  * inputs. Generated ignored outputs are not source. Unreadable members fail closed. */
@@ -129,7 +140,7 @@ export function projectCommit(projectDir: string): string | undefined {
 
 /** Diff is a separate inspectable artifact, never a summary by the author. Git
  * supplies the patch; structured file identities also include untracked writes. */
-export function evidenceContext(projectDir: string, runDir: string, _stageId: string): string {
+export function evidenceContext(projectDir: string, runDir: string, stageId?: string, previous?: { index: number; startedAt: string } | null): string {
   if (!existsSync(join(runDir, EVIDENCE_LEDGER))) writeFileSync(join(runDir, EVIDENCE_LEDGER), '', { flag: 'wx' });
   const entries = readEvidence(runDir);
   const validation = entries.filter((entry): entry is EvidenceEntry & ValidationFact => entry.kind === 'validation').at(-1);
@@ -159,21 +170,46 @@ export function evidenceContext(projectDir: string, runDir: string, _stageId: st
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || readFileSync(diffPath, 'utf8') !== patch) throw error;
   }
-  const excerpt = (value: string) => {
-    const bytes = Buffer.from(value);
-    if (bytes.length <= 3000) return value;
-    let head = 1500, tail = bytes.length - 1500;
-    while ((bytes[head] & 0xc0) === 0x80) head--;
-    while ((bytes[tail] & 0xc0) === 0x80) tail++;
-    return `${bytes.subarray(0, head).toString('utf8')}\n[excerpt; read the complete artifact above]\n${bytes.subarray(tail).toString('utf8')}`;
-  };
-  const ledgerText = entries.map(entry => JSON.stringify(entry)).join('\n');
+  // A field projection, not a model summary or a prose importance filter.
+  // Only the same stage sees its predecessor's final answer. Other stages see
+  // engine facts, decisions and unverified blocker declarations, never narratives.
+  if (stageId && previous === undefined) try { previous = JSON.parse(readFileSync(join(runDir, 'stages', stageId, 'status.json'), 'utf8')).attempts?.at(-1); } catch { /* unknown predecessor */ }
+  const predecessor = stageId ? stagePredecessor(entries, stageId, previous ?? undefined) : undefined;
+  const latest = new Map(entries.map(entry => [`${entry.kind}:${entry.stageId}`, entry]));
+  const facts = entries.flatMap<object>(entry => {
+    if (entry.kind === 'command' || entry.kind === 'identity-reading') return [];
+    if (entry.kind !== 'decision' && latest.get(`${entry.kind}:${entry.stageId}`) !== entry) return [];
+    if (entry.kind === 'validation') {
+      const attempt = latest.get(`attempt:${entry.stageId}`);
+      if (attempt?.kind !== 'attempt' || attempt.attemptIndex !== entry.attemptIndex
+        || attempt.attemptStartedAt !== entry.attemptStartedAt) return [];
+    }
+    if (entry.kind === 'attempt') {
+      const { finalRecord: _finalRecord, guidanceIds: _guidanceIds, remainingWork: _remainingWork, ...fact } = entry;
+      return [fact];
+    }
+    if (entry.kind === 'declaration') {
+      const { reason: _reason, caveats: _caveats, ...fact } = entry;
+      return [fact];
+    }
+    return [entry];
+  });
+  const ledgerText = JSON.stringify({ version: 1, sequence: entries.at(-1)?.sequence ?? 0, facts,
+
+  });
+  const predecessorText = predecessor ? `\n\n# Own-stage continuation evidence\n${JSON.stringify(predecessor)}` : '';
   const patchText = readFileSync(diffPath, 'utf8');
+  const patchBytes = Buffer.from(patchText);
+  let head = 1500, tail = patchBytes.length - 1500;
+  while ((patchBytes[head] & 0xc0) === 0x80) head--;
+  while ((patchBytes[tail] & 0xc0) === 0x80) tail++;
+  const patchExcerpt = patchBytes.length <= 3000 ? patchText
+    : `${patchBytes.subarray(0, head).toString('utf8')}\n[excerpt; read the complete artifact above]\n${patchBytes.subarray(tail).toString('utf8')}`;
   return `## Evidence ledger and diff\nRead ${join(runDir, EVIDENCE_LEDGER)} (version 1 append-only structured facts; latest validation sequence ${validation?.sequence ?? 'none'}).\n`
     + `Inspect the diff (including untracked additions; any unavailable patch is explicitly marked): ${diffPath}\nChanged-file hashes, including untracked files, are recorded in the ledger's attempt facts.\n`
     + 'Use these facts and current artifacts for every decision. Do not read author transcripts, stage output narratives or provider session history. '
     + 'Configured validation belongs to the completed author/repair attempt; decisions consume its tree-bound results without rerunning the suite. '
     + 'A solely pre-existing configured failure cannot justify repair; unknown identity remains unknown. '
-    + 'Independent experiments and every assigned acceptance criterion remain required. Read complete artifacts when an excerpt is truncated.\n'
-    + `Ledger facts:\n${excerpt(ledgerText) || '(no settled facts yet)'}\nDiff:\n${excerpt(patchText)}`;
+    + 'Independent experiments and every assigned acceptance criterion remain required. Read the complete diff artifact when its excerpt is truncated.\n'
+    + `Ledger facts:\n${ledgerText}${predecessorText}\nDiff:\n${patchExcerpt}`;
 }
