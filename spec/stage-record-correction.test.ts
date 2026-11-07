@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
+import { stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { ArtifactPathSchema, resolveArtifactLocation } from '../src/artifact-location.js';
 import { HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
 import { AuditFindingsSchema } from '../src/scoped-audit-repair.js';
@@ -13,6 +14,28 @@ import { runStage } from '../src/worker.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 
 let root: string, projectDir: string, runDir: string, runId: string, previousStore: string;
+function manualClock() {
+  let elapsed = 0;
+  const started = Date.parse('2026-01-01T00:00:00Z');
+  const timers = new Map<ReturnType<typeof setTimeout>, { at: number; callback: () => void }>();
+  const clock: AttemptDeadlineClock = {
+    monotonicNow: () => elapsed, wallNow: () => started + elapsed,
+    setTimer(callback, delay) {
+      const timer = {} as ReturnType<typeof setTimeout>;
+      timers.set(timer, { at: elapsed + delay, callback });
+      return timer;
+    },
+    clearTimer(timer) { timers.delete(timer); },
+  };
+  return { clock, advanceTo(value: number) {
+    elapsed = value;
+    for (const [timer, entry] of [...timers]) if (entry.at <= elapsed) {
+      timers.delete(timer);
+      entry.callback();
+    }
+  } };
+}
+let time: ReturnType<typeof manualClock>;
 const role = { name: 'reviewer', description: 'fixture', model: 'default', reasoning_effort: 'default', tools: [], prompt: 'Review independently.' };
 const sessionId = '11111111-1111-4111-8111-111111111111';
 const finding = () => ({ id: 'report', paths: ['docs/report.md'], reason: 'The report needs repair.', criterion_ids: ['criterion'], invalidates_plan: false, repair_role: 'coder' });
@@ -20,10 +43,11 @@ const rejected = () => ({ pass: false, reason: 'Reproduced a report defect.', cr
 const passed = () => ({ pass: true, reason: 'The report meets the brief.', criteria: { criterion: { status: 'pass', evidence: 'Inspected docs/report.md.' } }, audit_findings: { version: 1, findings: [] } });
 const schema = () => stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] });
 const options = () => ({ stageId: 'review', role, dependsOn: [], promptTemplate: 'Review the report.', projectDir, runId, runDir,
-  retries: 0, timeout_ms: 10000,  isGate: true, criterionRefs: ['criterion'], outputSchema: schema(),
+  retries: 0, timeout_ms: 10000, deadlineClock: time.clock, isGate: true, criterionRefs: ['criterion'], outputSchema: schema(),
   artifactContract: { version: 1 as const, produces: [{ id: 'verdict', root: 'run' as const, path: 'verdict_review.json', kind: 'file' as const }], reads: [], groups: [] } });
 
 beforeEach(() => {
+  time = manualClock();
   root = mkdtempSync(join(tmpdir(), 'stage-record-spec-'));
   projectDir = join(root, 'project'); mkdirSync(projectDir);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
@@ -118,6 +142,8 @@ describe('record correction uses the existing attempt', () => {
     const adapter: Adapter = { async run(prompt, _role, opts) {
       invocations.push(opts);
       expect(existsSync(join(runDir, 'verdict_review.json'))).toBe(false);
+      // Even slow host-side setup cannot consume the injected attempt budget.
+      if (invocations.length === 1) time.advanceTo(stageWrapUpTiming(options().timeout_ms).warningAfterMs - 1);
       if (invocations.length === 2) {
         expect(prompt).toContain('Stage result correction');
         expect(prompt).toContain(JSON.stringify(original));
@@ -135,6 +161,39 @@ describe('record correction uses the existing attempt', () => {
     expect(status.attempts).toHaveLength(1);
     expect(status.attempts?.[0]).toMatchObject({ exitCode: 0, disposition: 'repaired' });
     expect(readRunEvents(projectDir, runId).filter(event => event.type === 'attempt_failed')).toHaveLength(0);
+  });
+
+  it('wraps up instead of correcting when a malformed result crosses the warning boundary', async () => {
+    const invocations: RunOpts[] = [];
+    const warningAt = stageWrapUpTiming(options().timeout_ms).warningAfterMs;
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      invocations.push(opts);
+      expect(existsSync(join(runDir, 'verdict_review.json'))).toBe(false);
+      if (invocations.length === 1) {
+        time.advanceTo(warningAt - 1);
+        expect(opts.abortSignal?.aborted).toBe(false);
+        time.advanceTo(warningAt);
+        expect(opts.abortSignal?.aborted).toBe(true);
+        return { output: malformed[0][1](), exitCode: 0, duration_ms: 1 };
+      }
+      expect(prompt).toContain('# Stage budget wrap-up');
+      expect(prompt).not.toContain('# Stage result correction');
+      expect(opts.attemptIndex).toBe(invocations[0].attemptIndex);
+      expect(opts.attemptStartedAt).toBe(invocations[0].attemptStartedAt);
+      return { output: JSON.stringify(rejected()), exitCode: 0, duration_ms: 1 };
+    } };
+    const result = await runStage(adapter, options());
+    expect(result.exitCode, result.friendlyError).toBe(0);
+    expect(invocations).toHaveLength(2);
+    expect(result.continuation).toBeUndefined(); // A completed rejection remains authoritative.
+    expect(JSON.parse(readFileSync(join(runDir, 'verdict_review.json'), 'utf8'))).toEqual(rejected());
+    const status = readStageStatus(projectDir, runId, 'review');
+    expect(status.attempts).toHaveLength(1);
+    expect(status.attempts?.[0].disposition).not.toBe('repaired');
+    const requestedAt = new Date(time.clock.wallNow()).toISOString();
+    expect(status.timeout).toMatchObject({ wrapUpRequestedAt: requestedAt, wrapUpDeliveredAt: requestedAt, elapsedMs: warningAt });
+    expect(readRunEvents(projectDir, runId).filter(event => event.type.startsWith('stage_wrap_up_')).map(event => event.type))
+      .toEqual(['stage_wrap_up_requested', 'stage_wrap_up_delivered']);
   });
 
   it.each([false, true])('corrects author and planner reports through the same boundary (planner=%s)', async dynamicDispatch => {
