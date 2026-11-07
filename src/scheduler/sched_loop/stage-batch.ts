@@ -35,7 +35,8 @@ export async function executeReadyBatch(
     const runnableCandidates: StageConfig[] = [];
     const stageEvents: Array<{ stageId: string; status: StageStatus }> = [];
     for (const stage of ready) {
-      if (stage.condition) {
+      // A committed graph grant owns execution; conditions route only ordinary DAG work.
+      if (!state.decisionGraph?.enabled[stage.id] && stage.condition) {
         const met = evaluateCondition(stage.condition, projectDir, runId);
         if (!met) {
           // A later conditional skip is a scheduling decision, not evidence

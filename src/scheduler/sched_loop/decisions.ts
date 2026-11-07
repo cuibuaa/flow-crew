@@ -163,7 +163,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
       atomicWrite(join(directory, 'dispatch.yaml'), JSON.stringify({ stages: workflow.dispatch }));
       if (!injectDispatchedStages(source.id, roles, sorted, state, project, run).length) {
         record.outcome = 'refused'; record.reason = 'Fixed shape failed full dispatch admission; see dispatch_admission.json.'; delete record.successor;
-      }
+      } else graph.enabled[target] = source.id;
     } else if (destination) {
       if (source.is_gate) {
         const facts = collectGateRuntimeFacts(sorted, state, project, run);

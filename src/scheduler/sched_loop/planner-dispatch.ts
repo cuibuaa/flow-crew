@@ -2,7 +2,7 @@ import { preparePlanRetryCandidate, recordPlanRetryAdmission, recordPlanRetryRef
 import { currentDispatchAdmissionReport, planRetryRequirementsFromAdmission, archiveDispatchAdmissionRefusal } from '../sched_admission/dispatch-retry.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-/** Admit the planner's declared topology, then release it through the same decision ledger. */
+/** Admit planner topology; ordinary dependencies and conditions own its DAG duties. */
 import { StageConfig, loadDefaults } from '../sched_admission/configuration.js';
 import { attemptEventFields, recordRunEvent } from '../../run-events.js';
 import { STAGE_STATUS, StoreState, readRunState, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
@@ -18,21 +18,14 @@ export function admitPlannerDispatches(sorted: StageConfig[], state: StoreState,
     const prepared = preparePlanRetryCandidate({ runDirPath: directory, stageId: planner.id, iteration: state.currentIteration ?? 1, attemptIndex: 1 });
     const stages = injectDispatchedStages(planner.id, roles, sorted, state, project, run);
     state = readRunState(project, run);
-    state.decisionGraph ??= emptyDecisionGraph();
-    const graph = state.decisionGraph;
-    const key = `${decisionKey(state, planner)}/dispatch`;
     if (stages.length) {
       recordPlanRetryAdmission({ runDirPath: directory, prepared });
       injected.add(planner.id);
-      const ids = new Set(stages.map(stage => stage.id));
-      const roots = stages.filter(stage => stage.depends_on.every(id => !ids.has(id)));
-      const record = { key, declaredSuccessors: roots.map(stage => stage.id), stageId: planner.id, iteration: state.currentIteration ?? 1, outcome: 'chosen' as const,
-        successor: roots[0]?.id ?? stages[0].id, reason: `Admitted planner topology; declared entry set: ${roots.map(stage => stage.id).join(', ')}. Ordinary dependencies retain all duties.` };
-      graph.records.push(record);
-      recordRunEvent(project, run, { type: 'decision_chosen', runId: run, timestamp: new Date().toISOString(), stageId: planner.id, detail: JSON.stringify(record), source: 'scheduler' });
-      writeRunState(project, run, state);
       continue;
     }
+    state.decisionGraph ??= emptyDecisionGraph();
+    const graph = state.decisionGraph;
+    const key = `${decisionKey(state, planner)}/dispatch`;
     const count = prepared.attemptIndex - 1;
     const limit = Math.max(0, Math.floor(loadDefaults().plan_stage_retries));
     const record = { key, stageId: planner.id, iteration: state.currentIteration ?? 1, outcome: 'defaulted' as const,

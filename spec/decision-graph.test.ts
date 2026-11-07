@@ -1,5 +1,6 @@
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { createRun } from './test-support/create-run.js';
+import { executeReadyBatch } from '../src/scheduler/sched_loop/stage-batch.js';
 import { reconcileDecisionEvents } from '../src/scheduler/sched_loop/decisions.js';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import * as revisions from '../src/plan-revisions.js';
@@ -11,7 +12,7 @@ import { createHash } from 'node:crypto';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { loadWorkflow, runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
-import { fcGlobalDir, setFcGlobalDir, runDir, readRunState, writeRunState } from '../src/store.js';
+import { fcGlobalDir, setFcGlobalDir, runDir, readRunState, writeRunState, writeStageStatus } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
 import { decisionSchema, validateDecision, emptyDecisionGraph, declareReviewChoices } from '../src/decision-graph.js';
 import { parseBriefFrontmatter, entryWorkflow } from '../src/scheduler/sched_admission/brief-contract.js';
@@ -23,6 +24,7 @@ import { readEvidence, VALIDATION_FACT_VERSION } from '../src/evidence-ledger.js
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 
 let root: string, project: string, old: string;
+const executions = new Set<Promise<unknown>>();
 const agents = join(import.meta.dirname, '../config/agents');
 const contract = { version: 1, produces: [], reads: [] };
 const delivered = JSON.stringify({ status: 'delivered', summary: 'Verified.', checks: [], caveats: [], remaining_work: [] });
@@ -33,14 +35,27 @@ beforeEach(() => {
   old = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
   setEngineDefaults({ gate_retry_loops: 3, plan_stage_retries: 1, max_iterations: 1 });
 });
-afterEach(() => {
+async function settleExecutions() {
+  while (executions.size) await Promise.allSettled([...executions]);
+}
+afterEach(async () => {
+  // A Vitest timeout leaves the test promise running. Retire its workers and
+  // integrity guards before deleting their carriers or changing shared fixtures.
+  // Capture this test's fixtures first: if the wait outlives the hook timeout,
+  // the next beforeEach reassigns root/old and must not be cleaned up here.
+  const ownRoot = root, ownOld = old;
+  await settleExecutions();
   vi.restoreAllMocks();
-  setFcGlobalDir(old); rmSync(root, { recursive: true, force: true });
+  setFcGlobalDir(ownOld); rmSync(ownRoot, { recursive: true, force: true });
 });
-async function execute(raw: unknown, adapter: Adapter, brief = '') {
+function trackExecution<T>(pending: Promise<T>): Promise<T> {
+  const execution = pending.finally(() => { executions.delete(execution); });
+  executions.add(execution);
+  return execution;
+}
+function execute(raw: unknown, adapter: Adapter, brief = '') {
   const workflow = WorkflowConfigSchema.parse(raw);
-  const state = await runWorkflow(workflow, JSON.stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, agents, undefined, brief, true);
-  return state;
+  return trackExecution(runWorkflow(workflow, JSON.stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, agents, undefined, brief, true));
 }
 function gate(opts: RunOpts, pass = true) {
   const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
@@ -54,6 +69,33 @@ function decisionStage(id: string, successors: string[], fallback: string, depen
 }
 
 describe('declared successor execution', () => {
+  it('retires unfinished and chained fixture work before deleting its engine carriers', async () => {
+    let started!: () => void;
+    const active = new Promise<void>(resolve => { started = resolve; });
+    let finish!: () => void;
+    const release = new Promise<void>(resolve => { finish = resolve; });
+    let carrierAvailableAtRetirement = false;
+    const workflow = { name: 'fixture-retirement', stages: [
+      { id: 'work', role: 'coder', scope: [], depends_on: [], artifact_contract: contract },
+    ] };
+    const execution = execute(workflow, { async run(_prompt, _role, opts) {
+      started();
+      await release;
+      carrierAvailableAtRetirement = readRunState(project, opts.runDir.split('/').at(-1)!).stages.work.status === 'running';
+      return { output: '', exitCode: 1, duration_ms: 1 };
+    } }).then(() => execute(workflow, new ScriptedAdapter({ work: { output: delivered } })));
+    await active;
+    let settled = false;
+    const retirement = settleExecutions().then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finish();
+    await retirement;
+    expect((await execution).status).toBe('complete');
+    expect(carrierAvailableAtRetirement).toBe(true);
+    expect(executions.size).toBe(0);
+  });
+
   it('records valid, invalid-default and outside-set refusal in one real scheduler run', async () => {
     const adapter = new ScriptedAdapter({
       first: { output: choice('second') }, second: { output: '{}' }, third: { output: choice('escape') }, finish: { output: delivered },
@@ -459,6 +501,110 @@ describe('new review branches retain write isolation', () => {
 });
 
 describe('model-selected decomposition', () => {
+  // Scrubbed topology of #2441: the planner names the focused verdict in a
+  // repair condition, while review assessment selects the full alternative.
+  it.each([false, true])('honors the full gate choice over a planner repair condition (initial pass=%s)', async initialPass => {
+    isolatedProjectCommand('git', ['init', '-q'], project, root);
+    isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, root);
+    const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
+    const proposal = [
+      { id: 'implement', role: 'coder', scope: ['docs/'], depends_on: ['plan'], artifact_contract: contract },
+      { id: 'review', role: 'qa', scope: [], depends_on: ['implement'], is_gate: true, artifact_contract: contract },
+      { id: 'repair', role: 'coder', scope: ['docs/'], depends_on: ['review'], retry_to: ['review'],
+        condition: 'review.pass == false', artifact_contract: contract },
+    ];
+    const calls: string[] = [];
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      calls.push(opts.stageId);
+      let output = delivered;
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Separate author and independent review.', metric_search: false, assumptions: [], missing_author_facts: [] });
+      if (opts.stageId === 'plan') writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: proposal }));
+      if (opts.stageId === 'implement') {
+        mkdirSync(join(project, 'docs'));
+        writeFileSync(join(project, 'docs/report.md'), initialPass ? 'Required greeting.\n' : 'Wrong greeting.\n');
+      }
+      if (opts.stageId === 'review_assess') output = JSON.stringify({ successor: 'review_full', reason: 'Inspect the full outcome.', risk_areas: [] });
+      if (opts.stageId === 'review_full') output = gate(opts, readFileSync(join(project, 'docs/report.md'), 'utf8') === 'Required greeting.\n');
+      if (opts.stageId === 'repair') {
+        const current = readRunState(project, opts.runDir.split('/').at(-1)!);
+        expect(isStageInSkippedBranch('review', new Map(current.planControl!.stages.map(stage => [stage.id, stage])), current)).toBe(true);
+        expect(current.stages.review.attempts ?? []).toHaveLength(0);
+        expect(current.decisionGraph!.records.at(-1)).toMatchObject({ stageId: 'review_full', successor: 'repair', gateAccepted: false });
+        const rejection = JSON.parse(readFileSync(join(opts.runDir, 'verdict_review_full.json'), 'utf8'));
+        expect(rejection.repairability.disposition).toBe('repairable');
+        expect(rejection.audit_findings.findings).toHaveLength(1);
+        const confirmation = readEvidence(opts.runDir).find(entry => entry.sequence === rejection.audit_findings.findings[0].reproduction);
+        expect(confirmation).toMatchObject({ stageId: 'review_full', exitCode: 1 });
+        writeFileSync(join(project, 'docs/report.md'), 'Required greeting.\n');
+        output = choice('review_assess');
+      }
+      return { output, exitCode: 0, duration_ms: 1,
+        ...(opts.stageId === 'plan' ? { writes: ['run:dispatch.yaml'], writeAttribution: 'structured' as const } : {}) };
+    } };
+    const state = await execute(config, adapter, task);
+    expect(state.status, state.failureReason).toBe('complete');
+    expect(calls).toEqual(['choose', 'plan', 'implement', 'review_assess', 'review_full',
+      ...(initialPass ? [] : ['repair', 'review_assess', 'review_full'])]);
+    expect(state.planControl!.stages.find(stage => stage.id === 'repair')).toMatchObject({ condition: 'review.pass == false', depends_on: ['review', 'review_full'] });
+    expect(state.stages.review.status).toBe('skipped');
+    expect(state.stages.repair.attempts ?? []).toHaveLength(initialPass ? 0 : 1);
+    expect(state.decisionGraph!.records.filter(record => record.stageId === 'review_full').map(record => record.successor)).toEqual(initialPass ? ['continue'] : ['repair', 'continue']);
+    if (!initialPass) expect(state.decisionGraph!.visits['1/repair']).toBe(1);
+  });
+
+  it('dispatches the recorded repair grant with the focused review already skipped', async () => {
+    const workflow = WorkflowConfigSchema.parse({ name: 'skipped-review-replay', stages: [
+      { ...decisionStage('review_assess', ['review', 'review_full'], 'review_full'), role: 'qa' },
+      { id: 'review', role: 'qa', scope: [], depends_on: ['review_assess'], is_gate: true, artifact_contract: contract },
+      { id: 'review_full', role: 'qa', scope: [], depends_on: ['review_assess'], is_gate: true, artifact_contract: contract },
+      { id: 'repair', role: 'coder', scope: [], depends_on: ['review', 'review_full'], retry_to: ['review', 'review_full'],
+        condition: 'review.pass == false', artifact_contract: contract },
+    ] });
+    const created = createRun(project, workflow.name, JSON.stringify(workflow), workflow.stages.map(stage => stage.id));
+    const state = readRunState(project, created.runId);
+    for (const [id, status] of [['review_assess', 'complete'], ['review', 'skipped'], ['review_full', 'complete']] as const) {
+      state.stages[id] = { status, retries: 0 };
+      writeStageStatus(project, created.runId, id, state.stages[id]);
+    }
+    state.decisionGraph = { ...emptyDecisionGraph(), enabled: { repair: 'review_full', review_full: 'review_assess' },
+      visits: { '1/repair': 1 }, records: [
+        { key: 'assessment', stageId: 'review_assess', iteration: 1, successor: 'review_full', outcome: 'chosen', reason: 'Full review selected.' },
+        { key: 'gate', stageId: 'review_full', iteration: 1, successor: 'repair', gateAccepted: false, outcome: 'chosen', reason: 'Confirmed repairable finding.' },
+      ] };
+    writeRunState(project, created.runId, state);
+    const result = await trackExecution(executeReadyBatch(workflow.stages, state, project, created.runId, created.runDirPath,
+      workflow, new ScriptedAdapter({ repair: { output: delivered } }), new Map(), agents, new Map(), new Map()));
+    expect(result.state.stages.repair.status).toBe('complete');
+    expect(result.state.stages.repair.attempts).toHaveLength(1);
+    expect(result.state.stages.review.status).toBe('skipped');
+    expect(result.state.decisionGraph!.visits['1/repair']).toBe(1);
+  });
+
+  it('uses a graph grant for an ordinary successor regardless of its condition', async () => {
+    const adapter = new ScriptedAdapter({ route: { output: choice('selected') }, selected: { output: delivered } });
+    const state = await execute({ name: 'graph-condition', stages: [
+      decisionStage('route', ['selected'], 'selected'),
+      { id: 'selected', role: 'coder', scope: [], depends_on: ['route'], condition: 'route.status == failed', artifact_contract: contract },
+    ] }, adapter);
+    expect(state.status, state.failureReason).toBe('complete');
+    expect(state.stages.selected.attempts).toHaveLength(1);
+    expect(state.stages.selected.status).toBe('complete');
+  });
+
+  it('keeps ordinary DAG conditions active without a graph grant', async () => {
+    const adapter = new ScriptedAdapter({ source: { output: delivered }, met: { output: delivered } });
+    const state = await execute({ name: 'ordinary-conditions', stages: [
+      { id: 'source', role: 'coder', scope: [], depends_on: [], artifact_contract: contract },
+      ...['met', 'unmet'].map(id => ({ id, role: 'coder', scope: [], depends_on: ['source'],
+        condition: `source.status == ${id === 'met' ? 'complete' : 'failed'}`, artifact_contract: contract })),
+    ] }, adapter);
+    expect(state.status, state.failureReason).toBe('complete');
+    expect(state.stages.met.status).toBe('complete');
+    expect(state.stages.met.attempts).toHaveLength(1);
+    expect(state.stages.unmet.status).toBe('skipped');
+    expect(state.stages.unmet.attempts ?? []).toHaveLength(0);
+  });
+
   it('admits a separately planned shape and still routes every review through assessment', async () => {
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const calls: string[] = [];
