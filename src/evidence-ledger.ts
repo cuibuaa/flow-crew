@@ -9,7 +9,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from './engine-fs.js';
 import { readContentIdentity, type ContentIdentity } from './content-identity.js';
 import { listProjectFiles, listProjectFilesAt } from './scheduler/sched_scope/path-capabilities.js';
 import { extractBriefOutputDeclarations, parseBriefInputs } from './ship-inputs.js';
-import type { ValidationCommandResult, ValidationDeltaResult } from './project-validation.js';
+import { evaluateValidationDelta, projectValidationResult, type ValidationCommandResult, type ValidationDeltaResult } from './project-validation.js';
 import type { CommandContext } from './adapters/base.js';
 
 export const EVIDENCE_LEDGER = 'evidence-ledger.jsonl';
@@ -38,6 +38,48 @@ export interface ValidationFact {
   pass: boolean;
   baseInputSnapshot?: { manifestSha256: string; files: number; bytes: number; durationMs: number; error?: string };
 }
+/** Readers project raw receipts without rewriting the append-only ledger.
+ * Tree binding remains a separate fact from command outcome/measurement. */
+export function projectValidationFact<T extends ValidationFact>(fact: T) {
+  const executions = fact.executions.map(execution => ({ ...execution,
+    commands: execution.commands.map(result => ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) })) }));
+  const current = executions.find(execution => execution.target === 'attempt')?.commands ?? [];
+  const base = executions.find(execution => execution.target === 'base');
+  const bound = executions.length > 0 && executions.every(execution => execution.treeHash !== null && execution.treeHash === execution.treeAfterHash);
+  const changed = fact.executions.some(execution => execution.commands.some(result => {
+    const projected = projectValidationResult(result);
+    return result.state !== projected.state || result.measurement !== undefined && result.measurement !== projected.measurement;
+  }));
+  const delta = (changed ? evaluateValidationDelta(base ? { results: base.commands } : undefined, current) : fact.delta).map(entry => {
+    const recorded = fact.delta.find(prior => prior.role === entry.role && prior.display === entry.display);
+    return !bound ? { ...entry, state: 'unresolved' as const, reason: 'Source tree changed or became unreadable during configured validation' }
+      : entry.state === 'unresolved' && !base && recorded?.state === 'unresolved' ? { ...entry, reason: recorded.reason } : entry;
+  });
+  return { ...fact, executions, delta, pass: delta.length > 0 && delta.every(entry => entry.state === 'pass') };
+}
+
+/** Shared by receipt readers, including summaries of unversioned inline receipts. */
+export function projectValidationDelta<T extends { current: ValidationCommandResult[]; delta: ValidationDeltaResult[]; pass: boolean; ledgerSequence?: number }>(base: string, value: T): T | undefined {
+  if (value.ledgerSequence !== undefined) {
+    const fact = readEvidence(base).find(entry => entry.sequence === value.ledgerSequence);
+    if (fact?.kind !== 'validation' || fact.validationVersion !== VALIDATION_FACT_VERSION) return undefined;
+    const projected = projectValidationFact(fact);
+    value.current = projected.executions.find(execution => execution.target === 'attempt')?.commands ?? [];
+    value.delta = projected.delta; value.pass = projected.pass;
+  }
+  if (!Array.isArray(value.current)) return undefined;
+  const current = value.current.map(result => result && ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) }));
+  if (value.ledgerSequence === undefined && current.some((result, index) => result && (result.state !== value.current[index].state
+    || value.current[index].measurement !== undefined && result.measurement !== value.current[index].measurement))) {
+    // Inline receipts lack the base execution. Recompute from available facts;
+    // a red result stays unknown rather than inventing a base population.
+    value.delta = evaluateValidationDelta(undefined, current.filter(Boolean));
+  }
+  value.current = current;
+  value.pass = value.delta.length > 0 && value.delta.every(entry => entry.state === 'pass');
+  return value;
+}
+
 export type EvidenceFact = ValidationFact | {
   kind: 'attempt'; stageId: string; attemptIndex: number; attemptStartedAt: string;
   exitCode: number; status: string; treeHash: string | null;
@@ -188,6 +230,7 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
       const attempt = latest.get(`attempt:${entry.stageId}`);
       if (attempt?.kind !== 'attempt' || attempt.attemptIndex !== entry.attemptIndex
         || attempt.attemptStartedAt !== entry.attemptStartedAt) return [];
+      return [projectValidationFact(entry)];
     }
     if (entry.kind === 'attempt') {
       const { finalRecord: _finalRecord, guidanceIds: _guidanceIds, remainingWork: _remainingWork, ...fact } = entry;

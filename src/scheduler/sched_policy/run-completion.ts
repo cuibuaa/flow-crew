@@ -1,7 +1,7 @@
 // Boundary: Settle terminal research evidence before publishing a run's truthful outcome.
 import { rejectPendingResearchGateCandidates } from '../../research-candidate.js';
 import { readOptionalJsonlFile } from '../../jsonl.js';
-import { recordRunEvent, type RunEvent } from '../../run-events.js';
+import { appendRunEventAtRunDir, attemptEventFields, recordRunEvent, type RunEvent } from '../../run-events.js';
 import { type StoreState, evaluateRealityGate, isSuccessfulRunStatus, isTerminalRunStatus, runDir, writeRunState, updateOperationalRunState, interruptedStageStatus, resolveRunStatus, RUN_STATUS, STAGE_STATUS } from '../../store.js';
 import { log } from '../sched_admission/shared.js';
 import { join } from 'node:path';
@@ -92,6 +92,7 @@ export function concludeRun(state: StoreState, outcome: RunConclusion, commit?: 
 export function cancelRunStateAtPath(directory: string, completedAt: string): { state: StoreState; preservedRunStatus?: string } {
   let preservedRunStatus: string | undefined;
   let publish: (() => void) | undefined;
+  const interrupted: RunEvent[] = [];
   const state = updateOperationalRunState(directory, state => {
     if (resolveRunStatus(state.status).kind === 'unknown' || isTerminalRunStatus(state.status) && !(state.status === RUN_STATUS.FAILED && state.recovery?.kind === 'blocked')) {
       preservedRunStatus = state.status;
@@ -99,11 +100,21 @@ export function cancelRunStateAtPath(directory: string, completedAt: string): { 
     }
     for (const [id, stage] of Object.entries(state.stages)) {
       state.stages[id] = interruptedStageStatus(stage, completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
+      const settled = state.stages[id];
+      const attempt = settled.attempts?.at(-1);
+      if (attempt && attempt !== stage.attempts?.at(-1)) interrupted.push({
+        type: 'attempt_failed', runId: state.runId, timestamp: completedAt,
+        stageId: id, ...attemptEventFields(attempt), status: settled.status, exitCode: attempt.exitCode,
+        detail: attempt.error, source: 'scheduler',
+      });
       // Pending stages have no current execution to settle. Keep them runnable
       // for explicit continuation; the stopped run fences ordinary publication.
     }
     concludeRun(state, { status: RUN_STATUS.CANCELLED, reasonCode: 'cancelled', detail: 'Cancelled by user', completedAt },
       (_state, notify) => { publish = notify; });
-  }, 'cancellation', () => publish?.());
+  }, 'cancellation', () => {
+    for (const event of interrupted) appendRunEventAtRunDir(directory, event);
+    publish?.();
+  });
   return { state, preservedRunStatus };
 }

@@ -5,8 +5,9 @@ import { stripVTControlCharacters } from 'node:util';
 import { projectRunStageHistory } from './run-state-view.js';
 import { RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from './handoff.js';
 import { RECORDED_PLAN_SCHEMA } from './plan-interface.js';
-import { validationMeasurement, type ValidationCommandResult } from './project-validation.js';
-import { readEvidence } from './evidence-ledger.js';
+import { projectValidationResult } from './project-validation.js';
+import { projectValidationDelta, readEvidence } from './evidence-ledger.js';
+import type { GateValidationDeltaArtifact } from './scheduler/sched_settlement/gate-validation.js';
 import {
   STAGE_STATUS,
 } from './store.js';
@@ -391,14 +392,9 @@ function renderValidation(runDir: string): string {
   const sections: string[] = [];
   const seen = new Set<string>();
   for (const name of readdirSync(runDir).filter(name => /^validation_delta_.+\.json$/.test(name)).sort()) {
-    const receipt = readJson<{ stageId: string; checkedAt: string; pass: boolean; ledgerSequence?: number;
-      immutablePath?: string; current: ValidationCommandResult[];
-      delta: Array<{ role: string; display?: string; state: string; reason: string }> }>(join(runDir, name));
-    if (receipt?.ledgerSequence !== undefined) {
-      const fact = readEvidence(runDir).find(entry => entry.sequence === receipt.ledgerSequence);
-      receipt.current = fact?.kind === 'validation' ? fact.executions.find(entry => entry.target === 'attempt')?.commands ?? [] : [];
-    }
-    if (!receipt || !Array.isArray(receipt.current) || !Array.isArray(receipt.delta)) {
+    const raw = readJson<GateValidationDeltaArtifact>(join(runDir, name));
+    const receipt = raw && Array.isArray(raw.delta) && projectValidationDelta(runDir, raw);
+    if (!receipt) {
       sections.push(`- ${name}: validation receipt unavailable or invalid.`);
       continue;
     }
@@ -412,7 +408,8 @@ function renderValidation(runDir: string): string {
         lines.push('Command receipt unavailable or invalid; no exit or totals inferred.');
         continue;
       }
-      lines.push(`- \`${result.display ?? result.role}\` — ${validationMeasurement(result) === 'not_measured' ? 'not measured (neither pass nor failure; no author action)' : `${result.state} (${validationMeasurement(result).replaceAll('_', ' ')})`}; direct exit ${Number.isInteger(result.exitCode) ? result.exitCode : 'unknown'}; ${result.durationMs}ms${result.reason ? `; ${result.reason}` : ''}`);
+      const { state, measurement } = projectValidationResult(result);
+      lines.push(`- \`${result.display ?? result.role}\` — ${measurement === 'not_measured' ? 'not measured (neither pass nor failure; no author action)' : `${state} (${measurement.replaceAll('_', ' ')})`}; direct exit ${Number.isInteger(result.exitCode) ? result.exitCode : 'unknown'}; ${result.durationMs}ms; recorded state ${'storedState' in result ? result.storedState : result.state}; runner error ${JSON.stringify(result.error ?? null)}; load ${JSON.stringify(result.load ?? null)}${result.reason ? `; recorded reason: ${result.reason}` : ''}`);
       // These are labelled raw collector excerpts, never a synthesized total.
       const totals = stripVTControlCharacters(result.output).split('\n').filter(line => /^(?:\s*(?:Test Files|Tests)\s+\d|# (?:tests|pass|fail|cancelled|skipped|todo) \d|.*\b\d+ (?:passed|failed|skipped).* in [\d.]+s)/.test(line));
       if (totals.length) lines.push('Collector test totals:\n```text\n' + totals.join('\n') + '\n```');

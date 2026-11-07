@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { errorMessage } from './source_services/cli-inputs.js';
 import { appendEngineFile, withEngineIntegrity } from './engine-integrity.js';
@@ -8,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir, cpus, loadavg } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { validationEnvironment } from './validation-environment.js';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { decodeRunnerReport, identityFacts, type FailureReader, type IdentityFacts } from './validation-identity.js';
 import { prospectivePhysicalPath, safeEvidencePath } from './engine-owned-carriers.js';
 import { statSync } from 'node:fs';
@@ -83,6 +84,39 @@ export interface BriefValidationCommand {
   evidencePath: string;
 }
 
+export interface ValidationParseResult {
+  commands: BriefValidationCommand[];
+  error?: string;
+}
+
+const ROLES = ['build', 'test', 'lint'] as const;
+const argument = z.string().refine(value => ![...value].some(character => {
+  const code = character.codePointAt(0)!;
+  return code <= 0x1f || code >= 0x7f && code <= 0x9f;
+}), 'must not contain a control character');
+const commandDeclaration = z.object({
+  command: argument.refine(value => value.trim().length > 0, 'must be a non-empty string'),
+  args: z.array(argument),
+  report: z.object({ format: z.literal('vitest-json'), path: argument.refine(value => value.length > 0
+    && !isAbsolute(value) && !value.split('/').includes('..'), 'must be a project-relative file').optional() }).strict().optional(),
+}).strict();
+const validationDeclaration = z.object({ commands: z.object({
+  build: commandDeclaration.optional(), test: commandDeclaration.optional(), lint: commandDeclaration.optional(),
+}).strict().refine(value => Object.keys(value).length > 0, 'must declare at least one role') }).strict();
+
+/** One closed declaration contract for project config and brief frontmatter. */
+export function parseValidationCommands(validation: unknown, evidencePathRoot: string): ValidationParseResult {
+  if (validation === undefined) return { commands: [] };
+  const parsed = validationDeclaration.safeParse(validation);
+  if (!parsed.success) return { commands: [], error: `Invalid validation declaration at ${evidencePathRoot}#validation: `
+    + parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.code === 'unrecognized_keys'
+      ? `unknown ${issue.path.length === 1 && issue.path[0] === 'commands' ? 'role' : 'field'} ${issue.keys.join(', ')}` : issue.message}`).join('; ') };
+  return { commands: ROLES.flatMap(role => {
+    const command = parsed.data.commands[role];
+    return command ? [{ role, ...command, evidencePath: `${evidencePathRoot}#validation.commands.${role}` }] : [];
+  }) };
+}
+
 export interface ValidationDiscovery {
   state: 'configured' | 'partial' | 'unknown';
   configPath: string;
@@ -118,19 +152,33 @@ export interface ValidationLoad {
   waitedSeconds: number;
 }
 export type ValidationMeasurement = 'measured' | 'not_measured' | 'load_unknown';
-/** Legacy or malformed readings stay unknown. A pass is measured under any
- * load; only start overload can make a failure inconclusive. */
-export function validationMeasurement(result: { load?: ValidationLoad; exitCode?: number | null; error?: unknown; state?: string }): ValidationMeasurement {
+const VALIDATION_STATES = ['passed', 'failed', 'launch_error', 'not_configured', 'unresolved', 'not_measured'] as const;
+/** One interpretation of raw command facts, including historical receipts whose
+ * stored labels predate current load rules. No reader may use a cached label. */
+export function projectValidationResult(result: {
+  load?: ValidationLoad; exitCode?: number | null; error?: unknown;
+  dependencyPreparationFailed?: boolean; state?: string; storedState?: string;
+}): { state: ValidationCommandResult['state']; measurement: ValidationMeasurement } {
   const value = result.load;
-  if (!value || ![value.ceilingPerCpu, value.waitBoundSeconds, value.waitedSeconds,
+  const validLoad = value && [value.ceilingPerCpu, value.waitBoundSeconds, value.waitedSeconds,
     value.start?.loadAverage1m, value.start?.cpuCount, value.end?.loadAverage1m, value.end?.cpuCount].every(Number.isFinite)
-    || value.ceilingPerCpu <= 0 || value.ceilingPerCpu > 100 || value.waitBoundSeconds < 0 || value.waitBoundSeconds > 300
-    || value.waitedSeconds < 0 || value.waitedSeconds > Number.MAX_SAFE_INTEGER
-    || ![value.start, value.end].every(sample => Number.isSafeInteger(sample.cpuCount) && sample.cpuCount > 0 && sample.loadAverage1m >= 0 && sample.loadAverage1m <= Number.MAX_SAFE_INTEGER)) return 'load_unknown';
-  // A runner error or timeout can still report exit 0; it is a failure, not a pass.
-  const failed = result.exitCode !== 0 || Boolean(result.error) || result.state === 'launch_error';
-  return failed && value.start.loadAverage1m / value.start.cpuCount > value.ceilingPerCpu
-    ? 'not_measured' : 'measured';
+    && value.ceilingPerCpu > 0 && value.ceilingPerCpu <= 100 && value.waitBoundSeconds >= 0 && value.waitBoundSeconds <= 300
+    && value.waitedSeconds >= 0 && value.waitedSeconds <= Number.MAX_SAFE_INTEGER
+    && [value.start, value.end].every(sample => Number.isSafeInteger(sample.cpuCount) && sample.cpuCount > 0 && sample.loadAverage1m >= 0 && sample.loadAverage1m <= Number.MAX_SAFE_INTEGER);
+  // Preserve legacy runner-error evidence when a reader projects the state again.
+  const recordedState = result.storedState ?? result.state;
+  const launchError = Boolean(result.error) || result.dependencyPreparationFailed || result.exitCode === 127 || recordedState === 'launch_error';
+  const failed = result.exitCode !== 0 || launchError;
+  const measurement = !validLoad ? 'load_unknown'
+    : failed && value.start.loadAverage1m / value.start.cpuCount > value.ceilingPerCpu ? 'not_measured' : 'measured';
+  const state = measurement === 'not_measured' ? 'not_measured' : launchError ? 'launch_error'
+    : Number.isInteger(result.exitCode) ? result.exitCode === 0 ? 'passed' : 'failed'
+    : result.exitCode === null ? 'launch_error' : VALIDATION_STATES.find(state => state === recordedState) ?? 'unresolved';
+  return { state, measurement };
+}
+
+export function validationMeasurement(result: Parameters<typeof projectValidationResult>[0]): ValidationMeasurement {
+  return projectValidationResult(result).measurement;
 }
 
 /** One load boundary around a configured command, including its preparation.
@@ -177,6 +225,9 @@ export type ValidationCommandRunner = (
 ) => Promise<ValidationRunResponse> | ValidationRunResponse;
 
 export interface ValidationCommandResult {
+  storedState?: ValidationCommandResult['state'];
+  error?: string;
+  dependencyPreparationFailed?: boolean;
   load?: ValidationLoad;
   measurement?: ValidationMeasurement;
   outputBytes?: { stdout: number; stderr: number };
@@ -238,7 +289,6 @@ export interface ValidationDeltaResult {
   newFailureIdentifiers: string[];
 }
 
-const ROLES: readonly ValidationRole[] = ['build', 'test', 'lint'];
 const FAILED_VALIDATION_STATE: ValidationCommandResult['state'] = 'failed';
 const DEFAULT_MAX_OUTPUT_BYTES = 24 * 1024;
 const nodeValidationFs: ValidationFileSystem = {
@@ -446,7 +496,8 @@ function discoverProjectValidationDetails(
   const pyprojectPath = join(root, 'pyproject.toml');
   const toxPath = join(root, 'tox.ini');
   const pytestPath = join(root, 'pytest.ini');
-  const configPaths = [packagePath, makefilePath, pyprojectPath, toxPath, pytestPath].filter((path) => fs.exists(path));
+  const validationPath = join(root, 'config/validation.json');
+  const configPaths = [validationPath, packagePath, makefilePath, pyprojectPath, toxPath, pytestPath].filter((path) => fs.exists(path));
   const commands: ValidationCommand[] = [];
   const projectDeclarations = new Set<ValidationCommand>();
   const declareCommand = (command: ValidationCommand): void => {
@@ -528,6 +579,21 @@ function discoverProjectValidationDetails(
         commands.push(configuredCommand('test', 'python', ['-m', 'pytest'], path));
       }
     } catch (error) { diagnostics.push(`Cannot read ${path}: ${errorMessage(error)}`); }
+  }
+  if (fs.exists(validationPath)) {
+    try {
+      const declaration = parseValidationCommands(JSON.parse(fs.readText(validationPath)), validationPath);
+      if (declaration.error) throw new Error(declaration.error);
+      for (const command of declaration.commands) {
+        for (let i = commands.length - 1; i >= 0; i--) if (commands[i].role === command.role) {
+          projectDeclarations.delete(commands[i]); commands.splice(i, 1);
+        }
+        unresolvedProjectRoles.delete(command.role);
+        declareCommand({ ...command, display: [command.command, ...command.args].join(' ') });
+      }
+    } catch (error) {
+      throw new Error(`Invalid project validation configuration at ${validationPath}: ${errorMessage(error)}`, { cause: error });
+    }
   }
   const discoveredCommands = ROLES.flatMap(role => commands.filter(command => command.role === role));
   const unresolvedRoles = ROLES.filter((role) => unresolvedProjectRoles.has(role));
@@ -639,7 +705,10 @@ export function reconcileProjectValidation(
           `Validation command conflict for ${role}: project declaration at ${projectEvidence} specifies ${JSON.stringify(argv(projectCommand))}, but brief declaration at ${declaration.evidencePath} specifies ${JSON.stringify(argv(declaration))}. Project configuration governs; remove the overlapping brief declaration or make its argv exactly agree.`,
         );
       }
-      if (declaration.report) matching.report = declaration.report;
+      if (matching.report && declaration.report && (matching.report.format !== declaration.report.format || matching.report.path !== declaration.report.path)) {
+        return unknownReconciliation(discovery, `Validation reporter conflict for ${role}: project configuration governs`);
+      }
+      if (declaration.report) matching.report ??= declaration.report;
       matching.provenance = { source: 'project', evidencePath: matching.evidencePath ?? discovery.configPath, corroboratedBy: [declaration.evidencePath] };
     }
     if (!declaration || projectCommand) {
@@ -707,7 +776,7 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
     ? `FlowCrew validation environment: suppressed engine/control or credential settings: ${environment.removed.join(', ')}. Supply ordinary project inputs through the command environment; reserved settings are isolated.\n`
     : '';
   const stdoutDecoder = new TextDecoder('utf-8', { fatal: true });
-  const stderrDecoder = new TextDecoder('utf-8', { fatal: true });
+  const stderrDecoder = new TextDecoder('utf-8', { fatal: !request.report });
   let outputEncodingError: string | undefined;
   const decodeOutput = (decoder: TextDecoder, chunk?: Buffer | string): string => {
     if (outputEncodingError) return '';
@@ -839,6 +908,7 @@ export const runProjectCommand: ValidationCommandRunner = (request) => withEngin
       const stat = statSync(reportPath);
       if (!stat.isFile() || stat.size > 1024 * 1024 || before === JSON.stringify([stat.ino, stat.mtimeMs, stat.ctimeMs, stat.size])) throw new Error('Report absent, stale, invalid or exceeds 1 MiB');
       response.report = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(reportPath));
+      delete response.reportError; // The declared file, independently decoded, owns identity.
     } catch (error) { response.reportError = errorMessage(error); }
   }
   return { ...response, durationMs: Date.now() - started };
@@ -858,13 +928,7 @@ async function failureFacts(command: ValidationCommand, response: ValidationRunR
     try {
       const bytes = response.report ?? (command.report.path ? undefined : response.stdout);
       if (bytes === undefined || Buffer.byteLength(bytes) > 1024 * 1024) throw new Error('Structured report missing or exceeds 1 MiB');
-      const facts = identityFacts(decodeRunnerReport(bytes, command.report.format, root), 'runner-json', failed);
-      // A reporter cannot account for diagnostics carried outside its JSON.
-      // Withhold completeness using transport metadata, never message spelling.
-      const sizes = validationOutputBytes(response);
-      const extraOutput = sizes.stderr > 0 || Boolean(command.report.path || response.report !== undefined) && sizes.stdout > 0;
-      return failed && facts.owner !== 'unknown' && extraOutput ? { ...facts, evidence: 'partial',
-        reason: 'Additional unstructured output is not accounted for by the structured report' } : facts;
+      return identityFacts(decodeRunnerReport(bytes, command.report.format, root, failed), 'runner-json', failed);
     } catch (error) { return { identifiers: [], owner: 'unknown', reason: `Invalid structured report: ${errorMessage(error)}` }; }
   }
   if (!failed) return { identifiers: [], owner: 'unknown' };
@@ -877,7 +941,8 @@ async function failureFacts(command: ValidationCommand, response: ValidationRunR
   } catch (error) { return { identifiers: [], owner: 'unknown', reason: `Invalid model reading: ${errorMessage(error)}` }; }
 }
 
-function criterionFor(result: ValidationCommandResult): ValidationGateCriterion {
+function criterionFor(recorded: ValidationCommandResult): ValidationGateCriterion {
+  const result = { ...recorded, ...projectValidationResult(recorded) };
   if (result.state === 'passed') {
     return {
       role: result.role,
@@ -992,50 +1057,25 @@ export async function runProjectValidationBaseline(
       .join('\n');
     const output = boundedOutput(rawOutput, maxOutputBytes);
     const outputBytes = validationOutputBytes(response);
-    const measurement = { ...(response.load ? { load: response.load } : {}), measurement: validationMeasurement(response) };
-    if (measurement.measurement === 'not_measured') {
-      results.push({ role, display: command.display, state: 'not_measured', durationMs, output, outputBytes, ...measurement,
+    const projection = projectValidationResult(response);
+    const recorded = { ...(response.load ? { load: response.load } : {}),
+      ...(response.error ? { error: response.error } : {}),
+      ...(response.dependencyPreparationFailed ? { dependencyPreparationFailed: true } : {}), ...projection };
+    if (projectValidationResult({ ...response, load: undefined }).state === 'launch_error') {
+      results.push({ role, display: command.display, ...recorded, durationMs, output, outputBytes,
         ...(response.exitCode === null ? {} : { exitCode: response.exitCode }), failureIdentifiers: [], failureIdentity: 'unknown',
-        reason: 'Validation not measured: host load exceeded the declared ceiling; neither pass nor failure, no author action required' });
+        reason: projection.state === 'not_measured'
+          ? 'Validation not measured: host load exceeded the declared ceiling; neither pass nor failure, no author action required'
+          : response.dependencyPreparationFailed && response.exitCode !== null ? `Dependency preparation exited with code ${response.exitCode}`
+          : response.error ?? (response.exitCode === 127 ? 'Validation command could not run in the target environment (exit 127)' : 'Validation command ended without an exit code') });
       continue;
     }
-    if (response.dependencyPreparationFailed || response.error || response.exitCode === null) {
-      results.push({
-        role,
-        display: command.display,
-        state: 'launch_error',
-        durationMs,
-        output,
-        outputBytes,
-        ...measurement,
-        failureIdentifiers: [],
-        failureIdentity: 'unknown',
-        exitCode: response.exitCode ?? undefined,
-        reason: response.dependencyPreparationFailed && response.exitCode !== null
-          ? `Dependency preparation exited with code ${response.exitCode}`
-          : response.error ?? 'Validation command ended without an exit code',
-      });
-      continue;
-    }
-    if (response.exitCode === 127) {
-      results.push({
-        role,
-        display: command.display,
-        state: 'launch_error',
-        exitCode: response.exitCode,
-        durationMs,
-        output,
-        outputBytes,
-        ...measurement,
-        failureIdentifiers: [],
-        failureIdentity: 'unknown',
-        reason: 'Validation command could not run in the target environment (exit 127)',
-      });
-      continue;
-    }
-    const facts = await failureFacts(command, response, rawOutput, root, dependencies);
+    // Load withholds a measurement, not a declared runner's bounded facts.
+    // An unmeasured command needs no additional model judgment.
+    const facts: IdentityFacts = projection.state === 'not_measured' && !command.report
+      ? { identifiers: [], owner: 'unknown' } : await failureFacts(command, response, rawOutput, root, dependencies);
     const failureIdentity = response.exitCode === 0
-      ? 'none'
+      ? command.report && facts.owner === 'unknown' ? 'unknown' : 'none'
       : facts.count !== undefined || facts.identifiers.length > 0 ? 'known' : 'unknown';
     results.push({
       role,
@@ -1043,17 +1083,17 @@ export async function runProjectValidationBaseline(
       ...(facts.failures ? { failures: facts.failures } : {}),
       testsRun: facts.testsRun ?? null,
       display: command.display,
-      state: response.exitCode === 0 ? 'passed' : 'failed',
-      exitCode: response.exitCode,
+      exitCode: response.exitCode!,
       durationMs,
       output,
       outputBytes,
-      ...measurement,
+      ...recorded,
       ...(facts.count === undefined ? {} : { failureCount: facts.count }),
       failureIdentifiers: facts.identifiers,
       failureIdentity,
       ...(failureIdentity === 'known' ? { failureEvidence: facts.evidence ?? 'complete' } : {}),
-      ...(facts.reason === undefined ? {} : { reason: facts.reason }),
+      ...(projection.state === 'not_measured' ? { reason: 'Validation not measured: host load exceeded the declared ceiling; neither pass nor failure, no author action required' }
+        : facts.reason === undefined ? {} : { reason: facts.reason }),
     });
   }
 
@@ -1069,20 +1109,41 @@ export async function runProjectValidationBaseline(
 
 /** A run of a configured command that produced nothing to compare: it could not launch, or failed unidentifiably. */
 export function unmeasured(result: ValidationCommandResult): boolean {
-  return validationMeasurement(result) === 'not_measured' || (result.state === FAILED_VALIDATION_STATE || result.state === 'launch_error') && result.failureIdentity === 'unknown';
+  const { state } = projectValidationResult(result);
+  return state === 'not_measured' || (state === FAILED_VALIDATION_STATE || state === 'launch_error') && result.failureIdentity === 'unknown';
+}
+
+function invalidSuccessfulIdentity(result: ValidationCommandResult): boolean {
+  return result.state === 'passed' && result.failureIdentity === 'unknown' && result.identityOwner === 'unknown';
 }
 
 export function evaluateValidationDelta(
-  baseline: ProjectValidationBaseline,
+  baseline: Pick<ProjectValidationBaseline, 'results'> | undefined,
   current: ValidationCommandResult[],
+  baseUnavailableReason = 'Base result unavailable',
 ): ValidationDeltaResult[] {
-  return baseline.results.map((prior): ValidationDeltaResult => {
-    const siblings = baseline.results.filter(result => result.role === prior.role);
-    const next = current.find(result => result.role === prior.role && (siblings.length === 1 || result.display === prior.display));
+  if (!baseline) return current.map(recorded => {
+    const projected = { ...recorded, ...projectValidationResult(recorded) };
+    const { state } = projected;
+    const invalidIdentity = invalidSuccessfulIdentity(projected);
+    return { role: recorded.role, display: recorded.display,
+      state: invalidIdentity ? 'unresolved' : state === 'not_measured' ? 'not_measured' : state === 'passed' || state === 'not_configured' ? 'pass' : 'unresolved',
+      reason: invalidIdentity ? 'Declared structured report is invalid or contradicts the command exit; comparison remains unknown' : state === 'not_measured' ? 'Validation not measured: host load exceeded the declared ceiling; neither pass nor failure, no author action required'
+        : state === 'passed' ? 'Author attempt passed; no base execution required' : state === 'not_configured' ? 'Role is not configured' : baseUnavailableReason,
+      newFailureIdentifiers: [],
+    };
+  });
+  const priorResults = baseline.results.map(result => ({ ...result, ...projectValidationResult(result) }));
+  const nextResults = current.map(result => ({ ...result, ...projectValidationResult(result) }));
+  return priorResults.map((prior): ValidationDeltaResult => {
+    const siblings = priorResults.filter(result => result.role === prior.role);
+    const next = nextResults.find(result => result.role === prior.role && (siblings.length === 1 || result.display === prior.display));
     if (!next) return { role: prior.role, state: 'unresolved', reason: 'Current validation result is missing', newFailureIdentifiers: [] };
-    if (validationMeasurement(prior) === 'not_measured' || validationMeasurement(next) === 'not_measured') return {
+    if (prior.state === 'not_measured' || next.state === 'not_measured') return {
       role: prior.role, state: 'not_measured', reason: 'Validation not measured: host load exceeded the declared ceiling; neither pass nor failure, no author action required', newFailureIdentifiers: [],
     };
+    if (invalidSuccessfulIdentity(prior) || invalidSuccessfulIdentity(next)) return { role: prior.role, state: 'unresolved',
+      reason: 'Declared structured report is invalid or contradicts the command exit; comparison remains unknown', newFailureIdentifiers: [] };
     if (prior.state === 'passed') {
       if (next.state === 'passed') {
         return { role: prior.role, state: 'pass', reason: 'Green baseline remains green', newFailureIdentifiers: [] };

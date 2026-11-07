@@ -81,7 +81,7 @@ export interface RunEvent {
   requestingStageId?: string;
   requestedAt?: string;
   detectedAt?: string;
-  boundary?: 'attempt_start' | 'adapter_invocation' | 'tool_call_start' | 'tool_call_completion' | 'operator_interrupt';
+  boundary?: 'attempt_start' | 'adapter_invocation' | 'tool_call_start' | 'tool_call_completion' | 'operator_interrupt' | 'model_submission';
   invocationIndex?: number;
   round?: number;
   criteria?: string[];
@@ -89,6 +89,8 @@ export interface RunEvent {
   guidanceId?: string;
   delivered?: boolean;
   commandId?: string;
+  commandIds?: string[];
+  retiredCommandIds?: string[];
   command?: string;
   commandFingerprint?: string;
   commandTimeoutMs?: number;

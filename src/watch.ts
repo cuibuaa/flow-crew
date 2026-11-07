@@ -1,4 +1,4 @@
-import { validationMeasurement } from './project-validation.js';
+import { projectValidationResult } from './project-validation.js';
 import { inspectRunScheduler } from './run-lock.js';
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -129,7 +129,7 @@ export interface WatchTerminalStatusAlert {
 }
 
 export interface WatchValidationAlert {
-  kind: 'validation_measurement'; conditionId: string; runId: string; gateId: string; role: string; measurement: string;
+  kind: 'validation_measurement'; conditionId: string; runId: string; gateId: string; role: string; measurement: string; state?: string; storedState?: string;
 }
 
 export type WatchAlert =
@@ -761,9 +761,9 @@ export function pollWatch(
       if (!Array.isArray(gate?.validation)) continue;
       for (const result of gate.validation) {
         if (!result || typeof result.role !== 'string') continue;
-        const measurement = validationMeasurement(result);
+        const { state: commandState, measurement } = projectValidationResult(result);
         const alert: WatchValidationAlert = { kind: 'validation_measurement', runId, gateId, role: typeof result.display === 'string' ? result.display : result.role,
-          measurement, conditionId: conditionId('validation_measurement', runId, gateId, typeof result.display === 'string' ? result.display : result.role, measurement) };
+          measurement, state: commandState, storedState: result.storedState ?? result.state, conditionId: conditionId('validation_measurement', runId, gateId, typeof result.display === 'string' ? result.display : result.role, measurement) };
         active.set(alert.conditionId, alert);
       }
     }

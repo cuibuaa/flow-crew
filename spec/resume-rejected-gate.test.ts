@@ -100,7 +100,7 @@ it.each([false, true])('continues a rejected gate in the next iteration, retaini
   if (dynamic) {
     expect(after.stages.review.gate?.reason).toContain('Repair reproduction remains open');
     const original = readEvidence(join(root, 'state', 'runs', before.runId))
-      .filter(entry => entry.kind === 'command' && entry.owner === 'adapter-event').at(-1);
+      .filter(entry => entry.kind === 'command' && entry.owner === 'code' && entry.reproductionOf === undefined).at(-1);
     if (original?.kind !== 'command' || !original.command || !original.context) throw Error('Missing synthetic reproduction');
     const replay = await runProjectCommand({ role: 'test', command: original.context.shell, args: ['-c', original.command],
       display: original.command, cwd: original.context.cwd, timeoutMs: 5000 });

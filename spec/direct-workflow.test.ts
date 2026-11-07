@@ -153,7 +153,8 @@ describe('direct workflow', () => {
     writeFileSync(join(projectDir, 'validation-probe.mjs'), probe);
     const prompts: string[] = [];
     const final = await runDirect(task, [], false, (prompt, _role, opts) => { if (opts.stageId === 'review') prompts.push(prompt); });
-    expect(final.status, final.failureReason).toBe(state === 'passed' ? 'complete' : 'failed');
+    expect(final.status, final.failureReason).toBe(state === 'passed' ? 'complete' : 'incomplete');
+    if (state === 'failed') expect(final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'validation_unresolved' }, reason: expect.stringContaining('not certified') });
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain('evidence-ledger.jsonl');
     expect(prompts[0]).toContain('change.diff');

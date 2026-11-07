@@ -55,15 +55,15 @@ It executes the target baseline under the configured command bound and writes a 
 bound to the exact brief digest and canonical target. A failed setup can leave a diagnostic
 worktree; it does not publish a ready record for a blocker.
 
-Ordinary red checks can establish `no_regression_from_baseline`. Failure extraction uses
-complete joined output before bounding persisted text. Complete structural TAP and recognized
-FAIL/FAILED, cross-mark and compiler diagnostic lines can supply identities. Truncated recovered
-identities are partial lower bounds. Partial red-to-red comparisons stay unresolved;
-green-to-red needs a known complete failure inventory to establish regression; unknown/partial
-current failures stay unresolved. Red-to-green passes. If both baseline and current results
-cannot run or fail without identifiable failures, the delta passes and the gate judges its own
-checks. Missing/unlaunchable tools are environment problems; inspect the record's readiness and reasons rather than
-assuming every nonzero child exit has the same setup outcome.
+Ordinary red checks can establish `no_regression_from_baseline`. A declared structured runner
+report owns failure identity; otherwise a closed-schema model reads bounded output, with
+truncation forcing partial evidence. No test-output spelling supplies identities in code.
+Red-to-red comparisons require complete identities and counts; unknown or partial evidence
+leaves the comparison unresolved. Green-to-red is a regression, and red-to-green passes.
+Unlaunchable commands do not establish a comparable result. An unresolved comparison withholds
+final certification without vetoing a repair backed by a confirmed reproduction. Missing tools
+are environment problems; inspect the record's readiness and reasons rather than assuming
+every nonzero child exit has the same setup outcome.
 
 Exit 127 is not universally a refusal: an unlaunchable brief-declared command or a project
 whose commands cannot launch blocks readiness. A discovered missing command can remain an
@@ -150,9 +150,15 @@ No watcher opinion establishes that a model result is correct.
 
 `guide` writes to a named running run and optional stage. Without a run ID it refuses unless
 exactly one readable run is executing. Guidance targets the selected stage or explicit run-wide
-`*`; workers consume filtered envelopes at command boundaries. `interrupt` requests a stop of
-the exact active stage command and delivers its reason as guidance. Neither resets the attempt
-deadline. Changes to admitted criteria or authority need revised brief bytes and admission.
+`*`; routing uses that declaration, never prohibition wording in the message.
+Scheduler notices with an attempt index belong only to that attempt. For a running invocation the next command completion triggers delivery, even while
+other commands are open. The existing child-retirement path stops those commands before
+a fresh invocation submits the guidance. Delivery checks remain pending until the actual
+submitted input contains the envelope; the delivered receipt lists retired command IDs.
+`interrupt` stops every active command of the identified invocation and submits its reason
+through the same guidance path. Attempt and invocation identities reject stale requests.
+Neither action resets the attempt deadline. The attempt clock enforces wrap-up and the
+hard stop directly; shell-text timeout forecasts do not create control notices. Changes to admitted criteria or authority need revised brief bytes and admission.
 
 Use daemon `task cancel` or the dashboard Cancel control to stop registered work. Cancellation
 records the operator decision and closes active control state before bounded worker cleanup.
@@ -273,7 +279,8 @@ The task registry supplies the run ID and project directory; the dashboard Resum
 control beside Cancel requests the same continuation. Resume still checks brief
 admission, scheduler ownership, persisted execution compatibility and unresolved approvals.
 Only explicit continuation resumes cancelled work.
-Cancellation settles interrupted attempts and their stage ledgers. Resume requires settled execution records; it refuses unfinished attempts left by an older cancellation without rewriting them. Archived `stopped` records remain readable as `cancelled`.
+Cancellation settles interrupted attempts and their stage ledgers, and appends their terminal
+`attempt_failed` event for `events` and session-push wrap-up. Resume requires settled execution records; it refuses unfinished attempts left by an older cancellation without rewriting them. Archived `stopped` records remain readable as `cancelled`.
 `flowcrew task retry <task-id>` requests another launch attempt:
 before terminal settlement it retains any existing run binding, and after settlement
 it starts a fresh run with a new plan, stage history and iteration budget. Retry does

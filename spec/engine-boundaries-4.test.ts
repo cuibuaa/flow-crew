@@ -149,16 +149,17 @@ describe('engine boundaries from recorded runs', () => {
     }
   });
 
-  it('carries an explicit operator prohibition to later stages without spreading ordinary targeted advice', () => {
+  it('routes operator rulings by the declared target, independently of prohibition wording', () => {
     const root = fixture('guidance');
     try {
       appendGuidanceEnvelope({ runDir: root, target: 'fit_one', source: 'operator', knownStageIds: ['fit_one', 'fit_two'], body: 'Do not advance this fit in any later fit window.' });
+      const runWide = appendGuidanceEnvelope({ runDir: root, target: '*', source: 'operator', knownStageIds: ['fit_one', 'fit_two'], body: 'Keep this ruling in every stage.' });
       appendGuidanceEnvelope({ runDir: root, target: 'fit_one', source: 'supervisor', knownStageIds: ['fit_one', 'fit_two'], body: 'Do not advance this fit in any later fit window.' });
       appendGuidanceEnvelope({ runDir: root, target: 'fit_one', source: 'operator', knownStageIds: ['fit_one', 'fit_two'], body: 'Inspect the fit only while working in fit_one.' });
       appendGuidanceEnvelope({ runDir: root, target: 'fit_one', source: 'supervisor', knownStageIds: ['fit_one', 'fit_two'], body: 'Inspect the fit only while working in fit_one.' });
       const ledger = readFileSync(join(root, 'supervisor_guidance.md'), 'utf8');
-      expect(guidanceForStageFromText(ledger, 'fit_two').map((entry) => entry.source)).toEqual(['operator']);
-      expect(guidanceForStageFromText(ledger, 'fit_one')).toHaveLength(4);
+      expect(guidanceForStageFromText(ledger, 'fit_two').map((entry) => entry.id)).toEqual([runWide.id]);
+      expect(guidanceForStageFromText(ledger, 'fit_one')).toHaveLength(5);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

@@ -1,0 +1,9 @@
+{
+  "commands": {
+    "test": {
+      "command": "npm",
+      "args": ["run", "test", "--", "--reporter=default", "--reporter=./config/validation-reporter.ts", "--outputFile.json=.cache/validation-tests.json"],
+      "report": {"format": "vitest-json", "path": ".cache/validation-tests.json"}
+    }
+  }
+}

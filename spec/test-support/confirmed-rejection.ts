@@ -26,17 +26,16 @@ export function withConfirmedRejections(adapter: Adapter): Adapter {
     if (verdict.pass !== false || existing !== undefined && (!Array.isArray(existing) || existing.some((finding: Record<string, unknown>) => !finding || typeof finding !== 'object' || finding.reproduction !== undefined))) return result;
     writeFileSync(marker, 'present');
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(require('node:fs').readFileSync(${JSON.stringify(marker)},'utf8')==='present'?1:0)`)}`;
-    const id = `fixture-${opts.stageId}`;
-    opts.onCommandLifecycle?.({ phase: 'started', id, command, context: { cwd: opts.workDir, shell: '/bin/sh' }, timestamp: new Date().toISOString() });
-    // Load after a fixture's policy-runtime reset, sharing its carrier owner.
+    // Reproductions, unlike native progress facts, use the engine's tree-bound endpoint.
+    const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
+    const request = JSON.stringify({ command, cwd: opts.workDir, shell: '/bin/sh' });
     const { runProjectCommand } = await import('../../src/project-validation.js');
-    const { readEvidence } = await import('../../src/evidence-ledger.js');
-    const response = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', command], display: command,
+    const response = await runProjectCommand({ role: 'test', command: '/bin/sh',
+      args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Fixture reproduction',
       cwd: opts.workDir, runDir: opts.runDir, timeoutMs: 5000 });
-    if (response.exitCode !== 1) throw new Error('Fixture predicate did not reproduce');
-    opts.onCommandLifecycle?.({ phase: 'completed', id, command, exitCode: response.exitCode,
-      output: JSON.stringify([response.stdout ?? '', response.stderr ?? '']), timestamp: new Date().toISOString() });
-    const reproduction = readEvidence(opts.runDir).at(-1)!.sequence;
+    const recorded = JSON.parse(response.stdout!).record;
+    if (response.exitCode !== 0 || recorded.exitCode !== 1) throw new Error('Fixture predicate did not reproduce');
+    const reproduction = recorded.sequence;
     verdict.audit_findings = { version: 1, findings: existing?.length
       ? existing.map((finding: Record<string, unknown>) => ({ ...finding, reproduction }))
       : [{ id: 'fixture_defect', paths: ['fixture'], reason: 'Scripted fixture predicate is present',

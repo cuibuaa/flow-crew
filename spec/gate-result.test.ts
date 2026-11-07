@@ -419,7 +419,7 @@ describe('validation at the review boundary', () => {
       'Review the completed fixture using its configured validation.', true);
     const repairs = adapter.calls.filter(call => call.stageId === 'repair');
     if (outcome === 'launch_error') {
-      expect(final.status, final.failureReason).toBe('failed');
+      expect(final.status, final.failureReason).toBe('incomplete');
       expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0,
         gate: { pass: false, kind: 'validation_unresolved' } });
       expect(repairs).toHaveLength(0);

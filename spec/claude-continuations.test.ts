@@ -137,9 +137,13 @@ describe('Claude cold same-attempt continuations (G03)', () => {
       const events = readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf8').trim().split('\n')
         .map(line => JSON.parse(line) as { type: string; boundary?: string; delivered?: boolean });
       expect(events.some(event => event.type === 'stage_command_started')).toBe(false);
-      expect(events.some(event => mode === 'guidance'
-        ? event.type === 'guidance_delivery_checked' && event.boundary === 'tool_call_completion' && event.delivered === true
-        : event.type === 'stage_command_interrupted')).toBe(true);
+      expect(events.filter(event => event.type === 'guidance_delivery_checked' && event.delivered)).toEqual([
+        expect.objectContaining({ boundary: 'model_submission', delivered: true }),
+      ]);
+      if (mode === 'guidance') expect(events).toContainEqual(expect.objectContaining({
+        type: 'guidance_delivery_checked', boundary: 'tool_call_completion', delivered: false,
+      }));
+      else expect(events.some(event => event.type === 'stage_command_interrupted')).toBe(true);
     }
   });
 });

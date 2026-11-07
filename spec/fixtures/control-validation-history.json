@@ -1,0 +1,158 @@
+[
+  {
+    "source_run_suffix": "b4c75c",
+    "sequence": 1198,
+    "commands": [
+      {
+        "role": "build",
+        "display": "npm run build",
+        "state": "passed",
+        "exitCode": 0,
+        "durationMs": 87876.26209000009,
+        "load": {
+          "start": {
+            "loadAverage1m": 6.84,
+            "cpuCount": 8
+          },
+          "end": {
+            "loadAverage1m": 4.85,
+            "cpuCount": 8
+          },
+          "ceilingPerCpu": 1,
+          "waitBoundSeconds": 1,
+          "waitedSeconds": 0
+        },
+        "measurement": "measured",
+        "failureIdentifiers": [],
+        "failureIdentity": "none",
+        "output": ""
+      },
+      {
+        "role": "test",
+        "display": "npm run test",
+        "state": "not_measured",
+        "exitCode": 0,
+        "durationMs": 497002.3172860001,
+        "load": {
+          "start": {
+            "loadAverage1m": 4.85,
+            "cpuCount": 8
+          },
+          "end": {
+            "loadAverage1m": 18.2,
+            "cpuCount": 8
+          },
+          "ceilingPerCpu": 1,
+          "waitBoundSeconds": 1,
+          "waitedSeconds": 0
+        },
+        "measurement": "not_measured",
+        "failureIdentifiers": [],
+        "failureIdentity": "unknown",
+        "output": ""
+      },
+      {
+        "role": "lint",
+        "display": "npm run lint",
+        "state": "not_measured",
+        "exitCode": 0,
+        "durationMs": 18626.902904999908,
+        "load": {
+          "start": {
+            "loadAverage1m": 18.2,
+            "cpuCount": 8
+          },
+          "end": {
+            "loadAverage1m": 16.21,
+            "cpuCount": 8
+          },
+          "ceilingPerCpu": 1,
+          "waitBoundSeconds": 1,
+          "waitedSeconds": 1.0051663209998514
+        },
+        "measurement": "not_measured",
+        "failureIdentifiers": [],
+        "failureIdentity": "unknown",
+        "output": ""
+      }
+    ]
+  },
+  {
+    "source_run_suffix": "b4c75c",
+    "sequence": 1470,
+    "commands": [
+      {
+        "role": "build",
+        "display": "npm run build",
+        "state": "not_measured",
+        "exitCode": 0,
+        "durationMs": 54177.45377499983,
+        "load": {
+          "start": {
+            "loadAverage1m": 13.55,
+            "cpuCount": 8
+          },
+          "end": {
+            "loadAverage1m": 8.3,
+            "cpuCount": 8
+          },
+          "ceilingPerCpu": 1,
+          "waitBoundSeconds": 1,
+          "waitedSeconds": 1.0005357940001414
+        },
+        "measurement": "not_measured",
+        "failureIdentifiers": [],
+        "failureIdentity": "unknown",
+        "output": ""
+      },
+      {
+        "role": "test",
+        "display": "npm run test",
+        "state": "not_measured",
+        "exitCode": 0,
+        "durationMs": 258775.9241220001,
+        "load": {
+          "start": {
+            "loadAverage1m": 8.3,
+            "cpuCount": 8
+          },
+          "end": {
+            "loadAverage1m": 10.71,
+            "cpuCount": 8
+          },
+          "ceilingPerCpu": 1,
+          "waitBoundSeconds": 1,
+          "waitedSeconds": 1.0008127509998157
+        },
+        "measurement": "not_measured",
+        "failureIdentifiers": [],
+        "failureIdentity": "unknown",
+        "output": ""
+      },
+      {
+        "role": "lint",
+        "display": "npm run lint",
+        "state": "not_measured",
+        "exitCode": 0,
+        "durationMs": 5399.936077000573,
+        "load": {
+          "start": {
+            "loadAverage1m": 10.71,
+            "cpuCount": 8
+          },
+          "end": {
+            "loadAverage1m": 10.02,
+            "cpuCount": 8
+          },
+          "ceilingPerCpu": 1,
+          "waitBoundSeconds": 1,
+          "waitedSeconds": 1.0048962799999863
+        },
+        "measurement": "not_measured",
+        "failureIdentifiers": [],
+        "failureIdentity": "unknown",
+        "output": ""
+      }
+    ]
+  }
+]

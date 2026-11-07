@@ -106,14 +106,14 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
     expect(decodeRunnerReport(JSON.stringify(report), 'vitest-json', root).complete).toBe(false);
   });
 
-  it('withholds completeness when a valid report leaves an additional diagnostic stream unaccounted for', async () => {
+  it('uses the declared exhaustive report despite additional diagnostic bytes', async () => {
     const model = vi.fn(() => reading);
     const options = { commands: [{ role: 'test' as const, command: 'fixture', args: [], display: 'fixture', report: { format: 'vitest-json' as const } }], readFailureIdentity: model };
     const before = await run({ exitCode: 1, stdout: nativeReport(true) }, options);
     const after = await run({ exitCode: 1, stdout: nativeReport(true), stderr: 'opaque diagnostic bytes' }, options);
-    expect(testResult(after)).toMatchObject({ failureIdentity: 'known', failureEvidence: 'partial', identityOwner: 'runner-json' });
+    expect(testResult(after)).toMatchObject({ failureIdentity: 'known', failureEvidence: 'complete', identityOwner: 'runner-json' });
     expect(testResult(after).failureIdentifiers).toEqual(testResult(before).failureIdentifiers);
-    expect(evaluateValidationDelta(before, after.results).find(value => value.role === 'test')?.state).toBe('unresolved');
+    expect(evaluateValidationDelta(before, after.results).find(value => value.role === 'test')?.state).toBe('pass');
     expect(model).not.toHaveBeenCalled();
   });
 

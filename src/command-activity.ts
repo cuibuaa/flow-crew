@@ -17,58 +17,12 @@ export interface CommandActivitySnapshot {
   stageId: string;
   attemptIndex: number;
   attemptStartedAt: string;
+  invocationIndex?: number;
   updatedAt: string;
   active: CommandActivityRecord[];
   completedCount: number;
   streamClosed: boolean;
   process?: { pid: number; startTimeTicks: string; kind: 'command' | 'provider' };
-}
-
-export interface ExplicitCommandTimeout {
-  timeoutMs: number;
-  duration: string;
-}
-
-const DURATION = /^(\d+(?:\.\d+)?)([smhd]?)$/i;
-
-/** Conservatively recognize a GNU-style `timeout` command and its explicit
- * duration. Shell expressions and unknown options are intentionally ignored. */
-export function parseExplicitCommandTimeout(command: string): ExplicitCommandTimeout | undefined {
-  const match = /(?:^|(?:&&|\|\||;)\s*)(?:\/usr\/bin\/|\/bin\/)?timeout(?:\s+|$)([^;&|]*)/.exec(command);
-  if (!match) return undefined;
-  const tokens = match[1].match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g)?.map((token) => (
-    (token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))
-      ? token.slice(1, -1)
-      : token
-  )) ?? [];
-  let index = 0;
-  while (index < tokens.length) {
-    const token = tokens[index];
-    if (token === '--') {
-      index++;
-      break;
-    }
-    if (token === '-s' || token === '--signal' || token === '-k' || token === '--kill-after') {
-      if (!tokens[index + 1]) return undefined;
-      index += 2;
-      continue;
-    }
-    if (/^(?:--signal|--kill-after)=\S+$/.test(token)
-      || /^(?:--preserve-status|--foreground|--verbose)$/.test(token)) {
-      index++;
-      continue;
-    }
-    if (token.startsWith('-')) return undefined;
-    break;
-  }
-  const duration = tokens[index];
-  const parsed = duration ? DURATION.exec(duration) : undefined;
-  if (!parsed) return undefined;
-  const value = Number(parsed[1]);
-  const multiplier = ({ '': 1_000, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const)[parsed[2].toLowerCase() as '' | 's' | 'm' | 'h' | 'd'];
-  const timeoutMs = value * multiplier;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > Number.MAX_SAFE_INTEGER) return undefined;
-  return { timeoutMs: Math.round(timeoutMs), duration };
 }
 
 /** Native command progress parser; flushes trailing events before closure. */
@@ -87,6 +41,7 @@ export class CommandActivityTracker {
     stageId: string;
     attemptIndex: number;
     attemptStartedAt: string;
+    invocationIndex?: number;
     now?: () => string;
     onLifecycle?: (event: CommandLifecycleEvent) => void;
   }) {
@@ -166,6 +121,7 @@ export class CommandActivityTracker {
       stageId: this.input.stageId,
       attemptIndex: this.input.attemptIndex,
       attemptStartedAt: this.input.attemptStartedAt,
+      ...(this.input.invocationIndex === undefined ? {} : { invocationIndex: this.input.invocationIndex }),
       updatedAt: this.now(),
       active: [...this.active.values()],
       completedCount: this.completedCount,

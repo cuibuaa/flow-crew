@@ -13,7 +13,7 @@ import {
   discoverProjectValidation, evaluateValidationDelta, runProjectValidationBaseline, runValidationCommand,
   type ProjectValidationBaseline, type ProjectValidationDependencies, type ValidationDeltaResult,
 } from '../../project-validation.js';
-import { appendEvidence, captureProjectTree, projectCommit, readEvidence, safeEvidencePath, VALIDATION_FACT_VERSION, type ValidationExecution, type ValidationFact } from '../../evidence-ledger.js';
+import { appendEvidence, captureProjectTree, projectCommit, projectValidationDelta, projectValidationFact, readEvidence, safeEvidencePath, VALIDATION_FACT_VERSION, type ValidationExecution, type ValidationFact } from '../../evidence-ledger.js';
 import { parseBriefInputs } from '../../ship-inputs.js';
 import { RollbackContentStore } from '../../rollback-content-store.js';
 import { readRepairFileImage, type RepairFileImage } from '../sched_scope/file-images.js';
@@ -227,11 +227,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
       rmSync(scratch, { recursive: true, force: true });
     }
   }
-  let delta: ValidationDeltaResult[] = baseline ? evaluateValidationDelta(baseline, current.results)
-    : current.results.map(result => ({ role: result.role, display: result.display,
-      state: validationMeasurement(result) === 'not_measured' ? 'not_measured' : result.state === 'passed' || result.state === 'not_configured' ? 'pass' : 'unresolved',
-      reason: validationMeasurement(result) === 'not_measured' ? 'Validation not measured: host load exceeded the declared ceiling; neither pass nor failure, no author action required' : result.state === 'passed' ? 'Author attempt passed; no base execution required'
-        : result.state === 'not_configured' ? 'Role is not configured' : baseError ?? 'Base result unavailable', newFailureIdentifiers: [] }));
+  let delta = evaluateValidationDelta(baseline, current.results, baseError);
   const bindingValid = executions.every(execution => execution.treeHash !== null && execution.treeHash === execution.treeAfterHash);
   if (!bindingValid) {
     delta = delta.map(entry => ({ ...entry, state: 'unresolved', reason: 'Source tree changed or became unreadable during configured validation' }));
@@ -263,12 +259,7 @@ export function readValidationDelta(path: string): GateValidationDeltaArtifact |
   try {
     const value = JSON.parse(readFileSync(path, 'utf8')) as GateValidationDeltaArtifact;
     if (value.version !== 2 || typeof value.pass !== 'boolean' || !Array.isArray(value.delta)) return undefined;
-    if (value.ledgerSequence !== undefined) {
-      const fact = readEvidence(dirname(path)).find(entry => entry.sequence === value.ledgerSequence);
-      if (fact?.kind !== 'validation' || fact.validationVersion !== VALIDATION_FACT_VERSION) return undefined;
-      value.current = fact.executions.find(execution => execution.target === 'attempt')?.commands ?? [];
-    }
-    return Array.isArray(value.current) ? value : undefined;
+    return projectValidationDelta(dirname(path), value);
   } catch { return undefined; }
 }
 /** Bind a reference, not a second copy of the facts. This function executes no suite. */
@@ -310,7 +301,8 @@ export function bindReviewedGateValidation(projectDir: string, runId: string, st
  * Mutable aliases cannot replace the append-only author's receipt. */
 export function currentAuthorValidationRefusal(projectDir: string, runId: string): GateVerdict | undefined {
   const base = runDir(projectDir, runId);
-  const fact = readEvidence(base).filter(entry => entry.kind === 'validation').at(-1);
+  const recorded = readEvidence(base).filter(entry => entry.kind === 'validation').at(-1);
+  const fact = recorded?.kind === 'validation' && recorded.validationVersion === VALIDATION_FACT_VERSION ? projectValidationFact(recorded) : recorded;
   const tree = captureProjectTree(projectDir, briefAt(base));
   const owner = fact?.kind === 'validation' ? readStageStatus(projectDir, runId, fact.stageId).attempts?.at(-1) : undefined;
   const refuse = (reason: string): GateVerdict => ({ pass: false, reason, refusal: { kind: 'validation_unresolved' } });
@@ -318,12 +310,12 @@ export function currentAuthorValidationRefusal(projectDir: string, runId: string
     || owner?.index !== fact.attemptIndex || owner.startedAt !== fact.attemptStartedAt || owner.status !== STAGE_STATUS.COMPLETE) {
     return refuse('No settled author validation covers the changed tree; no suite is rerun by a decision');
   }
-  if (fact.pass || fact.delta.every(entry => entry.state === 'pass' || entry.state === 'not_measured')) return undefined;
+  if (fact.pass) return undefined;
   const regressions = fact.delta.filter(entry => entry.state === 'regression');
   if (regressions.length) return { pass: false,
     reason: `Introduced validation failures: ${regressions.map(entry => `${entry.display ?? entry.role}: ${entry.newFailureIdentifiers.join(', ') || entry.reason}`).join('; ')}`,
     refusal: { kind: 'validation_regression' }, repairability: { version: 1, disposition: 'repairable', evidence: `${join(base, 'evidence-ledger.jsonl')}#${fact.sequence}` } };
-  return refuse(`Validation identity/evidence is unknown: ${fact.delta.filter(entry => entry.state !== 'pass').map(entry => entry.reason).join('; ')}; no code repair is inferred`);
+  return refuse(`Validation comparison is unknown; run is not certified: ${fact.delta.filter(entry => entry.state !== 'pass').map(entry => entry.reason).join('; ')}; no code repair is inferred`);
 }
 
 export function gateValidationRefusal(projectDir: string, runId: string, stageId: string): GateVerdict | undefined {

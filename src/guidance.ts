@@ -163,17 +163,10 @@ export function parseGuidanceLedger(text: string): GuidanceEnvelope[] {
 export function guidanceForStageFromText(text: string, stageId: string, attemptIndex?: number): GuidanceEnvelope[] {
   const seen = new Set<string>();
   return parseGuidanceLedger(text).filter((entry) => {
-    // An operator can give a running stage an explicit prohibition for later
-    // stages. The authored target still records who received it first, while
-    // the prohibition itself remains binding within this run. Ordinary stage
-    // advice keeps its exact target.
-    const operatorFutureProhibition = entry.source === 'operator'
-      && /\b(?:do not|don't|never|must not|stop)\b/i.test(entry.body)
-      && /\b(?:any|all)\s+later\s+(?:\w+\s+){0,2}(?:stage|window)s?\b/i.test(entry.body);
     if (entry.quarantined
       || (entry.attemptIndex !== undefined && entry.attemptIndex !== attemptIndex)
       || (entry.target !== stageId
-      && entry.target !== RUN_WIDE_GUIDANCE_TARGET && !operatorFutureProhibition)) return false;
+      && entry.target !== RUN_WIDE_GUIDANCE_TARGET)) return false;
     if (seen.has(entry.id)) return false;
     seen.add(entry.id);
     return true;
@@ -275,12 +268,11 @@ export function routePendingOperatorGuidanceToStage(
   }
 }
 
-/** Retain delivery receipts verbatim while omitting superseded scheduler scope
- * notices from a later invocation. Operator rulings keep their original binding. */
+/** Retain historical operator rulings; scheduler control notices belong only
+ * to their declared attempt, independent of body wording. */
 export function guidanceForExecution(entries: readonly GuidanceEnvelope[], attemptIndex: number): GuidanceEnvelope[] {
   return entries.filter((entry) => !(entry.source === 'scheduler'
-    && entry.attemptIndex !== undefined && entry.attemptIndex < attemptIndex
-    && /^(?:Scope revision [^\s]+ was accepted\b|# Accepted scope revision\b|# Stage budget wrap-up\b)/.test(entry.body)));
+    && entry.attemptIndex !== undefined && entry.attemptIndex !== attemptIndex));
 }
 
 export function renderGuidanceDelivery(entries: readonly GuidanceEnvelope[]): string {

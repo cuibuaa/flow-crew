@@ -173,6 +173,7 @@ export interface RunOpts {
   /** Current scheduler attempt identity for durable adapter activity facts. */
   attemptIndex?: number;
   attemptStartedAt?: string;
+  invocationIndex?: number;
   /** Resume only this explicit UUID; global-most-recent selection is forbidden. */
   resumeSessionId?: string;
   /** Closed stage whose conversation is copied into this stage's private home. */
@@ -356,7 +357,7 @@ export function execWithStdin(
     onStdout?: (text: string, activity?: CommandActivityTracker) => void;
     /** The executable owner binds and closes command evidence with its child;
      * adapters only translate their native events into lifecycle records. */
-    execution?: Pick<RunOpts, 'runDir' | 'stageId' | 'attemptIndex' | 'attemptStartedAt' | 'onCommandLifecycle'>;
+    execution?: Pick<RunOpts, 'runDir' | 'stageId' | 'attemptIndex' | 'attemptStartedAt' | 'invocationIndex' | 'onCommandLifecycle'>;
     /** Opt in when the adapter parses stdout separately from diagnostics. */
     captureStreams?: boolean;
     /** Invoked once the child is spawned, gives caller a kill handle (e.g. to

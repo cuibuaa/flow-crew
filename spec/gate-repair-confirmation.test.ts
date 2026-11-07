@@ -61,7 +61,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
       if ((first || route?.length === 3 && review === 3) && mode === 'mixed') {
         const tracker = new CommandActivityTracker({ runDir: opts.runDir, stageId: opts.stageId, attemptIndex: 1,
           attemptStartedAt: new Date().toISOString(), onLifecycle: opts.onCommandLifecycle });
-        const client = variant === 'recorded' ? prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0] : undefined;
+        const client = variant !== 'unknown' ? prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0] : undefined;
         const transportedCommand = client ? `${client} '${JSON.stringify({ command, ...context }).replaceAll("'", "'\\''")}'` : command;
         tracker.feed(JSON.stringify({ type: 'item.started', item: { type: 'command_execution', id: 'reviewer-probe', command: transportedCommand,
           ...(variant === 'unknown' || client ? {} : context) } }) + '\n');
@@ -142,14 +142,16 @@ describe('repair requires a reviewer reproduction', () => {
       exitCode: 0, command: (original as { command: string }).command, context: (original as { context: unknown }).context });
     const native = value.ledger.find(entry => entry.kind === 'command' && entry.commandId === 'reviewer-probe')!;
     expect(native).not.toHaveProperty('context');
+    expect(native).not.toHaveProperty('treeHash');
+    expect(native).not.toHaveProperty('treeAfterHash');
     expect(native).toMatchObject({ exitCode: 0 });
     expect(value.final.stages.review.gate?.findings?.confirmed).toEqual([]);
   });
-  it.each(['long', 'cwd', 'bash'] as const)('replays the complete native command in its recorded context (%s)', async variant => {
+  it.each(['long', 'cwd', 'bash'] as const)('replays the complete engine-recorded command in its context (%s)', async variant => {
     const value = await workflow('mixed', variant !== 'bash', false, false, variant);
     expect(value.final.status).toBe(variant === 'bash' ? 'complete' : 'incomplete');
     expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
-    const original = value.ledger.find(entry => entry.kind === 'command' && entry.commandId === 'reviewer-probe')!;
+    const original = value.ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.stageId === 'review')!;
     const closure = value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence)!;
     expect(original).toMatchObject({ exitCode: 1, context: {
       cwd: variant === 'cwd' ? join(value.project, 'docs') : value.project,
@@ -172,8 +174,8 @@ describe('repair requires a reviewer reproduction', () => {
     const value = await workflow('mixed');
     expect(value.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
     expect(value.final.status).toBe('complete');
-    const reproduction = value.ledger.find(entry => entry.kind === 'command' && entry.commandId === 'reviewer-probe')!;
-    expect(reproduction).toMatchObject({ kind: 'command', owner: 'adapter-event', stageId: 'review', exitCode: 1,
+    const reproduction = value.ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.stageId === 'review')!;
+    expect(reproduction).toMatchObject({ kind: 'command', owner: 'code', stageId: 'review', exitCode: 1,
       treeHash: expect.stringMatching(/^[a-f0-9]{64}$/), outputDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
     if (reproduction.kind !== 'command') throw Error('missing reproduction');
     expect(reproduction.treeAfterHash).toBe(reproduction.treeHash);

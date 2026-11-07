@@ -2,6 +2,16 @@
 
 For an operator: which settings change behavior, and which value wins?
 
+## Project validation
+
+`config/validation.json` belongs to the target project. It declares commands and
+structured reporters, independently of engine defaults. It uses the brief's
+`{commands: {build|test|lint: {command, args, report?}}}` schema and overrides inferred
+commands for the declared roles. Overlapping brief declarations must agree with
+the project's argv and reporter. Other roles retain normal discovery from package,
+Make and Python declarations. Invalid explicit configuration refuses discovery before execution.
+See [validation evidence](agent-protocol.md) for report bounds and result interpretation.
+
 ## Engine defaults
 
 Defaults, roles and workflows come from the engine package's `config/` directory.

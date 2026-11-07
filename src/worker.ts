@@ -63,7 +63,6 @@ import {
   routePendingOperatorGuidanceToStage,
 } from './guidance.js';
 import { attemptEventFields, recordRunEvent } from './run-events.js';
-import { parseExplicitCommandTimeout } from './command-activity.js';
 import {
   commandFingerprint,
   parseStageCommandInterrupt,
@@ -359,9 +358,6 @@ export async function runStage(
   prompt = prompt
     .replace(/<current execution index>/g, String(attemptIndex))
     .replace(/<current attempt>/g, String(attemptIndex)); // legacy prompt templates
-  // Add notices bound to this execution; run-wide guidance is in the stage body.
-  const scopedAtStart = guidanceBeforePrompt.filter((entry) => entry.attemptIndex !== undefined);
-  if (scopedAtStart.length > 0) prompt += `\n\n${guidanceBlock(scopedAtStart)}`;
   beginAttemptEvidenceGeneration(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
   recordRunEvent(opts.projectDir, opts.runId, {
     type: 'attempt_started',
@@ -373,14 +369,18 @@ export async function runStage(
   });
 
   const guidanceReceiptPath = join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md');
-  const deliveredGuidanceIds = new Set(guidanceBeforePrompt.map((entry) => entry.id));
-  const deliveredGuidance = [...guidanceBeforePrompt];
+  const collectedGuidanceIds = new Set(guidanceBeforePrompt.map((entry) => entry.id));
+  const collectedGuidance = [...guidanceBeforePrompt];
+  const submittedGuidanceIds = new Set<string>();
+  const retiredForGuidance = new Map<string, string[]>();
   let receiptContent: string | undefined;
   const persistGuidanceReceipt = (): void => {
+    if (!submittedGuidanceIds.size && existsSync(guidanceReceiptPath)) return;
     try {
       mkdirSync(join(opts.runDir, 'stages', opts.stageId), { recursive: true });
-      const rendered = renderGuidanceDelivery(deliveredGuidance);
-      const content = rendered ? `${rendered}\n` : 'No guidance was delivered to this execution.\n';
+      const rendered = renderGuidanceDelivery(collectedGuidance.filter(entry => submittedGuidanceIds.has(entry.id)));
+      const retired = [...new Set([...submittedGuidanceIds].flatMap(id => retiredForGuidance.get(id) ?? []))];
+      const content = rendered ? `${rendered}\nRetired command IDs: ${JSON.stringify(retired)}\n` : 'No guidance was delivered to this execution.\n';
       if (content === receiptContent) return;
       writeFileSync(guidanceReceiptPath, content, 'utf-8');
       receiptContent = content;
@@ -390,22 +390,22 @@ export async function runStage(
     boundary: 'attempt_start' | 'adapter_invocation' | 'tool_call_start' | 'tool_call_completion' | 'operator_interrupt',
     boundaryInvocationIndex?: number,
     commandEvent?: Pick<CommandLifecycleEvent, 'id' | 'command'>,
-  ): ReturnType<typeof readGuidanceForStage> => {
-    if (opts.isolatedInput) return [];
+  ): void => {
+    if (opts.isolatedInput) return;
     let entries: ReturnType<typeof readGuidanceForStage> = [];
     let checkFailed = false;
     try {
       routePendingOperatorGuidanceToStage(opts.runDir, opts.stageId);
       entries = readGuidanceForStage(opts.runDir, opts.stageId, attemptIndex)
-        .filter((entry) => !deliveredGuidanceIds.has(entry.id));
+        .filter((entry) => !collectedGuidanceIds.has(entry.id));
       for (const entry of entries) {
-        deliveredGuidanceIds.add(entry.id);
-        deliveredGuidance.push(entry);
+        collectedGuidanceIds.add(entry.id);
+        collectedGuidance.push(entry);
       }
       persistGuidanceReceipt();
     } catch { checkFailed = true; }
-    if (!entries.length && !checkFailed && boundary !== 'attempt_start' && boundary !== 'adapter_invocation') return entries;
-    const currentDelivery = guidanceForExecution(boundary === 'attempt_start' ? deliveredGuidance : entries, attemptIndex);
+    if (!entries.length && !checkFailed && boundary !== 'attempt_start' && boundary !== 'adapter_invocation') return;
+    const currentDelivery = guidanceForExecution(boundary === 'attempt_start' ? collectedGuidance : entries, attemptIndex);
     recordRunEvent(opts.projectDir, opts.runId, {
       type: 'guidance_delivery_checked',
       runId: opts.runId,
@@ -418,20 +418,16 @@ export async function runStage(
       ...(commandEvent?.id ? { commandId: commandEvent.id } : {}),
       ...(checkFailed ? { checkFailed: true } : {}),
       guidanceIds: currentDelivery.map((entry) => entry.id),
-      delivered: currentDelivery.length > 0,
+      delivered: false,
       detail: entries.length > 0
-        ? `delivered ${entries.length} new guidance envelope${entries.length === 1 ? '' : 's'} at ${boundary}`
+        ? `pending ${entries.length} new guidance envelope${entries.length === 1 ? '' : 's'} at ${boundary}`
         : boundary === 'attempt_start' && currentDelivery.length > 0
-          ? `confirmed ${currentDelivery.length} guidance envelope${currentDelivery.length === 1 ? '' : 's'} at attempt start`
+          ? `pending ${currentDelivery.length} guidance envelope${currentDelivery.length === 1 ? '' : 's'} at attempt start`
           : `no new guidance available at ${boundary}`,
       source: 'worker',
     });
-    return entries;
   };
-  // buildStagePrompt read the first snapshot. Close the small read/build race by
-  // appending only envelopes that appeared after that snapshot.
-  const arrivedAtAttemptStart = consumeNewGuidance('attempt_start');
-  if (arrivedAtAttemptStart.length > 0) prompt += `\n\n${guidanceBlock(arrivedAtAttemptStart)}`;
+  consumeNewGuidance('attempt_start');
 
   // Auto-prepend task brief to the role's system prompt so the brief sits in
   // a stable prefix position across stages. This:
@@ -553,10 +549,9 @@ export async function runStage(
   let activeInvocationAbortController: AbortController | undefined;
   let activeInvocationIndex: number | undefined;
   type CommandBoundaryControl = {
-    kind: 'guidance' | 'budget_wrap_up' | 'timeout_projection' | 'operator_interrupt';
-    command: CommandLifecycleEvent;
-    guidance: ReturnType<typeof readGuidanceForStage>;
+    kind: 'guidance' | 'budget_wrap_up' | 'operator_interrupt';
     interrupt?: StageCommandInterruptSignal;
+    retiredCommandIds?: string[];
   };
   let commandBoundaryControl: CommandBoundaryControl | undefined;
   let stageAborted = false;
@@ -567,15 +562,17 @@ export async function runStage(
   let terminationCause: RunResult['terminationCause'];
   let wrapUpRequestedAt: string | undefined;
   let wrapUpDeliveredAt: string | undefined;
+  let wrapUpGuidanceId: string | undefined;
   const requestWrapUp = (): void => {
     if (wrapUpRequestedAt || attemptAbortController.signal.aborted) return;
     wrapUpRequestedAt = new Date(attemptDeadline.wallNow()).toISOString();
     const envelope = appendGuidanceEnvelope({ runDir: opts.runDir, target: opts.stageId, source: 'scheduler',
       knownStageIds: [opts.stageId], attemptIndex,
       body: `# Stage budget wrap-up\nTime is nearly up. Stop starting new work. Keep all admitted files. Finish safely and return your normal result with a concrete done/remaining handoff: what changed, evidence, unfinished duties and the next bounded action. Return remaining_work as a list of unfinished duties/checks, or [] only when all assigned work is complete. Do not claim unfinished work or unrun checks passed. If work remains, the next iteration continues these files. Hard stop: ${attemptDeadline.deadlineAt}; finishing interval: at least ${attemptDeadline.finishingMs} ms after the current child retires within its bounded closure window.` });
-    const guidance = consumeNewGuidance('adapter_invocation', activeInvocationIndex);
+    wrapUpGuidanceId = envelope.id;
+    consumeNewGuidance('adapter_invocation', activeInvocationIndex);
     if (activeInvocationAbortController && !activeInvocationAbortController.signal.aborted) {
-      commandBoundaryControl = { kind: 'budget_wrap_up', command: { id: 'stage_budget', phase: 'completed', timestamp: wrapUpRequestedAt }, guidance };
+      commandBoundaryControl = { kind: 'budget_wrap_up' };
       activeInvocationAbortController.abort('guidance_delivery_for_budget_wrap_up');
     }
 
@@ -664,49 +661,41 @@ export async function runStage(
       }
       const signal = parsed.signal;
       const active = activeCommands.get(signal.commandId);
+      const invocationMatches = signal.invocationIndex === undefined
+        ? active && commandFingerprint(active.command ?? '') === signal.commandFingerprint
+        : signal.invocationIndex === activeInvocationIndex;
       if (signal.stageId !== opts.stageId
         || signal.attemptIndex !== attemptIndex
         || signal.attemptStartedAt !== attemptStartedAt
-        || !active
-        || !active.command
-        || commandFingerprint(active.command) !== signal.commandFingerprint) {
+        || !invocationMatches) {
         removeCommandInterruptSignal();
         appendAbortWarning(
-          `Ignored stale operator command interrupt ${signal.requestId}: it does not match the active command in attempt ${attemptIndex}.`,
+          `Ignored stale operator command interrupt ${signal.requestId}: it does not match the active invocation in attempt ${attemptIndex}.`,
         );
         return;
       }
 
       const acceptedGuidance = appendGuidanceEnvelope({ runDir: opts.runDir, target: opts.stageId,
-        source: 'operator', body: signal.reason, knownStageIds: [opts.stageId], createdAt: signal.requestedAt });
+        source: 'operator', body: signal.reason, knownStageIds: [opts.stageId], createdAt: signal.requestedAt, attemptIndex });
       signal.guidanceId = acceptedGuidance.id;
       recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_command_interrupt_requested', runId: opts.runId,
         timestamp: signal.requestedAt, stageId: opts.stageId, attemptIndex, attemptStartedAt,
-        requestId: signal.requestId, guidanceId: signal.guidanceId, commandId: signal.commandId,
+        requestId: signal.requestId, guidanceId: signal.guidanceId, commandId: signal.commandId, commandIds: [...activeCommands.keys()],
         command: signal.command, commandFingerprint: signal.commandFingerprint, detail: signal.reason, source: 'operator' });
       // Consume before stopping the child so a crash cannot replay this exact
       // request into a later command or attempt.
       removeCommandInterruptSignal();
-      interruptedCommands.set(signal.commandFingerprint, signal);
-      const guidance = consumeNewGuidance(
-        'operator_interrupt',
-        activeInvocationIndex,
-        { id: active.id, command: active.command },
-      );
-      const interruptGuidance = deliveredGuidance.find((entry) => entry.id === signal.guidanceId);
-      const priorGuidance = commandBoundaryControl?.guidance ?? [];
-      const mergedGuidance = [...priorGuidance, ...guidance, ...(interruptGuidance ? [interruptGuidance] : [])]
-        .filter((entry, index, all) => all.findIndex((candidate) => candidate.id === entry.id) === index);
+      for (const command of activeCommands.values()) interruptedCommands.set(commandFingerprint(command.command ?? ''), signal);
+      consumeNewGuidance('operator_interrupt', activeInvocationIndex, active ?? { id: signal.commandId, command: signal.command });
       commandBoundaryControl = {
         kind: 'operator_interrupt',
-        command: active,
-        guidance: mergedGuidance,
         interrupt: signal,
+        retiredCommandIds: [...activeCommands.keys()],
       };
       try {
         appendFileSync(
           liveLogPath,
-          `\nOperator interrupt ${signal.requestId} matched command ${signal.commandId}; stopping only the current adapter invocation.\n`,
+          `\nOperator interrupt ${signal.requestId} matched command ${signal.commandId}; stopping all commands of the current adapter invocation.\n`,
         );
       } catch { /* the event ledger and signal are the durable audit */ }
       if (activeInvocationAbortController && !activeInvocationAbortController.signal.aborted) {
@@ -820,7 +809,7 @@ export async function runStage(
     invocationIndex++;
     const invocationRole = selectedRole;
     consumeNewGuidance('adapter_invocation', invocationIndex);
-    const additionalGuidance = (opts.isolatedInput ? [] : deliveredGuidance).filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
+    const additionalGuidance = (opts.isolatedInput ? [] : collectedGuidance).filter((entry) => !prompt.includes(renderGuidanceEnvelope(entry)));
     const stateContext = opts.isolatedInput ? '' : runStateContext(opts.projectDir, opts.runId, opts.planRevision);
     // Fresh children read current facts and bytes. The own-stage predecessor
     // stays bound to the attempt that preceded this execution, not its children.
@@ -833,16 +822,28 @@ export async function runStage(
         appendFileSync(liveLogPath, '\nINVOCATION_INPUT_UNAVAILABLE: standalone stage has no initialized run projection.\n');
         return;
       }
+      const submitted = guidanceForExecution(collectedGuidance, attemptIndex).filter(entry =>
+        input.userPrompt.includes(renderGuidanceEnvelope(entry)) || input.systemPrompt.includes(renderGuidanceEnvelope(entry)));
       recordInvocationInput(opts.runDir, {
         runId: opts.runId, stageId: opts.stageId, attemptIndex, attemptStartedAt,
         invocationIndex: ++inputRecordIndex, boundary,
         adapter: invocationRole.adapter ?? inferAdapterName(selectedAdapter) ?? 'custom',
         model: input.model ?? invocationRole.model ?? 'provider-default-unresolved', systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
-        resumeSessionId: input.resumeSessionId, transport: input.transport, guidanceIds: guidanceForExecution(deliveredGuidance, attemptIndex).map((entry) => entry.id),
+        resumeSessionId: input.resumeSessionId, transport: input.transport, guidanceIds: submitted.map(entry => entry.id),
       });
+      const newlySubmitted = submitted.filter(entry => !submittedGuidanceIds.has(entry.id));
+      for (const entry of newlySubmitted) submittedGuidanceIds.add(entry.id);
+      if (newlySubmitted.length) {
+        persistGuidanceReceipt();
+        recordRunEvent(opts.projectDir, opts.runId, { type: 'guidance_delivery_checked', runId: opts.runId,
+          timestamp: new Date().toISOString(), stageId: opts.stageId, attemptIndex, attemptStartedAt, invocationIndex,
+          boundary: 'model_submission', guidanceIds: newlySubmitted.map(entry => entry.id), delivered: true,
+          retiredCommandIds: [...new Set(newlySubmitted.flatMap(entry => retiredForGuidance.get(entry.id) ?? []))],
+          detail: 'Guidance delivered in submitted invocation input', source: 'worker' });
+      }
       // Record submitted input at the adapter's existing input boundary. Merely
       // preparing a prompt does not establish that a native call received it.
-      if (wrapUpRequestedAt && !wrapUpDeliveredAt && input.userPrompt.includes('# Stage budget wrap-up')) {
+      if (wrapUpRequestedAt && !wrapUpDeliveredAt && submitted.some(entry => entry.id === wrapUpGuidanceId)) {
         wrapUpDeliveredAt = new Date(attemptDeadline.wallNow()).toISOString();
 
         recordRunEvent(opts.projectDir, opts.runId, { type: 'stage_wrap_up_delivered', runId: opts.runId,
@@ -855,24 +856,15 @@ export async function runStage(
     activeInvocationAbortController = invocationAbortController;
     activeInvocationIndex = invocationIndex;
     const invocationAbortSignal = AbortSignal.any([aggregateAbortSignal, invocationAbortController.signal]);
-    const commandTrees = new Map<string, string | null>();
     const onCommandLifecycle = (event: CommandLifecycleEvent): void => {
       if (event.phase === 'completed') appendEvidence(opts.runDir, { kind: 'command', stageId: opts.stageId, attemptIndex, invocationIndex,
         commandId: event.id, command: activeCommands.get(event.id)?.command ?? event.command ?? null,
         context: activeCommands.get(event.id)?.context,
         exitCode: event.exitCode ?? null, owner: 'adapter-event',
-        ...(opts.isGate ? { treeHash: commandTrees.get(event.id) ?? null, treeAfterHash: captureProjectTree(opts.projectDir, evidenceBrief).hash,
-          ...(event.output === undefined ? {} : { outputDigest: createHash('sha256').update(event.output).digest('hex') }) } : {}) });
+        ...(event.output === undefined ? {} : { outputDigest: createHash('sha256').update(event.output).digest('hex') }) });
       if (event.phase === 'started') {
-        if (opts.isGate) commandTrees.set(event.id, captureProjectTree(opts.projectDir, evidenceBrief).hash);
         activeCommands.set(event.id, event);
-        const startGuidance = consumeNewGuidance(
-          'tool_call_start', invocationIndex, { id: event.id, command: event.command },
-        );
-        if (startGuidance.length > 0) {
-          commandBoundaryControl = { kind: 'guidance', command: event, guidance: startGuidance };
-
-        }
+        consumeNewGuidance('tool_call_start', invocationIndex, event);
         if (event.command) {
           const fingerprint = commandFingerprint(event.command);
           const interrupted = interruptedCommands.get(fingerprint);
@@ -895,55 +887,6 @@ export async function runStage(
               source: 'worker',
             });
           }
-          const explicitTimeout = parseExplicitCommandTimeout(event.command);
-          const remainingBudgetMs = Math.max(0, Math.floor(wrapUpRequestedAt ? attemptDeadline.remainingMs()
-            : Math.min(attemptDeadline.remainingMs(), effectiveBudgetMs - attemptDeadline.elapsedMs())));
-          if (explicitTimeout && explicitTimeout.timeoutMs > remainingBudgetMs) {
-            const shortfallMs = explicitTimeout.timeoutMs - remainingBudgetMs;
-            recordRunEvent(opts.projectDir, opts.runId, {
-              type: 'command_timeout_projection',
-              runId: opts.runId,
-              timestamp: event.timestamp,
-              stageId: opts.stageId,
-              attemptIndex,
-              attemptStartedAt,
-              invocationIndex,
-              commandId: event.id,
-              command: event.command,
-              commandFingerprint: fingerprint,
-              commandTimeoutMs: explicitTimeout.timeoutMs,
-              remainingBudgetMs,
-              shortfallMs,
-              detail: `command timeout exceeds the remaining attempt budget by ${shortfallMs}ms`,
-              level: 'warning',
-              source: 'worker',
-            });
-            appendGuidanceEnvelope({
-              runDir: opts.runDir,
-              target: opts.stageId,
-              source: 'scheduler',
-              knownStageIds: [opts.stageId],
-              body: [
-                'The command was stopped before it could silently exceed this attempt budget.',
-                `Command: ${event.command}`,
-                `Explicit command timeout: ${explicitTimeout.timeoutMs} ms.`,
-                `Remaining stage budget at command start: ${remainingBudgetMs} ms.`,
-                `Projected shortfall: ${shortfallMs} ms.`,
-                'Choose a bounded alternative or report that the requested work is infeasible; the attempt deadline is unchanged.',
-              ].join('\n'),
-            });
-            const projectionGuidance = consumeNewGuidance(
-              'tool_call_start', invocationIndex, { id: event.id, command: event.command },
-            );
-            commandBoundaryControl = {
-              kind: 'timeout_projection',
-              command: event,
-              guidance: [...startGuidance, ...projectionGuidance],
-            };
-            if (!invocationAbortController.signal.aborted) {
-              invocationAbortController.abort('command_timeout_projection');
-            }
-          }
         }
         // Close a publication race where the operator signal landed between
         // the adapter's activity snapshot and this callback.
@@ -956,12 +899,12 @@ export async function runStage(
       const completed = started
         ? { ...event, ...(started.command ? { command: started.command } : {}) }
         : event;
-      const guidance = consumeNewGuidance(
-        'tool_call_completion', invocationIndex, { id: event.id, command: completed.command },
-      );
-      if (guidance.length > 0 && !commandBoundaryControl) commandBoundaryControl = { kind: 'guidance', command: completed, guidance };
-      if (commandBoundaryControl?.kind === 'guidance' && activeCommands.size === 0
-        && !invocationAbortController.signal.aborted) invocationAbortController.abort('guidance_delivery_at_tool_completion');
+      consumeNewGuidance('tool_call_completion', invocationIndex, completed);
+      if (!commandBoundaryControl && guidanceForExecution(collectedGuidance, attemptIndex).some(entry => !submittedGuidanceIds.has(entry.id))) commandBoundaryControl = { kind: 'guidance' };
+      if (commandBoundaryControl?.kind === 'guidance' && !invocationAbortController.signal.aborted) {
+        commandBoundaryControl.retiredCommandIds = [...activeCommands.keys()];
+        invocationAbortController.abort('guidance_delivery_at_tool_completion');
+      }
     };
     let recordedCommandIndex = 0;
     const invocation = new Promise<RunResult>((resolvePromise, rejectPromise) => {
@@ -983,6 +926,7 @@ export async function runStage(
       };
       const onAbort = (): void => {
         if (attemptDeadline.signal.aborted) terminationCause ??= 'attempt_timeout';
+        if (commandBoundaryControl) commandBoundaryControl.retiredCommandIds ??= [...activeCommands.keys()];
         // The signal initiates cancellation; the adapter promise is the child
         // lifecycle acknowledgement. Wait for it before claiming childClosedAt.
         // A broken adapter is bounded by the observation tolerance and is then
@@ -1032,6 +976,7 @@ export async function runStage(
           stageId: opts.stageId,
           attemptIndex,
           attemptStartedAt,
+          invocationIndex,
           // The worker owns final cleanup; an adapter call may be corrected.
           preserveSession: true,
           abortSignal: invocationAbortSignal,
@@ -1045,7 +990,7 @@ export async function runStage(
           let finalRecord: unknown;
           try { finalRecord = JSON.parse(value.output); } catch { /* no structured final record */ }
           previousInvocation = { invocationIndex, exitCode: value.exitCode, finalRecord,
-            guidanceIds: [...deliveredGuidanceIds] };
+            guidanceIds: [...submittedGuidanceIds] };
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
           // Cancellation changes the attempt outcome, not telemetry already
@@ -1141,7 +1086,7 @@ export async function runStage(
       if (childCloseUnverified) return combined;
       if (!isRetryableAdapterFailure(current.providerFailure?.kind)) return combined;
       if (commandControl && !aggregateAbortSignal.aborted) {
-        activeCommands.delete(commandControl.command.id);
+        for (const entry of collectedGuidance.filter(entry => !submittedGuidanceIds.has(entry.id))) retiredForGuidance.set(entry.id, commandControl.retiredCommandIds ?? []);
         // A valid completed result needs no replacement finishing turn, even
         // when the warning arrived before the child's result was observed.
         if (commandControl.kind === 'budget_wrap_up' && current.exitCode === 0 && opts.outputSchema) {
@@ -1159,9 +1104,10 @@ export async function runStage(
             invocationIndex,
             requestId: commandControl.interrupt.requestId,
             guidanceId: commandControl.interrupt.guidanceId,
-            commandId: commandControl.command.id,
-            ...(commandControl.command.command ? {
-              command: commandControl.command.command,
+            commandId: commandControl.interrupt.commandId,
+            commandIds: commandControl.retiredCommandIds ?? [],
+            ...(commandControl.interrupt.command ? {
+              command: commandControl.interrupt.command,
               commandFingerprint: commandControl.interrupt.commandFingerprint,
             } : {}),
             detail: commandControl.interrupt.reason,
@@ -1170,9 +1116,7 @@ export async function runStage(
         }
         const label = commandControl.kind === 'budget_wrap_up' ? 'Stage budget wrap-up' : commandControl.kind === 'operator_interrupt'
           ? 'Operator command interrupt'
-          : commandControl.kind === 'timeout_projection'
-            ? 'Command timeout projection'
-            : 'Live guidance delivered at tool completion';
+          : 'Live guidance delivered at tool completion';
         invocationPrompt = `# ${label}`;
         try {
           appendFileSync(
@@ -1506,7 +1450,7 @@ export async function runStage(
     files: changedTreeFiles(evidenceTreeBefore, evidenceTreeAfter),
     remainingWork: Array.isArray(validatedStageRecord?.remaining_work) ? validatedStageRecord.remaining_work as string[] : null,
     continuation: Boolean(result.continuation), finalRecord,
-    guidanceIds: [...deliveredGuidanceIds], measurements: {
+    guidanceIds: [...submittedGuidanceIds], measurements: {
       inputTokens: result.tokens_in ?? null, outputTokens: result.tokens_out ?? null,
       durationMs: result.duration_ms, provenance: 'adapter-reported',
     } });

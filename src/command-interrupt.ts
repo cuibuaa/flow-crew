@@ -14,6 +14,7 @@ export interface StageCommandInterruptSignal {
   stageId: string;
   attemptIndex: number;
   attemptStartedAt: string;
+  invocationIndex?: number;
   commandId: string;
   command: string;
   commandFingerprint: string;
@@ -33,7 +34,7 @@ function nonEmpty(value: unknown): value is string {
 
 export function commandFingerprint(command: string): string {
   return createHash('sha256')
-    .update(command.trim().replace(/\s+/g, ' '), 'utf8')
+    .update(command, 'utf8')
     .digest('hex');
 }
 
@@ -42,7 +43,7 @@ export function parseStageCommandInterrupt(text: string): ParsedStageCommandInte
   try { value = JSON.parse(text) as Record<string, unknown>; } catch { return { ok: false, error: 'invalid JSON' }; }
   if (value.version !== COMMAND_INTERRUPT_VERSION) return { ok: false, error: 'unsupported version' };
   for (const field of [
-    'requestId', 'stageId', 'attemptStartedAt', 'commandId', 'command',
+    'requestId', 'stageId', 'attemptStartedAt', 'commandId',
     'commandFingerprint', 'guidanceId', 'requestedAt',
   ]) {
     if (!nonEmpty(value[field])) return { ok: false, error: `${field} must be a non-empty string` };
@@ -50,6 +51,8 @@ export function parseStageCommandInterrupt(text: string): ParsedStageCommandInte
   if (!Number.isSafeInteger(value.attemptIndex) || Number(value.attemptIndex) < 0) {
     return { ok: false, error: 'attemptIndex must be a non-negative safe integer' };
   }
+  if (typeof value.command !== 'string') return { ok: false, error: 'command must be a string' };
+  if (value.invocationIndex !== undefined && (!Number.isSafeInteger(value.invocationIndex) || Number(value.invocationIndex) < 1)) return { ok: false, error: 'invalid invocationIndex' };
   if (value.source !== 'operator') return { ok: false, error: 'source must be operator' };
   if (value.reason !== undefined && typeof value.reason !== 'string') return { ok: false, error: 'reason must be a string' };
   value.reason = (value.reason as string | undefined)?.trim() || DEFAULT_INTERRUPT_REASON;
@@ -74,7 +77,7 @@ function publishCreateOnly(path: string, body: string): void {
   }
 }
 
-/** Publish an operator interrupt bound to the one command proved active now.
+/** Publish an operator interrupt bound to the invocation with commands proved active now.
  * The engine records validated guidance before the request can stop the adapter. */
 export function requestStageCommandInterrupt(input: {
   runDir: string;
@@ -114,11 +117,8 @@ export function requestStageCommandInterrupt(input: {
     || currentAttempt.startedAt !== activity.attemptStartedAt) {
     throw new Error(`Stage ${input.stageId} command lifecycle is stale for the current attempt`);
   }
-  if (activity.active.length !== 1) {
-    throw new Error(`Stage ${input.stageId} has ${activity.active.length} active commands; expected exactly one`);
-  }
+  if (activity.active.length === 0) throw new Error(`Stage ${input.stageId} has no active commands`);
   const active = activity.active[0];
-  if (!active.command?.trim()) throw new Error(`The active command for stage ${input.stageId} has no attributable command text`);
   const requestedAt = input.requestedAt ?? new Date().toISOString();
   const signal: StageCommandInterruptSignal = {
     version: COMMAND_INTERRUPT_VERSION,
@@ -127,8 +127,9 @@ export function requestStageCommandInterrupt(input: {
     attemptIndex: activity.attemptIndex,
     attemptStartedAt: activity.attemptStartedAt,
     commandId: active.id,
-    command: active.command,
-    commandFingerprint: commandFingerprint(active.command),
+    ...(activity.invocationIndex === undefined ? {} : { invocationIndex: activity.invocationIndex }),
+    command: active.command ?? '',
+    commandFingerprint: commandFingerprint(active.command ?? ''),
     guidanceId: randomUUID(),
     reason,
     requestedAt,

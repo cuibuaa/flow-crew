@@ -413,11 +413,11 @@ describe('bounded timeout negotiation', () => {
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({
         type: 'guidance_delivery_checked', stageId, attemptIndex: 1,
-        boundary: 'attempt_start', delivered: true,
+        boundary: 'model_submission', invocationIndex: 1, delivered: true,
       }),
       expect.objectContaining({
         type: 'guidance_delivery_checked', stageId, attemptIndex: 1,
-        boundary: 'adapter_invocation', invocationIndex: 2, delivered: true,
+        boundary: 'model_submission', invocationIndex: 2, delivered: true,
       }),
     ]));
   });

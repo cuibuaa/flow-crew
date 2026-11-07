@@ -1,6 +1,6 @@
 // Boundary: Select and evaluate authored verdict carriers, project terminal-study evidence, derive digest-bound criterion discharges; no stage launching.
 import { captureProjectTree, readEvidence } from '../../evidence-ledger.js';
-import { validationMeasurement } from '../../project-validation.js';
+import { projectValidationResult } from '../../project-validation.js';
 import { readResearchGateCandidate } from '../../research-candidate.js';
 import { assessFindings, AuditFindingsSchema, projectLegacyFindings } from '../../scoped-audit-repair.js';
 import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, readRunState, readStageStatus, writeStageStatus, runDir, stageDir } from '../../store.js';
@@ -69,7 +69,9 @@ export function readGateEvaluation(
 /** Old settled verdicts predate the derived projection. Read it without
  * rewriting their authored bytes or historical engine conclusion. */
 export function projectLegacyGateAssessment(projectDir: string, runId: string, stageId: string, verdict: GateVerdict): GateVerdict {
-  return projectLegacyFindings(verdict, readGateVerdictDocument(runDir(projectDir, runId), stageId)?.value.audit_findings);
+  return projectLegacyFindings({ ...verdict, ...(verdict.validation ? { validation: verdict.validation.map(result => ({
+    ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result),
+  })) } : {}) }, readGateVerdictDocument(runDir(projectDir, runId), stageId)?.value.audit_findings);
 }
 
 /** Publish once, after the group has bound its post-write validation receipt. */
@@ -101,7 +103,8 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const findings = assessFindings(parsed.success ? parsed.data.findings : [], ledger, { stageId, attemptIndex, treeHash });
   const fact = ledger.filter(entry => entry.kind === 'validation').at(-1);
   const validation = fact?.kind === 'validation' ? fact.executions.find(entry => entry.target === 'attempt')?.commands.map(result => ({
-    role: result.role, display: result.display, exitCode: result.exitCode, load: result.load, measurement: validationMeasurement(result),
+    role: result.role, display: result.display, exitCode: result.exitCode, error: result.error, dependencyPreparationFailed: result.dependencyPreparationFailed,
+    load: result.load, storedState: result.state, ...projectValidationResult(result),
   })) : undefined;
   const unmeasured = validation?.filter(result => result.measurement === 'not_measured') ?? [];
   const loadNote = unmeasured.length ? ` Validation not measured (${unmeasured.map(result => result.display ?? result.role).join(', ')}): neither pass nor failure; no author action required.` : '';
@@ -122,7 +125,8 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
       || !(closure.treeHash === treeHash || accepted.some(entry => entry.kind === 'attempt' && entry.sequence > closure.sequence && entry.treeHash === closure.treeHash))
       || closure.command !== original.command || closure.context?.cwd !== original.context.cwd || closure.context?.shell !== original.context.shell;
   });
-  const reason = `${closureFailed ? 'Repair reproduction remains open or does not cover the repaired tree; a passing verdict cannot close it. ' : ''}${verdict.reason ?? ''}${findings.unconfirmed.length ? ` Unconfirmed observations: ${findings.unconfirmed.map(finding => finding.id).join(', ')}; no repair requested for these.` : ''}${loadNote}`;
+  const certification = !verdict.pass && verdict.refusal?.kind !== 'validation_unresolved' && verdict.refusal?.kind !== 'validation_regression' ? gateValidationRefusal(projectDir, runId, stageId)?.reason : undefined;
+  const reason = `${closureFailed ? 'Repair reproduction remains open or does not cover the repaired tree; a passing verdict cannot close it. ' : ''}${verdict.reason ?? ''}${findings.unconfirmed.length ? ` Unconfirmed observations: ${findings.unconfirmed.map(finding => finding.id).join(', ')}; no repair requested for these.` : ''}${loadNote}${certification ? ` Validation not certified: ${certification}` : ''}`;
   return { ...authored, ...(closureFailed ? { pass: false, refusal: { kind: 'audit_findings' as const } } : {}),
     ...(parsed.success ? { findings } : {}), ...(validation ? { validation } : {}), ...(reason ? { reason } : {}) };
 }
@@ -146,7 +150,7 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
   }
   // Mechanical validation precedes semantic acceptance. A regression remains
   // rejected; only a confirmed reviewer finding can authorize product repair.
-  if (runId && requireValidationDelta && (raw.repairability as GateVerdict['repairability'])?.disposition !== 'irreparable') {
+  if (runId && requireValidationDelta && v.pass === true) {
     const refusal = gateValidationRefusal(projectDir, runId, stageId);
     if (refusal) return refusal;
   }

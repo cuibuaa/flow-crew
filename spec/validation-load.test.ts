@@ -174,15 +174,19 @@ describe('validation measurement is code on bounded host readings', () => {
     const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml'));
     const brief = '---\noutputs: [docs/value.txt]\nvalidation:\n  commands:\n    test:\n      command: fixture-check\n      args: []\n---\n# Deliver a value\n\n## Acceptance criteria\n1. Value is independently checked.\n';
     const final = await runWorkflow(config, raw, project, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
-    expect(final.status).toBe('complete'); expect(calls).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(1);
-    expect(final.stages.review.gate).toMatchObject({ pass: true, validation: [{ role: 'test', measurement, exitCode, load: load() }] });
-    if (exitCode !== 0) expect(final.stages.review.gate?.reason).toContain('neither pass nor failure; no author action required');
+    expect(final.status).toBe(exitCode === 0 ? 'complete' : 'incomplete'); expect(calls).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(1);
+    expect(final.stages.review.gate).toMatchObject({ pass: exitCode === 0, validation: [{ role: 'test', measurement, exitCode, load: load() }] });
+    if (exitCode !== 0) {
+      expect(final.stages.review.gate).toMatchObject({ refusal: { kind: 'validation_unresolved' }, reason: expect.stringContaining('not certified') });
+      expect(final.stages.review.gate?.reason).toContain('neither pass nor failure; no author action required');
+      expect(final.stages.repair.attempts ?? []).toHaveLength(0);
+    }
     else expect(final.stages.review.gate?.reason).not.toContain('Validation not measured (');
     const directory = runDir(project, final.runId), fact = readEvidence(directory).find(entry => entry.kind === 'validation')!;
     if (fact.kind !== 'validation') throw Error('missing validation');
     expect(fact.pass).toBe(exitCode === 0); expect(fact.delta.find(entry => entry.role === 'test')?.state).toBe(exitCode === 0 ? 'pass' : 'not_measured');
     expect(fact.executions[0].commands[0]).toMatchObject({ exitCode, state: exitCode === 0 ? 'passed' : 'not_measured', measurement, load: load() });
-    expect(readFileSync(join(directory, 'iteration_log.md'), 'utf8')).toContain(`Gate verdict: PASS; validation: test: ${measurement.replaceAll('_', ' ')}`);
+    expect(readFileSync(join(directory, 'iteration_log.md'), 'utf8')).toContain(`Gate verdict: ${exitCode === 0 ? 'PASS' : 'FAIL'}; validation: test: ${measurement.replaceAll('_', ' ')}`);
     const summary = renderRunSummary(project, directory, final);
     expect(summary).toContain(exitCode === 0 ? 'passed (measured)' : 'not measured (neither pass nor failure');
     const watched = pollWatch(createWatchState(), { runsRoot: resolve(directory, '..'), candidateRunIds: () => [final.runId] });

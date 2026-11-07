@@ -59,8 +59,8 @@ preambles carry observed errors, budgets and admission requirements as JSON reco
 the result and dispatch schemas remain single-sourced in the stage contract.
 When the admitted brief exists, `{task_description}` names its readable path instead
 of printing a second copy; standalone callers without a brief retain inline text. The ledger on
-disk retains its append-only audit data. Guidance remains stage-addressed and retains
-its existing delivery receipts and scope semantics. Each invocation has private scratch.
+disk retains its append-only audit data. Guidance uses its declared target and attempt binding; submitted-input receipts record
+delivery without interpreting message wording. Each invocation has private scratch.
 
 ### Single-author execution and history
 
@@ -209,6 +209,15 @@ work incomplete. Repair closure replays each confirmed command on the repaired t
 records its passing exit, output digest, tree hash and `reproductionOf` in the same ledger,
 after the attempt's configured validation has prepared current dependencies.
 No reproduction is a second configured validation.
+Native command progress records retain command, context when available, raw exit and output
+digest without tree captures. Only engine-recorded reproductions and their closure replays
+receive command tree hashes; cite the engine-recorded command endpoint for a finding.
+Repair admission uses confirmed reproductions alone. A partial or unknown configured
+validation comparison cannot veto their scoped repair. Comparison still governs final
+certification: unknown evidence leaves the run incomplete after its admitted attempts,
+with the reason in the effective verdict; it does not independently terminate the run
+as a gate contract refusal or request product changes. A solely pre-existing configured
+failure is not a repair finding.
 An admitted repair's `retry_to` returns work to the same independent gate. A passing gate
 skips its unnecessary repair while ordinary dependents remain eligible. Exhausted ordinary
 repairs stop honestly rather than automatically repeating the whole plan.
@@ -233,6 +242,25 @@ command's own load and is recorded, not used. `not_measured` is neither pass nor
 and creates no author demand. Raw exits remain recorded.
 `watch`, run facts, the ledger and reports expose the same classification. Old receipts
 without load readings are `load_unknown`; their historical result remains readable.
+One projection derives both command state and measurement from exit, runner errors and
+the load facts. Historical stored labels remain recorded; displays name `storedState`
+when projecting them. Runner errors and dependency-preparation failures remain explicit
+facts even when the child reported exit zero. Readers do not rewrite old ledgers.
+
+Projects may declare validation argv and reporters in `config/validation.json`, using
+the same `{commands: {build|test|lint: {command, args, report?}}}` declaration as brief
+frontmatter. Project declarations replace inferred commands for their roles and take
+precedence over overlapping brief declarations. An invalid project declaration refuses
+discovery before execution; it never silently selects an inferred command. A report is declared as
+`{format: "vitest-json", path?: "project-relative-file.json"}`; omit `path` only when
+stdout is JSON alone. File reports must be freshly written, remain within the project,
+and fit the 1 MiB evidence bound. Valid, exit-consistent exhaustive reports own failure
+identity even when stdout or stderr also carries human diagnostics. Incomplete suite,
+snapshot or global-error populations remain partial; malformed or exit-inconsistent
+reports remain unknown, without model fallback. Without a declared reporter the existing
+closed-schema model reads bounded output, and truncation makes that reading partial.
+This repository declares its test reporter in `config/validation.json`; the reporter
+uses Vitest's structured global-error and completion facts to declare completeness.
 
 Sources: [result schemas](../src/handoff.ts), [gate evidence](../src/scheduler/sched_settlement/gate-evidence.ts),
 [gate contract](../src/scheduler/sched_settlement/gate-contract.ts),

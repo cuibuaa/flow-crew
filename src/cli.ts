@@ -1755,8 +1755,8 @@ function cmdInterrupt() {
       reason,
     });
     console.log(`Interrupt ${signal.requestId} sent to stage ${targetStageId} in run ${targetRunId}.`);
-    console.log(`Command: ${signal.command}`);
-    console.log('The engine will validate the interrupt and record its reason as operator guidance before stopping the command.');
+    console.log(`Invocation: ${signal.invocationIndex ?? 'legacy command binding'}; observed command: ${signal.commandId}`);
+    console.log('The engine will validate the interrupt and stop all active commands of the invocation and submit its reason as operator guidance.');
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(EXIT_CODE.failed);

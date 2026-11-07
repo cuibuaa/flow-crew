@@ -34,6 +34,7 @@ import {
 } from './orchestrator-rpc.js';
 import {
   runProjectValidationBaseline,
+  projectValidationResult,
   type ProjectValidationBaseline,
   type ValidationCommandRunner,
 } from './project-validation.js';
@@ -827,7 +828,7 @@ function renderHuman(report: ShipPreflightReport, writer: Writer): void {
   writer.write(`Validation baseline: ${report.validationBaseline.execution === 'skipped' ? 'SKIPPED' : report.validationBaseline.discovery.state.toUpperCase()}\n`);
   for (const result of report.validationBaseline.results) {
     const exit = result.exitCode === undefined ? '' : ` exit=${result.exitCode}`;
-    writer.write(`  ${result.role}: ${result.state.toUpperCase()}${exit}${result.display ? ` — ${result.display}` : ''}${result.reason ? ` — ${result.reason}` : ''}\n`);
+    writer.write(`  ${result.role}: ${projectValidationResult(result).state.toUpperCase()}${exit}${result.display ? ` — ${result.display}` : ''}${result.reason ? ` — ${result.reason}` : ''}\n`);
   }
   for (const criterion of report.validationBaseline.gateCriteria) {
     writer.write(`  gate ${criterion.role}: ${criterion.rule} — ${criterion.description}\n`);

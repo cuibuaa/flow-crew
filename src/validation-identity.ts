@@ -72,23 +72,26 @@ const VitestReport = z.object({
     name: z.string(), status: z.enum(['passed', 'failed']).optional(), message: z.string().optional(),
     startTime: z.number().optional(), endTime: z.number().optional(),
     assertionResults: z.array(z.object({
-      fullName: z.string().min(1), ancestorTitles: z.array(z.string()).optional(),
+      fullName: z.string().min(1).optional(), ancestorTitles: z.array(z.string()).optional(),
       status: z.enum(['passed', 'failed', 'pending', 'todo', 'skipped', 'disabled']),
       title: z.string().optional(), meta: z.unknown().optional(), tags: z.array(z.string()).optional(),
       duration: z.number().nullable().optional(), failureMessages: z.array(z.string()).nullable().optional(),
       location: z.object({ line: z.number(), column: z.number() }).optional(),
-    }).strict()),
+    }).strict().refine(test => test.status !== RUNNER_FAILURE_STATUS || test.fullName !== undefined, 'Failed assertion identity is missing')),
   }).strict()),
 }).strict();
 
-export function decodeRunnerReport(bytes: string, format: 'vitest-json', projectDir: string): FailureReading {
+export function decodeRunnerReport(bytes: string, format: 'vitest-json', projectDir: string, failed?: boolean): FailureReading {
   if (format !== 'vitest-json') throw new Error('Unsupported structured reporter');
   const report = VitestReport.parse(JSON.parse(bytes));
+  if (failed !== undefined && report.success !== undefined && report.success === failed) {
+    throw new Error('Structured reporter success contradicts the command exit');
+  }
   const assertions = report.testResults.flatMap(suite => suite.assertionResults.map(test => ({ suite, test })));
   let canonicalRoot = projectDir;
   try { canonicalRoot = realpathSync(projectDir); } catch { /* in-memory reporter fixtures */ }
   const failures = assertions.filter(({ test }) => test.status === RUNNER_FAILURE_STATUS).map(({ suite, test }) => ({
-    testId: test.fullName,
+    testId: test.fullName!,
     // Vitest emits absolute suite names. Removing the supplied checkout prefix
     // is path relativity on a structured field, never test-output normalization.
     file: (isAbsolute(suite.name) ? relative(canonicalRoot, suite.name) : suite.name).split(sep).join('/'),

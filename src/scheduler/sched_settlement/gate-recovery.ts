@@ -214,7 +214,7 @@ export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreSt
     failedGateIds.push(g.id);
     if (verdict?.pass === false) {
       rejectedGateIds.push(g.id);
-      if (verdict.refusal?.kind === 'numeric_evidence' || verdict.refusal?.kind === 'validation_unresolved') {
+      if (verdict.refusal?.kind === 'numeric_evidence') {
         contractRefusals.push({ id: g.id, reason: verdict.reason ?? 'Missing numeric gate evidence' });
       }
     }
@@ -367,9 +367,12 @@ export function findGateRecoveryStages(
 
     if (rejectionKind === 'irreparable_rejection') continue;
 
-    // Evidence refusal cannot certify the product or justify an unchanged
-    // model review. Mechanical validation settlement owns its own bounded work.
-    if (rejectionKind === 'engine_contract_or_evidence_rejection') continue;
+    // Repair admission depends only on confirmed reviewer reproductions.
+    // Comparison and other acceptance evidence do not enter this judgment.
+    if (fact?.effectiveVerdict?.findings?.confirmed.length) {
+      for (const repair of findAllRetryToStages(allStages, [gateId])) selected.set(repair.id, repair);
+      continue;
+    }
 
     if (rejectionKind === 'omitted_research_outcome' && research) {
       for (const candidate of allStages) {
@@ -379,13 +382,6 @@ export function findGateRecoveryStages(
         selected.set(candidate.id, candidate);
       }
       continue;
-    }
-
-    // Only confirmed reviewer findings authorize the declared product repair.
-    // Legacy prose and mechanical regressions remain visible, without repair.
-    if (!fact?.effectiveVerdict?.findings?.confirmed.length) continue;
-    for (const repair of findAllRetryToStages(allStages, [gateId])) {
-      selected.set(repair.id, repair);
     }
   }
   return [...selected.values()];

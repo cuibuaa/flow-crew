@@ -1,4 +1,3 @@
-import { stageWrapUpTiming } from '../src/attempt-deadline.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { spawnSync } from 'node:child_process';
 import {
@@ -147,53 +146,28 @@ describe('live guidance and command controls', () => {
     ));
     const deliveredAt = ledger.findIndex((event) => (
       event.type === 'guidance_delivery_checked'
-      && event.boundary === 'tool_call_completion'
+      && event.boundary === 'model_submission'
       && event.delivered === true
     ));
     expect(writtenAt).toBeGreaterThanOrEqual(0);
     expect(deliveredAt).toBeGreaterThan(writtenAt);
     expect(ledger).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        type: 'guidance_delivery_checked', boundary: 'tool_call_completion', delivered: true,
+        type: 'guidance_delivery_checked', boundary: 'model_submission', delivered: true,
       }),
     ]));
   });
 
-  it('[J2] records and stops an explicit command timeout that exceeds the remaining attempt budget', async () => {
+  it('[J2] leaves deadline ownership with the attempt clock rather than shell-text prediction', async () => {
     const created = makeRun(['work']);
-    const prompts: string[] = [];
-    const adapter: Adapter = {
-      async run(prompt, _agent, rawOpts): Promise<RunResult> {
-        prompts.push(prompt);
-        if (prompts.length > 1) return { output: 'bounded alternative', exitCode: 0, duration_ms: 1 };
-        const opts = rawOpts as LifecycleOpts;
-        opts.onCommandLifecycle?.({
-          phase: 'started', id: 'over-budget', command: 'timeout 60s python measure.py',
-          timestamp: new Date().toISOString(),
-        });
-        return {
-          output: 'projection boundary',
-          exitCode: opts.abortSignal?.aborted ? 137 : 0,
-          duration_ms: 1,
-        };
-      },
-    };
-    const options = { ...stageOptions(created), timeout_ms: 5_000 };
-
-    const result = await runStage(adapter, options);
-    const projection = events(created.runDirPath)
-      .find((event) => event.type === 'command_timeout_projection');
-    expect(result.exitCode).toBe(0);
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain('Projected shortfall');
-    expect(projection).toMatchObject({
-      commandId: 'over-budget',
-      command: 'timeout 60s python measure.py',
-      commandTimeoutMs: 60_000,
-      shortfallMs: expect.any(Number),
-    });
-    expect(Number(projection?.remainingBudgetMs)).toBeLessThanOrEqual(stageWrapUpTiming(5_000).hardLimitMs);
-    expect(Number(projection?.shortfallMs)).toBeGreaterThanOrEqual(60_000 - stageWrapUpTiming(5_000).hardLimitMs);
+    const adapter: Adapter = { async run(_prompt, _agent, opts) {
+      opts.onCommandLifecycle?.({ phase: 'started', id: 'bounded-tool', command: 'timeout 60s python measure.py', timestamp: new Date().toISOString() });
+      expect(opts.abortSignal?.aborted).toBe(false);
+      opts.onCommandLifecycle?.({ phase: 'completed', id: 'bounded-tool', exitCode: 0, timestamp: new Date().toISOString() });
+      return { output: 'Completed within the actual budget', exitCode: 0, duration_ms: 1 };
+    } };
+    expect((await runStage(adapter, { ...stageOptions(created), timeout_ms: 5_000 })).exitCode).toBe(0);
+    expect(events(created.runDirPath).some(event => event.type === 'command_timeout_projection')).toBe(false);
   });
 
   async function interruptScenario(repeatAfterInterrupt: boolean, reason = 'The 10000-block job is infeasible; stop it and use the measured rate.') {
@@ -268,7 +242,7 @@ describe('live guidance and command controls', () => {
     expect(scenario.prompts[1]).toContain('10000-block job is infeasible');
     expect(scenario.ledger).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'stage_command_interrupt_requested', source: 'operator' }),
-      expect.objectContaining({ type: 'guidance_delivery_checked', boundary: 'operator_interrupt', delivered: true }),
+      expect.objectContaining({ type: 'guidance_delivery_checked', boundary: 'model_submission', delivered: true }),
       expect.objectContaining({ type: 'stage_command_interrupted', commandId: 'active-command' }),
     ]));
     expect(scenario.ledger.some((event) => event.type === 'interrupted_command_repeated')).toBe(false);

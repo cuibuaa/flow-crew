@@ -10,11 +10,11 @@ import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
 import { briefDeclarationFailures } from './brief-preflight.js';
 import {
   runProjectValidationBaseline,
+  projectValidationResult,
+  parseValidationCommands,
   unmeasured,
-  type BriefValidationCommand,
   type ProjectValidationBaseline,
   type ValidationCommandRunner,
-  type ValidationRole,
 } from './project-validation.js';
 import {
   verifyDeclaredBriefInputs,
@@ -470,107 +470,14 @@ function safeReadBrief(path: string, fs: ShipSetupFileSystem): { text: string; d
   }
 }
 
-export interface BriefValidationParseResult {
-  commands: BriefValidationCommand[];
-  error?: string;
-}
-
-const VALIDATION_ROLES: readonly ValidationRole[] = ['build', 'test', 'lint'];
-
-function containsControlCharacter(value: string): boolean {
-  return [...value].some((character) => {
-    const code = character.codePointAt(0) as number;
-    return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
-  });
-}
-
-function validationDeclarationError(briefPath: string, reason: string): BriefValidationParseResult {
-  return {
-    commands: [],
-    error: `Invalid brief validation declaration at ${briefPath}#validation: ${reason}`,
-  };
-}
+export type BriefValidationParseResult = import('./project-validation.js').ValidationParseResult;
 
 /** Parse only a leading frontmatter validation block into shell-free argv declarations. */
-export function parseBriefValidationCommands(brief: string, briefPath: string): BriefValidationParseResult {
+export function parseBriefValidationCommands(brief: string, briefPath: string): import('./project-validation.js').ValidationParseResult {
   const frontmatter = parseBriefFrontmatterDocument(brief);
-  if (!frontmatter) return { commands: [] };
-  if (frontmatter.error) return { commands: [], error: frontmatter.error };
-  const parsed = frontmatter.value;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { commands: [] };
-  const validation = (parsed as Record<string, unknown>).validation;
-  if (validation === undefined) return { commands: [] };
-  if (!validation || typeof validation !== 'object' || Array.isArray(validation)) {
-    return validationDeclarationError(briefPath, '`validation` must be a mapping with a `commands` field');
-  }
-  const validationRecord = validation as Record<string, unknown>;
-  const validationFields = Object.keys(validationRecord);
-  const unknownValidationField = validationFields.find((field) => field !== 'commands');
-  if (unknownValidationField) {
-    return validationDeclarationError(
-      briefPath,
-      `unknown field ${JSON.stringify(unknownValidationField)} under \`validation\``,
-    );
-  }
-  const commands = validationRecord.commands;
-  if (!commands || typeof commands !== 'object' || Array.isArray(commands)) {
-    return validationDeclarationError(briefPath, '`validation.commands` must be a non-empty role mapping');
-  }
-  const commandsRecord = commands as Record<string, unknown>;
-  const roleNames = Object.keys(commandsRecord);
-  if (roleNames.length === 0) {
-    return validationDeclarationError(briefPath, '`validation.commands` must declare at least one role');
-  }
-  const unknownRole = roleNames.find((role) => !VALIDATION_ROLES.includes(role as ValidationRole));
-  if (unknownRole) {
-    return validationDeclarationError(briefPath, `unknown role ${JSON.stringify(unknownRole)} under \`validation.commands\``);
-  }
-
-  const declarations: BriefValidationCommand[] = [];
-  for (const role of VALIDATION_ROLES) {
-    if (!Object.hasOwn(commandsRecord, role)) continue;
-    const value = commandsRecord[role];
-    const evidencePath = `${briefPath}#validation.commands.${role}`;
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return validationDeclarationError(briefPath, `${evidencePath} must be a mapping with \`command\` and \`args\``);
-    }
-    const commandRecord = value as Record<string, unknown>;
-    const unknownField = Object.keys(commandRecord).find((field) => field !== 'command' && field !== 'args' && field !== 'report');
-    if (unknownField) {
-      return validationDeclarationError(
-        briefPath,
-        `unknown field ${JSON.stringify(unknownField)} at ${evidencePath}`,
-      );
-    }
-    if (typeof commandRecord.command !== 'string' || commandRecord.command.trim().length === 0) {
-      return validationDeclarationError(briefPath, `${evidencePath}.command must be a non-empty string`);
-    }
-    if (containsControlCharacter(commandRecord.command)) {
-      return validationDeclarationError(briefPath, `${evidencePath}.command must not contain a control character`);
-    }
-    if (!Array.isArray(commandRecord.args) || !commandRecord.args.every((argument) => typeof argument === 'string')) {
-      return validationDeclarationError(briefPath, `${evidencePath}.args must be an array containing only strings`);
-    }
-    const controlArgument = commandRecord.args.find((argument: string) => containsControlCharacter(argument));
-    if (controlArgument !== undefined) {
-      return validationDeclarationError(briefPath, `${evidencePath}.args must not contain a control character`);
-    }
-    const report = commandRecord.report;
-    if (report !== undefined && (!report || typeof report !== 'object' || Array.isArray(report)
-      || (report as Record<string, unknown>).format !== 'vitest-json'
-      || Object.keys(report).some(key => key !== 'format' && key !== 'path')
-      || ('path' in report && (typeof report.path !== 'string' || !report.path || isAbsolute(report.path) || report.path.split('/').includes('..'))))) {
-      return validationDeclarationError(briefPath, `${evidencePath}.report requires {format: vitest-json, path?: <project-relative file>}`);
-    }
-    declarations.push({
-      role,
-      ...(report ? { report: report as import('./project-validation.js').ValidationReport } : {}),
-      command: commandRecord.command,
-      args: [...commandRecord.args] as string[],
-      evidencePath,
-    });
-  }
-  return { commands: declarations };
+  if (frontmatter?.error) return { commands: [], error: frontmatter.error };
+  return parseValidationCommands(frontmatter?.value && typeof frontmatter.value === 'object'
+    ? (frontmatter.value as Record<string, unknown>).validation : undefined, briefPath);
 }
 
 function canonicalProject(path: string, fs: ShipSetupFileSystem): string {
@@ -1382,7 +1289,7 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
   if (report.state === 'ready') {
     writer.write(`Validation baseline: ${report.validationBaseline.discovery.state.toUpperCase()}\n`);
     for (const result of report.validationBaseline.results) {
-      writer.write(`  ${result.role}: ${unmeasured(result) ? 'ENVIRONMENT GAP' : result.state.toUpperCase()}${result.exitCode === undefined ? '' : ` exit=${result.exitCode}`}\n`);
+      writer.write(`  ${result.role}: ${unmeasured(result) ? 'ENVIRONMENT GAP' : projectValidationResult(result).state.toUpperCase()}${result.exitCode === undefined ? '' : ` exit=${result.exitCode}`}\n`);
     }
     for (const criterion of report.validationBaseline.gateCriteria) {
       writer.write(`  gate ${criterion.role}: ${criterion.rule} — ${criterion.description}\n`);

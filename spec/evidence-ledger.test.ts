@@ -115,12 +115,13 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
           ? "require('node:fs').readFileSync('data/value.txt','utf8')!=='GOOD'"
           : "require('node:fs').readFileSync('value.txt','utf8').startsWith('introduced')";
         const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(${predicate}?1:0)`)}`;
-        opts.onCommandLifecycle?.({ phase: 'started', id: 'value-probe', command, context: { cwd: target, shell: '/bin/sh' }, timestamp: new Date().toISOString() });
-        const probe = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', command], display: command, cwd: target, timeoutMs: 5000 });
-        expect(probe.exitCode).toBe(1);
-        opts.onCommandLifecycle?.({ phase: 'completed', id: 'value-probe', command, exitCode: probe.exitCode!,
-          output: JSON.stringify([probe.stdout ?? '', probe.stderr ?? '']), timestamp: new Date().toISOString() });
-        reproduction = readEvidence(opts.runDir).at(-1)!.sequence;
+        const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
+        const request = JSON.stringify({ command, cwd: target, shell: '/bin/sh' });
+        const probe = await runProjectCommand({ role: 'test', command: '/bin/sh',
+          args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Value reproduction', cwd: target, timeoutMs: 5000 });
+        expect(probe.exitCode).toBe(0);
+        const record = JSON.parse(probe.stdout!).record;
+        expect(record.exitCode).toBe(1); reproduction = record.sequence;
       }
       const pass = !defect && (!options.rejectFirstReview || reviews > 1);
       return { output: JSON.stringify({ pass, reason: pass ? 'Independent acceptance.' : 'Check the value again.',
@@ -159,17 +160,17 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(command.identityOwner).toBe('unknown');
   });
 
-  it.each(['suite', 'diagnostic', 'unhandled'] as const)('does not accept a new native Vitest %s failure as an unchanged pre-existing assertion', async suiteError => {
+  it.each(['suite', 'diagnostic', 'unhandled'] as const)('uses structured identity while retaining unrepresented native Vitest %s failures as unknown', async suiteError => {
     const result = await fixture({ suiteError });
-    expect(result.final.status).toBe('failed'); expect(result.executions).toHaveLength(2);
+    expect(result.final.status).toBe(suiteError === 'diagnostic' ? 'complete' : 'incomplete'); expect(result.executions).toHaveLength(2);
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
-    const [fact] = result.validations; expect(fact.pass).toBe(false);
+    const [fact] = result.validations; expect(fact.pass).toBe(suiteError === 'diagnostic');
     for (const execution of fact.executions) expect(execution.treeAfterHash).toBe(execution.treeHash);
-    expect(fact.executions[0].commands[0]).toMatchObject({ exitCode: 1, failureEvidence: 'partial', identityOwner: 'runner-json', testsRun: suiteError === 'unhandled' ? 2 : 1 });
+    expect(fact.executions[0].commands[0]).toMatchObject({ exitCode: 1, failureEvidence: suiteError === 'diagnostic' ? 'complete' : 'partial', identityOwner: 'runner-json', testsRun: suiteError === 'unhandled' ? 2 : 1 });
     expect(fact.executions[1].commands[0]).toMatchObject({ exitCode: 1, failureEvidence: suiteError === 'unhandled' ? 'partial' : 'complete', identityOwner: 'runner-json' });
     expect(fact.executions[1].commands[0].outputBytes?.stderr).toBe(0);
     if (suiteError === 'diagnostic') expect(fact.executions[0].commands[0].outputBytes!.stderr).toBeGreaterThan(0);
-    expect(fact.delta.find(value => value.role === 'test')?.state).toBe('unresolved');
+    expect(fact.delta.find(value => value.role === 'test')?.state).toBe(suiteError === 'diagnostic' ? 'pass' : 'unresolved');
     expect(fact.failures).toEqual([expect.objectContaining({ classification: 'pre-existing' })]);
   });
 
@@ -282,7 +283,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
 
   it('does not infer identity or trigger repairs from invalid readings, and never retries a suite at a gate', async () => {
     const result = await fixture({ baseRed: true, invalidReading: true });
-    expect(result.final.status).toBe('failed');
+    expect(result.final.status).toBe('incomplete');
     expect(result.executions).toHaveLength(2); expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
     expect(result.validations[0].failures).toEqual([expect.objectContaining({ identifier: null, classification: 'unknown' })]);
     expect(result.validations[0].pass).toBe(false);
@@ -292,7 +293,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
 
   it.each([false, true])('does not certify source changed by validation, or repair an evidence gap (base red=%s)', async baseRed => {
     const result = await fixture({ mutateValidation: true, baseRed });
-    expect(result.final.status).toBe('failed'); expect(result.executions).toHaveLength(baseRed ? 2 : 1);
+    expect(result.final.status).toBe('incomplete'); expect(result.executions).toHaveLength(baseRed ? 2 : 1);
     expect(result.validations[0].failures.every(failure => failure.classification === 'unknown')).toBe(true);
     expect(result.validations[0].delta.every(entry => entry.state === 'unresolved')).toBe(true);
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
