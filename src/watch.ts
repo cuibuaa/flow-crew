@@ -127,7 +127,12 @@ export interface WatchTerminalStatusAlert {
   terminalArtifact: string;
 }
 
+export interface WatchValidationAlert {
+  kind: 'validation_measurement'; conditionId: string; runId: string; gateId: string; role: string; measurement: string;
+}
+
 export type WatchAlert =
+  | WatchValidationAlert
   | WatchTerminalIndecisionAlert
   | WatchGateAlert
   | WatchEvidenceGapAlert
@@ -748,6 +753,18 @@ export function pollWatch(
       continue;
     }
     stats.readableRuns += 1;
+    const stages = state.stages && typeof state.stages === 'object' && !Array.isArray(state.stages) ? state.stages as JsonObject : undefined;
+    for (const [gateId, raw] of Object.entries(stages ?? {})) {
+      const stage = raw && typeof raw === 'object' ? raw as JsonObject : undefined;
+      const gate = stage?.gate && typeof stage.gate === 'object' ? stage.gate as JsonObject : undefined;
+      if (!Array.isArray(gate?.validation)) continue;
+      for (const result of gate.validation) {
+        if (!result || typeof result.role !== 'string' || !['measured', 'not_measured', 'load_unknown'].includes(result.measurement)) continue;
+        const alert: WatchValidationAlert = { kind: 'validation_measurement', runId, gateId, role: typeof result.display === 'string' ? result.display : result.role,
+          measurement: result.measurement, conditionId: conditionId('validation_measurement', runId, gateId, typeof result.display === 'string' ? result.display : result.role, result.measurement) };
+        active.set(alert.conditionId, alert);
+      }
+    }
     const mismatch = terminalArtifactStatusMismatch(state, {
       runDir,
       artifactIdentity: deps.artifactIdentity,

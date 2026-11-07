@@ -94,14 +94,14 @@ describe('typed gate recovery routes', () => {
     'The review omitted the research outcome',
     'Research round outcome is absent: no usable evidence',
     'Gate contract violation: this is the author describing a repairable defect',
-  ])('keeps an authored repairable rejection independent of its prose: %s', reason => {
+  ])('keeps the declared repairability independent of its prose: %s', reason => {
     const verdict: GateVerdict = { pass: false, reason,
       repairability: { version: 1, disposition: 'repairable', evidence: 'A retained reproduction can be repaired' } };
     expect(classifyGateRecoveryFact(gateId, verdict, verdict).rejectionKind).toBe('repairable_failure');
   });
 
   it.each(['criterion_evidence', 'audit_findings'] as const)(
-    'keeps an authored FAIL repairable after a secondary %s refusal', kind => {
+    'does not admit uncited authored FAIL to repair after a secondary %s refusal', kind => {
       const authored: GateVerdict = { pass: false,
         repairability: { version: 1, disposition: 'repairable', evidence: 'Reproducible product defect' } };
       const docs = join(projectDir, 'docs');
@@ -117,11 +117,11 @@ describe('typed gate recovery routes', () => {
       const repair = parseDispatchedStageConfig({ id: 'repair', role: 'coder', retry_to: [gateId] });
       expect(fact.rejectionKind).toBe('repairable_failure');
       expect(findGateRecoveryStages([gate, repair], [gateId], undefined, { [gateId]: fact })
-        .map(stage => stage.id)).toEqual(['repair']);
+        .map(stage => stage.id)).toEqual([]);
       const irreparable: GateVerdict = { ...effective,
         repairability: { version: 1, disposition: 'irreparable', evidence: 'Required GPU unavailable' } };
       expect(classifyGateRecoveryFact(gateId, authored, irreparable).rejectionKind).toBe('irreparable_rejection');
-      // Legacy author FAILs without a disposition keep the same repair route.
+      // Legacy author FAILs remain readable but do not establish confirmation.
       expect(classifyGateRecoveryFact(gateId, { pass: false }, { pass: false, refusal: { kind } }).rejectionKind)
         .toBe('repairable_failure');
     },
@@ -198,7 +198,7 @@ describe('settled gate results', () => {
       expect(readGateEvaluation(projectDir, gateId, runId)).toEqual(result);
       expect(facts.rejectedGateIds).toEqual([gateId]);
       const fact = classifyGateRecoveryFact(gateId, null, result!);
-      expect(findGateRecoveryStages([gate, repair], [gateId], undefined, { [gateId]: fact }).map(stage => stage.id)).toEqual(['repair']);
+      expect(findGateRecoveryStages([gate, repair], [gateId], undefined, { [gateId]: fact }).map(stage => stage.id)).toEqual([]);
     } else {
       expect(readStageStatus(projectDir, runId, gateId).gate).toBeUndefined();
       expect(facts.rejectedGateIds).toEqual([]);
@@ -258,7 +258,7 @@ describe('settled gate results', () => {
       expect(entry.rejectionKind).toBe(kind ? 'repairable_failure' : 'engine_contract_or_evidence_rejection');
       const fact = classifyGateRecoveryFact(gateId, entry.authoredVerdict, entry.effectiveVerdict);
       expect(findGateRecoveryStages([gate, repair], facts.rejectedGateIds, undefined, { [gateId]: fact })
-        .map(stage => stage.id)).toEqual(kind ? ['repair'] : []);
+        .map(stage => stage.id)).toEqual([]);
     },
   );
 
@@ -377,7 +377,7 @@ describe('stage group settlement boundaries', () => {
 });
 
 describe('validation at the review boundary', () => {
-  it.each(['repaired', 'exhausted', 'launch_error'] as const)('routes a green baseline failure through the bounded gate loop: %s', async outcome => {
+  it.each(['repaired', 'exhausted', 'launch_error'] as const)('records a green baseline regression without inferring uncited repair: %s', async outcome => {
     for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
     const baseline: projectValidation.ProjectValidationBaseline = {
       version: 1, projectDir,
@@ -425,13 +425,13 @@ describe('validation at the review boundary', () => {
       expect(repairs).toHaveLength(0);
       expect(commands).toHaveBeenCalledTimes(2);
     } else {
-      expect(final.status, final.failureReason).toBe(outcome === 'repaired' ? 'complete' : 'incomplete');
-      expect(repairs).toHaveLength(outcome === 'repaired' ? 1 : 3);
+      expect(final.status, final.failureReason).toBe('incomplete');
+      expect(repairs).toHaveLength(0);
+      expect(commands).toHaveBeenCalledTimes(2);
       const gateEvents = readRunEvents(projectDir, final.runId)
         .filter(event => event.type === 'stage_complete' && event.stageId === gateId);
       expect(gateEvents[0]).toMatchObject({ gate: { pass: false, kind: 'validation_regression' } });
-      if (outcome === 'repaired') expect(final.stages[gateId].gate).toMatchObject({ pass: true });
-      else expect(final.stages[gateId].gate).toMatchObject({ pass: false, kind: 'validation_regression' });
+      expect(final.stages[gateId].gate).toMatchObject({ pass: false, kind: 'validation_regression' });
     }
   });
 });

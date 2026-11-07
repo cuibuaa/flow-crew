@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -130,7 +131,7 @@ describe('append-only stage attempts', () => {
       },
     };
 
-    const finalState = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles(), created.runId, 'release task', true);
+    const finalState = await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, writeRoles(), created.runId, 'release task', true);
     const gate = finalState.stages.release_gate;
     expect(finalState.status).toBe('complete');
     expect(gate.attempts).toHaveLength(2);
@@ -195,7 +196,7 @@ describe('append-only stage attempts', () => {
       },
     };
 
-    const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles(), created.runId, 'release task', true);
+    const final = await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, writeRoles(), created.runId, 'release task', true);
     const gate = final.stages.release_gate;
     expect(final.status).toBe('complete');
     expect(final.currentIteration).toBe(2);

@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { providerFailureFromDiagnostic } from '../src/provider-result.js';
 import { atomicWrite } from '../src/engine-fs.js';
@@ -448,7 +449,7 @@ async function finishWorkflowAtWrap(stageId: 'work' | 'review', duringWrap: bool
     }
     return withRemaining(completed(opts, 'Both units and all assigned checks are complete.'), []);
   } };
-  const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+  const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles,
     undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
   return { result, calls };
 }
@@ -500,7 +501,7 @@ describe('authored completion at the budget boundary', () => {
       }
       return withRemaining(completed(opts, 'Complete.'), []);
     } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles,
       undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
@@ -598,7 +599,7 @@ describe('durable bounded continuation', () => {
         }
         return completed(opts, 'Complete.');
       } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
     expect(calls).toEqual(['done:1', 'work:1', 'work:1', 'work:2', 'review:1']);
@@ -620,7 +621,7 @@ describe('durable bounded continuation', () => {
           return completed(opts);
         return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'slice', duration_ms: 1 }), { once: true }); time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); });
       } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status).toBe('incomplete');
     expect(result.failureReason).toContain('iteration budget');
     expect(result.currentIteration).toBe(2);
@@ -646,7 +647,7 @@ describe('durable bounded continuation', () => {
     updateRunState(project, created.runId, state => { state.currentIteration = 1; state.maxIterations = 5; state.research = { stop: { maxWallHours: 0 } } as typeof state.research; });
     const adapter: Adapter = { async run(prompt, _role, opts) { if (opts.stageId !== 'work' || prompt.includes('# Stage budget wrap-up'))
         return completed(opts); return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'slice', duration_ms: 1 }), { once: true }); time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); }); } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles, created.runId, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, created.runId, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status).toBe('incomplete');
     expect(result.failureReason).toContain('research wall budget');
     expect(result.currentIteration).toBe(1);
@@ -735,7 +736,7 @@ describe('durable bounded continuation', () => {
           expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('retained dynamic work');
         return completed(opts, 'Complete.');
       } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
     expect(calls).toEqual(['work:1', 'work:1', 'work:2', 'review:1']);
@@ -798,7 +799,7 @@ describe('durable bounded continuation', () => {
         }
         return completed(opts, 'Complete.');
       } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
     expect(reviews).toBe(2);

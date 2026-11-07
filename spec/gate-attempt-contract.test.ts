@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
@@ -228,7 +229,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
     config,
     yaml,
     projectDir,
-    adapter,
+    withConfirmedRejections(adapter),
     new Map(),
     undefined,
     writeRoles(),

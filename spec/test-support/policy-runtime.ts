@@ -23,3 +23,9 @@ vi.mock('../../src/scheduler-heartbeat.js', async (importOriginal) => {
     ),
   };
 });
+
+// Policy fixtures declare an idle host; load and wait have explicit numeric
+// cases in validation-load.test.ts and real telemetry in native CLI trials.
+vi.mock('node:os', async importOriginal => ({
+  ...await importOriginal<typeof import('node:os')>(), loadavg: () => [0, 0, 0],
+}));

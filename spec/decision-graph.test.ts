@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { createRun } from './test-support/create-run.js';
 import { reconcileDecisionEvents } from '../src/scheduler/sched_loop/decisions.js';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
@@ -39,7 +40,7 @@ afterEach(() => {
 });
 async function execute(raw: unknown, adapter: Adapter, brief = '') {
   const workflow = WorkflowConfigSchema.parse(raw);
-  const state = await runWorkflow(workflow, JSON.stringify(workflow), project, adapter, new Map(), undefined, agents, undefined, brief, true);
+  const state = await runWorkflow(workflow, JSON.stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, agents, undefined, brief, true);
   return state;
 }
 function gate(opts: RunOpts, pass = true) {
@@ -98,20 +99,20 @@ describe('one entry and concrete clarification', () => {
       inputs.push(prompt);
       return { output: opts.stageId === 'choose' ? JSON.stringify({ successor: 'implement', reason: 'Scope needs a declaration.', metric_search: false, questions: inputs.length === 1 ? questions : [] }) : delivered, exitCode: 0, duration_ms: 1 };
     } };
-    const paused = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, undefined, task, true);
+    const paused = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, undefined, task, true);
     expect(paused.status).toBe('parked');
     expect(paused.decisionGraph!.pendingQuestion!.questions).toEqual(questions);
     expect(Object.keys(paused.stages)).toEqual(['choose', 'plan']);
     const request = paused.decisionGraph!.pendingQuestion!.requestId;
     const pausedBytes = readFileSync(join(runDir(project, paused.runId), 'run.json'), 'utf8');
-    const stillPaused = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, paused.runId, task, true);
+    const stillPaused = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, paused.runId, task, true);
     expect(stillPaused.status).toBe('parked');
     expect(stillPaused.decisionGraph!.pendingQuestion!.questions).toEqual(questions);
     expect(readFileSync(join(runDir(project, paused.runId), 'run.json'), 'utf8')).toBe(pausedBytes);
     expect(inputs).toHaveLength(1);
     expect(resolveRequest(project, paused.runId, request, 'approve', { reason: 'Only new writes; existing rows are out of scope.' }).won).toBe(true);
     // The second chooser's successor is inspected even though this intentionally incomplete author cannot satisfy the product duty.
-    const resumed = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, paused.runId, task, true);
+    const resumed = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, paused.runId, task, true);
     expect(resumed.decisionGraph!.declarations).toEqual([{ requestId: request, answer: 'Only new writes; existing rows are out of scope.' }]);
     expect(inputs[1]).toContain('Only new writes');
     expect(resumed.decisionGraph!.records.some(record => record.stageId === 'choose' && record.outcome === 'chosen')).toBe(true);
@@ -149,16 +150,16 @@ describe('one entry and concrete clarification', () => {
     const admission = (brief: string) => createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
     if (refused) {
       const initial = `---\n${JSON.stringify({ research })}\n---\n${task}`;
-      const baseline = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, undefined, initial, true, undefined, true, admission(initial));
+      const baseline = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, undefined, initial, true, undefined, true, admission(initial));
       expect(baseline.status).toBe('failed');
       expect(baseline.failureReason).toContain('Research budget admission refused');
       expect(calls).toEqual([]);
     }
-    const paused = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, undefined, task, true, undefined, true, admission(task));
+    const paused = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, undefined, task, true, undefined, true, admission(task));
     expect(paused.status).toBe('parked');
     const answer = JSON.stringify({ research });
     expect(resolveRequest(project, paused.runId, paused.decisionGraph!.pendingQuestion!.requestId, 'approve', { reason: answer }).won).toBe(true);
-    const resumed = await runWorkflow(config, raw, project, adapter, new Map(), undefined, agents, paused.runId, task, true, undefined, true, admission(task));
+    const resumed = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, paused.runId, task, true, undefined, true, admission(task));
     expect(resumed.decisionGraph!.declarations.at(-1)?.answer).toBe(answer);
     expect(resumed.startedAt).toBe(paused.startedAt);
     expect(resumed.maxIterations).toBe(1);
@@ -213,6 +214,7 @@ describe('independent post-author routing', () => {
         prompt.user = prompt.user.replaceAll(runDir(project, state.runId), '<RUN>').replaceAll(project, '<PROJECT>').replaceAll(state.runId, '<RUN_ID>')
           .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '<TIME>')
           .replace(/remaining \d+ ms/g, 'remaining <MS> ms')
+          .replace(/'[^'\n]*\/record-command\.cjs' '[^'\n]*\/command\.sock'/g, "'<RECORDER_CLIENT>' '<RECORDER_SOCKET>'")
           .replace(/[a-f0-9]{64}/g, '<HASH>')
           .replace(/Ledger facts:\n[\s\S]*?\nDiff:\n/, 'Ledger facts: <ENGINE_FACTS>\nDiff:\n')
           .replace(/^- (choose|assess) attempt 1: .*\n/gm, '')

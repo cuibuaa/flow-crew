@@ -1,6 +1,8 @@
 import { normalizedProjectPath } from '../scheduler/sched_admission/scope-services.js';
 import { isSessionUuid } from '../adapter-session.js';
 import { nativeDiagnostic, providerFailureFromEvent, type ProviderFailure } from '../provider-result.js';
+import type { CommandContext } from './base.js';
+import { isAbsolute } from 'node:path';
 
 type RecordValue = Record<string, any>; // Native CLI envelopes are untrusted, heterogeneous JSON.
 export interface NativeEvent {
@@ -11,12 +13,17 @@ export interface NativeEvent {
   terminal?: boolean;
   diagnostic?: string;
   providerFailure?: ProviderFailure;
-  commands: Array<{ phase: 'started' | 'completed'; id: string; command?: string; exitCode?: number }>;
+  commands: Array<{ phase: 'started' | 'completed'; id: string; command?: string; context?: CommandContext; exitCode?: number; output?: string }>;
   tools: Array<{ id: string; name: string; path?: string }>;
   results: Array<{ id: string; success: boolean }>;
   writes: string[];
 }
 
+function commandContext(input: RecordValue | undefined): CommandContext | undefined {
+  const cwd = input?.cwd ?? input?.workdir, shell = input?.shell;
+  return typeof cwd === 'string' && isAbsolute(cwd) && typeof shell === 'string' && isAbsolute(shell)
+    ? { cwd, shell } : undefined;
+}
 
 export function normalizeReportedWrite(path: string, workDir?: string): string | undefined {
   return normalizedProjectPath(path, workDir);
@@ -47,13 +54,17 @@ export function normalizeNativeEvent(event: RecordValue, provider?: ProviderFail
       for (const block of event.message.content) {
         if (block?.type !== 'tool_use' || typeof block.id !== 'string') continue;
         result.tools.push({ id: block.id, name: String(block.name ?? 'tool'), path: block.input?.file_path ?? block.input?.notebook_path });
-        if (/^(?:bash|shell|exec)$/i.test(String(block.name))) result.commands.push({ phase: 'started', id: block.id, command: block.input?.command ?? block.input?.cmd });
+        if (/^(?:bash|shell|exec)$/i.test(String(block.name))) result.commands.push({ phase: 'started', id: block.id,
+          command: block.input?.command ?? block.input?.cmd, context: commandContext(block.input) });
       }
     }
   }
   if (event.type === 'user' && Array.isArray(event.message?.content)) {
     for (const block of event.message.content) if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-      result.commands.push({ phase: 'completed', id: block.tool_use_id });
+      result.commands.push({ phase: 'completed', id: block.tool_use_id,
+        ...(Number.isInteger(event.tool_use_result?.exitCode) ? { exitCode: event.tool_use_result.exitCode } : {}),
+        ...(typeof event.tool_use_result?.stdout === 'string' && typeof event.tool_use_result?.stderr === 'string'
+          ? { output: JSON.stringify([event.tool_use_result.stdout, event.tool_use_result.stderr]) } : {}) });
       result.results.push({ id: block.tool_use_id, success: block.is_error !== true });
     }
   }
@@ -61,7 +72,9 @@ export function normalizeNativeEvent(event: RecordValue, provider?: ProviderFail
     const id = [item.id, event.item_id, event.id].find(value => typeof value === 'string' && value.trim());
     if (id) result.commands.push({ phase: event.type === 'item.started' ? 'started' : 'completed', id,
       command: [item.command, item.cmd, item.text].find(value => typeof value === 'string' && value.trim()),
-      ...(Number.isInteger(item.exit_code) ? { exitCode: item.exit_code } : {}) });
+      context: commandContext(item),
+      ...(Number.isInteger(item.exit_code) ? { exitCode: item.exit_code } : {}),
+      ...(typeof item.aggregated_output === 'string' ? { output: item.aggregated_output } : {}) });
   }
   const delta = event.type === 'stream_event' ? event.event : event;
   if (delta?.type === 'content_block_delta' && typeof delta.delta?.text === 'string' && !event.parent_tool_use_id) result.delta = delta.delta.text;

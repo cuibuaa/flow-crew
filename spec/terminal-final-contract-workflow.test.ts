@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -146,7 +147,7 @@ describe('terminal final contract workflow behavior', () => {
       async spawnInteractive() { throw new Error('not used'); },
     } as unknown as Adapter;
 
-    const finalState = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
+    const finalState = await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, agentsDir, runId);
 
     expect(finalState.status).toBe('complete');
     expect(gateAttempts).toBe(2);
@@ -223,7 +224,7 @@ describe('terminal final contract workflow behavior', () => {
       async spawnInteractive() { throw new Error('not used'); },
     } as unknown as Adapter;
 
-    const finalState = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
+    const finalState = await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, agentsDir, runId);
 
     expect(finalState.status).toBe('complete');
     expect(planCalls).toBe(2);

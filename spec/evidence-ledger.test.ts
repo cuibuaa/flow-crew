@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
@@ -13,6 +14,7 @@ import { fcGlobalDir, runDir } from '../src/store.js';
 import { captureProjectTree, readEvidence, VALIDATION_FACT_VERSION, type ValidationFact } from '../src/evidence-ledger.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 import { gateValidationRefusal, recordAttemptValidation, settleGateValidationEvidence } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { runProjectCommand } from '../src/project-validation.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
 const roots: string[] = [];
@@ -104,10 +106,26 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
     }
     if (opts.stageId === 'review') {
       const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
-      const pass = !options.rejectFirstReview || ++reviews > 1;
+      reviews++;
+      const defect = options.input === 'introduced' ? readFileSync(join(target, 'data/value.txt'), 'utf8') !== 'GOOD'
+        : options.introduce ? readFileSync(join(target, 'value.txt'), 'utf8').startsWith('introduced') : false;
+      let reproduction: number | undefined;
+      if (defect) {
+        const predicate = options.input === 'introduced'
+          ? "require('node:fs').readFileSync('data/value.txt','utf8')!=='GOOD'"
+          : "require('node:fs').readFileSync('value.txt','utf8').startsWith('introduced')";
+        const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(${predicate}?1:0)`)}`;
+        opts.onCommandLifecycle?.({ phase: 'started', id: 'value-probe', command, context: { cwd: target, shell: '/bin/sh' }, timestamp: new Date().toISOString() });
+        const probe = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', command], display: command, cwd: target, timeoutMs: 5000 });
+        expect(probe.exitCode).toBe(1);
+        opts.onCommandLifecycle?.({ phase: 'completed', id: 'value-probe', command, exitCode: probe.exitCode!,
+          output: JSON.stringify([probe.stdout ?? '', probe.stderr ?? '']), timestamp: new Date().toISOString() });
+        reproduction = readEvidence(opts.runDir).at(-1)!.sequence;
+      }
+      const pass = !defect && (!options.rejectFirstReview || reviews > 1);
       return { output: JSON.stringify({ pass, reason: pass ? 'Independent acceptance.' : 'Check the value again.',
         criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: pass ? 'pass' : 'fail', evidence: 'value.txt' }])),
-        audit_findings: { version: 1, findings: [] },
+        audit_findings: { version: 1, findings: defect ? [{ id: 'value', paths: [options.input ? 'data/value.txt' : 'value.txt'], reason: 'Value predicate reproduced', criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] : [] },
         ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'value.txt' } } : {}) }),
         exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured', tokens_in: 1, tokens_out: 1 };
     }
@@ -116,7 +134,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
       sessionId: '12345678-1234-4234-8234-123456789abc' };
   } };
   const { config, raw } = loadWorkflow(join(engine, 'config/workflows/direct.yaml')); config.defaults.max_iterations = 1;
-  const final = await runWorkflow(config, raw, target, adapter, new Map(), undefined, join(engine, 'config/agents'), undefined, brief, true);
+  const final = await runWorkflow(config, raw, target, withConfirmedRejections(adapter), new Map(), undefined, join(engine, 'config/agents'), undefined, brief, true);
   const rd = runDir(target, final.runId), ledger = readEvidence(rd);
   const validations = ledger.filter((entry): entry is ValidationFact & typeof entry => entry.kind === 'validation');
   const executions = existsSync(counter) ? readFileSync(counter, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { cwd: string; value: string; input?: string; member?: string; inputDirectoryMode?: number; inputFileMode?: number }) : [];

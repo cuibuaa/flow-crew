@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { execFileSync } from 'node:child_process';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -78,7 +79,7 @@ async function scenario(options: { negotiation?: boolean; includeRepair?: boolea
     } else throw new Error(`Unexpected stage ${opts.stageId}`);
     return fixtureResult({ output: `${opts.stageId} settled`, exitCode: 0, duration_ms: 1 }, opts);
   } };
-  const state = await runWorkflow(workflow, stringify(workflow), projectDir, adapter, new Map(), undefined, agentsDir,
+  const state = await runWorkflow(workflow, stringify(workflow), projectDir, withConfirmedRejections(adapter), new Map(), undefined, agentsDir,
     undefined, '---\ninputs: [{path: input.txt, frozen: true}]\n---\n# Clean up the report\nKeep `input.txt` frozen.\n', true, undefined, false);
   const directory = runDir(projectDir, state.runId);
   return { state, plans, repairs, reviews, pendingDigest, firstAuthorAudit, directory,

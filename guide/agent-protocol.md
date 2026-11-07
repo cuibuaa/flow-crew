@@ -188,7 +188,27 @@ publication channel. Gate rejection archives under the injected
 
 A rejection may carry `audit_findings: {version: 1, findings: [...]}`. Findings include exact
 project paths, reason, canonical criterion IDs, `invalidates_plan` and configured
-`repair_role`. They explain the rejection; they do not create another repair stage.
+`repair_role`, and optionally `reproduction` (a positive evidence-ledger sequence, or null).
+Run a targeted command, where exit 0 means the defect is absent and a positive exit
+means it is present. Each reviewer invocation receives an engine-recorded command endpoint:
+call its supplied client through the native shell tool with a JSON object containing
+`command`, absolute `cwd` and absolute `shell`. The parent executes it with the isolated
+command environment and the attempt's remaining time, capped at 60 seconds; the response
+returns output and `record.sequence` to cite. This works when native events omit context.
+Native command events are also eligible when they carry explicit absolute cwd and shell,
+exit and output. Replay uses that shell with `-c` in that cwd. Put required shell options
+in an explicit invocation in the command. Read the ledger after completion and cite
+that command's sequence. The engine records its exit, output digest and unchanged
+project tree hash; it confirms a finding only against a failed command from this reviewer
+attempt on the reviewed tree. Missing execution context, absent/missing citations and passing
+records remain unconfirmed observations. This also applies when reading old verdicts.
+Only confirmed findings enter an admitted repair's correction request. The original verdict
+and unconfirmed observations remain visible in run facts and the report. Unconfirmed
+observations alone open no repair: passing criteria permit acceptance, failed criteria leave
+work incomplete. Repair closure replays each confirmed command on the repaired tree and
+records its passing exit, output digest, tree hash and `reproductionOf` in the same ledger,
+after the attempt's configured validation has prepared current dependencies.
+No reproduction is a second configured validation.
 An admitted repair's `retry_to` returns work to the same independent gate. A passing gate
 skips its unnecessary repair while ordinary dependents remain eligible. Exhausted ordinary
 repairs stop honestly rather than automatically repeating the whole plan.
@@ -200,6 +220,16 @@ incomplete/shared unbound evidence, or an invalid declaration cannot grant that 
 A reviewed author's `blocked` answer settles for the gate to confirm or reject; an unreviewed
 blocked answer fails its stage. A pass still requires every assigned brief criterion, including
 any explicitly permitted negative/blocked report outcome.
+
+Configured validation belongs to the author/repair boundary, never the gate. Each command
+receipt includes `load.start` and `load.end` (`loadAverage1m`, `cpuCount`), `ceilingPerCpu`,
+`waitBoundSeconds` and `waitedSeconds`. Installed `config/defaults.yaml` declares a ceiling
+of 1 per CPU and a wait bound of 1 second. Above the ceiling, the runner waits within
+that bound and the enclosing deadline, then executes anyway. Code classifies either
+above-ceiling reading as `not_measured`, regardless of command exit or test identity.
+This is neither pass nor failure and creates no author demand. Raw exits remain recorded.
+`watch`, run facts, the ledger and reports expose the same classification. Old receipts
+without load readings are `load_unknown`; their historical result remains readable.
 
 Sources: [result schemas](../src/handoff.ts), [gate evidence](../src/scheduler/sched_settlement/gate-evidence.ts),
 [gate contract](../src/scheduler/sched_settlement/gate-contract.ts),

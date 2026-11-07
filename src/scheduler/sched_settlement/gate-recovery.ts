@@ -381,8 +381,9 @@ export function findGateRecoveryStages(
       continue;
     }
 
-    // A substantive rejection or measured regression requires product repair, so retain the declared retry_to repair route. Unknown legacy facts
-    // also fail conservatively into that established route.
+    // Only confirmed reviewer findings authorize the declared product repair.
+    // Legacy prose and mechanical regressions remain visible, without repair.
+    if (!fact?.effectiveVerdict?.findings?.confirmed.length) continue;
     for (const repair of findAllRetryToStages(allStages, [gateId])) {
       selected.set(repair.id, repair);
     }

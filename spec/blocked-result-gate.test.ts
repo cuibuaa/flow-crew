@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,7 +49,7 @@ async function run(verdicts: Array<Record<string, unknown>>, answers: Record<str
     },
   };
   const { config, raw } = loadWorkflow(workflow);
-  const final = await runWorkflow(config, raw, projectDir, adapter, new Map(), undefined, join(root, 'config', 'agents'), undefined, brief, true);
+  const final = await runWorkflow(config, raw, projectDir, withConfirmedRejections(adapter), new Map(), undefined, join(root, 'config', 'agents'), undefined, brief, true);
   const ledger = readFileSync(join(runDir(projectDir, final.runId), 'evidence-ledger.jsonl'), 'utf8');
   return { final, calls, reviews: prompts.review ?? [], repairs: prompts.repair ?? [], ledger };
 }
@@ -75,6 +76,7 @@ describe('a blocked author result goes to its gate', () => {
     expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
     expect(reviews[0]).toContain('\"kind\":\"declaration\"');
     expect(repairs[0]).toContain('rejected_verdict_review.json');
+    expect(repairs[0]).toContain('engine_verdict_review.json');
     expect(reviews[1]).toContain('\"stageId\":\"repair\"');
     expect(reviews[1]).not.toContain('The new parser rejects merge sequences');
     expect(final.status).toBe('complete');

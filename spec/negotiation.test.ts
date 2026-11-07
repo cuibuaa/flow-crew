@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { providerFailureFromDiagnostic } from '../src/provider-result.js';
 import { appendGateConstraintAuditContext } from '../src/scheduler/sched_policy/prompt-contracts.js';
@@ -152,7 +153,7 @@ describe('ordinary-stage content reconciliation', () => {
       if (invocationCount === 1) writeFileSync(join(projectDir, 'src', 'observed.ts'), 'snapshot only\n');
       return fixtureResult({ output: invocationCount === 1 ? 'snapshot' : 'corrected', exitCode: 0, duration_ms: 2 }, opts);
     } };
-    const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'scope snapshot', true);
+    const final = await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, writeRoles('coder'), created.runId, 'scope snapshot', true);
     expect(final.status).toBe('complete');
     expect(invocationCount).toBe(1);
     const status = readStageStatus(projectDir, created.runId, 'ordinary');
@@ -214,7 +215,7 @@ describe('approval attempt suspension', () => {
     } };
 
     const parked = await runWorkflow(
-      config, yaml, projectDir, adapter, new Map(), undefined,
+      config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined,
       writeRoles('coder'), created.runId, 'approval suspension', true,
     );
 
@@ -244,7 +245,7 @@ describe('approval attempt suspension', () => {
 
     expect(resolveRequest(projectDir, created.runId, 'launch-training', 'approve', { by: 'operator' }).won).toBe(true);
     const resumed = await runWorkflow(
-      config, yaml, projectDir, adapter, new Map(), undefined,
+      config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined,
       writeRoles('coder'), created.runId, 'approval suspension', true,
     );
     expect(resumed.status).toBe('complete');
@@ -351,7 +352,7 @@ describe('gate verdict facts and repair eligibility', () => {
       const writes = opts.stageId === 'implement' ? ['src/impl.ts'] : [];
       return fixtureResult({ output: opts.stageId, exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' }, opts);
     } };
-    const final = await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('planner', 'qa', 'coder', 'repair'), created.runId, 'gate order', true);
+    const final = await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, writeRoles('planner', 'qa', 'coder', 'repair'), created.runId, 'gate order', true);
     expect(final.status).toBe('complete');
     expect(calls).toEqual(['plan', 'review_gate', 'fix_review', 'review_gate', 'implement', 'release_gate', 'fix_release', 'release_gate']);
     expect(calls.indexOf('fix_release')).toBeGreaterThan(calls.indexOf('release_gate'));
@@ -474,7 +475,7 @@ describe('bounded timeout negotiation', () => {
         expect(opts.timeout_ms).toBeGreaterThan(0); expect(opts.timeout_ms).toBeLessThanOrEqual(nominal); budgets.push(nominal);
         return fixtureResult({ output: 'resumed', exitCode: 0, duration_ms: 1 }, opts);
       } };
-      await runWorkflow(config, yaml, projectDir, adapter, new Map(), undefined, writeRoles('coder'), created.runId, 'resume timeout', true);
+      await runWorkflow(config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined, writeRoles('coder'), created.runId, 'resume timeout', true);
       return { budgets, status: readStageStatus(projectDir, created.runId, 'work') };
     }
 
@@ -552,7 +553,7 @@ describe('bounded timeout negotiation', () => {
     } };
 
     const final = await runWorkflow(
-      config, yaml, projectDir, adapter, new Map(), undefined,
+      config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined,
       writeRoles('coder'), created.runId, 'timeout retry', true,
     );
     expect(final.status).toBe('complete');
@@ -604,7 +605,7 @@ describe('bounded timeout negotiation', () => {
     } };
 
     const final = await runWorkflow(
-      config, yaml, projectDir, adapter, new Map(), undefined,
+      config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined,
       writeRoles('planner', 'coder'), created.runId, 'planner retry suppression', true,
     );
     const recorded = parseYaml(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf-8')) as {

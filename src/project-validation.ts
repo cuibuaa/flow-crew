@@ -5,7 +5,8 @@ import { CommandActivityTracker } from './command-activity.js';
 import { spawnOwnedCommand } from './adapters/base.js';
 import { mkdirSync, mkdtempSync, rmSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, cpus, loadavg } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { validationEnvironment } from './validation-environment.js';
 import { dirname, join, resolve } from 'node:path';
 import { decodeRunnerReport, identityFacts, type FailureReader, type IdentityFacts } from './validation-identity.js';
@@ -109,7 +110,54 @@ export interface ValidationRunRequest extends ValidationCommand {
   env?: NodeJS.ProcessEnv;
 }
 
+export interface ValidationLoad {
+  start: { loadAverage1m: number; cpuCount: number };
+  end: { loadAverage1m: number; cpuCount: number };
+  ceilingPerCpu: number;
+  waitBoundSeconds: number;
+  waitedSeconds: number;
+}
+export type ValidationMeasurement = 'measured' | 'not_measured' | 'load_unknown';
+/** Legacy or malformed readings cannot manufacture a measured result. Raw
+ * command exits remain evidence, but overload is neither pass nor failure. */
+export function validationMeasurement(result: { load?: ValidationLoad }): ValidationMeasurement {
+  const value = result.load;
+  if (!value || ![value.ceilingPerCpu, value.waitBoundSeconds, value.waitedSeconds,
+    value.start?.loadAverage1m, value.start?.cpuCount, value.end?.loadAverage1m, value.end?.cpuCount].every(Number.isFinite)
+    || value.ceilingPerCpu <= 0 || value.ceilingPerCpu > 100 || value.waitBoundSeconds < 0 || value.waitBoundSeconds > 300
+    || value.waitedSeconds < 0 || value.waitedSeconds > Number.MAX_SAFE_INTEGER
+    || ![value.start, value.end].every(sample => Number.isSafeInteger(sample.cpuCount) && sample.cpuCount > 0 && sample.loadAverage1m >= 0 && sample.loadAverage1m <= Number.MAX_SAFE_INTEGER)) return 'load_unknown';
+  return [value.start, value.end].some(sample => sample.loadAverage1m / sample.cpuCount > value.ceilingPerCpu)
+    ? 'not_measured' : 'measured';
+}
+
+/** One load boundary around a configured command, including its preparation.
+ * The wait spends the command's enclosing deadline, never adds to it. */
+export async function withValidationLoad(request: ValidationRunRequest, execute: ValidationCommandRunner,
+  dependencies: { sample?: () => ValidationLoad['start']; now?: () => number; wait?: (ms: number) => Promise<void> } = {}): Promise<ValidationRunResponse> {
+  const defaults = loadEngineDefaults(), now = dependencies.now ?? (() => performance.now());
+  const sample = dependencies.sample ?? (() => ({ loadAverage1m: loadavg()[0], cpuCount: cpus().length }));
+  const begin = now();
+  const bound = Math.min(defaults.validation_load_wait_seconds, Math.max(0, (request.timeoutMs ?? Infinity) / 1000));
+  const wait = dependencies.wait ?? (ms => delay(ms, undefined, { signal: request.abortSignal }));
+  let start = sample(), waitedMs = 0;
+  while (start.loadAverage1m / start.cpuCount > defaults.validation_load_ceiling_per_cpu && (now() - begin) / 1000 < bound && !request.abortSignal?.aborted) {
+    const waitingAt = now();
+    await wait(Math.min(1000, bound * 1000 - (now() - begin)));
+    waitedMs += Math.max(0, now() - waitingAt);
+    start = sample();
+  }
+  const elapsed = Math.max(0, now() - begin);
+  const load = { start, end: start, ceilingPerCpu: defaults.validation_load_ceiling_per_cpu,
+    waitBoundSeconds: bound, waitedSeconds: waitedMs / 1000 };
+  const response = await execute({ ...request, ...(request.timeoutMs === undefined ? {} : { timeoutMs: Math.max(0, request.timeoutMs - elapsed) }) });
+  load.end = sample();
+  return { ...response, durationMs: Math.max(0, now() - begin), load, measurement: validationMeasurement({ load }) };
+}
+
 export interface ValidationRunResponse {
+  load?: ValidationLoad;
+  measurement?: ValidationMeasurement;
   report?: string;
   reportError?: string;
   dependencyPreparationFailed?: boolean;
@@ -127,13 +175,15 @@ export type ValidationCommandRunner = (
 ) => Promise<ValidationRunResponse> | ValidationRunResponse;
 
 export interface ValidationCommandResult {
+  load?: ValidationLoad;
+  measurement?: ValidationMeasurement;
   outputBytes?: { stdout: number; stderr: number };
   identityOwner?: IdentityFacts['owner'];
   failures?: import('./validation-identity.js').FailureReading['failures'];
   testsRun?: number | null;
   role: ValidationRole;
   display?: string;
-  state: 'passed' | 'failed' | 'launch_error' | 'not_configured' | 'unresolved';
+  state: 'passed' | 'failed' | 'launch_error' | 'not_configured' | 'unresolved' | 'not_measured';
   exitCode?: number;
   durationMs: number;
   output: string;
@@ -181,7 +231,7 @@ export interface ProjectValidationDependencies {
 export interface ValidationDeltaResult {
   role: ValidationRole;
   display?: string;
-  state: 'pass' | 'regression' | 'unresolved';
+  state: 'pass' | 'regression' | 'unresolved' | 'not_measured';
   reason: string;
   newFailureIdentifiers: string[];
 }
@@ -737,7 +787,9 @@ export function dependencyPreparation(projectDir: string): Array<{
 /** This command boundary owns the dependency environment, using current project
  * lockfiles even when validation commands come from the setup ready record.
  * Never infer readiness from an existing dependency directory. */
-export const runValidationCommand: ValidationCommandRunner = (request) => withEngineIntegrity({
+export const runValidationCommand: ValidationCommandRunner = (request) => withValidationLoad(request, runProjectCommand);
+
+export const runProjectCommand: ValidationCommandRunner = (request) => withEngineIntegrity({
   projectDir: request.cwd, runDir: request.runDir, stageId: '_validation',
 }, async () => {
   const started = Date.now();
@@ -865,7 +917,7 @@ export async function runProjectValidationBaseline(
   const root = resolve(projectDir);
   const fs = dependencies.fs ?? nodeValidationFs;
   const runner = dependencies.runCommand ?? runValidationCommand;
-  const now = dependencies.now ?? Date.now;
+  const now = dependencies.now ?? (() => performance.now());
   const maxOutputBytes = dependencies.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const declaredCommands = dependencies.declaredCommands;
   const discovery = dependencies.commands
@@ -938,6 +990,13 @@ export async function runProjectValidationBaseline(
       .join('\n');
     const output = boundedOutput(rawOutput, maxOutputBytes);
     const outputBytes = validationOutputBytes(response);
+    const measurement = { ...(response.load ? { load: response.load } : {}), measurement: validationMeasurement(response) };
+    if (measurement.measurement === 'not_measured') {
+      results.push({ role, display: command.display, state: 'not_measured', durationMs, output, outputBytes, ...measurement,
+        ...(response.exitCode === null ? {} : { exitCode: response.exitCode }), failureIdentifiers: [], failureIdentity: 'unknown',
+        reason: 'Validation not measured: host load exceeded the declared ceiling; neither pass nor failure, no author action required' });
+      continue;
+    }
     if (response.dependencyPreparationFailed || response.error || response.exitCode === null) {
       results.push({
         role,
@@ -946,6 +1005,7 @@ export async function runProjectValidationBaseline(
         durationMs,
         output,
         outputBytes,
+        ...measurement,
         failureIdentifiers: [],
         failureIdentity: 'unknown',
         exitCode: response.exitCode ?? undefined,
@@ -964,6 +1024,7 @@ export async function runProjectValidationBaseline(
         durationMs,
         output,
         outputBytes,
+        ...measurement,
         failureIdentifiers: [],
         failureIdentity: 'unknown',
         reason: 'Validation command could not run in the target environment (exit 127)',
@@ -985,6 +1046,7 @@ export async function runProjectValidationBaseline(
       durationMs,
       output,
       outputBytes,
+      ...measurement,
       ...(facts.count === undefined ? {} : { failureCount: facts.count }),
       failureIdentifiers: facts.identifiers,
       failureIdentity,
@@ -1005,7 +1067,7 @@ export async function runProjectValidationBaseline(
 
 /** A run of a configured command that produced nothing to compare: it could not launch, or failed unidentifiably. */
 export function unmeasured(result: ValidationCommandResult): boolean {
-  return (result.state === FAILED_VALIDATION_STATE || result.state === 'launch_error') && result.failureIdentity === 'unknown';
+  return validationMeasurement(result) === 'not_measured' || (result.state === FAILED_VALIDATION_STATE || result.state === 'launch_error') && result.failureIdentity === 'unknown';
 }
 
 export function evaluateValidationDelta(
@@ -1016,6 +1078,9 @@ export function evaluateValidationDelta(
     const siblings = baseline.results.filter(result => result.role === prior.role);
     const next = current.find(result => result.role === prior.role && (siblings.length === 1 || result.display === prior.display));
     if (!next) return { role: prior.role, state: 'unresolved', reason: 'Current validation result is missing', newFailureIdentifiers: [] };
+    if (validationMeasurement(prior) === 'not_measured' || validationMeasurement(next) === 'not_measured') return {
+      role: prior.role, state: 'not_measured', reason: 'Validation not measured: host load exceeded the declared ceiling; neither pass nor failure, no author action required', newFailureIdentifiers: [],
+    };
     if (prior.state === 'passed') {
       if (next.state === 'passed') {
         return { role: prior.role, state: 'pass', reason: 'Green baseline remains green', newFailureIdentifiers: [] };

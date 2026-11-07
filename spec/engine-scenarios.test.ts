@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 /**
@@ -64,7 +65,7 @@ async function runScenario(
   config.defaults.max_iterations = maxIterations;
   const adapter = adapterOverride ?? new ScriptedAdapter(script);
   const state = await scheduler.runWorkflow(
-    config, raw, projectDir, adapter, new Map(), undefined,
+    config, raw, projectDir, withConfirmedRejections(adapter), new Map(), undefined,
     join(PROJECT_ROOT, 'config', 'agents'),
     reuse?.runId, brief,
     /* autoApprove */ true, /* supervise */ undefined, /* inheritCampaignContext */ false,

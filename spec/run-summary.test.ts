@@ -331,10 +331,10 @@ describe('engine-assembled terminal reports', () => {
           { role: 'lint', state: 'unresolved', reason: 'no comparable execution' }],
       }));
       const report = await generateRunSummary(project, id);
-      expect(report).toContain('`npm run test` — failed; direct exit 1; 43ms');
+      expect(report).toContain('`npm run test` — failed (load unknown); direct exit 1; 43ms');
       expect(report).toContain('Tests  1 failed | 9 passed (10)');
       expect(report).toContain('Failure: greeting > locale');
-      expect(report).toContain('`npm run lint` — launch_error; direct exit unknown');
+      expect(report).toContain('`npm run lint` — launch_error (load unknown); direct exit unknown');
       expect(report).toContain('test baseline comparison: regression');
       expect(report).toContain('lint baseline comparison: unresolved');
       expect(report).toContain('validation_delta_review_attempt_1_exact.json');

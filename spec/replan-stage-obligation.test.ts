@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -146,7 +147,7 @@ describe('engine-owned unresolved stage obligations', () => {
       config,
       yaml,
       projectDir,
-      adapter,
+      withConfirmedRejections(adapter),
       new Map(),
       undefined,
       writeRoles(),
@@ -191,7 +192,7 @@ describe('engine-owned unresolved stage obligations', () => {
       config,
       yaml,
       projectDir,
-      adapter,
+      withConfirmedRejections(adapter),
       new Map(),
       undefined,
       writeRoles(),
@@ -230,7 +231,7 @@ describe('engine-owned unresolved stage obligations', () => {
       config,
       yaml,
       projectDir,
-      adapter,
+      withConfirmedRejections(adapter),
       new Map(),
       undefined,
       writeRoles(),
@@ -291,7 +292,7 @@ describe('engine-owned unresolved stage obligations', () => {
       config,
       yaml,
       projectDir,
-      adapter,
+      withConfirmedRejections(adapter),
       new Map(),
       undefined,
       writeRoles(),

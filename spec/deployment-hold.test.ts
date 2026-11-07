@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -73,7 +74,7 @@ function workflow() {
 }
 
 function execute(config: ReturnType<typeof workflow>, adapter: Adapter, existingRunId?: string) {
-  return runWorkflow(config, stringify(config), project, adapter, new Map(), undefined, roles,
+  return runWorkflow(config, stringify(config), project, withConfirmedRejections(adapter), new Map(), undefined, roles,
     existingRunId, brief, true, undefined, true, admitted().brief_admission);
 }
 

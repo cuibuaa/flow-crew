@@ -148,7 +148,8 @@ export function createCampaignWriters(services: CampaignWriterServices) {
       // Include actual gate verdict if available
       const verdict = readGateEvaluation(projectDir, sid, runId);
       if (verdict) {
-        lines.push(`Gate verdict: ${verdict.pass ? 'PASS' : 'FAIL'}${verdict.reason ? ' — ' + verdict.reason : ''}`);
+        const validation = verdict.validation?.map(result => `${result.role}: ${result.measurement.replaceAll('_', ' ')}`).join(', ');
+        lines.push(`Gate verdict: ${verdict.pass ? 'PASS' : 'FAIL'}${validation ? `; validation: ${validation}` : ''}${verdict.reason ? ' — ' + verdict.reason : ''}`);
       }
 
     }

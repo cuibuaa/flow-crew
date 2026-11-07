@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { readStageInput } from '../src/store.js';
 import { readInvocationInput } from '../src/run-state-view.js';
 import { gateArchiveArtifactPath } from '../src/scheduler/sched_settlement/gate-archives.js';
@@ -256,7 +257,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
     config,
     yaml,
     projectDir,
-    adapter,
+    withConfirmedRejections(adapter),
     new Map(),
     undefined,
     writeRoles(),

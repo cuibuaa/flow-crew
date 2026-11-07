@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
@@ -505,13 +506,13 @@ describe('engine generalization runtime bindings', () => {
     ).map((entry) => entry.id)).toEqual([]);
     expect(findGateRecoveryStages(
       [measure, gate, repair], ['qa'], research, { qa: substantiveFact },
-    ).map((entry) => entry.id)).toEqual(['repair']);
+    ).map((entry) => entry.id)).toEqual([]);
     expect(findGateRecoveryStages(
       [measure, gate, repair], ['qa'], research, { qa: omittedFact },
     ).map((entry) => entry.id)).toEqual(['measure']);
     expect(findGateRecoveryStages(
       [measure, gate, repair], ['qa'], research, { qa: legacyFact },
-    ).map((entry) => entry.id)).toEqual(['repair']);
+    ).map((entry) => entry.id)).toEqual([]);
 
     const { projectDir, agentsDir } = seedProject('recovery', 'planner', 'qa', 'repair');
     const workflow: WorkflowConfig = {description: '', 
@@ -806,7 +807,7 @@ describe('engine generalization runtime bindings', () => {
       workflow,
       'name: round-shape-paths',
       projectDir,
-      adapter,
+      withConfirmedRejections(adapter),
       new Map(),
       undefined,
       agentsDir,

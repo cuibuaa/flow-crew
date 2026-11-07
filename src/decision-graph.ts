@@ -17,6 +17,8 @@ export function decisionSchema(stage: StageConfig): Schema {
 }
 export interface DecisionRecord {
   declaredSuccessors?: string[]; requestedSuccessor?: string; planRevision?: number;
+  /** Effective engine judgment, independent of the authored verdict or route. */
+  gateAccepted?: boolean;
   key: string; stageId: string; iteration: number; successor?: string; reason: string;
   outcome: 'chosen' | 'defaulted' | 'refused' | 'questions';
   questions?: Array<{ missing: string; question: string }>;

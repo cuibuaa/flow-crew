@@ -11,6 +11,9 @@ stage_idle_timeout_ms: 600000
 # or repair attempt; only a failed suite also runs once on an isolated base tree.
 # Gates consume recorded results and never rerun the configured suite.
 validation_timeout_ms: 2700000
+# Results above this host-wide one-minute load per logical CPU are not measured.
+validation_load_ceiling_per_cpu: 1
+validation_load_wait_seconds: 1
 
 # Scheduler progress is published on its own loop; an independent process
 # warns when a live, identity-bound scheduler stops advancing it.

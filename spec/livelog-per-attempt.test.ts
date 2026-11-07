@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -126,7 +127,7 @@ describe('native logs belong to scheduler attempts', () => {
         return fixtureResult({ output: 'fixture complete', exitCode: 0, duration_ms: 1 }, opts);
       },
     };
-    const state = await runWorkflow(config, yaml, project, adapter, new Map(), undefined, agentsDir,
+    const state = await runWorkflow(config, yaml, project, withConfirmedRejections(adapter), new Map(), undefined, agentsDir,
       created.runId, 'verify synthetic fixture', true);
     expect(state.status, JSON.stringify({ stages: state.stages, results })).toBe('complete');
     const status = readStageStatus(project, created.runId, 'review');

@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -95,6 +95,19 @@ function clean(keep = 0): string {
 }
 
 describe('invocation scratch lifetime without provider calls', () => {
+  it('shares scratch ownership through an aliased run path and its physical storage identity', () => {
+    const link = join(root, 'control-link');
+    symlinkSync(join(root, 'control'), link, 'dir');
+    const aliasRun = join(link, 'runs', basename(runDir));
+    const first = createInvocationScratch(aliasRun), second = createInvocationScratch(realpathSync(runDir));
+    expect(dirname(first.path)).toBe(dirname(second.path));
+    writeFileSync(join(first.path, 'proof.txt'), 'retained');
+    retireRunScratch(aliasRun);
+    expect(existsSync(first.path)).toBe(false);
+    expect(existsSync(second.path)).toBe(false);
+    expect(existsSync(join(runDir, 'scratch'))).toBe(false);
+  });
+
   it.each([
     ['Claude', () => new ClaudeAdapter()],
     ['Codex', () => new CodexAdapter()],

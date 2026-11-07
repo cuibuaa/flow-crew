@@ -395,7 +395,7 @@ describe('independent engine-remediation verification', () => {
     expect(artifact.excluded).toBeUndefined();
   });
 
-  it('retains product repair for a legacy rejection without typed omission evidence', () => {
+  it('does not admit product repair for an unconfirmed legacy rejection', () => {
     const measure = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'measure', role: 'researcher', scope: ['docs/round.json'] });
     const gate = stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []), id: 'qa', role: 'qa', is_gate: true, depends_on: ['measure'] });
     const repair = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'repair_report', role: 'writer', depends_on: ['qa'], retry_to: ['qa'] });
@@ -404,7 +404,7 @@ describe('independent engine-remediation verification', () => {
       ['qa'],
       { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json' },
     );
-    expect(selected.map((entry) => entry.id)).toEqual(['repair_report']);
+    expect(selected.map((entry) => entry.id)).toEqual([]);
   });
 
   it('settles a terminal artifact during the fifth and final admitted research iteration', async () => {

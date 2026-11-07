@@ -3,7 +3,7 @@ import { atomicWrite, mkdirSync } from './engine-fs.js';
 
 import { dirname, join } from 'node:path';
 import { normalizeNativeEvent } from './adapters/native-events.js';
-import type { CommandLifecycleEvent } from './adapters/base.js';
+import type { CommandContext, CommandLifecycleEvent } from './adapters/base.js';
 import { processGroupWork } from './process-liveness.js';
 
 export interface CommandActivityRecord {
@@ -116,7 +116,7 @@ export class CommandActivityTracker {
     this.persist();
   }
 
-  started(id: string, command?: string): void {
+  started(id: string, command?: string, context?: CommandContext): void {
     const normalizedId = id.trim();
     if (!normalizedId || this.startedIds.has(normalizedId)) return;
     this.startedIds.add(normalizedId);
@@ -130,11 +130,11 @@ export class CommandActivityTracker {
     this.persist();
     this.input.onLifecycle?.({
       phase: 'started', id: normalizedId, timestamp,
-      ...(boundedCommand ? { command: boundedCommand } : {}),
+      ...(command ? { command } : {}), ...(context ? { context } : {}),
     });
   }
 
-  completed(id: string, exitCode?: number): void {
+  completed(id: string, exitCode?: number, output?: string): void {
     const normalizedId = id.trim();
     if (!normalizedId || this.completedIds.has(normalizedId)) return;
     this.completedIds.add(normalizedId);
@@ -142,7 +142,7 @@ export class CommandActivityTracker {
     this.completedCount++;
     const timestamp = this.now();
     this.persist();
-    this.input.onLifecycle?.({ phase: 'completed', id: normalizedId, timestamp,
+    this.input.onLifecycle?.({ phase: 'completed', ...(output === undefined ? {} : { output }), id: normalizedId, timestamp,
       ...(exitCode === undefined ? {} : { exitCode }) });
   }
 
@@ -151,8 +151,8 @@ export class CommandActivityTracker {
     let event: Record<string, unknown>;
     try { event = JSON.parse(line) as Record<string, unknown>; } catch { return; }
     for (const command of normalizeNativeEvent(event).commands) {
-      if (command.phase === 'started') this.started(command.id, command.command);
-      else this.completed(command.id, command.exitCode);
+      if (command.phase === 'started') this.started(command.id, command.command, command.context);
+      else this.completed(command.id, command.exitCode, command.output);
     }
   }
 

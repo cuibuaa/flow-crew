@@ -1,3 +1,4 @@
+import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -175,7 +176,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
       }
       return { output, exitCode: 0, duration_ms: 1, sessionId: uuid };
     } };
-    const final = await runWorkflow(config, raw, project, adapter, new Map(), undefined, join(engine, 'config/agents'), undefined, task, true);
+    const final = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, join(engine, 'config/agents'), undefined, task, true);
     expect(final.status, final.failureReason).toBe('complete');
     expect(calls.map(c => c.id)).toEqual(['choose', 'implement', 'assess', 'review', 'repair', 'assess', 'review']);
     const author = calls.find(c => c.id === 'implement')!.opts;
