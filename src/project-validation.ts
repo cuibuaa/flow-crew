@@ -118,16 +118,18 @@ export interface ValidationLoad {
   waitedSeconds: number;
 }
 export type ValidationMeasurement = 'measured' | 'not_measured' | 'load_unknown';
-/** Legacy or malformed readings cannot manufacture a measured result. Raw
- * command exits remain evidence, but overload is neither pass nor failure. */
-export function validationMeasurement(result: { load?: ValidationLoad }): ValidationMeasurement {
+/** Legacy or malformed readings stay unknown. A pass is measured under any
+ * load; only start overload can make a failure inconclusive. */
+export function validationMeasurement(result: { load?: ValidationLoad; exitCode?: number | null; error?: unknown; state?: string }): ValidationMeasurement {
   const value = result.load;
   if (!value || ![value.ceilingPerCpu, value.waitBoundSeconds, value.waitedSeconds,
     value.start?.loadAverage1m, value.start?.cpuCount, value.end?.loadAverage1m, value.end?.cpuCount].every(Number.isFinite)
     || value.ceilingPerCpu <= 0 || value.ceilingPerCpu > 100 || value.waitBoundSeconds < 0 || value.waitBoundSeconds > 300
     || value.waitedSeconds < 0 || value.waitedSeconds > Number.MAX_SAFE_INTEGER
     || ![value.start, value.end].every(sample => Number.isSafeInteger(sample.cpuCount) && sample.cpuCount > 0 && sample.loadAverage1m >= 0 && sample.loadAverage1m <= Number.MAX_SAFE_INTEGER)) return 'load_unknown';
-  return [value.start, value.end].some(sample => sample.loadAverage1m / sample.cpuCount > value.ceilingPerCpu)
+  // A runner error or timeout can still report exit 0; it is a failure, not a pass.
+  const failed = result.exitCode !== 0 || Boolean(result.error) || result.state === 'launch_error';
+  return failed && value.start.loadAverage1m / value.start.cpuCount > value.ceilingPerCpu
     ? 'not_measured' : 'measured';
 }
 
@@ -152,7 +154,7 @@ export async function withValidationLoad(request: ValidationRunRequest, execute:
     waitBoundSeconds: bound, waitedSeconds: waitedMs / 1000 };
   const response = await execute({ ...request, ...(request.timeoutMs === undefined ? {} : { timeoutMs: Math.max(0, request.timeoutMs - elapsed) }) });
   load.end = sample();
-  return { ...response, durationMs: Math.max(0, now() - begin), load, measurement: validationMeasurement({ load }) };
+  return { ...response, durationMs: Math.max(0, now() - begin), load, measurement: validationMeasurement({ ...response, load }) };
 }
 
 export interface ValidationRunResponse {
