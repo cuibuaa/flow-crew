@@ -1,3 +1,4 @@
+import { validationMeasurement } from './project-validation.js';
 import { inspectRunScheduler } from './run-lock.js';
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -759,9 +760,10 @@ export function pollWatch(
       const gate = stage?.gate && typeof stage.gate === 'object' ? stage.gate as JsonObject : undefined;
       if (!Array.isArray(gate?.validation)) continue;
       for (const result of gate.validation) {
-        if (!result || typeof result.role !== 'string' || !['measured', 'not_measured', 'load_unknown'].includes(result.measurement)) continue;
+        if (!result || typeof result.role !== 'string') continue;
+        const measurement = validationMeasurement(result);
         const alert: WatchValidationAlert = { kind: 'validation_measurement', runId, gateId, role: typeof result.display === 'string' ? result.display : result.role,
-          measurement: result.measurement, conditionId: conditionId('validation_measurement', runId, gateId, typeof result.display === 'string' ? result.display : result.role, result.measurement) };
+          measurement, conditionId: conditionId('validation_measurement', runId, gateId, typeof result.display === 'string' ? result.display : result.role, measurement) };
         active.set(alert.conditionId, alert);
       }
     }

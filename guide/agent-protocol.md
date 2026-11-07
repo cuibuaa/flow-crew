@@ -225,9 +225,12 @@ Configured validation belongs to the author/repair boundary, never the gate. Eac
 receipt includes `load.start` and `load.end` (`loadAverage1m`, `cpuCount`), `ceilingPerCpu`,
 `waitBoundSeconds` and `waitedSeconds`. Installed `config/defaults.yaml` declares a ceiling
 of 1 per CPU and a wait bound of 1 second. Above the ceiling, the runner waits within
-that bound and the enclosing deadline, then executes anyway. Code classifies either
-above-ceiling reading as `not_measured`, regardless of command exit or test identity.
-This is neither pass nor failure and creates no author demand. Raw exits remain recorded.
+that bound and the enclosing deadline, then executes anyway. A command that exits 0
+without a runner error is measured under any load: load can turn a pass into a failure,
+never a failure into a pass. A failing command (nonzero exit, timeout or launch error) is
+`not_measured` when the start reading is above the ceiling; the end reading includes the
+command's own load and is recorded, not used. `not_measured` is neither pass nor failure
+and creates no author demand. Raw exits remain recorded.
 `watch`, run facts, the ledger and reports expose the same classification. Old receipts
 without load readings are `load_unknown`; their historical result remains readable.
 

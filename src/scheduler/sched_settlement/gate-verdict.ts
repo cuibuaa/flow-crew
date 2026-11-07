@@ -101,7 +101,7 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const findings = assessFindings(parsed.success ? parsed.data.findings : [], ledger, { stageId, attemptIndex, treeHash });
   const fact = ledger.filter(entry => entry.kind === 'validation').at(-1);
   const validation = fact?.kind === 'validation' ? fact.executions.find(entry => entry.target === 'attempt')?.commands.map(result => ({
-    role: result.role, display: result.display, measurement: validationMeasurement(result),
+    role: result.role, display: result.display, exitCode: result.exitCode, load: result.load, measurement: validationMeasurement(result),
   })) : undefined;
   const unmeasured = validation?.filter(result => result.measurement === 'not_measured') ?? [];
   const loadNote = unmeasured.length ? ` Validation not measured (${unmeasured.map(result => result.display ?? result.role).join(', ')}): neither pass nor failure; no author action required.` : '';
