@@ -542,23 +542,32 @@ describe('session ledger input and CLI regressions', () => {
     expect(existsSync(writerDirectory) ? readdirSync(writerDirectory) : []).toEqual([]);
   });
 
-  it('QA13 bounds a direct front-end payload before JSON parsing can exhaust the process', { timeout: 20_000 }, () => {
-    expectConstrainedLoader(64);
-    const source = `
-      const { renderFcTasks } = await import(process.argv[1]);
-      const payload = '{"session_id":"' + 'x'.repeat(100 * 1024 * 1024) + '"}';
-      const result = renderFcTasks({
-        storeRoot: process.argv[2],
-        payload: { provided: true, text: payload },
-        columns: 80,
-        lines: 20,
-      });
-      process.stdout.write(result.text);
-    `;
-    const child = runInline(source, [fcTasksModuleUrl, root], 64);
-    expect(child.status, child.stderr.slice(-1_000)).toBe(0);
-    expect(child.stdout.trim()).not.toBe('');
-    expect(child.stdout).toMatch(/degraded\[payload_too_large\]|payload.*limit/iu);
+  it('QA13 bounds a direct front-end payload before JSON parsing can exhaust the process', () => {
+    const maxPayloadBytes = 1024 * 1024;
+    const invalidAtLimit = 'é'.repeat(maxPayloadBytes / 2);
+    const invalidOverLimit = invalidAtLimit + 'x';
+    expect(Buffer.byteLength(invalidAtLimit, 'utf-8')).toBe(maxPayloadBytes);
+    expect(Buffer.byteLength(invalidOverLimit, 'utf-8')).toBe(maxPayloadBytes + 1);
+    const render = (text: string) => renderFcTasks({
+      storeRoot: root,
+      payload: { provided: true, text },
+      columns: 80,
+      lines: 20,
+    });
+
+    // Invalid JSON distinguishes rejection before parsing from a parse failure.
+    const oversized = render(invalidOverLimit);
+    expect(oversized).toMatchObject({ state: 'degraded', issueCodes: ['payload_too_large'] });
+    expect(oversized.text.trim()).not.toBe('');
+    const atLimit = render(invalidAtLimit);
+    expect(atLimit).toMatchObject({ state: 'degraded', issueCodes: ['payload_not_json'] });
+    expect(atLimit.text.trim()).not.toBe('');
+
+    const validAtLimit = JSON.stringify({ session_id: 'bounded' }).padEnd(maxPayloadBytes, ' ');
+    expect(Buffer.byteLength(validAtLimit, 'utf-8')).toBe(maxPayloadBytes);
+    expect(render(validAtLimit)).toMatchObject({
+      state: 'no_ledger', session: 'bounded', issueCodes: [],
+    });
   });
 
   it('F07 rejects an unsafe session at the exported reader boundary', () => {
