@@ -94,7 +94,7 @@ describe('scheduler attempt closure and own-stage retry progress', () => {
         const config = workflow(), created = createRun(project, config.name, 'name: settlement', ['work']);
         let calls = 0;
         const adapter: Adapter = { async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { calls++; return fixtureResult({ output: 'closed child output', exitCode: 0, duration_ms: 1 }, recordOpts); } };
-        const runner = createScopeSafeStageRunner({ monitorApprovalRequests: async () => null, reconcileCompletedStageAttempts: () => {
+        const runner = createScopeSafeStageRunner({ reconcileCompletedStageAttempts: () => {
             const closed = readStageStatus(project, created.runId, 'work');
             expect(closed.status).toBe('running');
             expect(closed.attempts?.at(-1)?.status).toBe('closed');

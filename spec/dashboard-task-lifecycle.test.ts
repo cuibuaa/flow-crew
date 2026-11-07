@@ -14,7 +14,6 @@ import {
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { startDashboard } from '../src/dashboard.js';
-import { recordRequest } from '../src/inbox.js';
 import { RpcRemoteError, RpcOutcomeUnknownError } from '../src/orchestrator-rpc.js';
 import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
 import { Orchestrator } from '../src/orchestrator.js';
@@ -227,45 +226,15 @@ describe('dashboard project admission is pre-mutation', () => {
     expect(existsSync(join(projectDir, '.fc'))).toBe(false);
   });
 
-  const cases = [
-    {
-      name: 'durable approval resume',
-      status: RUN_STATUS.PARKED,
-      url: (runId: string) => `/api/inbox/${runId}/approval-one/resolve`,
-      payload: { decision: 'approve', by: 'operator' },
-      prepare: (runId: string) => recordRequest({
-        runId,
-        projectDir,
-        requestId: 'approval-one',
-        action: 'deploy',
-        target: 'production',
-        risk: 'external',
-        title: 'Deploy production',
-        createdAt: '2026-07-30T00:05:00.000Z',
-      }),
-    },
-
-  ];
-
-  it.each(cases)('$name returns 409 with zero launch and byte-for-byte zero side effects', async (testCase) => {
-    const runId = `busy-${testCase.name.replace(/[^a-z]+/g, '-')}`;
-    const runPath = writeRun(runId, testCase.status);
-    testCase.prepare(runId);
+  it('leaves the retired approval resolution endpoint unavailable without side effects', async () => {
+    const runPath = writeRun('legacy-park', RUN_STATUS.PARKED);
     const before = snapshotTree(runPath);
-
-    const response = await app!.inject({
-      method: 'POST',
-      url: testCase.url(runId),
-      payload: testCase.payload,
-    });
-
-    expect(response.statusCode).toBe(409);
-    expect(response.json().error).toContain('project busy (run occupied-run)');
+    const response = await app!.inject({ method: 'POST', url: '/api/inbox/legacy-park/approval-one/resolve', payload: { decision: 'approve' } });
+    expect(app!.hasRoute({ method: 'POST', url: '/api/inbox/:runId/:requestId/resolve' })).toBe(false);
+    expect(response.statusCode).toBe(400); // Existing wildcard path guard refuses the unregistered route.
     expect(snapshotTree(runPath)).toEqual(before);
-    expect(detachedSpawner).not.toHaveBeenCalled();
-    expect(workflowLauncher).not.toHaveBeenCalled();
-    expect(busyProbe).toHaveBeenCalledWith(projectDir, runId);
   });
+
 });
 
 describe('dashboard terminal-state truth', () => {

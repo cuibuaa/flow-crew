@@ -65,13 +65,11 @@ Follow it with the goal, constraints and extractable acceptance criteria. Every 
 model chooser, which chooses a coherent author/review/repair shape or a decomposition. The operator
 does not name a shape. Legacy `workflow:` metadata is accepted but has no routing effect;
 every value still enters the chooser. The CLI shape override remains unavailable.
-The chooser asks concrete scope or research-declaration questions when needed; answer them in the
-run inbox with `inbox approve <request> --reason <answer>`, then resume the same run. A JSON
-answer containing a `research` object can supply the missing research declaration. Questions and
-answers survive restart. No rule over brief words chooses a shape.
-Research supplied in an answer passes the same round/wall budget admission as frontmatter before
-any author work is released. An over-budget declaration is recorded and refused; answering does
-not increase the run's iteration or wall allowance.
+The chooser chooses and records nonblocking assumptions when scope is open. Invalid chooser
+output fails its attempt and uses the existing retry. A missing author-owned research fact ends
+the run with a result naming what the author must add before a new launch; it is never guessed.
+Research supplied before launch passes the existing round/wall budget admission without
+increasing the run's iteration or wall allowance. No rule over brief words chooses a shape.
 
 `objective:` is an exact alias for `research:`, with `research` winning when both exist.
 A numeric `baseline` activates the metric loop. An engineering `objective` containing only
@@ -81,55 +79,21 @@ validation for a pass/fail task.
 Sources: [frontmatter](../src/scheduler/sched_admission/brief-contract.ts),
 [criteria extraction](../src/brief-criteria.ts), [preflight](../src/brief-preflight.ts).
 
-## Declared authorizations
+## Execution and assumptions
 
-An optional frontmatter declaration supplies bounded external authority:
+The brief's constraints remain text that stages interpret under their existing authority.
+There is no execution approval contract, declaration, request inbox or decision transport.
+If a stage cannot obtain a resource, it continues as far as possible and names the gap in
+its structured result. Independent gates assess that result; the human reads it at wrap-up.
+Historical authorization frontmatter has no engine meaning.
 
-```yaml
-authorizations:
-  provider_calls: true
-  downloads:
-    hosts: [huggingface.co, cdn.example.org]
-  spend:
-    usd: 50
-```
-
-This is a closed set: only `provider_calls`, `downloads` and `spend` are declarable.
-Each nested object is closed too. `provider_calls` accepts only `true`; downloads
-require a nonempty list of exact lowercase DNS hostnames (no scheme, port, path,
-wildcard or implicit subdomains); spend requires a finite nonnegative USD cap.
-Unknown/forbidden keys or invalid bounds leave the entire declaration unadmitted,
-with an `Invalid authorizations declaration` diagnostic in preflight and run events.
-The run can proceed under its existing authority; external requests still park.
-A brief without this field is unchanged.
-Workflow/research, inputs/outputs, write scopes and independent read-only gates retain
-their existing meanings; an authorization does not expand a stage's write scope.
-
-Calls to the run's configured provider are inside run authority and never require a
-request. `provider_calls` permits the engine to answer a categorized legacy or
-misdirected request for that same authority; it grants no credential access or arbitrary
-provider spend. The worker must identify the configured-provider category explicitly.
-
-External requests name `category`: `provider_calls`, `downloads`, `spend`,
-`credentials`, `other_repositories`, `user_data_deletion`, `shared_devices` or
-`external_git_history`. The requesting model owns this judgment. For downloads it
-also supplies `host`; for spend it supplies `amountUsd`, the full maximum commitment.
-Code validates that closed schema and answers only when category membership and its
-bound match the declaration: exact hostname equality or `amountUsd <= usd`.
-The cap is per request, not a cumulative budget meter; authors needing an aggregate
-budget must declare an aggregate maximum in one request and enforce its accounting
-in the task. Redirect hosts need their own named authority.
-
-The engine records an approval with `source: scheduler` and `viaDeclaration` naming
-the authorizing field in the existing append-only first-responder-wins transport.
-Absent/unknown categories or invalid bounds, requests outside the declaration, and
-credentials, other repositories, deletion of user data, shared devices and git history
-outside the run branch keep parking. Split multiple effects into separate requests;
-a spend grant never covers a credential or device effect. A wrong category is repaired
-in the request or stage contract, never by interpreting its title, target, body or brief prose.
-
-Sources: [schema and bounded comparison](../src/brief-authorizations.ts),
-[inbox transport](../src/inbox.ts), [stage contract](../src/scheduler/sched_policy/prompt-contracts.ts).
+The entry chooser always chooses a shape and records `assumptions` in its closed-schema
+result. Those assumptions are retained in the run record and summary. Invalid output fails
+the attempt and uses the existing retry allowance. Missing author-owned facts are not
+assumptions: `missing_author_facts` ends the run with a result naming what the author must
+add. In particular a model-identified metric search without a research declaration cannot
+invent a baseline, policy or stop conditions. Prelaunch conversation, preflight and rehearsal
+still ask for missing information before launch.
 
 ## Inputs, outputs and validation
 

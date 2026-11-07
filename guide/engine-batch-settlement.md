@@ -18,7 +18,7 @@ acceptance must rerun the retained specs against the final source.
 | E03 | already fixed | Missing acknowledged history does not prevent operator cancellation; see [cancellation specs](../spec/cancellation-park.test.ts). |
 | E04 | already fixed | Old outward executable aliases do not move the next attempt's scratch root. See the [invocation scratch owner](../src/invocation-scratch.ts) and [carrier ownership](../src/engine-owned-carriers.ts). |
 | E05 | already fixed | Explicit manual retry can resume a proven resumable parked run; see [retry and repair contract](../spec/repair-replan-budget.test.ts). |
-| E06 | already fixed | Framework-owned isolated validation is engine-acknowledged; external effects retain separate approval authority under [operations](operations.md). |
+| E06 | already fixed | Framework-owned isolated validation is engine-acknowledged; stages report unavailable resources under [operations](operations.md#unattended-execution). |
 | E07 | declined | READY denotes setup admission, not a guarantee that an inferred pytest runner imports; see [project validation](../spec/project-validation.test.ts) and [operations](operations.md). |
 | E08 | already fixed | Pending scope input does not preempt an admitted repair; see [repair and replan specs](../spec/repair-replan-budget.test.ts). |
 | E09 | already fixed | The planner may publish its dispatch carrier while other roles remain constrained; see [planner carrier publication specs](../spec/planner-carrier.test.ts). |

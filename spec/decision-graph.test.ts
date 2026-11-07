@@ -16,7 +16,6 @@ import { readRunEvents } from '../src/run-events.js';
 import { decisionSchema, validateDecision, emptyDecisionGraph, declareReviewChoices } from '../src/decision-graph.js';
 import { parseBriefFrontmatter, entryWorkflow } from '../src/scheduler/sched_admission/brief-contract.js';
 import { parseCommandArgs } from '../src/cli-args.js';
-import { resolveRequest } from '../src/inbox.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { inspectBrief, createBriefAdmission } from '../src/brief-preflight.js';
 import { createReadyFinder, isStageInSkippedBranch } from '../src/scheduler/sched_admission/frontier.js';
@@ -90,92 +89,6 @@ describe('one entry and concrete clarification', () => {
     }
     expect(entryWorkflow(parseBriefFrontmatter(task)).workflow).toBe('entry');
   });
-
-  it('pauses on exact model questions, records an answer declaration, and reruns the chooser', async () => {
-    const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
-    const questions = [{ missing: 'scope of migration', question: 'Does this include existing stored rows or only new writes?' }];
-    const inputs: string[] = [];
-    const adapter: Adapter = { async run(prompt, _role, opts) {
-      inputs.push(prompt);
-      return { output: opts.stageId === 'choose' ? JSON.stringify({ successor: 'implement', reason: 'Scope needs a declaration.', metric_search: false, questions: inputs.length === 1 ? questions : [] }) : delivered, exitCode: 0, duration_ms: 1 };
-    } };
-    const paused = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, undefined, task, true);
-    expect(paused.status).toBe('parked');
-    expect(paused.decisionGraph!.pendingQuestion!.questions).toEqual(questions);
-    expect(Object.keys(paused.stages)).toEqual(['choose', 'plan']);
-    const request = paused.decisionGraph!.pendingQuestion!.requestId;
-    const pausedBytes = readFileSync(join(runDir(project, paused.runId), 'run.json'), 'utf8');
-    const stillPaused = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, paused.runId, task, true);
-    expect(stillPaused.status).toBe('parked');
-    expect(stillPaused.decisionGraph!.pendingQuestion!.questions).toEqual(questions);
-    expect(readFileSync(join(runDir(project, paused.runId), 'run.json'), 'utf8')).toBe(pausedBytes);
-    expect(inputs).toHaveLength(1);
-    expect(resolveRequest(project, paused.runId, request, 'approve', { reason: 'Only new writes; existing rows are out of scope.' }).won).toBe(true);
-    // The second chooser's successor is inspected even though this intentionally incomplete author cannot satisfy the product duty.
-    const resumed = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, paused.runId, task, true);
-    expect(resumed.decisionGraph!.declarations).toEqual([{ requestId: request, answer: 'Only new writes; existing rows are out of scope.' }]);
-    expect(inputs[1]).toContain('Only new writes');
-    expect(resumed.decisionGraph!.records.some(record => record.stageId === 'choose' && record.outcome === 'chosen')).toBe(true);
-  });
-
-  it('turns invalid chooser output into a concrete question without a rule fallback', async () => {
-    const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
-    const state = await execute(config, new ScriptedAdapter({ choose: { output: '{}' } }), task);
-    expect(state.status).toBe('parked');
-    expect(state.decisionGraph!.pendingQuestion!.questions[0].missing).toBe('valid shape decision');
-    expect(state.stages).not.toHaveProperty('implement');
-  });
-
-  it('asks for author-owned research fields on a model-identified metric search', async () => {
-    const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
-    const state = await execute(config, new ScriptedAdapter({ choose: { output: JSON.stringify({ successor: 'plan', reason: 'Optimize a measured objective.', metric_search: true, questions: [] }) } }), task);
-    expect(state.status).toBe('parked');
-    expect(state.decisionGraph!.pendingQuestion!.questions[0].missing).toBe('research.baseline, research.policy, research.stop');
-    expect(state.stages.plan.attempts ?? []).toHaveLength(0);
-  });
-
-  it.each([
-    { stop: { max_rounds: 2 }, refused: true },
-    { stop: { max_wall_hours: 1000 }, refused: true },
-    { stop: { max_rounds: 1 }, refused: false },
-  ])('admits operator research through the same budget boundary ($stop)', async ({ stop, refused }) => {
-    const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
-    config.defaults.max_iterations = 1;
-    const research = { baseline: 0.5, policy: 'greedy_stack', stop };
-    const calls: string[] = [];
-    const adapter: Adapter = { async run(_prompt, _role, opts) {
-      calls.push(opts.stageId);
-      return { output: opts.stageId === 'choose' ? JSON.stringify({ successor: 'implement', reason: 'A measured search needs author declarations.', metric_search: true, questions: [] }) : delivered, exitCode: 0, duration_ms: 1 };
-    } };
-    const admission = (brief: string) => createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
-    if (refused) {
-      const initial = `---\n${JSON.stringify({ research })}\n---\n${task}`;
-      const baseline = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, undefined, initial, true, undefined, true, admission(initial));
-      expect(baseline.status).toBe('failed');
-      expect(baseline.failureReason).toContain('Research budget admission refused');
-      expect(calls).toEqual([]);
-    }
-    const paused = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, undefined, task, true, undefined, true, admission(task));
-    expect(paused.status).toBe('parked');
-    const answer = JSON.stringify({ research });
-    expect(resolveRequest(project, paused.runId, paused.decisionGraph!.pendingQuestion!.requestId, 'approve', { reason: answer }).won).toBe(true);
-    const resumed = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, agents, paused.runId, task, true, undefined, true, admission(task));
-    expect(resumed.decisionGraph!.declarations.at(-1)?.answer).toBe(answer);
-    expect(resumed.startedAt).toBe(paused.startedAt);
-    expect(resumed.maxIterations).toBe(1);
-    if (refused) {
-      expect(resumed.status).toBe('failed');
-      expect(resumed.failureReason).toContain('Research budget admission refused');
-      expect(calls).toEqual(['choose']);
-      expect(resumed.research).toBeUndefined();
-      expect(resumed.decisionGraph!.pendingQuestion).toBeUndefined();
-      expect(readRunEvents(project, resumed.runId).map(event => event.type)).toEqual(expect.arrayContaining(['decision_declaration', 'admission_rejected']));
-    } else {
-      expect(calls).toContain('implement');
-      expect(resumed.research?.stop?.maxRounds).toBe(1);
-      expect(resumed.researchInputGeneration?.startedAt).toBe(paused.startedAt);
-    }
-  });
 });
 
 describe('independent post-author routing', () => {
@@ -192,7 +105,7 @@ describe('independent post-author routing', () => {
         calls.push(opts.stageId);
         seen[opts.stageId] = { system: role.prompt, user };
         let output = delivered;
-        if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One output.', metric_search: false, questions: [] });
+        if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One output.', metric_search: false, assumptions: [], missing_author_facts: [] });
         if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Greeting.\n'); output = JSON.stringify({ status: 'delivered', summary: 'PRIVATE_AUTHOR_TRANSCRIPT', caveats: [], remaining_work: [] }); }
         if (opts.stageId === 'assess') output = JSON.stringify({ successor: selected, reason: 'Independent review.', risk_areas: [{ file: 'docs/report.md', risk: 'Declared greeting risk.', experiment: 'Read and compare the greeting.' }] });
         if (['review', 'review_full'].includes(opts.stageId)) output = gate(opts);
@@ -250,7 +163,7 @@ describe('independent post-author routing', () => {
     const adapter: Adapter = { async run(_user, _role, opts) {
       calls.push(opts.stageId);
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One output.', metric_search: false, questions: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One output.', metric_search: false, assumptions: [], missing_author_facts: [] });
       if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Wrong greeting.\n'); }
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: ++assessments === 1 ? first : second, reason: 'Review the current output independently.', risk_areas: [] });
       if (opts.stageId === 'repair') { writeFileSync(join(project, 'docs/report.md'), 'Required greeting.\n'); output = choice('assess'); }
@@ -278,7 +191,7 @@ describe('independent post-author routing', () => {
     const adapter: Adapter = { async run(user, role, opts) {
       seen[opts.stageId] = role.prompt + '\n' + user;
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One coherent change.', metric_search: false, questions: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One coherent change.', metric_search: false, assumptions: [], missing_author_facts: [] });
       if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Actual diff greeting.\n'); output = JSON.stringify({ status: 'delivered', summary: 'AUTHOR_TRANSCRIPT_SECRET_MARKER', checks: [], caveats: [], remaining_work: [] }); }
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: 'review', reason: 'One bounded output.', risk_areas: [{ file: 'docs/report.md', risk: 'Greeting content could be wrong.', experiment: 'Read output and compare it to task.' }] });
       if (opts.stageId === 'review') output = gate(opts);
@@ -326,7 +239,7 @@ describe('in-iteration replanning through the revision authority', () => {
     const adapter: Adapter = { async run(user, _role, opts) {
       calls.push(opts.stageId);
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Separate revision and review duties.', metric_search: false, questions: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Separate revision and review duties.', metric_search: false, assumptions: [], missing_author_facts: [] });
       if (opts.stageId === 'plan') {
         const candidate = ++plans === 1 ? proposal : readRunState(project, opts.runDir.split('/').at(-1)!).planControl!.stages.filter(stage => !stage.dynamic_dispatch && stage.decision?.kind !== 'shape');
         writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: candidate }));
@@ -402,7 +315,7 @@ describe('in-iteration replanning through the revision authority', () => {
     });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Distinct execution and review duties.', metric_search: false, questions: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Distinct execution and review duties.', metric_search: false, assumptions: [], missing_author_facts: [] });
       else if (opts.stageId === 'plan') {
         plans++;
         if (plans === 1) { startedAt = readRunState(project, opts.runDir.split('/').at(-1)!).startedAt; writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages })); }
@@ -502,7 +415,7 @@ describe('decision descendants and joins', () => {
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       calls.push(opts.stageId);
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Declare alternatives and their shared independent review.', metric_search: false, questions: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Declare alternatives and their shared independent review.', metric_search: false, assumptions: [], missing_author_facts: [] });
       if (opts.stageId === 'plan') writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages }));
       if (opts.stageId === 'route') output = choice(selected);
       if (opts.stageId === selected) { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Greeting.\n'); }
@@ -532,7 +445,7 @@ describe('new review branches retain write isolation', () => {
     const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One coherent change.', metric_search: false, questions: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One coherent change.', metric_search: false, assumptions: [], missing_author_facts: [] });
       if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Author output.\n'); }
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: 'review', reason: 'Focused review sufficient.', risk_areas: [] });
       if (opts.stageId === 'review') { writeFileSync(join(project, 'docs/report.md'), 'Reviewer attempted repair.\n'); output = gate(opts); }
@@ -552,7 +465,7 @@ describe('model-selected decomposition', () => {
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       calls.push(opts.stageId);
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Importer and migration need separately assigned duties.', metric_search: false, questions: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Importer and migration need separately assigned duties.', metric_search: false, assumptions: [], missing_author_facts: [] });
       if (opts.stageId === 'plan') writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: [
         { id: 'implement', role: 'coder', scope: ['docs/'], depends_on: ['plan'], artifact_contract: contract },
         { id: 'review', role: 'qa', scope: [], depends_on: ['implement'], is_gate: true, artifact_contract: contract },
@@ -603,7 +516,7 @@ describe('full review remains an independent successor', () => {
     let fullInput = '';
     const adapter: Adapter = { async run(user, role, opts) {
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One coherent task.', metric_search: false, questions: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One coherent task.', metric_search: false, assumptions: [], missing_author_facts: [] });
       if (opts.stageId === 'implement') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Greeting.\n'); }
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: 'review', reason: 'Invalid reference.', risk_areas: [{ file: 'absent.ts', risk: 'STALE_RISK_MARKER', experiment: 'Probe an absent file.' }] });
       if (opts.stageId === 'review_full') { fullInput = role.prompt + '\n' + user; output = gate(opts); }
@@ -636,7 +549,7 @@ describe('review alternatives preserve result duties and joins', () => {
     let reviewerInput = '', published = false;
     const adapter: Adapter = { async run(user, role, opts) {
       let output = delivered;
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Separate author, review and publication duties.', metric_search: false, questions: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'plan', reason: 'Separate author, review and publication duties.', metric_search: false, assumptions: [], missing_author_facts: [] });
       if (opts.stageId === 'plan') writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: proposal }));
       if (opts.stageId === 'work') { mkdirSync(join(project, 'docs')); writeFileSync(join(project, 'docs/report.md'), 'Greeting.\n'); }
       if (opts.stageId === 'review_assess') output = JSON.stringify({ successor: selected, reason: 'Independent declared review.', risk_areas: [] });

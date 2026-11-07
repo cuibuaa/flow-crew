@@ -3,9 +3,7 @@ import type {
   BriefAdmissionSubmission,
   BriefPreflightResponse,
   DashboardStatus,
-  InboxDecision,
   InboxOverview,
-  InboxResolveResult,
   RunDetailData,
   SettingsData,
   WorkspaceRun,
@@ -180,13 +178,3 @@ export const fetchStandaloneRuns = async (): Promise<{ runs: WorkspaceRun[]; tot
 };
 
 export const fetchInboxOverview = () => json<InboxOverview>(`${BASE}/inbox/overview`);
-
-export const resolveInboxItem = (
-  runId: string,
-  requestId: string,
-  body: { decision: InboxDecision; by?: string; reason?: string;  }
-    & Partial<BriefAdmissionSubmission>,
-) => postWithBriefAdmission<InboxResolveResult>(
-  `${BASE}/inbox/${encodeURIComponent(runId)}/${encodeURIComponent(requestId)}/resolve`,
-  body,
-);

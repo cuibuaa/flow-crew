@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startDashboard } from '../src/dashboard.js';
-import { recordRequest } from '../src/inbox.js';
+import { recordRequest } from './test-support/legacy-approvals.js';
 import { campaignsRoot, fcGlobalDir, runsRoot, setFcGlobalDir } from '../src/store.js';
 
 let app: FastifyInstance | undefined;

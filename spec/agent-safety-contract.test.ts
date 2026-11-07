@@ -59,7 +59,7 @@ describe('agent run-directory safety contract', () => {
     expect(base).toContain('Use a shorter command limit when recovery needs it');
     expect(base).toContain('Necessary project-local dependency setup is allowed within admitted capabilities');
     expect(base).toContain('respect lockfiles');
-    expect(base).toContain('Global or external installation needs explicit authorization');
+    expect(base).toContain('Global or external installation must be within the brief’s existing authority');
     expect(base).toContain('write terminal deliverables at declared paths and any supporting documents at admitted evidence paths');
   });
 });

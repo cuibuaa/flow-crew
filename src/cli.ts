@@ -152,7 +152,7 @@ interface CliRunStatusPresentation {
 const CLI_RUN_STATUS_PRESENTATION = {
   [RUN_STATUS.PENDING]: { listLabel: '· pending ', notificationTitle: 'FlowCrew: Task Failed' },
   [RUN_STATUS.RUNNING]: { listLabel: '⟳ running ', notificationTitle: 'FlowCrew: Task Failed' },
-  [RUN_STATUS.PARKED]: { listLabel: '· parked  ', notificationTitle: 'FlowCrew: Awaiting Your Approval' },
+  [RUN_STATUS.PARKED]: { listLabel: '· parked  ', notificationTitle: 'FlowCrew: Run Paused' },
   [RUN_STATUS.COMPLETE]: { listLabel: '✓ complete', notificationTitle: 'FlowCrew: Task Complete' },
   [RUN_STATUS.FAILED]: { listLabel: '✗ failed  ', notificationTitle: 'FlowCrew: Task Failed' },
   [RUN_STATUS.SHIPPED]: { listLabel: '· shipped ', notificationTitle: 'FlowCrew: shipped' },
@@ -1316,7 +1316,6 @@ async function cmdQuick(preview = false) {
   if (resolvedCampaign && !inheritCampaignContext) {
     console.log('Campaign context: skipped (campaign ownership preserved)');
   }
-  console.log(`Auto-approve: true\n`);
 
   // Live progress reporter
   const { runsRoot } = await import('./store.js');
@@ -1379,8 +1378,7 @@ async function cmdQuick(preview = false) {
   const icon = succeeded ? '✓' : parked ? '⏸' : '✗';
   console.log(`\n${icon} Workflow "${config.name}" ${finalState.status} (${totalTime}s total)`);
   if (parked && finalState.parked) {
-    console.log(`  ⏸ awaiting approval: ${finalState.parked.action}${finalState.parked.target ? ` → ${finalState.parked.target}` : ''}`);
-    console.log(`     resolve with: flowcrew inbox approve ${finalState.parked.requestId}   (or: flowcrew inbox deny ${finalState.parked.requestId})`);
+    console.log(`  ⏸ historical pause: ${finalState.parked.action}${finalState.parked.target ? ` → ${finalState.parked.target}` : ''}`);
   }
   for (const [id, st] of Object.entries(finalState.stages) as [string, { status: string; duration_ms?: number; error?: string }][]) {
     const si = st.status === STAGE_STATUS.COMPLETE ? '✓' : st.status === STAGE_STATUS.FAILED ? '✗' : st.status === STAGE_STATUS.SKIPPED ? '⊘' : '·';
@@ -1400,7 +1398,7 @@ async function cmdQuick(preview = false) {
   // exit 0 so a spawning parent (campaign outer loop's execSync) doesn't read it as a crash.
   // A PARK is likewise not a failure: exiting non-zero would make systemd report
   // the unit failed, and the daemon would relaunch the brief as a BRAND-NEW run —
-  // i.e. re-run the very consequential action that is waiting for approval.
+  // Historical pauses remain readable without relaunching the brief.
   process.exitCode = (succeeded || parked) ? EXIT_CODE.completed : EXIT_CODE.failed;
 }
 
@@ -1848,9 +1846,7 @@ switch (command) {
   case 'audit-reality':
     process.exitCode = await (await import('./reality-gate/audit-reality.js')).cmdAuditReality(args);
     break;
-  case 'inbox':
-    process.exitCode = await (await import('./cli-inbox.js')).cmdInbox(args);
-    break;
+
   case 'ship-preflight':
     process.exitCode = await (await import('./cli-ship-preflight.js')).cmdShipPreflight(args);
     break;

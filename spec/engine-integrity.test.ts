@@ -124,6 +124,15 @@ describe('structural engine state protection', () => {
     expect(readFileSync(path, 'utf8')).toBe(local === 'events.jsonl' ? 'counterfeit pass' : 'engine record');
   });
 
+  it('voids a repair stage creating probe files under an engine-owned evidence carrier', async () => {
+    const carrier = join(run, 'stage_evidence/repair/notification-conflict');
+    await expect(withEngineIntegrity({ ...input(), stageId: 'repair' }, () => command(`
+      const fs=require('node:fs'),path=${JSON.stringify(carrier)};
+      fs.mkdirSync(path,{recursive:true});fs.writeFileSync(path+'/replay.sh','echo probe');
+    `))).rejects.toThrow('ENGINE_STATE_TAMPERED');
+    expect(existsSync(carrier)).toBe(false);
+  });
+
   it.each(['write', 'unlink', 'rename', 'symlink', 'hardlink', 'directory-view'])('voids the historical local carrier route: %s', async route => {
     const path = join(run, 'verdict_previous.json'); write(path);
     const alias = join(project, 'alias');
@@ -699,22 +708,6 @@ describe('structural engine state protection', () => {
     let called = false;
     const summary = await generateRunSummary(project,runId,{async run(){called=true;writeFileSync(join(run,'run.json'),'counterfeit');throw new Error('must not run')}});
     expect(summary).toContain('Status: **complete**');expect(called).toBe(false);
-  });
-
-  it('keeps a tampered stage failed when a trusted approval suspension also arrives', async () => {
-    const runId = run.split('/').at(-1)!;
-    const adapter: Adapter = {async run(_prompt,_role,opts) {
-      atomicWrite(join(run,'signals/abort_work.json'), JSON.stringify({version:1,stageId:'work',attemptIndex:opts.attemptIndex,
-        source:'scheduler',timestamp:new Date().toISOString(),reason:'pending approval',requestId:'fixture',requestingStageId:'work'}));
-      await new Promise<void>(resolve=>opts.abortSignal!.addEventListener('abort',()=>resolve(),{once:true}));
-      writeFileSync(join(run,'verdict_previous.json'),'{"pass":true}');
-      return {exitCode:0,duration_ms:1,output:'done'};
-    }};
-    const result = await runStage(adapter,{stageId:'work',projectDir:project,runDir:run,runId,
-      role:{name:'fixture',description:'',model:'default',reasoning_effort:'low',tools:[],prompt:''},dependsOn:[],promptTemplate:'Work',
-      timeout_ms:5000,retries:0,artifactContract:contract});
-    expect(result.exitCode).toBe(125);expect(result.suspended).not.toBe(true);
-    expect(readStageStatus(project,runId,'work').status).toBe('failed');
   });
 
   it.each(['scheduler.identity.json','run-index.sqlite-wal'])('refuses a declared hardlink output alias of %s', async name => {

@@ -11,7 +11,6 @@ import { ResearchPolicySchema, RESEARCH_POLICY_IDS } from '../../research-policy
 import { ArtifactReadSchema } from '../../artifact-declarations.js';
 import { log } from './shared.js';
 import { parsePlannerPolicySelection, type PlannerPolicyName } from '../../planner-policies.js';
-import { BriefAuthorizationsSchema, type BriefAuthorizations } from '../../brief-authorizations.js';
 
 export function recordConfirmNotRun(runDirPath: string, confirm: ResearchConfirmConfig | undefined, terminalStatus: string): void {
   if (!confirm?.command) return;
@@ -28,8 +27,6 @@ export function recordConfirmNotRun(runDirPath: string, confirm: ResearchConfirm
 }
 
 export interface ParsedBriefFrontmatter {
-  authorizations?: BriefAuthorizations;
-  authorizationsError?: string;
   /** Task authoring requirements; independent of engine admission. */
   plannerPolicies?: PlannerPolicyName[];
   workflowError?: string;
@@ -142,12 +139,6 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
   const stripped = frontmatter.body;
   if (!parsed || typeof parsed !== 'object') return { stripped, frontmatterError: 'frontmatter parsed but is not a YAML mapping/object' };
   const out: ParsedBriefFrontmatter = { stripped };
-  const authorizations = (parsed as Record<string, unknown>).authorizations;
-  if (authorizations !== undefined) {
-    const result = BriefAuthorizationsSchema.safeParse(authorizations);
-    if (result.success) out.authorizations = result.data;
-    else out.authorizationsError = `Invalid authorizations declaration: ${result.error.message}. Only provider_calls, downloads (named hosts), and spend (usd cap) are declarable; credentials, other repositories, deletion of user data, shared devices and git history outside the run branch always require a human.`;
-  }
   try { out.plannerPolicies = parsePlannerPolicySelection((parsed as Record<string, unknown>).planner_policies); }
   catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

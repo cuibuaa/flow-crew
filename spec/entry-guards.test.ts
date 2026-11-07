@@ -18,8 +18,6 @@ import {
 } from '../src/brief-preflight.js';
 import { buildCommand, Orchestrator, type GitAdapter, type SupervisorBackend, type UnitStatus } from '../src/orchestrator.js';
 import { startRpcServer, type RpcRequest } from '../src/orchestrator-rpc.js';
-import { recordRequest } from '../src/inbox.js';
-import { cmdInbox } from '../src/cli-inbox.js';
 import { createRun } from './test-support/create-run.js';
 import {
   fcGlobalDir,
@@ -233,70 +231,6 @@ describe('Dashboard admission handshake', () => {
     expect(report).not.toContain('SIDE-CAR-DRIFT-MUST-NOT-RUN');
     expect(prompts).not.toContain('_summary');
   });
-
-  it('replaces a mismatched digest before consuming an Inbox decision', async () => {
-    const spawns: string[] = [];
-    app = await (await import('../src/dashboard.js')).startDashboard(projectDir, 0, {
-      registerTask: async (task) => {
-        spawns.push(task.run_id!);
-        return { id: 1, unit: 'private-resume', pid: process.pid, build: 'fixture' };
-      },
-      isProjectBusy: () => null,
-    });
-    const brief = 'Resume this consequential one-line brief';
-    const { runId } = createRun(projectDir, 'default', WORKFLOW, ['work']);
-    const requestId = 'p11-resume-review';
-    const state = readRunState(projectDir, runId);
-    const malformed = explicitAdmission(brief);
-    malformed.digest = inspectBrief(`${brief}\n`).digest;
-    state.status = 'parked';
-    state.taskDescription = brief;
-    state.briefAdmission = malformed;
-    state.parked = {
-      requestId,
-      action: 'deploy',
-      risk: 'external',
-      pausedAt: '2026-08-03T00:00:00.000Z',
-      atIteration: 1,
-    };
-    writeRunState(projectDir, runId, state);
-    writeFileSync(join(runsRoot(), runId, 'task_brief.md'), brief, 'utf-8');
-    recordRequest({
-      runId,
-      projectDir,
-      requestId,
-      action: 'deploy',
-      risk: 'external',
-      title: 'Resume after review',
-      createdAt: '2026-08-03T00:00:00.000Z',
-      atIteration: 1,
-    });
-
-    const rejected = await app.inject({
-      method: 'POST',
-      url: `/api/inbox/${runId}/${requestId}/resolve`,
-      payload: { decision: 'approve' },
-    });
-    expect(rejected.statusCode).toBe(409);
-    expect(spawns).toHaveLength(0);
-
-    const review = rejected.json();
-    const accepted = await app.inject({
-      method: 'POST',
-      url: `/api/inbox/${runId}/${requestId}/resolve`,
-      payload: {
-        decision: 'approve',
-        briefPreflightDigest: review.report.digest,
-        briefPreflightReceipt: review.receipt,
-      },
-    });
-    expect(accepted.statusCode).toBe(200);
-    expect(accepted.json()).toMatchObject({ won: true, resumeRegistered: true });
-    expect(spawns).toEqual([runId]);
-    const persistedAdmission = readRunState(projectDir, runId).briefAdmission;
-    expect(verifyBriefAdmission(brief, persistedAdmission).status).toBe('valid');
-    expect(accepted.json().resumeRegistered).toBe(true);
-  });
 });
 
 describe('durable daemon boundary', () => {
@@ -398,57 +332,6 @@ describe('durable daemon boundary', () => {
     const encoded = /'--brief-input-base64' '([A-Za-z0-9_-]+)'/.exec(command)?.[1];
     expect(encoded, command).toBeTruthy();
     expect(Buffer.from(encoded!, 'base64url').toString('utf8')).toBe(brief);
-  });
-});
-
-describe('deferred continuation snapshots', () => {
-  it('passes CLI Inbox resume the brief captured before the approval is consumed', async () => {
-    const brief = '# Goal\nResume the captured Inbox brief.\n';
-    const changed = `${brief}\n`;
-    const admission = explicitAdmission(brief);
-    const { runId } = createRun(projectDir, 'default', WORKFLOW, ['work']);
-    const state = readRunState(projectDir, runId);
-    state.status = 'parked';
-    state.taskDescription = brief;
-    state.briefAdmission = admission;
-    state.parked = {
-      requestId: 'captured-cli-resume',
-      action: 'deploy',
-      pausedAt: '2026-08-03T00:00:00.000Z',
-      atIteration: 1,
-    };
-    writeRunState(projectDir, runId, state);
-    const sidecar = join(runsRoot(), runId, 'task_brief.md');
-    writeFileSync(sidecar, brief, 'utf-8');
-    recordRequest({
-      runId,
-      projectDir,
-      requestId: 'captured-cli-resume',
-      action: 'deploy',
-      risk: 'external',
-      title: 'Resume captured CLI brief',
-      createdAt: '2026-08-03T00:00:00.000Z',
-      atIteration: 1,
-    });
-
-    let registeredTask: TaskCreateInput | undefined;
-    const stdout = new PassThrough();
-    const stderr = new PassThrough();
-    const code = await cmdInbox(['inbox', 'approve', 'captured-cli-resume'], {
-      stdout: stdout as unknown as NodeJS.WriteStream,
-      stderr: stderr as unknown as NodeJS.WriteStream,
-      registerTask: async (task) => {
-        writeFileSync(sidecar, changed, 'utf-8');
-        registeredTask = task;
-        return { id: 1, unit: 'private-resume', pid: process.pid, build: 'fixture' };
-      },
-    });
-
-    expect(code).toBe(0);
-    expect(registeredTask).toMatchObject({ run_id: runId, brief_text: brief, brief_admission: admission });
-    expect(registeredTask).not.toHaveProperty('launch_args');
-    expect(registeredTask?.launch_options).not.toHaveProperty('task');
-    expect(readFileSync(sidecar, 'utf-8')).toBe(changed);
   });
 });
 

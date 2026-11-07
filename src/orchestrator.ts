@@ -18,7 +18,6 @@ import {
 } from './task-registry.js';
 import {
   claimLaunchIntent,
-  findParkedRunForProject,
   inspectRunScheduler,
   invalidateRunLockCache,
   isProjectBusy,
@@ -47,7 +46,6 @@ import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflig
 import { reconcileHostInterruptedRun } from './restart-recovery.js';
 import { resolveRunIdentity } from './cancellation-policy.js';
 import { workflowContinuation } from './scheduler/sched_loop/launch.js';
-import { getItem, isPendingInboxItemState } from './inbox.js';
 import {
   RunCancellationCoordinator,
   type CancellationResult,
@@ -86,9 +84,8 @@ interface BoundRun {
   path: string;
   status: string;
   failureReason?: string;
-  pendingApprovalId?: string;
   resumeAuthorized?: boolean;
-  /** Parked runs with released deployment holds or approved actions continue without a crash retry. */
+  /** Parked runs with released deployment holds continue without a crash retry. */
   retryExemptContinuation?: boolean;
 }
 
@@ -188,7 +185,7 @@ export class Orchestrator {
 
   /**
    * Every quick launch must have a durable run identity before systemd can
-   * start it. A readable existing run (approval resume/rerun) is already bound;
+   * start it. A readable existing run (continuation/rerun) is already bound;
    * an uninitialized id is accepted only when its reservation marker validates.
    */
   private prepareRunBinding(task: TaskEntry): TaskEntry | undefined {
@@ -600,7 +597,7 @@ export class Orchestrator {
         );
         return;
       }
-      if (this.waitForBoundApproval(task, bound)) return;
+      if (this.waitForBoundHold(task, bound)) return;
       const recovery = this.boundRunRecoveryDecision(task, bound);
       if (recovery.kind === 'stop') return;
       if (task.defer_kind !== 'retry' && !bound.retryExemptContinuation) {
@@ -615,9 +612,6 @@ export class Orchestrator {
       return;
     }
 
-    // Never relaunch a brief whose run is parked on an approval — the resume
-    // path (`flowcrew inbox approve`) owns that run.
-    if (this.parkTaskIfRunParked(task)) return;
     // Catch-up must gate on EVIDENCE, not on assumption: a task can be queued
     // with a unit that is already live (the daemon died between launch and the
     // status write). Launching again reuses the transient unit name, systemd
@@ -725,13 +719,8 @@ export class Orchestrator {
     if (hasLiveForegroundOwner(task)) return;
     if (this.launchingTaskIds.has(task.id)) return;
     const held = this.readBoundRun(task);
-    if (held && this.waitForBoundApproval(task, held)) return;
-    // A parked run EXITS its process on purpose (freeing the project and the
-    // queue) while a human decides. To systemd that is indistinguishable from a
-    // clean exit or a crash, so ask the run itself first — otherwise the
-    // retry/stuck logic below would relaunch the brief and re-run the very
-    // consequential action that is waiting for approval.
-    if (this.parkTaskIfRunParked(task)) return;
+    if (held && this.waitForBoundHold(task, held)) return;
+
     const state = await this.systemd.isActive(task.systemd_unit);
     const current = this.registry.get(task.id);
     if (!current) return;
@@ -810,22 +799,6 @@ export class Orchestrator {
     this.failClosed(task, `${reason}; refusing to retry automatically`);
   }
 
-  /**
-   * If the task's project has a run parked on an approval, park the TASK too:
-   * 'deferred' with a bounded not_before. Each elapsed window re-folds the
-   * inbox, so abandoned or already-resolved parks cannot pin the queue forever.
-   */
-  private parkTaskIfRunParked(task: TaskEntry): boolean {
-    const parked = findParkedRunForProject(task.projectDir, task.started_at ?? task.created_at);
-    if (!parked) return false;
-    // A task's durable binding is authoritative. Project discovery is only
-    // for legacy unbound tasks and must never replace another run's identity.
-    if (task.run_id && this.readBoundRun(task)?.runId !== parked.runId) return false;
-    const reason = `awaiting human approval (run ${parked.runId}, request ${parked.requestId}); resolve with: flowcrew inbox approve ${parked.requestId}`;
-    this.defer(task, reason, 'wait', parked.runId);
-    return true;
-  }
-
   private boundRunPath(runIdOrPath: string): string {
     return isAbsolute(runIdOrPath) ? resolve(runIdOrPath) : join(runsRoot(), runIdOrPath);
   }
@@ -841,40 +814,33 @@ export class Orchestrator {
         failureReason?: unknown;
         engineCheckpoint?: unknown;
         projectDir?: string;
-        parked?: { requestId?: string; pausedAt?: string };
         recovery?: { kind?: string };
         deploymentHold?: { releasedAt?: string };
       };
       if (typeof parsed.status !== 'string' || parsed.runId !== identity.runId || typeof parsed.projectDir !== 'string' || resolve(parsed.projectDir) !== resolve(task.projectDir)) return undefined;
       const status = resolveRunStatus(parsed.status);
-      const requestId = parsed.parked?.requestId;
-      const item = requestId && Number.isFinite(Date.parse(parsed.parked?.pausedAt ?? '')) ? getItem(identity.runId, requestId) : undefined;
-      const boundApproval = item?.runId === identity.runId && resolve(item.projectDir) === resolve(task.projectDir) ? item : undefined;
       return {
         runId: identity.runId,
         path,
         status: status.kind === 'known' ? status.status : parsed.status,
         ...(typeof parsed.failureReason === 'string' ? { failureReason: parsed.failureReason } : {}),
-        ...(boundApproval && isPendingInboxItemState(boundApproval.state) ? { pendingApprovalId: requestId } : {}),
-        resumeAuthorized: parsed.recovery?.kind === 'resumable' || Boolean(parsed.deploymentHold?.releasedAt) || Boolean(boundApproval && !isPendingInboxItemState(boundApproval.state)),
+        resumeAuthorized: parsed.recovery?.kind === 'resumable' || Boolean(parsed.deploymentHold?.releasedAt),
         retryExemptContinuation: parsed.status === RUN_STATUS.PARKED
-          && (Boolean(parsed.deploymentHold?.releasedAt) || boundApproval?.state === 'approved'),
+          && Boolean(parsed.deploymentHold?.releasedAt),
       };
     } catch {
       return undefined;
     }
   }
 
-  private waitForBoundApproval(task: TaskEntry, bound: BoundRun, prefix = ''): boolean {
+  private waitForBoundHold(task: TaskEntry, bound: BoundRun, prefix = ''): boolean {
     if (!isPausedRunStatus(bound.status)) return false;
     if (readRunState(task.projectDir, bound.runId).deploymentHold && deploymentHeld()) {
       this.defer(task, `${prefix}deployment hold: run ${bound.runId} parked at settled stage boundary`, 'wait', task.run_id);
       return true;
     }
-    if (bound.pendingApprovalId) {
-      this.defer(task, `${prefix}bound run ${bound.runId} is awaiting approval resume (request ${bound.pendingApprovalId})`, 'wait', task.run_id);
-    } else if (bound.resumeAuthorized) return false;
-    else this.failClosed(task, `${prefix}bound run ${bound.runId} has no pending approval and no proven resume authority; ${bound.failureReason ?? 'RECOVERY_FATE_UNKNOWN: inspect the run recovery record before starting new work'}`);
+    if (bound.resumeAuthorized) return false;
+    this.failClosed(task, `${prefix}bound run ${bound.runId} has no proven continuation authority; ${bound.failureReason ?? 'RECOVERY_FATE_UNKNOWN: inspect the run recovery record before starting new work'}`);
     return true;
   }
 
@@ -897,7 +863,7 @@ export class Orchestrator {
 
   /**
    * A stopped unit is transport evidence only. Reconcile the bound run first:
-   * terminal verdicts settle, owned/approval-bound runs wait, authorized runs
+   * terminal verdicts settle, owned/held runs wait, authorized runs
    * resume, guard collisions defer,
    * and an unreadable known binding fails closed. Only a valid reservation or
    * a legacy unbound task may fall through to crash retry.
@@ -923,7 +889,7 @@ export class Orchestrator {
         await this.reconcileTerminalBoundRun(task, bound);
         return true;
       }
-      if (this.waitForBoundApproval(task, bound, `${reason}; `)) return true;
+      if (this.waitForBoundHold(task, bound, `${reason}; `)) return true;
       const recovery = this.boundRunRecoveryDecision(task, bound, reason);
       if (recovery.kind === 'resume') {
         if (deploymentHeld()) {

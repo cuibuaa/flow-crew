@@ -1,3 +1,4 @@
+import { concludeRun } from '../sched_policy/run-completion.js';
 import { captureRepairRoundSnapshot, type RepairRoundSnapshot } from '../sched_scope/snapshots.js';
 import { ensureRollbackBaseline } from '../sched_scope/rollback-baseline.js';
 import { topoSort } from '../sched_admission/frontier.js';
@@ -8,15 +9,10 @@ import { atomicWrite, mkdirSync, unlinkSync } from '../../engine-fs.js';
 import { emptyDecisionGraph, validateDecision, type DecisionRecord } from '../../decision-graph.js';
 import { reviewFacts } from '../../decision-context.js';
 import { readRunEvents, recordRunEvent } from '../../run-events.js';
-import { getItem, recordRequest } from '../../inbox.js';
-import { recordBlockageOccurrence } from '../../blockage-ledger.js';
 import { RUN_STATUS, STAGE_STATUS, readStageOutput, rependStageStatus, writeStageStatus, writeRunState, isPendingStageStatus, type StoreState } from '../../store.js';
 import { loadDefaults, type StageConfig, type WorkflowConfig } from '../sched_admission/configuration.js';
 import { collectGateRuntimeFacts, classifyGateRecoveryFact, findGateRecoveryStages } from '../sched_settlement/gate-recovery.js';
 import { archiveGateRoundEvidence, archiveRejectedGateRuntimeFacts, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
-import { parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
-import { refuseResearchBudget } from './brief.js';
-import { beginResearchInputGeneration } from '../../research-candidate.js';
 import { injectDispatchedStages, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
 
 export function decisionKey(state: StoreState, stage: StageConfig): string {
@@ -50,7 +46,7 @@ function publishTarget(id: string, state: StoreState, project: string, run: stri
 }
 
 function event(record: DecisionRecord, state: StoreState, project: string, run: string): void {
-  recordRunEvent(project, run, { type: `decision_${record.outcome === 'questions' ? 'questions' : record.outcome === 'chosen' ? 'chosen' : record.outcome === 'refused' ? 'refused' : 'defaulted'}`,
+  recordRunEvent(project, run, { type: `decision_${record.outcome === 'chosen' ? 'chosen' : record.outcome === 'refused' ? 'refused' : 'defaulted'}`,
     runId: run, timestamp: new Date().toISOString(), iteration: record.iteration, stageId: record.stageId,
     detail: JSON.stringify(record), source: 'scheduler' });
 }
@@ -59,45 +55,10 @@ function event(record: DecisionRecord, state: StoreState, project: string, run: 
 export function reconcileDecisionEvents(state: StoreState, project: string, run: string): void {
   if (!state.decisionGraph?.records.length) return;
   const published = new Set(readRunEvents(project, run).flatMap(event => {
-    if (!['decision_chosen', 'decision_defaulted', 'decision_refused', 'decision_questions'].includes(event.type)) return [];
+    if (!['decision_chosen', 'decision_defaulted', 'decision_refused'].includes(event.type)) return [];
     try { return [JSON.parse(event.detail ?? '{}').key]; } catch { return []; }
   }));
   for (const record of state.decisionGraph.records) if (!published.has(record.key)) event(record, state, project, run);
-}
-
-/** Return false when waiting for the operator. Resuming never clears a question. */
-export function resumeDecisionQuestions(state: StoreState, project: string, run: string, directory: string): boolean {
-  const graph = state.decisionGraph, pending = graph?.pendingQuestion;
-  if (!graph || !pending) return true;
-  const item = getItem(run, pending.requestId);
-  const answer = item?.resolution?.decision === 'approve' ? item.resolution.reason?.trim() : undefined;
-  if (!answer) {
-    state.status = RUN_STATUS.PARKED;
-    state.parked = { requestId: pending.requestId, action: 'answer_questions', reason: JSON.stringify(pending.questions),
-      atIteration: state.currentIteration ?? 1, stageId: pending.stageId, requestedAt: item?.createdAt ?? new Date().toISOString(), pausedAt: new Date().toISOString() };
-    writeRunState(project, run, state);
-    return false;
-  }
-  graph.declarations.push({ requestId: pending.requestId, answer });
-  recordRunEvent(project, run, { type: 'decision_declaration', runId: run, timestamp: new Date().toISOString(), stageId: pending.stageId, requestId: pending.requestId, detail: answer, source: 'operator' });
-  // The operator may supply research as a JSON declaration, never inferred prose.
-  let declaration: unknown;
-  try { declaration = JSON.parse(answer); } catch { /* Free text is consumed semantically by the chooser. */ }
-  if (declaration && typeof declaration === 'object' && 'research' in declaration) {
-    const parsed = parseBriefFrontmatter(`---\n${JSON.stringify(declaration)}\n---\n`);
-    if (parsed.research && !parsed.researchPolicyError && !parsed.researchFeasibilityError) {
-      if (refuseResearchBudget(state, parsed.research, state.maxIterations ?? loadDefaults().max_iterations)) return false;
-      state.research = parsed.research;
-      beginResearchInputGeneration(project, state);
-    }
-  }
-  repend(pending.stageId, state);
-  delete graph.pendingQuestion;
-  state.status = RUN_STATUS.RUNNING;
-  delete state.parked;
-  writeRunState(project, run, state);
-  publishTarget(pending.stageId, state, project, run, directory);
-  return true;
 }
 
 export function settleDecisions(sorted: StageConfig[], state: StoreState, project: string, run: string, directory: string,
@@ -155,20 +116,21 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     } else {
       choice = validateDecision(stage, readStageOutput(project, run, source.id), source.decision?.kind === 'review' ? reviewFacts(project, directory, state).files : []);
     }
-    if (source.decision?.kind === 'shape' && !choice.questions?.length) {
-      let raw: Record<string, unknown> = {};
-      try { raw = JSON.parse(readStageOutput(project, run, source.id)); } catch { /* schema failure already creates questions */ }
-      if (raw.metric_search === true && !state.research) choice = { ...choice, outcome: 'questions', questions: [{ missing: 'research.baseline, research.policy, research.stop', question: 'Supply the measured baseline, research policy and finite stop conditions in a research declaration. These are author-owned facts.' }] };
+    if (source.decision?.kind === 'shape') {
+      const raw = JSON.parse(readStageOutput(project, run, source.id));
+      if (raw.metric_search === true && !state.research) {
+        choice.missing_author_facts = [...new Set([...(choice.missing_author_facts ?? []), 'research.baseline', 'research.policy', 'research.stop'])];
+      }
     }
     const record: DecisionRecord = { ...choice, ...(gateAccepted === undefined ? {} : { gateAccepted }), planRevision: state.queryState?.planRevision?.revision, declaredSuccessors: declaration.successors, key, stageId: source.id, iteration };
     for (const [target, owner] of Object.entries(graph.enabled)) if (owner === source.id) delete graph.enabled[target];
-    if (choice.questions?.length) {
-      const requestId = `decision_${source.id}_${graph.records.length}`;
-      graph.pendingQuestion = { requestId, stageId: source.id, questions: choice.questions };
-      recordRequest({ runId: run, projectDir: project, requestId, action: 'answer_questions', risk: 'unknown', title: 'Clarify the task before choosing a shape', body: JSON.stringify(choice.questions), createdAt: new Date().toISOString(), stageId: source.id, atIteration: iteration, questions: choice.questions });
-      recordBlockageOccurrence({ runDir: directory, kind: 'decision_questions', stageId: source.id, detail: JSON.stringify(choice.questions) });
-      graph.records.push(record); event(record, state, project, run);
-      resumeDecisionQuestions(state, project, run, directory);
+    if (choice.missing_author_facts?.length) {
+      record.outcome = 'refused';
+      delete record.successor;
+      record.reason = `Author must add missing facts before launch: ${choice.missing_author_facts.join(', ')}. ${choice.reason}`;
+      graph.records.push(record);
+      event(record, state, project, run);
+      concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: 'admission_refused', detail: record.reason });
       return state;
     }
     graph.records.push(record);

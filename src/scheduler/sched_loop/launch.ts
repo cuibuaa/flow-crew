@@ -1,4 +1,3 @@
-import { getItem } from '../../inbox.js';
 import { attachBriefWritingEvidence } from '../../brief-writer.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Validate declared launch inputs and claim one run/project owner; preserves cancellation and park/resume transactions before execution.
@@ -24,7 +23,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 /** Interrupted work keeps its iteration; a settled rejection spends the next one. */
 export function workflowContinuation(state: StoreState, projectDir: string, runId: string, workflow?: WorkflowConfig): { iteration: number; gateIds: string[] } {
-  const currentIteration = state.parked?.atIteration ?? state.currentIteration ?? 1;
+  const currentIteration = state.currentIteration ?? 1;
   const workflowPath = join(runDir(projectDir, runId), 'workflow.yaml');
   const admitted = workflow ?? (existsSync(workflowPath) ? RecordedWorkflowConfigSchema.parse(parseYaml(readFileSync(workflowPath, 'utf8'))) : undefined);
   const gateIds = state.status === RUN_STATUS.INCOMPLETE
@@ -101,11 +100,6 @@ export function prepareWorkflowLaunch(
     }
     if (hasRunState) {
       let archived = readRunState(projectDir, runId);
-      if (archived.decisionGraph?.pendingQuestion) {
-        const question = archived.decisionGraph.pendingQuestion;
-        const answer = getItem(runId, question.requestId)?.resolution;
-        if (answer?.decision !== 'approve' || !answer.reason?.trim()) return { kind: 'settled', state: archived };
-      }
       requireKnownRunStatus(archived.status, `resume run ${runId}`);
       if (!launchUnchanged(archived)) return { kind: 'settled', state: archived };
       // Run initialization prepares a running projection before dispatch. Every consumer
@@ -280,7 +274,7 @@ export function prepareWorkflowLaunch(
     const state = readRunState(projectDir, runId);
     removeSchedulerPidIfOwned(schedulerPidPath);
     if (resumingExistingRun) {
-      // Approval remains consumed in the append log, but the run itself must
+      // The existing run must
       // stay resumable. Do not erase parked metadata or manufacture a failure.
       log.warn({ runId, sibling: siblingDescription, projectDir }, 'Resume deferred: another active run exists for this project');
       if (launchIntentOwned) {
@@ -321,7 +315,7 @@ export function prepareWorkflowLaunch(
       delete current.reasonCode;
       delete current.continuationFailure;
       // Release is authority for this parked continuation only, never for a
-      // later failure/approval or a future manual retry of the same run.
+      // later failure or a future manual retry of the same run.
       delete current.deploymentHold;
       // The admitted workflow already exists. A replacement parser can reorder
       // serialized defaults without changing meaning; continuation must retain

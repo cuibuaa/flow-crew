@@ -1,6 +1,6 @@
 export const ABORT_SIGNAL_VERSION = 1 as const;
 
-export type AbortSignalSource = 'watchdog' | 'scheduler';
+export type AbortSignalSource = 'watchdog';
 
 /** One-shot cancellation envelope owned by one concrete stage execution. */
 export interface StageAbortSignal {
@@ -10,10 +10,6 @@ export interface StageAbortSignal {
   reason: string;
   timestamp: string;
   source: AbortSignalSource;
-  /** Present only for scheduler-owned approval suspension. */
-  requestId?: string;
-  /** Stage that created the approval request; peers may be suspended with it. */
-  requestingStageId?: string;
 }
 
 export type ParsedStageAbortSignal =
@@ -49,20 +45,8 @@ export function parseStageAbortSignal(raw: string): ParsedStageAbortSignal {
   }
   if (typeof candidate.reason !== 'string') return invalid('missing reason');
   if (typeof candidate.timestamp !== 'string' || !candidate.timestamp) return invalid('missing timestamp');
-  if (candidate.source !== 'watchdog' && candidate.source !== 'scheduler') {
+  if (candidate.source !== 'watchdog') {
     return invalid('invalid source');
-  }
-  if (candidate.requestId !== undefined && (typeof candidate.requestId !== 'string' || !candidate.requestId)) {
-    return invalid('invalid approval request id');
-  }
-  if (
-    candidate.requestingStageId !== undefined
-    && (typeof candidate.requestingStageId !== 'string' || !candidate.requestingStageId)
-  ) {
-    return invalid('invalid requesting stage id');
-  }
-  if (candidate.source === 'scheduler' && typeof candidate.requestId !== 'string') {
-    return invalid('scheduler signal is missing approval request id');
   }
   return {
     ok: true,
@@ -73,10 +57,6 @@ export function parseStageAbortSignal(raw: string): ParsedStageAbortSignal {
       reason: candidate.reason,
       timestamp: candidate.timestamp,
       source: candidate.source,
-      ...(typeof candidate.requestId === 'string' ? { requestId: candidate.requestId } : {}),
-      ...(typeof candidate.requestingStageId === 'string'
-        ? { requestingStageId: candidate.requestingStageId }
-        : {}),
     },
   };
 }

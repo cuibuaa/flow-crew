@@ -1197,7 +1197,7 @@ function classify(
 export const RUN_STATUS_EXPLANATIONS = {
   [RUN_STATUS.PENDING]: 'Queued and waiting to execute',
   [RUN_STATUS.RUNNING]: 'Executing',
-  [RUN_STATUS.PARKED]: 'No worker; waiting for an operator decision',
+  [RUN_STATUS.PARKED]: 'Run paused; inspect the recorded lifecycle reason',
   [RUN_STATUS.COMPLETE]: 'Engineering DAG completed',
   [RUN_STATUS.FAILED]: 'Execution failed',
   [RUN_STATUS.SHIPPED]: 'Research or declared gate confirmed delivery',
@@ -1534,7 +1534,7 @@ function attentionForCampaign(
         id: `parked:${run.state.runId}`,
         kind: 'parked',
         title: `${title.shortName} is parked`,
-        reason: run.state.parked?.reason ?? 'No worker; waiting for an operator decision',
+        reason: run.state.parked?.reason ?? 'Run paused; inspect the recorded lifecycle reason',
         runId: run.state.runId,
         href: '/inbox',
         priority: 'high',

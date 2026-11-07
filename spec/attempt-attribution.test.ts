@@ -15,8 +15,6 @@ import { runStage } from '../src/worker.js';
 import {
   recordThrownStageAttempt,
 } from '../src/scheduler/sched_scope/stage-group.js';
-import { createApprovalMonitor } from '../src/scheduler/sched_policy/approvals.js';
-import { recordRequest } from '../src/inbox.js';
 import { admitPlannerDispatches } from '../src/scheduler/sched_loop/planner-dispatch.js';
 import type { StageConfig } from '../src/scheduler/sched_admission/configuration.js';
 
@@ -104,24 +102,18 @@ describe('durable attempt attribution on every publisher', () => {
     ]);
   });
 
-  it.each(['scheduler', 'watchdog'] as const)('attributes the worker control signal from %s', async source => {
+  it.each(['watchdog'] as const)('attributes the worker control signal from %s', async source => {
     const created = fixture();
     await runStage({ run: async () => {
       mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
       atomicWrite(join(created.runDirPath, 'signals', 'abort_opaque.json'), JSON.stringify({
         version: 1, stageId: 'opaque', attemptIndex: 1, source, reason: 'control boundary',
-        timestamp: new Date().toISOString(), ...(source === 'scheduler' ? { requestId: 'review' } : {}),
+        timestamp: new Date().toISOString(),
       }));
       return result();
     } }, workerOpts(created));
-    expect(settled(created)).toMatchObject({ type: source === 'scheduler' ? 'approval_attempt_suspended' : 'attempt_failed',
+    expect(settled(created)).toMatchObject({ type: 'attempt_failed',
       ...attribution, disposition: 'discarded' });
-  });
-
-  it.each(['scope_revision', 'approval'] as const)('attributes worker suspension for %s', async suspensionReason => {
-    const created = fixture();
-    await runStage({ run: async () => ({ ...result(), suspended: true, suspensionReason }) }, workerOpts(created));
-    expect(settled(created)).toMatchObject({ type: 'attempt_suspended', ...attribution, disposition: 'discarded' });
   });
 
   it.each([false, true])('attributes awaited settlement after reconciliation failure=%s', async failed => {
@@ -151,20 +143,6 @@ describe('durable attempt attribution on every publisher', () => {
     expect(settled(created)).toMatchObject({ type: 'attempt_failed', ...attribution, disposition: 'discarded', attemptIndex: 1 });
     expect(settled(created)?.attemptStartedAt).toBeDefined();
     expect(readStageStatus(project, created.runId, 'opaque').attempts).toHaveLength(1);
-  });
-
-  it('attributes scheduler approval suspension to the settled attempt, including its start identity', async () => {
-    const created = fixture();
-    startLedger(created);
-    completeStageAttempt(project, created.runId, 'opaque', 0, { exitCode: 0, duration_ms: 1 });
-    recordRequest({ runId: created.runId, projectDir: project, requestId: 'review', action: 'publish',
-      risk: 'external', title: 'Review publication', stageId: 'opaque', createdAt: new Date().toISOString() });
-    const monitor = createApprovalMonitor({ writeCampaignEntryUnlessPaused: () => {} });
-    await monitor.tryParkOnApprovalRequest(readRunState(project, created.runId), {
-      projectDir: project, runId: created.runId, runDirPath: created.runDirPath, iteration: 9,
-    });
-    expect(settled(created)).toMatchObject({ type: 'approval_attempt_suspended', ...attribution,
-      disposition: 'discarded', attemptIndex: 1, attemptStartedAt: '2026-01-01T00:00:00.000Z' });
   });
 
   it('retains the original attribution when another execution supersedes the accepted result', async () => {

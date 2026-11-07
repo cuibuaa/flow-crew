@@ -1,4 +1,4 @@
-import { settleDecisions, resumeDecisionQuestions, reconcileDecisionEvents } from './decisions.js';
+import { settleDecisions, reconcileDecisionEvents } from './decisions.js';
 // Boundary: Advance one admitted DAG until quiescence, park or terminal state; planner admission and ordinary batch execution own their independent loops.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState } from '../../attempt-deadline.js';
@@ -33,7 +33,6 @@ export async function executeIteration(
     if (held) return held;
     let state = readRunState(projectDir, runId);
     if (!eventsChecked) { reconcileDecisionEvents(state, projectDir, runId); eventsChecked = true; }
-    if (!resumeDecisionQuestions(state, projectDir, runId, runDirPath)) return state;
     if (state.status === RUN_STATUS.RUNNING) state = consumePlanRevisions(sorted, state, projectDir, runId, runDirPath, workflow, roleRegistry);
 
     // Exit if run was cancelled or reached any terminal state externally

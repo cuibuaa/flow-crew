@@ -451,6 +451,9 @@ function assemble(parts: (string | null | undefined)[]): string {
 /** Render the candidate state without reading the older public projection. */
 export function renderRunSummary(projectDir: string, runDir: string, state: StoreState): string {
   const records = renderStageRecords(runDir, state);
+  const assumptions = (state.decisionGraph?.records ?? []).flatMap(record =>
+    (record.assumptions ?? []).map(assumption => `- ${record.stageId}: ${assumption}`));
+  if (assumptions.length) records.details += `\n\n## Chooser assumptions\n\n${assumptions.join('\n')}`;
   const engineGateSection = renderEngineGateConclusions(runDir, state);
   const validationSection = renderValidation(runDir);
   const runOutcome = renderRunOutcome(state);

@@ -9,7 +9,7 @@ import {
   type ValidationCommandResult,
 } from '../src/project-validation.js';
 import { inspectApprovalRunStanding } from '../src/run-standing.js';
-import { listAll, recordRequest } from '../src/inbox.js';
+import { listAll, recordRequest } from './test-support/legacy-approvals.js';
 import { writeSchedulerProcessIdentity } from '../src/run-lock.js';
 import { createRun } from './test-support/create-run.js';
 import {

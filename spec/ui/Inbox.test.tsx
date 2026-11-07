@@ -50,7 +50,6 @@ function makeOverview(overrides: Partial<InboxOverview> = {}): InboxOverview {
 }
 
 const loadOverview = vi.fn();
-const resolveItem = vi.fn();
 const markRunFailed = vi.fn();
 
 function view() {
@@ -59,7 +58,6 @@ function view() {
       <ToastContainer />
       <Inbox
         loadOverview={loadOverview}
-        resolveItem={resolveItem}
         markRunFailed={markRunFailed}
       />
     </MemoryRouter>,
@@ -69,7 +67,6 @@ function view() {
 describe("operator Inbox", () => {
   beforeEach(() => {
     loadOverview.mockResolvedValue(makeOverview());
-    resolveItem.mockResolvedValue({ ok: true, won: true, resumeRegistered: true });
     markRunFailed.mockResolvedValue({ ok: true });
   });
 
@@ -79,7 +76,7 @@ describe("operator Inbox", () => {
     vi.clearAllMocks();
   });
 
-  it("renders approval actions, omits permanent approval, and preserves an ended obligation", async () => {
+  it("renders historical request cards without decision controls, including ended runs", async () => {
     loadOverview.mockResolvedValue(makeOverview({
       approvals: { status: "complete", items: [{ ...approval, risk: "write", }] },
     }));
@@ -89,7 +86,8 @@ describe("operator Inbox", () => {
     expect(await screen.findByText("Deploy the release")).toBeInTheDocument();
     expect(screen.getByTestId("inbox-approvals")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Always allow" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Approve and resume" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve and resume" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
     expect(screen.queryByTestId("inbox-deferred")).not.toBeInTheDocument();
 
     cleanup();
@@ -114,7 +112,7 @@ describe("operator Inbox", () => {
 
     expect(await screen.findByText("Originating run: ended")).toBeInTheDocument();
     expect(screen.getByText("originating run reached terminal status cancelled")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve and resume" })).not.toBeInTheDocument();
   });
 
@@ -153,30 +151,6 @@ describe("operator Inbox", () => {
     expect(screen.queryByTestId("inbox-approvals")).not.toBeInTheDocument();
     expect(screen.queryByTestId("inbox-deferred")).not.toBeInTheDocument();
     expect(screen.queryByTestId("inbox-stale")).not.toBeInTheDocument();
-  });
-
-  it("shows the winning operator when an approval loses the first-wins race", async () => {
-    loadOverview
-      .mockResolvedValueOnce(makeOverview({ approvals: { status: "complete", items: [approval] } }))
-      .mockResolvedValueOnce(makeOverview());
-    resolveItem.mockResolvedValue({
-      ok: true,
-      won: false,
-      winner: { decision: "approve", by: "alice", at: "2026-07-30T01:02:03.000Z" },
-    });
-    view();
-    await screen.findByText("Deploy the release");
-
-    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
-
-    const result = await screen.findByTestId("inbox-resolution-approval:run-approval:deploy-production");
-    expect(result).toHaveTextContent(/alice already marked this request approved at/);
-    expect(result).toHaveAttribute("role", "status");
-    expect(result).toHaveAttribute("aria-live", "polite");
-    await waitFor(() => expect(loadOverview).toHaveBeenCalledTimes(2));
-    expect(screen.getByTestId("inbox-resolution-results")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
-    expect(screen.queryByTestId("inbox-resolution-results")).not.toBeInTheDocument();
   });
 
   it("shows a page error for an unreachable aggregate request instead of pretending the inbox is empty", async () => {

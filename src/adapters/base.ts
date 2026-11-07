@@ -106,11 +106,6 @@ export interface RunResult extends InvocationUsage {
   /** Worker-owned authoritative termination attribution. */
   terminationCause?: AttemptTerminationCause;
   engineVoid?: boolean;
-  /** Scheduler/worker control boundary: the stage must be re-dispatched, not completed. */
-  suspended?: boolean;
-  suspensionReason?: 'approval';
-  suspensionRequestId?: string;
-  suspensionRequestingStageId?: string;
   /** Original launch failure; ENOENT can name a missing cwd or interpreter too. */
   spawnError?: {
     message: string;

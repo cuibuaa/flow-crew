@@ -47,7 +47,6 @@ describe('configured validation has one attempt owner and read-only gate binding
   it('never executes at unchanged reviews, including repeated inner-loop reviews', async () => {
     const f = await fixture();
     const runner = createScopeSafeStageRunner({
-      monitorApprovalRequests: async () => null,
       reconcileCompletedStageAttempts: () => ({ violation: false, }),
     });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
@@ -79,7 +78,6 @@ describe('configured validation has one attempt owner and read-only gate binding
       artifact_contract: fixtureArtifactContract('peer') });
     writeStageStatus(project, f.runId, peer.id, { status: 'pending', retries: 0 });
     const runner = createScopeSafeStageRunner({
-      monitorApprovalRequests: async () => null,
       reconcileCompletedStageAttempts: () => ({ violation: false, }),
     });
     let releasePeer!: () => void;

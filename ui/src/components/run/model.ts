@@ -6,7 +6,7 @@ export { NON_TERMINAL_RUN_STATUSES, TERMINAL_RUN_STATUSES, isTerminalRunStatus, 
 const STATUS_DESCRIPTIONS: Record<string, string> = {
   pending: "Registered and waiting to start.",
   running: "Workers are executing this run.",
-  parked: "No worker is active; the run is waiting for an operator decision.",
+  parked: "The run is paused at a recorded lifecycle boundary; inspect its pause reason.",
   complete: "The engineering stage graph completed.",
   failed: "Execution ended after a stage or run failure.",
   shipped: "Research or declared delivery was confirmed by its gate.",

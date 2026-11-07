@@ -98,7 +98,7 @@ export interface StageOpts {
   outputSchema?: Schema;
   /** Engine-built allowlist input; excludes handoffs, guidance and previous sessions. */
   isolatedInput?: { system: string; user: string };
-  decisionResult?: boolean;
+  decisionResult?: boolean | 'shape';
   artifactContract?: ArtifactContract;
   planRevision?: { revision: number; digest: string };
   artifactStatuses?: Record<string, StageStatus>;
@@ -555,9 +555,6 @@ export async function runStage(
   };
   let commandBoundaryControl: CommandBoundaryControl | undefined;
   let stageAborted = false;
-  let approvalSuspended = false;
-  let approvalRequestId: string | undefined;
-  let approvalRequestingStageId: string | undefined;
   let abortReason = '';
   let terminationCause: RunResult['terminationCause'];
   let wrapUpRequestedAt: string | undefined;
@@ -630,24 +627,11 @@ export async function runStage(
       // SIGKILLed, the next same-name attempt cannot replay this cancellation.
       abortReason = parsed.signal.reason.slice(0, 240);
       removeAbortSignal();
-      const approvalSignal = parsed.signal.source === 'scheduler' && parsed.signal.requestId !== undefined;
-      if (approvalSignal) {
-        approvalSuspended = true;
-        approvalRequestId = parsed.signal.requestId;
-        approvalRequestingStageId = parsed.signal.requestingStageId;
-      } else {
-        stageAborted = true;
-        terminationCause ??= 'stage_abort';
-      }
-      try {
-        appendFileSync(
-          liveLogPath,
-          approvalSignal
-            ? `\nApproval suspension ${approvalRequestId} consumed for attempt ${attemptIndex}; stopping stage child process.\n`
-            : `\nStage abort signal consumed for attempt ${attemptIndex}; killing stage child process.\n`,
-        );
-      } catch { /* non-critical */ }
-      attemptAbortController.abort(approvalSignal ? 'approval_suspension' : 'stage_abort');
+      stageAborted = true;
+      terminationCause ??= 'stage_abort';
+      try { appendFileSync(liveLogPath, `\nStage abort signal consumed for attempt ${attemptIndex}; killing stage child process.\n`); }
+      catch { /* non-critical */ }
+      attemptAbortController.abort('stage_abort');
     } catch { /* non-critical */ }
   };
   const pollCommandInterruptSignal = (): void => {
@@ -760,22 +744,16 @@ export async function runStage(
     const tokensOut = typeof telemetry?.tokens_out === 'number' && Number.isFinite(telemetry.tokens_out)
       ? telemetry.tokens_out
       : undefined;
-    const timedOut = !stageAborted && !approvalSuspended && (terminationCause === 'attempt_timeout' || attemptDeadline.signal.aborted);
+    const timedOut = !stageAborted && (terminationCause === 'attempt_timeout' || attemptDeadline.signal.aborted);
     return {
       output: '',
-      exitCode: approvalSuspended ? 0 : timedOut ? 124 : 137,
+      exitCode: timedOut ? 124 : 137,
       ...(telemetry?.processExitCode !== undefined ? { processExitCode: telemetry.processExitCode } : {}),
       ...(telemetry?.processSignal !== undefined ? { processSignal: telemetry.processSignal } : {}),
       // Telemetry belongs to this invocation; adding the whole attempt here
       // would count earlier turns twice when the warning retired a child.
       duration_ms: telemetry?.duration_ms ?? Math.round(attemptElapsedMs()),
       timedOut,
-      ...(approvalSuspended ? {
-        suspended: true,
-        suspensionReason: 'approval' as const,
-        ...(approvalRequestId ? { suspensionRequestId: approvalRequestId } : {}),
-        ...(approvalRequestingStageId ? { suspensionRequestingStageId: approvalRequestingStageId } : {}),
-      } : {}),
       ...invocationUsageFields({ ...telemetry, tokens_in: tokensIn, tokens_out: tokensOut }),
       invocations: telemetry?.invocations,
     };
@@ -785,7 +763,7 @@ export async function runStage(
     // current-attempt ABORT first because abort authority takes
     // precedence, then observe the monotonic deadline synchronously.
     pollAbortSignal();
-    if (!stageAborted && !approvalSuspended) attemptDeadline.observeSettlement();
+    if (!stageAborted) attemptDeadline.observeSettlement();
   };
   let lastChildClosedAt: string | undefined;
   let childCloseUnverified = false;
@@ -1002,7 +980,6 @@ export async function runStage(
           lastChildClosedAt = new Date().toISOString();
           observeAdapterSettlement();
           if (error instanceof EngineStateError) {
-            approvalSuspended = false;
             finish({ engineVoid: true, terminationCause: 'engine_void', output: error.message, friendlyError: error.message, exitCode: 125, duration_ms: Math.round(attemptElapsedMs()) });
           } else if (aggregateAbortSignal.aborted) finish(cancelledResult());
           else if (invocationAbortController.signal.aborted) finish(cancelledResult());
@@ -1050,7 +1027,7 @@ export async function runStage(
   const stageRecord = (output: string): Record<string, unknown> => {
     // Older native/fixture answers remain readable; only the response schema
     // advertises new output. Admission still checks every executable field.
-    if (opts.decisionResult) return {}; // Scheduler validates once and owns defaults/questions.
+    if (opts.decisionResult && opts.decisionResult !== 'shape') return {}; // Review/successor defaults remain scheduler-owned.
     const record = parseStageRecord(output, opts.outputSchema === HANDOFF_SCHEMA ? RECORDED_HANDOFF_SCHEMA : opts.outputSchema!);
     if (opts.isGate) {
       const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)
@@ -1271,15 +1248,15 @@ export async function runStage(
     // The execution attempt ends after adapter settlement.
     // A blocked event loop can settle after the immutable boundary before its
     // timer callback runs, so observe monotonic expiry before disposal.
-    if (!stageAborted && !approvalSuspended) attemptDeadline.observeSettlement();
+    if (!stageAborted) attemptDeadline.observeSettlement();
     // Dispose here as well on thrown adapter errors so no long deadline timer
     // survives this invocation and keeps the worker process alive.
     attemptDeadline.dispose();
   }
 
   const settlementRefused = result.exitCode === 125 || Boolean(result.exitCode !== 0 && result.friendlyError && !result.timedOut);
-  if (attemptDeadline.signal.aborted && !stageAborted && !approvalSuspended) terminationCause = 'attempt_timeout';
-  const timedOut = !settlementRefused && !stageAborted && !approvalSuspended && (
+  if (attemptDeadline.signal.aborted && !stageAborted) terminationCause = 'attempt_timeout';
+  const timedOut = !settlementRefused && !stageAborted && (
     terminationCause === 'attempt_timeout'
     || result.exitCode === 124
     || result.timedOut === true
@@ -1287,14 +1264,6 @@ export async function runStage(
   );
   if (result.engineVoid) {
     terminationCause = 'engine_void';
-  } else if (approvalSuspended) {
-    result.exitCode = 0;
-    result.timedOut = false;
-    result.suspended = true;
-    result.suspensionReason = 'approval';
-    result.suspensionRequestId = approvalRequestId;
-    result.suspensionRequestingStageId = approvalRequestingStageId;
-    terminationCause = 'exit';
   } else if (timedOut) {
     result.exitCode = 124;
     result.timedOut = true;
@@ -1309,7 +1278,7 @@ export async function runStage(
   }
   const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
   const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir);
-  if (!result.engineVoid && !stageAborted && !approvalSuspended
+  if (!result.engineVoid && !stageAborted
     && (result.exitCode === 0 && wrapUpRequestedAt && !stageWorkFinished || timedOut)) {
     const forced = timedOut;
     const retainedPaths = artifacts;
@@ -1329,7 +1298,7 @@ export async function runStage(
       handoff: result.continuation.handoff, source: 'worker' });
   }
   if (stageAborted) result.output = renderStageAbortOutput(result.output, opts.stageId, attemptIndex, abortReason);
-  if (approvalSuspended || timedOut || stageAborted || result.exitCode === 0) result.providerFailure = undefined;
+  if (timedOut || stageAborted || result.exitCode === 0) result.providerFailure = undefined;
   result.effectiveTimeoutMs = effectiveBudgetMs;
   result.terminationCause = terminationCause;
 
@@ -1392,13 +1361,13 @@ export async function runStage(
   let boundaryError: unknown;
   try {
     await opts.settlementBoundary?.('attempt_closed');
-    final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, result.suspended === true);
+    final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex);
   } catch (error) {
     boundaryError = error;
-    final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex, false,
+    final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex,
       { exitCode: 1, error: error instanceof Error ? error.message : String(error) });
   }
-  if (attemptValidationPlan?.baseline.discovery.commands.length && !result.engineVoid && !childCloseUnverified && !result.suspended && !result.continuation) {
+  if (attemptValidationPlan?.baseline.discovery.commands.length && !result.engineVoid && !childCloseUnverified && !result.continuation) {
     await recordAttemptValidation(opts.projectDir, opts.runId, opts.stageId, {
       remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
       readFailureIdentity: async input => {
@@ -1425,7 +1394,7 @@ export async function runStage(
       },
     });
   }
-  if (result.exitCode === 0 && !result.continuation && !result.suspended) {
+  if (result.exitCode === 0 && !result.continuation) {
     for (const finding of opts.repairFindings ?? []) {
       const before = captureProjectTree(opts.projectDir, evidenceBrief);
       // Old records without native context cannot authorize an assumed replay.
@@ -1463,20 +1432,18 @@ export async function runStage(
         command: check.command, exitCode: check.exit_code, evidence: check.evidence, owner: 'declaration' });
     }
   }
-  if (result.exitCode === 0 && opts.isGate && !result.continuation && !result.suspended) {
+  if (result.exitCode === 0 && opts.isGate && !result.continuation) {
     const verdict = stageRecord(result.output);
     appendEvidence(opts.runDir, { kind: 'decision', stageId: opts.stageId, attemptIndex,
       verdict, owner: 'closed-schema-model' });
   }
   {
     const settled = final.attempts?.at(-1);
-    const suspended = settled?.status === 'suspended';
     if (settled?.exitCode !== undefined) result.exitCode = settled.exitCode;
-    result.suspended = suspended;
     if (result.exitCode !== 0) result.continuation = undefined;
     result.terminationCause = settled?.terminationCause ?? 'exit';
     recordRunEvent(opts.projectDir, opts.runId, {
-      type: approvalSuspended ? 'approval_attempt_suspended' : suspended ? 'attempt_suspended' : result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
+      type: result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
       runId: opts.runId,
       timestamp: final.attempts?.at(-1)?.completedAt ?? new Date().toISOString(),
       stageId: opts.stageId,
@@ -1486,11 +1453,7 @@ export async function runStage(
       ...(result.processExitCode !== undefined ? { processExitCode: result.processExitCode } : {}),
       ...(result.processSignal !== undefined ? { processSignal: result.processSignal } : {}),
       ...(result.providerFailure ? { providerFailure: result.providerFailure } : {}),
-      ...(approvalRequestId ? { requestId: approvalRequestId } : {}),
-      ...(approvalRequestingStageId ? { requestingStageId: approvalRequestingStageId } : {}),
-      detail: approvalSuspended
-        ? `attempt suspended for approval ${approvalRequestId ?? 'unknown'}`
-        : suspended ? 'attempt suspended at scheduler control boundary' : result.exitCode === 0 ? 'attempt completed' : (final.error ?? `exit ${result.exitCode}`),
+      detail: result.exitCode === 0 ? 'attempt completed' : (final.error ?? `exit ${result.exitCode}`),
       source: 'worker',
     });
 
@@ -1500,7 +1463,7 @@ export async function runStage(
 
     // Final classification and durable settlement, rather than a raw child zero,
     // determine whether the successful-home cleanup policy applies.
-    if (final.status === RUN_STATUS.COMPLETE && !result.continuation && !opts.preserveSession && !suspended) {
+    if (final.status === RUN_STATUS.COMPLETE && !result.continuation && !opts.preserveSession) {
       finalizeStageSessions(opts.runDir, opts.stageId);
     }
   }

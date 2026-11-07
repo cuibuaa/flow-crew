@@ -2,7 +2,7 @@
 name: ship
 description: Turn the current conversation into a self-contained FlowCrew brief, rehearse it, and launch the workflow. Use when the user asks to hand off or ship work to FlowCrew.
 ---
-<!-- flowcrew-skill-revision: 39 -->
+<!-- flowcrew-skill-revision: 40 -->
 
 # Ship a conversation to FlowCrew
 
@@ -20,7 +20,7 @@ as invocations too. Exit zero means facts were gathered, not that they are favor
 collection failure exits nonzero. Preflight cannot decide what prior state means. It discovers
 validation commands but does not execute a baseline.
 
-If a prior run is pending/running/parked/awaiting approval, show its identity and stop instead
+If a prior run is pending/running/parked, show its identity and stop instead
 of duplicating it. For terminal failure/incomplete/ceiling/phase/stop, carry forward the
 relevant blocker and durable evidence. Unknown status needs inspection. Use prior reports
 as inputs, not paraphrased facts or a promise to repeat their outcome.
@@ -34,21 +34,13 @@ Declare gitignored inputs in the block and intentional reuse of existing outputs
 or tree by declaring a structured input with `frozen: true`; inputs are mutable by default. Prose, headings and input notes do
 not enforce freezing. Explain evidence gaps and dependencies of quantities.
 
-Declare any authorized external effects using the
-[brief-contract authorization schema](../guide/brief-contract.md#declared-authorizations):
-only `provider_calls: true`, `downloads: {hosts: [exact.lowercase.host]}` and
-`spend: {usd: <nonnegative USD cap>}` under `authorizations:`. Spend caps apply to
-each request's full maximum commitment; downloads match exact named hosts.
-Calls to the run's configured provider are already inside run authority and never
-require an approval request. Credentials, other repositories, deletion of user data,
-shared devices and git history outside the run branch cannot be declared. Workers
-name a closed-schema category (and amountUsd or host where required) in a request;
-the engine does not infer authority from prose. Omit the declaration when no external
-effects are authorized; existing briefs retain their behavior.
+State effect constraints as plain brief text for the stages to read under their existing
+authority. Execution never waits for a human. A stage that lacks a resource continues as far
+as possible and names the gap in its result and report; there is no authorization frontmatter.
 
 State whether the goal is a known pass/fail outcome or candidate research with an allowed supported
-ceiling. Do not name a workflow or shape: the entry chooser reads the brief and asks concrete
-questions when information is missing. A metric search needs the author's research declaration
+ceiling. Do not name a workflow or shape: the entry chooser reads the brief, chooses and records assumptions
+when scope is open. Missing author-owned facts end the run with a result naming them. A metric search needs the author's research declaration
 (baseline, policy and stop conditions). Do not invent those fields or create an acceptance-only
 `objective.confirm` envelope. Map writable paths for authored stages; leave schema details in the
 canonical references.

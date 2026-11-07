@@ -90,9 +90,9 @@ describe("run-page canonical scenes", () => {
     expect(recent).toContain(`title="${status.toUpperCase()}"`);
   });
 
-  it("links parked runs to their pending approval", () => {
+  it("links recorded pauses to historical request context", () => {
     const parked = markup({ ...fixture("parked"), stages: [] });
-    expect(parked).toContain('data-testid="parked-approval-banner"');
+    expect(parked).toContain('data-testid="parked-run-banner"');
     expect(parked).toContain('href="/inbox"');
   });
 

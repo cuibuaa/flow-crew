@@ -1,7 +1,6 @@
 // Boundary: Compose existing typed admission, policy, scope and settlement services; exports individual effects, never a context or facade dependency.
 import { createDispatchAdmission } from '../sched_admission/dispatch.js';
 import { createReadyFinder } from '../sched_admission/frontier.js';
-import { createApprovalMonitor } from '../sched_policy/approvals.js';
 import { createCampaignWriters } from '../sched_policy/campaign.js';
 import { createDispatchInjector } from '../sched_policy/dispatch-injection.js';
 import { createBlockageConcluder } from '../sched_policy/guidance.js';
@@ -26,13 +25,12 @@ export const inspectDispatchAdmission = createDispatchAdmission();
 // Each unit captures only the services owned by the remaining scheduler.
 export const { appendIterationLog, writeCampaignEntry, writeCampaignEntryUnlessPaused } = createCampaignWriters({ readGateEvaluation, readTerminalStudyCompletionEvidence, pendingScopePlanningInputs });
 export const concludeRepeatedBlockage = createBlockageConcluder(writeCampaignEntry).concludeRepeatedBlockage;
-export const { tryParkOnApprovalRequest, inspectApprovalRequests, monitorApprovalRequests } = createApprovalMonitor({ writeCampaignEntryUnlessPaused });
 export const { tryAdvanceResearch } = createResearchAdvancer({ listProjectFilesAt, settleFrameworkRollbackPath, writeCampaignEntry });
 export const { ensureTerminalArtifactValidation, tryTerminateOnTerminalState, concludeDeclaredTerminalAtQuiescence } = createTerminalEvaluator({ validationDeltaMatchesExecution, settledGateValidationExecution, validationExecutionId, writeCampaignEntry, concludeRepeatedBlockage });
 export const { injectDispatchedStages } = createDispatchInjector({ inspectDispatchAdmission });
 export const { writeRepairRoundDiffArtifact } = createRepairDiffWriter({ gateArchiveCoordinate, canonicalGateRoundArtifactDir });
 export const { reconcileStageScope, reconcileCompletedStageAttempts } = createScopeReconciler();
-export const { runScopeSafeStageGroup } = createScopeSafeStageRunner({ monitorApprovalRequests, reconcileCompletedStageAttempts });
+export const { runScopeSafeStageGroup } = createScopeSafeStageRunner({ reconcileCompletedStageAttempts });
 
 // Settlement effects receive only their consumed service.
 export const terminateForGateContractRefusal = createGateContractRefusalHandler(writeCampaignEntry);

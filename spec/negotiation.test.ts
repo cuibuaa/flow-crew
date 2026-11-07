@@ -41,7 +41,6 @@ import {
   type AttemptDeadlineClock,
   type TechnicalRetryTerminalDecision,
 } from '../src/attempt-deadline.js';
-import { resolveRequest } from '../src/inbox.js';
 
 let projectDir: string;
 let isolatedStateDir: string;
@@ -160,99 +159,6 @@ describe('ordinary-stage content reconciliation', () => {
     expect(status.attempts).toHaveLength(1);
     expect(status.constraintAudit).toMatchObject({ violationCount: 0, rolledBackWriteCount: 0 });
     expect(readFileSync(join(projectDir, 'src/observed.ts'), 'utf8')).toBe('snapshot only\n');
-  });
-});
-
-describe('approval attempt suspension', () => {
-  it('[C1] parks on approval detection, suspends the requester, and resumes by re-running that same stage', { timeout: 15_000 }, async () => {
-    const yaml = [
-      'name: approval-suspension', 'defaults:', '  max_iterations: 2', '  max_retries: 0', 'stages:',
-      '  - id: action', '    role: coder', '    scope: []', '    prompt_template: request approval',
-      '  - id: downstream', '    role: coder', '    scope: []', '    depends_on: [action]',
-      '    dependency_reasons: {action: "consume the approved action"}', '    prompt_template: finish',
-    ].join('\n');
-    const config: WorkflowConfig = {description: '', 
-      name: 'approval-suspension',
-      defaults: { max_iterations: 2, max_retries: 0 },
-      stages: [
-        { artifact_contract: fixtureArtifactContract('action', false),criterion_refs: [],  id: 'action', role: 'coder', depends_on: [], scope: [], prompt_template: 'request approval', skills: [], dynamic_dispatch: false, is_gate: false },
-        { artifact_contract: fixtureArtifactContract('downstream', false),criterion_refs: [],  id: 'downstream', role: 'coder', depends_on: ['action'], dependency_reasons: { action: 'consume the approved action' }, scope: [], prompt_template: 'finish', skills: [], dynamic_dispatch: false, is_gate: false },
-      ],
-    };
-    const created = prepareRun(config, yaml);
-    let actionCalls = 0;
-    let downstreamCalls = 0;
-    let approvalAborted = false;
-    const adapter: Adapter = { async run(_prompt, _agent, opts) {
-      const summary = summaryResult(opts);
-      if (summary) return fixtureResult(summary, opts);
-      if (opts.stageId === 'downstream') {
-        downstreamCalls++;
-        return fixtureResult({ output: 'downstream complete', exitCode: 0, duration_ms: 1 }, opts);
-      }
-      actionCalls++;
-      if (actionCalls > 1) {
-        expect(existsSync(join(opts.runDir, 'approvals', 'launch-training.decision.json'))).toBe(true);
-        return fixtureResult({ output: 'approved action complete', exitCode: 0, duration_ms: 1 }, opts);
-      }
-      const requestedAt = new Date().toISOString();
-      writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'approval_request.json'), JSON.stringify({
-        id: 'launch-training',
-        action: 'launch_model_training',
-        risk: 'external',
-        title: 'launch model training',
-        requestedAt,
-      }));
-      await new Promise<void>((resolveWait) => {
-        const finish = () => {
-          approvalAborted = true;
-          resolveWait();
-        };
-        if (opts.abortSignal?.aborted) finish();
-        else opts.abortSignal?.addEventListener('abort', finish, { once: true });
-      });
-      return fixtureResult({ output: 'stopped at approval boundary', exitCode: opts.abortSignal?.aborted ? 137 : 0, duration_ms: Date.now() - started }, opts);
-    } };
-
-    const parked = await runWorkflow(
-      config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined,
-      writeRoles('coder'), created.runId, 'approval suspension', true,
-    );
-
-    expect(parked.status).toBe('parked');
-    expect(approvalAborted).toBe(true);
-    expect(parked.stages.action.status, JSON.stringify(parked.stages.action)).toBe('pending');
-    expect(readStageStatus(projectDir, created.runId, 'action').attempts?.[0]?.status).toBe('suspended');
-    expect(downstreamCalls).toBe(0);
-    const events = readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf-8')
-      .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-    const parkedEvent = events.find((event) => event.type === 'approval_parked');
-    expect(parkedEvent).toMatchObject({
-      stageId: 'action',
-      attemptIndex: 1,
-      requestId: 'launch-training',
-      requestedAt: expect.any(String),
-      detectedAt: expect.any(String),
-    });
-    expect(Date.parse(String(parkedEvent?.detectedAt)) - Date.parse(String(parkedEvent?.requestedAt)))
-      .toBeGreaterThanOrEqual(0);
-    expect(events).toContainEqual(expect.objectContaining({
-      type: 'approval_attempt_suspended',
-      stageId: 'action',
-      attemptIndex: 1,
-      requestId: 'launch-training',
-    }));
-
-    expect(resolveRequest(projectDir, created.runId, 'launch-training', 'approve', { by: 'operator' }).won).toBe(true);
-    const resumed = await runWorkflow(
-      config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined,
-      writeRoles('coder'), created.runId, 'approval suspension', true,
-    );
-    expect(resumed.status).toBe('complete');
-    expect(actionCalls).toBe(2);
-    expect(downstreamCalls).toBe(1);
-    expect(readStageStatus(projectDir, created.runId, 'action').attempts?.map((attempt) => attempt.status))
-      .toEqual(['suspended', 'complete']);
   });
 });
 

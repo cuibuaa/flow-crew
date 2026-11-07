@@ -18,15 +18,14 @@ export const historicalApproval: PushEvent = {
 };
 const root = '/fixture/fc';
 const duties = ['This event is not acceptance.', 'Read the report and run state;',
-  'For a parked run, approval request, or failed attempt,', 'Deduplicate by event id:', 'Only after handling this event,'];
-const decision = "Decide: FC_HOME='/fixture/fc' flowcrew inbox approve 'decision_graph_real_chooser_replays' --run 'historical-run' (use deny to decline).";
-const approval = `Request: ${historicalApproval.requestTitle}. Target: ${historicalApproval.requestTarget}. ${decision}`;
+  'For unfinished work or a failed attempt,', 'Deduplicate by event id:', 'Only after handling this event,'];
+const historical = 'Status: complete. Last stage: review. Report: /fixture/fc/runs/run/summary.md';
 const task = `FlowCrew #2433 ${historicalApproval.taskTitle}`;
 
 describe('one structured push has separate human and agent renderings', () => {
   it.each([
-    ['approval_parked', 'needs approval', approval],
-    ['approval_attempt_suspended', 'attempt suspended for approval', approval],
+    ['approval_parked', 'run event', historical],
+    ['approval_attempt_suspended', 'run event', historical],
     ['attempt_failed', 'attempt failed', 'Stage: implement. Attempt: 1. Failure: provider_rate_limit.'],
     ['stage_failed', 'stage failed', 'Stage: implement. Attempt: 1. Failure: provider_rate_limit.'],
     ['run_status_changed', 'run status changed', 'Status: complete. Last stage: review. Report: /fixture/fc/runs/run/summary.md'],

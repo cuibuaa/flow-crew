@@ -151,7 +151,7 @@ export async function executeOrdinaryStage(
         artifactObligationTemplate: stage.prompt_template,
         artifactContract: stage.artifact_contract,
         isolatedInput,
-        decisionResult: Boolean(stage.decision && !stage.is_gate),
+        decisionResult: stage.decision?.kind === 'shape' ? 'shape' : Boolean(stage.decision && !stage.is_gate),
         outputSchema: stage.decision && !stage.is_gate ? decisionSchema(stage) : stageRecordSchema({ isGate: stage.is_gate,
           criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
         planRevision: state.queryState?.planRevision,

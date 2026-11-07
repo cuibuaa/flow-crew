@@ -1,8 +1,7 @@
 import { settleGateEvaluation } from '../sched_settlement/gate-verdict.js';
-import { runStageWave } from '../stage-wave.js';
 import { bindReviewedGateValidation, recordGateValidationDelta, settleGateValidationEvidence } from '../sched_settlement/gate-validation.js';
-// Run serialized shared-tree authors, coordinate approvals, and settle each closed attempt.
-import { StageAttemptSettlementError, STAGE_STATUS, type StoreState, type AttemptAttribution, readRunState, readStageStatus, runDir, type StageStatus, completeStageAttempt, isPausedRunStatus, writeRunState } from "../../store.js";
+// Run serialized shared-tree authors and settle each closed attempt.
+import { StageAttemptSettlementError, STAGE_STATUS, type StoreState, type AttemptAttribution, readRunState, readStageStatus, type StageStatus, completeStageAttempt, isPausedRunStatus, writeRunState } from "../../store.js";
 import { attemptEventFields, recordRunEvent, recordStageOutcome } from "../../run-events.js";
 import { log } from "../sched_admission/shared.js";
 import { type RunResult } from '../../adapters/base.js';
@@ -10,7 +9,6 @@ import { type StageConfig } from "../sched_admission/configuration.js";
 import { isStageInSkippedBranch, selectRunnableBatch } from "../sched_admission/frontier.js";
 import { type RepairRoundSnapshot } from './snapshots.js';
 import { type ScopeBatchContext, createScopeBatchContext } from './scope-batch.js';
-import { type createApprovalMonitor } from "../sched_policy/approvals.js";
 import { type createScopeReconciler } from './reconciliation.js';
 
 export function allDone(state: StoreState, stages: StageConfig[]): boolean {
@@ -86,7 +84,6 @@ export function syncStageStatuses(projectDir: string, runId: string, stageIds: s
 }
 
 interface ScopeSafeStageServices {
-  monitorApprovalRequests: ReturnType<typeof createApprovalMonitor>['monitorApprovalRequests'];
   reconcileCompletedStageAttempts: ReturnType<typeof createScopeReconciler>['reconcileCompletedStageAttempts'];
 }
 
@@ -101,7 +98,6 @@ export function createStageSettlementBoundary(input: {
 }
 
 export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
-  const { monitorApprovalRequests } = services;
 
   async function runScopeSafeStageGroup(
     stages: StageConfig[],
@@ -111,7 +107,6 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
     execute: (stage: StageConfig, settlementBoundary?: (phase: 'attempt_closed') => Promise<void>) => Promise<RunResult | void>,
     repairEvidence?: RepairRoundSnapshot,
   ): Promise<void> {
-    const runDirPath = runDir(projectDir, runId);
     const declaredStageById = new Map(stages.map((stage) => [stage.id, stage]));
     let pending = stages;
     const executedStages: StageConfig[] = [];
@@ -133,9 +128,7 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
         undefined,
         runId,
       );
-      const wave = await runStageWave(selected, {
-        monitorApproval: (completion) => monitorApprovalRequests({ selected, projectDir, runId, runDirPath, iteration, completion }),
-        execute: async (initialStage) => {
+      const wave = await Promise.allSettled(selected.map(async (initialStage) => {
         const stage = initialStage;
         try {
           await execute(stage, createStageSettlementBoundary({ stage, projectDir, runId, context }, services));
@@ -148,8 +141,7 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
           recordThrownStageAttempt(projectDir, runId, stage.id, retries, error, { role: stage.role, iteration });
           throw error;
         }
-        },
-      });
+      }));
       executedStages.push(...selected);
       // Each serialized wave observes the preceding author's settled content.
       // Retain those captures for independent repair review,
@@ -160,13 +152,12 @@ export function createScopeSafeStageRunner(services: ScopeSafeStageServices) {
         }
         Object.assign(repairEvidence.declaredScopes, context.snapshot.declaredScopes);
       }
-      const executionError = wave.results.find((item): item is PromiseRejectedResult => item.status === 'rejected');
+      const executionError = wave.find((item): item is PromiseRejectedResult => item.status === 'rejected');
       if (executionError) throw executionError.reason;
-      const parkedDuringExecution = wave.parked;
       // Let recursive filesystem notifications queued by a synchronous adapter
       // reach the run-scoped journal before reconciliation reads its cursor.
       await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
-      if (parkedDuringExecution || isPausedRunStatus(readRunState(projectDir, runId).status)) {
+      if (isPausedRunStatus(readRunState(projectDir, runId).status)) {
         interrupted = true;
         break;
       }

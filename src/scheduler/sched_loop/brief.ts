@@ -22,7 +22,6 @@ export function refuseResearchBudget(state: StoreState, research: ResearchConfig
   });
   if (assessment.pass) return false;
   delete state.parked;
-  if (state.decisionGraph) delete state.decisionGraph.pendingQuestion;
   concludeRun(state, { status: 'failed', reasonCode: 'admission_refused',
     detail: `Research budget admission refused: ${assessment.reason}. Adjust the named authored budget or its named engine binding before launch.` });
   recordRunEvent(state.projectDir, state.runId, { type: 'admission_rejected', runId: state.runId,
@@ -33,10 +32,10 @@ export function refuseResearchBudget(state: StoreState, research: ResearchConfig
 export function configureWorkflowBrief(
   workflow: WorkflowConfig, projectDir: string, runId: string, runDirPath: string,
   maxIterations: number, resumingExistingRun: boolean, taskDescription?: string,
-  autoApprove?: boolean, campaignId?: string,
+  campaignId?: string,
   inheritCampaignContext = true, briefAdmission?: BriefAdmissionRecord,
 ): {kind: 'settled'; state: StoreState} | {kind: 'configured'; taskDescription?: string} {
-  if (taskDescription || autoApprove || campaignId || briefAdmission) {
+  if (taskDescription || campaignId || briefAdmission) {
     const initState = readRunState(projectDir, runId);
     if (taskDescription && !resumingExistingRun) {
       initState.taskDescription = taskDescription;
@@ -48,7 +47,6 @@ export function configureWorkflowBrief(
         }
       } catch { /* non-critical */ }
     }
-    if (autoApprove) initState.autoApprove = true;
     if (briefAdmission) initState.briefAdmission = briefAdmission;
     if (campaignId) {
       initState.campaignId = campaignId;
@@ -71,7 +69,7 @@ export function configureWorkflowBrief(
       : readFileSync(briefPath, 'utf-8')).trim();
     if (briefContent) {
       const parsed = parseBriefFrontmatter(briefContent);
-      const { terminalStates, research, outputs, stripped, authorizations } = parsed;
+      const { terminalStates, research, outputs, stripped } = parsed;
       // An already selected library workflow retains its recorded metadata
       // tolerance; the command entrances validate the full brief before launch.
       const { frontmatterError, ...workflowDeclaration } = parsed;
@@ -84,18 +82,9 @@ export function configureWorkflowBrief(
         return { kind: 'settled', state };
       }
       taskDescription = stripped || briefContent;
-      if (parsed.authorizationsError) {
-        const detail = `${parsed.authorizationsError} The entire declaration is ignored; external requests still require a human.`;
-        log.warn({ runId, detail }, 'authorization declaration not admitted');
-        recordRunEvent(projectDir, runId, { type: 'execution_notice', runId, timestamp: new Date().toISOString(),
-          source: 'scheduler', level: 'warning', detail });
-      }
       if (outputs?.length) taskDescription += `\n\nDeclared outputs (required by the brief):\n${outputs.map(output => `- ${output.path} (${output.expectedType})`).join('\n')}\nGuidance cannot remove these obligations. Report conflicting actual constraints rather than silently overriding either one.`;
       const s = readRunState(projectDir, runId);
-      // A consumed continuation replaces authority, including a removed grant.
-      if (terminalStates || research || outputs || authorizations || parsed.authorizationsError || s.authorizations) {
-        if (authorizations) s.authorizations = authorizations;
-        else delete s.authorizations;
+      if (terminalStates || research || outputs) {
         if (terminalStates) {
           s.terminalStates = terminalStates;
           if (!resumingExistingRun) s.terminalArtifactBaselines = Object.fromEntries(

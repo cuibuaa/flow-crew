@@ -74,7 +74,7 @@ function unchosenJoinDependency(stage: StageConfig, dependency: string, stages: 
     const targets = source.decision?.successors.filter(id => stages.has(id)) ?? [];
     if (targets.length < 2) return false;
     const record = state.decisionGraph?.records.filter(record => record.stageId === source.id).at(-1);
-    const choice = record?.outcome === 'questions' ? undefined : record?.successor;
+    const choice = record?.successor;
     const descendsFrom = (id: string, target: string) => id === target || transitivelyDependsOn(id, target, stages);
     return Boolean(choice && targets.includes(choice)
       && targets.every(target => stage.depends_on.some(id => descendsFrom(id, target)))
@@ -104,7 +104,7 @@ export function isStageInSkippedBranch(stageId: string, stages: ReadonlyMap<stri
       && decisionControls(source, id, state) && !transitivelyDependsOn(source.id, id, stages));
     if (incoming.length && incoming.every(source => {
       const record = state.decisionGraph?.records.filter(record => record.stageId === source.id).at(-1);
-      return record?.outcome !== 'questions' && record?.successor && record.successor !== id;
+      return record?.successor && record.successor !== id;
     }) && !state.decisionGraph?.enabled[id]) return true;
     if (completedReview) return false;
     if (id !== stageId && status === STAGE_STATUS.SKIPPED && stage.condition?.trim()) return true;

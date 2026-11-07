@@ -175,77 +175,16 @@ Sources: [state](../src/run-state-access.ts), [status/guide/interrupt](../src/cl
 [events](../src/cli-events.ts), [watch](../src/watch.ts),
 [cancellation](../src/cancellation-policy.ts), [task CLI](../src/cli-task.ts).
 
-## Approvals
+## Unattended execution
 
-Human approval supplies authority outside the run: other repositories, credentials,
-outward network effects, deletion of user data, shared devices, or git history outside
-the run branch. Admitted writes, private scratch, run-local tool environment setup and
-framework-owned isolated validation proceed under their existing execution owners.
-Contract errors receive engine decisions; approval cannot override engine ownership or frozen-input protections.
-Calls to the run's configured provider are inside the run's authority and never
-require an approval request. Native provider authentication remains owned by the
-provider; reading or injecting credentials is a separate external effect.
+After launch, stages use their existing authority under the brief and continue as far as
+possible when a resource is unavailable. Their structured result and terminal report state
+any gap. There is no execution request/decision transport or entry clarification pause.
+The chooser chooses and records assumptions for wrap-up. Missing author-owned facts end
+the run with a result naming what the author must supply before launching again.
 
-The brief may declare `authorizations` in frontmatter (see the
-[brief contract](brief-contract.md#declared-authorizations)). The closed declaration
-set is `provider_calls: true`, `downloads: {hosts: [exact.lowercase.host]}` and
-`spend: {usd: 50}`. Requests within these bounds receive an engine approval through
-the existing append-only transport, with `source: scheduler` and `viaDeclaration`
-naming the frontmatter field. Unknown keys, forbidden categories and invalid bounds
-produce an admission diagnostic and leave the entire declaration unadmitted; the
-run proceeds under its existing authority and external requests still park.
-
-A worker that needs external authorization writes one request to its injected stage slot
-`stages/<id>/approval_request.json` and stops before the action. Required fields are `id`
-(or alias `requestId`), nonblank `action`, and `risk: external`; `target`, `title`, `body`
-describe the external effect and exact authority needed. IDs match `[A-Za-z0-9._-]{1,64}`.
-The worker owns categorization: `category` is one of `provider_calls`, `downloads`,
-`spend`, `credentials`, `other_repositories`, `user_data_deletion`, `shared_devices`,
-`external_git_history`. For downloads also name `host`, one exact lowercase hostname;
-for spend give `amountUsd`, the full maximum USD commitment. Code validates the
-closed schema and compares only membership, `amountUsd <= usd` and exact host equality.
-The cap is per request, not a cumulative spend meter. Split distinct effects into
-separate requests and wait for each decision; a spend category cannot authorize
-credential injection or a shared device. Downloads authorize only the named host;
-redirects to other hosts require separate authority. No wildcard or subdomain matching.
-Missing/unknown categories, malformed bounds, requests outside the declaration,
-and every never-declarable category park. Legacy category-less files still load.
-Code never classifies request titles, targets, bodies or brief prose.
-The stage slot determines the requesting stage, even if its JSON names another stage.
-
-Legacy exec/write/unknown requests receive a deterministic answer without parking.
-A target physically inside the requesting stage's run subtree, excluding engine records,
-acknowledges existing scratch authority. Symlinks, traversal, another stage's work and
-engine records cannot expand it. Other non-external requests are denied: use the existing
-execution/scope mechanism, or explicitly describe an external effect with `risk: external`.
-Refusal of this grant leaves existing admitted capabilities unchanged. The answer grants
-no device, credential or network authority. Engine answers use the same
-append-only decision transport and identify their source as the scheduler.
-
-The scheduler watches active batches as well as inspecting completed ones. It persists the
-request, chooses the oldest unresolved external item, parks the run without `completedAt`, suspends
-workers and closes children before releasing ownership. Requests are idempotent by run and
-ID; resolutions are append-only, first-responder-wins. The decision is projected at
-`approvals/<id>.decision.json`; read it before acting. An external approval authorizes
-that effect; its denial forbids it. An engine answer changes no existing capabilities.
-An engine answer under `viaDeclaration` acknowledges the brief's authority for that
-categorized bounded effect. The legacy scratch answer grants no external authority.
-
-Session push stores one event and renders it for two audiences. Synchronous Claude
-and Codex Stop hooks put the human summary in `systemMessage` and the event identity,
-duties and exact ACK command in `reason`. Claude asyncRewake stderr is model-only;
-the synchronous Stop hook supplies the human warning. Session-push list, watch,
-frontend user-message transports and notifier fallback use the human summary.
-At selection, wake claim and send, resolved approval pushes are superseded by their
-decision projection. The run-linked `session-push/delivery/<event>.json` receipt
-records the decision, its time and `ackRequired: false`; no business ACK is fabricated.
-An unresolved request remains deliverable. Other wrap-up obligations remain open.
-
-CLI approve and deny both resume a parked run through daemon registration by default,
-preserving run/DAG/iteration identity. `--no-resume` records a decision without relaunch.
-Resume still checks brief admission. Standing rules, `--always`, `rules` and `revoke` are
-retired. Root request variants remain historical compatibility inputs. Full shell access
-means this request protocol is not a host-wide interception of arbitrary side effects.
+Historical approval logs and paused run records remain readable by the CLI, dashboard and
+wrap-up readers. They grant no new authority and have no decision/resume endpoint.
 
 Exhausted research gates use their admitted escalation terminal owner. Without that owner,
 the run finishes incomplete with the failing criteria and missing-owner evidence. It does
@@ -277,21 +216,20 @@ An unfinished repair continues its admitted gate round; the related gates review
 the new repair without restarting earlier authoring or planning work.
 The task registry supplies the run ID and project directory; the dashboard Resume
 control beside Cancel requests the same continuation. Resume still checks brief
-admission, scheduler ownership, persisted execution compatibility and unresolved approvals.
+admission, scheduler ownership, persisted execution compatibility.
 Only explicit continuation resumes cancelled work.
 Cancellation settles interrupted attempts and their stage ledgers, and appends their terminal
 `attempt_failed` event for `events` and session-push wrap-up. Resume requires settled execution records; it refuses unfinished attempts left by an older cancellation without rewriting them. Archived `stopped` records remain readable as `cancelled`.
 `flowcrew task retry <task-id>` requests another launch attempt:
 before terminal settlement it retains any existing run binding, and after settlement
 it starts a fresh run with a new plan, stage history and iteration budget. Retry does
-not resume cancelled work. Parked approval requests use the Inbox decision controls.
+not resume cancelled work.
 
 For a run without a registered task, the existing continuation command remains
 `flowcrew quick --background --project <project-dir> --existing-run-id <run-id>`.
 Omit `--background` to continue that run in the foreground.
 
-Sources: [inbox](../src/inbox.ts), [request paths](../src/approval-artifacts.ts),
-[active monitoring](../src/scheduler/sched_policy/approvals.ts), [decision CLI](../src/cli-inbox.ts),
+Sources: [historical inbox reader](../src/inbox.ts),
 [continuation admission](../src/scheduler/sched_loop/launch.ts), [daemon queue](../src/orchestrator.ts).
 
 ## Deploy while tasks are in flight
@@ -382,7 +320,7 @@ the global hold and compatible peers parked. Repair the refusal and retry: held 
 revalidated and their refusal is cleared only on successful admission. Explicit cancellation
 excludes that task without reviving it. Queue writes happen under the active latch; an
 interruption remains retryable. Repeated continuation does not grant attempts twice.
-Approval parks still require their own decisions; cancellation takes precedence. Task
+Historical approval parks remain readable; cancellation takes precedence. Task
 launch retry budgets are not charged for the hold.
 If a scheduler is lost while the hold is pending, existing restart recovery must first
 prove owner/command fate and reconcile its ledger. A proven resumable interruption joins

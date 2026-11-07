@@ -12,7 +12,7 @@ import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetr
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, buildRoleRegistry, loadBasePrompt } from '../sched_admission/dispatch.js';
 import { log } from '../sched_admission/shared.js';
-import { appendApprovalRequestContract, appendAttemptDeadlineContract, appendGateConstraintAuditContext, appendPlannerAdmissionContract, appendResearchPathContract, appendProjectWriteContext } from '../sched_policy/prompt-contracts.js';
+import { appendAttemptDeadlineContract, appendGateConstraintAuditContext, appendPlannerAdmissionContract, appendResearchPathContract, appendProjectWriteContext } from '../sched_policy/prompt-contracts.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -226,10 +226,9 @@ export async function executeSingleStage(
 /** Prompt-only enrichment shared by ordinary execution and gate repair. */
 export function appendStageExecutionContracts(
   resolvedPrompt: string, stage: StageConfig, allStages: StageConfig[],
-  state: Pick<StoreState, 'research' | 'terminalStates' | 'workflowName' | 'authorizations'>,
+  state: Pick<StoreState, 'research' | 'terminalStates' | 'workflowName'>,
   projectDir: string, runId: string, runDirPath: string,
 ): string {
-  resolvedPrompt = appendApprovalRequestContract(resolvedPrompt, runDirPath, stage.id, state.authorizations);
   resolvedPrompt = appendProjectWriteContext(resolvedPrompt, stage);
   resolvedPrompt = appendResearchPathContract(resolvedPrompt, state.research, state.terminalStates);
   if (stage.dynamic_dispatch) {

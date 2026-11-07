@@ -148,10 +148,10 @@ Historical workflow files remain readable for admitted runs and library fixtures
 
 Any stage can declare `decision: {successors: [next_stage, replan], default: next_stage}`.
 A decision returns one JSON object with `successor` and `reason`; review decisions also return
-closed risk-area objects and the chooser returns concrete `questions` plus `metric_search`.
+closed risk-area objects and the chooser returns `assumptions`, `missing_author_facts` and `metric_search`.
 The default must belong to the declared set. `continue` releases ordinary dependencies; `replan`
 reruns planning at an idle boundary in the same iteration. Invalid ordinary outputs take the
-declared default and record why; invalid chooser outputs pause for a declaration. Outside-set
+declared default and record why; invalid chooser outputs fail their attempt and use the existing retry. Missing author-owned facts end the run with a named result. Outside-set
 choices are refused and recorded. Declared paths remain subject to full plan, scope, result-duty
 and finite-budget admission. Replanning cannot change executed duties or discard result obligations.
 Gate verdicts and historical repair edges translate to these same bounded successor transitions.

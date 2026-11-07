@@ -197,7 +197,7 @@ async function createHarness(): Promise<Harness> {
     tokens_in: 0,
     tokens_out: 0,
   }), 'utf-8');
-  writeFileSync(join(mockDir, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single coherent fixture task.', metric_search: false, questions: [] }) }));
+  writeFileSync(join(mockDir, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single coherent fixture task.', metric_search: false, assumptions: [], missing_author_facts: [] }) }));
   writeFileSync(join(mockDir, 'assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Bounded fixture change.', risk_areas: [] }) }));
   writeFileSync(join(mockDir, 'review.json'), JSON.stringify({
     output_text: 'portable fixture gate passed', exit_code: 0,

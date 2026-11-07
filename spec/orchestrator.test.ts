@@ -18,12 +18,11 @@ import { createBriefAdmission, inspectBrief } from '../src/brief-preflight.js';
 import {
   activeRunsByProject,
   claimLaunchIntent,
-  findParkedRunForProject,
   invalidateRunLockCache,
   releaseLaunchIntent,
   writeSchedulerProcessIdentity,
 } from '../src/run-lock.js';
-import { recordRequest, resolveRequest } from '../src/inbox.js';
+import { recordRequest, resolveRequest } from './test-support/legacy-approvals.js';
 import { supervisionPaths } from '../src/supervision.js';
 import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
@@ -489,7 +488,7 @@ describe('Orchestrator', () => {
 
   // Stable item-17 workload IDs. The running fixture now proves live process
   // ownership; the missing/dead-owner behavior is covered by the replay suite.
-  it.each(['running', 'parked'])('waits for a readable %s bound run when its unit reports failed', async (runStatus) => {
+  it.each(['running'])('waits for a readable %s bound run when its unit reports failed', async (runStatus) => {
     const runId = `bound-${runStatus}`;
     const runPath = writeRun(runId, runStatus, runStatus === 'parked' ? { requestId: 'bound-request', pausedAt: new Date(clock).toISOString() } : undefined);
     if (runStatus === 'parked') addPendingApproval(runId, 'bound-request');
@@ -525,7 +524,7 @@ describe('Orchestrator', () => {
     await orchestrator.tickOnce();
     expect(registry.get(task.id)).toMatchObject({ status: 'stuck', run_id: runId, attempt: 1 });
     expect(registry.get(task.id)?.notes).toContain('RECOVERY_FATE_UNKNOWN');
-    expect(registry.get(task.id)?.notes).toContain('no pending approval');
+    expect(registry.get(task.id)?.notes).toContain('no proven continuation authority');
     advance(120_000);
     await orchestrator.tickOnce();
     expect(registry.get(task.id)?.status).toBe('stuck');
@@ -900,33 +899,6 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(1);
     expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 3 });
     expect(systemd.runs[0].unit).toBe(`flowcrew-task-${task.id}-attempt-3.service`);
-  });
-
-  it.each(['enqueue', 'register', 'resume'] as const)('reuses the bound task for an approved run via %s without consuming a retry', async method => {
-    const runId = 'approved-continuation';
-    const admitted = admittedBrief('Resume the approved work.');
-    const runPath = writeRun(runId, 'parked', { requestId: 'approval-request', pausedAt: new Date(clock).toISOString() });
-    const runJson = join(runPath, 'run.json');
-    writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
-      taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission }));
-    addPendingApproval(runId, 'approval-request');
-    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'deferred' });
-    registry.update(task.id, { started_at: new Date(clock).toISOString() });
-    resolveRequest(tempDir, runId, 'approval-request', 'approve', { by: 'fixture' });
-
-    expect(readRunState(tempDir, runId).deploymentHold).toBeUndefined();
-    const resumed = method === 'resume' ? await orchestrator.resume(task.id)
-      : await orchestrator[method]({ ...admitted, projectDir: tempDir, run_id: runPath });
-    expect(resumed.id).toBe(task.id);
-    expect(registry.list({ status: 'all' })).toHaveLength(1);
-    if (method !== 'register') {
-      expect(systemd.runs).toHaveLength(0);
-      await orchestrator.tickOnce();
-    }
-    expect(systemd.runs).toHaveLength(1);
-    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 1 });
-    expect(systemd.runs[0].unit).not.toBe(task.systemd_unit);
-    expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
   });
 
   it.each(['failed', 'incomplete', 'complete'])('launches an explicit queued continuation of a %s run before reconciling its outcome', async status => {
@@ -1329,67 +1301,6 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     expect(systemd.runs.length).toBe(1);
     expect(registry.get(a.id)?.status).toBe('running');
     expect(registry.get(b.id)?.status).toBe('deferred');
-  });
-
-  it('uses created_at for never-started tasks so an older parked run cannot pin them (H2)', async () => {
-    const task = registry.create({ ...admittedBrief('fresh task'), projectDir: tempDir });
-    writeRun('old-park', 'parked', {
-      requestId: 'old-request',
-      pausedAt: '2026-07-29T23:59:59.000Z',
-    });
-    addPendingApproval('old-park', 'old-request');
-    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
-
-    expect(findParkedRunForProject(tempDir)).toBeNull();
-    await orchestrator.tickOnce();
-
-    expect(registry.get(task.id)?.status).toBe('running');
-    expect(systemd.runs).toHaveLength(1);
-  });
-
-  it('rejects parked records without pausedAt and ignores already-resolved requests (H2)', () => {
-    writeRun('no-paused-at', 'parked', { requestId: 'missing-time' });
-    addPendingApproval('no-paused-at', 'missing-time');
-
-    writeRun('resolved-park', 'parked', {
-      requestId: 'resolved-request',
-      pausedAt: '2026-07-30T00:00:01.000Z',
-    });
-    addPendingApproval('resolved-park', 'resolved-request');
-    expect(resolveRequest(tempDir, 'resolved-park', 'resolved-request', 'approve', { by: 'test' }).won).toBe(true);
-
-    expect(findParkedRunForProject(tempDir, '2026-07-30T00:00:00.000Z')).toBeNull();
-  });
-
-  it('keeps approval waits durable without appending unchanged rows across 100 ticks', async () => {
-    const task = registry.create({ brief_text: 'task', projectDir: tempDir, status: 'running', run_id: 'approval-park' });
-    registry.update(task.id, { started_at: new Date(clock).toISOString() });
-    writeRun('approval-park', 'parked', {
-      requestId: 'approval-request',
-      pausedAt: '2026-07-30T00:00:01.000Z',
-    });
-    addPendingApproval('approval-park', 'approval-request');
-    systemd.states.set(task.systemd_unit, CLEAN_UNIT_EXIT);
-
-    await orchestrator.tickOnce();
-    const first = registry.get(task.id)!;
-    expect(first).toMatchObject({ status: 'deferred', run_id: 'approval-park', defer_kind: 'wait' });
-    expect(Date.parse(first.not_before!)).toBeGreaterThan(clock);
-    expect(systemd.runs).toHaveLength(0);
-
-    const rows = registry.metrics().records;
-    const ticks = registry.readRecentTicks(task.id, 200).length;
-    for (let tick = 0; tick < 100; tick++) {
-      advance(31_000);
-      await orchestrator.tickOnce();
-    }
-    const second = registry.get(task.id)!;
-    expect(second.status).toBe('deferred');
-    expect(registry.metrics().records).toBe(rows);
-    expect(second.not_before).toBe(first.not_before);
-    expect(registry.readRecentTicks(task.id, 200)).toHaveLength(ticks);
-    expect(second.defer_reason).toContain('awaiting approval resume');
-    expect(systemd.runs).toHaveLength(0);
   });
 
   it('defers a readable running bound run instead of starting a new run (C2)', async () => {

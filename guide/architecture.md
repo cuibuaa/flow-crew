@@ -13,7 +13,7 @@ flowchart LR
   Settlement --> Records
 ```
 
-This diagram summarizes the engineering path, not every terminal research or approval branch.
+This diagram summarizes the engineering path, not every terminal research branch.
 The scheduler owns graph execution and settlement; the worker owns one adapter execution.
 Planning and judging are model work when live adapters are selected. Admission, declared
 checks, deadlines, process identity and publication integrity are code boundaries.
@@ -119,9 +119,9 @@ Engine mutation-capable filesystem access goes through `engine-fs`, enforced by 
 Reserved run carrier identities and acknowledged history are checked independently of
 process supervision. Worker-authored outputs do not become engine records merely by
 occupying a stage directory or resembling a reserved name. Native shared SQLite carrier
-families have their own ownership boundary. Cross-process approval resolutions are projected
-by the resident owner under the run lock; parked status alone does not grant another writer
-ownership while children close. Integrity refusal is an execution failure, not ordinary
+families have their own ownership boundary. Synchronous engine writes advance the guard
+through their filesystem owner; a stage write to an engine carrier still voids its attempt.
+Integrity refusal is an execution failure, not ordinary
 work that can be retried into authority.
 
 These checks do not turn shell-enabled workers into an OS sandbox. Use an isolated host/workspace

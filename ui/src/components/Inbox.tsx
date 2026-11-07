@@ -1,23 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  BriefAdmissionRequestError,
   cancelTask,
   fetchInboxOverview,
-  resolveInboxItem,
 } from "../api";
 import type {
-  BriefAdmissionSubmission,
-  BriefPreflightResponse,
   DeferredInboxItem,
-  InboxDecision,
   InboxItem,
   InboxOverview,
   InboxSource,
   InboxSourceCoverage,
   InboxStaleItem,
 } from "../types";
-import { BriefPreflightPanel } from "./NewRunModal";
 import { showToast } from "./Toast";
 import { isRecord, isNonNegativeInteger } from "../lib/source-validation";
 
@@ -26,19 +20,8 @@ const SOURCE_KEYS = ["approvals", "deferred", "stale"] as const;
 
 type InboxSourceKey = typeof SOURCE_KEYS[number];
 
-interface ResolutionNotice {
-  key: string;
-  title: string;
-  message: string;
-}
-
-interface BriefAdmissionReview {
-  preflight: BriefPreflightResponse;
-  decision: InboxDecision;
-}
-
 const SOURCE_LABELS: Record<InboxSourceKey, string> = {
-  approvals: "Pending approvals",
+  approvals: "Historical requests",
   deferred: "Deferred tasks",
   stale: "Stale run alerts",
 };
@@ -53,10 +36,6 @@ function waitingTime(createdAt: string): string {
   if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"}`;
   const days = Math.floor(hours / 24);
   return `${days} day${days === 1 ? "" : "s"}`;
-}
-
-function decisionLabel(decision: InboxDecision): string {
-  return decision === "approve" ? "approved" : "denied";
 }
 
 function retryLabel(notBefore?: string | null): string {
@@ -185,11 +164,9 @@ function focusAfterMutation(): void {
 
 export default function Inbox({
   loadOverview = fetchInboxOverview,
-  resolveItem = resolveInboxItem,
   markRunFailed = cancelTask,
 }: {
   loadOverview?: typeof fetchInboxOverview;
-  resolveItem?: typeof resolveInboxItem;
   markRunFailed?: typeof cancelTask;
 }) {
   const [overview, setOverview] = useState<InboxOverview | null>(null);
@@ -198,8 +175,6 @@ export default function Inbox({
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [lastSuccessAt, setLastSuccessAt] = useState<Date | null>(null);
   const [itemErrors, setItemErrors] = useState<Record<string, string>>({});
-  const [briefAdmissionReviews, setBriefAdmissionReviews] = useState<Record<string, BriefAdmissionReview>>({});
-  const [resolutionNotices, setResolutionNotices] = useState<ResolutionNotice[]>([]);
   const [resolving, setResolving] = useState<string | null>(null);
   const mounted = useRef(false);
   const trustedOverview = useRef<InboxOverview | null>(null);
@@ -258,60 +233,6 @@ export default function Inbox({
       else delete next[key];
       return next;
     });
-  };
-
-  const resolveApproval = async (
-    item: InboxItem,
-    decision: InboxDecision,
-    admission?: BriefAdmissionSubmission,
-  ) => {
-    const key = `approval:${item.runId}:${item.requestId}`;
-    if (resolving) return;
-    setResolving(key);
-    setItemError(key);
-    try {
-      const result = await resolveItem(item.runId, item.requestId, {
-        decision,
-        ...admission,
-      });
-      if (!result.won) {
-        if (result.winner) {
-          const at = new Date(result.winner.at).toLocaleString();
-          const message = `${result.winner.by} already marked this request ${decisionLabel(result.winner.decision)} at ${at}`;
-          setResolutionNotices((current) => [
-            { key, title: item.title, message },
-            ...current.filter((notice) => notice.key !== key),
-          ]);
-        } else {
-          showToast(result.error ?? "Approval decision did not take effect");
-        }
-      } else {
-        showToast(result.resumeRegistered ? `Request ${decisionLabel(decision)}; resume queued` : `Request ${decisionLabel(decision)}`, "success");
-      }
-      setBriefAdmissionReviews((current) => {
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      if (await refresh()) focusAfterMutation();
-    } catch (error) {
-      if (error instanceof BriefAdmissionRequestError) {
-        setBriefAdmissionReviews((current) => ({
-          ...current,
-          [key]: {
-            preflight: error.preflight,
-            decision,
-          },
-        }));
-        setItemError(key, error.message);
-        return;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      setItemError(key, `Approval failed: ${message}`);
-      showToast(`Approval failed: ${message}`);
-    } finally {
-      if (mounted.current) setResolving(null);
-    }
   };
 
   const markFailed = async (item: InboxStaleItem) => {
@@ -374,28 +295,6 @@ export default function Inbox({
             </div>
           ) : null}
 
-          {resolutionNotices.length ? (
-            <section className="inbox-resolution-results" aria-label="Approval results" data-testid="inbox-resolution-results">
-              {resolutionNotices.map((notice) => (
-                <article className="inbox-card resolution-card" key={notice.key}>
-                  <div role="status" aria-live="polite" aria-atomic="true" data-testid={`inbox-resolution-${notice.key}`}>
-                    <h2>Approval result: {notice.title}</h2>
-                    <p className="inbox-body">{notice.message}</p>
-                  </div>
-                  <div className="inbox-actions">
-                    <button
-                      className="btn ghost"
-                      type="button"
-                      onClick={() => setResolutionNotices((current) => current.filter((item) => item.key !== notice.key))}
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </section>
-          ) : null}
-
           {sourceIssues.length ? (
             <div className="inbox-source-errors" data-testid="inbox-source-errors">
               {sourceIssues.map((key) => {
@@ -422,12 +321,11 @@ export default function Inbox({
             <div className="inbox-sections">
               {overview.approvals.items.length ? (
                 <section className="inbox-group" data-testid="inbox-approvals">
-                  <h2>Pending approvals <span>{overview.approvals.items.length}</span></h2>
+                  <h2>Historical requests <span>{overview.approvals.items.length}</span></h2>
                   <div className="inbox-list">
                     {overview.approvals.items.map((item) => {
                       const itemKey = `approval:${item.runId}:${item.requestId}`;
                       const busy = resolving === itemKey;
-                      const briefReview = briefAdmissionReviews[itemKey];
                       const campaign = item.campaignName ?? item.campaignId;
                       const runHref = item.campaignId
                         ? `/campaign/${encodeURIComponent(item.campaignId)}/run/${encodeURIComponent(item.runId)}`
@@ -445,7 +343,7 @@ export default function Inbox({
                           <div className="inbox-meta">
                             <span>run <Link className="mono" to={runHref}>{item.runId}</Link></span>
                             <span>{campaign ? `campaign ${campaign}` : "Standalone"}</span>
-                            <span>Waiting for {waitingTime(item.createdAt)}</span>
+                            <span>Recorded {waitingTime(item.createdAt)} ago</span>
                           </div>
                           {item.runStanding ? (
                             <div className={`inbox-run-standing standing-${item.runStanding.kind}`}>
@@ -454,44 +352,6 @@ export default function Inbox({
                             </div>
                           ) : null}
                           {itemErrors[itemKey] ? <div className="inbox-item-error" role="alert">{itemErrors[itemKey]}</div> : null}
-                          {briefReview ? (
-                            <>
-                              <BriefPreflightPanel preflight={briefReview.preflight} />
-                              <div className="inbox-actions">
-                                <button
-                                  className="btn ghost"
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => {
-                                    setBriefAdmissionReviews((current) => {
-                                      const next = { ...current };
-                                      delete next[itemKey];
-                                      return next;
-                                    });
-                                    setItemError(itemKey);
-                                  }}
-                                >Cancel brief review</button>
-                                <button
-                                  className="btn"
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => void resolveApproval(
-                                    item,
-                                    briefReview.decision,
-                                    {
-                                      briefPreflightDigest: briefReview.preflight.report.digest,
-                                      briefPreflightReceipt: briefReview.preflight.receipt,
-                                    },
-                                  )}
-                                >Continue decision and resume</button>
-                              </div>
-                            </>
-                          ) : (
-                            <div className="inbox-actions">
-                              <button className="btn" type="button" disabled={busy} onClick={() => void resolveApproval(item, "approve")}>{!item.runStanding || item.runStanding.kind === "parked" ? "Approve and resume" : "Approve"}</button>
-                              <button className="btn ghost" type="button" disabled={busy} onClick={() => void resolveApproval(item, "deny")}>Deny</button>
-                            </div>
-                          )}
                         </article>
                       );
                     })}

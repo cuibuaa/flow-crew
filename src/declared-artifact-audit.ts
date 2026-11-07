@@ -17,7 +17,7 @@ export function inspectDeclaredStageReads(input: { artifactContract: ArtifactCon
           if (!owner.decision?.successors.includes(original)) return false;
           const choice = input.state?.decisionGraph?.records.filter(record => record.stageId === owner.id).at(-1);
           const selected = stages.find(stage => stage.id === choice?.successor);
-          return choice?.outcome !== 'questions' && selected && owner.decision.successors.includes(selected.id)
+          return selected && owner.decision.successors.includes(selected.id)
             && input.statuses?.[selected.id]?.status === STAGE_STATUS.COMPLETE
             && !artifactProducerReadError({ ...read, source: { kind: 'stage', stage: selected.id, artifact: read.source.kind === 'stage' ? read.source.artifact : '' } }, selected);
         });

@@ -50,11 +50,11 @@ button:focus-visible,a:focus-visible,.stage-output-preview:focus-visible,.activi
 .error-state{margin-top:16px;border-color:rgba(248,113,113,.55);background:rgba(248,113,113,.08);color:var(--error);font-style:normal}
 .workspace-load-error{margin:0 0 16px;text-align:left}
 .recent-count-hint{margin-top:8px;color:var(--muted);font-size:11px}
-.approval-waiting{display:flex;align-items:center;gap:12px;margin-top:16px;padding:14px 16px;border:1px solid rgba(251,191,36,.5);border-radius:8px;background:rgba(251,191,36,.08);color:var(--text-secondary)}
-.approval-waiting strong{color:var(--warning);font-size:15px}
-.approval-waiting .btn{margin-left:auto;text-decoration:none}
+.run-paused{display:flex;align-items:center;gap:12px;margin-top:16px;padding:14px 16px;border:1px solid rgba(251,191,36,.5);border-radius:8px;background:rgba(251,191,36,.08);color:var(--text-secondary)}
+.run-paused strong{color:var(--warning);font-size:15px}
+.run-paused .btn{margin-left:auto;text-decoration:none}
 
-/* Cross-run approval inbox */
+/* Cross-run history and task inbox */
 .inbox-view{max-width:980px;margin:0 auto}.inbox-empty{margin-top:24px}
 .inbox-list{display:grid;gap:14px;margin-top:20px}
 .inbox-card{padding:18px;background:var(--panel);border:1px solid var(--border);border-radius:10px}
@@ -67,13 +67,13 @@ button:focus-visible,a:focus-visible,.stage-output-preview:focus-visible,.activi
 .inbox-meta a{color:var(--accent);text-decoration:none}
 .inbox-meta code{color:var(--text-secondary)}
 .inbox-run-standing{display:grid;gap:2px;margin-top:12px;padding:9px 11px;border:1px solid var(--border);border-radius:6px;background:var(--code);color:var(--text-secondary);font-size:11px}.inbox-run-standing strong{color:var(--text)}.inbox-run-standing.standing-ended,.inbox-run-standing.standing-orphaned{border-color:rgba(251,191,36,.45)}.inbox-run-standing.standing-unknown{border-color:rgba(248,113,113,.45)}
-.inbox-source-errors,.inbox-resolution-results{display:grid;gap:8px;margin-top:20px}.inbox-source-error,.inbox-item-error{padding:10px 12px;border:1px solid rgba(248,113,113,.5);border-radius:6px;background:rgba(248,113,113,.08);color:var(--text-secondary);font-size:12px;overflow-wrap:anywhere}.inbox-source-error strong,.inbox-item-error{color:var(--error)}.inbox-item-error{margin-top:12px}.inbox-refresh-error{text-align:left}.resolution-card{border-color:rgba(96,165,250,.45)}.resolution-card h2{margin:0;font-size:15px}
+.inbox-source-errors{display:grid;gap:8px;margin-top:20px}.inbox-source-error,.inbox-item-error{padding:10px 12px;border:1px solid rgba(248,113,113,.5);border-radius:6px;background:rgba(248,113,113,.08);color:var(--text-secondary);font-size:12px;overflow-wrap:anywhere}.inbox-source-error strong,.inbox-item-error{color:var(--error)}.inbox-item-error{margin-top:12px}.inbox-refresh-error{text-align:left}
 .inbox-actions{display:flex;gap:8px;margin-top:16px}.inbox-actions .always{color:var(--warning);border-color:rgba(251,191,36,.45)}
 .run-audit-details>summary{cursor:pointer;color:var(--text-secondary);font-weight:600}.run-audit-body{padding-top:14px}.run-audit-body>h2{margin-top:0}.audit-stage-meta{margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--code)}
 .inbox-sections{display:grid;gap:26px;margin-top:20px}.inbox-group>h2{display:flex;align-items:center;gap:8px;margin:0;font-size:15px}.inbox-group>h2 span{min-width:22px;padding:2px 7px;border-radius:999px;background:var(--code);color:var(--muted);font-size:11px;text-align:center}.inbox-group .inbox-list{margin-top:10px}.inbox-actions a.btn{display:inline-flex;align-items:center;text-decoration:none}.wait-card{border-color:rgba(251,191,36,.35)}.stale-card{border-color:rgba(248,113,113,.4)}
 .badge.risk-external{color:var(--warning);border-color:rgba(251,191,36,.4)}
 .badge.risk-exec,.badge.risk-write{color:var(--error);border-color:rgba(248,113,113,.4)}
-@media (max-width:700px){.topbar{gap:4px;padding:0 8px}.topbar .brand{display:none}.tabs{width:100%;margin-left:0;justify-content:space-between;gap:0}.tab{padding:6px 8px}.campaign-header,.inbox-card-head,.approval-waiting{align-items:stretch;flex-direction:column}.campaign-header>.badge{align-self:flex-start;max-width:100%;white-space:normal}.approval-waiting .btn{margin-left:0}.inbox-actions{flex-wrap:wrap}}
+@media (max-width:700px){.topbar{gap:4px;padding:0 8px}.topbar .brand{display:none}.tabs{width:100%;margin-left:0;justify-content:space-between;gap:0}.tab{padding:6px 8px}.campaign-header,.inbox-card-head,.run-paused{align-items:stretch;flex-direction:column}.campaign-header>.badge{align-self:flex-start;max-width:100%;white-space:normal}.run-paused .btn{margin-left:0}.inbox-actions{flex-wrap:wrap}}
 
 /* Truthful process and route diagnostics */
 .dashboard-stale-banner{display:flex;align-items:center;gap:10px;padding:9px 16px;border-bottom:1px solid rgba(248,113,113,.65);background:rgba(248,113,113,.14);color:var(--text-secondary);font-size:12px}

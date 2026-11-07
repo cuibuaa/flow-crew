@@ -27,7 +27,7 @@ export function reviewFacts(projectDir: string, directory: string, state: StoreS
 export function decisionInput(stage: StageConfig, projectDir: string, directory: string, state: StoreState): { system: string; user: string } {
   const predecessor = stagePredecessor(readEvidence(directory), stage.id, state.stages[stage.id]?.attempts?.at(-1));
   if (stage.decision?.kind === 'shape') return { system: CHOOSER_PROMPT,
-    user: JSON.stringify({ task: state.taskDescription, research: state.research ?? null, declarations: state.decisionGraph?.declarations ?? [], predecessor }) };
+    user: JSON.stringify({ task: state.taskDescription, research: state.research ?? null, predecessor }) };
   const facts = reviewFacts(projectDir, directory, state);
   const system = POST_AUTHOR_PROMPT.replaceAll('review_full', stage.decision!.successors[1]).replaceAll('Select review (', `Select ${stage.decision!.successors[0]} (`);
   return { system, user: JSON.stringify({ task: state.taskDescription, ...facts, predecessor }) };

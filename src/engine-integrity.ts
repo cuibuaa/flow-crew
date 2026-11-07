@@ -239,11 +239,8 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
       if (/^gate_reevaluation\/verdict_correction_[^/]+\.json$/.test(local)) return false;
       // The independent heartbeat warning is checked against live identity and never grades a result.
       if (local === 'scheduler-loop-stall.json') return false;
-      // Operator resolutions enter through the shared inbox. The resident
-      // scheduler publishes their canonical decision and event records.
-      if (local === 'approvals.jsonl') return false;
       if (local === 'user_input.md' || local === 'signals' || /^signals\/interrupt_[^/]+\.json$/.test(local)) return false;
-      if (/^stages\/[^/]+\/(?:approval_request|plan_revision_request)\.json$/.test(local)) return false;
+      if (/^stages\/[^/]+\/plan_revision_request\.json$/.test(local)) return false;
       return isEngineOwnedRunPath(local, { id: input.stageId, dynamic_dispatch: input.dynamicDispatch }) || /^handoff_[^/]+\.md(?:\/|$)/.test(local);
     }
     return inside(distribution, path);

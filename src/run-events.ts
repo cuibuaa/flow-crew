@@ -9,7 +9,7 @@ import type { ProviderFailure } from './provider-result.js';
 import { isSettledStageStatus, isTerminalRunStatus, requireExistingRunArtifactDirectory, requireRunArtifactDirectory, runDir, STAGE_STATUS } from './store.js';
 
 export type RunEventType =
-  | 'decision_chosen' | 'decision_defaulted' | 'decision_refused' | 'decision_questions' | 'decision_declaration'
+  | 'decision_chosen' | 'decision_defaulted' | 'decision_refused'
   | 'execution_notice'
   | 'stage_wrap_up_requested'
   | 'stage_wrap_up_delivered'
@@ -20,7 +20,6 @@ export type RunEventType =
   | 'attempt_started'
   | 'attempt_finished'
   | 'attempt_failed'
-  | 'attempt_suspended'
   | 'guidance_written'
   | 'guidance_delivery_checked'
   | 'command_timeout_projection'
@@ -46,14 +45,7 @@ export type RunEventType =
   | 'research_round_contract_repaired'
   | 'research_gate_candidate_settled'
   | 'reality_gate_advisory'
-  | 'parallel_scope_serialized'
-  // Approval inbox: the run suspended on a consequential action, and the
-  // resolution that released it. Part of the run's audit narrative — the only
-  // place an operator sees WHY a run stopped without a verdict. Deliberately
-  // NOT a summary-refresh trigger: an approval is not new measurable work.
-  | 'approval_parked'
-  | 'approval_attempt_suspended'
-  | 'approval_resolved';
+  | 'parallel_scope_serialized';
 
 export interface RunEvent {
   type: RunEventType;

@@ -486,8 +486,6 @@ export interface RunStateFormat {
 }
 
 export interface StoreState {
-  /** Validated brief declaration; absent in legacy runs. */
-  authorizations?: import('./brief-authorizations.js').BriefAuthorizations;
   deploymentHold?: import('./deployment-hold.js').RunDeploymentHold;
   continuationFailure?: { at: string; reason: string; generation?: string };
   /** Observed scheduler admissions only; legacy starts are never fabricated. */
@@ -509,12 +507,12 @@ export interface StoreState {
   status: RunStatus;
   /** Engine-owned cause of the latest conclusion; absent in legacy records. */
   reasonCode?: import('./scheduler/sched_policy/run-completion.js').RunConclusionReason;
+  decisionGraph?: import('./decision-graph.js').DecisionGraphState;
   /**
-   * Set while status==='parked': the approval request this run suspended on.
+   * Historical approval metadata, retained only for record readers.
    * `pausedAt` freezes the elapsed clock so a park that waits a day does not
    * render as a 24h hang.
    */
-  decisionGraph?: import('./decision-graph.js').DecisionGraphState;
   parked?: {
     requestId: string;
     action: string;
@@ -567,6 +565,7 @@ export interface StoreState {
   gateRetryRound?: { iteration: number; round: number };
   maxIterations?: number;
   maxRetries?: number;
+  /** Historical metadata only; execution never consults these flags. */
   autoApproveRetries?: boolean;
   autoApprove?: boolean;
   timeoutMs?: number;
@@ -1312,8 +1311,7 @@ function mergeStateHistories(current: StoreState | undefined, incoming: StoreSta
   let graph = incomingGraph ?? currentGraph;
   if (currentGraph && incomingGraph) {
     const records = mergeImmutableHistory('decisionGraph.records', currentGraph.records, incomingGraph.records);
-    const declarations = mergeImmutableHistory('decisionGraph.declarations', currentGraph.declarations, incomingGraph.declarations);
-    graph = { ...(records.length > incomingGraph.records.length || declarations.length > incomingGraph.declarations.length ? currentGraph : incomingGraph), records, declarations,
+    graph = { ...(records.length > incomingGraph.records.length ? currentGraph : incomingGraph), records,
       visits: Object.fromEntries([...new Set([...Object.keys(currentGraph.visits), ...Object.keys(incomingGraph.visits)])].map(key => [key, Math.max(currentGraph.visits[key] ?? 0, incomingGraph.visits[key] ?? 0)])),
       maxVisits: currentGraph.maxVisits === undefined ? incomingGraph.maxVisits : incomingGraph.maxVisits === undefined ? currentGraph.maxVisits : Math.min(currentGraph.maxVisits, incomingGraph.maxVisits) };
   }
@@ -1680,7 +1678,7 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
 /** Close exactly the current interrupted execution without inventing another attempt. */
 export function interruptedStageStatus(previous: StageStatus, completedAt: string, error: string, terminationCause: 'cancelled' | 'host_restart' = 'cancelled'): StageStatus {
   const attempt = previous.attempts?.at(-1);
-  if (attempt?.status === 'closed') return settledStageAttemptStatus(previous, attempt.index, false, { exitCode: 143, error, terminationCause });
+  if (attempt?.status === 'closed') return settledStageAttemptStatus(previous, attempt.index, { exitCode: 143, error, terminationCause });
   if (attempt?.status === 'running') return completedStageAttemptStatus(previous, previous.retries, {
     // Sampled calls are a lower bound: interruption supplies no final usage.
     ...sumInvocationUsage([{ ...attempt, tokenUsage: 'unknown', costUsage: 'unknown' }]),
@@ -1860,8 +1858,6 @@ export interface CompleteStageAttemptInput extends InvocationUsage {
   disposition?: AttemptDisposition;
   invocations?: NativeInvocationUsage[];
   exitCode: number;
-  /** Real control-boundary suspension, never a verification placeholder. */
-  suspended?: boolean;
   processExitCode?: number | null;
   processSignal?: NodeJS.Signals | null;
   providerFailure?: ProviderFailure;
@@ -1916,7 +1912,7 @@ export function completedStageAttemptStatus(
     ...current,
     ...(completion.disposition ? { disposition: completion.disposition } : {}),
     completedAt,
-    status: completion.suspended ? 'suspended' : completion.exitCode === 0 ? 'complete' : 'failed',
+    status: completion.exitCode === 0 ? 'complete' : 'failed',
     duration_ms: completion.duration_ms,
     exitCode: completion.exitCode,
     processExitCode: completion.processExitCode,
@@ -1939,7 +1935,7 @@ export function completedStageAttemptStatus(
   const writes = uniqueStrings(previous?.writes, completion.writes);
   const usage = sumInvocationUsage(attempts);
   const final: StageStatus = {
-    status: completion.suspended ? STAGE_STATUS.PENDING : completion.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED,
+    status: completion.exitCode === 0 ? STAGE_STATUS.COMPLETE : STAGE_STATUS.FAILED,
     exitCode: completion.exitCode,
     processExitCode: completion.processExitCode,
     processSignal: completion.processSignal,
@@ -1948,8 +1944,8 @@ export function completedStageAttemptStatus(
     artifacts: uniqueStrings(previous?.artifacts, completion.artifacts),
     retries,
     startedAt: attempts[0]?.startedAt,
-    completedAt: completion.suspended ? undefined : completedAt,
-    error: completion.suspended ? undefined : completion.error,
+    completedAt,
+    error: completion.error,
     tokens_in: sumAttemptField(attempts, 'tokens_in'),
     tokens_out: sumAttemptField(attempts, 'tokens_out'),
     tokens_cached: usage.tokens_cached,
@@ -1999,7 +1995,7 @@ export function closeStageAttempt(
 
 /** One owner projects a closed execution's final classification onto its stage. */
 export function settledStageAttemptStatus(
-  previous: StageStatus, attemptIndex: number, suspended = false,
+  previous: StageStatus, attemptIndex: number,
   failure?: { exitCode: number; error: string; terminationCause?: AttemptTerminationCause },
 ): StageStatus {
   const attempts = (previous.attempts ?? []).map(attempt => ({ ...attempt }));
@@ -2009,24 +2005,22 @@ export function settledStageAttemptStatus(
   }
   if (failure) Object.assign(attempt, failure, { terminationCause: failure.terminationCause ?? 'exit' });
   if (attempt.exitCode !== 0) delete attempt.continuation;
-  // Reconciliation can already have refused or suspended this exact execution.
-  attempt.status = attempt.exitCode !== 0 ? 'failed'
-    : suspended || attempt.status === 'suspended' ? 'suspended' : 'complete';
+  attempt.status = attempt.exitCode !== 0 ? 'failed' : 'complete';
   return {
     ...previous, attempts,
     continuation: attempt.continuation,
-    status: attempt.status === 'suspended' ? STAGE_STATUS.PENDING : attempt.status,
-    exitCode: attempt.status === 'suspended' ? undefined : attempt.exitCode,
-    completedAt: attempt.status === 'suspended' ? undefined : attempt.completedAt,
-    error: attempt.status === 'suspended' ? undefined : attempt.error,
+    status: attempt.status,
+    exitCode: attempt.exitCode,
+    completedAt: attempt.completedAt,
+    error: attempt.error,
   };
 }
 
 export function settleStageAttempt(
   projectDir: string, runId: string, stageId: string, attemptIndex: number,
-  suspended = false, failure?: { exitCode: number; error: string; terminationCause?: AttemptTerminationCause },
+  failure?: { exitCode: number; error: string; terminationCause?: AttemptTerminationCause },
 ): StageStatus {
-  const status = settledStageAttemptStatus(readStageStatus(projectDir, runId, stageId), attemptIndex, suspended, failure);
+  const status = settledStageAttemptStatus(readStageStatus(projectDir, runId, stageId), attemptIndex, failure);
   writeStageStatus(projectDir, runId, stageId, status);
   return status;
 }
@@ -2179,38 +2173,6 @@ export function rependStageStatus(
     acceptedFrom: undefined,
     continuation: undefined,
   };
-}
-
-/**
- * Convert one settled execution into a durable control-boundary suspension.
- * The attempt remains in history, while the stage becomes runnable again and
- * cannot release downstream dependencies.
- */
-export function suspendStageAttempt(
-  projectDir: string,
-  runId: string,
-  stageId: string,
-  attemptIndex: number,
-): StageStatus {
-  const previous = readStageStatus(projectDir, runId, stageId);
-  const attempts = [...(previous.attempts ?? [])];
-  const index = attempts.findIndex((attempt) => attempt.index === attemptIndex);
-  if (index < 0) throw new Error(`Cannot suspend stage ${stageId} attempt ${attemptIndex}: attempt not found`);
-  attempts[index] = {
-    ...attempts[index],
-    status: 'suspended',
-    completedAt: attempts[index].completedAt ?? new Date().toISOString(),
-  };
-  const suspended: StageStatus = {
-    ...previous,
-    status: STAGE_STATUS.PENDING,
-    exitCode: undefined,
-    completedAt: undefined,
-    error: undefined,
-    attempts,
-  };
-  writeStageStatus(projectDir, runId, stageId, suspended);
-  return suspended;
 }
 
 /**

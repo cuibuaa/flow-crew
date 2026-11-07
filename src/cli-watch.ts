@@ -168,7 +168,7 @@ export async function cmdWatch(args: string[]): Promise<number> {
   return cmdWatchWithDeps(args, { pendingPushLines: () => {
     push ??= new SessionPush(new TaskRegistry({ baseDir: fcGlobalDir(), createDirectories: false }));
     // Watch observes liveness without publishing delivery dispositions.
-    return push.pending(undefined, false).flatMap(event => {
+    return push.pending().flatMap(event => {
       if (shown.has(event.eventId)) return [];
       shown.add(event.eventId);
       return [renderPushEvent(event, push!.registry.baseDir).human];

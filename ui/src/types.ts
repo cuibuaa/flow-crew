@@ -134,18 +134,7 @@ export interface InboxItem {
   campaignName?: string;
 }
 
-export interface InboxResolveResult {
-  ok: boolean;
-  won: boolean;
-  item?: InboxItem;
-  resumeRegistered?: boolean;
-  error?: string;
-  winner?: {
-    decision: InboxDecision;
-    by: string;
-    at: string;
-  };
-}
+
 
 export interface DeferredInboxItem {
   id: string | number;

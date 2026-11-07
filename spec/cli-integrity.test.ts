@@ -174,7 +174,7 @@ describe('command help before side effects', () => {
     ['daemon', 'hold', '--timeout-ms', '0', '--help'],
     ['inbox', 'approve', 'missing', '--always', '--help'],
     ['guide', '--run', '2000-01-01T00-00-00-help', 'operator text', '--help'],
-  ])('prints help for %s without changing the run', (...args) => {
+  ])('handles help or the retired %s command without changing the run', (...args) => {
     const isolated = fixture();
     const run = join(isolated.fcHome, 'runs', '2000-01-01T00-00-00-help');
     mkdirSync(run, { recursive: true });
@@ -186,8 +186,9 @@ describe('command help before side effects', () => {
       env: { ...process.env, HOME: isolated.home, FC_HOME: isolated.fcHome, TMPDIR: isolated.temp },
     });
     expect(result.error).toBeUndefined();
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, result.stderr).toBe(args[0] === 'inbox' ? 1 : 0);
     expect(result.stdout).toContain('Usage:');
+    if (args[0] === 'inbox') expect(result.stderr).toContain('Unknown command: inbox');
     if (args[0] === 'daemon') {
       expect(result.stdout).toContain('daemon hold');
       expect(result.stdout).toContain('--timeout-ms');

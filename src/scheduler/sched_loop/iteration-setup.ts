@@ -15,7 +15,7 @@ import { checkCampaignHealth } from '../sched_policy/campaign.js';
 import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { deriveCriterionDischarges } from '../sched_settlement/gate-verdict.js';
 import { STAGE_STATUS, StoreState, isContinuingStage, captureStageEvidence, isTerminalRunStatus, readRunState, rependStageStatus, requireKnownRunStatus, runDir, writeRunState, writeStageStatus } from '../../store.js';
-import { concludeRepeatedBlockage, tryParkOnApprovalRequest, tryTerminateOnTerminalState } from './services.js';
+import { concludeRepeatedBlockage, tryTerminateOnTerminalState } from './services.js';
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -49,12 +49,6 @@ export async function prepareWorkflowIteration(
     // [Unified terminal gate, call site 1 of 2] Catch a terminal artifact
     // written by a PRIOR iteration (or present at start). Takes precedence
     // Floor-unmet writes a hint and falls through.
-    // [Approval park gate, call site 1 of 2] An unresolved approval request
-    // written by a previous iteration (or still unresolved at relaunch) parks
-    // again instead of re-executing the consequential action.
-    const parkedTop = await tryParkOnApprovalRequest(state, { projectDir, runId, runDirPath, iteration });
-    if (parkedTop) return { kind: 'settled', state: parkedTop };
-
     const terminalTop = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration, adapter });
     if (terminalTop.decision === 'matched') return { kind: 'settled', state: terminalTop.state };
 

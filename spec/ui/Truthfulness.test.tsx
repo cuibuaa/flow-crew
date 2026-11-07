@@ -251,66 +251,6 @@ describe("dashboard truthfulness", () => {
     expect(screen.getByLabelText("Brief content")).not.toHaveAttribute("readonly");
   });
 
-  it("shows an Inbox resume 409 and retries the unperformed decision with the exact receipt", async () => {
-    const approval: InboxItem = {
-      runId: "run-admission",
-      projectDir: "/tmp/project",
-      requestId: "deploy-fixture",
-      action: "deploy",
-      risk: "external",
-      title: "Deploy safely",
-      createdAt: "2026-08-03T00:00:00.000Z",
-      state: "pending",
-    };
-    const overview = (items: InboxItem[]): InboxOverview => ({
-      approvals: { status: "complete", items },
-      deferred: { status: "complete", items: [] },
-      stale: { status: "complete", items: [] },
-      campaignCount: 0,
-    });
-    const review = p11Preflight({
-      digest: "5".repeat(64),
-      findings: [{
-        code: "terminal_states_missing",
-        fingerprint: "terminal-states-missing",
-        level: "warn",
-        message: "Resume warning",
-        consequential: true,
-      }],
-    }, "6".repeat(64));
-    const loadOverview = vi.fn()
-      .mockResolvedValueOnce(overview([approval]))
-      .mockResolvedValue(overview([]));
-    const resolveItem = vi.fn()
-      .mockRejectedValueOnce(new BriefAdmissionRequestError("Resume brief review required", 409, review))
-      .mockResolvedValueOnce({ ok: true, won: true, resumeRegistered: true });
-    render(
-      <MemoryRouter>
-        <><Inbox loadOverview={loadOverview} resolveItem={resolveItem} /><ToastContainer /></>
-      </MemoryRouter>,
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Approve and resume" }));
-
-    expect(await screen.findByText("Resume warning")).toBeInTheDocument();
-    expect(screen.getByText("Resume brief review required")).toBeInTheDocument();
-    const continueButton = screen.getByRole("button", { name: "Continue decision and resume" });
-    expect(continueButton).toBeEnabled();
-    expect(resolveItem).toHaveBeenCalledTimes(1);
-
-    fireEvent.click(continueButton);
-    await waitFor(() => expect(resolveItem).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText(/Request approved; resume queued/i)).toBeInTheDocument();
-    expect(resolveItem.mock.calls[1]).toEqual([
-      approval.runId,
-      approval.requestId,
-      {
-        decision: "approve",
-        briefPreflightDigest: review.report.digest,
-        briefPreflightReceipt: review.receipt,
-      },
-    ]);
-  });
-
   it("keeps the navigation name-only instead of inventing one campaign-level status", () => {
     window.localStorage.setItem("fc.campaignFilter", "all");
     const campaigns: Campaign[] = [
@@ -405,7 +345,7 @@ describe("dashboard truthfulness", () => {
     expect(await screen.findByText("Campaign index failed to load: server offline")).toBeInTheDocument();
   });
 
-  it("makes a parked run's approval wait prominent and links to the inbox", () => {
+  it("renders a recorded pause without a decision instruction", () => {
     const run: RunDetailData = {
       runId: "parked-run",
       projectDir: "/tmp/project",
@@ -417,9 +357,9 @@ describe("dashboard truthfulness", () => {
     };
     render(<MemoryRouter><RunDetail run={run} /></MemoryRouter>);
 
-    const banner = screen.getByTestId("parked-approval-banner");
-    expect(banner).toHaveTextContent("Awaiting approval");
-    expect(within(banner).getByRole("link", { name: "Open approval in Inbox" })).toHaveAttribute("href", "/inbox");
+    const banner = screen.getByTestId("parked-run-banner");
+    expect(banner).toHaveTextContent("Run paused");
+    expect(within(banner).getByRole("link", { name: "Historical requests" })).toHaveAttribute("href", "/inbox");
   });
 
   it("uses router-native topbar navigation without a document reload", async () => {

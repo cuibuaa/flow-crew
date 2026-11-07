@@ -547,9 +547,9 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
             <strong>{run.operational.lastRejection?.detail ?? "none recorded"}</strong>
           </div>
           <div>
-            <span>Pending decisions</span>
+            <span>Recorded requests</span>
             <strong>{run.operational.pendingApproval
-              ? `Approval: ${run.operational.pendingApproval.detail}`
+              ? `Historical request: ${run.operational.pendingApproval.detail}`
               : run.operational.pendingScope.length > 0
                 ? `${run.operational.pendingScope.length} scope revision ${run.operational.pendingScope.length === 1 ? "request" : "requests"}`
                 : "none"}</strong>
@@ -567,10 +567,10 @@ export default function RunDetail({ run: providedRun }: { run?: RunDetailData })
       ) : null}
 
       {!terminalRun && run.status === "parked" ? (
-        <div className="approval-waiting" role="status" data-testid="parked-approval-banner" data-answers="Q2 Q5">
-          <strong>Awaiting approval</strong>
-          <span>No worker is active for this run. Review the pending decision before work can continue.</span>
-          <Link className="btn" to="/inbox">Open approval in Inbox</Link>
+        <div className="run-paused" role="status" data-testid="parked-run-banner" data-answers="Q2 Q5">
+          <strong>Run paused</strong>
+          <span>Inspect the recorded pause reason and run history.</span>
+          <Link className="btn" to="/inbox">Historical requests</Link>
         </div>
       ) : null}
 

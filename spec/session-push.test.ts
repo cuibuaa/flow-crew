@@ -350,7 +350,8 @@ describe('durable delivery and business ACK', () => {
     writeFileSync(join(root, 'runs', 'own-run', 'events.jsonl'), [source, { ...source, type: 'approval_parked', attemptIndex: 2 }].map(e => JSON.stringify(e)).join('\n') + '\n');
     await push.sweep();
     const ids = push.events().map(e => e.eventId).sort();
-    expect(push.events().map(e => e.kind)).toEqual(expect.arrayContaining(['attempt_failed', 'approval_parked', 'operator_wrap_up_required']));
+    expect(push.events().map(e => e.kind)).toEqual(expect.arrayContaining(['attempt_failed', 'operator_wrap_up_required']));
+    expect(push.events().some(e => e.kind === 'approval_parked')).toBe(false);
     push = new SessionPush(registry, dependencies);
     await push.sweep();
     expect(push.events().map(e => e.eventId).sort()).toEqual(ids);
@@ -388,9 +389,9 @@ describe('durable delivery and business ACK', () => {
     }
     const event = new SessionPush(registry).enqueue(task, { type: 'approval_attempt_suspended', runId: 'own-run',
       timestamp: '2020-01-01T00:00:01Z', ...(context === 'unknown' ? {} : { requestId: 'original' }) })!;
-    const known = context === 'inbox' || context === 'same-request';
+    const known = false;
     expect(event.requestTitle).toBe(known ? 'Known normalized title' : undefined);
-    expect(event.requestTarget).toBe(context === 'inbox' ? 'Known target' : undefined);
+    expect(event.requestTarget).toBeUndefined();
     const human = renderPushEvent(event, root).human;
     expect(human).not.toContain('Unrelated newer title');
     expect(human.includes('Request:')).toBe(known);

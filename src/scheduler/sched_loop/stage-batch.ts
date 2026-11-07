@@ -1,7 +1,6 @@
 import { atomicWrite } from '../../engine-fs.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 import { decideStageRetry } from '../sched_settlement/stage-execution.js';
-import { runStageWave } from '../stage-wave.js';
 // Select one shared-tree author and settle technical/failure/validation outcomes before terminal decisions.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
@@ -16,7 +15,7 @@ import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPausedRunStatus, i
 import { freshRunningStageProjection } from '../../worker.js';
 import { executeOrdinaryStage } from './ordinary-stage.js';
 import { join } from 'node:path';
-import { consumePlanRevisions, findAllReady, monitorApprovalRequests, reconcileCompletedStageAttempts, tryParkOnApprovalRequest, tryTerminateOnTerminalState } from './services.js';
+import { consumePlanRevisions, findAllReady, reconcileCompletedStageAttempts, tryTerminateOnTerminalState } from './services.js';
 
 export async function executeReadyBatch(
   sorted: StageConfig[], state: StoreState, projectDir: string, runId: string, runDirPath: string,
@@ -86,9 +85,7 @@ export async function executeReadyBatch(
       undefined,
       runId,
     );
-    const wave = await runStageWave(toRun, {
-      monitorApproval: (completion) => monitorApprovalRequests({ selected: toRun, projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, completion }),
-      execute: async (initialStage) => {
+    const wave = await Promise.allSettled(toRun.map(async (initialStage) => {
      const stage = initialStage;
      try {
         const boundary = createStageSettlementBoundary({ stage, projectDir, runId, context: ordinaryScopeContext }, { reconcileCompletedStageAttempts });
@@ -105,25 +102,12 @@ export async function executeReadyBatch(
        const failedResult: RunResult = { output: '', exitCode: 1, duration_ms: 0, timedOut: false };
        return { stage, result: failedResult, currentRetries: retriesNow };
      }
-      },
-    });
-    const rejected = wave.results.find((entry): entry is PromiseRejectedResult => entry.status === 'rejected');
+    }));
+    const rejected = wave.find((entry): entry is PromiseRejectedResult => entry.status === 'rejected');
     if (rejected) throw rejected.reason;
-    const results = wave.results.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value] : []);
-    const parkedDuringExecution = wave.parked;
-    await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+    const results = wave.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value] : []);
+    await new Promise<void>(resolve => setImmediate(resolve));
     await settleStageGroup(projectDir, runId, toRun);
-    for (const item of results) {
-      const postControlStatus = readStageStatus(projectDir, runId, item.stage.id);
-      if (
-        postControlStatus.status === STAGE_STATUS.PENDING
-        && postControlStatus.attempts?.at(-1)?.status === 'suspended'
-      ) {
-        item.result.suspended = true;
-        item.result.suspensionReason ??= 'approval';
-      }
-    }
-
     state = readRunState(projectDir, runId);
     let failed = false;
     let exhaustedAdapterFailure: {
@@ -134,12 +118,6 @@ export async function executeReadyBatch(
     for (const { stage, result, currentRetries } of results) {
       const decision = decideStageRetry(result, currentRetries, configuredTechnicalRetryLimit(), failureRetryLimit(stage, workflow));
       if (decision === 'engine_void') throw new Error(result.friendlyError);
-      if (result.suspended) {
-        technicalRetries.delete(stage.id);
-        state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
-        log.info({ stage: stage.id, reason: result.suspensionReason }, 'Stage suspended at control boundary; re-dispatching');
-        continue;
-      }
       const isAdapterFailure = !!result.providerFailure && result.providerFailure.kind !== 'refusal';
       if (decision === 'retry') {
         const failedStatus = readStageStatus(projectDir, runId, stage.id);
@@ -193,28 +171,16 @@ export async function executeReadyBatch(
       }) });
       return { kind: 'settled', state };
     }
-    if (parkedDuringExecution || isPausedRunStatus(state.status)) return { kind: 'settled', state };
+    if (isPausedRunStatus(state.status)) return { kind: 'settled', state };
     state = consumePlanRevisions(sorted, state, projectDir, runId, runDirPath, workflow, roleRegistry);
     if (isTerminalRunStatus(state.status)) return { kind: 'settled', state };
 
     // Scope admission may split one logical ready set into several physical
-    // waves. Do not park, terminate, or return a failure between those waves:
-    // the pre-E6 Promise.all batch let every ready peer finish, and its approval
-    // requests/artifacts remained observable even when another peer failed.
+    // waves. Let every ready peer settle before batch-level terminal handling.
     if (scopeDeferred.length > 0) {
       log.info({ deferred: scopeDeferred.map(({ stage }) => stage.id) }, 'Continuing serialized waves before batch-level terminal handling');
       return { kind: 'continue', state };
     }
-
-    // Check approvals and terminal artifacts after every settled batch, before later stages can change them.
-    const parkedEager = await tryParkOnApprovalRequest(state, {
-      projectDir,
-      runId,
-      runDirPath,
-      iteration: state.currentIteration ?? 1,
-      candidateStageIds: toRun.map((stage) => stage.id),
-    });
-    if (parkedEager) return { kind: 'settled', state: parkedEager };
 
     const terminalEager = await tryTerminateOnTerminalState(state, { projectDir, runId, runDirPath, iteration: state.currentIteration ?? 1, adapter });
     if (terminalEager.decision === 'matched') return { kind: 'settled', state: terminalEager.state };

@@ -185,7 +185,7 @@ describe('CLI argument dispatch before side effects', () => {
 
   it.each([
     ['task'], ['task', 'invalid'], ['daemon'], ['daemon', 'invalid'],
-    ['dashboard'], ['dashboard', 'invalid'], ['inbox', 'invalid'],
+    ['dashboard'], ['dashboard', 'invalid'],
     ['fc_tasks', 'invalid'], ['session-push'], ['session-push', 'invalid'],
     ['status', '--project'], ['guide', '--run'], ['interrupt', '--stage'],
     ['doctor', '--repair-registry', '--invalid'],
@@ -194,6 +194,16 @@ describe('CLI argument dispatch before side effects', () => {
     const result = await runCli(args, isolated);
     expect(result.code, JSON.stringify(result)).toBe(1);
     expect(result.stdout + result.stderr).toContain(`Usage: flowcrew ${args[0]} `);
+    expect(existsSync(isolated.fcHome)).toBe(false);
+    expect(readdirSync(isolated.home)).toEqual([]);
+  });
+
+  it.each([['inbox', 'list'], ['inbox', 'approve', 'request'], ['inbox', 'deny', 'request']])('rejects the retired decision command %j without creating a store', async (...args) => {
+    const isolated = fixture();
+    const result = await runCli(args, isolated);
+    expect(result.code).toBe(1);
+    expect(result.stdout + result.stderr).toContain('Unknown command: inbox');
+    expect(result.stdout + result.stderr).not.toContain('Usage: flowcrew inbox ');
     expect(existsSync(isolated.fcHome)).toBe(false);
     expect(readdirSync(isolated.home)).toEqual([]);
   });

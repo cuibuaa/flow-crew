@@ -29,8 +29,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { getItem, isPendingInboxItemState } from './inbox.js';
-import { fcGlobalDir, isPausedRunStatus, runsRoot, updateRunState } from './store.js';
+import { fcGlobalDir, runsRoot, updateRunState } from './store.js';
 import { listOperationalRunIdsFromIndex, setRunSchedulerActive } from './run-index.js';
 import { canonicalRunDirectory, canonicalRunId, resolveRunIdentity } from './cancellation-policy.js';
 export const LAUNCH_INTENT_TTL_MS = 60_000;
@@ -612,40 +611,4 @@ export function isProjectBusy(projectDir: string, selfOwnerRunId?: string, nowMs
   const intent = readLaunchIntent(projectDir, selfOwnerRunId, nowMs);
   if (intent) return intent.ownerRunId;
   return activeRunsByProject().get(normalizedProjectDir(projectDir)) ?? null;
-}
-
-/**
- * A run for this project that is PARKED on an approval request, if any.
- *
- * The daemon needs this to tell "the unit exited because the run is waiting for
- * a human" from "the unit crashed". Without it, a park looks exactly like a
- * clean-exit-without-commit and the orchestrator relaunches the brief as a NEW
- * run — re-running the very consequential action awaiting approval.
- *
- * Matched by projectDir + a park that started at/after the task's launch, so a
- * months-old parked run cannot pin a fresh task in place.
- */
-export function findParkedRunForProject(projectDir: string, sinceIso?: string): { runId: string; requestId?: string } | null {
-  const since = sinceIso ? Date.parse(sinceIso) : NaN;
-  // Callers with a registry task always have created_at available. Fail closed
-  // when no usable boundary is supplied so an abandoned historical park can
-  // never pin unrelated future work.
-  if (!Number.isFinite(since)) return null;
-  let dirs: string[];
-  try { dirs = listOperationalRunIdsFromIndex('') ?? readdirSync(runsRoot()); } catch { return null; }
-  for (const dir of dirs.sort().reverse()) {
-    try {
-      const rs = JSON.parse(readFileSync(join(runsRoot(), dir, 'run.json'), 'utf-8')) as {
-        projectDir?: string; status?: string; parked?: { requestId?: string; pausedAt?: string };
-      };
-      if (rs.projectDir !== projectDir || !rs.status || !isPausedRunStatus(rs.status)) continue;
-      const pausedAt = rs.parked?.pausedAt ? Date.parse(rs.parked.pausedAt) : NaN;
-      if (!Number.isFinite(pausedAt) || pausedAt < since) continue;
-      const requestId = rs.parked?.requestId;
-      const item = requestId ? getItem(dir, requestId) : undefined;
-      if (!requestId || !item || !isPendingInboxItemState(item.state)) continue;
-      return { runId: dir, requestId };
-    } catch { /* skip */ }
-  }
-  return null;
 }

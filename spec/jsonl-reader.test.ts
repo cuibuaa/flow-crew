@@ -8,7 +8,7 @@ import { readRunDriftProjection } from '../src/run-drift.js';
 import { readRunStateView } from '../src/run-state-view.js';
 import { SessionPush } from '../src/session-push.js';
 import { createRun } from './test-support/create-run.js';
-import { getItem, recordRequest, resolveRequest } from '../src/inbox.js';
+import { getItem, recordRequest, resolveRequest } from './test-support/legacy-approvals.js';
 import { readJsonlFile, readJsonlFileWithDiagnostics, type JsonlReadCursor } from '../src/jsonl.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
 import { fcGlobalDir, setFcGlobalDir, reserveRun } from '../src/store.js';

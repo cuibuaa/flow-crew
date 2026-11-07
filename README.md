@@ -129,7 +129,7 @@ flowcrew task show <numeric-id>
 Use `daemon hold` and `daemon continue` for the [deployment procedure](guide/operations.md#deploy-while-tasks-are-in-flight).
 `task resume` (and Dashboard Resume) explicitly continues compatible cancelled, failed or incomplete work,
 preserving completed work and remaining budget. Cancellation stays cancelled until explicit continuation; retry starts fresh after settlement.
-Parked approvals use Inbox decisions. [CLI](guide/cli.md#services-and-tasks) · [Operations](guide/operations.md#inspect-guide-and-stop).
+After launch, stages continue under the brief and report unavailable resources at wrap-up. [CLI](guide/cli.md#services-and-tasks) · [Operations](guide/operations.md#inspect-guide-and-stop).
 
 When launch records a supported frontend and session, session-push queues terminal and attention
 events for delivery to the launcher. Keep the daemon running for delivery retries. ACK each
@@ -200,8 +200,8 @@ Checks and their inputs need to express the outcome you actually want.
 
 > [!WARNING]
 > **Live runs receive unattended shell access.** The adapters select bypass modes for normal
-> approval and sandbox prompts. Input protection and approval requests govern the engine's protocol;
-> they are not an operating-system sandbox. Use a dedicated workspace, read the brief and review
+> approval and sandbox prompts. Brief constraints guide stages; the engine checks declared input
+> and output contracts; this is not an operating-system sandbox. Use a dedicated workspace, read the brief and review
 > its evidence before accepting the result. To stop an intentionally selected registered task,
 > use `flowcrew task cancel <id>` and inspect settlement as explained in [operations](guide/operations.md#inspect-guide-and-stop).
 

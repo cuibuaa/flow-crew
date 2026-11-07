@@ -49,7 +49,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
     calls.push({ stage: opts.stageId, prompt });
     const result = (value: unknown, writes: string[] = []) => ({ output: JSON.stringify(value), exitCode: 0, duration_ms: 1,
       writes, writeAttribution: 'structured' as const });
-    if (opts.stageId === 'choose') return result({ successor: 'implement', reason: 'One output', metric_search: false, questions: [] });
+    if (opts.stageId === 'choose') return result({ successor: 'implement', reason: 'One output', metric_search: false, assumptions: [], missing_author_facts: [] });
     if (opts.stageId === 'assess') return result({ successor: route![Math.min(++assessments - 1, route!.length - 1)], reason: 'Review current value', risk_areas: [] });
     if (opts.stageId === 'later_author') {
       writeFileSync(join(project, 'docs/other.txt'), 'Independent downstream output');

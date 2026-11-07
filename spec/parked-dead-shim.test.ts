@@ -253,7 +253,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
     await orchestrator.tickOnce();
 
     expect(registry.get(task.id)).toMatchObject({ status: 'stuck', attempt: 1, run_id: runId });
-    expect(registry.get(task.id)?.notes).toContain('no pending approval and no proven resume authority');
+    expect(registry.get(task.id)?.notes).toContain('no proven continuation authority');
     expect(registry.get(task.id)?.notes).toContain('RECOVERY_FATE_UNKNOWN');
     clock += 120_000;
     await orchestrator.tickOnce();

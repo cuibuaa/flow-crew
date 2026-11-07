@@ -19,7 +19,7 @@ export type { StageConfig, WorkflowConfig } from './scheduler/sched_admission/co
 export type { ScopeConflict } from './scheduler/sched_admission/frontier.js';
 export type { GateVerdictCorrection } from './scheduler/sched_admission/sessions.js';
 export type { TerminalConditionCoverageAssessment } from './scheduler/sched_admission/condition-coverage.js';
-export { appendIterationLog, ensureTerminalArtifactValidation, inspectApprovalRequests, monitorApprovalRequests, tryTerminateOnTerminalState, writeCampaignEntry } from './scheduler/sched_loop/services.js';
+export { appendIterationLog, ensureTerminalArtifactValidation, tryTerminateOnTerminalState, writeCampaignEntry } from './scheduler/sched_loop/services.js';
 export { immutableEvidenceConflict, resolveImmutableEvidenceBindings, scopeContainsPath } from './scheduler/sched_scope/path-capabilities.js';
 export { captureRepairRoundSnapshot } from './scheduler/sched_scope/snapshots.js';
 export { restoreProjectPath } from './scheduler/sched_scope/restore.js';

@@ -31,9 +31,8 @@ export type ApprovalRunStanding =
     };
 
 /**
- * Project an approval's owning run at read time. Approval state remains an
- * append-only human obligation; lifecycle/process evidence only says whether
- * the requester can still consume a decision without a separate restart.
+ * Read historical approval records for dashboard context. Lifecycle/process
+ * evidence describes the originating run; this reader cannot resolve or resume it.
  */
 export function inspectApprovalRunStanding(projectDir: string, runId: string): ApprovalRunStanding {
   let archived: ReturnType<typeof readArchivedRunState>;

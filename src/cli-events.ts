@@ -240,7 +240,7 @@ function pendingApproval(state: OperationalRunState): OperationalProjection['pen
     requestId,
     ...(stageId ? { stageId } : {}),
     ...(requestedAt ? { requestedAt } : {}),
-    detail: text(parked.reason) ?? text(parked.action) ?? 'operator approval is required',
+    detail: text(parked.reason) ?? text(parked.action) ?? 'historical pending request',
   };
 }
 

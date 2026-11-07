@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertDistFresh } from '../src/build-manifest.js';
@@ -23,6 +23,8 @@ export default function verifyTestRuntimeGeneration(): () => void {
   const tracked = execFileSync('git', ['ls-files', '-z'], gitOptions);
   const violations: string[] = [];
   for (const file of tracked.split('\0').filter(Boolean)) {
+    // Deleted tracked files belong to the index, not the tree being tested.
+    if (!existsSync(resolve(projectRoot, file))) continue;
     const bytes = readFileSync(resolve(projectRoot, file));
     if (bytes.includes(0)) continue; // Git's text scan also skips NUL-containing binary files.
     for (const [index, line] of bytes.toString('utf8').split('\n').entries()) {

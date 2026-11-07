@@ -30,9 +30,6 @@ import type { CampaignHistoryEntry } from "./campaigns.js";
 import { engineConfigDir, loadEngineDefaults } from './config.js';
 import { readActiveSchedulerLoopStall } from './scheduler-heartbeat.js';
 import {
-describeLiveRunOwner,
-findLiveRunOwnerForProject,
-invalidateRunLockCache,
 inspectRunScheduler,
 isProjectBusy,
 } from "./run-lock.js";
@@ -56,12 +53,10 @@ type TaskCreateInput,
 type TaskListFilter,
 } from './task-registry.js';
 import { readOperatorEvents,readOperationalProjection,type EventLike } from './cli-events.js';
-import { approvalResumeLaunch,isValidApprovalRequestId } from './approval-artifacts.js';
 import {
-getItem as getInboxItem,
 INBOX_FILTER_STATE,
 listAll as listInboxItems,
-resolveRequest,type InboxItem
+type InboxItem
 } from './inbox.js';
 import { inspectApprovalRunStanding } from './run-standing.js';
 import { z } from "zod";
@@ -76,7 +71,6 @@ type CampaignPageSources
 import {
 createBriefAdmission,
 inspectBrief,
-verifyBriefAdmission,
 type BriefAdmissionRecord,
 type BriefPreflightReport,
 } from './brief-preflight.js';
@@ -684,25 +678,6 @@ export async function cancelRunWithControlPlane(
   });
 }
 
-function projectAdmissionBlocker(
-  targetProjectDir: string,
-  selfRunId: string | undefined,
-  probe: typeof isProjectBusy,
-): string | null {
-  // The daemon deliberately caches its directory walk within a sweep. A user
-  // mutation is a launch boundary, so it must force a fresh observation.
-  invalidateRunLockCache();
-  if (selfRunId) {
-    const liveOwner = findLiveRunOwnerForProject(targetProjectDir);
-    if (liveOwner?.runId === selfRunId) return describeLiveRunOwner(liveOwner);
-  }
-  return probe(targetProjectDir, selfRunId);
-}
-
-function projectBusyMessage(blockingRunId: string): string {
-  return `project busy (run ${blockingRunId}); waiting for that run to finish`;
-}
-
 export interface DashboardOptions {
   /** Control-plane seams keep tests away from the real daemon and run probe. */
   registerTask?: DashboardTaskRegistrar;
@@ -729,15 +704,6 @@ const DashboardTaskCreateSchema = z.object({
   campaign: z.string().trim().min(1).optional(),
   campaignId: z.string().trim().min(1).optional(),
   campaignName: z.string().trim().min(1).optional(),
-  briefPreflightDigest: z.string().optional(),
-  briefPreflightReceipt: z.string().optional(),
-});
-
-const InboxResolveBodySchema = z.object({
-  decision: z.enum(['approve', 'deny']),
-  by: z.string().trim().min(1).optional(),
-  reason: z.string().optional(),
-  always: z.never({ error: 'Standing approval rules were retired; approve this request once.' }).optional(),
   briefPreflightDigest: z.string().optional(),
   briefPreflightReceipt: z.string().optional(),
 });
@@ -1054,34 +1020,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
       ),
     };
   };
-  const effectiveRunBrief = (state: StoreState, runId: string): { exactBrief: string; hasBriefSidecar: boolean } => {
-    const briefPath = join(runsRoot(), runId, 'task_brief.md');
-    const hasBriefSidecar = existsSync(briefPath);
-    return {
-      exactBrief: hasBriefSidecar ? readFileSync(briefPath, 'utf-8') : state.taskDescription ?? '',
-      hasBriefSidecar,
-    };
-  };
-  const admitExistingRunBrief = (
-    state: StoreState,
-    runId: string,
-    fields: DashboardBriefAdmissionFields,
-  ): DashboardBriefAdmissionResult => {
-    const { exactBrief, hasBriefSidecar } = effectiveRunBrief(state, runId);
-    const stored = verifyBriefAdmission(exactBrief, state.briefAdmission);
-    if (stored.status === 'valid' && state.briefAdmission) {
-      const report = inspectBrief(exactBrief);
-      return {
-        ok: true,
-        exactBrief,
-        hasBriefSidecar,
-        report,
-        receipt: issueBriefReceipt(report),
-        admission: state.briefAdmission,
-      };
-    }
-    return { ...admitDashboardBrief(exactBrief, fields), hasBriefSidecar };
-  };
   let cleanupComplete = false;
   let signalShutdownStarted = false;
   const shutdownFromSignal = () => {
@@ -1187,132 +1125,6 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   });
 
   app.get("/api/inbox/overview", async () => inboxOverview(projectDir, options));
-
-  app.post<{
-    Params: { runId: string; requestId: string };
-    Body: { decision?: unknown; by?: unknown; reason?: unknown; always?: unknown };
-  }>("/api/inbox/:runId/:requestId/resolve", async (req, reply) => {
-    const { runId, requestId } = req.params;
-    if (!isSafeId(runId)) return reply.code(400).send({ ok: false, won: false, error: 'invalid runId' });
-    if (!isValidApprovalRequestId(requestId)) {
-      return reply.code(400).send({ ok: false, won: false, error: 'unsafe approval request id' });
-    }
-    const body = InboxResolveBodySchema.safeParse(req.body);
-    if (!body.success) {
-      return reply.code(400).send({ ok: false, won: false, error: body.error.issues[0]?.message ?? 'decision must be approve or deny' });
-    }
-    const existing = getInboxItem(runId, requestId);
-    if (!existing || typeof existing.projectDir !== 'string' || !existing.projectDir) {
-      return reply.code(404).send({ ok: false, won: false, error: `unknown request: ${requestId}` });
-    }
-    if (existing.resolution) {
-      return {
-        ok: true,
-        won: false,
-        item: dashboardInboxItem(existing),
-        winner: {
-          decision: existing.resolution.decision,
-          by: existing.resolution.by,
-          at: existing.resolution.at,
-        },
-      };
-    }
-    // Resolving a parked request normally resumes that same run (approve and
-    // deny both need the agent to consume the decision). Admission therefore
-    // precedes resolveRequest: a 409 must not secretly consume the request.
-    const parkedState = readRunStateSafe(existing.projectDir, runId);
-    let resumeTask: TaskCreateInput | undefined;
-    if (parkedState && isPausedRunStatus(parkedState.status)) {
-      const targetProjectDir = parkedState.projectDir || existing.projectDir;
-      const blocker = projectAdmissionBlocker(
-        targetProjectDir,
-        runId,
-        options.isProjectBusy ?? isProjectBusy,
-      );
-      if (blocker) {
-        return reply.code(409).send({
-          ok: false,
-          won: false,
-          error: projectBusyMessage(blocker),
-        });
-      }
-      const briefAdmission = admitExistingRunBrief(parkedState, runId, body.data);
-      if (!briefAdmission.ok || !briefAdmission.admission) {
-        return reply.code(409).send({
-          ok: false,
-          won: false,
-          error: briefAdmission.error,
-          report: briefAdmission.report,
-          receipt: briefAdmission.receipt,
-        });
-      }
-      resumeTask = {
-        kind: 'quick',
-        run_id: runId,
-        projectDir: targetProjectDir,
-        brief_text: briefAdmission.exactBrief,
-        brief_admission: briefAdmission.admission,
-        launch_options: approvalResumeLaunch(parkedState),
-      };
-    }
-
-    const result = resolveRequest(existing.projectDir, runId, requestId, body.data.decision, {
-      by: body.data.by,
-      reason: body.data.reason,
-    });
-    const item = result.item ? dashboardInboxItem(result.item) : undefined;
-    if (result.won || result.item?.resolution) invalidateTaskListCache();
-    if (!result.won) {
-      const resolution = result.item?.resolution;
-      if (resolution) {
-        return {
-          ok: true,
-          won: false,
-          item,
-          winner: {
-            decision: resolution.decision,
-            by: resolution.by,
-            at: resolution.at,
-          },
-        };
-      }
-      return reply.code(400).send({
-        ok: false,
-        won: false,
-        error: result.error ?? 'approval request was not resolved',
-        ...(item ? { item } : {}),
-      });
-    }
-
-    const resolution = result.item.resolution;
-    if (!resolution) {
-      return reply.code(500).send({ ok: false, won: true, error: 'winning resolution is missing' });
-    }
-    let resumeRegistered = false;
-    const runState = readRunStateSafe(existing.projectDir, runId);
-    if (resumeTask && runState && isPausedRunStatus(runState.status)) {
-      try {
-        // Preserve the operator's reviewed admission on the bound run before
-        // the daemon verifies its task/run agreement. The daemon owns launch.
-        if (JSON.stringify(runState.briefAdmission) !== JSON.stringify(resumeTask.brief_admission)) {
-          updateRunState(existing.projectDir, runId, current => {
-            assertRunEditable(runId);
-            current.briefAdmission = resumeTask!.brief_admission;
-          });
-        }
-        await (options.registerTask ?? registerTaskWithDaemon)(resumeTask);
-        resumeRegistered = true;
-      } catch (error) {
-        const unknown = error instanceof RpcOutcomeUnknownError;
-        return reply.code(rpcHttpStatus(error)).send({
-          ok: false, won: true, item, resumeRegistered: false,
-          error: `Approval was recorded; resume ${unknown ? 'outcome is unknown' : 'registration failed'}: ${error instanceof Error ? error.message : String(error)}`,
-        });
-      }
-    }
-
-    return { ok: true, won: true, item, resumeRegistered };
-  });
 
   app.get<{ Params: { runId: string; stageId: string }; Querystring: { tailBytes?: string } }>(
     "/api/runs/:runId/stages/:stageId/output",

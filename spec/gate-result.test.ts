@@ -290,9 +290,9 @@ describe('stage group settlement boundaries', () => {
     expect(record).toHaveBeenCalledOnce();
   });
 
-  function interruptedGroup(control: 'parked' | 'paused') {
+  function serializedGroup() {
     const stages = ['first', gateId, 'deferred'].map(id => parseDispatchedStageConfig({
-      id, role: id === gateId ? 'qa' : 'coder', scope: ['product.ts'], is_gate: id === gateId,
+      id, role: id === gateId ? 'qa' : 'coder', scope: id === gateId ? [] : ['product.ts'], is_gate: id === gateId,
     }));
     const state = readRunState(projectDir, runId);
     for (const stage of stages) state.stages[stage.id] = { status: 'pending', retries: 0 };
@@ -314,17 +314,11 @@ describe('stage group settlement boundaries', () => {
         : { exitCode: 0 });
     const bind = vi.spyOn(gateValidation, 'bindReviewedGateValidation');
     const retry = vi.spyOn(gateValidation, 'settleGateValidationEvidence');
-    let wave = 0;
     const runner = createScopeSafeStageRunner({
-      // Both controls use the wave's interruption result. Literal `paused` is
-      // deliberately retained here rather than relabelled as `parked`.
-      monitorApprovalRequests: async () => ++wave === 2
-        ? { ...readRunState(projectDir, runId), status: control as typeof state.status } : null,
       reconcileCompletedStageAttempts: () => ({ violation: false }),
     });
     const executed: string[] = [];
     const execute = async (stage: typeof stages[number]) => {
-      // On resume the caller continues unfinished attempts in the same group.
       if (executed.includes(stage.id)) return;
       executed.push(stage.id);
       if (stage.is_gate) writeVerdict({ pass: true });
@@ -342,38 +336,22 @@ describe('stage group settlement boundaries', () => {
     return { stages, runner, execute, executed, commands, bind, retry };
   }
 
-  it.each(['parked', 'paused'] as const)('records finished stages without settling a %s group', async control => {
-    const f = interruptedGroup(control);
-    await f.runner.runScopeSafeStageGroup(f.stages, projectDir, runId, 1, f.execute);
-    expect(f.executed).toEqual(['first', gateId]);
-    const events = readRunEvents(projectDir, runId).filter(event => event.type === 'stage_complete');
-    expect(events.map(event => event.stageId)).toEqual(['first', gateId]);
-    expect(events.every(event => event.gate === undefined)).toBe(true);
-    expect(f.bind).not.toHaveBeenCalled();
-    expect(f.retry).not.toHaveBeenCalled();
-    expect(f.commands).not.toHaveBeenCalled();
-    expect(readStageStatus(projectDir, runId, gateId).gate).toBeUndefined();
-    expect(readRunState(projectDir, runId).stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0 });
-    expect(readRunState(projectDir, runId).stages[gateId].gate).toBeUndefined();
-    expect(existsSync(join(runDirPath, `validation_delta_${gateId}.json`))).toBe(false);
-    expect(readRunState(projectDir, runId).stages.deferred).toEqual({ status: 'pending', retries: 0 });
-    expect(existsSync(join(runDirPath, 'stages', 'deferred', 'status.json'))).toBe(false);
-  });
-
-  it.each(['parked', 'paused'] as const)('settles a resumed %s group using its deferred author writes', async control => {
-    const f = interruptedGroup(control);
-    await f.runner.runScopeSafeStageGroup(f.stages, projectDir, runId, 1, f.execute);
-    expect(f.executed).toEqual(['first', gateId]);
+  it('settles the complete serialized group using the later author writes', async () => {
+    const f = serializedGroup();
     await f.runner.runScopeSafeStageGroup(f.stages, projectDir, runId, 1, f.execute);
     expect(f.executed).toEqual(['first', gateId, 'deferred']);
     expect(readFileSync(join(projectDir, 'product.ts'), 'utf8')).toBe('regressed');
     expect(readStageStatus(projectDir, runId, gateId)).toMatchObject({ status: 'complete', exitCode: 0,
       gate: { pass: false, kind: 'validation_regression' } });
     expect(readRunState(projectDir, runId).stages[gateId].gate).toMatchObject({ pass: false, kind: 'validation_regression' });
+    const events = readRunEvents(projectDir, runId).filter(event => event.type === 'stage_complete');
+    expect(events.map(event => event.stageId)).toEqual(['first', gateId, 'deferred']);
+    expect(events.find(event => event.stageId === gateId)?.gate).toMatchObject({ pass: false, kind: 'validation_regression' });
     expect(f.bind).toHaveBeenCalledOnce();
     expect(f.retry).toHaveBeenCalledOnce();
     expect(f.commands).toHaveBeenCalledOnce();
   });
+
 });
 
 describe('validation at the review boundary', () => {

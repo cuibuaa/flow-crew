@@ -4,12 +4,12 @@ For an operator: which command and parsed options do I use?
 Use `node dist/cli.js` from a built source checkout, or `flowcrew` when a command link is
 installed. Below, `flowcrew` is the executable prefix. Angle-bracket values are placeholders;
 synopses are syntax references, not recipes to run without selecting real identities.
-[Operations](operations.md) owns lifecycle, baseline, approvals, campaigns and preservation.
+[Operations](operations.md) owns lifecycle, baseline, campaigns and preservation.
 [Configuration](configuration.md) owns defaults and environment routing.
 
 ## Dispatch and help
 
-The current dispatcher has 28 named command routes, including the early `fc_tasks`,
+The current dispatcher has 27 named command routes, including the early `fc_tasks`,
 `plan-check`, `state` and `clean` paths (excluding the legacy `session-push` entry
 and `prune` alias). Bare invocation, `--help`, `-h` print top-level help;
 `version`, `--version`, `-v` print package version. Unknown commands exit 1. Command help is generated from the same option tables as the parser; `--help` and `-h` return before any engine operation.
@@ -23,7 +23,6 @@ and `prune` alias). Bare invocation, `--help`, `-h` print top-level help;
 | `status`, `list`, `state`, `events`, `watch` | What happened or is happening? |
 | `guide`, `interrupt` | Request guidance or stop an active stage command |
 | `daemon`, `task`, `dashboard`, `start` | Operate the orchestrator or dashboard |
-| `inbox` | Resolve a per-request approval |
 | `fc_tasks` | Inspect/update optional conversation ledger intent |
 | `audit-reality`, `land`, `export`, `clean` | Recheck, preserve, export or reclaim records |
 | `version` | Which package version is this? |
@@ -31,7 +30,7 @@ and `prune` alias). Bare invocation, `--help`, `-h` print top-level help;
 `quick --supervise`, `--no-supervise`, `--foreground`, `--hold-gates`
 and unknown long options refuse with exit 1. `--timeout`/`--timeout=...` refuses with a
 engine-default migration hint. Foreground is the absence of `--background`.
-Standing approval rules are retired. Historic usage records remain readable.
+Historic approval records remain readable; the execution decision CLI is removed.
 
 Commands share [one exit-code table](../src/exit-code.ts): 0 means completed, 1 means
 known refusal or failure (including invalid usage), and 2 means the outcome is unknown
@@ -215,25 +214,13 @@ Compatible cancelled and failed work continues its current iteration. CLI output
 when a pipe reader closes early. Restart, recovery and automatic retry never resume
 a cancelled run. Retry remains distinct: before a run settles it requests another launch;
 after terminal settlement it starts a new run instead of continuing the previous one.
-Parked approval requests continue through `inbox approve` or `inbox deny`.
+Historical paused records remain readable without a decision path.
 
 Sources: [daemon](../src/cli-daemon.ts), [task](../src/cli-task.ts),
 [dashboard identity](../src/cli-dashboard.ts), [dashboard startup](../src/cli.ts).
 
-## Approval controls
-
-| Synopsis | Options |
-|---|---|
-| `inbox list` | `--state pending\|resolved\|all`, `--run <id>` |
-| `inbox show <request-id>` | Optional `--run` to disambiguate |
-| `inbox approve\|deny <request-id>` | `--run`, `--reason <text>`, `--no-resume`; 0 winning resolution, 2 lost first-responder race, 1 failure |
-
-`inbox --always`, `rules`, `revoke` refuse. Decisions can relaunch work unless no-resume.
-Only explicit external authority requests wait for a human. Legacy local or ambiguous
-requests receive engine decisions without parking; resolved history includes those answers.
-An approval cannot override engine ownership or frozen-input protections.
-
-Sources: [inbox parser](../src/cli-inbox.ts).
+Execution approval controls are removed. Constraints are stage-readable brief text; unavailable
+resources appear in stage results and reports at wrap-up.
 
 ## Audit, export and cleanup
 
@@ -301,10 +288,6 @@ Every route accepts `--help` and `-h` without contacting services or creating st
 | `task resume` | `--socket` |
 | `task retry` | `--socket` |
 | `task tail` | `--socket`, `--tail`, `--follow`, `-f` |
-| `inbox list` | `--state`, `--run` |
-| `inbox show` | `--run` |
-| `inbox approve` | `--run`, `--reason`, `--no-resume`, `--always` |
-| `inbox deny` | `--run`, `--reason`, `--no-resume`, `--always` |
 | `audit-reality` | `--task`, `--range`, `--output` |
 | `land` | `--complete-fc-task`, `--fc-task-session`, `--fc-tasks-root`, `--run`, `--json`, `--remove`, `--archive`, `--acknowledge-regenerable` |
 | `export` | — |

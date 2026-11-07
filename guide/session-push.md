@@ -41,7 +41,7 @@ For Claude it checks the exact wake definition, shim and installed CLI version;
 missing/outdated hooks or an unsupported version produce a repair command.
 
 Run events are replayed from durable engine records into `FC_HOME/session-push`.
-Terminal, parked, awaiting-approval, and failed-attempt events carry stable IDs.
+Terminal, deployment-hold and failed-attempt events carry stable IDs. Historical kinds remain readable.
 Claude delivery uses its live Stop waiter once the session has registered wake capability;
 while that session is busy or closed it waits for the next live waiter. Only legacy
 sessions that have never registered a waiter use the session inbox;
@@ -85,8 +85,7 @@ refresh its address and handle its existing obligations.
 
 The fixed prompt asks the launcher to inspect current state, independently verify,
 archive unique work, reclaim only when authorized, and explicitly close the ledger
-after terminal wrap-up. Approval and parked events do not authorize bypassing an
-approval or closing an active task. A model reply, successful socket write, queue
+after terminal wrap-up. Unfinished work keeps its ledger open. A model reply, successful socket write, queue
 receipt, or terminal run status is not an ACK. After handling the exact event:
 
 ```bash

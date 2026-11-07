@@ -69,7 +69,7 @@ it.each(['claude', 'codex'] as const)('foreground %s quick completes locally wit
   for (const path of [project, engine, bin, fixtures, join(root, 'home'), join(root, 'tmp')]) mkdirSync(path, { recursive: true });
   const brief = '# Foreground task\n\n## Acceptance criteria\n1. The tiny task completes with a wrap-up obligation.\n';
   const gate = { pass: true, reason: 'Tiny task checked.', criteria: Object.fromEntries(extractBriefCriteria(brief).criteria.map(c => [c.id, { status: 'pass', evidence: 'The deterministic stage completed.' }])), audit_findings: { version: 1, findings: [] } };
-  writeFileSync(join(fixtures, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single coherent fixture task.', metric_search: false, questions: [] }) }));
+  writeFileSync(join(fixtures, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single coherent fixture task.', metric_search: false, assumptions: [], missing_author_facts: [] }) }));
   writeFileSync(join(fixtures, 'assess.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'review', reason: 'Bounded fixture change.', risk_areas: [] }) }));
   writeFileSync(join(fixtures, 'implement.json'), JSON.stringify({ output_text: 'Tiny task completed.' }));
   writeFileSync(join(fixtures, 'review.json'), JSON.stringify({ output_text: JSON.stringify(gate) }));

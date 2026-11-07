@@ -6,13 +6,11 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { RunEvent } from './run-events.js';
 import type { StoreState } from './store.js';
-import type { ApprovalRequest } from './inbox.js';
 import { isPausedRunStatus, isTerminalRunStatus, isSuccessfulRunStatus } from './lifecycle-status.js';
 import { TaskRegistry, TASK_LIST_STATUS, isActiveTaskStatus, hasLiveForegroundOwner, sessionTaskIndexPath, type TaskEntry } from './task-registry.js';
 import { codexRequest, queueCodex, sendClaude, notifyFallback } from './session-push-transport.js';
 import { publicTaskEntries, readTaskLedger } from './fc-tasks.js';
 import { hasClaudeWakeWaiter } from './session-wake.js';
-import { approvalArtifactPath, isValidApprovalRequestId } from './approval-artifacts.js';
 
 export interface LaunchTarget {
   frontend: 'claude' | 'codex';
@@ -166,27 +164,15 @@ export class SessionPush {
     return readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/u.test(name))
       .map(name => load<PushEvent>(join(directory, name))!).filter(Boolean).map(normalizePushEvent);
   }
-  pending(session?: string, recordSupersession = true): PushEvent[] {
+  pending(session?: string): PushEvent[] {
     return this.events().filter(event => (!session || event.target.sessionId === session)
-      && !this.acknowledged(event.eventId) && !this.superseded(event, recordSupersession)).map(event => this.describe(event));
+      && !this.acknowledged(event.eventId) && !this.superseded(event)).map(event => this.describe(event));
   }
   /** A delivery disposition retires the obligation without forging a business ACK.
    * The push service observes run records; it never writes into another run. */
-  private superseded(event: PushEvent, record = true): boolean {
+  private superseded(event: PushEvent): boolean {
     if (this.delivery(event.eventId).superseded) return true;
-    if (!['approval_parked', 'approval_attempt_suspended'].includes(event.kind)) return false;
-    const described = this.describe(event);
-    if (!described.requestId || !isValidApprovalRequestId(described.requestId)) return false;
-    const directory = this.runDirectory(event);
-    if (!directory) return false;
-    const decision = load<{ decision?: string; at?: string }>(approvalArtifactPath(directory, described.requestId, 'decision'));
-    if ((decision?.decision !== 'approve' && decision?.decision !== 'deny')
-      || !decision.at || !Number.isFinite(Date.parse(decision.at))) return false;
-    if (record) publish(this.deliveryPath(event.eventId), { ...this.delivery(event.eventId), superseded: {
-      runId: event.runId, requestId: described.requestId, decision: decision.decision, at: decision.at,
-      observedAt: new Date(this.now()).toISOString(), ackRequired: false,
-    } });
-    return true;
+    return false;
   }
   private runDirectory(event: PushEvent): string | undefined {
     return /^[\w.-]+$/u.test(event.runId) && event.runId !== '.' && event.runId !== '..'
@@ -197,30 +183,15 @@ export class SessionPush {
     const task = event.taskTitle ? undefined : this.registry.get(event.taskId);
     const directory = this.runDirectory(event);
     const state = directory && load<StoreState>(join(directory, 'run.json'));
-    const approval = ['approval_parked', 'approval_attempt_suspended'].includes(event.kind);
     const failure = ['attempt_failed', 'stage_failed'].includes(event.kind);
-    const needsOriginal = approval && !event.requestId || failure && !event.failureIdentity;
+    const needsOriginal = failure && !event.failureIdentity;
     const original = directory && needsOriginal && readOptionalJsonlFile<RunEvent>(join(directory, 'events.jsonl'))
       .find(source => source.type === event.kind && source.timestamp === event.occurredAt
         && source.stageId === event.stageId
         && (event.attemptIndex === undefined || source.attemptIndex === event.attemptIndex));
-    const samePark = approval && state && state.parked?.pausedAt === event.occurredAt;
-    const requestId = event.requestId || (original && original.requestId)
-      || (samePark && state && state.parked?.requestId) || undefined;
-    const request = directory && requestId && isValidApprovalRequestId(requestId)
-      ? load<{ title?: string; target?: string }>(approvalArtifactPath(directory, requestId, 'request')) : undefined;
-    const normalizedRequest = approval && directory && requestId
-      ? readOptionalJsonlFile<ApprovalRequest>(join(directory, 'approvals.jsonl'))
-        .find(record => record.kind === 'request' && record.requestId === requestId) : undefined;
-    const sameRequest = approval && requestId && state && state.parked?.requestId === requestId;
     const stages = state ? Object.entries(state.stages ?? {}).filter(([, stage]) => stage.startedAt || stage.completedAt)
       .sort((a, b) => (a[1].completedAt || a[1].startedAt || '').localeCompare(b[1].completedAt || b[1].startedAt || '')) : [];
-    return { ...event, taskTitle: event.taskTitle || task?.name, requestId,
-      requestTitle: event.requestTitle || normalizedRequest?.title
-        || (typeof request?.title === 'string' && request.title ? request.title : undefined)
-        || (sameRequest && state && state.parked?.reason) || undefined,
-      requestTarget: event.requestTarget || normalizedRequest?.target
-        || (typeof request?.target === 'string' && request.target ? request.target : undefined),
+    return { ...event, taskTitle: event.taskTitle || task?.name,
       failureIdentity: event.failureIdentity || (original && (providerFailureIdentity(original) || original.adapterFailureKind
         || (original.exitCode === undefined ? undefined : `exit ${original.exitCode}`))) || undefined,
       runStatus: event.runStatus || (state && state.status) || undefined,
@@ -343,7 +314,7 @@ export class SessionPush {
           lifecycleRecorded = event.runStatus === run?.status
             && (event.type === 'operator_wrap_up_required' || !isTerminalRunStatus(event.runStatus));
         }
-        if (['operator_wrap_up_required', 'attempt_failed', 'stage_failed', 'approval_parked', 'approval_attempt_suspended', 'decision_questions'].includes(event.type)
+        if (['operator_wrap_up_required', 'attempt_failed', 'stage_failed'].includes(event.type)
             || (event.type === 'run_status_changed' && isPausedRunStatus(event.runStatus))) this.enqueue(task, event);
       }
       // A crash between the status commit and event append must still wake the
@@ -515,7 +486,7 @@ export function wrapUpPrompt(event: PushEvent, engineRoot: string): string {
         .filter(([, value]) => value !== undefined).map(([name, value]) => `${name}=${value}`), `kind=${event.kind}.`].join(' '),
     'This event is not acceptance. Check the current run/attempt first; a late event must not authorize work on a superseded attempt.',
     'Read the report and run state; independently verify the result; archive unique output; reclaim the worktree and branch only when authorized and safe; then close the session ledger for a terminal run.',
-    'For a parked run, approval request, or failed attempt, inspect and resolve or surface the decision needed; do not bypass approval. Keep its task ledger open while work remains.',
+    'For unfinished work or a failed attempt, inspect the recorded result and surface missing resources or author-owned facts. Keep its task ledger open while work remains.',
     'Deduplicate by event id: if already acknowledged, do not repeat wrap-up. Delivery or a reply is not completion.',
     `Only after handling this event, acknowledge it explicitly: FC_HOME=${quote(engineRoot)} flowcrew session-push ack --event ${event.eventId} --session ${quote(event.target.sessionId)}`,
   ].join('\n');
@@ -525,16 +496,11 @@ export function wrapUpPrompt(event: PushEvent, engineRoot: string): string {
 export function renderPushEvent(event: PushEvent, engineRoot: string): { human: string; agent: string } {
   const task = `FlowCrew #${event.taskId}${event.taskTitle ? ` ${event.taskTitle}` : ''}`;
   const kind: Record<string, string> = {
-    approval_parked: 'needs approval', approval_attempt_suspended: 'attempt suspended for approval',
     attempt_failed: 'attempt failed', stage_failed: 'stage failed',
     run_status_changed: 'run status changed', operator_wrap_up_required: 'wrap-up required',
   };
   const parts = [`${task}: ${kind[event.kind] || 'run event'}.`];
-  if (event.kind === 'approval_parked' || event.kind === 'approval_attempt_suspended') {
-    if (event.requestTitle) parts.push(`Request: ${event.requestTitle}.`);
-    if (event.requestTarget) parts.push(`Target: ${event.requestTarget}.`);
-    if (event.requestId) parts.push(`Decide: FC_HOME=${quote(engineRoot)} flowcrew inbox approve ${quote(event.requestId)} --run ${quote(event.runId)} (use deny to decline).`);
-  } else if (event.kind === 'attempt_failed' || event.kind === 'stage_failed') {
+  if (event.kind === 'attempt_failed' || event.kind === 'stage_failed') {
     if (event.stageId) parts.push(`Stage: ${event.stageId}.`);
     if (event.attemptIndex !== undefined) parts.push(`Attempt: ${event.attemptIndex}.`);
     if (event.failureIdentity) parts.push(`Failure: ${event.failureIdentity}.`);

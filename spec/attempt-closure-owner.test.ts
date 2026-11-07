@@ -49,14 +49,14 @@ describe('one attempt closure owner', () => {
     expect(ledger()).toBe(closed);
   });
 
-  it('records refusal or a real suspension on the same closed child', () => {
+  it('records refusal and successful settlement on the same closed child', () => {
     close();
-    const failed = settleStageAttempt(project, runId, 'work', 1, true, { exitCode: 1, error: 'independent audit refused' });
+    const failed = settleStageAttempt(project, runId, 'work', 1, { exitCode: 1, error: 'independent audit refused' });
     expect(failed).toMatchObject({ status: 'failed', attempts: [{ status: 'failed', exitCode: 1, error: 'independent audit refused', tokens_out: 23 }] });
     expect(failed.attempts).toHaveLength(1);
     beginStageAttempt(project, runId, 'work', 0);
     closeStageAttempt(project, runId, 'work', 2, { exitCode: 0, duration_ms: 1 });
-    expect(settleStageAttempt(project, runId, 'work', 2, true)).toMatchObject({ status: 'pending', attempts: [{ status: 'failed' }, { status: 'suspended' }] });
+    expect(settleStageAttempt(project, runId, 'work', 2)).toMatchObject({ status: 'complete', attempts: [{ status: 'failed' }, { status: 'complete' }] });
   });
 
   it('recovers unverified closure honestly without losing known usage or claiming successful work', () => {

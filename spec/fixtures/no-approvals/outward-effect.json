@@ -1,0 +1,16 @@
+{
+  "implement": {
+    "output": {
+      "status": "delivered",
+      "summary": "Offline: the requested download from example.invalid is unavailable; the local greeting is complete.",
+      "checks": [],
+      "caveats": [
+        "Offline: the requested download from example.invalid is unavailable; the local greeting is complete."
+      ],
+      "remaining_work": []
+    },
+    "runFiles": {
+      "stages/implement/approval_request.json": "{\"id\": \"offline-download\", \"action\": \"download\", \"risk\": \"external\", \"category\": \"downloads\", \"host\": \"example.invalid\", \"target\": \"https://example.invalid/data\", \"title\": \"Offline: the requested download from example.invalid is unavailable; the local greeting is complete.\"}"
+    }
+  }
+}
