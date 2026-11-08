@@ -143,7 +143,7 @@ describe('the review decision gets the whole diff or none of it', () => {
     const input = decisionInput(stage, project, created.runDirPath, state, CODEX_LIMIT);
     expect(input.adapter).toBeUndefined();
     expect(JSON.parse(input.user)).toEqual({ task: state.taskDescription, files: ['src/app.ts', 'src/other.ts', 'a_large.txt', 'b_small.txt'],
-      diff: legacyDiff(['a_large.txt', 'b_small.txt']), validation: { status: 'No configured validation facts have been recorded.' } });
+      diff: legacyDiff(['a_large.txt', 'b_small.txt']), validation: { status: 'No configured validation fact covers the current tree; validation unmeasured.' } });
     // The prompt is the decision prompt as it was: no extra instruction, and still no tools.
     expect(input.system).toBe(POST_AUTHOR_PROMPT);
     expect(input.system).toContain('Do not use tools');

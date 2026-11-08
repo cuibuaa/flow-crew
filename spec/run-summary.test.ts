@@ -317,14 +317,15 @@ describe('engine-assembled terminal reports', () => {
     });
   });
 
-  it('uses configured receipts for direct exits, totals and unresolved comparisons', async () => {
+  it.each([true, false])('uses declared reporter totals and direct exits without parsing display output (totals=%s)', async totals => {
     await terminalFixture(async (project, id, directory) => {
       writeFileSync(join(directory, 'validation_delta_review.json'), JSON.stringify({
         stageId: 'review', checkedAt: '2026-10-09T00:00:00Z', pass: false,
         immutablePath: 'validation_delta_review_attempt_1_exact.json',
         current: [
           { role: 'test', display: 'npm run test', state: 'failed', exitCode: 1, durationMs: 43,
-            output: ' Test Files  1 failed | 2 passed (3)\n Tests  1 failed | 9 passed (10)', failureIdentifiers: ['greeting > locale'] },
+            output: 'Tests 9999 passed', failureIdentifiers: ['greeting > locale'],
+            ...(totals ? { testsRun: 10, failureCount: 1, identityOwner: 'runner-json', failureIdentity: 'known', failureEvidence: 'complete' } : {}) },
           { role: 'lint', display: 'npm run lint', state: 'launch_error', durationMs: 2,
             output: '', failureIdentifiers: [], reason: 'spawn failed' },
         ], delta: [{ role: 'test', state: 'regression', reason: 'new failing locale' },
@@ -332,7 +333,8 @@ describe('engine-assembled terminal reports', () => {
       }));
       const report = await generateRunSummary(project, id);
       expect(report).toContain('`npm run test` — failed (load unknown); direct exit 1; 43ms');
-      expect(report).toContain('Tests  1 failed | 9 passed (10)');
+      expect(report).toContain(totals ? 'Declared reporter totals: tests run 10; failures 1.' : 'Declared reporter totals: tests run unknown; failures unknown.');
+      expect(report).not.toContain('Tests 9999 passed');
       expect(report).toContain('Failure: greeting > locale');
       expect(report).toContain('`npm run lint` — launch_error (load unknown); direct exit unknown');
       expect(report).toContain('test baseline comparison: regression');

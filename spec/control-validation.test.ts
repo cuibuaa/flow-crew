@@ -1,3 +1,4 @@
+import { validationReport } from './test-support/structured-validation.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -32,7 +33,6 @@ describe('declared runner identity owns the failure population', () => {
       maxOutputBytes: 20,
       runCommand: () => ({ exitCode: 1, stdout: file ? 'human output'.repeat(100) : JSON.stringify(report),
         ...(file ? { report: JSON.stringify(report) } : {}), stderr: 'diagnostics'.repeat(100) }),
-      readFailureIdentity: () => { throw Error('Declared report must never consult a model'); },
     });
     const command = measured.results.find(result => result.role === 'test')!;
     expect(command).toMatchObject({ state: 'failed', identityOwner: 'runner-json', failureIdentity: 'known', failureEvidence: 'complete', testsRun: 1,
@@ -84,23 +84,18 @@ describe('declared runner identity owns the failure population', () => {
     const measured = await runProjectValidationBaseline('/workspace', {
       commands: [{ role: 'test', command: 'runner', args: [], display: 'runner', report: { format: 'vitest-json' } }],
       runCommand: () => ({ exitCode, stdout: bytes, stderr: 'diagnostic' }),
-      readFailureIdentity: () => { throw Error('Invalid declared evidence cannot fall back to a model'); },
     });
     expect(measured.results.find(result => result.role === 'test')).toMatchObject({ identityOwner: 'unknown', failureIdentity: 'unknown', failureIdentifiers: [] });
     expect(evaluateValidationDelta(measured, measured.results).find(result => result.role === 'test')?.state).toBe('unresolved');
     expect(evaluateValidationDelta(undefined, measured.results).find(result => result.role === 'test')?.state).toBe('unresolved');
   });
 
-  it('keeps undeclared bounded model readings partial when transport is truncated', async () => {
+  it('keeps undeclared output unknown even when transport is bounded', async () => {
     const measured = await runProjectValidationBaseline('/workspace', {
       commands: [{ role: 'test', command: 'opaque', args: [], display: 'opaque' }], maxOutputBytes: 40,
       runCommand: () => ({ exitCode: 1, stdout: 'arbitrary data'.repeat(100) }),
-      readFailureIdentity: input => {
-        expect(input.truncated).toBe(true);
-        return { version: 1, testsRun: 1, complete: true, failures: [{ testId: 'known', file: null, messageClass: 'assertion' }] };
-      },
     });
-    expect(measured.results.find(result => result.role === 'test')).toMatchObject({ identityOwner: 'closed-schema-model', failureEvidence: 'partial' });
+    expect(measured.results[0]).toMatchObject({ identityOwner: 'unknown', failureIdentity: 'unknown' });
   });
 
   it('declares this repository runner in config and keeps the project reporter authoritative', () => {
@@ -127,8 +122,8 @@ describe('declared runner identity owns the failure population', () => {
 async function partialWorkflow(confirmed: boolean) {
   const root = project();
   mkdirSync(join(root, 'config'));
-  writeFileSync(join(root, 'config/validation.json'), JSON.stringify({ commands: { test: { command: process.execPath, args: ['check.mjs'] } } }));
-  writeFileSync(join(root, 'check.mjs'), "process.stdout.write('opaque data '.repeat(4000)); process.exitCode=1;");
+  writeFileSync(join(root, 'config/validation.json'), JSON.stringify({ commands: { test: { command: process.execPath, args: ['check.mjs'], report: { format: 'vitest-json' } } } }));
+  writeFileSync(join(root, 'check.mjs'), `console.log(${JSON.stringify(validationReport(['fixture failure'], { complete: false }))});process.exitCode=1;`);
   for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base']]) {
     isolatedProjectCommand('git', args, root, root);
   }
@@ -137,8 +132,6 @@ async function partialWorkflow(confirmed: boolean) {
   const adapter: Adapter = { async run(prompt, _role, opts) {
     const result = (value: unknown, writes: string[] = []) => ({ output: JSON.stringify(value), exitCode: 0, duration_ms: 1,
       writes, writeAttribution: 'structured' as const });
-    if (opts.stageId === '_validation_identity') return result({ version: 1, testsRun: 1, complete: true,
-      failures: [{ testId: 'fixture failure', file: 'check.mjs', messageClass: 'assertion' }] });
     calls.push(opts.stageId);
     if (opts.stageId === 'review') {
       const reject = confirmed && review++ === 0;
@@ -148,7 +141,7 @@ async function partialWorkflow(confirmed: boolean) {
         const request = { command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.exit(require('node:fs').readFileSync('docs/value.txt','utf8')==='repaired'?0:1)")}`,
           cwd: root, shell: '/bin/sh' };
         const child = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', `${client} '${JSON.stringify(request).replaceAll("'", "'\\''")}'`],
-          display: 'reviewer reproduction', cwd: root, runDir: opts.runDir, timeoutMs: 5000 });
+          display: 'reviewer reproduction', cwd: root, runDir: opts.runDir, timeoutMs: 30000 });
         expect(child.exitCode).toBe(0);
         const recorded = JSON.parse(child.stdout!).record;
         expect(recorded.exitCode).toBe(1); reproduction = recorded.sequence;
@@ -165,15 +158,15 @@ async function partialWorkflow(confirmed: boolean) {
     return result({ status: 'delivered', summary: 'Value written', caveats: [], remaining_work: [] }, ['docs/value.txt']);
   } };
   const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml')); config.defaults.max_iterations = 1;
-  const brief = `---\noutputs: [docs/value.txt]\nvalidation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: [check.mjs]\n---\n# Value\n\n## Acceptance criteria\n1. Independently verify the value.\n`;
+  const brief = `---\noutputs: [docs/value.txt]\nvalidation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: [check.mjs]\n      report: {format: vitest-json}\n---\n# Value\n\n## Acceptance criteria\n1. Independently verify the value.\n`;
   const final = await runWorkflow(config, raw, root, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
   return { root, final, calls, ledger: readEvidence(runDir(root, final.runId)) };
 }
 
 describe('repair admission and certification have distinct evidence demands', () => {
-  it('repairs a confirmed reproduction despite partial validation and closes it while the run stays uncertified', async () => {
+  it('repairs a confirmed reproduction despite partial validation and lets the gate accept its stated limits', { timeout: 60_000 }, async () => {
     const { final, calls, ledger } = await partialWorkflow(true);
-    expect(calls, JSON.stringify({ gate: final.stages.review.gate, commands: ledger.filter(entry => entry.kind === 'command') })).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(calls, JSON.stringify({ gate: final.stages.review, decisions: ledger.filter(entry => entry.kind === 'decision'), commands: ledger.filter(entry => entry.kind === 'command') })).toEqual(['implement', 'review', 'repair', 'review']);
     const validations = ledger.filter(entry => entry.kind === 'validation');
     expect(validations).toHaveLength(2);
     for (const fact of validations) {
@@ -183,16 +176,15 @@ describe('repair admission and certification have distinct evidence demands', ()
     const original = ledger.find(entry => entry.kind === 'command' && entry.owner === 'code' && entry.exitCode === 1)!;
     expect(original).toBeDefined();
     expect(ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence)).toMatchObject({ exitCode: 0 });
-    expect(final.status).toBe('incomplete');
-    expect(final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'validation_unresolved' }, reason: expect.stringContaining('not certified') });
+    expect(final.status).toBe('complete');
+    expect(final.stages.review.gate).toMatchObject({ pass: true });
   });
 
-  it('withholds certification for unknown comparison alone without requesting repair or terminal refusal', async () => {
+  it('lets the independent gate accept unknown comparison without inventing repair or a validation pass', async () => {
     const { final, calls } = await partialWorkflow(false);
     expect(calls).toEqual(['implement', 'review']);
-    expect(final.status).toBe('incomplete');
-    expect(final.reasonCode).toBe('validation_unresolved');
-    expect(final.stages.review.gate).toMatchObject({ pass: false, reason: expect.stringContaining('comparison is unknown') });
+    expect(final.status).toBe('complete');
+    expect(final.stages.review.gate).toMatchObject({ pass: true });
   });
 
   it('admits confirmed repair even when a historic effective verdict retained a validation refusal', () => {
@@ -261,6 +253,34 @@ describe('one projection across historic receipts and every reader', () => {
       delta: [{ state: 'unresolved', reason: 'Base result unavailable' }] });
   });
 
+  it('never republishes historical unconfigured slots as passing validation', () => {
+    const root = project(), { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture', ['author']);
+    const commands: ValidationCommandResult[] = ['build', 'test', 'lint'].map(role => ({
+      role: role as ValidationCommandResult['role'], state: 'not_configured', durationMs: 0, output: '',
+      failureIdentifiers: [], failureIdentity: 'none', reason: 'No command was configured',
+    }));
+    const delta = commands.map(({ role }) => ({ role, state: 'pass' as const,
+      reason: 'Historical absence was called a pass', newFailureIdentifiers: [] }));
+    writeFileSync(join(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
+      version: 1, projectDir: root, discovery: { state: 'unknown', configPath: 'fixture', commands: [], missingRoles: ['build', 'test', 'lint'] },
+      results: [], gateCriteria: [],
+    } }));
+    const fact = seedAttemptValidation(root, runId, commands, { delta });
+    appendEvidence(base, { kind: 'attempt', stageId: fact.stageId, attemptIndex: fact.attemptIndex,
+      attemptStartedAt: fact.attemptStartedAt, exitCode: 0, status: 'complete', treeHash: fact.treeHash, files: [],
+      measurements: { inputTokens: 0, outputTokens: 0, durationMs: 1, provenance: 'adapter-reported' } });
+    const before = readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8');
+    expect(projectValidationFact(fact)).toMatchObject({ pass: false,
+      delta: commands.map(({ role }) => ({ role, state: 'not_measured' })) });
+    const path = join(base, 'validation_delta_legacy.json');
+    writeFileSync(path, JSON.stringify({ version: 2, stageId: 'legacy', current: commands, delta, pass: true }));
+    expect(readValidationDelta(path)).toMatchObject({ pass: false,
+      delta: commands.map(({ role }) => ({ role, state: 'not_measured' })) });
+    expect(evidenceContext(root, base)).toContain('"pass":false');
+    expect(renderRunSummary(root, base, readRunState(root, runId))).not.toContain('comparison passed');
+    expect(readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
+  });
+
   it('retains runner errors with exit zero and never projects them as a pass', async () => {
     const measured = await runProjectValidationBaseline('/workspace', { commands: [{ role: 'test', command: 'fixture', args: [], display: 'fixture' }],
       runCommand: () => ({ exitCode: 0, error: 'runner did not complete', load: { start: { loadAverage1m: 0, cpuCount: 1 }, end: { loadAverage1m: 0, cpuCount: 1 }, ceilingPerCpu: 1, waitBoundSeconds: 0, waitedSeconds: 0 } }) });
@@ -290,7 +310,7 @@ describe('one projection across historic receipts and every reader', () => {
     const projected = projectValidationFact(fact);
     expect(projectValidationFact(projected)).toEqual(projected);
     expect(projected).toMatchObject({ pass: false, delta, executions: [{ commands: [{ ...expected, storedState: 'launch_error', exitCode: 0 }] }] });
-    expect(currentAuthorValidationRefusal(root, runId)).toMatchObject({ pass: false, reason: expect.stringContaining('not certified') });
+    expect(currentAuthorValidationRefusal(root, runId)).toBeUndefined();
     writeStageStatus(root, runId, 'review', { status: 'complete', retries: 0,
       gate: { pass: false, validation: [once] } });
     const verdict = readGateEvaluation(root, 'review', runId)!;

@@ -1,7 +1,7 @@
 import './test-support/policy-runtime.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
-import { captureProjectTree, projectCommit } from '../src/evidence-ledger.js';
+import { captureProjectTree, projectCommit, readEvidence } from '../src/evidence-ledger.js';
 import { writeCampaignEntry, parseDispatchedStageConfig } from '../src/scheduler.js';
 import { collectGateRuntimeFacts, findGateRecoveryStages } from '../src/scheduler/sched_settlement/gate-recovery.js';
 import { findCampaignPhaseMetadata } from '../src/scheduler/sched_policy/campaign.js';
@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, w
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRun } from './test-support/create-run.js';
-import { campaignsRoot, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState, writeStageStatus, type GateVerdict } from '../src/store.js';
+import { campaignsRoot, fcGlobalDir, readRunState, readStageStatus, runDir, setFcGlobalDir, writeRunState, writeStageStatus, type GateVerdict } from '../src/store.js';
 import { readRunEvents, recordStageOutcome } from '../src/run-events.js';
 import { classifyGateRecoveryFact } from '../src/scheduler/sched_settlement/gate-recovery.js';
 import { readGateEvaluation, settleGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
@@ -148,15 +148,16 @@ describe('settled gate results', () => {
       .toEqual([expect.objectContaining({ stageId: gateId, status: 'complete', gate: status.gate })]);
   });
 
-  it('projects a failed effective gate into campaign metadata despite an authored PASS', () => {
+  it('projects independent acceptance with stated unknown validation into campaign metadata', () => {
     writeVerdict({ pass: true, phase: 'delivery', phaseComplete: true, reason: 'Authored pass' });
     writeValidation('unresolved');
     settleGateEvaluation(projectDir, runId, gateId);
     expect(findCampaignPhaseMetadata(projectDir, readRunState(projectDir, runId)))
-      .toMatchObject({ gate: gateId, pass: false, phase: 'delivery' });
+      .toMatchObject({ gate: gateId, pass: true, phase: 'delivery' });
+    expect(readEvidence(runDirPath).filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(false);
   });
 
-  it.each(['pass', 'unresolved'] as const)('publishes a terminal study campaign outcome only when its settled validation is %s', validation => {
+  it.each(['pass', 'unresolved'] as const)('publishes an independently accepted terminal study outcome with validation %s stated separately', validation => {
     writeVerdict({ pass: false, study_complete: true, model_success: false, reason: 'study_complete_without_model_success' });
     writeValidation(validation);
     settleGateEvaluation(projectDir, runId, gateId);
@@ -164,20 +165,30 @@ describe('settled gate results', () => {
     state.campaignStorageKey = 'study-receipt';
     writeCampaignEntry(projectDir, state);
     const row = JSON.parse(readFileSync(join(campaignsRoot(), 'study-receipt.jsonl'), 'utf8').trim());
-    expect(row).toMatchObject({ pass: validation === 'pass', gates: validation === 'pass' ? '1/1' : '0/1' });
-    expect(row.terminalStudyComplete).toBe(validation === 'pass' ? true : undefined);
+    expect(row).toMatchObject({ pass: true, gates: '1/1' });
+    expect(row.terminalStudyComplete).toBe(true);
   });
 
-  it.each(['unresolved', 'regression'] as const)('records validation %s as a rejected gate without changing the completed process result', state => {
+  it('records introduced regression as a rejected gate without changing the completed process result', () => {
     const verdictSha256 = writeVerdict({ pass: true, reason: 'The model accepted the output' });
-    writeValidation(state);
+    writeValidation('regression');
     settleGateEvaluation(projectDir, runId, gateId);
     const status = readStageStatus(projectDir, runId, gateId);
     expect(status).toMatchObject({ status: 'complete', exitCode: 0,
       attempts: [{ status: 'complete', exitCode: 0 }],
-      gate: { pass: false, kind: `validation_${state}`, verdictSha256, refusal: { kind: `validation_${state}` } } });
+      gate: { pass: false, kind: 'validation_regression', verdictSha256, refusal: { kind: 'validation_regression' } } });
     expect(classifyGateRecoveryFact(gateId, { pass: true }, status.gate!).rejectionKind)
-      .toBe(state === 'regression' ? 'repairable_failure' : 'engine_contract_or_evidence_rejection');
+      .toBe('repairable_failure');
+  });
+
+  it('retains unknown evidence without vetoing an independent acceptance or relabeling validation as passing', () => {
+    const verdictSha256 = writeVerdict({ pass: true, reason: 'The independent gate accepted the stated limits' });
+    writeValidation('unresolved');
+    settleGateEvaluation(projectDir, runId, gateId);
+    expect(readStageStatus(projectDir, runId, gateId)).toMatchObject({ status: 'complete', exitCode: 0,
+      gate: { pass: true, kind: 'pass', verdictSha256 } });
+    expect(readStageStatus(projectDir, runId, gateId).gate?.refusal).toBeUndefined();
+    expect(readEvidence(runDirPath).filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(false);
   });
 
   it.each(['pass', 'regression'] as const)('keeps a failed reviewer with validation %s on its existing recovery route without an authored verdict', validation => {
@@ -397,11 +408,12 @@ describe('validation at the review boundary', () => {
       'Review the completed fixture using its configured validation.', true);
     const repairs = adapter.calls.filter(call => call.stageId === 'repair');
     if (outcome === 'launch_error') {
-      expect(final.status, final.failureReason).toBe('incomplete');
+      expect(final.status, final.failureReason).toBe('complete');
       expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0,
-        gate: { pass: false, kind: 'validation_unresolved' } });
+        gate: { pass: true, kind: 'pass' } });
       expect(repairs).toHaveLength(0);
-      expect(commands).toHaveBeenCalledTimes(2);
+      expect(commands).toHaveBeenCalledTimes(1);
+      expect(readEvidence(runDir(projectDir, final.runId)).filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(false);
     } else {
       expect(final.status, final.failureReason).toBe('incomplete');
       expect(repairs).toHaveLength(0);

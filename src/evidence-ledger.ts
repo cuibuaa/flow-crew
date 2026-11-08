@@ -42,13 +42,20 @@ export interface ValidationFact {
  * Tree binding remains a separate fact from command outcome/measurement. */
 export function projectValidationFact<T extends ValidationFact>(fact: T) {
   const executions = fact.executions.map(execution => ({ ...execution,
-    commands: execution.commands.map(result => ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) })) }));
+    commands: execution.commands.map(result => {
+      const projected = projectValidationResult(result);
+      // Preserve legacy/reclassified labels without changing an already-owned,
+      // current fact's shape for decision-stage consumers.
+      const provenance = result.identityOwner === undefined || result.state !== projected.state
+        ? { storedState: result.storedState ?? result.state } : {};
+      return { ...result, ...provenance, ...projected };
+    }) }));
   const current = executions.find(execution => execution.target === 'attempt')?.commands ?? [];
   const base = executions.find(execution => execution.target === 'base');
   const bound = executions.length > 0 && executions.every(execution => execution.treeHash !== null && execution.treeHash === execution.treeAfterHash);
   const changed = fact.executions.some(execution => execution.commands.some(result => {
     const projected = projectValidationResult(result);
-    return result.state !== projected.state || result.measurement !== undefined && result.measurement !== projected.measurement;
+    return result.state === 'not_configured' || result.state !== projected.state || result.measurement !== undefined && result.measurement !== projected.measurement;
   }));
   const delta = (changed ? evaluateValidationDelta(base ? { results: base.commands } : undefined, current) : fact.delta).map(entry => {
     const recorded = fact.delta.find(prior => prior.role === entry.role && prior.display === entry.display);
@@ -69,7 +76,7 @@ export function projectValidationDelta<T extends { current: ValidationCommandRes
   }
   if (!Array.isArray(value.current)) return undefined;
   const current = value.current.map(result => result && ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) }));
-  if (value.ledgerSequence === undefined && current.some((result, index) => result && (result.state !== value.current[index].state
+  if (value.ledgerSequence === undefined && current.some((result, index) => result && (result.state === 'not_configured' || result.state !== value.current[index].state
     || value.current[index].measurement !== undefined && result.measurement !== value.current[index].measurement))) {
     // Inline receipts lack the base execution. Recompute from available facts;
     // a red result stays unknown rather than inventing a base population.
@@ -99,10 +106,7 @@ export type EvidenceFact = ValidationFact | {
   reproductionOf?: number;
 } | {
   kind: 'decision'; stageId: string; attemptIndex: number; verdict: Record<string, unknown>; owner: 'closed-schema-model';
-} | {
-  kind: 'identity-reading'; stageId: string; attemptIndex: number; command: string;
-  inputSha256: string; inputBytes: number; truncated: boolean; valid: boolean;
-  inputTokens: number | null; outputTokens: number | null; owner: 'closed-schema-model';
+
 };
 export type EvidenceEntry = EvidenceFact & { version: 1; sequence: number; at: string; owner?: string };
 
@@ -135,6 +139,13 @@ export function stagePredecessor(entries: EvidenceEntry[], stageId: string, prev
   if (!attempt) return undefined;
   return { attempt, validation: entries.find(entry => entry.kind === 'validation' && entry.stageId === stageId
     && entry.attemptIndex === attempt.attemptIndex && entry.attemptStartedAt === attempt.attemptStartedAt) };
+}
+
+/** A restored tree consumes its original receipt, not a later different tree's
+ * result. Unmatched historical facts remain in the ledger, never current greens. */
+export function validationForTree(entries: EvidenceEntry[], treeHash: string | null) {
+  const facts = entries.filter((entry): entry is EvidenceEntry & ValidationFact => entry.kind === 'validation');
+  return treeHash === null ? undefined : facts.filter(fact => fact.treeHash === treeHash).at(-1);
 }
 
 /** Identity covers Git's source inventory, plus explicitly declared ignored
@@ -190,10 +201,12 @@ export function projectCommit(projectDir: string): string | undefined {
 export function evidenceContext(projectDir: string, runDir: string, stageId?: string, previous?: { index: number; startedAt: string } | null, budget = Infinity): string {
   if (!existsSync(join(runDir, EVIDENCE_LEDGER))) writeFileSync(join(runDir, EVIDENCE_LEDGER), '', { flag: 'wx' });
   const entries = readEvidence(runDir);
-  const validation = entries.filter((entry): entry is EvidenceEntry & ValidationFact => entry.kind === 'validation').at(-1);
+  let brief = ''; try { brief = readFileSync(join(runDir, 'task_brief.md'), 'utf8'); } catch { /* legacy context */ }
+  const validation = validationForTree(entries, captureProjectTree(projectDir, brief).hash);
   const baselinePath = join(runDir, 'validation_baseline.json');
   let commit: string | undefined;
-  try { commit = JSON.parse(readFileSync(baselinePath, 'utf8')).baseCommit; } catch { /* no Git baseline */ }
+  let selection: unknown;
+  try { const plan = JSON.parse(readFileSync(baselinePath, 'utf8')); commit = plan.baseCommit; selection = plan.baseline?.discovery; } catch { /* no Git baseline */ }
   const diff = commit ? spawnSync('git', ['diff', '--no-ext-diff', '--no-textconv', '--binary', commit, '--', '.', ':(exclude)**/.env*', ':(exclude)**/auth.json', ':(exclude)**/credentials.json', ':(exclude)**/installation_id'], {
     cwd: projectDir, encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
@@ -224,10 +237,10 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
   const predecessor = stageId ? stagePredecessor(entries, stageId, previous ?? undefined) : undefined;
   const latest = new Map(entries.map(entry => [`${entry.kind}:${entry.stageId}`, entry]));
   const facts = entries.flatMap<object>(entry => {
-    if (entry.kind === 'command' || entry.kind === 'identity-reading') return [];
-    if (entry.kind !== 'decision' && latest.get(`${entry.kind}:${entry.stageId}`) !== entry) return [];
+    if (entry.kind === 'command') return [];
+    if (entry.kind === 'validation' ? entry !== validation : entry.kind !== 'decision' && latest.get(`${entry.kind}:${entry.stageId}`) !== entry) return [];
     if (entry.kind === 'validation') {
-      const attempt = latest.get(`attempt:${entry.stageId}`);
+      const attempt = entries.find(fact => fact.kind === 'attempt' && fact.stageId === entry.stageId && fact.attemptIndex === entry.attemptIndex && fact.attemptStartedAt === entry.attemptStartedAt);
       if (attempt?.kind !== 'attempt' || attempt.attemptIndex !== entry.attemptIndex
         || attempt.attemptStartedAt !== entry.attemptStartedAt) return [];
       return [projectValidationFact(entry)];
@@ -245,6 +258,8 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
   const ledgerText = JSON.stringify({ version: 1, sequence: entries.at(-1)?.sequence ?? 0, facts,
 
   });
+  const selectionText = `\nValidation command selection (unconfigured roles are unmeasured): ${JSON.stringify(selection ?? { state: 'unknown', reason: 'No declaration or model selection recorded' })}`
+    + (validation ? '' : '\nNo configured validation fact covers the current tree; validation unmeasured.');
   const predecessorText = predecessor ? `\n\n# Own-stage continuation evidence\n${JSON.stringify(predecessor)}` : '';
   const patchText = readFileSync(diffPath, 'utf8');
   const patchBytes = Buffer.from(patchText);
@@ -259,8 +274,8 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
     + 'Configured validation belongs to the completed author/repair attempt; decisions consume its tree-bound results without rerunning the suite. '
     + 'A solely pre-existing configured failure cannot justify repair; unknown identity remains unknown. '
     + 'Independent experiments and every assigned acceptance criterion remain required. Read the complete diff artifact when its excerpt is truncated.\n'
-    + (ledgerText.length + predecessorText.length <= budget ? `Ledger facts:\n${ledgerText}${predecessorText}`
+    + (ledgerText.length + selectionText.length + predecessorText.length <= budget ? `Ledger facts:\n${ledgerText}${selectionText}${predecessorText}`
       // All or nothing: a ledger that does not fit the adapter's input limit is named, not clipped.
-      : `Ledger facts are not inlined (ledger_exceeds_inline_bound): ${facts.length} facts from ${entries.length} ledger entries, ${ledgerText.length + predecessorText.length} characters against the ${Math.max(0, budget)} that fit the adapter's input limit. Read ${join(runDir, EVIDENCE_LEDGER)} with your tools; the attempt facts carry the changed-file hashes and your own stage's latest attempt is its continuation evidence.`)
+      : `Ledger facts are not inlined (ledger_exceeds_inline_bound): ${facts.length} facts from ${entries.length} ledger entries, ${ledgerText.length + selectionText.length + predecessorText.length} characters against the ${Math.max(0, budget)} that fit the adapter's input limit. Read ${join(runDir, EVIDENCE_LEDGER)} with your tools; the attempt facts carry the changed-file hashes and your own stage's latest attempt is its continuation evidence.`)
     + `\nDiff:\n${patchExcerpt}`;
 }

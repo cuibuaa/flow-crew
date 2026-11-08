@@ -1,4 +1,5 @@
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
+import { declareValidation } from './test-support/structured-validation.js';
 import { artifacts, inputFile, stageArtifacts } from './spec_contracts/declared-fixtures.js';
 import { createBuildManifest, BUILD_MANIFEST_FILENAME } from '../src/build-manifest.js';
 import { readCampaignEntries } from '../src/campaigns.js';
@@ -379,6 +380,7 @@ describe('engine self-collision after-state replays and controls', () => {
       scripts: { build: 'compile', test: 'check', lint: 'style' },
     }));
     write(join(projectDir, 'package-lock.json'), '{}\n');
+    declareValidation(projectDir, { build: { command: 'npm', args: ['run', 'build'] }, test: { command: 'npm', args: ['run', 'test'] }, lint: { command: 'npm', args: ['run', 'lint'] } });
     write(join(packageRoot, 'src', 'probe.ts'), 'export const probe = true;\n');
     write(join(packageRoot, 'dist', 'probe.js'), 'export const probe = true;\n');
     write(join(packageRoot, 'dist', 'probe.d.ts'), 'export declare const probe = true;\n');

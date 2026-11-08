@@ -1,12 +1,13 @@
 import { appendFileSync, mkdirSync } from '../engine-fs.js';
 
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { readFileSync, readdirSync } from 'node:fs';
 
 import { dirname } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { runDir, updateRunState, type StageContinuation, type AttemptTerminationCause } from '../store.js';
 import { createInvocationScratch } from '../invocation-scratch.js';
-import { processGroupIsAlive, processStartToken } from '../process-liveness.js';
+import { linuxProcessStartTimeTicks, processGroupIsAlive, processStartToken } from '../process-liveness.js';
 import type { ProviderFailure } from '../provider-result.js';
 import { CommandActivityTracker } from '../command-activity.js';
 import type { InvocationUsage, NativeInvocationUsage } from '../invocation-usage.js';
@@ -474,14 +475,51 @@ export function execWithStdin(
   });
 }
 
-/** Raw command owner; close retires only descendants of the process we started. */
+/** Raw command owner. Remember Linux descendants while ancestry is observable,
+ * including workers that create their own session and later lose their parent. */
 export function spawnOwnedCommand(command: string, args: string[], options: { cwd: string; env?: NodeJS.ProcessEnv }) {
   const environment = commandEnvironment(options.env);
   let child: ChildProcess;
   try {
     child = spawnRunCommand(command, args, { ...options, env: environment.env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (error) { environment.cleanup(); throw error; }
+  const owned = new Map<number, string>();
+  if (process.platform === 'linux' && child.pid) {
+    const token = linuxProcessStartTimeTicks(child.pid);
+    if (token) owned.set(child.pid, token);
+  }
+  const rememberDescendants = (): void => {
+    for (const [pid, token] of owned) {
+      if (linuxProcessStartTimeTicks(pid) !== token) continue;
+      try {
+        for (const tid of readdirSync(`/proc/${pid}/task`)) {
+          const children = readFileSync(`/proc/${pid}/task/${tid}/children`, 'utf8').trim();
+          for (const value of children.split(/\s+/)) {
+            const descendant = Number(value);
+            if (!Number.isSafeInteger(descendant) || descendant <= 0) continue;
+            const stat = readFileSync(`/proc/${descendant}/stat`, 'utf8');
+            const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
+            // Verify both the current parent link and its identity before
+            // granting authority; a stale children list cannot bind a reused PID.
+            if (Number(fields[1]) === pid && fields[19] && linuxProcessStartTimeTicks(pid) === token) owned.set(descendant, fields[19]);
+          }
+        }
+      } catch { /* exited or ancestry unavailable; never infer ownership */ }
+    }
+  };
+  const ancestry = process.platform === 'linux' ? setInterval(rememberDescendants, 50) : undefined;
+  ancestry?.unref();
   const stop = (): void => {
+    rememberDescendants();
+    clearInterval(ancestry);
+    for (const [pid, token] of [...owned].reverse()) {
+      if (pid === child.pid || linuxProcessStartTimeTicks(pid) !== token) continue;
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already exited */ }
+    }
+    if (child.pid && owned.has(child.pid)) {
+      const current = linuxProcessStartTimeTicks(child.pid);
+      if (current !== undefined && current !== owned.get(child.pid)) return;
+    }
     try { if (child.pid && process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch { /* already closed */ }
   };
   child.once('close', stop);

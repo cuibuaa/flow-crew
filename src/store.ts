@@ -655,7 +655,7 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
 /** Gate verdict fields returned in the final structured answer and published by the engine. */
 export interface GateVerdict {
   findings?: import('./scoped-audit-repair.js').FindingAssessment;
-  validation?: Array<Pick<import('./project-validation.js').ValidationCommandResult, 'exitCode' | 'load' | 'error' | 'dependencyPreparationFailed'>
+  validation?: Array<Pick<import('./project-validation.js').ValidationCommandResult, 'exitCode' | 'load' | 'error' | 'unfinished' | 'dependencyPreparationFailed'>
     & { role: string; display?: string; state?: import('./project-validation.js').ValidationCommandResult['state']; storedState?: import('./project-validation.js').ValidationCommandResult['state']; measurement: import('./project-validation.js').ValidationMeasurement }>;
   pass: boolean;
   reason?: string;

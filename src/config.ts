@@ -13,7 +13,7 @@ const nonempty = z.string().min(1);
 const EngineDefaultsSchema = z.object({
   default_timeout_ms: numeric,
   stage_idle_timeout_ms: positive,
-  validation_timeout_ms: numeric,
+  validation_timeout_ms: positive,
   validation_load_ceiling_per_cpu: z.number().finite().positive().max(100),
   validation_load_wait_seconds: z.number().finite().nonnegative().max(300),
   scheduler_heartbeat_interval_ms: positive,

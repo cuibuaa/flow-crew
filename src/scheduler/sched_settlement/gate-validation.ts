@@ -1,3 +1,6 @@
+import { loadEngineDefaults } from '../../config.js';
+import { performance } from 'node:perf_hooks';
+import { parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
 import { validationMeasurement } from '../../project-validation.js';
 // Configured validation belongs to authors. Gates only bind and consume facts.
 import { createHash } from 'node:crypto';
@@ -10,10 +13,10 @@ import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { readShipSetupReadyValidationBaseline } from '../../ship-setup-record.js';
 import { readStageStatus, runDir, STAGE_STATUS, type GateVerdict } from '../../store.js';
 import {
-  discoverProjectValidation, evaluateValidationDelta, runProjectValidationBaseline, runValidationCommand,
+  reconcileProjectValidation, parseValidationCommands, ValidationSelectionSchema, evaluateValidationDelta, runProjectValidationBaseline, runValidationCommand,
   type ProjectValidationBaseline, type ProjectValidationDependencies, type ValidationDeltaResult,
 } from '../../project-validation.js';
-import { appendEvidence, captureProjectTree, projectCommit, projectValidationDelta, projectValidationFact, readEvidence, safeEvidencePath, VALIDATION_FACT_VERSION, type ValidationExecution, type ValidationFact } from '../../evidence-ledger.js';
+import { appendEvidence, captureProjectTree, projectCommit, projectValidationDelta, projectValidationFact, readEvidence, safeEvidencePath, validationForTree, VALIDATION_FACT_VERSION, type ValidationExecution, type ValidationFact } from '../../evidence-ledger.js';
 import { parseBriefInputs } from '../../ship-inputs.js';
 import { RollbackContentStore } from '../../rollback-content-store.js';
 import { readRepairFileImage, type RepairFileImage } from '../sched_scope/file-images.js';
@@ -25,7 +28,7 @@ import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 export interface RunValidationBaselineArtifact {
   version: 1;
   capturedAt: string;
-  source: 'ship-setup-ready-record' | 'project-declarations';
+  source: 'ship-setup-ready-record' | 'project-declarations' | 'model-selection';
   baseCommit?: string;
   baseInputs?: { files: Array<{ path: string; image: RepairFileImage }>; durationMs: number; error?: string };
   baseline: ProjectValidationBaseline;
@@ -117,12 +120,19 @@ export function readRunValidationBaseline(base: string): RunValidationBaselineAr
 }
 export function snapshotShipSetupValidationBaseline(projectDir: string, exactBrief: string, base: string): RunValidationBaselineArtifact {
   const admitted = readShipSetupReadyValidationBaseline(projectDir, exactBrief);
+  // Ordinary launch already owns metadata warnings. Validate a decoded
+  // declaration here without turning unrelated malformed YAML into admission.
+  const metadata = parseBriefFrontmatterDocument(exactBrief)?.value;
+  const declaration = parseValidationCommands(metadata && typeof metadata === 'object'
+    ? (metadata as Record<string, unknown>).validation : undefined, join(base, 'task_brief.md'));
+  if (declaration.error) throw new Error(declaration.error);
   const baseline: ProjectValidationBaseline = admitted ?? { version: 1, execution: 'skipped', projectDir,
-    discovery: discoverProjectValidation(projectDir), results: [], gateCriteria: [] };
+    discovery: reconcileProjectValidation(projectDir, declaration.commands), results: [], gateCriteria: [] };
+  if (baseline.discovery.state === 'unknown' && declaration.commands.length) throw new Error(baseline.discovery.reason ?? 'Validation declarations conflict');
   const baseCommit = projectCommit(projectDir);
   const artifact: RunValidationBaselineArtifact = { version: 1, capturedAt: new Date().toISOString(),
     source: admitted ? 'ship-setup-ready-record' : 'project-declarations', baseCommit,
-    ...(baseline.discovery.commands.length ? { baseInputs: captureBaseInputs(projectDir, exactBrief, base, baseCommit) } : {}),
+    baseInputs: captureBaseInputs(projectDir, exactBrief, base, baseCommit),
     // Historical setup measurements are retained for audit, but never decide a new attempt.
     baseline };
   writeFileSync(join(base, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(artifact, null, 2)}\n`);
@@ -136,22 +146,47 @@ export function ensureAttemptValidationPlan(projectDir: string, runId: string): 
   return snapshotShipSetupValidationBaseline(projectDir, briefAt(base), base);
 }
 
-/** One suite at the closed author boundary, plus one separate base tree only
- * for a red suite. There is no tree cache and no retry on uncertain identity. */
+/** Settle the first author's schema-bound command selection once. Invalid output stays
+ * explicitly unknown and is never replaced by discovery heuristics. */
+export function recordValidationSelection(projectDir: string, runId: string, value: unknown): void {
+  const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
+  if (!plan || plan.baseline.discovery.commands.length || plan.source === 'model-selection') return;
+  const selected = ValidationSelectionSchema.safeParse(value);
+  plan.source = 'model-selection';
+  const commands = selected.success && Object.keys(selected.data.commands).length
+    ? parseValidationCommands({ commands: selected.data.commands }, 'model-selection').commands : [];
+  plan.baseline.discovery = { state: commands.length ? 'partial' : 'unknown', configPath: 'model-selection',
+    commands: commands.map(command => ({ ...command, display: [command.command, ...command.args].join(' ') })),
+    missingRoles: (['build', 'test', 'lint'] as const).filter(role => !commands.some(command => command.role === role)),
+    reason: `Model selection: ${selected.success ? selected.data.reason : 'invalid or unavailable; validation unmeasured'}` };
+  // Never reconstruct a missing pre-author input image from authored bytes.
+  writeFileSync(join(base, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(plan, null, 2)}\n`);
+}
+
+/** One bounded batch per tree. Prior facts remain append-only, including unknown
+ * outcomes. A decision never retries identical evidence. */
 export async function recordAttemptValidation(projectDir: string, runId: string, stageId: string,
   dependencies: ProjectValidationDependencies = {}): Promise<ValidationFact> {
   const base = runDir(projectDir, runId), plan = readRunValidationBaseline(base);
   const attempt = readStageStatus(projectDir, runId, stageId).attempts?.at(-1);
   if (!attempt || !plan) throw new Error('ATTEMPT_VALIDATION_PLAN_MISSING');
+  const treeHash = captureProjectTree(projectDir, briefAt(base)).hash;
   const previous = readEvidence(base).find((entry): entry is ValidationFact & { sequence: number; version: 1; at: string } =>
-    entry.kind === 'validation' && entry.stageId === stageId && entry.attemptIndex === attempt.index && entry.attemptStartedAt === attempt.startedAt);
+    entry.kind === 'validation' && (entry.stageId === stageId && entry.attemptIndex === attempt.index && entry.attemptStartedAt === attempt.startedAt
+      || entry.validationVersion === VALIDATION_FACT_VERSION && treeHash !== null && entry.treeHash === treeHash
+      && entry.executions.every(execution => execution.treeHash !== null && execution.treeHash === execution.treeAfterHash)));
   if (previous) return previous;
+  const started = performance.now();
+  const budgetMs = Math.max(0, Math.min(loadEngineDefaults().validation_timeout_ms, dependencies.remainingMs?.() ?? Infinity));
+  const remainingMs = () => Math.max(0, Math.min(budgetMs - (performance.now() - started), dependencies.remainingMs?.() ?? Infinity));
+  const abortSignal = AbortSignal.any([AbortSignal.timeout(Math.max(1, Math.ceil(budgetMs))), ...(dependencies.abortSignal ? [dependencies.abortSignal] : [])]);
   const brief = briefAt(base), executions: ValidationExecution[] = [];
   const execute = async (cwd: string, target: 'attempt' | 'base', commit?: string): Promise<ProjectValidationBaseline> => {
     const tree = captureProjectTree(cwd, brief);
-    const commandFacts: Array<{ treeHash: string | null; treeAfterHash: string | null; output: string }> = [];
+    const commandFacts = new Map<string, { treeHash: string | null; treeAfterHash: string | null; output: string }>();
     const measured = await runProjectValidationBaseline(cwd, {
-      ...dependencies, commands: plan.baseline.discovery.commands.map(command => {
+      ...dependencies, remainingMs, abortSignal, commands: plan.baseline.discovery.commands.filter(command => target === 'attempt' || executions[0].commands.some(result => result.role === command.role
+        && result.display === command.display && result.state === 'failed' && validationMeasurement(result) !== 'not_measured')).map(command => {
         // A declared absolute project path follows the isolated base tree.
         // Shell programs are opaque declarations; never parse their text.
         const relocate = (value: string) => {
@@ -169,7 +204,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
           ...(target === 'attempt' ? { execution: { stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt } } : {}) })))(request);
         // Retain the command's full transport output before prompt/identity
         // bounding. Large stderr must not erase stdout's suite totals.
-        commandFacts.push({ treeHash: before.hash, treeAfterHash: captureProjectTree(cwd, brief).hash,
+        commandFacts.set(JSON.stringify([request.role, request.display]), { treeHash: before.hash, treeAfterHash: captureProjectTree(cwd, brief).hash,
           output: [result.stdout, result.stderr].filter(value => Boolean(value)).join('\n') });
         return result;
       },
@@ -180,7 +215,8 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
       if (!command) return [];
       const outputPath = `stage_evidence/${stageId}/validation-${attempt.index}-${target}-${commandIndex}.log`;
       mkdirSync(dirname(join(base, outputPath)), { recursive: true });
-      const { output = result.output, ...tree } = commandFacts[commandIndex++] ?? {};
+      commandIndex++;
+      const { output = result.output, ...tree } = commandFacts.get(JSON.stringify([result.role, result.display])) ?? {};
       writeFileSync(join(base, outputPath), output);
       return [{ ...result, output: '', outputPath, command: command.command, args: command.args,
         ...tree }];
@@ -191,14 +227,14 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
   const current = await execute(projectDir, 'attempt');
   let baseline: ProjectValidationBaseline | undefined;
   let baseError: string | undefined;
-  if (current.results.some(result => validationMeasurement(result) !== 'not_measured' && (result.state === 'failed' || result.state === 'launch_error'))) {
+  if (current.results.some(result => validationMeasurement(result) !== 'not_measured' && result.state === 'failed')) {
     const scratch = mkdtempSync(join(tmpdir(), 'flowcrew-base-')), checkout = join(scratch, 'tree');
     let added = false;
     try {
-      if (dependencies.abortSignal?.aborted || dependencies.remainingMs && dependencies.remainingMs() <= 0) throw new Error('Attempt deadline/control ended before the base comparison');
+      if (abortSignal.aborted || remainingMs() <= 0) throw new Error('Attempt deadline/control ended before the base comparison');
       if (!plan.baseCommit) throw new Error('No base commit was captured before authoring');
       const result = spawnSync('git', ['worktree', 'add', '--detach', checkout, plan.baseCommit], {
-        cwd: projectDir, encoding: 'utf8', timeout: 60_000, maxBuffer: 1024 * 1024,
+        cwd: projectDir, encoding: 'utf8', timeout: Math.max(1, Math.ceil(Math.min(60_000, remainingMs()))), maxBuffer: 1024 * 1024,
       });
       if (result.status !== 0) throw new Error(`Base worktree exited ${result.status}: ${result.stderr}`);
       added = true;
@@ -227,7 +263,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
       rmSync(scratch, { recursive: true, force: true });
     }
   }
-  let delta = evaluateValidationDelta(baseline, current.results, baseError);
+  let delta = evaluateValidationDelta(baseline, current.results, baseError, plan.baseline.discovery.commands);
   const bindingValid = executions.every(execution => execution.treeHash !== null && execution.treeHash === execution.treeAfterHash);
   if (!bindingValid) {
     delta = delta.map(entry => ({ ...entry, state: 'unresolved', reason: 'Source tree changed or became unreadable during configured validation' }));
@@ -236,12 +272,12 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
     const prior = baseline?.results.find(item => item.role === result.role && item.display === result.display);
     return (result.failureIdentifiers.length ? result.failureIdentifiers : [null]).map(identifier => {
       let classification: 'pre-existing' | 'introduced' | 'unknown' = 'unknown';
-      if (bindingValid && prior && validationMeasurement(prior) !== 'not_measured' && prior.state === 'passed') classification = 'introduced';
-      else if (bindingValid && prior && validationMeasurement(prior) !== 'not_measured' && identifier !== null && prior.failureIdentity === 'known' && result.failureIdentity === 'known') {
+      if (bindingValid && prior && validationMeasurement(prior) !== 'not_measured' && prior.state === 'passed' && prior.failureIdentity !== 'unknown') classification = 'introduced';
+      else if (bindingValid && prior?.state === 'failed' && validationMeasurement(prior) !== 'not_measured' && identifier !== null && prior.failureIdentity === 'known' && result.failureIdentity === 'known') {
         // Positive membership is meaningful even in a partial population.
         // Absence proves introduction only when the base population is complete.
         if (prior.failureIdentifiers.includes(identifier)) classification = 'pre-existing';
-        else if (prior.failureEvidence !== 'partial') classification = 'introduced';
+        else if (prior.failureEvidence !== 'partial' && result.failureEvidence !== 'partial') classification = 'introduced';
       }
       return { role: result.role, display: result.display, identifier, classification };
     });
@@ -250,7 +286,7 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
     ...(plan.baseInputs ? { baseInputSnapshot: { manifestSha256: createHash('sha256').update(JSON.stringify(plan.baseInputs)).digest('hex'),
       files: plan.baseInputs.files.length, bytes: plan.baseInputs.files.reduce((total, file) => total + (file.image.byteLength ?? 0), 0),
       durationMs: plan.baseInputs.durationMs, ...(plan.baseInputs.error ? { error: plan.baseInputs.error } : {}) } } : {}),
-    treeHash: executions[0].treeAfterHash, executions, delta, failures, pass: delta.every(entry => entry.state === 'pass') };
+    treeHash: executions[0].treeAfterHash, executions, delta, failures, pass: delta.length > 0 && delta.every(entry => entry.state === 'pass') };
   appendEvidence(base, fact);
   return fact;
 }
@@ -270,9 +306,9 @@ export async function recordGateValidationDelta(projectDir: string, runId: strin
   const execution = closedGateValidationExecution(projectDir, runId, stageId) ?? gateExecution(projectDir, runId, stageId, ['running']);
   if (!execution) return undefined;
   const tree = captureProjectTree(projectDir, briefAt(base));
-  const fact = readEvidence(base).filter(entry => entry.kind === 'validation').at(-1);
+  const fact = validationForTree(readEvidence(base), tree.hash);
   const valid = fact?.kind === 'validation' && fact.validationVersion === VALIDATION_FACT_VERSION && tree.hash !== null && fact.treeHash === tree.hash
-    && readStageStatus(projectDir, runId, fact.stageId).attempts?.at(-1)?.index === fact.attemptIndex;
+    && readStageStatus(projectDir, runId, fact.stageId).attempts?.some(attempt => attempt.index === fact.attemptIndex && attempt.startedAt === fact.attemptStartedAt && attempt.status === STAGE_STATUS.COMPLETE);
   const delta: ValidationDeltaResult[] = valid ? fact.delta : [{ role: 'test', state: 'unresolved', reason: 'No settled author validation covers the current source tree', newFailureIdentifiers: [] }];
   const artifact: GateValidationDeltaArtifact = { version: 2, stageId, checkedAt: new Date().toISOString(),
     pass: valid ? fact.pass : false, baselineSha256: createHash('sha256').update(readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex'),
@@ -301,10 +337,10 @@ export function bindReviewedGateValidation(projectDir: string, runId: string, st
  * Mutable aliases cannot replace the append-only author's receipt. */
 export function currentAuthorValidationRefusal(projectDir: string, runId: string): GateVerdict | undefined {
   const base = runDir(projectDir, runId);
-  const recorded = readEvidence(base).filter(entry => entry.kind === 'validation').at(-1);
-  const fact = recorded?.kind === 'validation' && recorded.validationVersion === VALIDATION_FACT_VERSION ? projectValidationFact(recorded) : recorded;
   const tree = captureProjectTree(projectDir, briefAt(base));
-  const owner = fact?.kind === 'validation' ? readStageStatus(projectDir, runId, fact.stageId).attempts?.at(-1) : undefined;
+  const recorded = validationForTree(readEvidence(base), tree.hash);
+  const fact = recorded?.kind === 'validation' && recorded.validationVersion === VALIDATION_FACT_VERSION ? projectValidationFact(recorded) : recorded;
+  const owner = fact?.kind === 'validation' ? readStageStatus(projectDir, runId, fact.stageId).attempts?.find(attempt => attempt.index === fact.attemptIndex && attempt.startedAt === fact.attemptStartedAt) : undefined;
   const refuse = (reason: string): GateVerdict => ({ pass: false, reason, refusal: { kind: 'validation_unresolved' } });
   if (fact?.kind !== 'validation' || fact.validationVersion !== VALIDATION_FACT_VERSION || tree.hash === null || fact.treeHash !== tree.hash
     || owner?.index !== fact.attemptIndex || owner.startedAt !== fact.attemptStartedAt || owner.status !== STAGE_STATUS.COMPLETE) {
@@ -315,7 +351,9 @@ export function currentAuthorValidationRefusal(projectDir: string, runId: string
   if (regressions.length) return { pass: false,
     reason: `Introduced validation failures: ${regressions.map(entry => `${entry.display ?? entry.role}: ${entry.newFailureIdentifiers.join(', ') || entry.reason}`).join('; ')}`,
     refusal: { kind: 'validation_regression' }, repairability: { version: 1, disposition: 'repairable', evidence: `${join(base, 'evidence-ledger.jsonl')}#${fact.sequence}` } };
-  return refuse(`Validation comparison is unknown; run is not certified: ${fact.delta.filter(entry => entry.state !== 'pass').map(entry => entry.reason).join('; ')}; no code repair is inferred`);
+  // Incomplete and unmeasured evidence is stated in the gate's ledger input.
+  // Only that independent gate owns acceptance under its brief criteria.
+  return undefined;
 }
 
 export function gateValidationRefusal(projectDir: string, runId: string, stageId: string): GateVerdict | undefined {

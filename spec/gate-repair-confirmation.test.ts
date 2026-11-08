@@ -1,5 +1,6 @@
 import './test-support/policy-runtime.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
+import { declareValidation } from './test-support/structured-validation.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,6 +38,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
   const dependency = mkdtempSync(join(tmpdir(), 'closure-dependency-')); roots.push(dependency);
   const marker = join(dependency, 'ready');
   if (needsValidationPreparation) {
+    declareValidation(project, { test: { command: 'npm', args: ['run', 'test'] } });
     writeFileSync(join(project, 'package.json'), JSON.stringify({ packageManager: 'npm@10.9.7', scripts: { test: 'fixture-check' } }));
     vi.spyOn(validation, 'runValidationCommand').mockImplementation(request => {
       if (request.execution?.stageId === 'repair') writeFileSync(marker, 'ready');
@@ -226,7 +228,7 @@ describe('repair requires a reviewer reproduction', () => {
   it.each([
     ['review', 'review_full'], ['review_full', 'review'],
     ['review', 'review'], ['review_full', 'review_full'],
-  ])('retains reproduction closure across assessment choices (%s → %s)', async (first, second) => {
+  ])('retains reproduction closure across assessment choices (%s → %s)', { timeout: 60_000 }, async (first, second) => {
     for (const failedRepair of [true, false]) {
       const value = await workflow('mixed', failedRepair, false, false, 'recorded', [first, second]);
       expect(value.calls.map(call => call.stage)).toEqual(['choose', 'implement', 'assess', first, 'repair', 'assess', second]);

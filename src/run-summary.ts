@@ -1,7 +1,6 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
-import { stripVTControlCharacters } from 'node:util';
 import { projectRunStageHistory } from './run-state-view.js';
 import { RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from './handoff.js';
 import { RECORDED_PLAN_SCHEMA } from './plan-interface.js';
@@ -410,10 +409,8 @@ function renderValidation(runDir: string): string {
       }
       const { state, measurement } = projectValidationResult(result);
       lines.push(`- \`${result.display ?? result.role}\` — ${measurement === 'not_measured' ? 'not measured (neither pass nor failure; no author action)' : `${state} (${measurement.replaceAll('_', ' ')})`}; direct exit ${Number.isInteger(result.exitCode) ? result.exitCode : 'unknown'}; ${result.durationMs}ms; recorded state ${'storedState' in result ? result.storedState : result.state}; runner error ${JSON.stringify(result.error ?? null)}; load ${JSON.stringify(result.load ?? null)}${result.reason ? `; recorded reason: ${result.reason}` : ''}`);
-      // These are labelled raw collector excerpts, never a synthesized total.
-      const totals = stripVTControlCharacters(result.output).split('\n').filter(line => /^(?:\s*(?:Test Files|Tests)\s+\d|# (?:tests|pass|fail|cancelled|skipped|todo) \d|.*\b\d+ (?:passed|failed|skipped).* in [\d.]+s)/.test(line));
-      if (totals.length) lines.push('Collector test totals:\n```text\n' + totals.join('\n') + '\n```');
-      else if (result.role === 'test') lines.push('Test totals unavailable in collector output; see receipt.');
+      if (result.unfinished) lines.push('Validation unfinished; no completed result or passing totals inferred.');
+      lines.push(`Declared reporter totals: tests run ${result.testsRun ?? 'unknown'}; failures ${result.failureCount ?? 'unknown'}.`);
       for (const failure of result.failureIdentifiers) lines.push(`  - Failure: ${failure}`);
     }
     for (const delta of receipt.delta) lines.push(delta
@@ -421,7 +418,8 @@ function renderValidation(runDir: string): string {
       : 'Baseline comparison entry unavailable or invalid.');
     sections.push(lines.join('\n\n'));
   }
-  return '## Configured validation\n\n' + (sections.join('\n\n') || 'No engine validation receipts recorded; configured verification is unreported.');
+  const selection = readJson<{ baseline?: { discovery?: unknown } }>(join(runDir, 'validation_baseline.json'))?.baseline?.discovery;
+  return '## Configured validation\n\n' + (sections.join('\n\n') || `No engine validation receipts recorded; validation unmeasured. Command selection: ${JSON.stringify(selection ?? 'unavailable')}.`);
 }
 
 function renderRunOutcome(state: StoreState): string {

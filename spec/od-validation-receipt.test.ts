@@ -1,3 +1,4 @@
+import { validationReport } from './test-support/structured-validation.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -5,7 +6,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
-import { runProjectValidationBaseline } from '../src/project-validation.js';
+import { runProjectValidationBaseline, runValidationCommand } from '../src/project-validation.js';
 import { parseDispatchedStageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { createScopeSafeStageRunner } from '../src/scheduler/sched_scope/stage-group.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
@@ -91,8 +92,8 @@ describe('configured validation has one attempt owner and read-only gate binding
         await reviewClosed;
         writeFileSync(join(project, 'product.ts'), 'regressed');
         completeStageAttempt(project, f.runId, peer.id, 0, { exitCode: 0, duration_ms: 1, writes: ['product.ts'], writeAttribution: 'snapshot' });
-        const measured = await runProjectValidationBaseline(project, { commands: JSON.parse(readFileSync(join(f.runDirPath, 'validation_baseline.json'), 'utf8')).baseline.discovery.commands,
-          readFailureIdentity: () => ({ version: 1, complete: true, testsRun: 1, failures: [{ testId: 'test_missing_result', file: 'product.ts', messageClass: 'test-failure' }] }) });
+        const measured = await runProjectValidationBaseline(project, { commands: JSON.parse(readFileSync(join(f.runDirPath, 'validation_baseline.json'), 'utf8')).baseline.discovery.commands.map(command => ({ ...command, report: { format: 'vitest-json' } })),
+          runCommand: async request => { const response = await runValidationCommand({ ...request, report: undefined }); return { ...response, stdout: validationReport(['test_missing_result'], { file: 'product.ts' }) }; } });
         seedAttemptValidation(project, f.runId, measured.results, { stageId: peer.id });
         return;
       }

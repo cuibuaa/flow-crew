@@ -1,3 +1,4 @@
+import { validationReport } from './test-support/structured-validation.js';
 import './test-support/policy-runtime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -5,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   discoverProjectValidation,
+  reconcileProjectValidation,
+  parseValidationCommands,
   evaluateValidationDelta,
   runProjectValidationBaseline,
   runValidationCommand,
@@ -32,31 +35,6 @@ function memoryFs(files: Record<string, string>): ValidationFileSystem {
 const root = resolve('portable-project');
 
 describe('project command environment and observer authority', () => {
-  it.skipIf(process.platform === 'win32').each([
-    ['npm', 'npm@10.0.0', 'package-lock.json', '{}', ['ci']],
-    ['pnpm', 'pnpm@9.0.0', 'pnpm-lock.yaml', '', ['install', '--frozen-lockfile']],
-    ['yarn', 'yarn@1.22.0', 'yarn.lock', '', ['install', '--frozen-lockfile']],
-    ['yarn', 'yarn@4.0.0', 'yarn.lock', '__metadata:', ['install', '--immutable']],
-    ['yarn', undefined, 'yarn.lock', '# yarn lockfile v1', ['install', '--frozen-lockfile']],
-    ['yarn', undefined, 'yarn.lock', '__metadata:', ['install', '--immutable']],
-    ['bun', 'bun@1.0.0', 'bun.lock', '', ['install', '--frozen-lockfile']],
-  ])('prepares %s dependencies with frozen argv (%s)', async (manager, packageManager, lockfile, lock, expected) => {
-    const project = mkdtempSync(join(tmpdir(), 'validation-manager-'));
-    try {
-      const bin = join(project, 'bin'); mkdirSync(bin);
-      writeFileSync(join(project, 'package.json'), JSON.stringify({ packageManager }));
-      writeFileSync(join(project, String(lockfile)), String(lock));
-      const executable = join(bin, String(manager));
-      writeFileSync(executable, `#!${process.execPath}\nrequire('node:fs').writeFileSync('install.json', JSON.stringify(process.argv.slice(2)));\n`);
-      chmodSync(executable, 0o755);
-      const result = await runValidationCommand({ role: 'build', command: process.execPath,
-        args: ['-e', "process.stdout.write(require('node:fs').readFileSync('install.json'))"],
-        display: 'configured build', cwd: project, prepareDependencies: true,
-        env: { ...process.env, PATH: bin } });
-      expect(result.exitCode, result.error ?? result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout ?? '')).toEqual(expected);
-    } finally { rmSync(project, { recursive: true, force: true }); }
-  });
   it('ends configured validation inside the enclosing attempt budget', async () => {
     const project = mkdtempSync(join(tmpdir(), 'validation-deadline-'));
     // Keep the requested budget deterministic while the real timeout runs.
@@ -147,396 +125,54 @@ describe('project command environment and observer authority', () => {
 });
 
 describe('configuration-driven project validation baseline', () => {
-  it('discovers and runs exactly the declared build, test, and lint scripts with lockfile-selected argv', async () => {
-    const fs = memoryFs({
-      [`${root}/package.json`]: JSON.stringify({
-        scripts: { build: 'tsc', test: 'vitest run', lint: 'eslint src', deploy: 'must not run' },
-      }),
-      [`${root}/package-lock.json`]: '{}',
-    });
-    const runner = vi.fn(({ role }: { role: string }) => ({
-      exitCode: role === 'test' ? 1 : 0,
-      stdout: role === 'test' ? 'FAIL spec/existing.test.ts\nTests 1 failed' : `${role} ok`,
-      durationMs: 7,
-    }));
-
-    const baseline = await runProjectValidationBaseline(root, { fs, runCommand: runner, readFailureIdentity: () => ({ version: 1, testsRun: 1, complete: true, failures: [{ testId: 'spec/existing.test.ts', file: null, messageClass: 'test-failure' }] }) });
-
-    expect(baseline.discovery).toMatchObject({
-      state: 'configured',
-      runner: 'npm',
-      runnerEvidence: 'package-lock.json',
-      missingRoles: [],
-    });
-    expect(baseline.discovery.commands.every((command) => command.provenance === undefined)).toBe(true);
-    expect(runner.mock.calls.map(([request]) => request)).toEqual([
-      expect.objectContaining({ role: 'build', command: 'npm', args: ['run', 'build'], cwd: root }),
-      expect.objectContaining({ role: 'test', command: 'npm', args: ['run', 'test'], cwd: root }),
-      expect.objectContaining({ role: 'lint', command: 'npm', args: ['run', 'lint'], cwd: root }),
-    ]);
-    expect(baseline.results).toContainEqual(expect.objectContaining({
-      role: 'test',
-      state: 'failed',
-      exitCode: 1,
-      failureCount: 1,
-      failureIdentifiers: [JSON.stringify(['spec/existing.test.ts', null, 'test-failure'])],
-    }));
-    expect(baseline.gateCriteria).toContainEqual(expect.objectContaining({
-      role: 'test',
-      rule: 'no_regression_from_baseline',
-      baselineFailureCount: 1,
-      description: expect.stringContaining('may not add'),
-    }));
-    expect(baseline.gateCriteria).toContainEqual(expect.objectContaining({
-      role: 'build', rule: 'must_remain_green',
-    }));
-  });
-
-  it('infers and runs Python build, test, and lint commands from pyproject.toml', async () => {
-    const pyprojectPath = `${root}/pyproject.toml`;
-    const fs = memoryFs({
-      [pyprojectPath]: [
-        '[build-system]',
-        'requires = ["hatchling"]',
-        'build-backend = "hatchling.build"',
-        '',
-        '[project]',
-        'dependencies = ["pytest>=8", "ruff>=0.6"]',
-        '',
-        '[tool.pytest.ini_options]',
-        'testpaths = ["checks"]',
-        '',
-        '[tool.ruff]',
-        'line-length = 100',
-      ].join('\n'),
-    });
-    const runner = vi.fn(() => ({ exitCode: 0, durationMs: 3 }));
-
-    const baseline = await runProjectValidationBaseline(root, { fs, runCommand: runner });
-
-    expect(baseline.discovery).toMatchObject({
-      state: 'configured',
-      configPath: pyprojectPath,
-      configPaths: [pyprojectPath],
-      missingRoles: [],
-    });
-    expect(runner.mock.calls.map(([request]) => request)).toEqual([
-      expect.objectContaining({ role: 'build', command: 'python', args: ['-m', 'build'], evidencePath: pyprojectPath }),
-      expect.objectContaining({ role: 'test', command: 'python', args: ['-m', 'pytest'], evidencePath: pyprojectPath }),
-      expect.objectContaining({ role: 'lint', command: 'python', args: ['-m', 'ruff', 'check', '.'], evidencePath: pyprojectPath }),
-    ]);
-    expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'must_remain_green')).toBe(true);
-  });
-
-  it('does not infer Python tools from comments or descriptive metadata', () => {
-    const pyprojectPath = `${root}/pyproject.toml`;
-    const discovery = discoverProjectValidation(root, memoryFs({
-      [pyprojectPath]: [
-        '[project]',
-        'name = "sample"',
-        'description = "pytest and ruff may be adopted later"',
-        '# [tool.pytest.ini_options]',
-        '# [tool.ruff]',
-      ].join('\n'),
-    }));
-
-    expect(discovery).toMatchObject({ state: 'unknown', commands: [] });
-  });
-
-  it.each([
-    ['pytest.ini', '[pytest]\ntestpaths = checks\n', 'test', ['-m', 'pytest', '-q']],
-    ['tox.ini', '[pytest]\ntestpaths = checks\n', 'test', ['-m', 'pytest', '-q']],
-    ['pyproject.toml', '[tool.pytest.ini_options]\n', 'test', ['-m', 'pytest', '-q']],
-    ['pyproject.toml', '[build-system]\nrequires = ["hatchling"]\n', 'build', ['-m', 'build', '--wheel']],
-    ['pyproject.toml', '[tool.ruff]\n', 'lint', ['-m', 'ruff', 'check', 'checks']],
-  ] as const)('replaces a command inferred from %s with the brief declaration (%s, %s)', async (file, text, role, args) => {
-    const evidencePath = `${root}/task.md#validation.commands.${role}`;
-    const declaration = { role, command: '/opt/project-venv/bin/python', args: [...args], evidencePath };
+  it('runs only literal declared argv; script names, locks, Make and Python files never select commands', async () => {
+    const files = memoryFs({ [`${root}/package.json`]: JSON.stringify({ packageManager: 'npm@10', scripts: { test: 'all' } }),
+      [`${root}/package-lock.json`]: '{}', [`${root}/Makefile`]: 'test:\n\tfalse',
+      [`${root}/pyproject.toml`]: '[build-system]\n[tool.pytest.ini_options]', [`${root}/tox.ini`]: '[testenv]\ncommands=pytest' });
+    expect(discoverProjectValidation(root, files)).toMatchObject({ state: 'unknown', commands: [] });
     const runner = vi.fn(() => ({ exitCode: 0 }));
-    const baseline = await runProjectValidationBaseline(root, {
-      fs: memoryFs({ [`${root}/${file}`]: text }),
-      runCommand: runner,
-      declaredCommands: [declaration],
-    });
-
-    expect(baseline.discovery).toMatchObject({
-      state: 'partial',
-      missingRoles: ['build', 'test', 'lint'].filter(candidate => candidate !== role),
-      commands: [{ ...declaration, provenance: { source: 'brief', evidencePath } }],
-    });
-    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      ...declaration, cwd: root, provenance: { source: 'brief', evidencePath },
-    }));
-    expect(baseline.results).toContainEqual(expect.objectContaining({ role, state: 'passed' }));
-  });
-
-  it.each([undefined, []])('keeps the inferred pytest.ini command without a brief declaration (%j)', async declaredCommands => {
-    const evidencePath = `${root}/pytest.ini`;
-    const runner = vi.fn(() => ({ exitCode: 0 }));
-    const baseline = await runProjectValidationBaseline(root, {
-      fs: memoryFs({ [evidencePath]: '[pytest]\ntestpaths = checks\n' }),
-      runCommand: runner,
-      declaredCommands,
-    });
-
-    expect(baseline.discovery).toMatchObject({
-      state: 'partial', missingRoles: ['build', 'lint'],
-      commands: [{ role: 'test', command: 'python', args: ['-m', 'pytest'], evidencePath }],
-    });
-    expect(baseline.discovery.commands[0].provenance).toBeUndefined();
-    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      role: 'test', command: 'python', args: ['-m', 'pytest'], evidencePath, cwd: root,
-    }));
-  });
-
-  it('infers named Makefile targets without executing unrelated targets', async () => {
-    const makefilePath = `${root}/Makefile`;
-    const fs = memoryFs({
-      [makefilePath]: [
-        'build: compile',
-        'test:',
-        'lint:',
-        'deploy:',
-      ].join('\n'),
-    });
-    const runner = vi.fn(() => ({ exitCode: 0 }));
-
-    const baseline = await runProjectValidationBaseline(root, { fs, runCommand: runner });
-
-    expect(baseline.discovery.state).toBe('configured');
-    expect(runner.mock.calls.map(([request]) => [request.command, request.args])).toEqual([
-      ['make', ['build']],
-      ['make', ['test']],
-      ['make', ['lint']],
-    ]);
-  });
-
-  it('records every role of a zero-command discovery as not configured when nothing is declared', async () => {
-    const runner = vi.fn(() => ({ exitCode: 0 }));
-
-    const baseline = await runProjectValidationBaseline(root, { fs: memoryFs({}), runCommand: runner });
-
-    expect(baseline.discovery).toMatchObject({
-      state: 'unknown',
-      commands: [],
-      missingRoles: ['build', 'test', 'lint'],
-      reason: expect.stringContaining('No recognized'),
-    });
+    expect((await runProjectValidationBaseline(root, { fs: files, runCommand: runner })).results).toEqual([]);
     expect(runner).not.toHaveBeenCalled();
-    expect(baseline.results.every((result) => result.state === 'not_configured')).toBe(true);
-    expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'not_configured')).toBe(true);
-  });
-
-  it('uses a brief declaration as an argv-literal fallback when project discovery is unknown', async () => {
-    const evidencePath = `${root}/task.md#validation.commands.test`;
-    const runner = vi.fn(() => ({ exitCode: 0, stdout: '151 passed', durationMs: 5 }));
-
-    const baseline = await runProjectValidationBaseline(root, {
-      fs: memoryFs({}),
-      runCommand: runner,
-      declaredCommands: [{
-        role: 'test',
-        command: '/opt/project-venv/bin/python',
-        args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
-        evidencePath,
-      }],
-    });
-
-    expect(baseline.discovery).toMatchObject({
-      state: 'partial',
-      missingRoles: ['build', 'lint'],
-      commands: [{
-        role: 'test',
-        command: '/opt/project-venv/bin/python',
-        args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
-        evidencePath,
-        provenance: { source: 'brief', evidencePath },
-      }],
-    });
-    expect(runner).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      role: 'test',
-      command: '/opt/project-venv/bin/python',
-      args: ['-m', 'pytest', '--label', 'literal; $(must-not-run)'],
-      cwd: root,
-    }));
-    expect(baseline.results).toEqual([
-      expect.objectContaining({ role: 'build', state: 'not_configured' }),
-      expect.objectContaining({ role: 'test', state: 'passed' }),
-      expect.objectContaining({ role: 'lint', state: 'not_configured' }),
-    ]);
-    expect(baseline.gateCriteria).toContainEqual(expect.objectContaining({
-      role: 'test', rule: 'must_remain_green', baselineFailureIdentifiers: [],
-    }));
-  });
-
-  it('merges missing roles from the brief while project configuration governs declared roles', async () => {
-    const packagePath = `${root}/package.json`;
-    const briefPath = `${root}/task.md`;
-    const runner = vi.fn(() => ({ exitCode: 0 }));
-    const baseline = await runProjectValidationBaseline(root, {
-      fs: memoryFs({
-        [packagePath]: JSON.stringify({ scripts: { test: 'vitest run' } }),
-        [`${root}/package-lock.json`]: '{}',
-      }),
-      runCommand: runner,
-      declaredCommands: [
-        { role: 'build', command: 'custom-build', args: ['--frozen'], evidencePath: `${briefPath}#validation.commands.build` },
-        { role: 'lint', command: 'custom-lint', args: ['--strict'], evidencePath: `${briefPath}#validation.commands.lint` },
-      ],
-    });
-
-    expect(baseline.discovery).toMatchObject({ state: 'configured', missingRoles: [] });
-    expect(baseline.discovery.commands.map((command) => [
-      command.role,
-      command.command,
-      command.args,
-      command.provenance?.source,
-    ])).toEqual([
-      ['build', 'custom-build', ['--frozen'], 'brief'],
-      ['test', 'npm', ['run', 'test'], undefined],
-      ['lint', 'custom-lint', ['--strict'], 'brief'],
-    ]);
-  });
-
-  it('accepts exact overlap as corroboration and executes the project command once', async () => {
-    const packagePath = `${root}/package.json`;
-    const evidencePath = `${root}/task.md#validation.commands.test`;
-    const runner = vi.fn(() => ({ exitCode: 0 }));
-    const baseline = await runProjectValidationBaseline(root, {
-      fs: memoryFs({
-        [packagePath]: JSON.stringify({ scripts: { test: 'vitest run' } }),
-        [`${root}/package-lock.json`]: '{}',
-      }),
-      runCommand: runner,
-      declaredCommands: [{ role: 'test', command: 'npm', args: ['run', 'test'], evidencePath }],
-    });
-
-    expect(runner).toHaveBeenCalledOnce();
-    expect(baseline.discovery.commands).toEqual([
-      expect.objectContaining({
-        role: 'test',
-        command: 'npm',
-        args: ['run', 'test'],
-        evidencePath: packagePath,
-        provenance: {
-          source: 'project',
-          evidencePath: packagePath,
-          corroboratedBy: [evidencePath],
-        },
-      }),
-    ]);
-  });
-
-  it.each([
-    ['package.json', JSON.stringify({ scripts: { test: 'vitest run' } }), ['npm', 'run', 'test']],
-    ['Makefile', 'test:\n\tpython checks/runtests.py\n', ['make', 'test']],
-    ['tox.ini', '[testenv]\ncommands = python checks/runtests.py\n', ['tox']],
-  ])('refuses conflicting %s and brief declarations even when the brief matches a guess', async (file, text, projectArgv) => {
-    const projectPath = `${root}/${file}`;
-    const evidencePath = `${root}/task.md#validation.commands.test`;
-    const runner = vi.fn(() => ({ exitCode: 0 }));
-    const baseline = await runProjectValidationBaseline(root, {
-      fs: memoryFs({
-        [projectPath]: text,
-        [`${root}/package-lock.json`]: '{}',
-        [`${root}/pytest.ini`]: '[pytest]\ntestpaths = checks\n',
-      }),
-      runCommand: runner,
-      declaredCommands: [{
-        role: 'test', command: 'python', args: ['-m', 'pytest'], evidencePath,
-      }],
-    });
-
-    expect(runner).not.toHaveBeenCalled();
-    expect(baseline.discovery).toMatchObject({
-      state: 'unknown',
-      commands: [],
-      missingRoles: ['build', 'test', 'lint'],
-      reason: expect.stringContaining(projectPath),
-    });
-    expect(baseline.discovery.reason).toContain(evidencePath);
-    expect(baseline.discovery.reason).toContain(JSON.stringify(projectArgv));
-    expect(baseline.discovery.reason).toContain('["python","-m","pytest"]');
-    expect(baseline.results.every((result) => result.state === 'unresolved')).toBe(true);
-  });
-
-  it('does not let a brief replace a package script whose package runner is ambiguous', async () => {
-    const packagePath = `${root}/package.json`;
-    const evidencePath = `${root}/task.md#validation.commands.build`;
-    const runner = vi.fn(() => ({ exitCode: 0 }));
-    const baseline = await runProjectValidationBaseline(root, {
-      fs: memoryFs({
-        [packagePath]: JSON.stringify({ scripts: { build: 'compile' } }),
-        [`${root}/package-lock.json`]: '{}',
-        [`${root}/yarn.lock`]: '',
-      }),
-      runCommand: runner,
-      declaredCommands: [{ role: 'build', command: 'operator-build', args: [], evidencePath }],
-    });
-
-    expect(runner).not.toHaveBeenCalled();
-    expect(baseline.discovery).toMatchObject({
-      state: 'unknown',
-      commands: [],
-      missingRoles: ['build', 'test', 'lint'],
-    });
-    expect(baseline.discovery.reason).toContain('Package-manager lockfiles disagree');
-    expect(baseline.discovery.reason).toContain(packagePath);
-    expect(baseline.discovery.reason).toContain(evidencePath);
-    expect(baseline.discovery.reason).toContain('cannot replace');
-    expect(baseline.results.every((result) => result.state === 'unresolved')).toBe(true);
-  });
-
-  it('keeps launch errors and exit 127 from brief commands unresolved with their provenance', async () => {
-    const briefPath = `${root}/task.md`;
-    const baseline = await runProjectValidationBaseline(root, {
-      fs: memoryFs({}),
-      runCommand: ({ role }) => role === 'build'
-        ? { exitCode: null, error: 'spawn ENOENT' }
-        : { exitCode: 127, stderr: 'dependency not found' },
-      declaredCommands: [
-        { role: 'build', command: 'missing-build', args: [], evidencePath: `${briefPath}#validation.commands.build` },
-        { role: 'test', command: 'missing-test', args: [], evidencePath: `${briefPath}#validation.commands.test` },
-      ],
-    });
-
-    expect(baseline.results).toEqual([
-      expect.objectContaining({ role: 'build', state: 'launch_error', reason: 'spawn ENOENT' }),
-      expect.objectContaining({ role: 'test', state: 'launch_error', exitCode: 127, reason: expect.stringContaining('could not run') }),
-      expect.objectContaining({ role: 'lint', state: 'not_configured' }),
-    ]);
-    expect(baseline.discovery.commands.map((command) => command.provenance?.source)).toEqual(['brief', 'brief']);
-    expect(baseline.gateCriteria.filter((criterion) => criterion.role !== 'lint')
-      .every((criterion) => criterion.rule === 'baseline_unresolved')).toBe(true);
-  });
-
-  it('reports missing scripts and uncertain package runners instead of inventing commands', async () => {
-    const partialFs = memoryFs({
-      [`${root}/package.json`]: JSON.stringify({ scripts: { test: 'vitest run' } }),
-      [`${root}/package-lock.json`]: '{}',
-    });
-    const runner = vi.fn(() => ({ exitCode: 0 }));
-    const partial = await runProjectValidationBaseline(root, { fs: partialFs, runCommand: runner });
-
-    expect(partial.discovery).toMatchObject({ state: 'partial', missingRoles: ['build', 'lint'] });
+    const declaredCommands = [{ role: 'test' as const, command: 'project-check', args: ['literal; no shell', '--focused'], evidencePath: 'brief#test' }];
+    const selected = await runProjectValidationBaseline(root, { fs: files, declaredCommands, runCommand: runner });
+    expect(selected.results).toEqual([expect.objectContaining({ role: 'test', state: 'passed', exitCode: 0 })]);
     expect(runner).toHaveBeenCalledTimes(1);
-    expect(partial.results).toContainEqual(expect.objectContaining({
-      role: 'build', state: 'not_configured', reason: expect.stringContaining('No build command was inferred'),
-    }));
-
-    const ambiguousFs = memoryFs({
-      [`${root}/package.json`]: JSON.stringify({ scripts: { build: 'build' } }),
-      [`${root}/package-lock.json`]: '{}',
-      [`${root}/yarn.lock`]: '',
-    });
-    expect(discoverProjectValidation(root, ambiguousFs)).toMatchObject({
-      state: 'unknown',
-      commands: [],
-      reason: expect.stringContaining('disagree'),
-    });
+    expect(runner.mock.calls[0][0]).toMatchObject({ command: 'project-check', args: declaredCommands[0].args, cwd: root });
   });
 
-  it('treats a role unconfigured in both baseline and current as a pass, not unresolved', () => {
+  it('uses project declarations, merges brief gaps, corroborates exact overlap and refuses conflicting declarations', async () => {
+    const declaration = { commands: { test: { command: 'check', args: ['unit'], report: { format: 'vitest-json' } } } };
+    const fs = memoryFs({ [`${root}/config/validation.json`]: JSON.stringify(declaration) });
+    const declared = parseValidationCommands(declaration, 'brief').commands;
+    expect(reconcileProjectValidation(root, declared, fs).commands).toEqual([expect.objectContaining({
+      command: 'check', args: ['unit'], provenance: { source: 'project', evidencePath: `${root}/config/validation.json#validation.commands.test`, corroboratedBy: ['brief#validation.commands.test'] },
+    })]);
+    const merged = reconcileProjectValidation(root, [{ role: 'lint', command: 'focused-lint', args: [], evidencePath: 'brief#lint' }], fs);
+    expect(merged.commands.map(command => command.command)).toEqual(['check', 'focused-lint']);
+    for (const conflict of [{ ...declared[0], args: ['different'] }, { ...declared[0], report: { format: 'vitest-json' as const, path: 'other.json' } }]) {
+      expect(reconcileProjectValidation(root, [conflict], fs)).toMatchObject({ state: 'unknown', commands: [], reason: expect.stringContaining('conflict') });
+    }
+    const runner = vi.fn(() => ({ exitCode: 0 }));
+    const skipped = await runProjectValidationBaseline(root, { fs, skipExecution: true, runCommand: runner });
+    expect(skipped.execution).toBe('skipped'); expect(skipped.results[0].state).toBe('unresolved'); expect(runner).not.toHaveBeenCalled();
+  });
+
+  it.each([null, {}, { commands: { deploy: { command: 'deploy', args: [] } } }, { commands: { test: { command: 'check', args: 'not argv' } } }])('refuses invalid project declarations without a discovery fallback (%j)', async declaration => {
+    const fs = memoryFs({ [`${root}/config/validation.json`]: JSON.stringify(declaration) });
+    await expect(runProjectValidationBaseline(root, { fs })).rejects.toThrow('Invalid');
+  });
+
+  it('keeps launch errors and exit 127 unknown with explicit provenance', async () => {
+    for (const response of [{ exitCode: 127 }, { exitCode: null, error: 'not available' }]) {
+      const measured = await runProjectValidationBaseline(root, { fs: memoryFs({}),
+        declaredCommands: [{ role: 'test', command: 'missing', args: [], evidencePath: 'brief#test' }], runCommand: () => response });
+      expect(measured.results[0]).toMatchObject({ state: 'launch_error', failureIdentity: 'unknown' });
+      expect(measured.discovery.commands[0].provenance).toEqual({ source: 'brief', evidencePath: 'brief#test' });
+      expect(evaluateValidationDelta(measured, measured.results)[0].state).toBe('unresolved');
+    }
+  });
+
+  it('states unconfigured roles as unmeasured, never a passing command', () => {
     const unconfigured = (role: 'build' | 'lint'): ValidationCommandResult => ({
       role, state: 'not_configured', durationMs: 0, output: '',
       failureIdentifiers: [], failureIdentity: 'none',
@@ -554,13 +190,13 @@ describe('configuration-driven project validation baseline', () => {
     } satisfies ProjectValidationBaseline;
 
     const unchanged = evaluateValidationDelta(baseline, [unconfigured('build'), red, unconfigured('lint')]);
-    expect(unchanged.map((entry) => entry.state)).toEqual(['pass', 'pass', 'pass']);
+    expect(unchanged.map((entry) => entry.state)).toEqual(['not_measured', 'pass', 'not_measured']);
 
     const launchError = evaluateValidationDelta(baseline, [{ ...unconfigured('build'), state: 'launch_error' }, red, unconfigured('lint')]);
     expect(launchError.find((entry) => entry.role === 'build')?.state).toBe('unresolved');
   });
 
-  it('passes absent roles, refuses receipt reuse after peer writes, and keeps command launch errors unresolved', async () => {
+  it('states absent roles as unmeasured, refuses receipt reuse after peer writes, and keeps command launch errors unresolved', async () => {
     const roles = ['build', 'test', 'lint'] as const;
     const absent = (role: typeof roles[number]): ValidationCommandResult => ({
       role, state: 'not_configured', durationMs: 0, output: '',
@@ -574,15 +210,14 @@ describe('configuration-driven project validation baseline', () => {
       gateCriteria: [],
     } satisfies ProjectValidationBaseline;
     expect(evaluateValidationDelta(baseline, roles.map(absent)).map((entry) => entry.state))
-      .toEqual(['pass', 'pass', 'pass']);
+      .toEqual(['not_measured', 'not_measured', 'not_measured']);
     const projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-validation-control-'));
     try {
       writeFileSync(join(projectDir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': {} } }));
       for (const role of roles) {
-        const configure = (script: string) => writeFileSync(
-          join(projectDir, 'package.json'),
-          JSON.stringify({ scripts: { [role]: script } }),
-        );
+        mkdirSync(join(projectDir, 'config'), { recursive: true });
+        const configure = (script: string) => writeFileSync(join(projectDir, 'config/validation.json'),
+          JSON.stringify({ commands: { [role]: { command: '/bin/sh', args: ['-c', script] } } }));
         configure(`${JSON.stringify(process.execPath)} -e "process.exit(0)"`);
         const configuredBaseline = await runProjectValidationBaseline(projectDir);
         const { runId, runDirPath } = createRun(projectDir, 'peer-validation', 'name: peer-validation\nstages: []\n', ['review', 'peer']);
@@ -600,15 +235,15 @@ describe('configuration-driven project validation baseline', () => {
         const current = await runProjectValidationBaseline(projectDir);
         for (const discovery of [configuredBaseline.discovery, current.discovery]) {
           expect(discovery.commands).toEqual([
-            expect.objectContaining({ role, command: 'npm', args: ['run', role] }),
+            expect.objectContaining({ role, command: '/bin/sh' }),
           ]);
         }
         expect(configuredBaseline.results.find((result) => result.role === role))
           .toMatchObject({ state: 'passed', exitCode: 0 });
         expect(current.results.find((result) => result.role === role))
           .toMatchObject({ state: 'launch_error', exitCode: 127 });
-        expect(evaluateValidationDelta(configuredBaseline, current.results).map((entry) => entry.state))
-          .toEqual(roles.map((candidate) => candidate === role ? 'unresolved' : 'pass'));
+        expect(evaluateValidationDelta(configuredBaseline, current.results, undefined, current.discovery.commands).map((entry) => entry.state))
+          .toEqual(['unresolved']);
       }
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
@@ -670,18 +305,12 @@ describe('configuration-driven project validation baseline', () => {
     }));
   });
 
-  it('keeps pytest red-to-red comparison sensitive to new ids with the same failure count', async () => {
-    const fs = memoryFs({ [`${root}/pyproject.toml`]: '[tool.pytest.ini_options]\ntestpaths = ["tests"]' });
-    const measure = (id: string) => runProjectValidationBaseline(root, { fs, readFailureIdentity: () => ({ version: 1, testsRun: 1, complete: true, failures: [{ testId: id, file: 'tests/test_check.py', messageClass: 'assertion' }] }), runCommand: () => ({
-      exitCode: 1, stdout: `FAILED tests/test_check.py::${id} - AssertionError\n================ 1 failed in 0.1s ================`,
-    }) });
-    const baseline = await measure('test_existing');
-    const unchanged = await measure('test_existing');
-    const changed = await measure('test_new');
-    expect(evaluateValidationDelta(baseline, unchanged.results).find(entry => entry.role === 'test'))
-      .toMatchObject({ state: 'pass' });
-    expect(evaluateValidationDelta(baseline, changed.results).find(entry => entry.role === 'test'))
-      .toMatchObject({ state: 'regression', newFailureIdentifiers: [JSON.stringify(['test_new', 'tests/test_check.py', 'assertion'])] });
+  it('keeps red-to-red comparison sensitive to declared new IDs at the same failure count', async () => {
+    const measure = (id: string) => runProjectValidationBaseline(root, {
+      commands: [{ role: 'test', command: 'check', args: [], display: 'check', report: { format: 'vitest-json' } }],
+      runCommand: () => ({ exitCode: 1, stdout: validationReport([id]) }) });
+    const baseline = await measure('old');
+    expect(evaluateValidationDelta(baseline, (await measure('new')).results)[0].state).toBe('regression');
   });
 
   it('keeps an unparseable red baseline unresolved rather than treating it as zero failures', async () => {
@@ -690,14 +319,14 @@ describe('configuration-driven project validation baseline', () => {
       [`${root}/package-lock.json`]: '{}',
     });
     const baseline = await runProjectValidationBaseline(root, {
-      fs,
+      commands: [{ role: 'test', command: 'check', args: [], display: 'check' }], fs,
       runCommand: () => ({ exitCode: 9, stderr: 'opaque failure; 0 errors were classified' }),
     });
     const test = baseline.results.find((entry) => entry.role === 'test');
     expect(test).toMatchObject({
       state: 'failed',
       failureIdentity: 'unknown',
-      reason: expect.stringContaining('No structured report or closed-schema model reading'),
+      reason: expect.stringContaining('No declared structured reporter'),
     });
     if (!test?.reason) throw new Error('unknown failure cause was not recorded');
     expect(test?.failureCount).toBeUndefined();
@@ -707,37 +336,11 @@ describe('configuration-driven project validation baseline', () => {
     });
   });
 
-  it('uses a closed model reading of the terminal pytest result instead of counting incidental text', async () => {
-    const fs = memoryFs({
-      [`${root}/package.json`]: JSON.stringify({ scripts: { test: 'pytest' } }),
-      [`${root}/package-lock.json`]: '{}',
-    });
+  it('keeps incidental output opaque while declared structured totals own identity', async () => {
     const baseline = await runProjectValidationBaseline(root, {
-      fs,
-      readFailureIdentity: () => ({ version: 1, testsRun: 5, complete: true, failures: [
-        { testId: 'test_alpha', file: 'checks/test_alpha.py', messageClass: 'assertion' },
-        { testId: 'test_beta', file: 'checks/test_beta.py', messageClass: 'assertion' },
-      ] }),
-      runCommand: () => ({
-        exitCode: 1,
-        stdout: [
-          '1 Failed download while arranging a fixture',
-          'FAILED checks/test_alpha.py::test_alpha - AssertionError',
-          'FAILED checks/test_beta.py::test_beta - AssertionError',
-          '================ 2 failed, 3 passed in 1.25s ================',
-        ].join('\n'),
-      }),
-    });
-
-    expect(baseline.results.find((result) => result.role === 'test')).toMatchObject({
-      state: 'failed',
-      failureCount: 2,
-      failureIdentity: 'known',
-    });
-    expect(baseline.gateCriteria.find((criterion) => criterion.role === 'test')).toMatchObject({
-      rule: 'no_regression_from_baseline',
-      baselineFailureCount: 2,
-    });
+      commands: [{ role: 'test', command: 'check', args: [], display: 'check', report: { format: 'vitest-json', path: 'report.json' } }],
+      runCommand: () => ({ exitCode: 1, stdout: 'FAIL unrelated error TS2322', report: validationReport(['actual'], { passed: 4 }) }) });
+    expect(baseline.results[0]).toMatchObject({ testsRun: 5, failureCount: 1, failureIdentifiers: [JSON.stringify(['actual', 'case.test', 'test-failure'])] });
   });
 
   it('treats exit 127 as a command that could not run, not as a usable red baseline', async () => {
@@ -749,7 +352,7 @@ describe('configuration-driven project validation baseline', () => {
     });
 
     const baseline = await runProjectValidationBaseline(root, {
-      fs,
+      commands: (['build', 'test', 'lint'] as const).map(role => ({ role, command: 'check', args: [], display: 'check' })), fs,
       runCommand: ({ role }) => ({
         exitCode: 127,
         stderr: `sh: ${role}-tool: command not found`,

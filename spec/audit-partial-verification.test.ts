@@ -1,3 +1,4 @@
+import { validationReport } from './test-support/structured-validation.js';
 import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,7 @@ import {
   shipSetupReadyRecordPath,
 } from '../src/ship-setup-record.js';
 
-const encoded = (id: string) => JSON.stringify([id, null, 'fixture-failure']);
+const encoded = (id: string) => JSON.stringify([id, 'case.test', 'test-failure']);
 const portableProject = resolve('portable-partial-evidence-audit');
 const temporaryRoots: string[] = [];
 
@@ -38,10 +39,9 @@ async function baselineFor(
       command: 'fixture-test',
       args: [],
       evidencePath: 'portable-brief.md#validation.commands.test',
+      ...(options.ids ? { report: { format: 'vitest-json' as const } } : {}),
     }],
-    runCommand: () => response,
-    ...(options.ids ? { readFailureIdentity: () => ({ version: 1, testsRun: null, complete: options.complete ?? true,
-      failures: options.ids!.map(testId => ({ testId, file: null, messageClass: 'fixture-failure' })) }) } : {}),
+    runCommand: () => ({ ...response, ...(options.ids ? { report: validationReport(options.ids, { complete: options.complete }) } : {}) }),
     ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
   });
 }
@@ -102,11 +102,11 @@ describe('partial failure evidence audit', () => {
     expect(result).toMatchObject({
       failureIdentity: 'unknown',
       failureIdentifiers: [],
-      reason: expect.stringContaining('No structured report or closed-schema model reading'),
+      reason: expect.stringContaining('No declared structured reporter'),
     });
   });
 
-  it('bounds TAP before the model and keeps an incomplete reading partial', async () => {
+  it('bounds opaque TAP display while a declared partial reporter keeps identity partial', async () => {
     const rawOutput = [
       'TAP version 13',
       'not ok 1 - actual failure',
@@ -119,7 +119,7 @@ describe('partial failure evidence audit', () => {
 
     const result = testResult(await baselineFor(
       { exitCode: 1, stdout: rawOutput },
-      { maxOutputBytes: 128, ids: ['actual failure'] },
+      { maxOutputBytes: 128, ids: ['actual failure'], complete: false },
     ));
 
     expect(result).toMatchObject({
@@ -132,7 +132,7 @@ describe('partial failure evidence audit', () => {
     expect(result.output).toMatch(/^\[\.\.\. \d+ earlier bytes omitted \.\.\.\]/);
   });
 
-  it('keeps all three untruncated line-oriented formats complete', async () => {
+  it('uses declared complete reporters independently of three opaque display formats', async () => {
     const cases = [
       {
         output: 'FAIL  spec/existing.test.ts > exact case\nTests 1 failed',
@@ -193,7 +193,7 @@ describe('partial failure evidence audit', () => {
       expect(result, fixture.label).toMatchObject({
         failureIdentity: 'unknown',
         failureIdentifiers: [],
-        reason: expect.stringContaining('No structured report or closed-schema model reading'),
+        reason: expect.stringContaining('No declared structured reporter'),
       });
       expect(result.failureCount, fixture.label).toBeUndefined();
       expect(result.failureEvidence, fixture.label).toBeUndefined();

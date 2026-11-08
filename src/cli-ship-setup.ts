@@ -6,12 +6,11 @@ import { spawn } from 'node:child_process';
 import { atomicWrite, copyFileSync, mkdirSync, rmSync, symlinkSync } from './engine-fs.js';
 import { accessSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { parseBriefFrontmatterDocument } from './brief-frontmatter.js';
 import { briefDeclarationFailures } from './brief-preflight.js';
 import {
   runProjectValidationBaseline,
   projectValidationResult,
-  parseValidationCommands,
+  parseBriefValidationCommands,
   unmeasured,
   type ProjectValidationBaseline,
   type ValidationCommandRunner,
@@ -472,13 +471,7 @@ function safeReadBrief(path: string, fs: ShipSetupFileSystem): { text: string; d
 
 export type BriefValidationParseResult = import('./project-validation.js').ValidationParseResult;
 
-/** Parse only a leading frontmatter validation block into shell-free argv declarations. */
-export function parseBriefValidationCommands(brief: string, briefPath: string): import('./project-validation.js').ValidationParseResult {
-  const frontmatter = parseBriefFrontmatterDocument(brief);
-  if (frontmatter?.error) return { commands: [], error: frontmatter.error };
-  return parseValidationCommands(frontmatter?.value && typeof frontmatter.value === 'object'
-    ? (frontmatter.value as Record<string, unknown>).validation : undefined, briefPath);
-}
+export { parseBriefValidationCommands } from './project-validation.js';
 
 function canonicalProject(path: string, fs: ShipSetupFileSystem): string {
   if (!fs.exists(path)) throw new Error(`source project does not exist: ${path}`);

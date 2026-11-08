@@ -201,31 +201,31 @@ describe('mixed language validation retains all measured commands', () => {
     writeFileSync(join(project, 'setup.py'), 'from setuptools import setup\nsetup(name="fixture")\n');
     if (python === 'pyproject') writeFileSync(join(project, 'pyproject.toml'), '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n');
     else writeFileSync(join(project, 'tox.ini'), python === 'tox' ? '[testenv]\ncommands = python tests/runtests.py\n' : '[pytest]\ntestpaths = tests\n');
+    return [
+      { role: 'test' as const, command: 'npm', args: ['run', 'test'], display: 'npm run test' },
+      { role: 'test' as const, command: python === 'tox' ? 'tox' : 'python', args: python === 'tox' ? [] : ['-m', 'pytest'], display: python === 'tox' ? 'tox' : 'python -m pytest' },
+    ];
   }
-  it.each(['pyproject', 'pytest', 'tox'])('runs Python and JS from %s without hiding a Python regression', async kind => {
-    mixed(kind);
-    const discovery = discoverProjectValidation(project);
-    const tests = discovery.commands.filter(c => c.role === 'test');
-    expect(tests).toHaveLength(2);
-    expect(tests.map(c => c.command)).toContain('npm');
-    expect(tests.map(c => c.command)).toContain(kind === 'tox' ? 'tox' : 'python');
-    const baseline = await runProjectValidationBaseline(project, { runCommand: () => ({ exitCode: 0, stdout: '1 passed' }) });
+  it.each(['pyproject', 'pytest', 'tox'])('runs explicitly selected Python and JS commands with %s without hiding a Python regression', async kind => {
+    const commands = mixed(kind);
+    expect(discoverProjectValidation(project).commands).toEqual([]);
+    const baseline = await runProjectValidationBaseline(project, { commands, runCommand: () => ({ exitCode: 0, stdout: '1 passed' }) });
     const calls: string[] = [];
-    const current = await runProjectValidationBaseline(project, { runCommand: request => {
+    const current = await runProjectValidationBaseline(project, { commands, runCommand: request => {
       calls.push(request.command);
       return request.command === 'npm' ? { exitCode: 0, stdout: '1 passed' } : { exitCode: 1, stdout: 'FAILED tests/test_fixture.py::test_regression\n1 failed' };
     } });
     expect(calls).toHaveLength(2);
     expect(evaluateValidationDelta(baseline, current.results).some(d => d.state === 'regression')).toBe(true);
-    expect(reconcileProjectValidation(project, [{ role: 'test', command: 'npm', args: ['run', 'test'], evidencePath: 'brief' }]).commands.filter(c => c.role === 'test')).toHaveLength(2);
+    expect(reconcileProjectValidation(project, [{ role: 'test', command: 'npm', args: ['run', 'test'], evidencePath: 'brief' }]).commands.filter(c => c.role === 'test')).toHaveLength(1);
   });
   it('does not guess an executable test command from setup.py alone', () => {
     writeFileSync(join(project, 'setup.py'), 'from setuptools import setup\nsetup(name="fixture")\n');
     expect(discoverProjectValidation(project).commands).toEqual([]);
   });
   it('adopts a durable mixed-command review receipt without rerunning or collapsing its checks', async () => {
-    mixed('pyproject');
-    const baseline = await runProjectValidationBaseline(project, { runCommand: () => ({ exitCode: 0 }) });
+    const commands = mixed('pyproject');
+    const baseline = await runProjectValidationBaseline(project, { commands, runCommand: () => ({ exitCode: 0 }) });
     const { runId, runDirPath } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['review']);
     writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline }));
     const attempt = { index: 1, startedAt: 'fixture-start', writes: [], writeAttribution: 'structured' as const };
@@ -242,12 +242,12 @@ describe('mixed language validation retains all measured commands', () => {
     expect(receipt?.current.filter(result => result.role === 'test')).toHaveLength(2);
   });
   it('does not let a passing JS result substitute for an absent or renamed Python command', async () => {
-    mixed('pyproject');
-    const baseline = await runProjectValidationBaseline(project, { runCommand: () => ({ exitCode: 0 }) });
+    const commands = mixed('pyproject');
+    const baseline = await runProjectValidationBaseline(project, { commands, runCommand: () => ({ exitCode: 0 }) });
     const js = baseline.results.find(result => result.display === 'npm run test')!;
     const otherRoles = baseline.results.filter(result => result.role !== 'test');
-    expect(evaluateValidationDelta(baseline, [...otherRoles, js]).filter(result => result.state === 'unresolved')).toHaveLength(1);
-    expect(evaluateValidationDelta(baseline, [...otherRoles, js, { ...js, display: 'different test command' }]).filter(result => result.state === 'unresolved')).toHaveLength(1);
+    expect(evaluateValidationDelta(baseline, [...otherRoles, js]).filter(result => result.state === 'not_measured')).toHaveLength(1);
+    expect(evaluateValidationDelta(baseline, [...otherRoles, js, { ...js, display: 'different test command' }]).filter(result => result.state === 'not_measured')).toHaveLength(1);
     expect(baseline.gateCriteria.filter(criterion => criterion.role === 'test').map(criterion => criterion.display)).toEqual(['npm run test', 'python -m pytest']);
   });
 });

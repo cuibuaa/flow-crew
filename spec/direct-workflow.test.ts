@@ -41,7 +41,6 @@ function adapter(calls: string[], rejectFirstReview: boolean, observe?: (prompt:
   let reviews = 0;
   return {
     async run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
-      if (opts.stageId === '_validation_identity') return { output: JSON.stringify({ version: 1, testsRun: 1, complete: true, failures: [{ testId: 'new test', file: 'spec/new.test.ts', messageClass: 'assertion' }] }), exitCode: 0, duration_ms: 1 };
       if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       calls.push(opts.stageId);
       observe?.(prompt, role, opts);
@@ -153,8 +152,8 @@ describe('direct workflow', () => {
     writeFileSync(join(projectDir, 'validation-probe.mjs'), probe);
     const prompts: string[] = [];
     const final = await runDirect(task, [], false, (prompt, _role, opts) => { if (opts.stageId === 'review') prompts.push(prompt); });
-    expect(final.status, final.failureReason).toBe(state === 'passed' ? 'complete' : 'incomplete');
-    if (state === 'failed') expect(final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'validation_unresolved' }, reason: expect.stringContaining('not certified') });
+    expect(final.status, final.failureReason).toBe('complete');
+    if (state === 'failed') expect(readEvidence(runDir(projectDir, final.runId)).filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(false);
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain('evidence-ledger.jsonl');
     expect(prompts[0]).toContain('change.diff');

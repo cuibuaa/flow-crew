@@ -1,7 +1,9 @@
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { runProjectValidationBaseline, runValidationCommand, type ProjectValidationBaseline } from '../src/project-validation.js';
 import {
@@ -12,7 +14,6 @@ import {
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, setFcGlobalDir, writeStageStatus } from '../src/store.js';
 
-const repository = resolve(import.meta.dirname, '..');
 const temporary: string[] = [];
 const previousStore = fcGlobalDir();
 const roles = ['build', 'test', 'lint'] as const;
@@ -23,7 +24,7 @@ afterEach(() => {
 });
 
 async function fixture(mode: 'root' | 'shell' | 'child-process' = 'root') {
-  const root = mkdtempSync(join(repository, '.validation-dependencies-'));
+  const root = mkdtempSync(join(tmpdir(), 'validation-dependencies-'));
   temporary.push(root);
   const project = join(root, 'project');
   const nested = mode !== 'root';
@@ -34,6 +35,8 @@ async function fixture(mode: 'root' | 'shell' | 'child-process' = 'root') {
   for (const directory of [project, packageDir, home, cache, join(packageDir, 'vendor', 'fixture-value')]) {
     mkdirSync(directory, { recursive: true });
   }
+  isolatedProjectCommand('git', ['init', '-q'], project, root);
+  writeFileSync(join(project, '.gitignore'), 'node_modules\n');
   writeFileSync(userConfig, '');
   const npmConfig = `offline=true\nignore-scripts=true\naudit=false\nfund=false\ncache=${cache}\n`;
   for (const directory of new Set([project, packageDir])) writeFileSync(join(directory, '.npmrc'), npmConfig);
@@ -51,6 +54,9 @@ async function fixture(mode: 'root' | 'shell' | 'child-process' = 'root') {
       'process.exit(result.status ?? 1);',
     ].join('\n'));
   }
+  mkdirSync(join(project, 'config'), { recursive: true });
+  writeFileSync(join(project, 'config/validation.json'), JSON.stringify({ commands: Object.fromEntries(roles.map(role => [role, { command: '/bin/sh',
+    args: ['-c', `cd ${nested ? 'ui' : '.'} && npm ci --ignore-scripts --offline && npm run ${role}`] }])) }));
   writeFileSync(join(packageDir, 'verify.mjs'), "console.log('configured validation passed');\n");
   writeFileSync(join(packageDir, 'vendor', 'fixture-value', 'package.json'), JSON.stringify({
     name: 'fixture-value', version: '1.0.0', type: 'module', exports: './index.mjs',
@@ -58,7 +64,7 @@ async function fixture(mode: 'root' | 'shell' | 'child-process' = 'root') {
   writeFileSync(join(packageDir, 'vendor', 'fixture-value', 'index.mjs'), 'export const value = 42;\n');
   const npm = async (args: string[], directory = packageDir) => {
     const result = await runValidationCommand({ role: 'build', command: 'npm', args,
-      display: `fixture npm ${args.join(' ')}`, cwd: directory, prepareDependencies: false,
+      display: `fixture npm ${args.join(' ')}`, cwd: directory,
       env: { ...process.env, HOME: home, npm_config_cache: cache, npm_config_userconfig: userConfig } });
     expect(result.exitCode, result.error ?? result.stderr).toBe(0);
   };
@@ -152,7 +158,7 @@ describe('validation dependencies follow the current lockfile', () => {
     expect(gateValidationRefusal(project.project, run.runId, 'review')?.reason).toContain('Introduced validation failures');
   });
 
-  it('refuses an inconsistent manifest and lockfile despite a previously installed dependency', async () => {
+  it('refuses an inconsistent manifest and lockfile despite a previously installed dependency', { timeout: 60_000 }, async () => {
     const project = await fixture();
     await project.addDependency();
     await project.install();

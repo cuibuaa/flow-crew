@@ -257,10 +257,9 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     expect(predecessor.finalRecord?.summary).toBe('OWN_PREDECESSOR_RECORD');
     expect(predecessor.guidanceIds).toContain(guidance.id);
     const validation = readEvidence(created.runDirPath).find(entry => entry.kind === 'validation');
-    if (kind === 'retry') {
-      expect(validation).toMatchObject({ stageId: 'work', attemptIndex: predecessor.attemptIndex,
-        attemptStartedAt: predecessor.attemptStartedAt, treeHash: predecessor.treeHash, pass: true });
-    } else expect(validation).toBeUndefined(); // unfinished budget slices keep their existing validation owner
+    // Neither a failed model attempt nor an unfinished budget slice is a
+    // settled author tree for the gate; both retain unknown validation.
+    expect(validation).toBeUndefined();
     expect(stagePredecessor(readEvidence(created.runDirPath), 'work', { index: predecessor.attemptIndex + 1, startedAt: predecessor.attemptStartedAt })).toBeUndefined();
     expect(stagePredecessor(readEvidence(created.runDirPath), 'work', { index: predecessor.attemptIndex, startedAt: 'unknown-start' })).toBeUndefined();
     await runStage(adapter, { ...opts, retries: 1, resumeSessionId: uuid, sessionOwnerStageId: 'work' });

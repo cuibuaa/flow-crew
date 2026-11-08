@@ -112,8 +112,8 @@ validation fact and delivered guidance IDs through the evidence ledger, plus the
 diff and repository paths. Transcripts and live logs are never handoff input. Each slice spends one of the existing finite `max_iterations`; exhaustion is
 `incomplete` with retained work, without timeout retry growth. A configured research wall
 ceiling also prevents another slice at a budget boundary. Cancel/resume preserves spent
-iterations. Gates and configured validation run in independent stage boundaries with
-their own budgets, so an author cannot consume their execution time.
+iterations. Gates have independent stage budgets. Validation settlement uses the remaining author
+budget, capped by its whole-batch bound; it cannot consume the gate budget.
 
 ## Artifact locations
 
@@ -207,16 +207,15 @@ and unconfirmed observations remain visible in run facts and the report. Unconfi
 observations alone open no repair: passing criteria permit acceptance, failed criteria leave
 work incomplete. Repair closure replays each confirmed command on the repaired tree and
 records its passing exit, output digest, tree hash and `reproductionOf` in the same ledger,
-after the attempt's configured validation has prepared current dependencies.
+after the attempt's selected validation commands. Dependency preparation, when needed, is part of those declared commands.
 No reproduction is a second configured validation.
 Native command progress records retain command, context when available, raw exit and output
 digest without tree captures. Only engine-recorded reproductions and their closure replays
 receive command tree hashes; cite the engine-recorded command endpoint for a finding.
 Repair admission uses confirmed reproductions alone. A partial or unknown configured
-validation comparison cannot veto their scoped repair. Comparison still governs final
-certification: unknown evidence leaves the run incomplete after its admitted attempts,
-with the reason in the effective verdict; it does not independently terminate the run
-as a gate contract refusal or request product changes. A solely pre-existing configured
+validation comparison cannot veto their scoped repair. Confirmed introduced failures still block acceptance. The independent gate decides whether
+the brief permits acceptance with incomplete, unknown or unmeasured validation; those facts
+remain explicit in its input and the report and never become a passing validation result. A solely pre-existing configured
 failure is not a repair finding.
 An admitted repair's `retry_to` returns work to the same independent gate. A passing gate
 skips its unnecessary repair while ordinary dependents remain eligible. Exhausted ordinary
@@ -230,35 +229,42 @@ A reviewed author's `blocked` answer settles for the gate to confirm or reject; 
 blocked answer fails its stage. A pass still requires every assigned brief criterion, including
 any explicitly permitted negative/blocked report outcome.
 
-Configured validation belongs to the author/repair boundary, never the gate. Each command
-receipt includes `load.start` and `load.end` (`loadAverage1m`, `cpuCount`), `ceilingPerCpu`,
-`waitBoundSeconds` and `waitedSeconds`. Installed `config/defaults.yaml` declares a ceiling
-of 1 per CPU and a wait bound of 1 second. Above the ceiling, the runner waits within
-that bound and the enclosing deadline, then executes anyway. A command that exits 0
-without a runner error is measured under any load: load can turn a pass into a failure,
-never a failure into a pass. A failing command (nonzero exit, timeout or launch error) is
-`not_measured` when the start reading is above the ceiling; the end reading includes the
-command's own load and is recorded, not used. `not_measured` is neither pass nor failure
-and creates no author demand. Raw exits remain recorded.
-`watch`, run facts, the ledger and reports expose the same classification. Old receipts
-without load readings are `load_unknown`; their historical result remains readable.
-One projection derives both command state and measurement from exit, runner errors and
-the load facts. Historical stored labels remain recorded; displays name `storedState`
-when projecting them. Runner errors and dependency-preparation failures remain explicit
-facts even when the child reported exit zero. Readers do not rewrite old ledgers.
+Configured validation belongs to the author/repair boundary, never the gate. A batch
+spends at most the smaller of `validation_timeout_ms` (60 seconds by default) and the
+remaining author budget, including any base comparison. Owned commands are retired on
+expiry even when silent. Settlement does not wait for inherited output pipes to close:
+deadline/abort closes the local streams and records an unfinished command. Linux command
+ownership retains observed descendants by ancestry and start token, including detached workers;
+other platforms retain process-group/direct-child retirement. Completed
+author output and earlier command exits survive. Unfinished and unstarted commands are
+explicitly `not_measured`, with `unfinished: true`, never a green exit or a green comparison.
+The independent gate has its own budget and decides acceptance from these facts.
+
+A tree gets at most one configured batch per run. Matching unchanged trees reuse the
+append-only fact, including uncertain results; writes invalidate coverage. Only measured
+final failures trigger an isolated base comparison, and only those failed commands run
+there. A passing final command is independent of unrelated base failures. A complete
+structured red-to-red comparison can confirm new stable failure IDs; a green-to-red
+command transition can establish introduction by exits. Partial/malformed identities stay
+unknown. Only confirmed independent findings authorize the existing repair path.
+Source and execution binding, isolated command environments, declared report freshness
+and base-input restoration remain mechanical guarantees. Readers preserve raw exits,
+errors and host-load facts and project their meaning without rewriting the ledger.
 
 Projects may declare validation argv and reporters in `config/validation.json`, using
 the same `{commands: {build|test|lint: {command, args, report?}}}` declaration as brief
-frontmatter. Project declarations replace inferred commands for their roles and take
+frontmatter. Project declarations take
 precedence over overlapping brief declarations. An invalid project declaration refuses
-discovery before execution; it never silently selects an inferred command. A report is declared as
+selection before execution; it never silently guesses another command. A report is declared as
 `{format: "vitest-json", path?: "project-relative-file.json"}`; omit `path` only when
 stdout is JSON alone. File reports must be freshly written, remain within the project,
 and fit the 1 MiB evidence bound. Valid, exit-consistent exhaustive reports own failure
 identity even when stdout or stderr also carries human diagnostics. Incomplete suite,
 snapshot or global-error populations remain partial; malformed or exit-inconsistent
-reports remain unknown, without model fallback. Without a declared reporter the existing
-closed-schema model reads bounded output, and truncation makes that reading partial.
+reports remain unknown, without model fallback. Without a declared reporter, failure identity remains unknown. No model or text parser
+classifies introduction from arbitrary logs. Without any command declaration, the author
+model reads the repository and chooses commands via `ValidationSelectionSchema` in its existing result; an empty
+or invalid selection is explicitly unmeasured, with no discovery fallback.
 This repository declares its test reporter in `config/validation.json`; the reporter
 uses Vitest's structured global-error and completion facts to declare completeness.
 

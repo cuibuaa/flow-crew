@@ -1,4 +1,4 @@
-import { runProjectCommand } from './project-validation.js';
+import { runProjectCommand, VALIDATION_SELECTION_JSON_SCHEMA } from './project-validation.js';
 import { startCommandRecorder } from './recorded-command.js';
 import { listProjectFiles } from './scheduler/sched_scope/path-capabilities.js';
 import { stageLiveLogPath } from './stage-live-log.js';
@@ -22,13 +22,10 @@ import { runProcessAbortSignal } from './adapters/base.js';
 export { classifyAdapterFailure } from './adapters/failure.js';
 import { appendEvidence, captureProjectTree, changedTreeFiles, evidenceContext } from './evidence-ledger.js';
 import { adapterInputLimit, INPUT_RESERVE_CHARS } from './config.js';
-import { FAILURE_READING_JSON_SCHEMA, FailureReadingSchema, failureReadingPrompt } from './validation-identity.js';
-import { createInvocationScratch } from './invocation-scratch.js';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { buildStagePrompt, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
-import { recordGateValidationDelta, ensureAttemptValidationPlan, recordAttemptValidation } from './scheduler/sched_settlement/gate-validation.js';
+import { recordValidationSelection, readRunValidationBaseline, recordGateValidationDelta, ensureAttemptValidationPlan, recordAttemptValidation } from './scheduler/sched_settlement/gate-validation.js';
 import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
 import { AuditFindingsSchema } from './scoped-audit-repair.js';
 import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
@@ -37,6 +34,7 @@ import { extractBriefCriteria } from './brief-criteria.js';
 import { parseStageAbortSignal } from './abort-signal.js';
 import {
   RUN_STATUS,
+  STAGE_STATUS,
   beginStageAttempt,
   closeStageAttempt,
   settleStageAttempt,
@@ -296,7 +294,7 @@ export async function runStage(
 
   // Isolated decisions are read-only consumers. A repair can also return a
   // decision, but keeps the ordinary author boundary and its one validation.
-  const attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch && !(opts.decisionResult && opts.isolatedInput)
+  let attemptValidationPlan = !opts.isGate && !opts.dynamicDispatch && !(opts.decisionResult && opts.isolatedInput)
     ? ensureAttemptValidationPlan(opts.projectDir, opts.runId) : undefined;
   // Use the same raw declarations as configured validation, including ignored
   // artifacts. The rendered task description has already lost frontmatter.
@@ -511,6 +509,19 @@ export async function runStage(
     if (opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === handoff)) carriers.push(handoff);
     return carriers;
   };
+  // Preserve the existing legacy reader when the generated author schema gains
+  // the optional selection field. Custom stage-result contracts stay exact.
+  const recordedOutputSchema = opts.outputSchema === HANDOFF_SCHEMA ? { ...RECORDED_HANDOFF_SCHEMA,
+    properties: { ...RECORDED_HANDOFF_SCHEMA.properties, validation: VALIDATION_SELECTION_JSON_SCHEMA } } : undefined;
+  if (attemptValidationPlan && !attemptValidationPlan.baseline.discovery.commands.length && attemptValidationPlan.source !== 'model-selection'
+    && opts.outputSchema === HANDOFF_SCHEMA && existsSync(join(opts.runDir, 'task_brief.md'))) {
+    // Reuse the author result, not a third decision stage or another model call.
+    if (opts.outputSchema?.properties) opts.outputSchema = { ...opts.outputSchema,
+      properties: { ...opts.outputSchema.properties, validation: VALIDATION_SELECTION_JSON_SCHEMA } };
+    prompt += '\n\n# Validation command selection\nNo project or brief command declaration is available. Read the repository and choose validation commands in the optional validation field of your final result, using this fixed schema: '
+      + JSON.stringify(VALIDATION_SELECTION_JSON_SCHEMA)
+      + '. Use exact executable/argv and optional structured reporters; include dependency preparation in those commands if needed. Do not guess from names alone. An empty commands object states that no validation could be chosen, with the reason. Omitted or invalid selection remains explicitly unmeasured.';
+  }
   if (opts.outputSchema) {
     const judgement = opts.isGate
       ? 'Judge assigned criteria in the context of the full brief, including permitted outcomes and stopping conditions. Stage instructions and extracted criteria cannot narrow or replace the outcomes the brief permits. Pass when an allowed outcome has all required evidence, including a permitted negative or blocked report. Reject missing required attempts, measurements or artifacts. '
@@ -1031,7 +1042,7 @@ export async function runStage(
     // Older native/fixture answers remain readable; only the response schema
     // advertises new output. Admission still checks every executable field.
     if (opts.decisionResult && opts.decisionResult !== 'shape') return {}; // Review/successor defaults remain scheduler-owned.
-    const record = parseStageRecord(output, opts.outputSchema === HANDOFF_SCHEMA ? RECORDED_HANDOFF_SCHEMA : opts.outputSchema!);
+    const record = parseStageRecord(output, recordedOutputSchema ?? opts.outputSchema!);
     if (opts.isGate) {
       const violation = validateGateCriterionEvidence(opts.runDir, opts.stageId, record)
         ?? validateGateRepairability(record) ?? explicitPassContradiction(record, 'verdict');
@@ -1370,31 +1381,16 @@ export async function runStage(
     final = settleStageAttempt(opts.projectDir, opts.runId, opts.stageId, attemptIndex,
       { exitCode: 1, error: error instanceof Error ? error.message : String(error) });
   }
-  if (attemptValidationPlan?.baseline.discovery.commands.length && !result.engineVoid && !childCloseUnverified && !result.continuation) {
+  if (attemptValidationPlan && !attemptValidationPlan.baseline.discovery.commands.length
+    && attemptValidationPlan.source !== 'model-selection' && final.status === STAGE_STATUS.COMPLETE && result.exitCode === 0 && !result.engineVoid && !childCloseUnverified && !result.continuation) {
+    let selection: unknown;
+    try { selection = JSON.parse(result.output).validation; } catch { /* unavailable stays unknown */ }
+    recordValidationSelection(opts.projectDir, opts.runId, selection);
+    attemptValidationPlan = readRunValidationBaseline(opts.runDir);
+  }
+  if (attemptValidationPlan?.baseline.discovery.commands.length && final.status === STAGE_STATUS.COMPLETE && result.exitCode === 0 && !result.engineVoid && !childCloseUnverified && !result.continuation) {
     await recordAttemptValidation(opts.projectDir, opts.runId, opts.stageId, {
       remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
-      readFailureIdentity: async input => {
-        // A fresh bounded reading has no author home, conversation, or project.
-        const scratch = createInvocationScratch();
-        try {
-          const initialized = spawnSync('git', ['init', '-q', scratch.path], { timeout: 15_000 });
-          if (initialized.status !== 0) return undefined;
-          const reading = await withEngineIntegrity({ projectDir: scratch.path, runDir: opts.runDir, stageId: '_validation_identity' }, () => adapter.run(failureReadingPrompt(input), { ...resolvedRole, name: '_validation_identity',
-            prompt: 'Return only the supplied closed-schema validation reading.', tools: [] }, {
-            stageId: '_validation_identity', workDir: scratch.path, runDir: opts.runDir,
-            outputSchema: FAILURE_READING_JSON_SCHEMA, timeout_ms: Math.max(1, Math.min(60_000, attemptDeadline.remainingMs())),
-            abortSignal: aggregateAbortSignal, preserveSession: false,
-          }));
-          let parsed: unknown;
-          try { parsed = JSON.parse(reading.output); } catch { /* invalid evidence stays unknown */ }
-          appendEvidence(opts.runDir, { kind: 'identity-reading', stageId: opts.stageId, attemptIndex,
-            command: input.command, inputSha256: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
-            inputBytes: Buffer.byteLength(JSON.stringify(input)), truncated: input.truncated,
-            valid: reading.exitCode === 0 && FailureReadingSchema.safeParse(parsed).success,
-            inputTokens: reading.tokens_in ?? null, outputTokens: reading.tokens_out ?? null, owner: 'closed-schema-model' });
-          return reading.exitCode === 0 ? parsed : undefined;
-        } finally { scratch.cleanup(); }
-      },
     });
   }
   if (result.exitCode === 0 && !result.continuation) {

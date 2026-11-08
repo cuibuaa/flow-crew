@@ -25,7 +25,7 @@ import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { runPostTerminateHook } from './research.js';
 
 import { currentAuthorValidationRefusal, readRunValidationBaseline } from '../sched_settlement/gate-validation.js';
-import { readEvidence } from '../../evidence-ledger.js';
+import { captureProjectTree, readEvidence, validationForTree } from '../../evidence-ledger.js';
 
 export interface TerminalEvaluationServices {
   validationDeltaMatchesExecution: typeof import('../sched_settlement/gate-validation.js').validationDeltaMatchesExecution;
@@ -146,11 +146,13 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     const plan = readRunValidationBaseline(input.runDirPath);
     if (plan && plan.baseline.discovery.commands.length === 0) return { required: false, pass: true, disposition: 'no_baseline', writeAt };
     const facts = readEvidence(input.runDirPath);
-    const validation = facts.filter(entry => entry.kind === 'validation').at(-1);
+    let brief = ''; try { brief = readFileSync(join(input.runDirPath, 'task_brief.md'), 'utf8'); } catch { /* legacy terminal */ }
+    const validation = validationForTree(facts, captureProjectTree(input.projectDir, brief).hash);
     // Gate and terminal decisions share receipt semantics, tree/attempt binding
-    // and unknown handling. Only coverage of the terminal write is additional.
+    // and unknown handling. Producing identical bytes does not change the tree
+    // or require another suite; artifact production is checked independently.
     const refusal = currentAuthorValidationRefusal(input.projectDir, input.runId);
-    const matches = validation?.kind === 'validation' && !refusal && Date.parse(validation.at) >= writeAtMs;
+    const matches = validation?.kind === 'validation' && !refusal;
     if (!matches) return { required: true, pass: false, disposition: 'rejected', writeAt,
       reason: refusal?.reason ?? 'no settled author validation in the evidence ledger covers the terminal write/tree' };
     return { required: true, pass: true, disposition: 'already_blessed', writeAt,

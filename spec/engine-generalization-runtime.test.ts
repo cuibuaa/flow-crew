@@ -217,7 +217,6 @@ describe('engine generalization runtime bindings', () => {
     const peerDone = new Promise<void>(resolve => { peerFinished = resolve; });
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       const summary = summaryResult(opts); if (summary) return fixtureResult(summary, opts);
-      if (opts.stageId === '_validation_identity') return { output: JSON.stringify({ version: 1, complete: true, testsRun: 1, failures: [{ testId: 'regression', file: 'spec/regression.test.ts', messageClass: 'test-failure' }] }), exitCode: 0, duration_ms: 1 };
       if (opts.stageId === 'author' || opts.stageId.startsWith('repair_')) return fixtureResult({ output: 'Author attempt complete', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       if (opts.stageId === 'peer_review') return { output: JSON.stringify({ pass: true, reason: 'Peer reviewed', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       if (opts.stageId === 'peer') {
@@ -241,7 +240,7 @@ describe('engine generalization runtime bindings', () => {
     expect(final.stages.qa.attempts).toHaveLength(1);
   });
   it.each(['regression', 'regression-with-report', 'post-write-regression', 'persistent-unknown', 'transient-unknown', 'semantic'])
-  ('preserves independent review and fails closed without rerunning the suite: %s', async failure => {
+  ('preserves independent review, introduced failures and stated unknown evidence without rerunning: %s', async failure => {
     const { projectDir } = seedProject('validation-routing');
     const created = createRun(projectDir, 'routing', 'name: routing', ['qa']);
     const baseline = await configuredBaseline(projectDir);
@@ -267,8 +266,8 @@ describe('engine generalization runtime bindings', () => {
     await recordGateValidationDelta(projectDir, created.runId, 'qa', dependencies);
     if (failure === 'post-write-regression') writeFileSync(join(projectDir, 'peer.ts'), 'changed after measurement');
     const verdict = readGateEvaluation(projectDir, 'qa', created.runId);
-    expect(verdict?.pass).toBe(false);
-    const kind = failure === 'post-write-regression' || unknown ? 'validation_unresolved' : semantic ? undefined : 'validation_regression';
+    expect(verdict?.pass).toBe(unknown);
+    const kind = failure === 'post-write-regression' ? 'validation_unresolved' : semantic || unknown ? undefined : 'validation_regression';
     expect(verdict?.refusal?.kind).toBe(kind);
     for (let read = 0; read < 3; read++) await settleGateValidationEvidence(projectDir, created.runId, 'qa', dependencies);
     expect(commands).toBe(0);
@@ -442,13 +441,14 @@ describe('engine generalization runtime bindings', () => {
     expect(first?.pass).toBe(false);
     expect(first?.delta.every((entry) => entry.state === 'unresolved')).toBe(true);
     let commands = 0;
-    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: (request) => { commands++; return validationRunner(0)(request); } })).toMatchObject({ kind: 'refused' });
+    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: (request) => { commands++; return validationRunner(0)(request); } })).toMatchObject({ kind: 'unchanged' });
     expect(commands).toBe(0);
     expect(readFileSync(join(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
     expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('ledgerSequence');
-    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: () => { throw new Error('settled validation must not repeat'); } })).toMatchObject({ kind: 'refused' });
+    expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: () => { throw new Error('settled validation must not repeat'); } })).toMatchObject({ kind: 'unchanged' });
+    expect(readGateEvaluation(projectDir, 'qa', created.runId)?.pass).toBe(true);
   });
-  it('keeps persistent validation launch failures fail-closed and bounds mechanical retries across calls', async () => {
+  it('keeps persistent validation launch evidence unknown without automatic retries or a mechanical veto', async () => {
     const { projectDir } = seedProject('validation-unresolved');
     const created = createRun(projectDir, 'validation-unresolved', 'name: validation-unresolved', ['qa']);
     const at = new Date().toISOString();
@@ -461,9 +461,9 @@ describe('engine generalization runtime bindings', () => {
     let commands = 0;
     const deps = { runCommand: () => { commands++; return { exitCode: null, error: 'validation runner unavailable' }; } };
     await recordGateValidationDelta(projectDir, created.runId, 'qa', deps);
-    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('refused');
+    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('unchanged');
     expect(commands).toBe(0);
-    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('refused');
+    expect((await settleGateValidationEvidence(projectDir, created.runId, 'qa', deps)).kind).toBe('unchanged');
     expect(commands).toBe(0);
   });
   it('9 — routes authored/effective rejection facts to the responsible producer', async () => {

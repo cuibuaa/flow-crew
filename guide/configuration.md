@@ -6,10 +6,11 @@ For an operator: which settings change behavior, and which value wins?
 
 `config/validation.json` belongs to the target project. It declares commands and
 structured reporters, independently of engine defaults. It uses the brief's
-`{commands: {build|test|lint: {command, args, report?}}}` schema and overrides inferred
-commands for the declared roles. Overlapping brief declarations must agree with
-the project's argv and reporter. Other roles retain normal discovery from package,
-Make and Python declarations. Invalid explicit configuration refuses discovery before execution.
+`{commands: {build|test|lint: {command, args, report?}}}` schema. Overlapping brief declarations must agree with
+the project's argv and reporter. If neither project nor brief declares commands, the author reads the repository
+and includes the fixed command-selection schema in its existing result. Invalid or empty selection remains unmeasured;
+there is no filename/script/lockfile discovery fallback. Dependency preparation belongs in the
+selected executable/argv. Invalid explicit configuration refuses selection before execution.
 See [validation evidence](agent-protocol.md) for report bounds and result interpretation.
 
 ## Engine defaults
@@ -26,7 +27,7 @@ Parser field names are listed exactly.
 |---|---:|---|
 | `default_timeout_ms` | 10800000 | Normal execution budget including wrap-up; see [timing](agent-protocol.md#stage-budgets-and-retained-continuation) |
 | `stage_idle_timeout_ms` | 600000 | Minimum observed silence before watchdog abort |
-| `validation_timeout_ms` | 2700000 | Bound for one configured validation command |
+| `validation_timeout_ms` | 60000 | Whole author-settlement validation batch, including lazy base comparison; also narrowed by remaining author time |
 | `max_iterations` | 5 | Workflow iteration limit, including each retained budget slice |
 | `gate_retry_loops` | 3 | Gate repair-loop bound |
 | `stage_technical_retries` | 1 | Technical execution retry bound; fallback ordinary retry default |

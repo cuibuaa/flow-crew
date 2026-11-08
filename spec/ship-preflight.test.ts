@@ -64,6 +64,7 @@ beforeEach(() => {
     stateRoot: join(root, 'state'),
   };
   mkdirSync(join(fixture.project, 'config'), { recursive: true });
+  writeFileSync(join(fixture.project, 'config/validation.json'), JSON.stringify({ commands: { build: { command: 'npm', args: ['run', 'build'] }, test: { command: 'npm', args: ['run', 'test'] }, lint: { command: 'npm', args: ['run', 'lint'] } } }));
   mkdirSync(join(fixture.packageRoot, 'src'), { recursive: true });
   mkdirSync(join(fixture.packageRoot, 'dist'), { recursive: true });
   writeFileSync(join(fixture.packageRoot, 'src', 'probe.ts'), 'export const probe = true;\n', 'utf-8');
@@ -134,6 +135,8 @@ describe('ship-preflight command discovery boundary', () => {
       scripts: { build: 'node build-dist.mjs', test: 'node check.mjs', lint: 'node style.mjs' },
     }));
     writeFileSync(join(fixture.packageRoot, 'package-lock.json'), '{}\n');
+    mkdirSync(join(fixture.packageRoot, 'config'), { recursive: true });
+    writeFileSync(join(fixture.packageRoot, 'config/validation.json'), JSON.stringify({ commands: Object.fromEntries(['build','test','lint'].map(role => [role, { command: 'npm', args: ['run',role] }])) }));
     writeFileSync(join(fixture.packageRoot, 'build-dist.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync("dist/probe.js", "replacement engine build");\n');
     const before = readFileSync(join(fixture.packageRoot, 'dist', 'probe.js'), 'utf-8');
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 0, stdout: 'must not run' }));

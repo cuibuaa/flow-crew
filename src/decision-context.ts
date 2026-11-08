@@ -1,9 +1,11 @@
 /** Review routing receives facts from engine/git authorities, never author narrative. */
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { StoreState } from './store.js';
 import { POST_AUTHOR_PROMPT, CHOOSER_PROMPT } from './decision-graph.js';
 import type { StageConfig } from './scheduler/sched_admission/configuration.js';
-import { readEvidence, stagePredecessor } from './evidence-ledger.js';
+import { captureProjectTree, projectValidationFact, readEvidence, stagePredecessor, validationForTree } from './evidence-ledger.js';
 import { adapterInputLimit, INPUT_RESERVE_CHARS } from './config.js';
 import type { Adapter } from './adapters/base.js';
 
@@ -21,8 +23,9 @@ export function changedPaths(projectDir: string, state: StoreState): string[] {
 
 /** Complete legacy facts, or bounded counts. Any unreadable piece makes the whole diff unavailable. */
 export function reviewFacts(projectDir: string, directory: string, state: StoreState, room: number) {
-  const validation = readEvidence(directory).filter(entry => entry.kind === 'validation').at(-1)
-    ?? { status: 'No configured validation facts have been recorded.' };
+  let brief = ''; try { brief = readFileSync(join(directory, 'task_brief.md'), 'utf8'); } catch { /* legacy context */ }
+  const fact = validationForTree(readEvidence(directory), captureProjectTree(projectDir, brief).hash);
+  const validation = fact ? projectValidationFact(fact) : { status: 'No configured validation fact covers the current tree; validation unmeasured.' };
   let diff = '', files: string[] = [], pathsComplete = false;
   const counts = () => ({ files: pathsComplete ? files.length : null, diffChars: diff.length,
     encodedDiffChars: escapedLength(diff), nonDiffChars: JSON.stringify({ files, diff: '', validation }).length });

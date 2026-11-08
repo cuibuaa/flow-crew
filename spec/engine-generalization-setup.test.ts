@@ -28,6 +28,7 @@ import {
 } from '../src/cli-ship-setup.js';
 import { runProjectValidationBaseline, type ValidationCommandRunner } from '../src/project-validation.js';
 import { rehearseBriefIsolated } from './test-support/rehearse.js';
+import { declareValidation } from './test-support/structured-validation.js';
 
 
 class Capture {
@@ -61,6 +62,7 @@ beforeEach(() => {
   mkdirSync(fixture.project, { recursive: true });
   mkdirSync(join(fixture.project, 'node_modules'), { recursive: true });
   writeFileSync(join(fixture.project, 'package.json'), JSON.stringify(packageManifest()));
+  declareValidation(fixture.project, { build: { command: 'npm', args: ['run', 'build'] }, test: { command: 'npm', args: ['run', 'test'] }, lint: { command: 'npm', args: ['run', 'lint'] } });
   writeFileSync(join(fixture.project, 'package-lock.json'), '{}\n');
 
   mkdirSync(join(fixture.packageRoot, 'src'), { recursive: true });
@@ -165,6 +167,8 @@ function materializeTrackedTarget(target: string): void {
   mkdirSync(target, { recursive: true });
   mkdirSync(join(target, 'node_modules'), { recursive: true });
   copyFileSync(join(fixture.project, 'package.json'), join(target, 'package.json'));
+  mkdirSync(join(target, 'config'), { recursive: true });
+  copyFileSync(join(fixture.project, 'config/validation.json'), join(target, 'config/validation.json'));
   copyFileSync(join(fixture.project, 'package-lock.json'), join(target, 'package-lock.json'));
 }
 
@@ -184,6 +188,7 @@ describe('declared-input materialization and live producers', () => {
     writeFileSync(join(fixture.project, 'package.json'), JSON.stringify({
       scripts: { build: 'compile', lint: 'style' },
     }));
+    declareValidation(fixture.project, { build: { command: 'npm', args: ['run', 'build'] }, test: { command: 'make', args: ['test'] }, lint: { command: 'npm', args: ['run', 'lint'] } });
     const contents: Record<string, string> = {
       'tools/parity/main.py': 'def parity(value):\n    return value % 2\n',
       'tests/test_parity.py': 'from tools.parity.main import parity\ndef test_parity():\n    assert parity(2) == 0\n',
@@ -199,7 +204,7 @@ describe('declared-input materialization and live producers', () => {
       mkdirSync(join(fixture.project, path, '..'), { recursive: true });
       writeFileSync(join(fixture.project, path), content);
     }
-    const tracked = ['package.json', 'package-lock.json', ...Object.keys(contents)
+    const tracked = ['package.json', 'package-lock.json', 'config/validation.json', ...Object.keys(contents)
       .filter(path => path !== 'tools/parity/values.csv')];
     const brief = [
       '---', 'inputs: [tools/parity]', 'outputs: [report.md]', '---',

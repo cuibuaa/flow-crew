@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runShipSetup } from '../src/cli-ship-setup.js';
-import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { ensureTerminalArtifactValidation, loadWorkflow, runWorkflow } from '../src/scheduler.js';
+import { reviewFacts } from '../src/decision-context.js';
 import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { fcGlobalDir, runDir } from '../src/store.js';
@@ -23,11 +24,10 @@ afterEach(() => { for (const root of roots.splice(0)) {
   rmSync(root, { recursive: true, force: true });
 } });
 const engine = resolve(import.meta.dirname, '..');
-const reading = { version: 1, testsRun: 1, complete: true,
-  failures: [{ testId: 'fixture test', file: 'case.test', messageClass: 'assertion' }] };
+
 
 async function fixture(options: { noValidation?: boolean; nativeCommands?: boolean; baseRed?: boolean; introduce?: boolean; invalidReading?: boolean;
-  rejectFirstReview?: boolean; mutateValidation?: boolean; unchanged?: boolean; verbose?: boolean; suiteError?: 'suite' | 'diagnostic' | 'unhandled'; input?: 'introduced' | 'mixed'; readonlyInput?: boolean } = {}) {
+  rejectFirstReview?: boolean; returnToFirstTree?: boolean; mutateValidation?: boolean; unchanged?: boolean; verbose?: boolean; suiteError?: 'suite' | 'diagnostic' | 'unhandled'; input?: 'introduced' | 'mixed'; readonlyInput?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'ledger-spec-')); roots.push(root);
   const source = join(root, 'source'), target = join(root, 'target'); mkdirSync(source);
   const counter = join(root, 'executions.jsonl');
@@ -36,9 +36,10 @@ async function fixture(options: { noValidation?: boolean; nativeCommands?: boole
   writeFileSync(join(source, 'value.txt'), 'base\n');
   writeFileSync(join(source, 'check.mjs'), `import fs from 'node:fs';
 fs.appendFileSync(${JSON.stringify(counter)},JSON.stringify({cwd:process.cwd(),value:fs.readFileSync('value.txt','utf8')})+'\\n');
-const fail=${Boolean(options.baseRed)}||fs.readFileSync('value.txt','utf8').startsWith('introduced');
+const fail=${Boolean(options.baseRed)}||fs.readFileSync('value.txt','utf8').startsWith('introduced')||${Boolean(options.returnToFirstTree)}&&fs.readFileSync('value.txt','utf8')==='intermediate\\n';
 ${options.mutateValidation ? "fs.writeFileSync('value.txt','changed by validation\\n');" : ''}
-console.log(fail?'FAIL case.test > fixture test 0.375s\\nTests 1 failed':'Tests 1 passed');process.exitCode=fail?1:0;`);
+console.log(JSON.stringify({complete:true,numTotalTests:1,numFailedTests:fail?1:0,numPassedTests:fail?0:1,testResults:[{name:'case.test',assertionResults:[{fullName:'fixture test',status:fail?'failed':'passed'}]}]}));process.exitCode=fail?1:0;`);
+  if (options.invalidReading) writeFileSync(join(source, 'check.mjs'), `import fs from 'node:fs';fs.appendFileSync(${JSON.stringify(counter)},JSON.stringify({cwd:process.cwd(),value:fs.readFileSync('value.txt','utf8')})+'\\n');console.log('{invalid');process.exitCode=1;`);
   if (options.verbose) writeFileSync(join(source, 'check.mjs'), `import fs from 'node:fs';
 fs.appendFileSync(${JSON.stringify(counter)},JSON.stringify({cwd:process.cwd(),value:fs.readFileSync('value.txt','utf8')})+'\\n');
 console.log('Test Files 1 passed (1)\\nTests 1 passed (1)');
@@ -66,7 +67,7 @@ fs.appendFileSync(${JSON.stringify(counter)},JSON.stringify({cwd:process.cwd(),v
 const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTests:1,numFailedTests:fail?1:0,numPassedTests:fail?0:1,testResults:[{name:'case.test',status:fail?'failed':'passed',message:'',assertionResults:[{fullName:'input validity',status:fail?'failed':'passed'}]}]}));process.exitCode=fail?1:0;`);
   }
   git('add', '.'); if (options.input === 'mixed') git('add', '-f', 'data/readme.txt'); git('commit', '-qm', 'base');
-  const validationDeclaration = options.noValidation ? '' : `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: [check.mjs]\n${options.suiteError || options.input ? '      report: {format: vitest-json}\n' : ''}`;
+  const validationDeclaration = options.noValidation ? '' : `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: [check.mjs]\n${!options.verbose && !options.noValidation ? '      report: {format: vitest-json}\n' : ''}`;
   const brief = `---\n${options.input ? 'inputs: [{path: data}]\n' : ''}${validationDeclaration}outputs: [{path: value.txt, on_existing: update}]\n---\n# Goal\nWrite a value.\n\n## Acceptance criteria\n1. Deliver the independently reviewed value.\n`;
   const briefPath = join(root, 'brief.md'); writeFileSync(briefPath, brief);
   const setup = await runShipSetup(['--project', source, '--target', target, '--base', 'HEAD', '--branch', 'trial', '--brief', briefPath], { globalDir: fcGlobalDir });
@@ -81,11 +82,6 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
   let writes = 0, reviews = 0;
   const scripted = new ScriptedAdapter({ implement: { output: 'AUTHOR_TRANSCRIPT_SENTINEL' }, repair: { output: 'REPAIR_TRANSCRIPT_SENTINEL' } });
   const adapter: Adapter = { async run(prompt, role, opts) {
-    if (opts.stageId === '_validation_identity') {
-      expect(opts.resumeSessionId).toBeUndefined(); expect(role.tools).toEqual([]);
-      expect(Buffer.byteLength(prompt)).toBeLessThan(26 * 1024);
-      return { output: JSON.stringify(options.invalidReading ? { failures: ['invalid'] } : reading), exitCode: 0, duration_ms: 1 };
-    }
     calls.push({ stage: opts.stageId, prompt, resume: opts.resumeSessionId, schema: opts.outputSchema });
     if (opts.stageId === 'implement') {
       if (options.nativeCommands) {
@@ -101,7 +97,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
       if (options.input === 'mixed') writeFileSync(join(target, 'data/readme.txt'), 'authored member');
     }
     if (opts.stageId === 'repair') {
-      writeFileSync(join(target, 'value.txt'), options.unchanged ? 'base\n' : 'repaired\n');
+      writeFileSync(join(target, 'value.txt'), options.returnToFirstTree ? reviews === 1 ? 'intermediate\n' : 'write 3\n' : options.unchanged ? 'base\n' : 'repaired\n');
       if (options.input === 'introduced') writeFileSync(join(target, 'data/value.txt'), 'GOOD');
     }
     if (opts.stageId === 'review') {
@@ -123,7 +119,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
         const record = JSON.parse(probe.stdout!).record;
         expect(record.exitCode).toBe(1); reproduction = record.sequence;
       }
-      const pass = !defect && (!options.rejectFirstReview || reviews > 1);
+      const pass = !defect && (options.returnToFirstTree ? reviews > 2 : !options.rejectFirstReview || reviews > 1);
       return { output: JSON.stringify({ pass, reason: pass ? 'Independent acceptance.' : 'Check the value again.',
         criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: pass ? 'pass' : 'fail', evidence: 'value.txt' }])),
         audit_findings: { version: 1, findings: defect ? [{ id: 'value', paths: [options.input ? 'data/value.txt' : 'value.txt'], reason: 'Value predicate reproduced', criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction }] : [] },
@@ -162,7 +158,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
 
   it.each(['suite', 'diagnostic', 'unhandled'] as const)('uses structured identity while retaining unrepresented native Vitest %s failures as unknown', async suiteError => {
     const result = await fixture({ suiteError });
-    expect(result.final.status).toBe(suiteError === 'diagnostic' ? 'complete' : 'incomplete'); expect(result.executions).toHaveLength(2);
+    expect(result.final.status).toBe('complete'); expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2);
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
     const [fact] = result.validations; expect(fact.pass).toBe(suiteError === 'diagnostic');
     for (const execution of fact.executions) expect(execution.treeAfterHash).toBe(execution.treeHash);
@@ -187,7 +183,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
 
   it.each([false, true])('restores ignored descendants and modes without replacing base tracked source or repairing a pre-existing failure (readonly=%s)', async readonlyInput => {
     const result = await fixture({ input: 'mixed', readonlyInput });
-    expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(2);
+    expect(result.final.status).toBe('complete'); expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2);
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
     expect(result.executions.map(value => value.input)).toEqual(['BAD', 'BAD']);
     expect(result.executions.map(value => value.member)).toEqual(['authored member', 'committed member']);
@@ -202,7 +198,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     const result = await fixture({ baseRed: true });
     expect(result.final.status).toBe('complete'); expect(result.writes).toBe(3);
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
-    expect(result.executions).toHaveLength(2);
+    expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2);
     expect(result.executions[0]).toMatchObject({ cwd: result.target, value: 'write 3\n' });
     expect(result.executions[1].cwd).not.toBe(result.target); expect(result.executions[1].value).toBe('base\n');
     expect(existsSync(result.executions[1].cwd)).toBe(false);
@@ -214,7 +210,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(validation.executions[1].treeHash).toBe(result.baselineTree.hash);
     for (const execution of validation.executions) {
       expect(execution.treeHash).toMatch(/^[a-f0-9]{64}$/); expect(execution.treeAfterHash).toBe(execution.treeHash);
-      expect(execution.commands).toEqual([expect.objectContaining({ exitCode: 1, testsRun: 1, identityOwner: 'closed-schema-model' })]);
+      expect(execution.commands).toEqual([expect.objectContaining({ exitCode: 1, testsRun: 1, identityOwner: 'runner-json' })]);
     }
     expect(validation.pass).toBe(true);
   });
@@ -283,17 +279,17 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
 
   it('does not infer identity or trigger repairs from invalid readings, and never retries a suite at a gate', async () => {
     const result = await fixture({ baseRed: true, invalidReading: true });
-    expect(result.final.status).toBe('incomplete');
-    expect(result.executions).toHaveLength(2); expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
+    expect(result.final.status).toBe('complete');
+    expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2); expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
     expect(result.validations[0].failures).toEqual([expect.objectContaining({ identifier: null, classification: 'unknown' })]);
     expect(result.validations[0].pass).toBe(false);
     const settlement = await settleGateValidationEvidence(result.target, result.final.runId, 'review', { runCommand: () => { throw new Error('decision reran the suite'); } });
-    expect(settlement.kind).toBe('refused'); expect(result.executions).toHaveLength(2);
+    expect(settlement.kind).toBe('unchanged'); expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2);
   });
 
-  it.each([false, true])('does not certify source changed by validation, or repair an evidence gap (base red=%s)', async baseRed => {
+  it.each([false, true])('invalidates validation when source changes and lets the independent gate judge the stated gap (base red=%s)', async baseRed => {
     const result = await fixture({ mutateValidation: true, baseRed });
-    expect(result.final.status).toBe('incomplete'); expect(result.executions).toHaveLength(baseRed ? 2 : 1);
+    expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(baseRed ? 2 : 1);
     expect(result.validations[0].failures.every(failure => failure.classification === 'unknown')).toBe(true);
     expect(result.validations[0].delta.every(entry => entry.state === 'unresolved')).toBe(true);
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
@@ -317,13 +313,31 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(readFileSync(join(result.root, 'executions.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2);
   });
 
-  it('validates separate attempts on an unchanged tree instead of reusing a result by tree hash', async () => {
+  it('reuses a tree-bound fact on an unchanged tree without repeating uncertain or passing evidence', async () => {
     const result = await fixture({ unchanged: true, rejectFirstReview: true });
-    expect(result.final.status).toBe('complete'); expect(result.validations).toHaveLength(2);
-    expect(result.executions).toHaveLength(2);
-    expect(result.validations[0].treeHash).toBe(result.validations[1].treeHash);
+    expect(result.final.status).toBe('complete'); expect(result.validations).toHaveLength(1);
+    expect(result.executions).toHaveLength(1);
     // Re-reading one already-recorded attempt is idempotent, never a third suite.
     await recordAttemptValidation(result.target, result.final.runId, 'repair', { runCommand: () => { throw new Error('duplicate suite'); } });
-    expect(readEvidence(result.rd).filter(entry => entry.kind === 'validation')).toHaveLength(2);
+    expect(readEvidence(result.rd).filter(entry => entry.kind === 'validation')).toHaveLength(1);
+  });
+
+  it('returns to an earlier measured tree without rerunning it or consuming the later different tree receipt', async () => {
+    const result = await fixture({ returnToFirstTree: true });
+    expect(result.final.status, JSON.stringify(result.final.stages.review.gate)).toBe('complete');
+    expect(result.executions.map(execution => execution.value)).toEqual(['write 3\n', 'intermediate\n', 'base\n']);
+    expect(result.validations).toHaveLength(2);
+    const [first, later] = result.validations;
+    expect(first.treeHash).not.toBe(later.treeHash);
+    expect(later.delta[0].state).toBe('regression');
+    const input = result.calls.filter(call => call.stage === 'review').at(-1)!.prompt;
+    const facts = JSON.parse(input.split('Ledger facts:\n')[1].split('\nValidation command selection')[0]).facts;
+    expect(facts.filter((fact: { kind: string }) => fact.kind === 'validation').map((fact: { sequence: number }) => fact.sequence)).toEqual([first.sequence]);
+    expect(JSON.parse(readFileSync(join(result.rd, 'validation_delta_review.json'), 'utf8')).ledgerSequence).toBe(first.sequence);
+    expect(reviewFacts(result.target, result.rd, result.final).validation).toMatchObject({ sequence: first.sequence, pass: true });
+    expect(await ensureTerminalArtifactValidation({ projectDir: result.target, runId: result.final.runId, runDirPath: result.rd,
+      state: result.final, ownerStageId: 'repair', terminalPath: 'value.txt', artifactMtimeMs: Date.now(),
+      dependencies: { runCommand: () => { throw Error('restored terminal tree reran validation'); } },
+    })).toMatchObject({ pass: true, validationStageId: first.stageId, checkedAt: first.at });
   });
 });
