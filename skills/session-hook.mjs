@@ -1,6 +1,6 @@
 // FlowCrew session integration. Installed from this template; no user paths.
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, readdirSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -16,38 +16,10 @@ const wake = process.argv[2] === 'Wake';
 let payload = {};
 try { payload = JSON.parse(input || '{}'); } catch { /* CLI reports malformed input */ }
 const session = payload.session_id || payload.thread_id || payload['thread-id'] || 'unknown';
-function incident(operation, cause) {
-  const root = join(process.env.FC_HOME || join(homedir(), '.fc'), 'session-push', 'integration-errors');
-  const id = createHash('sha256').update(JSON.stringify([settings.frontend, session, operation, cause])).digest('hex');
-  return { root, path: join(root, `${id}.json`) };
-}
-function clearFailure(operation, cause) {
-  const { root, path } = incident(operation, cause);
-  try {
-    const recovered = JSON.parse(readFileSync(path, 'utf8'));
-    appendFileSync(join(root, '..', '..', 'infrastructure-recoveries.jsonl'), JSON.stringify({ at: new Date().toISOString(), component: 'session-read', frontend: settings.frontend, session, operation, recovered }) + '\n', { mode: 0o600, flush: true });
-    unlinkSync(path);
-    try { unlinkSync(`${path}.shown`); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  } catch { /* diagnostics cannot break a recovered integration */ }
-}
-function recordFailure(operation, detail, show = !wake, cause = 'command') {
-  const { root, path } = incident(operation, cause);
-  const message = `FlowCrew ${operation} unavailable for ${settings.frontend} session ${session}: ${detail}. Session state cannot be checked; inspect the push service.`;
-  try {
-    mkdirSync(root, { recursive: true });
-    try { writeFileSync(path, JSON.stringify({ message, frontend: settings.frontend, session, operation, cause, at: new Date().toISOString() }), { flag: 'wx', mode: 0o600, flush: true }); }
-    catch (error) { if (error.code !== 'EEXIST') throw error; }
-    if (show) {
-      try {
-        writeFileSync(`${path}.shown`, '', { flag: 'wx', mode: 0o600 });
-        process.stdout.write(JSON.stringify({ systemMessage: JSON.parse(readFileSync(path, 'utf8')).message }) + '\n');
-      } catch (error) { if (error.code !== 'EEXIST') throw error; }
-    }
-  } catch {
-    // If diagnostics cannot be persisted, still keep the warning human-only.
-    if (show) process.stdout.write(JSON.stringify({ systemMessage: message }) + '\n');
-  }
-}
+// Diagnostics are for the operator only: Stop's systemMessage, or stderr of a
+// non-blocking wake exit. They never reach the model-visible decision/reason.
+const notices = [];
+let wakeUnavailable = false; // coverage cannot be registered: the CLI must not ask the model to renew it
 // A session without tasks or pending events has no engine work. Keep this
 // preflight in the small installed shim, before loading the CLI or registry.
 let idle = false;
@@ -71,29 +43,31 @@ if (settings.frontend === 'claude' && !statusline) {
   try {
     const config = JSON.parse(readFileSync(settings.wakeConfigPath, 'utf8'));
     const installed = ['Stop', 'SessionStart'].every(event => (config.hooks?.[event] || []).some(group => isDeepStrictEqual(group, settings.wakeDefinition)));
-    if (config.disableAllHooks === true || !installed) {
-      recordFailure('wake', 'the installed async wake hook is disabled or missing', false, 'configuration');
-      if (wake) process.exit(0);
-    } else clearFailure('wake', 'configuration');
-  } catch (error) {
-    recordFailure('wake', error.message, false, 'configuration');
-    if (wake) process.exit(0);
-  }
+    if (config.disableAllHooks === true || !installed) wakeUnavailable = true;
+    if (wakeUnavailable) notices.push(`FlowCrew wake coverage unavailable for session ${session}: the installed async wake hook is disabled or missing.`);
+  } catch (error) { wakeUnavailable = true; notices.push(`FlowCrew wake coverage unavailable for session ${session}: ${error.message}.`); }
+  if (wake && notices.length) { process.stderr.write(`${notices.join('\n')}\n`); process.exit(0); }
 }
 const result = spawnSync(process.execPath, [settings.cli, 'session-push',
-  ...(wake ? ['wake'] : statusline ? ['statusline', '--json'] : ['hook', '--frontend', settings.frontend, '--event', process.argv[2] || 'Stop']),
+  ...(wake ? ['wake'] : statusline ? ['statusline', '--json'] : ['hook', '--frontend', settings.frontend, '--event', process.argv[2] || 'Stop', ...(wakeUnavailable ? ['--wake-unavailable'] : [])]),
 ], { input, encoding: 'utf8', timeout: wake ? settings.limits.wakeMs : statusline ? settings.limits.statusMs : settings.limits.commandMs, maxBuffer: 2 * 1024 * 1024 });
-if (!statusline) {
-  if (result.status === 0 || (wake && result.status === 2 && !result.error)) {
-    clearFailure(wake ? 'wake' : 'hook', 'command');
-    if (result.stdout) process.stdout.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
-    process.exitCode = result.status;
-  } else {
-    recordFailure(wake ? 'wake' : 'hook', result.error?.message || result.stderr || `command exit ${result.status}`);
-  }
-} else {
+if (statusline) {
   let rendering;
   try { rendering = JSON.parse(result.stdout); } catch { rendering = { text: 'FlowCrew: session display unavailable; inspect the push service', covered: false }; }
   process.stdout.write(rendering.text + '\n');
+} else {
+  const ran = result.status === 0 || (wake && result.status === 2 && !result.error);
+  if (!ran) notices.push(`FlowCrew ${wake ? 'wake' : 'hook'} unavailable for ${settings.frontend} session ${session}: ${result.error?.message || result.stderr || `command exit ${result.status}`}. Session state cannot be checked; inspect the push service.`);
+  if (wake) {
+    // asyncRewake: stderr of exit 2 is the model's prompt; of exit 0, the operator's.
+    process.stderr.write(ran ? result.stderr : `${notices.join('\n')}\n`);
+    process.exitCode = ran ? result.status : 0;
+  } else {
+    // The CLI's decision/reason is the whole model-visible result.
+    let verdict = {};
+    try { if (ran) verdict = JSON.parse(result.stdout || '{}'); } catch { notices.push('FlowCrew hook output unreadable; inspect the push service.'); }
+    if (notices.length) verdict = { ...verdict, systemMessage: [verdict.systemMessage, ...notices].filter(Boolean).join('\n') };
+    if (Object.keys(verdict).length) process.stdout.write(`${JSON.stringify(verdict)}\n`);
+    process.exitCode = 0;
+  }
 }

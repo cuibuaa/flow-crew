@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaskRegistry } from '../src/task-registry.js';
 import { lockOwnerIdentity } from '../src/lock-publication.js';
 import { SessionPush, PUSH_FALLBACK_MS, PUSH_RETRY_MS, wrapUpPrompt } from '../src/session-push.js';
-import { hasSessionFailure, recordSessionFailure, sessionFailures } from '../src/session-integration-errors.js';
 import { sessionGate } from '../src/cli-session-push.js';
 import { hasClaudeWakeWaiter, supportsClaudeWakeVersion, waitForClaudeWake } from '../src/session-wake.js';
 import { createTaskEntry, refreshOpenTaskLedger, readOpenTaskLedger } from '../src/fc-tasks.js';
@@ -135,7 +134,6 @@ describe('Claude async Stop wake', () => {
       ? wrapUpPrompt(event!, registry.baseDir) : expect.stringContaining('renews wake coverage') });
     expect(readFileSync(registry.lockPath, 'utf8')).toBe(owner);
     expect(readdirSync(registry.baseDir).filter(name => name.startsWith('tasks.lock.'))).toEqual([]);
-    expect(hasSessionFailure(push.root, 'claude', f.launcher.sessionId, 'wake')).toBe(false);
     if (event) { expect(push.pending(f.launcher.sessionId, 'claude')).toHaveLength(1); expect(push.claimWake(event)).toBe(false); }
     if (writable) expect(JSON.parse(readFileSync(diagnostic, 'utf8'))).toMatchObject({
       component: 'wake-lease', session: f.launcher.sessionId, operation: 'retire', deferred: true,
@@ -267,7 +265,8 @@ describe('Claude async Stop wake', () => {
 
   it('reports ledger damage through its view, rejects damaged scoped outbox state, and never accepts reused waiter identities', async () => {
     const f = fixture();
-    const result = await waitForClaudeWake(f.push, f.launcher.sessionId, { now: f.now, lifetimeMs: 60_000, sleep: async () => {
+    // A read fault that outlasts the lease is thrown to the caller, which reports it on stderr (exit 0).
+    await expect(waitForClaudeWake(f.push, f.launcher.sessionId, { now: f.now, lifetimeMs: 60_000, sleep: async () => {
       mkdirSync(join(f.launcher.ledgerRoot, f.launcher.sessionId), { recursive: true });
       writeFileSync(join(f.launcher.ledgerRoot, f.launcher.sessionId, 'bad.json'), '{bad');
       refreshOpenTaskLedger(f.launcher.ledgerRoot, f.launcher.sessionId);
@@ -282,9 +281,7 @@ describe('Claude async Stop wake', () => {
       mkdirSync(join(f.push.root, 'events'), { recursive: true });
       writeFileSync(join(f.push.root, 'events', `${'a'.repeat(64)}.json`), '{bad');
       f.advance(60_000);
-    } });
-    expect(result).toEqual({ code: 0 });
-    expect(hasSessionFailure(f.push.root, 'claude', f.launcher.sessionId, 'wake')).toBe(true);
+    } })).rejects.toThrow();
     expect(() => sessionGate(f.push, 'claude', f.launcher.sessionId)).toThrow();
     expect(readdirSync(join(f.push.root, 'waiters'))).toEqual([]);
   });
@@ -294,57 +291,27 @@ describe('Claude async Stop wake', () => {
     writeFileSync(join(f.registry.baseDir, 'tasks', String(f.task.id), 'current.json'), '{broken');
     let event: ReturnType<typeof f.event> | undefined;
     const result = await waitForClaudeWake(f.push, f.launcher.sessionId, { now: f.now, lifetimeMs: 100, sleep: async () => {
-      expect(hasSessionFailure(f.push.root, 'claude', f.launcher.sessionId, 'wake')).toBe(true);
       writeFileSync(join(f.registry.baseDir, 'tasks', String(f.task.id), 'current.json'), JSON.stringify(f.task));
       event = f.event();
       await f.push.deliver(event);
       f.advance(1);
     } });
     expect(result).toEqual({ code: 2, prompt: wrapUpPrompt(event!, f.registry.baseDir) });
-    expect(hasSessionFailure(f.push.root, 'claude', f.launcher.sessionId, 'wake')).toBe(false);
     expect(f.claude).not.toHaveBeenCalled();
-    expect(readFileSync(join(f.registry.baseDir, 'infrastructure-recoveries.jsonl'), 'utf8')).toContain('session-read');
   });
 
-  it('a pending event wakes through a damaged task view without falsely clearing the read incident', async () => {
+  it('a pending event wakes through a damaged task view and the claim survives it', async () => {
     const f = fixture();
-    const event = f.event();
-    writeFileSync(join(f.registry.baseDir, 'tasks', String(f.task.id), 'current.json'), '{broken');
-    recordSessionFailure(f.push.root, 'claude', f.launcher.sessionId, 'wake', new Error('task view unavailable'));
-    const result = await waitForClaudeWake(f.push, f.launcher.sessionId, { sleep: async () => { await f.push.deliver(event); } });
-    expect(result).toEqual({ code: 2, prompt: wrapUpPrompt(event, f.registry.baseDir) });
-    expect(hasSessionFailure(f.push.root, 'claude', f.launcher.sessionId, 'wake')).toBe(true);
-  });
-
-  it.each([true, false])('a claimed event survives task-view and incident-storage failures (fallback writable=%s)', async writable => {
-    const f = fixture();
-    const incidents = join(f.push.root, 'integration-errors');
-    const fallback = join(f.registry.baseDir, 'infrastructure-recoveries.jsonl');
-    if (!writable) mkdirSync(fallback);
     let event: ReturnType<typeof f.event> | undefined;
     const result = await waitForClaudeWake(f.push, f.launcher.sessionId, { now: f.now, sleep: async () => {
       event = f.event();
       await f.push.deliver(event);
       writeFileSync(join(f.registry.baseDir, 'tasks', String(f.task.id), 'current.json'), '{broken');
-      writeFileSync(incidents, 'incident directory unavailable');
     } });
     expect(result).toEqual({ code: 2, prompt: wrapUpPrompt(event!, f.registry.baseDir) });
     expect(f.push.pending(f.launcher.sessionId, 'claude')).toHaveLength(1);
     expect(f.push.claimWake(event!)).toBe(false);
     expect(hasClaudeWakeWaiter(f.push.root, f.launcher.sessionId)).toBe(false);
-    if (writable) expect(JSON.parse(readFileSync(fallback, 'utf8'))).toMatchObject({
-      component: 'session-read', frontend: 'claude', session: f.launcher.sessionId,
-      operation: 'wake', error: expect.any(String), diagnosticError: expect.any(String),
-    });
-    // Delivery does not declare the damaged view recovered. Once incident
-    // storage returns, the next read still reports it to the operator once.
-    rmSync(incidents);
-    expect(await waitForClaudeWake(f.push, f.launcher.sessionId, { now: f.now, lifetimeMs: 0 })).toEqual({ code: 0 });
-    expect(sessionFailures(f.push.root, 'claude', f.launcher.sessionId, true)).toHaveLength(1);
-    expect(sessionFailures(f.push.root, 'claude', f.launcher.sessionId, true)).toEqual([]);
-    writeFileSync(join(f.registry.baseDir, 'tasks', String(f.task.id), 'current.json'), JSON.stringify(f.task));
-    expect((await waitForClaudeWake(f.push, f.launcher.sessionId, { now: f.now, lifetimeMs: 0 })).code).toBe(2);
-    expect(hasSessionFailure(f.push.root, 'claude', f.launcher.sessionId, 'wake')).toBe(false);
   });
 
   it('atomically arbitrates real concurrent processes for the same event/attempt', async () => {

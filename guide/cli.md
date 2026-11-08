@@ -303,7 +303,7 @@ Every route accepts `--help` and `-h` without contacting services or creating st
 | `session-push ack` | `--event`, `--session` |
 | `session-push list` | `--session` |
 | `session-push bind-display` | `--task`, `--thread`, `--session` |
-| `session-push hook` | `--frontend`, `--event` |
+| `session-push hook` | `--frontend`, `--event`, `--wake-unavailable` |
 | `session-push statusline` | `--session`, `--json` |
 | `version` | — |
 <!-- cli-options:end -->

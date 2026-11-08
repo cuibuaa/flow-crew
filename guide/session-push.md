@@ -102,16 +102,17 @@ Missing Codex display creation is retried by the service; a pending event can al
 ask the frontend to create and bind a standalone display with `session-push bind-display`.
 The engine never invokes wrap-up or creates a display subagent.
 
-Read or command failures produce a human `systemMessage` once per affected session,
-operation and structured cause, without a model `reason` or exit 2. The status line retains the diagnostic.
-The waiter retries state reads while its lease is live; a complete healthy state check
-clears only a read incident. The shim verifies repaired hook definitions or a successful
-command, and the CLI verifies restored version support, before clearing those respective
-causes and recording recovery for the operator. A known wake failure suppresses
-renewal-only Stop continuations, preventing empty-turn retry loops. Pending events
-always take priority. Unsupported Claude versions and missing/disabled async definitions
-use this same operator diagnostic instead of foreground waiting. Check `flowcrew doctor`
-and repair the integration to restore automatic wake delivery.
+Nothing persists diagnostics. A Stop hook's model-visible result (`decision`, `reason`) comes only
+from the session gate: a pending event, or wake coverage that must be renewed. A read or command
+failure, an unreadable optional view, or a missing CLI reaches the operator alone, each time it
+occurs: in Stop's `systemMessage`, on stderr of a non-blocking exit, or on the status line. A
+failure that leaves the gate unknown never blocks the model and never exits 2. A recovered stale
+lock is recorded only in `infrastructure-recoveries.jsonl`. The waiter retries state reads while
+its lease is live. Coverage that cannot be registered (an unsupported Claude version, or a
+missing or disabled async definition, which the shim reports with `--wake-unavailable`) is
+checked afresh by each Stop and is not asked of the model, preventing empty-turn retry loops.
+Pending events always take priority. Check `flowcrew doctor` and repair the integration to
+restore automatic wake delivery.
 
 Session reads open only the calling session's open state: the registry writer publishes
 `tasks/<id>/current.json` and an open task index, event writers publish immutable links

@@ -526,6 +526,16 @@ describe('shared progress and turn gate', () => {
     expect(sessionGate(push, 'codex', launcher.sessionId)).toMatchObject({ decision: 'block', reason: expect.stringContaining(event.eventId) });
   });
 
+  it('a failing diagnostic read cannot replace the pending event: the verdict is the event, the diagnostic is for the operator only', () => {
+    const { registry, task, launcher } = fixture('codex');
+    const push = new SessionPush(registry);
+    const event = push.enqueue(task, source)!;
+    writeFileSync(join(registry.baseDir, 'tasks', String(task.id), 'session-push.json'), '{broken');
+    const verdict = sessionGate(push, 'codex', launcher.sessionId);
+    expect(verdict).toMatchObject({ decision: 'block', reason: expect.stringContaining(event.eventId), systemMessage: expect.stringContaining('display state unreadable') });
+    expect(verdict.reason).not.toContain('unreadable');
+  });
+
   it('uses exact elapsed seconds, workflow medians and repair frequency; missing history is unknown', () => {
     const run = { workflowName: 'tiny', status: 'running', startedAt: '2020-01-01T00:00:00Z', stages: { build: { status: 'running', startedAt: '2020-01-01T00:00:00Z' }, repair: { status: 'pending' } } };
     const history = [

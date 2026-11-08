@@ -83,7 +83,7 @@ export const CLI_COMMANDS: Record<string, Command> = {
   'session-push ack': command(values('event session')),
   'session-push list': command(values('session')),
   'session-push bind-display': command(values('task thread session')),
-  'session-push hook': command(values('frontend event')),
+  'session-push hook': command({ ...values('frontend event'), ...flags('wake-unavailable') }),
   'session-push statusline': command({ ...values('session'), ...flags('json') }),
   version: command(),
 };

@@ -6,35 +6,40 @@ import { isActiveTaskStatus, TaskRegistry } from './task-registry.js';
 import { defaultFcTasksRoot, readOpenTaskLedger, renderFcTasks } from './fc-tasks.js';
 import { SessionPush, estimateProgress, progressLine, renderPushEvent, PUSH_RETRY_MS, type LaunchTarget } from './session-push.js';
 import { claudeWakeCapability, hasClaudeWakeWaiter, waitForClaudeWake } from './session-wake.js';
-import { clearSessionFailure, hasSessionFailure, recordSessionFailure, sessionFailures } from './session-integration-errors.js';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-export function sessionGate(push: SessionPush, frontend: LaunchTarget['frontend'], session: string): { decision?: 'block'; reason?: string; systemMessage?: string } {
+/** `wakeProblem` is asked only when coverage would have to be renewed: undefined
+ * means it can be; a string means it cannot (non-empty: say so to the operator;
+ * empty: already reported). The model is then never asked to renew it. */
+export function sessionGate(push: SessionPush, frontend: LaunchTarget['frontend'], session: string, wakeProblem: () => string | undefined = () => undefined): { decision?: 'block'; reason?: string; systemMessage?: string } {
   const pending = push.pending(session, frontend);
   const first = pending[0];
   if (first) {
     let displayAdvice = '';
+    let notice = '';
     if (frontend === 'codex') {
       try {
         const display = push.display(first.taskId);
         if (!display.threadId) displayAdvice = `\nFlowCrew #${first.taskId} display thread is missing: ${display.error || 'creation pending'}. Create one standalone thread, then bind it with flowcrew session-push bind-display --task ${first.taskId} --thread <new-thread-id> --session ${session}.`;
-      } catch { /* optional display state cannot hide a known pending event */ }
+      } catch (error) { notice = `\nFlowCrew #${first.taskId} display state unreadable: ${error instanceof Error ? error.message : String(error)}`; } // for the operator; cannot hide the event
     }
-    return { decision: 'block', systemMessage: renderPushEvent(first, push.registry.baseDir).human,
+    return { decision: 'block', systemMessage: renderPushEvent(first, push.registry.baseDir).human + notice,
       reason: `FlowCrew wrap-up is open: ${pending.length} unacknowledged event(s).\n${renderPushEvent(first, push.registry.baseDir).agent}${displayAdvice}` };
   }
   // Codex's durable queue does not have an expiring wake lease. Missing
   // display creation is retried by the service; it cannot manufacture a turn.
   if (frontend === 'codex') return {};
   const open = push.openTasks(frontend, session);
-  if (!open.length || hasClaudeWakeWaiter(push.root, session) || hasSessionFailure(push.root, frontend, session, 'wake')) return {};
+  if (!open.length || hasClaudeWakeWaiter(push.root, session)) return {};
+  const problem = wakeProblem();
+  if (problem !== undefined) return problem ? { systemMessage: problem } : {};
   return { decision: 'block', reason: `FlowCrew wake coverage must be renewed for this session's open tasks ${open.map(task => `#${task.id}`).join(', ')}. End this turn normally to register the installed wake waiter; inspect the push service if coverage remains unavailable.` };
 }
 
 export function renderSessionProgress(push: SessionPush, session: string, now = Date.now(), frontend: LaunchTarget['frontend'] = 'claude'): { text: string; covered: boolean } {
   const tasks = push.sessionTasks(frontend, session);
   const rows = push.pending(session, frontend).map(event => renderPushEvent(event, push.registry.baseDir).human);
-  let covered = tasks.length > 0 && !hasSessionFailure(push.root, frontend, session, 'wake');
+  let covered = tasks.length > 0;
   for (const task of tasks) {
     const display = push.display(task.id);
     const fresh = display.refreshedAt !== undefined && now - display.refreshedAt < PUSH_RETRY_MS;
@@ -77,11 +82,7 @@ export async function cmdSessionPush(args: string[]): Promise<number> {
         if (!payload.session_id) throw new Error('Hook payload has no session identifier');
         callingSession = payload.session_id;
         const capability = claudeWakeCapability();
-        if (!capability.supported) {
-          recordSessionFailure(push.root, 'claude', callingSession, 'wake', new Error(capability.detail), 'capability');
-          return EXIT_CODE.completed;
-        }
-        clearSessionFailure(push.root, 'claude', callingSession, 'wake', 'capability');
+        if (!capability.supported) { process.stderr.write(`${capability.detail}\n`); return EXIT_CODE.completed; }
         const result = await waitForClaudeWake(push, payload.session_id);
         if (result.prompt) process.stderr.write(`${result.prompt}\n`);
         return result.code;
@@ -121,20 +122,22 @@ export async function cmdSessionPush(args: string[]): Promise<number> {
         callingFrontend = frontend;
         // A resumed Claude session can have a new inbox path. Never scan or
         // guess a session from a caller's daemon environment.
+        const wakeProblem = (): string | undefined => {
+          if (parsed.flags.has('--wake-unavailable')) return '';
+          const { supported, detail } = claudeWakeCapability();
+          return supported ? undefined : detail;
+        };
         const requestedEvent = payload.hook_event_name || payload.hookEventName || value('--event');
         if (requestedEvent === 'SessionStart') push.refreshSession(frontend, session, frontend === 'claude' ? process.env.CLAUDE_CODE_MESSAGING_SOCKET : undefined);
         const eventName = payload.hook_event_name || payload.hookEventName || value('--event');
         if (eventName === 'Stop' || eventName === 'stop') {
           // Claude starts synchronous and async Stop commands concurrently.
           // Allow registration to win that race; without it the old gate holds.
-          if (frontend === 'claude' && !hasSessionFailure(push.root, frontend, session, 'wake') && !push.pending(session, frontend).length && push.openTasks(frontend, session).length) {
+          if (frontend === 'claude' && !push.pending(session, frontend).length && push.openTasks(frontend, session).length && wakeProblem() === undefined) {
             for (let i = 0; i < 80 && !hasClaudeWakeWaiter(push.root, session); i++) await sleep(50);
           }
-          const verdict = sessionGate(push, frontend, session);
-          clearSessionFailure(push.root, frontend, session, 'hook');
-          const warnings = sessionFailures(push.root, frontend, session, true);
-          if (verdict.systemMessage) warnings.unshift(verdict.systemMessage);
-          if (verdict.decision || warnings.length) process.stdout.write(`${JSON.stringify({ ...verdict, ...(warnings.length ? { systemMessage: warnings.join('\n') } : {}) })}\n`);
+          const verdict = sessionGate(push, frontend, session, wakeProblem);
+          if (verdict.decision || verdict.systemMessage) process.stdout.write(`${JSON.stringify(verdict)}\n`);
         }
         return EXIT_CODE.completed;
       }
@@ -159,7 +162,7 @@ export async function cmdSessionPush(args: string[]): Promise<number> {
               : { state: 'stale', taskId: entry.flowcrewTaskId, detail: 'Task absent from this session’s open work' };
           } },
         }).text;
-        result.text = [ledgerText.trim(), result.text, ...sessionFailures(push.root, 'claude', session)].filter(Boolean).join('\n');
+        result.text = [ledgerText.trim(), result.text].filter(Boolean).join('\n');
         process.stdout.write(`${parsed.flags.has('--json') ? JSON.stringify(result) : result.text}\n`);
         return EXIT_CODE.completed;
       }
@@ -169,16 +172,11 @@ export async function cmdSessionPush(args: string[]): Promise<number> {
     }
   } catch (error) {
     if (subcommand === 'hook' || subcommand === 'wake') {
-      try {
-        recordSessionFailure(push.root, callingFrontend, callingSession, subcommand, error);
-        if (subcommand === 'hook') {
-          const warnings = sessionFailures(push.root, callingFrontend, callingSession, true);
-          if (warnings.length) process.stdout.write(`${JSON.stringify({ systemMessage: warnings.join('\n') })}\n`);
-        }
-      } catch (failure) {
-        // Even a failed diagnostic store must remain visible to the operator.
-        process.stdout.write(`${JSON.stringify({ systemMessage: `FlowCrew session state and diagnostic storage unavailable: ${String(failure)}` })}\n`);
-      }
+      // Not knowing the gate is a fact for the operator, never a model turn:
+      // systemMessage for Stop, stderr (non-blocking exit) for the wake waiter.
+      const text = `FlowCrew ${subcommand} unavailable for ${callingFrontend} session ${callingSession}: ${error instanceof Error ? error.message : String(error)}. Session state cannot be checked; inspect the push service.`;
+      if (subcommand === 'hook') process.stdout.write(`${JSON.stringify({ systemMessage: text })}\n`);
+      else process.stderr.write(`${text}\n`);
       return EXIT_CODE.completed;
     }
     if (subcommand === 'statusline') {

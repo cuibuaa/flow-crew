@@ -8,7 +8,6 @@ import { afterEach, expect, it } from 'vitest';
 import { TaskRegistry, sessionTaskIndexPath } from '../src/task-registry.js';
 import { SessionPush } from '../src/session-push.js';
 import { sessionGate } from '../src/cli-session-push.js';
-import { hasSessionFailure, recordSessionFailure } from '../src/session-integration-errors.js';
 import { hasClaudeWakeWaiter, sessionWaiterPath, waitForClaudeWake } from '../src/session-wake.js';
 
 const roots: string[] = [];
@@ -115,6 +114,11 @@ new TaskRegistry({ baseDir: process.env.FC_HOME, syncFile: fd => { fsyncSync(fd)
   expect(result.status, result.stderr).toBe(0);
   expect(result.stdout).toBe('');
   expect(result.stderr).toBe('');
+  // Same recovered condition with a real obligation: the verdict is the event, with no word of the takeover.
+  const event = new SessionPush(f.registry).enqueue(f.task, { type: 'operator_wrap_up_required', runId: 'fixture-run', timestamp: new Date().toISOString() })!;
+  const withEvent = hook(f);
+  expect(JSON.parse(withEvent.stdout)).toMatchObject({ decision: 'block', reason: expect.stringContaining(event.eventId) });
+  expect(withEvent.stdout).not.toMatch(/recover|stale|infrastructure/iu);
 });
 
 it.each(['removed', 'rebound'])('crash recovery removes obsolete session ownership when a launcher was %s', change => {
@@ -225,23 +229,20 @@ console.log(JSON.stringify(await waitForClaudeWake(new SessionPush(new TaskRegis
   expect(readdirSync(join(push.root, 'waiters'))).toEqual([]);
 });
 
-it('an unrecoverable session read failure is human-visible once, stays on the status line, and has no model reason', () => {
+it('an unrecoverable session read failure reaches the operator on every Stop and status refresh and is never a decision or reason', () => {
   const f = fixture();
   writeFileSync(join(f.fc, 'tasks', '1', 'current.json'), '{broken');
-  const first = hook(f);
-  expect(first.status, first.stderr).toBe(0);
-  expect(JSON.parse(first.stdout)).toEqual({ systemMessage: expect.stringContaining('Session state cannot be checked') });
-  expect(first.stderr).toBe('');
-  const again = hook(f);
-  expect(again.status).toBe(0);
-  expect(again.stdout).toBe('');
+  for (let call = 0; call < 2; call++) {
+    const result = hook(f);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ systemMessage: expect.stringContaining('Session state cannot be checked') });
+    expect(result.stderr).toBe('');
+  }
   const status = spawnSync(process.execPath, [cli, 'session-push', 'statusline', '--json'], {
     env: f.env, input: JSON.stringify({ session_id: 'reader-session' }), encoding: 'utf8', timeout: 15_000,
   });
   expect(JSON.parse(status.stdout).text).toContain('display unavailable for session reader-session');
-  const incidents = readdirSync(join(f.fc, 'session-push', 'integration-errors')).filter(name => name.endsWith('.json'));
-  expect(incidents).toHaveLength(1);
-  expect(JSON.parse(readFileSync(join(f.fc, 'session-push', 'integration-errors', incidents[0]), 'utf8')).session).toBe('reader-session');
+  expect(existsSync(join(f.fc, 'session-push', 'integration-errors'))).toBe(false); // nothing persists diagnostics
 });
 
 it('a pending event remains session-scoped and produces a real Stop continuation', () => {
@@ -252,29 +253,14 @@ it('a pending event remains session-scoped and produces a real Stop continuation
   expect(JSON.parse(result.stdout)).toMatchObject({ decision: 'block', reason: expect.stringContaining(event.eventId) });
 });
 
-it('an unrecoverable wake failure cannot cause repeated renewal turns, and a pending event still takes priority', () => {
+it('a wake read fault that outlasts the lease is thrown to the caller, not recorded, and a later healthy tick needs no clearing', async () => {
   const f = fixture();
   const push = new SessionPush(f.registry);
-  recordSessionFailure(push.root, 'claude', 'reader-session', 'wake', new Error('fixture wake unavailable'));
-  const first = hook(f);
-  expect(first.status).toBe(0);
-  expect(JSON.parse(first.stdout)).toEqual({ systemMessage: expect.stringContaining('fixture wake unavailable') });
-  expect(hook(f).stdout).toBe('');
-  const event = push.enqueue(f.task, { type: 'operator_wrap_up_required', runId: 'fixture-run', timestamp: new Date().toISOString() })!;
-  expect(JSON.parse(hook(f).stdout)).toMatchObject({ decision: 'block', reason: expect.stringContaining(event.eventId) });
-});
-
-it('a registration retry clears an outage only after a healthy tick and preserves its recovery for the operator', async () => {
-  const f = fixture();
-  const push = new SessionPush(f.registry);
-  recordSessionFailure(push.root, 'claude', 'reader-session', 'wake', new Error('original outage'));
   writeFileSync(join(f.fc, 'tasks', '1', 'current.json'), '{broken');
-  expect(await waitForClaudeWake(push, 'reader-session', { lifetimeMs: 0 })).toEqual({ code: 0 });
-  expect(hasSessionFailure(push.root, 'claude', 'reader-session', 'wake')).toBe(true);
+  await expect(waitForClaudeWake(push, 'reader-session', { lifetimeMs: 0 })).rejects.toThrow();
   writeFileSync(join(f.fc, 'tasks', '1', 'current.json'), JSON.stringify(f.task));
   expect((await waitForClaudeWake(push, 'reader-session', { lifetimeMs: 0 })).code).toBe(2);
-  expect(hasSessionFailure(push.root, 'claude', 'reader-session', 'wake')).toBe(false);
-  expect(readFileSync(join(f.fc, 'infrastructure-recoveries.jsonl'), 'utf8')).toContain('original outage');
+  expect(existsSync(join(push.root, 'integration-errors'))).toBe(false);
 });
 
 it('a killed ACK writer atomically retires the pending link and replay cannot resurrect it', async () => {

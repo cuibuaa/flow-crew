@@ -266,7 +266,7 @@ describe('installer-owned front-end integration', () => {
     expect(result.stdout).toContain('Working independently');
   });
 
-  it('reports legacy views once and lets a service writer rebuild them before reads resume', () => {
+  it('reports legacy views to the operator on every call and lets a service writer rebuild them before reads resume', () => {
     const f = fixture();
     const root = join(f.home, '.claude');
     expect(integrate('install', 'claude', root, f.env).status).toBe(0);
@@ -281,7 +281,7 @@ describe('installer-owned front-end integration', () => {
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ systemMessage: expect.stringContaining('Session task view unavailable') });
     expect(existsSync(join(f.env.FC_HOME, 'session-push', 'task-index', 'ready'))).toBe(false);
-    expect(command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'own-session' })).stdout).toBe('');
+    expect(JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'own-session' })).stdout)).toEqual(JSON.parse(result.stdout));
     new TaskRegistry({ baseDir: f.env.FC_HOME }).ensureSessionTaskIndexes();
     expect(JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'own-session' })).stdout).decision).toBe('block');
     expect(existsSync(join(f.env.FC_HOME, 'session-push', 'task-index', 'ready'))).toBe(true);
@@ -307,7 +307,7 @@ describe('installer-owned front-end integration', () => {
     expect(JSON.parse(result.stdout).decision).toBe('block');
   });
 
-  it.each(['Stop', 'Wake'])('missing CLI errors are recorded once for the operator by the installed %s hook', event => {
+  it.each(['Stop', 'Wake'])('a missing CLI is shown to the operator on every %s and never blocks the model', event => {
     const f = fixture();
     const root = join(f.home, '.claude');
     expect(integrate('install', 'claude', root, f.env).status).toBe(0);
@@ -316,17 +316,21 @@ describe('installer-owned front-end integration', () => {
     } });
     const path = join(root, 'hooks', 'flowcrew-session.mjs');
     writeFileSync(path, readFileSync(path, 'utf8').replace(JSON.stringify(join(packageRoot, 'dist', 'cli.js')), JSON.stringify(join(f.root, 'missing-cli.js'))));
-    const result = command(process.execPath, [path, event], f.env, JSON.stringify({ session_id: 'own-session' }));
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe('');
-    if (event === 'Stop') expect(JSON.parse(result.stdout)).toEqual({ systemMessage: expect.stringContaining('missing-cli.js') });
-    const incidents = readdirSync(join(f.env.FC_HOME, 'session-push', 'integration-errors')).filter(name => name.endsWith('.json'));
-    expect(incidents).toHaveLength(1);
-    expect(readFileSync(join(f.env.FC_HOME, 'session-push', 'integration-errors', incidents[0]), 'utf8')).toContain('missing-cli.js');
-    expect(command(process.execPath, [path, event], f.env, JSON.stringify({ session_id: 'own-session' })).stdout).toBe('');
+    for (let call = 0; call < 2; call++) {
+      const result = command(process.execPath, [path, event], f.env, JSON.stringify({ session_id: 'own-session' }));
+      expect(result.status).toBe(0); // a non-blocking exit: no loop of model turns
+      if (event === 'Stop') {
+        expect(JSON.parse(result.stdout)).toEqual({ systemMessage: expect.stringContaining('missing-cli.js') });
+        expect(result.stderr).toBe('');
+      } else {
+        expect(result.stdout).toBe('');
+        expect(result.stderr).toContain('missing-cli.js');
+      }
+    }
+    expect(existsSync(join(f.env.FC_HOME, 'session-push', 'integration-errors'))).toBe(false);
   });
 
-  it('healthy waiter reads do not clear missing-hook incidents; only repaired definitions start a new incident period', async () => {
+  it('a disabled or missing wake hook is shown to the operator on every call, is never asked of the model, and a pending event still blocks', () => {
     const f = fixture();
     const root = join(f.home, '.claude');
     expect(integrate('install', 'claude', root, f.env).status).toBe(0);
@@ -334,44 +338,28 @@ describe('installer-owned front-end integration', () => {
     const original = readFileSync(configPath, 'utf8');
     const config = JSON.parse(original);
     const registry = new TaskRegistry({ baseDir: f.env.FC_HOME });
-    registry.create({ projectDir: f.project, status: 'running', launcher: {
+    const task = registry.create({ projectDir: f.project, status: 'running', launcher: {
       frontend: 'claude', sessionId: 'own-session', cwd: f.project, ledgerRoot: join(f.root, 'ledger'),
     } });
-    const push = new SessionPush(registry);
     const hook = join(root, 'hooks', 'flowcrew-session.mjs');
     const input = JSON.stringify({ session_id: 'own-session' });
-    const worker = spawn(process.execPath, [join(packageRoot, 'dist', 'cli.js'), 'session-push', 'wake'], {
-      env: f.env, stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const closed = new Promise(resolve => worker.once('close', resolve));
-    worker.stdin.end(input);
-    try {
-      const deadline = Date.now() + 10_000;
-      while (!hasClaudeWakeWaiter(push.root, 'own-session')) {
-        if (Date.now() >= deadline) throw Error('fixture waiter readiness deadline');
-        await sleep(20);
-      }
-      for (const event of ['Stop', 'SessionStart']) {
-        config.hooks[event] = config.hooks[event].filter((group: { hooks: { asyncRewake?: boolean }[] }) => !group.hooks.some(hook => hook.asyncRewake));
-      }
-      writeFileSync(configPath, JSON.stringify(config));
-      const first = command(process.execPath, [hook, 'Stop'], f.env, input);
-      expect(first.status, first.stderr).toBe(0);
-      expect(JSON.parse(first.stdout)).toEqual({ systemMessage: expect.stringContaining('async wake hook is disabled or missing') });
-      await sleep(1200); // at least one healthy tick in the still-running waiter
-      expect(command(process.execPath, [hook, 'Stop'], f.env, input).stdout).toBe('');
-      const recoveries = join(f.env.FC_HOME, 'infrastructure-recoveries.jsonl');
-      expect(existsSync(recoveries) ? readFileSync(recoveries, 'utf8') : '').not.toContain('configuration');
-      writeFileSync(configPath, original);
-      expect(command(process.execPath, [hook, 'Stop'], f.env, input).stdout).toBe('');
-      expect(readFileSync(recoveries, 'utf8')).toContain('"cause":"configuration"');
-      writeFileSync(configPath, JSON.stringify(config));
-      expect(JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, input).stdout)).toEqual({ systemMessage: expect.stringContaining('async wake hook is disabled or missing') });
-      expect(command(process.execPath, [hook, 'Stop'], f.env, input).stdout).toBe('');
-    } finally {
-      if (worker.exitCode === null && worker.signalCode === null) worker.kill('SIGKILL');
-      await closed;
+    for (const event of ['Stop', 'SessionStart']) {
+      config.hooks[event] = config.hooks[event].filter((group: { hooks: { asyncRewake?: boolean }[] }) => !group.hooks.some(hook => hook.asyncRewake));
     }
+    writeFileSync(configPath, JSON.stringify(config));
+    const gate = (event: string) => JSON.parse(command(process.execPath, [hook, event], f.env, input).stdout);
+    const disabled = { systemMessage: expect.stringContaining('async wake hook is disabled or missing') };
+    // Coverage that cannot be registered is not renewable: operator notice only, on each call.
+    for (let call = 0; call < 2; call++) expect(gate('Stop')).toEqual(disabled);
+    const event = new SessionPush(registry).enqueue(task, { type: 'operator_wrap_up_required', runId: 'fixture-run', timestamp: new Date().toISOString() })!;
+    const withEvent = gate('Stop');
+    expect(withEvent).toMatchObject({ decision: 'block', reason: expect.stringContaining(event.eventId), ...disabled });
+    expect(withEvent.reason).not.toContain('disabled or missing');
+    const wake = command(process.execPath, [hook, 'Wake'], f.env, input);
+    expect(wake.status).toBe(0);
+    expect(wake.stderr).toContain('async wake hook is disabled or missing');
+    writeFileSync(configPath, original);
+    expect(gate('Stop').systemMessage).not.toContain('disabled or missing');
   }, 60_000);
 
   it('upgrades pre-wake installations in place, preserves inbound policy, and repairs hook drift', () => {
@@ -415,7 +403,8 @@ describe('installer-owned front-end integration', () => {
     expect(command(process.execPath, [hook, 'Wake'], f.env, input).status).toBe(0);
     const warning = JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, input).stdout);
     expect(warning).toEqual({ systemMessage: expect.stringContaining('wake requires') });
-    expect(command(process.execPath, [hook, 'Stop'], f.env, input).stdout).toBe('');
+    // Shown again on each Stop while the condition lasts, still without a decision or reason.
+    expect(JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, input).stdout)).toEqual(warning);
   });
 
   it.each(['claude', 'codex'])('merges %s hooks idempotently, preserves adjacent hooks and restores the status line on uninstall', frontend => {

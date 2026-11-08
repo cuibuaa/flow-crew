@@ -7,7 +7,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './run-lock.js';
 import { lockOwnerIdentity, parseLockOwner, publishLockOwner, recoverStaleLock, type LockObservation, type LockOwner } from './lock-publication.js';
 import type { SessionPush } from './session-push.js';
-import { clearSessionFailure, hasSessionFailure, recordSessionFailure } from './session-integration-errors.js';
 import { wrapUpPrompt } from './session-push.js';
 
 // Conservative supported floor: this is the version exercised by the native
@@ -118,9 +117,6 @@ export async function waitForClaudeWake(push: SessionPush, session: string, opti
     });
   } finally { removeDetached(); }
   if (!acquired) return { code: 0 };
-  const healthy = (): void => {
-    if (hasSessionFailure(push.root, 'claude', session, 'wake')) clearSessionFailure(push.root, 'claude', session, 'wake');
-  };
   try {
     for (;;) {
       if (readWaiter(path)?.waiter?.token !== token) return { code: 0 };
@@ -129,31 +125,18 @@ export async function waitForClaudeWake(push: SessionPush, session: string, opti
         const pending = push.pending(session, 'claude');
         for (const event of pending) {
           if (push.claimWake(event)) {
-            // A real event may wake even while another session view is broken.
-            // Only a complete successful state check proves read recovery.
-            try { push.openTasks('claude', session); healthy(); }
-            catch (error) {
-              try { recordSessionFailure(push.root, 'claude', session, 'wake', error); }
-              catch (diagnosticError) {
-                // This auxiliary check cannot revoke a claimed event. Retain
-                // both failures in the existing operator log when possible;
-                // async wake stderr is reserved for the actionable prompt.
-                try { appendFileSync(join(push.registry.baseDir, 'infrastructure-recoveries.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), component: 'session-read', frontend: 'claude', session, operation: 'wake', error: String(error), diagnosticError: String(diagnosticError) })}\n`, { mode: 0o600, flush: true }); }
-                catch { /* diagnostic storage cannot suppress the actionable result */ }
-              }
-            }
             return { code: 2, prompt: wrapUpPrompt(event, push.registry.baseDir) };
           }
         }
         const open = push.openTasks('claude', session);
-        healthy();
         if (!open.length && !pending.length) return { code: 0 };
         if (now() >= expiresAt) return { code: 2, prompt: 'FlowCrew wake coverage is expiring. Inspect this session’s FlowCrew task and pending events. Handle and explicitly ACK any pending event. If execution is still in flight, end this turn normally so the installed Stop hook renews wake coverage; do not wait in the foreground.' };
       } catch (error) {
-        recordSessionFailure(push.root, 'claude', session, 'wake', error);
         // Retain the live waiter across read/publication faults. A service
         // repair can resume delivery without inventing an empty model turn.
-        if (now() >= expiresAt) return { code: 0 };
+        // Stop and the status line show the same fault; if it outlasts the
+        // lease, the caller reports it on stderr (a non-blocking exit).
+        if (now() >= expiresAt) throw error;
       }
       await pause(Math.min(options.pollMs ?? 1000, Math.max(1, expiresAt - now())));
     }
