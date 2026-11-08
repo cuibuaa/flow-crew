@@ -1,3 +1,4 @@
+import { diagnosticDataCode } from './failure.js';
 import { stageLiveLogPath } from '../stage-live-log.js';
 import { atomicWrite, appendFileSync, mkdirSync } from '../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -219,10 +220,6 @@ export function buildCodexExecArgs(_prompt: string, sessionId?: string, schemaPa
  *   --model: override model
  *   --config reasoning_effort="<effort>": set reasoning effort
  */
-/** What the CLI itself printed once JSON events flowed: stderr plus any stdout line that is not an event. Either stream can carry its error line. */
-const cliDiagnostic = (result: ExecResult): string =>
-  [result.stderr, ...(result.stdout ?? '').split('\n').filter(line => line.trim() && !line.trimStart().startsWith('{'))].filter(Boolean).join('\n');
-
 export class CodexAdapter implements Adapter {
   readonly sessionKind = 'codex';
   readonly capturesInvocationInput = true;
@@ -313,7 +310,10 @@ export class CodexAdapter implements Adapter {
           ? [events.terminalError, result.stderr].filter(Boolean).join('\n') : result.output;
         if (![124, 125, 137].includes(result.exitCode) && !result.spawnError) {
           result.providerFailure = events.providerFailure
-            ?? providerFailureFromDiagnostic({ provider: 'codex', eventType: 'cli_diagnostic', message: events.eventCount ? cliDiagnostic(result) : result.output });
+            ?? (diagnosticDataCode(result.stdout ?? '') === 'input_too_large'
+              ? providerFailureFromDiagnostic({ provider: 'codex', eventType: 'cli_diagnostic', message: result.stdout ?? '', code: 'input_too_large' }) : undefined)
+            ?? providerFailureFromDiagnostic({ provider: 'codex', eventType: 'cli_diagnostic',
+              message: events.eventCount ? result.stderr ?? '' : result.output });
         }
         diagnosis = result.spawnError && result.exitCode !== 124 && result.exitCode !== 137
           ? { fix: 'none', friendly: `Could not launch Codex: ${result.spawnError.message}. Check the executable, its interpreter and working directory ${result.spawnError.cwd}.`, matched: result.spawnError.code ?? 'spawn error' }

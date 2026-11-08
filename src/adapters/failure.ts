@@ -2,7 +2,7 @@
 export type ProviderFailureKind = 'refusal' | 'authentication' | 'transient' | 'input_too_large';
 
 /** A CLI that prints its error as `... (code N), data: {json}` carries the provider's reason code in that object. */
-function diagnosticDataCode(diagnostic: string): unknown {
+export function diagnosticDataCode(diagnostic: string): unknown {
   const at = diagnostic.lastIndexOf(', data: {');
   if (at < 0) return undefined;
   try { return JSON.parse(diagnostic.slice(at + 8).trim().split('\n')[0])?.input_error_code; } catch { return undefined; }

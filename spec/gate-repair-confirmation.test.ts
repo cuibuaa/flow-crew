@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,6 +28,9 @@ const finding = (id: string, reproduction?: number | null): AuditFinding => ({ i
 
 async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRepair = false, observeAfterRepair = false, needsValidationPreparation = false, variant?: 'long' | 'cwd' | 'bash' | 'unknown' | 'recorded', route?: [string, string, string?]) {
   const project = mkdtempSync(join(tmpdir(), 'confirmed-gate-')); roots.push(project);
+  // Assessment routing requires a complete readable diff, including in the repair scenarios.
+  isolatedProjectCommand('git', ['init', '-q'], project, project);
+  isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, project);
   const calls: Array<{ stage: string; prompt: string }> = [];
   let review = 0;
   let assessments = 0;

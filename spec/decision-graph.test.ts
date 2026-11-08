@@ -33,6 +33,9 @@ const task = '# Coherent change\n\n## Acceptance criteria\n1. Produce docs/repor
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'decision-graph-')); project = join(root, 'project'); mkdirSync(project);
   old = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
+  // Routing tests need a readable diff; unavailable diffs deliberately bypass the assessor.
+  isolatedProjectCommand('git', ['init', '-q'], project, root);
+  isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], project, root);
   setEngineDefaults({ gate_retry_loops: 3, plan_stage_retries: 1, max_iterations: 1 });
 });
 async function settleExecutions() {

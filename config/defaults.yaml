@@ -36,8 +36,8 @@ plan_stage_retries: 2
 # Codex is the recommended execution backend. Use `flowcrew adapter <name>` to pin.
 adapter: auto
 # Largest input, in characters, that each adapter accepts for one stage prompt.
-# Review routing sizes its diff text from this value and names the rest in a
-# manifest, so an oversized change cannot make the adapter refuse the attempt.
+# Review routing sends the complete diff only when it fits this bound; otherwise
+# code selects the full independent review, which reads the worktree.
 adapter_input_limit_chars:
   # Observed: codex rejects turn/start input above 1048576 characters
   # (code -32602, input_error_code input_too_large; FlowCrew task #2456).

@@ -1,14 +1,14 @@
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import * as childProcess from 'node:child_process';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { classifyAdapterFailure, isRetryableAdapterFailure } from '../src/adapters/failure.js';
 import { providerFailureFromEvent } from '../src/provider-result.js';
-import { adapterInputLimit, loadEngineDefaults } from '../src/config.js';
+import { adapterInputLimit, INPUT_RESERVE_CHARS, loadEngineDefaults } from '../src/config.js';
 import { decisionInput } from '../src/decision-context.js';
 import { appendEvidence, evidenceContext } from '../src/evidence-ledger.js';
 import { decisionSchema, POST_AUTHOR_PROMPT } from '../src/decision-graph.js';
@@ -16,11 +16,14 @@ import { StageConfigSchema } from '../src/scheduler/sched_admission/configuratio
 import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
 import { executeReadyBatch } from '../src/scheduler/sched_loop/stage-batch.js';
 import { fcGlobalDir, setFcGlobalDir, readRunState, readStageStatus } from '../src/store.js';
+import { latestInvocationInput } from '../src/run-state-view.js';
 import { runStage } from '../src/worker.js';
 import { createRun } from './test-support/create-run.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
+
+vi.mock('node:child_process', async importOriginal => ({ ...await importOriginal<typeof import('node:child_process')>() }));
 
 const CODEX_LIMIT = 1_048_576;
 const agents = join(import.meta.dirname, '../config/agents');
@@ -40,9 +43,16 @@ function commitFile(path: string, content: string) {
 }
 /** The diff text the engine produced before the input was bounded: git's tracked diff, then each untracked file as an added file. */
 function legacyDiff(untracked: string[]): string {
-  let diff = git('diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--');
-  for (const file of untracked) diff += isolatedProjectCommand('sh', ['-c', 'git diff --no-index --no-ext-diff --no-textconv -- /dev/null "$0" || true', file], project, root);
-  return diff;
+  return isolatedProjectCommand(process.execPath, ['--input-type=module', '-e', `
+    import { execFileSync } from 'node:child_process';
+    const options = { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 };
+    let diff = execFileSync('git', ['diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--'], options);
+    for (const file of JSON.parse(process.argv[1])) {
+      try { diff += execFileSync('git', ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', '/dev/null', file], options); }
+      catch (error) { if (error.status !== 1) throw error; diff += error.stdout; }
+    }
+    process.stdout.write(diff);
+  `, JSON.stringify(untracked)], project, root);
 }
 function gateVerdict(opts: RunOpts) {
   const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
@@ -52,7 +62,8 @@ function gateVerdict(opts: RunOpts) {
 }
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'review-input-'));
+  mkdirSync(join(process.cwd(), 'tmp'), { recursive: true });
+  root = mkdtempSync(join(process.cwd(), 'tmp/review-input-'));
   project = join(root, 'project'); mkdirSync(project);
   prior = fcGlobalDir(); setFcGlobalDir(join(root, 'fc'));
   git('init', '-q');
@@ -68,17 +79,17 @@ describe('the review decision gets the whole diff or none of it', () => {
     expect(readFileSync(join(import.meta.dirname, '../config/defaults.yaml'), 'utf8')).toMatch(/codex: 1048576/);
   });
 
-  it('the #2456 shape: many tiny evidence files plus new source files, together over the bound, go to the full review without a model call', async () => {
+  it.each([{ payload: 560, fits: false }, { payload: 20, fits: true }])('the #2456 shape through the real codex call site (fits=$fits)', async ({ payload, fits }) => {
     writeFileSync(join(project, 'src/app.ts'), 'export const greeting = "CODE_CHANGE_MARKER";\n');
     mkdirSync(join(project, 'docs/evidence'), { recursive: true });
-    for (let i = 0; i < 1000; i++) writeFileSync(join(project, `docs/evidence/note_${String(i).padStart(4, '0')}.jsonl`), `${JSON.stringify({ event: 'trace', n: i, payload: 'x'.repeat(560) })}\n`);
+    for (let i = 0; i < 1000; i++) writeFileSync(join(project, `docs/evidence/note_${String(i).padStart(4, '0')}.jsonl`), `${JSON.stringify({ event: 'trace', n: i, payload: 'x'.repeat(payload) })}\n`);
     mkdirSync(join(project, 'tools/consolidation'), { recursive: true });
     for (const name of ['parity', 'defects', 'closure']) writeFileSync(join(project, `tools/consolidation/${name}.py`), `# ${name}\n${'value = 1\n'.repeat(15_000)}`);
     const calls: Array<{ stageId: string; prompt: string }> = [];
     // Declares codex, so the engine's own lookup (adapterInputLimit(stageAdapter) in ordinary-stage) supplies the bound.
     const adapter: Adapter = { sessionKind: 'codex', async run(prompt, _role, opts) {
       calls.push({ stageId: opts.stageId, prompt });
-      return { output: opts.stageId === 'review_full' ? gateVerdict(opts) : '', exitCode: 0, duration_ms: 1 };
+      return { output: opts.stageId === 'review_full' ? gateVerdict(opts) : JSON.stringify({ successor: 'review_full', risk_areas: [], reason: 'Assessor chose full review.' }), exitCode: 0, duration_ms: 1 };
     } };
     const workflow = WorkflowConfigSchema.parse({ name: 'oversize-change', stages: [
       { id: 'review_assess', role: 'qa', scope: [], decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' }, artifact_contract: contract },
@@ -88,18 +99,29 @@ describe('the review decision gets the whole diff or none of it', () => {
     ] });
     const state = await runWorkflow(workflow, JSON.stringify(workflow), project, adapter, new Map(), undefined, agents, undefined, brief, true);
     expect(state.status, state.failureReason).toBe('complete');
-    // No model call for the decision, so no diff text and no file list was sent anywhere.
-    expect(calls.map(call => call.stageId)).toEqual(['review_full']);
+    expect(calls.map(call => call.stageId), JSON.stringify(state.decisionGraph?.records)).toEqual(fits ? ['review_assess', 'review_full'] : ['review_full']);
     const record = state.decisionGraph!.records.find(entry => entry.stageId === 'review_assess')!;
     expect(record).toMatchObject({ successor: 'review_full', outcome: 'chosen', risk_areas: [] });
-    const [, measured, files, bound] = record.reason.match(/^diff_exceeds_inline_bound: .*at least (\d+) characters across (\d+) changed files, over the (\d+) characters/)!.map(Number);
-    expect(files).toBe(1004);
-    expect(bound).toBeLessThan(CODEX_LIMIT);
-    expect(measured).toBeGreaterThan(bound);
+    const directory = join(fcGlobalDir(), 'runs', state.runId);
+    if (fits) {
+      const input = JSON.parse(calls[0].prompt.split('\n')[0]);
+      expect(input.diff.length).toBeGreaterThan(600_000);
+      expect(input.diff.length).toBeLessThan(970_000);
+      expect(input.diff).toBe(legacyDiff(input.files.filter((file: string) => file !== 'src/app.ts')));
+    } else {
+      const [, raw, encoded, nonDiff, files, bound] = record.reason.match(/^diff_exceeds_inline_bound: code decided review routing; measured at least (\d+) diff characters \((\d+) JSON-encoded diff characters\) and (\d+) non-diff JSON characters; (\d+) changed files including untracked; inline bound (\d+)/)!.map(Number);
+      expect(files).toBe(1004);
+      expect(bound).toBe(CODEX_LIMIT - INPUT_RESERVE_CHARS - JSON.stringify({ task: state.taskDescription }).length);
+      expect(encoded + nonDiff).toBeGreaterThan(bound);
+      expect(raw).toBeLessThan(encoded);
+      expect(latestInvocationInput(directory, 'review_assess')).toBeUndefined();
+      expect(existsSync(join(directory, 'stages/review_assess/invocations'))).toBe(false);
+      expect(record).not.toHaveProperty('model');
+    }
     expect(state.stages.review.status).toBe('skipped');
     // The full review reads the worktree itself: its prompt carries the usual 3 KB excerpt and the path of the full patch, not the 1 MB diff.
-    expect(calls[0].prompt.length).toBeLessThan(60_000);
-    expect(calls[0].prompt).toContain('change.diff');
+    expect(calls.at(-1)!.prompt.length).toBeLessThan(60_000);
+    expect(calls.at(-1)!.prompt).toContain('change.diff');
   }, 120_000);
 
   it('a change that fits gives the assessor exactly the input it got before', () => {
@@ -117,6 +139,29 @@ describe('the review decision gets the whole diff or none of it', () => {
     // The prompt is the decision prompt as it was: no extra instruction, and still no tools.
     expect(input.system).toBe(POST_AUTHOR_PROMPT);
     expect(input.system).toContain('Do not use tools');
+  });
+
+  it.each([
+    ['tracked', { code: 'ENOBUFS', status: 1, stdout: 'partial' }],
+    ['untracked', { code: 'ENOBUFS', status: 1, stdout: 'partial' }],
+    ['untracked', { code: 'ETIMEDOUT', signal: 'SIGTERM', status: null, stdout: 'partial' }],
+    ['untracked', { status: 2, stdout: 'partial' }],
+    ['paths', { code: 'ETIMEDOUT', stdout: 'partial' }],
+  ])('an incomplete %s read cannot pass as complete even with a huge declared limit (%j)', async (piece, failure) => {
+    writeFileSync(join(project, 'new.txt'), 'untracked');
+    const created = createRun(project, 'fixture', 'name: fixture', ['assess']);
+    const original = childProcess.execFileSync;
+    vi.spyOn(childProcess, 'execFileSync').mockImplementation(((command: string, args: string[], options: object) => {
+      if (command === 'git' && (piece === 'paths' ? args[0] === 'ls-files' : piece === 'untracked' ? args.includes('--no-index') : args.includes('--no-textconv') && !args.includes('--no-index'))) throw failure;
+      return original(command, args, options);
+    }) as typeof childProcess.execFileSync);
+    const input = decisionInput(stage, project, created.runDirPath, readRunState(project, created.runId), 100_000_000);
+    expect(input.adapter).toBeDefined();
+    expect(input.user).not.toContain('partial');
+    const result = JSON.parse((await input.adapter!.run('', role, {} as RunOpts)).output);
+    expect(result).toMatchObject({ successor: 'review_full' });
+    expect(result.reason).toMatch(/^diff_unavailable: code decided/);
+    expect(result.reason).toContain(piece === 'paths' ? 'changed-file count unavailable' : '1 changed files including untracked');
   });
 
   it('is decided by size alone: the same files over a small bound go to the full review whatever their names', () => {
@@ -185,16 +230,19 @@ describe('an adapter that refuses the input by size', () => {
 
   // The real CLI prints thread.started, then its error line; the recorded #2456 log merges the streams,
   // so the error line is delivered on either one.
-  it.each(['stdout', 'stderr'])('after a JSON event, the line on %s records one attempt, spends no retry and concludes with its own reason code', async stream => {
+  it.each([{ stream: 'stdout', diagnostic: message, typed: true }, { stream: 'stderr', diagnostic: message, typed: true },
+    { stream: 'stdout', diagnostic: '401 unauthorized', typed: false },
+    { stream: 'stdout', diagnostic: 'rate limit', typed: false }])('after a JSON event ($stream, typed=$typed)', async ({ stream, diagnostic, typed }) => {
     const bin = join(root, 'bin'); mkdirSync(bin);
     const calls = join(root, 'calls.txt');
     writeFileSync(join(bin, 'codex'), `#!${process.execPath}\n` + String.raw`
-const fs = require('node:fs');
+import fs from 'node:fs';
 process.stdin.resume();
 process.stdin.on('end', () => {
   fs.appendFileSync(process.env.FC_FIXTURE_CALLS, 'call\n');
   console.log(JSON.stringify({ type: 'thread.started', thread_id: '01a1ba92-1221-7410-9b54-3baa3eb139dd' }));
   (process.env.FC_FIXTURE_STREAM === 'stdout' ? console.log : console.error)(process.env.FC_FIXTURE_MESSAGE);
+  if (process.env.FC_FIXTURE_STREAM === 'stdout' && process.env.FC_FIXTURE_MESSAGE.includes('input_error_code')) console.error('rate limit');
   process.exitCode = 1;
 });
 `, { mode: 0o700 });
@@ -205,19 +253,22 @@ process.stdin.on('end', () => {
     vi.stubEnv('PATH', `${bin}:/usr/bin:/bin`);
     vi.stubEnv('FC_FIXTURE_CALLS', calls);
     vi.stubEnv('FC_FIXTURE_STREAM', stream);
-    vi.stubEnv('FC_FIXTURE_MESSAGE', message);
-    setEngineDefaults({ default_timeout_ms: 5_000, stage_technical_retries: 2 });
+    vi.stubEnv('FC_FIXTURE_MESSAGE', diagnostic);
+    setEngineDefaults({ default_timeout_ms: 30_000, stage_technical_retries: 2 });
     const workflow = WorkflowConfigSchema.parse({ name: 'size-fixture', defaults: { max_iterations: 1, max_retries: 2 },
       stages: [{ id: 'work', role: 'fixture', scope: [], prompt_template: 'fixture', artifact_contract: fixtureArtifactContract('work') }] });
     const run = createRun(project, workflow.name, stringify(workflow), ['work']);
     await executeReadyBatch(workflow.stages, readRunState(project, run.runId), project, run.runId, run.runDirPath, workflow,
       new CodexAdapter(), new Map([['fixture', { ...role, name: 'fixture' }]]), project,
       new Map([['fixture', { name: 'fixture', description: '' }]]), new Map());
-    expect(existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n') : []).toHaveLength(1);
-    expect(readRunState(project, run.runId)).toMatchObject({ status: 'failed', reasonCode: 'input_too_large' });
+    const observed = readStageStatus(project, run.runId, 'work');
+    expect(existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n') : [], JSON.stringify(observed)).toHaveLength(1);
+    if (typed) expect(readRunState(project, run.runId)).toMatchObject({ status: 'failed', reasonCode: 'input_too_large' });
     const status = readStageStatus(project, run.runId, 'work');
-    expect(status).toMatchObject({ status: 'failed', retries: 0 });
+    if (typed) expect(status).toMatchObject({ status: 'failed', retries: 0 });
+    else expect(status.retries).toBe(1);
     expect(status.attempts).toHaveLength(1);
-    expect(status.attempts![0].providerFailure).toMatchObject({ kind: 'input_too_large', provider: 'codex' });
+    if (typed) expect(status.attempts![0].providerFailure).toMatchObject({ kind: 'input_too_large', provider: 'codex' });
+    else expect(status.attempts![0].providerFailure).toBeUndefined();
   }, 60_000);
 });
