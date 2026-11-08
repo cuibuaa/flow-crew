@@ -7,9 +7,11 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, expect, it } from 'vitest';
 import { TaskRegistry, sessionTaskIndexPath } from '../src/task-registry.js';
 import { SessionPush } from '../src/session-push.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { sessionGate } from '../src/cli-session-push.js';
 import { hasClaudeWakeWaiter, sessionWaiterPath, waitForClaudeWake, wakeUnavailablePath } from '../src/session-wake.js';
 
+const originalFcHome = fcGlobalDir();
 const roots: string[] = [];
 const children = new Set<ChildProcess>();
 afterEach(async () => {
@@ -18,12 +20,14 @@ afterEach(async () => {
     await new Promise<void>(resolve => { if (child.exitCode !== null || child.signalCode !== null) resolve(); else child.once('close', () => resolve()); });
   }
   children.clear();
+  setFcGlobalDir(originalFcHome);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 const cli = join(import.meta.dirname, '../dist/cli.js');
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'fc-reader-owner-')); roots.push(root);
   const fc = join(root, 'fc');
+  setFcGlobalDir(fc);
   const env = { ...process.env, HOME: root, FC_HOME: fc, FC_TASKS_ROOT: join(root, 'ledger'), FLOWCREW_DAEMON_SOCKET: join(root, 'daemon.sock') };
   const registry = new TaskRegistry({ baseDir: fc });
   const task = registry.create({ projectDir: root, status: 'running', launcher: {
@@ -49,7 +53,7 @@ async function kill(child: ChildProcess) {
 }
 function hook(f: ReturnType<typeof fixture>, env: NodeJS.ProcessEnv = f.env, frontend = 'claude', session = 'reader-session') {
   return spawnSync(process.execPath, [cli, 'session-push', 'hook', '--frontend', frontend, '--event', 'Stop'], {
-    env, input: JSON.stringify({ session_id: session }), encoding: 'utf8', timeout: 15_000,
+    cwd: f.root, env: { ...env, HOME: f.root, FC_HOME: f.fc }, input: JSON.stringify({ session_id: session }), encoding: 'utf8', timeout: 15_000,
   });
 }
 
@@ -80,7 +84,7 @@ fs.readFileSync = function(path, ...args) {
   return read.call(this, path, ...args);
 }; syncBuiltinESMExports();`);
   const child = spawn(process.execPath, ['--import', preload, cli, 'session-push', command,
-    ...(command === 'hook' ? ['--frontend', 'claude', '--event', 'Stop'] : ['--json'])], { env: f.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    ...(command === 'hook' ? ['--frontend', 'claude', '--event', 'Stop'] : ['--json'])], { cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdin!.end(JSON.stringify({ session_id: 'reader-session' }));
   await ready(child);
   expect(existsSync(f.registry.lockPath)).toBe(false);
@@ -97,7 +101,7 @@ it('a killed writer retains its durable append, is recovered by the next writer,
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
 import { TaskRegistry } from ${JSON.stringify(module)}; import { fsyncSync } from 'node:fs';
 new TaskRegistry({ baseDir: process.env.FC_HOME, syncFile: fd => { fsyncSync(fd); process.stderr.write('fixture-ready\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); } }).create({ projectDir: process.env.HOME });
-`], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
+`], { cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, stdio: ['ignore', 'pipe', 'pipe'] });
   await ready(child);
   expect(existsSync(f.registry.lockPath)).toBe(true);
   await kill(child);
@@ -128,7 +132,7 @@ it.each(['removed', 'rebound'])('crash recovery removes obsolete session ownersh
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
 import { TaskRegistry } from ${JSON.stringify(module)}; import { fsyncSync } from 'node:fs';
 new TaskRegistry({ baseDir: process.env.FC_HOME, syncFile: fd => { fsyncSync(fd); process.kill(process.pid, 'SIGKILL'); } }).update(1, ${patch});
-`], { env: f.env, encoding: 'utf8', timeout: 15_000 });
+`], { cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, encoding: 'utf8', timeout: 15_000 });
   expect(child.signal, child.stderr).toBe('SIGKILL');
   const writer = new TaskRegistry({ baseDir: f.fc, lockTimeoutMs: 0 });
   writer.ensureSessionTaskIndexes();
@@ -164,7 +168,7 @@ fs.linkSync = (source, target, ...args) => {
 const { TaskRegistry } = await import(${JSON.stringify(modules[0])});
 const { SessionPush } = await import(${JSON.stringify(modules[1])});
 console.log(JSON.stringify(new SessionPush(new TaskRegistry({ baseDir: process.env.FC_HOME })).enqueue(${JSON.stringify(taskB)}, ${JSON.stringify(source)})));
-`], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
+`], { cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout!.on('data', bytes => { output += bytes; });
   const done = new Promise(resolve => child.once('close', resolve));
   await ready(child);
@@ -206,7 +210,7 @@ console.log(JSON.stringify(await waitForClaudeWake(new SessionPush(new TaskRegis
   lifetimeMs: ${old ? 50 : 15_000}, pollMs: 10,
   sleep: async ms => { if (!${old}) process.stderr.write('fixture-ready\\n'); await new Promise(resolve => setTimeout(resolve, ms)); },
 })));
-`], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
+`], { cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; child.stdout!.on('data', bytes => { output += bytes; });
     const done = new Promise(resolve => child.once('close', resolve));
     return { child, done, output: () => output };
@@ -239,7 +243,7 @@ it('an unrecoverable session read failure reaches the operator on every Stop and
     expect(result.stderr).toBe('');
   }
   const status = spawnSync(process.execPath, [cli, 'session-push', 'statusline', '--json'], {
-    env: f.env, input: JSON.stringify({ session_id: 'reader-session' }), encoding: 'utf8', timeout: 15_000,
+    cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, input: JSON.stringify({ session_id: 'reader-session' }), encoding: 'utf8', timeout: 15_000,
   });
   expect(JSON.parse(status.stdout).text).toContain('display unavailable for session reader-session');
   expect(existsSync(join(f.fc, 'session-push', 'integration-errors'))).toBe(false); // nothing persists diagnostics
@@ -277,7 +281,7 @@ fs.renameSync = function(source, target) {
   return result;
 }; syncBuiltinESMExports();`);
   const child = spawn(process.execPath, ['--import', preload, cli, 'session-push', 'ack', '--event', event.eventId, '--session', 'reader-session'], {
-    env: f.env, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   await ready(child);
   await kill(child);
@@ -301,7 +305,7 @@ const { waitForClaudeWake } = await import(${JSON.stringify(modules[2])});
 await waitForClaudeWake(new SessionPush(new TaskRegistry({ baseDir: process.env.FC_HOME })), 'reader-session', {
   lifetimeMs: 30_000, pollMs: 50, sleep: async ms => { process.stderr.write('fixture-ready\\n'); await new Promise(resolve => setTimeout(resolve, ms)); },
 });
-`], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
+`], { cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, stdio: ['ignore', 'pipe', 'pipe'] });
   await ready(waiter);
   const push = new SessionPush(f.registry);
   expect(hasClaudeWakeWaiter(push.root, 'reader-session')).toBe(true);
@@ -319,7 +323,7 @@ syncBuiltinESMExports();`);
   expect(stop.stdout).toBe('');
   expect(existsSync(spawns)).toBe(false);
   // Control: the same counter records the version probe the wake path (and doctor) still make.
-  spawnSync(process.execPath, [cli, 'session-push', 'wake-check'], { env: { ...env, PATH: dirname(process.execPath) }, encoding: 'utf8', timeout: 15_000 });
+  spawnSync(process.execPath, [cli, 'session-push', 'wake-check'], { cwd: f.root, env: { ...env, HOME: f.root, FC_HOME: f.fc, PATH: dirname(process.execPath) }, encoding: 'utf8', timeout: 15_000 });
   expect(readFileSync(spawns, 'utf8')).toContain('execFileSync claude');
 });
 
@@ -330,7 +334,7 @@ it('a Stop in its registration wait shows no takeover text when a writer holds a
   const writer = spawn(process.execPath, ['--input-type=module', '-e', `
 import { TaskRegistry } from ${JSON.stringify(module)};
 new TaskRegistry({ baseDir: process.env.FC_HOME }).withSessionWrite(() => { process.stderr.write('fixture-ready\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); });
-`], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
+`], { cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc }, stdio: ['ignore', 'pipe', 'pipe'] });
   await ready(writer);
   expect(existsSync(f.registry.lockPath)).toBe(true);
   const waiting = join(f.root, 'stop-waiting');
@@ -342,7 +346,7 @@ fs.statSync = function(path, ...args) {
   return stat.call(this, path, ...args);
 }; syncBuiltinESMExports();`);
   const stop = spawn(process.execPath, ['--import', preload, cli, 'session-push', 'hook', '--frontend', 'claude', '--event', 'Stop'], {
-    env: { ...f.env, FIXTURE_WAITING: waiting }, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: f.root, env: { ...f.env, HOME: f.root, FC_HOME: f.fc, FIXTURE_WAITING: waiting }, stdio: ['pipe', 'pipe', 'pipe'],
   });
   children.add(stop);
   let out = ''; let err = '';

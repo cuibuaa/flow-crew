@@ -38,7 +38,7 @@ it('statusline, Stop and a wake tick read the same records and open the same fil
       const args = operation === 'statusline' ? ['statusline', '--json'] : (operation === 'Stop' || operation === 'StopIdle')
         ? ['hook', '--frontend', 'claude', '--event', 'Stop'] : ['wake'];
       const child = spawnSync(process.execPath, ['--import', preload, cli, 'session-push', ...args], {
-        env: { ...process.env, HOME: root, USERPROFILE: root, FC_HOME: f.fc, FC_TASKS_ROOT: f.ledger,
+        cwd: root, env: { ...process.env, HOME: root, USERPROFILE: root, FC_HOME: f.fc, FC_TASKS_ROOT: f.ledger,
           CODEX_HOME: join(root, 'codex'), AGENT_TASK_ROOT: join(root, 'agents'), FLOWCREW_DAEMON_SOCKET: join(root, 'daemon.sock'),
           PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: '', SESSION_COST_FIXTURE: fixturePath, SESSION_COST_OPERATION: operation, SESSION_COST_IO: receipt },
         input: JSON.stringify({ session_id: f.session }), encoding: 'utf8', timeout: 120_000,

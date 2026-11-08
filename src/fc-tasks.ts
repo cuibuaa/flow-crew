@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { isDeepStrictEqual } from 'node:util';
 import stringWidth from 'string-width';
 import { TaskRegistry } from './task-registry.js';
+import { fcGlobalDir } from './store.js';
 import { readRunRecordFields } from './run-record-fields.js';
 import { agentTaskProgressReader } from './agent-task-progress.js';
 import { lockOwnerIdentity, parseLockOwner, publishLockOwner, recoverStaleLock, type LockObservation } from './lock-publication.js';
@@ -1174,20 +1175,26 @@ export function readTaskLedger(
   return { state: 'ready', entries: scanned.entries, issues: scanned.issues };
 }
 
-/** Published by ledger writers (and service migration), outside the entry
- * directory. Status readers open one file regardless of completed history. */
+/** Writer-owned projection in engine state, keyed by ledger root and session.
+ * Status readers open one file regardless of completed history. */
 export function openTaskLedgerPath(storeRoot: string, session: string): string {
   if (!isSafePathSegment(session)) throw new FcTasksRefusal('invalid ledger session');
-  return join(storeRoot, '.flowcrew-open', `${session}.json`);
+  return join(fcGlobalDir(), 'task-ledger-open', ledgerRootKey(storeRoot), `${session}.json`);
+}
+
+function ledgerRootKey(storeRoot: string): string {
+  return createHash('sha256').update(resolve(storeRoot)).digest('hex');
 }
 
 function openTaskLedgerDirectory(storeRoot: string): { path: string; identity: DirectoryIdentity } {
-  if (!containedDirectoryIdentity(storeRoot, storeRoot)) throw new FcTasksRefusal('ledger store must be a real directory');
-  return assertWritableSession(storeRoot, '.flowcrew-open', true);
+  const root = join(fcGlobalDir(), 'task-ledger-open');
+  ensureDirectoryChain(root);
+  if (!containedDirectoryIdentity(fcGlobalDir(), root)) throw new FcTasksRefusal('open ledger store must be a real directory');
+  return assertWritableSession(root, ledgerRootKey(storeRoot), true);
 }
 
-function writeOpenTaskLedgerFile(storeRoot: string, directory: { path: string; identity: DirectoryIdentity }, path: string, text: string): void {
-  const unchanged = () => sameContainedDirectory(storeRoot, directory.path, directory.identity);
+function writeOpenTaskLedgerFile(directory: { path: string; identity: DirectoryIdentity }, path: string, text: string): void {
+  const unchanged = () => sameContainedDirectory(fcGlobalDir(), directory.path, directory.identity);
   if (!unchanged()) throw new FcTasksRefusal('open ledger directory changed before publication');
   const temporary = writeTemporaryEntry(directory.path, directory.identity, text);
   try {
@@ -1208,7 +1215,7 @@ function publishOpenTaskLedger(storeRoot: string, session: string, ledger: Ledge
     ? { state: 'ready', entries: entries.filter(entry => entry.status !== 'completed'), issues: ledger.issues,
       completedCount: entries.filter(entry => entry.status === 'completed').length }
     : ledger;
-  writeOpenTaskLedgerFile(storeRoot, directory, path, `${JSON.stringify(view)}\n`);
+  writeOpenTaskLedgerFile(directory, path, `${JSON.stringify(view)}\n`);
   try { unlinkSync(`${path}.dirty`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
 }
 
@@ -2027,7 +2034,7 @@ export function createTaskEntry(options: LedgerWriteOptions): string {
         throw new FcTasksRefusal('session ledger changed before create publication');
       }
       const viewPath = openTaskLedgerPath(options.storeRoot, options.session);
-      writeOpenTaskLedgerFile(options.storeRoot, viewDirectory, `${viewPath}.dirty`, 'dirty\n');
+      writeOpenTaskLedgerFile(viewDirectory, `${viewPath}.dirty`, 'dirty\n');
       const publish = options.publication?.create ?? ((temporary, target) => linkSync(temporary, target));
       publish(temporaryPath, targetPath);
       published = true;
@@ -2150,7 +2157,7 @@ export function updateTaskEntry(options: LedgerUpdateOptions): string {
         throw new FcTasksRefusal('session ledger changed before update publication');
       }
       const viewPath = openTaskLedgerPath(options.storeRoot, options.session);
-      writeOpenTaskLedgerFile(options.storeRoot, viewDirectory, `${viewPath}.dirty`, 'dirty\n');
+      writeOpenTaskLedgerFile(viewDirectory, `${viewPath}.dirty`, 'dirty\n');
       const publish = options.publication?.update ?? ((temporary, targetPathValue) => renameSync(temporary, targetPathValue));
       publish(temporaryPath, targetPath);
       published = true;

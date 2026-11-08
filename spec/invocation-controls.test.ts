@@ -80,7 +80,9 @@ describe('control reaches the invocation with verified retirement', () => {
       direct = result;
       return result;
     } };
-    const result = await runStage(adapter, options);
+    // Leave room for loaded-host startup without injecting scheduler wrap-up
+    // guidance into this command-control proof; the child still has a 5s timeout.
+    const result = await runStage(adapter, { ...options, timeout_ms: 30_000 });
     expect(interruptError).toBeUndefined();
     if (control === 'guidance') expect(abortedAtFirstCompletion).toBe(true);
     expect(result.exitCode).toBe(0); expect(calls).toBe(2);

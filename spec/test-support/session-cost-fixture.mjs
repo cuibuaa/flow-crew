@@ -1,7 +1,7 @@
 // Synthetic records only. The two histories have identical open session work.
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const write = (path, value) => {
@@ -43,7 +43,7 @@ export function sessionCostFixture(root, scale = 1) {
     ...(n === 0 ? { flowcrewTaskId: 1 } : n > 1 ? { flowcrewTaskId: n + 1 } : {}),
   }));
   for (const entry of entries) write(join(ledger, session, entry.id + '.json'), entry);
-  write(join(ledger, '.flowcrew-open', session + '.json'), {
+  write(join(fc, 'task-ledger-open', createHash('sha256').update(resolve(ledger)).digest('hex'), session + '.json'), {
     state: 'ready', entries: entries.filter(entry => entry.status !== 'completed'), issues: [], completedCount: ledgerCount - 2,
   });
   const event = n => ({ version: 1, eventId: hash(['fixture-event', n]), taskId: n + 1, runId: `fixture-run-${n + 1}`,

@@ -5,6 +5,7 @@ import { delimiter, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { doctorSessionIntegration } from '../src/session-integration.js';
 import { createTaskEntry } from '../src/fc-tasks.js';
+import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { createServer } from 'node:net';
 import { SessionPush } from '../src/session-push.js';
@@ -18,11 +19,13 @@ import { fakeCodexHookRequest } from './test-support/fake-codex-hooks.mjs';
 const packageRoot = join(import.meta.dirname, '..');
 const integration = join(packageRoot, 'skills', 'session-integration.mjs');
 const installer = join(packageRoot, 'skills', 'install.sh');
+const originalFcHome = fcGlobalDir();
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { setFcGlobalDir(originalFcHome); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'fc-hooks-'));
   roots.push(root);
+  setFcGlobalDir(join(root, 'fc'));
   const home = join(root, 'home');
   const codexHome = join(root, 'codex');
   const project = join(root, 'project');
@@ -448,8 +451,8 @@ describe('installer-owned front-end integration', () => {
       { code: 'wake_cli_failed', kind: 'crash' },
       { code: 'owner_unverifiable', kind: 'none', arrange: s => {
         // A live lease owner whose host is gone: neither stale nor a verifiable waiter.
-        const owner = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
-        const gone = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+        const owner = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { cwd: s.f.project, env: { ...s.f.env, HOME: s.f.home, FC_HOME: s.f.env.FC_HOME }, stdio: 'ignore' });
+        const gone = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { cwd: s.f.project, env: { ...s.f.env, HOME: s.f.home, FC_HOME: s.f.env.FC_HOME }, encoding: 'utf8' });
         const start = processStartToken(owner.pid!);
         mkdirSync(join(s.push, 'waiters'), { recursive: true });
         const path = sessionWaiterPath(s.push, 'own-session');
@@ -476,7 +479,7 @@ describe('installer-owned front-end integration', () => {
         }
         armed?.heal();
         // A healthy wake registers a waiter: the fact is deleted and the session is covered.
-        const healthy = spawn(process.execPath, [s.hook, 'Wake'], { env: s.f.env, stdio: ['pipe', 'ignore', 'ignore'] });
+        const healthy = spawn(process.execPath, [s.hook, 'Wake'], { cwd: s.f.project, env: { ...s.f.env, HOME: s.f.home, FC_HOME: s.f.env.FC_HOME }, stdio: ['pipe', 'ignore', 'ignore'] });
         spawned.push(healthy);
         healthy.stdin!.end(s.input);
         for (let i = 0; i < 300 && !(existsSync(sessionWaiterPath(s.push, 'own-session')) && hasClaudeWakeWaiter(s.push, 'own-session') && !existsSync(wakeUnavailablePath(s.push, 'own-session'))); i++) await sleep(50);

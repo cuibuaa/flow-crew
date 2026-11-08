@@ -49,9 +49,11 @@ timers.setTimeout = function(ms, ...args) {
         ? ['hook', '--frontend', 'claude', '--event', 'Stop'] : ['wake'];
       if (operation === 'wakeTick') rmSync(waiter);
       const hostLoad = loadavg();
-      const result = spawnSync('/usr/bin/time', ['-o', timeFile, '-f', '{"wall_seconds":%e,"user_seconds":%U,"system_seconds":%S,"exit_code":%x}',
+      const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+        "import { spawnSync } from 'node:child_process'; const [command, ...args] = process.argv.slice(1); const result = spawnSync(command, args, { stdio: 'inherit' }); process.exit(result.status ?? 1);",
+        '--', '/usr/bin/time', '-o', timeFile, '-f', '{"wall_seconds":%e,"user_seconds":%U,"system_seconds":%S,"exit_code":%x}',
         'nice', '-n', '19', process.execPath, ...(operation === 'wakeTick' ? ['--import', preload] : []), cli, 'session-push', ...args], {
-        env, input: JSON.stringify({ session_id: f.session }), encoding: 'utf8', timeout: 180_000, maxBuffer: 2 * 1024 * 1024,
+        cwd: resolve('.'), env: { ...env, HOME: f.root, FC_HOME: f.fc }, input: JSON.stringify({ session_id: f.session }), encoding: 'utf8', timeout: 180_000, maxBuffer: 2 * 1024 * 1024,
       });
       if (result.error || result.status !== 0) throw new Error(`${variant}/${scale}/${operation} exit ${result.status}: ${result.error || result.stderr}`);
       const processTiming = JSON.parse(readFileSync(timeFile, 'utf8'));
