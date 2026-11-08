@@ -7,6 +7,7 @@ import { isDeepStrictEqual } from 'node:util';
 import stringWidth from 'string-width';
 import { TaskRegistry } from './task-registry.js';
 import { fcGlobalDir } from './store.js';
+import { resolveControlPath } from './daemon-identity.js';
 import { readRunRecordFields } from './run-record-fields.js';
 import { agentTaskProgressReader } from './agent-task-progress.js';
 import { lockOwnerIdentity, parseLockOwner, publishLockOwner, recoverStaleLock, type LockObservation } from './lock-publication.js';
@@ -170,6 +171,8 @@ export interface LedgerPublication {
 
 export interface LedgerWriteOptions {
   storeRoot: string;
+  /** Engine state for the optional open view; defaults to FC_HOME. */
+  engineRoot?: string;
   session: string;
   entry: unknown;
   maxEntries?: number;
@@ -1177,24 +1180,40 @@ export function readTaskLedger(
 
 /** Writer-owned projection in engine state, keyed by ledger root and session.
  * Status readers open one file regardless of completed history. */
-export function openTaskLedgerPath(storeRoot: string, session: string): string {
+export function openTaskLedgerPath(storeRoot: string, session: string, engineRoot = fcGlobalDir()): string {
   if (!isSafePathSegment(session)) throw new FcTasksRefusal('invalid ledger session');
-  return join(fcGlobalDir(), 'task-ledger-open', ledgerRootKey(storeRoot), `${session}.json`);
+  return join(resolveControlPath(engineRoot), 'task-ledger-open', ledgerRootKey(storeRoot), `${session}.json`);
 }
 
 function ledgerRootKey(storeRoot: string): string {
-  return createHash('sha256').update(resolve(storeRoot)).digest('hex');
+  return createHash('sha256').update(resolveControlPath(storeRoot)).digest('hex');
 }
 
-function openTaskLedgerDirectory(storeRoot: string): { path: string; identity: DirectoryIdentity } {
-  const root = join(fcGlobalDir(), 'task-ledger-open');
-  ensureDirectoryChain(root);
-  if (!containedDirectoryIdentity(fcGlobalDir(), root)) throw new FcTasksRefusal('open ledger store must be a real directory');
-  return assertWritableSession(root, ledgerRootKey(storeRoot), true);
+type OpenLedgerDirectory = { root: string; path: string; identity: DirectoryIdentity };
+
+function openTaskLedgerDirectory(storeRoot: string, engineRoot = fcGlobalDir()): OpenLedgerDirectory | undefined {
+  let root: string;
+  try {
+    root = resolveControlPath(engineRoot);
+    ensureDirectoryChain(root);
+  } catch { return undefined; } // Engine state is an optimisation, never the ledger authority.
+  let path = root;
+  for (const component of ['task-ledger-open', ledgerRootKey(storeRoot)]) {
+    path = join(path, component);
+    try { mkdirSync(path, { mode: 0o700 }); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return undefined;
+    }
+    let stat;
+    try { stat = lstatSync(path); } catch { return undefined; }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new FcTasksRefusal('open ledger store must be a real directory');
+  }
+  const identity = containedDirectoryIdentity(root, path);
+  if (!identity) throw new FcTasksRefusal('open ledger store must be a real directory');
+  return { root, path, identity };
 }
 
-function writeOpenTaskLedgerFile(directory: { path: string; identity: DirectoryIdentity }, path: string, text: string): void {
-  const unchanged = () => sameContainedDirectory(fcGlobalDir(), directory.path, directory.identity);
+function writeOpenTaskLedgerFile(directory: OpenLedgerDirectory, path: string, text: string): void {
+  const unchanged = () => sameContainedDirectory(directory.root, directory.path, directory.identity);
   if (!unchanged()) throw new FcTasksRefusal('open ledger directory changed before publication');
   const temporary = writeTemporaryEntry(directory.path, directory.identity, text);
   try {
@@ -1208,32 +1227,41 @@ function writeOpenTaskLedgerFile(directory: { path: string; identity: DirectoryI
   }
 }
 
-function publishOpenTaskLedger(storeRoot: string, session: string, ledger: LedgerReadResult, directory = openTaskLedgerDirectory(storeRoot)): void {
-  const path = openTaskLedgerPath(storeRoot, session);
+// Atomic entry publication changes the session directory, even when engine state
+// cannot be written. This replaces the dirty marker with a reader-checkable stamp.
+function ledgerDirectoryStamp(storeRoot: string, session: string): string {
+  const stat = lstatSync(join(storeRoot, session), { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new FcTasksRefusal('session ledger must be a real directory');
+  return [stat.dev, stat.ino, stat.mtimeNs, stat.ctimeNs].join(':');
+}
+
+function openLedgerProjection(ledger: LedgerReadResult): LedgerReadResult {
   const entries = publicTaskEntries(ledger);
-  const view: LedgerReadResult = ledger.state === 'ready'
+  return ledger.state === 'ready'
     ? { state: 'ready', entries: entries.filter(entry => entry.status !== 'completed'), issues: ledger.issues,
       completedCount: entries.filter(entry => entry.status === 'completed').length }
     : ledger;
-  writeOpenTaskLedgerFile(directory, path, `${JSON.stringify(view)}\n`);
-  try { unlinkSync(`${path}.dirty`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+}
+
+function publishOpenTaskLedger(storeRoot: string, session: string, ledger: LedgerReadResult, directory: OpenLedgerDirectory | undefined): void {
+  if (!directory) return;
+  try {
+    const view = { ...openLedgerProjection(ledger), sourceDirectory: ledgerDirectoryStamp(storeRoot, session) };
+    writeOpenTaskLedgerFile(directory, join(directory.path, `${session}.json`), `${JSON.stringify(view)}\n`);
+  } catch { /* A stale/missing stamp makes readers use the bounded session census. */ }
 }
 
 export function readOpenTaskLedger(storeRoot: string, session: string): LedgerReadResult {
-  const path = openTaskLedgerPath(storeRoot, session);
   try {
-    if (existsSync(`${path}.dirty`)) throw new Error('open ledger publication interrupted');
-    const view: LedgerReadResult = JSON.parse(readFileSync(path, 'utf8'));
-    if (!['ready', 'no_ledger', 'unavailable'].includes(view.state) || !Array.isArray(view.entries) || !Array.isArray(view.issues)) {
-      throw new Error('invalid open ledger view');
+    const path = openTaskLedgerPath(storeRoot, session);
+    const { sourceDirectory, ...view }: LedgerReadResult & { sourceDirectory: string } = JSON.parse(readFileSync(path, 'utf8'));
+    if (!['ready', 'no_ledger', 'unavailable'].includes(view.state) || !Array.isArray(view.entries) || !Array.isArray(view.issues)
+        || sourceDirectory !== ledgerDirectoryStamp(storeRoot, session)) {
+      throw new Error('stale or invalid open ledger view');
     }
     return view;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !existsSync(join(storeRoot, session))) {
-      return { state: 'no_ledger', entries: [], issues: [] };
-    }
-    return { state: 'unavailable', entries: [], issues: [{ code: 'store_unreadable',
-      detail: `Open ledger view unavailable for session ${session}; the push service must refresh it` }] };
+  } catch {
+    return openLedgerProjection(readTaskLedger(storeRoot, session));
   }
 }
 
@@ -1243,7 +1271,7 @@ export function refreshOpenTaskLedger(storeRoot: string, session: string): Ledge
   assertWritableSession(storeRoot, session, false);
   return withLedgerLock(storeRoot, session, () => {
     const ledger = readTaskLedger(storeRoot, session, Number.MAX_SAFE_INTEGER);
-    if (ledger.state !== 'no_ledger') publishOpenTaskLedger(storeRoot, session, ledger);
+    if (ledger.state !== 'no_ledger') publishOpenTaskLedger(storeRoot, session, ledger, openTaskLedgerDirectory(storeRoot));
     return ledger;
   });
 }
@@ -1643,6 +1671,7 @@ function assertWritableSession(
 ): { path: string; identity: DirectoryIdentity } {
   if (!isSafePathSegment(session)) throw new FcTasksRefusal('session must be a non-empty safe path segment');
   if (create) ensureDirectoryChain(storeRoot);
+  if (!containedDirectoryIdentity(storeRoot, storeRoot)) throw new FcTasksRefusal('ledger store must be a real directory');
   const sessionPath = join(storeRoot, session);
   if (create) {
     try {
@@ -2015,7 +2044,7 @@ export function createTaskEntry(options: LedgerWriteOptions): string {
   const session = assertWritableSession(options.storeRoot, options.session, true);
   const sessionPath = session.path;
   return withLedgerLock(options.storeRoot, options.session, () => {
-    const viewDirectory = openTaskLedgerDirectory(options.storeRoot);
+    const viewDirectory = openTaskLedgerDirectory(options.storeRoot, options.engineRoot);
     const writable = readWritableLedger(options.storeRoot, options.session, limit);
     if (writable.entries.length >= limit) {
       throw new FcTasksRefusal(`ledger entry limit ${limit} has been reached`);
@@ -2033,11 +2062,10 @@ export function createTaskEntry(options: LedgerWriteOptions): string {
       if (!sameDirectory(sessionPath, session.identity)) {
         throw new FcTasksRefusal('session ledger changed before create publication');
       }
-      const viewPath = openTaskLedgerPath(options.storeRoot, options.session);
-      writeOpenTaskLedgerFile(viewDirectory, `${viewPath}.dirty`, 'dirty\n');
       const publish = options.publication?.create ?? ((temporary, target) => linkSync(temporary, target));
       publish(temporaryPath, targetPath);
       published = true;
+      unlinkSync(temporaryPath);
       if (!sameDirectory(sessionPath, session.identity)) {
         throw new FcTasksRefusal('session ledger changed during create publication');
       }
@@ -2075,7 +2103,7 @@ export function updateTaskEntry(options: LedgerUpdateOptions): string {
   const session = assertWritableSession(options.storeRoot, options.session, false);
   const sessionPath = session.path;
   return withLedgerLock(options.storeRoot, options.session, () => {
-    const viewDirectory = openTaskLedgerDirectory(options.storeRoot);
+    const viewDirectory = openTaskLedgerDirectory(options.storeRoot, options.engineRoot);
     const scanned = scanTaskLedger(options.storeRoot, options.session, limit);
     if (scanned.state === 'unavailable') {
       const issue = scanned.issues[0];
@@ -2156,8 +2184,6 @@ export function updateTaskEntry(options: LedgerUpdateOptions): string {
       if (!sameDirectory(sessionPath, session.identity)) {
         throw new FcTasksRefusal('session ledger changed before update publication');
       }
-      const viewPath = openTaskLedgerPath(options.storeRoot, options.session);
-      writeOpenTaskLedgerFile(viewDirectory, `${viewPath}.dirty`, 'dirty\n');
       const publish = options.publication?.update ?? ((temporary, targetPathValue) => renameSync(temporary, targetPathValue));
       publish(temporaryPath, targetPath);
       published = true;

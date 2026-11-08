@@ -121,15 +121,19 @@ restore automatic wake delivery.
 
 Session reads open only the calling session's open state: the registry writer publishes
 `tasks/<id>/current.json` and an open task index, event writers publish immutable links
-in `session-push/pending/<session-key>/`, and ledger writers publish `.flowcrew-open/`
-views containing open entries plus a scalar completed count. Event ownership comes from
+in `session-push/pending/<session-key>/`, and ledger writers publish
+`FC_HOME/task-ledger-open/<sha256(realpath(ledgerRoot))>/<session>.json` views
+containing open entries plus a scalar completed count. `fc_tasks --engine-root` selects
+the engine state root for its writes. Event ownership comes from
 its recorded launcher, never message text. ACK atomically moves a pending event link
 into `session-push/acks/`; old ACK receipts remain valid. Terminal tasks leave the index
 after explicit ledger completion and ACK, as observed by the writer/service. A new run,
 launch or session binding invalidates the closure receipt.
 
 Readers never acquire the exclusive registry lock or rebuild a legacy store. A missing
-or interrupted view is reported to the operator. Registry writers and the push service
+or stale ledger view falls back to the bounded census of that session; an unreadable
+or over-limit census is reported to the operator. Ledger writes still succeed when the
+optional engine view cannot be written. Registry writers and the push service
 repair/migrate views from canonical history; ordinary foreground/background sweeps do
 this automatically. General registry inspection also reads without the writer lock;
 mutations retain append, sync, integrity checks and PID/start-token stale-lock recovery.

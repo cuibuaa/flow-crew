@@ -1,5 +1,5 @@
 import './test-support/policy-runtime.js';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -108,4 +108,81 @@ it('open views live in engine state and distinguish ledger roots and sessions', 
   expect(readdirSync(ledgerA).sort()).toEqual(['other', 'shared']);
   expect(readdirSync(ledgerB)).toEqual(['shared']);
   expect(readdirSync(join(ledgerA, 'shared'))).toEqual(['a.json']);
+});
+
+
+it('a symlinked FC_HOME supports create, update and service refresh from its canonical root', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fc-home-alias-')); roots.push(root);
+  const home = join(root, 'state'); mkdirSync(home);
+  const alias = join(root, 'fc'); symlinkSync(home, alias, 'dir'); setFcGlobalDir(alias);
+  const storeRoot = join(root, 'ledger');
+  const session = 'alias-session';
+  createTaskEntry({ storeRoot, session, entry: {
+    id: 'work', subject: 'Work', description: '', activeForm: '', status: 'pending', blocks: [], blockedBy: [],
+  } });
+  const path = openTaskLedgerPath(storeRoot, session);
+  expect(path.startsWith(home + sep)).toBe(true);
+  expect(existsSync(path)).toBe(true);
+  updateTaskEntry({ storeRoot, session, id: 'work', entry: { status: 'in_progress' } });
+  expect(readOpenTaskLedger(storeRoot, session).entries[0].status).toBe('in_progress');
+  rmSync(path);
+  expect(refreshOpenTaskLedger(storeRoot, session).state).toBe('ready');
+  expect(existsSync(path)).toBe(true);
+  expect(readOpenTaskLedger(storeRoot, session).entries[0].status).toBe('in_progress');
+});
+
+it.each(['absent', 'cached'])('an unwritable FC_HOME with %s view never blocks ledger writes or refresh and readers fall back within one session', mode => {
+  const root = mkdtempSync(join(tmpdir(), 'fc-home-readonly-')); roots.push(root);
+  const home = join(root, 'fc'); mkdirSync(home); setFcGlobalDir(home);
+  const storeRoot = join(root, 'ledger');
+  const session = 'readonly-session';
+  const entry = (id: string) => ({ id, subject: id, description: '', activeForm: '', status: 'pending' as const, blocks: [], blockedBy: [] });
+  if (mode === 'cached') createTaskEntry({ storeRoot, session, entry: entry('old') });
+  const path = openTaskLedgerPath(storeRoot, session);
+  const cached = mode === 'cached' ? readFileSync(path, 'utf8') : undefined;
+  const directories = mode === 'cached' ? [dirname(path), dirname(dirname(path)), home] : [home];
+  for (const directory of directories) chmodSync(directory, 0o500);
+  try {
+    createTaskEntry({ storeRoot, session, entry: entry('new') });
+    updateTaskEntry({ storeRoot, session, id: 'new', entry: { status: 'completed' } });
+    updateTaskEntry({ storeRoot, session, id: 'new', entry: { status: 'completed' }, skipUnchanged: true });
+    expect(refreshOpenTaskLedger(storeRoot, session).state).toBe('ready');
+    if (cached) expect(readFileSync(path, 'utf8')).toBe(cached);
+    else expect(existsSync(path)).toBe(false);
+    // An unreadable unrelated session must not enter the fallback census.
+    symlinkSync(join(root, 'missing'), join(storeRoot, 'unrelated'), 'dir');
+    expect(readOpenTaskLedger(storeRoot, session)).toMatchObject({ state: 'ready', completedCount: 1,
+      entries: mode === 'cached' ? [{ id: 'old' }] : [], issues: [] });
+  } finally { for (const directory of directories.reverse()) chmodSync(directory, 0o700); }
+  // Restoring permissions cannot resurrect the stale cached contents.
+  expect(readOpenTaskLedger(storeRoot, session).completedCount).toBe(1);
+  refreshOpenTaskLedger(storeRoot, session);
+  expect(readOpenTaskLedger(storeRoot, session).completedCount).toBe(1);
+});
+
+it('canonical ledger paths share one view, including absent roots under an aliased parent, while writers reject a symlinked store root', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fc-ledger-alias-')); roots.push(root); setFcGlobalDir(join(root, 'fc'));
+  const parent = join(root, 'real'); mkdirSync(parent);
+  const alias = join(root, 'alias'); symlinkSync(parent, alias, 'dir');
+  const storeRoot = join(parent, 'ledger');
+  const viaParent = join(alias, 'ledger');
+  const session = 'shared';
+  const before = openTaskLedgerPath(viaParent, session);
+  expect(before).toBe(openTaskLedgerPath(storeRoot, session));
+  const entry = { id: 'work', subject: 'Work', description: '', activeForm: '', status: 'pending' as const, blocks: [], blockedBy: [] };
+  createTaskEntry({ storeRoot: viaParent, session, entry });
+  const link = join(root, 'ledger-link'); symlinkSync(storeRoot, link, 'dir');
+  expect(openTaskLedgerPath(link, session)).toBe(before);
+  expect(readOpenTaskLedger(link, session).entries.map(entry => entry.id)).toEqual(['work']);
+  expect(() => createTaskEntry({ storeRoot: link, session, entry: { ...entry, id: 'other' } })).toThrow(/ledger store must be a real directory/);
+  expect(() => updateTaskEntry({ storeRoot: link, session, id: 'work', entry: { status: 'completed' } })).toThrow(/ledger store must be a real directory/);
+  expect(() => refreshOpenTaskLedger(link, session)).toThrow(/ledger store must be a real directory/);
+  expect(readTaskLedger(storeRoot, session).entries.map(entry => entry.id)).toEqual(['work']);
+});
+
+it('a missing view falls back to the default bounded census rather than scanning large history', () => {
+  const root = mkdtempSync(join(tmpdir(), 'fc-view-bounded-')); roots.push(root); setFcGlobalDir(join(root, 'fc'));
+  const session = 'large'; mkdirSync(join(root, session));
+  for (let n = 0; n < 1001; n++) writeFileSync(join(root, session, `${n}.json`), '{}');
+  expect(readOpenTaskLedger(root, session)).toMatchObject({ state: 'unavailable', issues: [{ code: 'scan_limit_exceeded' }] });
 });

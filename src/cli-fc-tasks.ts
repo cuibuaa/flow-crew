@@ -376,6 +376,7 @@ export function cmdFcTasks(
       const entry = parseEntry(parsed, dependencies);
       createTaskEntry({
         storeRoot: storeRoot(parsed, dependencies),
+        engineRoot: engineRoot(parsed, dependencies),
         session: session.session,
         entry,
         maxEntries: maxEntries(parsed),
@@ -397,6 +398,7 @@ export function cmdFcTasks(
       const entry = parseEntry(parsed, dependencies);
       updateTaskEntry({
         storeRoot: storeRoot(parsed, dependencies),
+        engineRoot: engineRoot(parsed, dependencies),
         session: session.session,
         id: parsed.positionals[0],
         entry,

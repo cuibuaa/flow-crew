@@ -1,6 +1,6 @@
 import './test-support/policy-runtime.js';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -661,4 +661,28 @@ describe('frontend transports with fake CLIs and sockets', () => {
     expect(await queueCodex('own-session', 'event=id fixed prompt', root)).toBe('Queued receipt');
     expect(JSON.parse(readFileSync(join(root, 'queued.json'), 'utf8'))).toEqual(['queue', '--thread', 'own-session', '--message', 'event=id fixed prompt']);
   });
+});
+
+
+it('a symlinked FC_HOME lets the sweep close handled tasks, collect events and maintain the display', async () => {
+  const { root, registry, launcher, task } = fixture();
+  const previous = fcGlobalDir();
+  const alias = join(root, 'fc-alias'); symlinkSync(root, alias, 'dir'); setFcGlobalDir(alias);
+  try {
+    const resolver = { resolve: () => ({ state: 'resolved' as const, taskId: task.id, taskStatus: 'done', projectDir: root }) };
+    createTaskEntry({ storeRoot: launcher.ledgerRoot, session: launcher.sessionId, taskRunResolver: resolver,
+      entry: { id: 'work', subject: 'Work', description: '', activeForm: '', status: 'in_progress', blocks: [], blockedBy: [], flowcrewTaskId: task.id } });
+    runFile(root, 'complete');
+    registry.update(task.id, { status: 'done' });
+    const rpc = vi.fn().mockResolvedValue({ thread: { id: 'display', parentThreadId: null } });
+    const push = new SessionPush(registry, { rpc, queue: vi.fn().mockResolvedValue('queued'), notify: vi.fn().mockResolvedValue(undefined) });
+    await push.sweep();
+    expect(push.events()).toEqual([expect.objectContaining({ taskId: task.id, runStatus: 'complete' })]);
+    expect(push.display(task.id)).toMatchObject({ threadId: 'display' });
+    expect(push.display(task.id)?.error).toBeUndefined();
+    updateTaskEntry({ storeRoot: launcher.ledgerRoot, session: launcher.sessionId, id: 'work', entry: { status: 'completed' }, taskRunResolver: resolver });
+    push.acknowledge(push.pending()[0].eventId, launcher.sessionId);
+    await push.sweep();
+    expect(push.openTasks('codex', launcher.sessionId)).toEqual([]);
+  } finally { setFcGlobalDir(previous); }
 });

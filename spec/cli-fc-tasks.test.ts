@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import stringWidth from 'string-width';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cmdFcTasks } from '../src/cli-fc-tasks.js';
-import type { FcTaskEntry } from '../src/fc-tasks.js';
+import { openTaskLedgerPath, type FcTaskEntry } from '../src/fc-tasks.js';
 
 let root: string;
 
@@ -603,4 +603,22 @@ describe('fc_tasks CLI detail and write paths', () => {
     expect(dispatcher).toContain("bootstrapArgs[0] === 'fc_tasks'");
     expect(dispatcher).toContain("import('./cli-fc-tasks.js')");
   });
+});
+
+
+it('create and update publish the view under --engine-root instead of the ambient engine', () => {
+  const explicit = join(root, 'selected-engine');
+  const ambient = join(root, 'engine-sandbox');
+  const session = 'engine-location';
+  const flags = ['--store-root', root, '--session', session, '--engine-root', 'selected-engine'];
+  const created = new Capture();
+  expect(cmdFcTasks(['fc_tasks', 'create', ...flags, '--entry', JSON.stringify(task('work'))], dependencies(created)), created.error).toBe(0);
+  const path = openTaskLedgerPath(root, session, explicit);
+  expect(path.startsWith(join(explicit, 'task-ledger-open'))).toBe(true);
+  expect(existsSync(path)).toBe(true);
+  expect(existsSync(join(ambient, 'task-ledger-open'))).toBe(false);
+  const updated = new Capture();
+  expect(cmdFcTasks(['fc_tasks', 'update', 'work', ...flags, '--entry', '{"status":"completed"}'], dependencies(updated)), updated.error).toBe(0);
+  expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ entries: [], completedCount: 1 });
+  expect(existsSync(join(ambient, 'task-ledger-open'))).toBe(false);
 });
