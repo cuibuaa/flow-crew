@@ -14,7 +14,7 @@ and evidence. Pass only when all meet their acceptance lines. Disclose missing o
 never invent a threshold or waive a supplied one. Examples do not exclude equivalent property evidence
 unless the criterion explicitly requires that means. A wording/property conflict identifies its originating
 sentence; a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it. Reviewers say briefly in their reason what they did not examine and why.
-Independent reviewers must not durably modify the reviewed target or authoritative inputs; disposable probes use only the invocation's private $TMPDIR. Read-only gates (is_gate with scope: []) write no project files or declared outputs. Target repairs belong to an author.
+Independent reviewers must not durably modify the reviewed target or authoritative inputs; disposable probes use only the invocation's private $TMPDIR. Target repairs belong to an author.
 
 ## Run-directory safety
 The FlowCrew run directory (<run>/…) is engine-owned. Its records, including stage_evidence/, the evidence ledger and state, are read-only to stages; writing those records voids the stage result.

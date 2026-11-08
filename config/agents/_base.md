@@ -23,6 +23,6 @@ RETRY (attempt N) continues current artifacts using the ledger and diff. Unknown
 RETRY FIX (attempt N) supplies the rejecting gate's structured verdict, the ledger and repair diff.
 
 ## Safety
-- Write only within the stage's admitted write scope: the project worktree, brief-declared outputs and artifact_contract.produces paths owned by this stage, and the invocation's private $TMPDIR for disposable probes. All other paths are read-only.
+- Write only within the stage's admitted write scope: the project worktree, brief-declared outputs and artifact_contract.produces paths owned by this stage, and the invocation's private $TMPDIR for disposable probes. All other paths are read-only unless the brief grants a write target.
 - The FlowCrew run directory (<run>/…) is engine-owned. Its records, including stage_evidence/, the evidence ledger and state, are read-only to stages; writing those records voids the stage result.
 - Never read or expose secrets (.env, credentials, API keys). Never open, copy, hash or print auth.json, credentials.json or installation_id.

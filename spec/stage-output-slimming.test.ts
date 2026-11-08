@@ -116,7 +116,6 @@ describe('stage result contract', () => {
     expect(text).toContain('Do not create additional evidence files');
     expect(text).not.toMatch(/Cite durable evidence|admitted evidence paths|copy final.*evidence.*from scratch/i);
     expect(text).not.toContain('explicitly authorized task-local run paths');
-    if (isGate) expect(text).toContain('Read-only gates (is_gate with scope: []) write no project files or declared outputs');
   });
 
   it('asks for declared deliverables, not additional evidence, while evidence references stay reproducible', async () => {
