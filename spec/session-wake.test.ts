@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaskRegistry } from '../src/task-registry.js';
 import { lockOwnerIdentity } from '../src/lock-publication.js';
 import { SessionPush, PUSH_FALLBACK_MS, PUSH_RETRY_MS, wrapUpPrompt } from '../src/session-push.js';
-import { sessionGate } from '../src/cli-session-push.js';
+import { renderSessionProgress, sessionGate } from '../src/cli-session-push.js';
 import { hasClaudeWakeWaiter, supportsClaudeWakeVersion, waitForClaudeWake } from '../src/session-wake.js';
 import { createTaskEntry, refreshOpenTaskLedger, readOpenTaskLedger } from '../src/fc-tasks.js';
 
@@ -99,6 +99,28 @@ describe('Claude async Stop wake', () => {
     expect(await waitForClaudeWake(f.push, f.launcher.sessionId)).toEqual({ code: 0 });
     expect(f.push.claimWake(event)).toBe(false);
     expect(sessionGate(f.push, 'claude', f.launcher.sessionId)).toEqual({});
+  });
+
+  it('lets a finished task with every event handled rest while its ledger entry stays open, and still wakes for a new event', async () => {
+    const f = fixture();
+    const session = f.launcher.sessionId;
+    const first = f.event();
+    f.registry.update(f.task.id, { status: 'done' });
+    f.push.acknowledge(first.eventId, session);
+    expect(f.push.sessionTasks('claude', session).map(task => task.id)).toEqual([f.task.id]);
+    expect(sessionGate(f.push, 'claude', session)).toEqual({});
+    expect(renderSessionProgress(f.push, session, f.now()).text).not.toContain('push target unavailable');
+    expect(await waitForClaudeWake(f.push, session, { now: f.now, lifetimeMs: 10, sleep: async ms => { f.advance(ms); } })).toEqual({ code: 0 });
+    expect(hasClaudeWakeWaiter(f.push.root, session)).toBe(false);
+
+    let prompt = '';
+    const woke = await waitForClaudeWake(f.push, session, { now: f.now, sleep: async () => {
+      const next = f.event('attempt_failed');
+      prompt = wrapUpPrompt(next, f.registry.baseDir);
+      await f.push.deliver(next);
+    } });
+    expect(woke).toEqual({ code: 2, prompt });
+    expect(sessionGate(f.push, 'claude', session).decision).toBe('block');
   });
 
   it('renews at its own deadline so a run longer than one waiter still wakes', async () => {

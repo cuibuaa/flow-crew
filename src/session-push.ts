@@ -265,8 +265,10 @@ export class SessionPush {
       .map(id => this.registry.get(id, { frontend, sessionId }))
       .filter((task): task is TaskEntry => !!task && task.launcher?.frontend === frontend && task.launcher.sessionId === sessionId);
   }
-  openTasks(frontend: LaunchTarget['frontend'], session: string, allowExecuting = false): TaskEntry[] {
-    return this.sessionTasks(frontend, session).filter(task => !allowExecuting || !isActiveTaskStatus(task.status));
+  /** Tasks wake coverage must be renewed for. A finished task's open ledger entry is a reminder;
+   * only work that can still produce an event, or a pending event itself, justifies a model turn. */
+  openTasks(frontend: LaunchTarget['frontend'], session: string): TaskEntry[] {
+    return this.sessionTasks(frontend, session).filter(task => isActiveTaskStatus(task.status));
   }
   private closeHandledTask(task: TaskEntry, events: PushEvent[], ledger = readTaskLedger(task.launcher!.ledgerRoot, task.launcher!.sessionId, Number.MAX_SAFE_INTEGER)): boolean {
     const closed = !ledger.issues.length && publicTaskEntries(ledger).some(entry => entry.flowcrewTaskId === task.id && entry.status === 'completed');
@@ -279,11 +281,11 @@ export class SessionPush {
   deliveryReady(task: TaskEntry): boolean {
     if (!task.launcher) return false;
     const target = this.currentTarget(task.launcher);
-    if (target.frontend === 'claude' && !hasClaudeWakeWaiter(this.root, target.sessionId, this.now())) {
+    const pending = this.pending(target.sessionId, target.frontend).filter(event => event.taskId === task.id);
+    if (target.frontend === 'claude' && (pending.length || isActiveTaskStatus(task.status)) && !hasClaudeWakeWaiter(this.root, target.sessionId, this.now())) {
       try { if (!target.socket || !lstatSync(target.socket).isSocket()) return false; } catch { return false; }
     }
-    return this.pending(target.sessionId, target.frontend).filter(event => event.taskId === task.id)
-      .every(event => !load<DeliveryState>(this.deliveryPath(event.eventId))?.error);
+    return pending.every(event => !load<DeliveryState>(this.deliveryPath(event.eventId))?.error);
   }
   enqueue(task: TaskEntry, source: Pick<RunEvent, 'type' | 'timestamp' | 'runId' | 'attemptIndex' | 'detail' | 'stageId' | 'attemptStartedAt' | 'requestId' | 'runStatus' | 'providerFailure' | 'adapterFailureKind' | 'exitCode'>, identity: unknown = source): PushEvent | undefined {
     if (!task.launcher) return undefined;

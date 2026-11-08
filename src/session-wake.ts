@@ -163,9 +163,12 @@ export async function waitForClaudeWake(push: SessionPush, session: string, opti
             return { code: 2, prompt: wrapUpPrompt(event, push.registry.baseDir) };
           }
         }
-        const open = push.openTasks('claude', session);
-        if (!open.length && !pending.length) return { code: 0 };
-        if (now() >= expiresAt) return { code: 2, prompt: 'FlowCrew wake coverage is expiring. Inspect this session’s FlowCrew task and pending events. Handle and explicitly ACK any pending event. If execution is still in flight, end this turn normally so the installed Stop hook renews wake coverage; do not wait in the foreground.' };
+        // Poll for every session task (a finished run's event may still be publishing);
+        // renewal needs a model turn, so only unfinished work or a pending event earns one.
+        if (!push.sessionTasks('claude', session).length && !pending.length) return { code: 0 };
+        if (now() >= expiresAt) return pending.length || push.openTasks('claude', session).length
+          ? { code: 2, prompt: 'FlowCrew wake coverage is expiring. Inspect this session’s FlowCrew task and pending events. Handle and explicitly ACK any pending event. If execution is still in flight, end this turn normally so the installed Stop hook renews wake coverage; do not wait in the foreground.' }
+          : { code: 0 };
       } catch (error) {
         // Retain the live waiter across read/publication faults. A service
         // repair can resume delivery without inventing an empty model turn.

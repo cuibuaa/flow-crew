@@ -499,7 +499,8 @@ describe('durable delivery and business ACK', () => {
     writeFileSync(join(root, 'runs', 'next-run', 'run.json'), JSON.stringify({
       runId: 'next-run', projectDir: root, status: 'complete', stages: {},
     }));
-    expect(sessionGate(push, 'claude', launcher.sessionId).decision).toBe('block');
+    // The Wake hook starts on this same Stop and polls every session task, so publication needs no block.
+    expect(sessionGate(push, 'claude', launcher.sessionId)).toEqual({});
     await push.sweep();
     expect(push.pending()).toEqual([expect.objectContaining({ runId: 'next-run' })]);
     expect(sessionGate(push, 'claude', launcher.sessionId).decision).toBe('block');
