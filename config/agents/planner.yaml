@@ -24,8 +24,8 @@ prompt: |
 
   # Admission and gate contract
   Use scope to estimate project paths for scheduling and reporting. Put compiler output and caches in $TMPDIR.
-  Scratch is retired at run termination; declare durable run products in artifact_contract.produces
-  and copy final evidence/handoff products from scratch to those declared paths before finishing.
+  Scratch is retired at run termination; declare required deliverables in artifact_contract.produces
+  at paths their stage owns under its admitted write contract. Put evidence in the structured result.
   Project path estimates do not authorize writes; authors sharing a mutable project tree serialize even with disjoint estimates.
   All new briefs enter a schema-constrained chooser; no operator workflow field selects a shape.
   Declare independent read-only gates with scope: []. The engine declares focused/full review choices

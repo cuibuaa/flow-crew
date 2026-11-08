@@ -14,10 +14,11 @@ and evidence. Pass only when all meet their acceptance lines. Disclose missing o
 never invent a threshold or waive a supplied one. Examples do not exclude equivalent property evidence
 unless the criterion explicitly requires that means. A wording/property conflict identifies its originating
 sentence; a confirmed compatibility requirement remains binding unless the brief itself allows that incompatibility to be documented instead, in which case documenting it with its cause and evidence satisfies it. Reviewers say briefly in their reason what they did not examine and why.
-Independent reviewers must not durably modify the reviewed target or authoritative inputs; isolated temporary probes and declared evidence generation are allowed within admitted capabilities. Target repairs belong to an author.
+Independent reviewers must not durably modify the reviewed target or authoritative inputs; disposable probes use only the invocation's private $TMPDIR. Read-only gates (is_gate with scope: []) write no project files or declared outputs. Target repairs belong to an author.
 
 ## Run-directory safety
-Never write, move, delete, or otherwise modify any run directory other than this task's own run directory. This prohibition is absolute; read authorization never grants mutation authority.
+The FlowCrew run directory (<run>/…) is engine-owned. Its records, including stage_evidence/, the evidence ledger and state, are read-only to stages; writing those records voids the stage result.
+Never write, move, delete, or otherwise modify engine-owned records in any FlowCrew run directory. This prohibition is absolute; read authorization never grants mutation authority. Only exact output paths already assigned to this stage by its admitted artifact_contract.produces or brief retain write authority; output ownership never authorizes additional evidence files or engine-record writes.
 By default, do not read, browse, or list other \`.fc/runs/\` directories. Explicit brief authorization allows a bounded set as read-only evidence and governs default read restrictions for that evidence only; it grants no permission to modify those runs.`;
 
 /** Raw roles and base-loaded roles share the same policy, including when _base.md is absent. */
@@ -63,7 +64,7 @@ export function appendPlannerAdmissionContract(
     ? terminalPaths.map(({ status, path }) => `- ${status}: ${path} — one final ordinary producer; ordered writers and repairs may share its scope`).join('\n')
     : '- none declared';
   return `${prompt}\n\n# Engine admission contract for this proposal (pre-submit)\n${rows}\n`
-    + `Put compiler output and caches in $TMPDIR; project scope covers source edits. Scratch is retired at run termination. Declare durable run products in artifact_contract.produces, copy final products and evidence from scratch to those paths before finishing, and cite them in the result. `
+    + `Put compiler output and caches in $TMPDIR; project scope covers source edits. Scratch is retired at run termination. Declare required deliverables in artifact_contract.produces at paths their stage owns under its admitted write contract. Put evidence in the structured result. `
     + `Paths under an external run store (for example .fc/runs/) are not project outputs and cannot be made reachable by declaring project scope.`;
 }
 

@@ -13,7 +13,9 @@ Explain test changes and preserve brief-required coverage and honest expectation
 
 ## Result and evidence
 Return the scheduler's schema-validated final result. The engine publishes run records and the terminal
-summary; write terminal deliverables at declared paths and any supporting documents at admitted evidence paths.
+summary; write deliverables only at brief-declared output paths and owned artifact_contract.produces paths.
+Put evidence needed by later stages or the report in the structured result: commands run, exit codes,
+short excerpts and file:line references. Do not create additional evidence files.
 Stages consume the structured evidence ledger and the current diff; provider session history and author transcripts are not handoff inputs.
 
 ## Retry context
@@ -21,5 +23,6 @@ RETRY (attempt N) continues current artifacts using the ledger and diff. Unknown
 RETRY FIX (attempt N) supplies the rejecting gate's structured verdict, the ledger and repair diff.
 
 ## Safety
-- Never modify files outside the project directory except at explicitly authorized task-local run paths and the invocation's private $TMPDIR for ephemeral evidence. All other external paths remain read-only unless the task explicitly grants a narrower write target.
+- Write only within the stage's admitted write scope: the project worktree, brief-declared outputs and artifact_contract.produces paths owned by this stage, and the invocation's private $TMPDIR for disposable probes. All other paths are read-only.
+- The FlowCrew run directory (<run>/…) is engine-owned. Its records, including stage_evidence/, the evidence ledger and state, are read-only to stages; writing those records voids the stage result.
 - Never read or expose secrets (.env, credentials, API keys). Never open, copy, hash or print auth.json, credentials.json or installation_id.

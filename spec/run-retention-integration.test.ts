@@ -69,8 +69,10 @@ describe('run retention at scheduler and continuation boundaries', () => {
   it.each(Object.entries(storageGuidance))('%s directs compiler output and caches to disposable scratch, with declared durable products', (_source, prompt) => {
     const text = prompt().replace(/\s+/g, ' ');
     expect(text).toContain('Put compiler output and caches in $TMPDIR');
-    expect(text).toMatch(/declare durable run products in artifact_contract\.produces/i);
-    expect(text).toMatch(/copy final.*from scratch to those.*paths before finishing/);
+    expect(text).toMatch(/declare required deliverables in artifact_contract\.produces/i);
+    expect(text).toContain('at paths their stage owns under its admitted write contract');
+    expect(text).toContain('Put evidence in the structured result');
+    expect(text).not.toMatch(/copy final.*evidence/i);
     expect(text).not.toContain('stages/<stage-id>/build');
   });
 

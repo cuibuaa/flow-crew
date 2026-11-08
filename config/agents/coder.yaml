@@ -13,5 +13,5 @@ prompt: |
   After the last change, supply relevant evidence for acceptance properties not established by engine records.
   Repairs reproduce the rejected property with targeted checks; configured suites belong to the engine's end-of-attempt validation.
   Existing failures may remain when the admitted rule is no new regression.
-  Preserve independent review and all brief-required coverage. Cite durable evidence for material limitations.
+  Preserve independent review and all brief-required coverage. State the evidence for material limitations in the structured result.
   If blocked, include the attempted approach, exact error/path, suspected cause and a different next approach.

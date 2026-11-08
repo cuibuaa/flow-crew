@@ -6,11 +6,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { HANDOFF_SCHEMA, parseStageRecord } from '../src/handoff.js';
 import { renderPlanInterface } from '../src/plan-interface.js';
 import { generationCompatibleSchema } from '../src/reality-gate/checks/json-schema-match.js';
-import { parseAgent } from '../src/scheduler/sched_admission/configuration.js';
+import { StageConfigSchema, parseAgent } from '../src/scheduler/sched_admission/configuration.js';
 import { applyBasePrompt } from '../src/scheduler/sched_admission/dispatch.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 import { runStage } from '../src/worker.js';
+import { appendProjectWriteContext } from '../src/scheduler/sched_policy/prompt-contracts.js';
 
 const agents = resolve(import.meta.dirname, '..', 'config', 'agents');
 const base = readFileSync(join(agents, '_base.md'), 'utf8');
@@ -40,7 +41,7 @@ describe('author results and reports carry only what the brief and readers need'
       .toEqual({ status: 'delivered', summary: 'Done.', caveats: [], remaining_work: [] });
   });
 
-  it('asks authors for one citable final test log instead of raw evidence sets', () => {
+  it('uses engine records without requesting extra evidence files', () => {
     const coder = loaded('coder');
     expect(coder).toContain('The engine records changed-file hashes, command exits and configured validation in the evidence ledger');
     expect(coder).not.toContain('raw evidence');
@@ -52,7 +53,7 @@ describe('a passing verdict is the record', () => {
     const qa = loaded('qa');
     expect(qa).toContain('Return the scheduler\'s typed verdict with reproducible evidence references; beyond declared outputs, a passing verdict is the whole record');
     expect(qa).toContain('A rejection includes concrete repairable findings and whether repair is possible');
-    expect(base.replace(/\s+/g, ' ')).toContain('any supporting documents at admitted evidence paths');
+    expect(base.replace(/\s+/g, ' ')).toContain('Put evidence needed by later stages or the report in the structured result');
   });
 
   it('no longer nudges planners toward evidence or handoff documents', () => {
@@ -73,7 +74,7 @@ describe('engine-held facts and boundaries', () => {
   it('keeps other run directories closed and unwritable', () => {
     const coder = loaded('coder');
     expect(coder).toContain('By default, do not read, browse, or list other `.fc/runs/` directories.');
-    expect(coder).toContain('Never write, move, delete, or otherwise modify any run directory other than this task\'s own run directory. This prohibition is absolute');
+    expect(coder).toContain('Never write, move, delete, or otherwise modify engine-owned records in any FlowCrew run directory. This prohibition is absolute');
   });
 });
 
@@ -86,6 +87,37 @@ describe('stage result contract', () => {
     ({ runId, runDirPath: directory } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']));
   });
   afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
+
+  it.each([
+    { roleName: 'coder', isGate: false, scope: ['src/'] },
+    { roleName: 'qa', isGate: true, scope: [] },
+  ])('assembled $roleName prompt names write boundaries and carries evidence in the result', async ({ roleName, isGate, scope }) => {
+    const stage = StageConfigSchema.parse({ id: 'work', role: roleName, is_gate: isGate, scope });
+    const role = applyBasePrompt(parseAgent(parse(readFileSync(join(agents, `${roleName}.yaml`), 'utf8'))), base);
+    // The shipped read-only gate has tools, so it must not be mistaken for tools: [].
+    expect(role.tools).toEqual(['default']);
+    let assembled = '';
+    await runStage({ async run(prompt, resolvedRole) {
+      assembled = `${resolvedRole.prompt}\n\n${prompt}`;
+      return { output: 'Prompt captured without executing a provider.', exitCode: 1, duration_ms: 1 };
+    } }, {
+      stageId: stage.id, projectDir: project, runDir: directory, runId, role, isGate,
+      dependsOn: [], promptTemplate: appendProjectWriteContext('Perform assigned work.', stage),
+      timeout_ms: 10000, retries: 0, outputSchema: HANDOFF_SCHEMA,
+      artifactContract: { version: 1, produces: [], reads: [], groups: [] },
+    });
+    const text = assembled.replace(/\s+/g, ' ');
+    expect(text).toContain('The FlowCrew run directory (<run>/…) is engine-owned. Its records, including stage_evidence/, the evidence ledger and state, are read-only to stages; writing those records voids the stage result.');
+    expect(text).toContain('brief-declared outputs and artifact_contract.produces paths owned by this stage');
+    expect(text).toContain('Only exact output paths already assigned to this stage by its admitted artifact_contract.produces or brief retain write authority');
+    expect(text).toContain('output ownership never authorizes additional evidence files or engine-record writes');
+    expect(text).toContain("invocation's private $TMPDIR for disposable probes");
+    expect(text).toContain('commands run, exit codes, short excerpts and file:line references');
+    expect(text).toContain('Do not create additional evidence files');
+    expect(text).not.toMatch(/Cite durable evidence|admitted evidence paths|copy final.*evidence.*from scratch/i);
+    expect(text).not.toContain('explicitly authorized task-local run paths');
+    if (isGate) expect(text).toContain('Read-only gates (is_gate with scope: []) write no project files or declared outputs');
+  });
 
   it('asks for declared deliverables, not additional evidence, while evidence references stay reproducible', async () => {
     let seen = '';

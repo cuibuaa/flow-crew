@@ -13,20 +13,20 @@ const prompt = (role: string, withBase = true): string => {
 };
 
 describe('agent run-directory safety contract', () => {
-  it('keeps the external write boundary while allowing authorized run records and invocation-private evidence', () => {
+  it('limits writes to owned outputs, admitted project work and invocation-private probes', () => {
     const safety = prompt('coder');
 
-    expect(safety).toMatch(/Never modify files outside the project directory except/i);
-    expect(safety).toMatch(/explicitly authorized task-local run paths/i);
-    expect(safety).toContain("invocation's private $TMPDIR for ephemeral evidence");
-    expect(safety).toMatch(/All other external paths remain read-only/i);
+    expect(safety).toContain("Write only within the stage's admitted write scope: the project worktree");
+    expect(safety).toContain('brief-declared outputs and artifact_contract.produces paths owned by this stage');
+    expect(safety).toContain("invocation's private $TMPDIR for disposable probes");
+    expect(safety).toContain('All other paths are read-only');
   });
 
   it.each([false, true])('keeps run mutation absolutely prohibited with base=%s', (withBase) => {
     const safety = prompt('coder', withBase);
 
     expect(safety).toMatch(
-      /never write, move, delete, or otherwise modify any run directory other than this task's own run directory/i,
+      /never write, move, delete, or otherwise modify engine-owned records in any FlowCrew run directory/i,
     );
     expect(safety).toMatch(/this prohibition is absolute/i);
     expect(safety).toMatch(/read authorization never grants mutation authority/i);
@@ -60,7 +60,7 @@ describe('agent run-directory safety contract', () => {
     expect(base).toContain('Necessary project-local dependency setup is allowed within admitted capabilities');
     expect(base).toContain('respect lockfiles');
     expect(base).toContain('Global or external installation must be within the brief’s existing authority');
-    expect(base).toContain('write terminal deliverables at declared paths and any supporting documents at admitted evidence paths');
+    expect(base).toContain('write deliverables only at brief-declared output paths and owned artifact_contract.produces paths');
   });
 });
 
@@ -96,7 +96,7 @@ describe('shipped role outcome contracts', () => {
   it('preserves independent review inputs while allowing isolated probes and contextual evidence', () => {
     for (const role of ['qa', 'doc_reviewer', 'paper_reviewer', 'ai_detector']) {
       expect(prompt(role)).toContain('must not durably modify the reviewed target or authoritative inputs');
-      expect(prompt(role)).toContain('isolated temporary probes and declared evidence generation are allowed within admitted capabilities');
+      expect(prompt(role)).toContain('disposable probes use only the invocation\'s private $TMPDIR');
       expect(prompt(role)).toContain('Target repairs belong to an author');
     }
     expect(prompt('ai_detector')).toContain('cited sources, comparator papers and experiment records within read authorization');
