@@ -1,7 +1,6 @@
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import * as childProcess from 'node:child_process';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
 import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
@@ -23,7 +22,16 @@ import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
-vi.mock('node:child_process', async importOriginal => ({ ...await importOriginal<typeof import('node:child_process')>() }));
+type ExecFileSync = typeof import('node:child_process').execFileSync;
+// Lets one case replace git's execFileSync without importing node:child_process in this spec (spec purity).
+const gitOverride = vi.hoisted(() => ({ impl: undefined as undefined | ((original: ExecFileSync, command: string, args: string[], options: object) => unknown) }));
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const execFileSync = ((command: string, args: string[], options: object) => gitOverride.impl
+    ? gitOverride.impl(actual.execFileSync, command, args, options)
+    : actual.execFileSync(command, args, options as never)) as ExecFileSync;
+  return { ...actual, execFileSync };
+});
 
 const CODEX_LIMIT = 1_048_576;
 const agents = join(import.meta.dirname, '../config/agents');
@@ -69,7 +77,7 @@ beforeEach(() => {
   git('init', '-q');
   commitFile('src/app.ts', 'export const greeting = "hello";\n');
 });
-afterEach(() => { setFcGlobalDir(prior); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { gitOverride.impl = undefined; setFcGlobalDir(prior); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
 describe('the review decision gets the whole diff or none of it', () => {
   it('declares the codex limit with its reason in configuration', () => {
@@ -152,11 +160,10 @@ describe('the review decision gets the whole diff or none of it', () => {
   ])('an incomplete %s read cannot pass as complete even with a huge declared limit (%j)', async (piece, failure) => {
     writeFileSync(join(project, 'new.txt'), 'untracked');
     const created = createRun(project, 'fixture', 'name: fixture', ['assess']);
-    const original = childProcess.execFileSync;
-    vi.spyOn(childProcess, 'execFileSync').mockImplementation(((command: string, args: string[], options: object) => {
+    gitOverride.impl = (original, command, args, options) => {
       if (command === 'git' && (piece === 'paths' ? args[0] === 'ls-files' : piece === 'untracked' ? args.includes('--no-index') : args.includes('--no-textconv') && !args.includes('--no-index'))) throw failure;
-      return original(command, args, options);
-    }) as typeof childProcess.execFileSync);
+      return original(command, args, options as never);
+    };
     const input = decisionInput(stage, project, created.runDirPath, readRunState(project, created.runId), 100_000_000);
     expect(input.adapter).toBeDefined();
     expect(input.user).not.toContain('partial');
