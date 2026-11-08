@@ -146,6 +146,8 @@ describe('the review decision gets the whole diff or none of it', () => {
     ['untracked', { code: 'ENOBUFS', status: 1, stdout: 'partial' }],
     ['untracked', { code: 'ETIMEDOUT', signal: 'SIGTERM', status: null, stdout: 'partial' }],
     ['untracked', { status: 2, stdout: 'partial' }],
+    ['untracked', { status: 1, stdout: '', stderr: "Could not access 'missing'" }],
+    ['untracked', { status: 1, stdout: 'partial', stderr: 'error: read failed' }],
     ['paths', { code: 'ETIMEDOUT', stdout: 'partial' }],
   ])('an incomplete %s read cannot pass as complete even with a huge declared limit (%j)', async (piece, failure) => {
     writeFileSync(join(project, 'new.txt'), 'untracked');

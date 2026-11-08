@@ -35,11 +35,13 @@ export function reviewFacts(projectDir: string, directory: string, state: StoreS
     diff = git(projectDir, ['diff', '--no-ext-diff', '--no-textconv', base, '--']);
     for (const file of untracked) {
       if (escapedLength(diff) + counts().nonDiffChars > room) break;
-      // Git no-index exits 1 for a complete added-file diff. Every other failure is unavailable.
+      // Git no-index exits 1 for a complete added-file diff, with a header on stdout and nothing on stderr.
+      // It also exits 1 when it cannot read the path (empty stdout, a stderr message): that is unavailable.
       try { diff += git(projectDir, ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', '/dev/null', file]); }
       catch (error) {
-        const failure = error as { status?: number; code?: string; signal?: string; stdout?: string };
-        if (failure.status !== 1 || failure.code || failure.signal || typeof failure.stdout !== 'string') throw error;
+        const failure = error as { status?: number; code?: string; signal?: string; stdout?: string; stderr?: string };
+        if (failure.status !== 1 || failure.code || failure.signal || typeof failure.stdout !== 'string'
+          || failure.stdout.length === 0 || (failure.stderr ?? '').length > 0) throw error;
         diff += failure.stdout;
       }
     }
