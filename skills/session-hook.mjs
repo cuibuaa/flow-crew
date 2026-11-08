@@ -1,6 +1,6 @@
 // FlowCrew session integration. Installed from this template; no user paths.
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -44,8 +44,8 @@ if (settings.frontend === 'claude' && !statusline) {
     const config = JSON.parse(readFileSync(settings.wakeConfigPath, 'utf8'));
     const installed = ['Stop', 'SessionStart'].every(event => (config.hooks?.[event] || []).some(group => isDeepStrictEqual(group, settings.wakeDefinition)));
     if (config.disableAllHooks === true || !installed) wakeUnavailable = true;
-    if (wakeUnavailable) notices.push(`FlowCrew wake coverage unavailable for session ${session}: the installed async wake hook is disabled or missing.`);
-  } catch (error) { wakeUnavailable = true; notices.push(`FlowCrew wake coverage unavailable for session ${session}: ${error.message}.`); }
+    if (wakeUnavailable) notices.push(`FlowCrew wake coverage unavailable (hook_disabled) for session ${session}: the installed async wake hook is disabled or missing.`);
+  } catch (error) { wakeUnavailable = true; notices.push(`FlowCrew wake coverage unavailable (hook_disabled) for session ${session}: ${error.message}.`); }
   if (wake && notices.length) { process.stderr.write(`${notices.join('\n')}\n`); process.exit(0); }
 }
 const result = spawnSync(process.execPath, [settings.cli, 'session-push',
@@ -59,6 +59,16 @@ if (statusline) {
   const ran = result.status === 0 || (wake && result.status === 2 && !result.error);
   if (!ran) notices.push(`FlowCrew ${wake ? 'wake' : 'hook'} unavailable for ${settings.frontend} session ${session}: ${result.error?.message || result.stderr || `command exit ${result.status}`}. Session state cannot be checked; inspect the push service.`);
   if (wake) {
+    // A wake CLI that crashed or hung registered nothing; leave the same fact the
+    // CLI leaves, so Stop does not ask the model to renew what cannot be renewed.
+    // Own tmp+rename: the CLI is what failed, and the shim imports nothing from dist.
+    if (!ran) try {
+      const dir = join(process.env.FC_HOME || join(homedir(), '.fc'), 'session-push', 'wake-unavailable');
+      const file = join(dir, `${createHash('sha256').update(session).digest('hex')}.json`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(`${file}.tmp.${process.pid}`, `${JSON.stringify({ reason: 'wake_cli_failed', at: new Date().toISOString() })}\n`, { mode: 0o600 });
+      renameSync(`${file}.tmp.${process.pid}`, file);
+    } catch { /* the operator notice below is all that can be said */ }
     // asyncRewake: stderr of exit 2 is the model's prompt; of exit 0, the operator's.
     process.stderr.write(ran ? result.stderr : `${notices.join('\n')}\n`);
     process.exitCode = ran ? result.status : 0;

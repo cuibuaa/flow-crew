@@ -8,9 +8,11 @@ import { createTaskEntry } from '../src/fc-tasks.js';
 import { TaskRegistry } from '../src/task-registry.js';
 import { createServer } from 'node:net';
 import { SessionPush } from '../src/session-push.js';
-import { hasClaudeWakeWaiter } from '../src/session-wake.js';
+import { hasClaudeWakeWaiter, sessionWaiterPath, wakeUnavailablePath } from '../src/session-wake.js';
+import { processStartToken } from '../src/run-lock.js';
+import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { processIsAlive } from '../src/process-liveness.js';
+import { linuxProcessStartTimeTicks, processIsAlive } from '../src/process-liveness.js';
 import { fakeCodexHookRequest } from './test-support/fake-codex-hooks.mjs';
 
 const packageRoot = join(import.meta.dirname, '..');
@@ -400,11 +402,110 @@ describe('installer-owned front-end integration', () => {
     expect(task.id).toBeGreaterThan(0);
     const hook = join(root, 'hooks', 'flowcrew-session.mjs');
     const input = JSON.stringify({ session_id: 'own-session' });
-    expect(command(process.execPath, [hook, 'Wake'], f.env, input).status).toBe(0);
+    const wake = command(process.execPath, [hook, 'Wake'], f.env, input);
+    expect(wake.status).toBe(0);
+    expect(wake.stderr).toContain('wake requires');
     const warning = JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, input).stdout);
-    expect(warning).toEqual({ systemMessage: expect.stringContaining('wake requires') });
+    expect(warning).toEqual({ systemMessage: expect.stringContaining('unsupported_version') });
     // Shown again on each Stop while the condition lasts, still without a decision or reason.
     expect(JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, input).stdout)).toEqual(warning);
+  });
+
+  describe('wake coverage that cannot be registered', () => {
+    // Faults are injected into the wake CLI only (never the Stop CLI), by a preload the generated shim passes on.
+    const preload = [
+      "import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';",
+      "const kind = process.env.FIXTURE_FAIL;",
+      "if (/cli\\.js$/u.test(process.argv[1] || '')) {",
+      "  const deny = () => Object.assign(new Error('fixture fault'), { code: 'EACCES' });",
+      "  if (kind === 'crash') process.exit(7);",
+      "  const read = fs.readFileSync, mkdir = fs.mkdirSync, link = fs.linkSync;",
+      "  if (kind === 'identity') fs.readFileSync = function(path, ...args) { if (String(path).endsWith('/boot_id')) throw deny(); return read.call(this, path, ...args); };",
+      "  if (kind === 'register') fs.mkdirSync = function(path, ...args) { if (String(path).endsWith('/waiters')) throw deny(); return mkdir.call(this, path, ...args); };",
+      "  if (kind === 'lock') fs.linkSync = function(from, to, ...args) { if (String(to).endsWith('tasks.lock')) throw deny(); return link.call(this, from, to, ...args); };",
+      "  syncBuiltinESMExports();",
+      "}",
+    ].join('\n');
+    const setup = () => {
+      const f = fixture();
+      const root = join(f.home, '.claude');
+      expect(integrate('install', 'claude', root, f.env).status).toBe(0);
+      new TaskRegistry({ baseDir: f.env.FC_HOME }).create({ projectDir: f.project, status: 'running', launcher: {
+        frontend: 'claude', sessionId: 'own-session', cwd: f.project, ledgerRoot: join(f.root, 'ledger'),
+      } });
+      const file = join(f.root, 'fail-preload.mjs');
+      writeFileSync(file, preload);
+      const push = join(f.env.FC_HOME, 'session-push');
+      return { f, root, push, hook: join(root, 'hooks', 'flowcrew-session.mjs'), input: JSON.stringify({ session_id: 'own-session' }),
+        failing: (kind: string) => ({ ...f.env, NODE_OPTIONS: `--import ${pathToFileURL(file).href}`, FIXTURE_FAIL: kind }) };
+    };
+    const claude = (f: ReturnType<typeof fixture>, version: string) => writeFileSync(join(f.bin, 'claude'), `#!${process.execPath}\nconsole.log(${JSON.stringify(version)});\n`);
+    const cases: { code: string; kind: string; arrange?: (s: ReturnType<typeof setup>) => { heal: () => void } }[] = [
+      { code: 'unsupported_version', kind: 'none', arrange: s => { claude(s.f, '2.1.287 (Claude Code)'); return { heal: () => claude(s.f, '2.1.308 (Claude Code)') }; } },
+      { code: 'identity_unavailable', kind: 'identity' },
+      { code: 'registration_failed', kind: 'register' },
+      { code: 'lock_unavailable', kind: 'lock' },
+      { code: 'wake_cli_failed', kind: 'crash' },
+      { code: 'owner_unverifiable', kind: 'none', arrange: s => {
+        // A live lease owner whose host is gone: neither stale nor a verifiable waiter.
+        const owner = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+        const gone = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+        const start = processStartToken(owner.pid!);
+        mkdirSync(join(s.push, 'waiters'), { recursive: true });
+        const path = sessionWaiterPath(s.push, 'own-session');
+        writeFileSync(path, JSON.stringify({ pid: owner.pid, processStartTime: linuxProcessStartTimeTicks(owner.pid!), token: 'fixture-owner', session: 'own-session', start,
+          host: Number(gone.stdout), hostStart: start, expiresAt: Date.now() + 3_600_000, bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() }));
+        return { heal: () => { owner.kill('SIGKILL'); rmSync(path); } };
+      } },
+    ];
+    it.each(cases.filter(c => process.platform === 'linux' || !['identity_unavailable', 'owner_unverifiable'].includes(c.code)))('a $code wake never makes three Stops block, names the code each time, and a later registration restores renewal', async ({ code, kind, arrange }) => {
+      const s = setup();
+      const spawned: ReturnType<typeof spawn>[] = [];
+      try {
+        const armed = arrange?.(s);
+        const wake = command(process.execPath, [s.hook, 'Wake'], kind === 'none' ? s.f.env : s.failing(kind), s.input);
+        expect(wake.status, wake.stderr).toBe(0);
+        expect(JSON.parse(readFileSync(wakeUnavailablePath(s.push, 'own-session'), 'utf8'))).toMatchObject({ reason: code });
+        for (let call = 0; call < 3; call++) {
+          const stop = command(process.execPath, [s.hook, 'Stop'], s.f.env, s.input);
+          expect(stop.status, stop.stderr).toBe(0);
+          const verdict = JSON.parse(stop.stdout);
+          expect(verdict.decision).toBeUndefined();
+          expect(verdict.reason).toBeUndefined();
+          expect(verdict.systemMessage).toContain(code);
+        }
+        armed?.heal();
+        // A healthy wake registers a waiter: the fact is deleted and the session is covered.
+        const healthy = spawn(process.execPath, [s.hook, 'Wake'], { env: s.f.env, stdio: ['pipe', 'ignore', 'ignore'] });
+        spawned.push(healthy);
+        healthy.stdin!.end(s.input);
+        for (let i = 0; i < 300 && !(existsSync(sessionWaiterPath(s.push, 'own-session')) && hasClaudeWakeWaiter(s.push, 'own-session') && !existsSync(wakeUnavailablePath(s.push, 'own-session'))); i++) await sleep(50);
+        expect(hasClaudeWakeWaiter(s.push, 'own-session')).toBe(true);
+        expect(existsSync(wakeUnavailablePath(s.push, 'own-session'))).toBe(false);
+        expect(command(process.execPath, [s.hook, 'Stop'], s.f.env, s.input).stdout).toBe('');
+        // Coverage gone with the fact gone: the gate asks for renewal again.
+        healthy.kill('SIGKILL');
+        process.kill(JSON.parse(readFileSync(sessionWaiterPath(s.push, 'own-session'), 'utf8')).pid, 'SIGKILL');
+        for (let i = 0; i < 100 && hasClaudeWakeWaiter(s.push, 'own-session'); i++) await sleep(50);
+        const renewal = JSON.parse(command(process.execPath, [s.hook, 'Stop'], s.f.env, s.input).stdout);
+        expect(renewal).toMatchObject({ decision: 'block', reason: expect.stringContaining('must be renewed') });
+      } finally { for (const child of spawned) child.kill('SIGKILL'); }
+    }, 90_000);
+
+    it('a disabled wake hook is named hook_disabled on three Stops without blocking, and enabling it restores renewal', () => {
+      const s = setup();
+      const configPath = join(s.root, 'settings.json');
+      const original = readFileSync(configPath, 'utf8');
+      const config = JSON.parse(original);
+      config.disableAllHooks = true;
+      writeFileSync(configPath, JSON.stringify(config));
+      for (let call = 0; call < 3; call++) {
+        const verdict = JSON.parse(command(process.execPath, [s.hook, 'Stop'], s.f.env, s.input).stdout);
+        expect(verdict).toEqual({ systemMessage: expect.stringContaining('hook_disabled') });
+      }
+      writeFileSync(configPath, original);
+      expect(JSON.parse(command(process.execPath, [s.hook, 'Stop'], s.f.env, s.input).stdout)).toMatchObject({ decision: 'block', reason: expect.stringContaining('must be renewed') });
+    }, 60_000);
   });
 
   it.each(['claude', 'codex'])('merges %s hooks idempotently, preserves adjacent hooks and restores the status line on uninstall', frontend => {

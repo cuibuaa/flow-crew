@@ -108,9 +108,14 @@ failure, an unreadable optional view, or a missing CLI reaches the operator alon
 occurs: in Stop's `systemMessage`, on stderr of a non-blocking exit, or on the status line. A
 failure that leaves the gate unknown never blocks the model and never exits 2. A recovered stale
 lock is recorded only in `infrastructure-recoveries.jsonl`. The waiter retries state reads while
-its lease is live. Coverage that cannot be registered (an unsupported Claude version, or a
-missing or disabled async definition, which the shim reports with `--wake-unavailable`) is
-checked afresh by each Stop and is not asked of the model, preventing empty-turn retry loops.
+its lease is live. When the wake path cannot register a waiter (unsupported Claude version, process
+identity, registration or lock failure, an unverifiable lease owner, a crashed or hung wake command)
+it leaves one small fact for the session, `session-push/wake-unavailable/<hash>.json`: a closed reason
+code and the time. It is overwritten by each failure and deleted when a waiter registers. While it
+exists Stop does not ask the model to renew coverage; it shows the reason code to the operator in
+`systemMessage` and the status line, and every Stop and SessionStart retries registration. An
+unreadable fact counts as present. A missing or disabled async definition (`hook_disabled`) is read
+live by the shim, which reports it with `--wake-unavailable`. Stop never probes the Claude version.
 Pending events always take priority. Check `flowcrew doctor` and repair the integration to
 restore automatic wake delivery.
 

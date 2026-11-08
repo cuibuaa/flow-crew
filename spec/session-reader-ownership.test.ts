@@ -2,13 +2,13 @@ import './test-support/policy-runtime.js';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, expect, it } from 'vitest';
 import { TaskRegistry, sessionTaskIndexPath } from '../src/task-registry.js';
 import { SessionPush } from '../src/session-push.js';
 import { sessionGate } from '../src/cli-session-push.js';
-import { hasClaudeWakeWaiter, sessionWaiterPath, waitForClaudeWake } from '../src/session-wake.js';
+import { hasClaudeWakeWaiter, sessionWaiterPath, waitForClaudeWake, wakeUnavailablePath } from '../src/session-wake.js';
 
 const roots: string[] = [];
 const children = new Set<ChildProcess>();
@@ -47,9 +47,9 @@ async function kill(child: ChildProcess) {
   await done;
   children.delete(child);
 }
-function hook(f: ReturnType<typeof fixture>) {
-  return spawnSync(process.execPath, [cli, 'session-push', 'hook', '--frontend', 'claude', '--event', 'Stop'], {
-    env: f.env, input: JSON.stringify({ session_id: 'reader-session' }), encoding: 'utf8', timeout: 15_000,
+function hook(f: ReturnType<typeof fixture>, env: NodeJS.ProcessEnv = f.env, frontend = 'claude', session = 'reader-session') {
+  return spawnSync(process.execPath, [cli, 'session-push', 'hook', '--frontend', frontend, '--event', 'Stop'], {
+    env, input: JSON.stringify({ session_id: session }), encoding: 'utf8', timeout: 15_000,
   });
 }
 
@@ -289,4 +289,91 @@ fs.renameSync = function(source, target) {
   push.enqueue(f.task, source);
   expect(push.pending('reader-session', 'claude')).toEqual([]);
   expect(JSON.parse(readFileSync(join(push.root, 'acks', event.eventId + '.json'), 'utf8')).eventId).toBe(event.eventId);
+});
+
+it('a healthy Stop with a live waiter spawns no child process; the counter does see the version probe', async () => {
+  const f = fixture();
+  const modules = ['task-registry', 'session-push', 'session-wake'].map(name => pathToFileURL(join(import.meta.dirname, `../dist/${name}.js`)).href);
+  const waiter = spawn(process.execPath, ['--input-type=module', '-e', `
+const { TaskRegistry } = await import(${JSON.stringify(modules[0])});
+const { SessionPush } = await import(${JSON.stringify(modules[1])});
+const { waitForClaudeWake } = await import(${JSON.stringify(modules[2])});
+await waitForClaudeWake(new SessionPush(new TaskRegistry({ baseDir: process.env.FC_HOME })), 'reader-session', {
+  lifetimeMs: 30_000, pollMs: 50, sleep: async ms => { process.stderr.write('fixture-ready\\n'); await new Promise(resolve => setTimeout(resolve, ms)); },
+});
+`], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  await ready(waiter);
+  const push = new SessionPush(f.registry);
+  expect(hasClaudeWakeWaiter(push.root, 'reader-session')).toBe(true);
+  const preload = join(f.root, 'count-spawns.mjs');
+  const spawns = join(f.root, 'spawns.log');
+  writeFileSync(preload, `import cp from 'node:child_process'; import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
+  const original = cp[name];
+  cp[name] = function(...args) { fs.appendFileSync(process.env.FIXTURE_SPAWNS, name + ' ' + String(args[0]) + '\\n'); return original.apply(this, args); };
+}
+syncBuiltinESMExports();`);
+  const env = { ...f.env, NODE_OPTIONS: `--import ${pathToFileURL(preload).href}`, FIXTURE_SPAWNS: spawns };
+  const stop = hook(f, env);
+  expect(stop.status, stop.stderr).toBe(0);
+  expect(stop.stdout).toBe('');
+  expect(existsSync(spawns)).toBe(false);
+  // Control: the same counter records the version probe the wake path (and doctor) still make.
+  spawnSync(process.execPath, [cli, 'session-push', 'wake-check'], { env: { ...env, PATH: dirname(process.execPath) }, encoding: 'utf8', timeout: 15_000 });
+  expect(readFileSync(spawns, 'utf8')).toContain('execFileSync claude');
+});
+
+it('a Stop in its registration wait shows no takeover text when a writer holds and then loses the registry lock', async () => {
+  const f = fixture();
+  const module = pathToFileURL(join(import.meta.dirname, '../dist/task-registry.js')).href;
+  // The wake registrant's own writer boundary: the lock is held between publications, so readers keep reading.
+  const writer = spawn(process.execPath, ['--input-type=module', '-e', `
+import { TaskRegistry } from ${JSON.stringify(module)};
+new TaskRegistry({ baseDir: process.env.FC_HOME }).withSessionWrite(() => { process.stderr.write('fixture-ready\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); });
+`], { env: f.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  await ready(writer);
+  expect(existsSync(f.registry.lockPath)).toBe(true);
+  const waiting = join(f.root, 'stop-waiting');
+  const preload = join(f.root, 'signal-wait.mjs');
+  writeFileSync(preload, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const stat = fs.statSync; let signalled = false;
+fs.statSync = function(path, ...args) {
+  if (!signalled && String(path).includes('/waiters/')) { signalled = true; fs.writeFileSync(process.env.FIXTURE_WAITING, 'x'); }
+  return stat.call(this, path, ...args);
+}; syncBuiltinESMExports();`);
+  const stop = spawn(process.execPath, ['--import', preload, cli, 'session-push', 'hook', '--frontend', 'claude', '--event', 'Stop'], {
+    env: { ...f.env, FIXTURE_WAITING: waiting }, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  children.add(stop);
+  let out = ''; let err = '';
+  stop.stdout!.on('data', bytes => { out += bytes; }); stop.stderr!.on('data', bytes => { err += bytes; });
+  const closed = new Promise(resolve => stop.once('close', resolve));
+  stop.stdin!.end(JSON.stringify({ session_id: 'reader-session' }));
+  for (let i = 0; i < 300 && !existsSync(waiting); i++) await new Promise(resolve => setTimeout(resolve, 50));
+  expect(existsSync(waiting), `stdout=${out} stderr=${err}`).toBe(true); // the Stop is now inside its 4 s registration wait
+  await kill(writer); // the writer loses the lock ...
+  expect(new TaskRegistry({ baseDir: f.fc, lockTimeoutMs: 0 }).create({ projectDir: f.root }).id).toBeGreaterThan(1); // ... and the next writer takes it over
+  await closed; children.delete(stop);
+  expect(readFileSync(join(f.fc, 'infrastructure-recoveries.jsonl'), 'utf8')).toContain('"component":"registry"');
+  const verdict = JSON.parse(out);
+  expect(verdict).toEqual({ decision: 'block', reason: expect.stringContaining('must be renewed') });
+  expect(`${out}${err}`).not.toMatch(/recover|stale|took over|takeover|infrastructure|tasks\.lock/iu);
+}, 30_000);
+
+it('a Codex pending event with an unreadable or failed display returns the event; raw error text reaches only the operator', () => {
+  const f = fixture();
+  const task = f.registry.create({ projectDir: f.root, status: 'running', launcher: {
+    frontend: 'codex', sessionId: 'codex-session', cwd: f.root, ledgerRoot: f.env.FC_TASKS_ROOT, socket: join(f.root, 'codex.sock'),
+  } });
+  const event = new SessionPush(f.registry).enqueue(task, { type: 'operator_wrap_up_required', runId: 'fixture-run', timestamp: new Date().toISOString() })!;
+  const display = join(f.fc, 'tasks', String(task.id), 'session-push.json');
+  for (const [content, operator] of [['{broken', 'display state unreadable'], [JSON.stringify({ error: 'RAW-DISPLAY-FAILURE-TEXT /secret/path' }), 'RAW-DISPLAY-FAILURE-TEXT']] as const) {
+    writeFileSync(display, content);
+    const result = hook(f, f.env, 'codex', 'codex-session');
+    expect(result.status, result.stderr).toBe(0);
+    const verdict = JSON.parse(result.stdout);
+    expect(verdict).toMatchObject({ decision: 'block', reason: expect.stringContaining(event.eventId), systemMessage: expect.stringContaining(operator) });
+    expect(verdict.reason).not.toMatch(/RAW-DISPLAY|secret|unreadable|JSON|position/u);
+    expect(result.stderr).toBe('');
+  }
 });

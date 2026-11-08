@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
-import { appendFileSync, mkdirSync, renameSync, unlinkSync } from './engine-fs.js';
+import { appendFileSync, atomicWrite, mkdirSync, renameSync, unlinkSync } from './engine-fs.js';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './run-lock.js';
@@ -25,6 +25,33 @@ export function claudeWakeCapability(): { supported: boolean; detail: string } {
     const supported = supportsClaudeWakeVersion(version);
     return { supported, detail: `Claude ${version || '(unknown)'}; wake requires >= ${CLAUDE_WAKE_MIN_VERSION}${supported ? '' : '. Upgrade: claude update'}` };
   } catch { return { supported: false, detail: `Claude version unavailable; wake requires >= ${CLAUDE_WAKE_MIN_VERSION}. Install/upgrade Claude Code: claude update` }; }
+}
+
+/** One small fact per session: wake coverage could not be registered. Written
+ * only by the wake path, overwritten on each failure, deleted when a waiter
+ * registers. While it exists Stop does not ask the model to renew coverage;
+ * the next wake attempt (every Stop and SessionStart runs one) retires it. */
+export const WAKE_UNAVAILABLE_REASONS = ['unsupported_version', 'hook_disabled', 'identity_unavailable', 'registration_failed', 'lock_unavailable', 'owner_unverifiable', 'wake_cli_failed'] as const;
+export type WakeUnavailableReason = typeof WAKE_UNAVAILABLE_REASONS[number];
+export const wakeUnavailablePath = (root: string, session: string): string =>
+  join(root, 'wake-unavailable', `${createHash('sha256').update(session).digest('hex')}.json`);
+/** Undefined: no fact. Any file that cannot be read whole counts as present. */
+export function wakeUnavailable(root: string, session: string): string | undefined {
+  try {
+    const fact = JSON.parse(readFileSync(wakeUnavailablePath(root, session), 'utf8')) as { reason?: unknown; at?: unknown };
+    const reason = (WAKE_UNAVAILABLE_REASONS as readonly unknown[]).includes(fact.reason) ? fact.reason : 'unreadable';
+    return typeof fact.at === 'string' ? `${reason} since ${fact.at}` : `${reason}`;
+  } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : 'unreadable'; }
+}
+export function markWakeUnavailable(root: string, session: string, reason: WakeUnavailableReason): void {
+  const path = wakeUnavailablePath(root, session);
+  try {
+    mkdirSync(join(root, 'wake-unavailable'), { recursive: true });
+    atomicWrite(path, `${JSON.stringify({ reason, at: new Date().toISOString() })}\n`, { durability: 'replace-only', mode: 0o600 });
+  } catch { /* the caller reports the failure itself; an unwritable store cannot add another */ }
+}
+function clearWakeUnavailable(root: string, session: string): void {
+  try { unlinkSync(wakeUnavailablePath(root, session)); } catch { /* absent, or nothing to retire */ }
 }
 
 interface Waiter extends LockOwner {
@@ -65,16 +92,13 @@ export interface WakeOptions {
 /** Called only by the installed asyncRewake command. No model worker, socket
  * discovery, permission edits, or ACK inference. Exit 2 is Claude's wake API. */
 export async function waitForClaudeWake(push: SessionPush, session: string, options: WakeOptions = {}): Promise<{ code: 0 | 2; prompt?: string }> {
-  if (!/^[\w-]+$/u.test(session)) throw new Error('Invalid wake session id');
   const now = options.now ?? Date.now;
   const pause = options.sleep ?? sleep;
   const expiresAt = now() + (options.lifetimeMs ?? WAKE_LIFETIME_MS);
+  let failed: WakeUnavailableReason = 'identity_unavailable'; // what a throw during registration means for the fact
   const start = processStartToken(process.pid);
   const hostStart = processStartToken(process.ppid);
   const boot = bootId();
-  if (!start || !hostStart || (process.platform === 'linux' && !boot)) throw new Error('Wake process identity unavailable; coverage cannot be registered');
-  push.registerClaudeWake(session);
-  mkdirSync(join(push.root, 'waiters'), { recursive: true });
   const path = sessionWaiterPath(push.root, session);
   const token = randomUUID();
   const recovered = (owner: LockObservation, reason: string): void => {
@@ -93,7 +117,14 @@ export async function waitForClaudeWake(push: SessionPush, session: string, opti
   const removeDetached = (): void => { for (const file of detached.splice(0)) unlinkSync(file); };
   let acquired = false;
   try {
+    if (!/^[\w-]+$/u.test(session)) { failed = 'registration_failed'; throw new Error('Invalid wake session id'); }
+    if (!start || !hostStart || (process.platform === 'linux' && !boot)) throw new Error('Wake process identity unavailable; coverage cannot be registered');
+    failed = 'registration_failed';
+    push.registerClaudeWake(session);
+    mkdirSync(join(push.root, 'waiters'), { recursive: true });
+    failed = 'lock_unavailable';
     push.registry.withSessionWrite(() => {
+      failed = 'registration_failed';
       for (;;) {
         try {
           publishLockOwner(path, { ...lockOwnerIdentity(), token, session, start, host: process.ppid, hostStart, expiresAt, bootId: boot });
@@ -110,12 +141,16 @@ export async function waitForClaudeWake(push: SessionPush, session: string, opti
           }
           const reason = recoverStaleLock(current.observation, () => readWaiter(path)?.observation, detach);
           if (reason) { recovered(current.observation, reason); continue; }
-          if (!hasClaudeWakeWaiter(push.root, session, now())) throw new Error('Wake lease owner cannot be verified; coverage unavailable', { cause: error });
+          if (!hasClaudeWakeWaiter(push.root, session, now())) { failed = 'owner_unverifiable'; throw new Error('Wake lease owner cannot be verified; coverage unavailable', { cause: error }); }
           break; // an existing verified owner keeps its lease
         }
       }
     });
+  } catch (error) {
+    markWakeUnavailable(push.root, session, failed);
+    throw error;
   } finally { removeDetached(); }
+  clearWakeUnavailable(push.root, session); // a verified waiter now holds the slot
   if (!acquired) return { code: 0 };
   try {
     for (;;) {

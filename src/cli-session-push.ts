@@ -5,13 +5,14 @@ import { fcGlobalDir } from './store.js';
 import { isActiveTaskStatus, TaskRegistry } from './task-registry.js';
 import { defaultFcTasksRoot, readOpenTaskLedger, renderFcTasks } from './fc-tasks.js';
 import { SessionPush, estimateProgress, progressLine, renderPushEvent, PUSH_RETRY_MS, type LaunchTarget } from './session-push.js';
-import { claudeWakeCapability, hasClaudeWakeWaiter, waitForClaudeWake } from './session-wake.js';
+import { claudeWakeCapability, hasClaudeWakeWaiter, markWakeUnavailable, wakeUnavailable, waitForClaudeWake } from './session-wake.js';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-/** `wakeProblem` is asked only when coverage would have to be renewed: undefined
- * means it can be; a string means it cannot (non-empty: say so to the operator;
- * empty: already reported). The model is then never asked to renew it. */
-export function sessionGate(push: SessionPush, frontend: LaunchTarget['frontend'], session: string, wakeProblem: () => string | undefined = () => undefined): { decision?: 'block'; reason?: string; systemMessage?: string } {
+/** `unavailable` is asked only when coverage would have to be renewed: undefined
+ * means it can be; a string means the wake path recorded that it cannot
+ * (non-empty: say so to the operator; empty: the shim already did). The model
+ * is then never asked to renew it. */
+export function sessionGate(push: SessionPush, frontend: LaunchTarget['frontend'], session: string, unavailable: () => string | undefined = () => wakeUnavailable(push.root, session)): { decision?: 'block'; reason?: string; systemMessage?: string } {
   const pending = push.pending(session, frontend);
   const first = pending[0];
   if (first) {
@@ -20,7 +21,10 @@ export function sessionGate(push: SessionPush, frontend: LaunchTarget['frontend'
     if (frontend === 'codex') {
       try {
         const display = push.display(first.taskId);
-        if (!display.threadId) displayAdvice = `\nFlowCrew #${first.taskId} display thread is missing: ${display.error || 'creation pending'}. Create one standalone thread, then bind it with flowcrew session-push bind-display --task ${first.taskId} --thread <new-thread-id> --session ${session}.`;
+        if (!display.threadId) {
+          displayAdvice = `\nFlowCrew #${first.taskId} display thread is missing (display_thread_missing). Create one standalone thread, then bind it with flowcrew session-push bind-display --task ${first.taskId} --thread <new-thread-id> --session ${session}.`;
+          if (display.error) notice = `\nFlowCrew #${first.taskId} display creation error: ${display.error}`; // raw text is for the operator only
+        }
       } catch (error) { notice = `\nFlowCrew #${first.taskId} display state unreadable: ${error instanceof Error ? error.message : String(error)}`; } // for the operator; cannot hide the event
     }
     return { decision: 'block', systemMessage: renderPushEvent(first, push.registry.baseDir).human + notice,
@@ -31,15 +35,17 @@ export function sessionGate(push: SessionPush, frontend: LaunchTarget['frontend'
   if (frontend === 'codex') return {};
   const open = push.openTasks(frontend, session);
   if (!open.length || hasClaudeWakeWaiter(push.root, session)) return {};
-  const problem = wakeProblem();
-  if (problem !== undefined) return problem ? { systemMessage: problem } : {};
+  const problem = unavailable();
+  if (problem !== undefined) return problem ? { systemMessage: `FlowCrew wake coverage unavailable for session ${session} (${problem}); the next Stop retries registration and this turn is not blocked.` } : {};
   return { decision: 'block', reason: `FlowCrew wake coverage must be renewed for this session's open tasks ${open.map(task => `#${task.id}`).join(', ')}. End this turn normally to register the installed wake waiter; inspect the push service if coverage remains unavailable.` };
 }
 
 export function renderSessionProgress(push: SessionPush, session: string, now = Date.now(), frontend: LaunchTarget['frontend'] = 'claude'): { text: string; covered: boolean } {
   const tasks = push.sessionTasks(frontend, session);
   const rows = push.pending(session, frontend).map(event => renderPushEvent(event, push.registry.baseDir).human);
-  let covered = tasks.length > 0;
+  const wake = frontend === 'claude' ? wakeUnavailable(push.root, session) : undefined;
+  let covered = tasks.length > 0 && wake === undefined;
+  if (wake) rows.push(`⚠ FlowCrew wake coverage unavailable (${wake}); inspect flowcrew session-push wake-check`);
   for (const task of tasks) {
     const display = push.display(task.id);
     const fresh = display.refreshedAt !== undefined && now - display.refreshedAt < PUSH_RETRY_MS;
@@ -82,7 +88,7 @@ export async function cmdSessionPush(args: string[]): Promise<number> {
         if (!payload.session_id) throw new Error('Hook payload has no session identifier');
         callingSession = payload.session_id;
         const capability = claudeWakeCapability();
-        if (!capability.supported) { process.stderr.write(`${capability.detail}\n`); return EXIT_CODE.completed; }
+        if (!capability.supported) { markWakeUnavailable(push.root, payload.session_id, 'unsupported_version'); process.stderr.write(`${capability.detail}\n`); return EXIT_CODE.completed; }
         const result = await waitForClaudeWake(push, payload.session_id);
         if (result.prompt) process.stderr.write(`${result.prompt}\n`);
         return result.code;
@@ -122,21 +128,17 @@ export async function cmdSessionPush(args: string[]): Promise<number> {
         callingFrontend = frontend;
         // A resumed Claude session can have a new inbox path. Never scan or
         // guess a session from a caller's daemon environment.
-        const wakeProblem = (): string | undefined => {
-          if (parsed.flags.has('--wake-unavailable')) return '';
-          const { supported, detail } = claudeWakeCapability();
-          return supported ? undefined : detail;
-        };
+        const unavailable = (): string | undefined => parsed.flags.has('--wake-unavailable') ? '' : wakeUnavailable(push.root, session);
         const requestedEvent = payload.hook_event_name || payload.hookEventName || value('--event');
         if (requestedEvent === 'SessionStart') push.refreshSession(frontend, session, frontend === 'claude' ? process.env.CLAUDE_CODE_MESSAGING_SOCKET : undefined);
         const eventName = payload.hook_event_name || payload.hookEventName || value('--event');
         if (eventName === 'Stop' || eventName === 'stop') {
           // Claude starts synchronous and async Stop commands concurrently.
           // Allow registration to win that race; without it the old gate holds.
-          if (frontend === 'claude' && !push.pending(session, frontend).length && push.openTasks(frontend, session).length && wakeProblem() === undefined) {
-            for (let i = 0; i < 80 && !hasClaudeWakeWaiter(push.root, session); i++) await sleep(50);
+          if (frontend === 'claude' && !push.pending(session, frontend).length && push.openTasks(frontend, session).length && unavailable() === undefined) {
+            for (let i = 0; i < 80 && !hasClaudeWakeWaiter(push.root, session) && unavailable() === undefined; i++) await sleep(50);
           }
-          const verdict = sessionGate(push, frontend, session, wakeProblem);
+          const verdict = sessionGate(push, frontend, session, unavailable);
           if (verdict.decision || verdict.systemMessage) process.stdout.write(`${JSON.stringify(verdict)}\n`);
         }
         return EXIT_CODE.completed;

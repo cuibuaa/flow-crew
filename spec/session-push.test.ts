@@ -11,6 +11,7 @@ import { SessionPush, captureLauncher, estimateProgress, progressLine, PUSH_FALL
 import { codexRequest, queueCodex, sendClaude } from '../src/session-push-transport.js';
 import { TaskRegistry, hasLiveForegroundOwner } from '../src/task-registry.js';
 import { processStartToken } from '../src/run-lock.js';
+import { markWakeUnavailable, wakeUnavailable, wakeUnavailablePath } from '../src/session-wake.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
@@ -504,6 +505,26 @@ describe('durable delivery and business ACK', () => {
     expect(sessionGate(push, 'claude', launcher.sessionId).decision).toBe('block');
     push.acknowledge(push.pending()[0].eventId, launcher.sessionId);
     expect(sessionGate(push, 'claude', launcher.sessionId)).toEqual({});
+  });
+});
+
+describe('wake unavailable fact', () => {
+  it('stops the renewal block, is shown by the status line with covered false, a partial file counts as present, and a pending event still wins', () => {
+    const { registry, task, launcher } = fixture('claude');
+    const push = new SessionPush(registry);
+    expect(sessionGate(push, 'claude', launcher.sessionId).decision).toBe('block');
+    markWakeUnavailable(push.root, launcher.sessionId, 'registration_failed');
+    expect(sessionGate(push, 'claude', launcher.sessionId)).toEqual({ systemMessage: expect.stringContaining('registration_failed') });
+    expect(renderSessionProgress(push, launcher.sessionId)).toMatchObject({ text: expect.stringContaining('registration_failed'), covered: false });
+    writeFileSync(wakeUnavailablePath(push.root, launcher.sessionId), '{"reason":"regi');
+    expect(wakeUnavailable(push.root, launcher.sessionId)).toBe('unreadable');
+    expect(sessionGate(push, 'claude', launcher.sessionId)).toEqual({ systemMessage: expect.stringContaining('unreadable') });
+    writeFileSync(wakeUnavailablePath(push.root, launcher.sessionId), JSON.stringify({ reason: 'raw exception text', at: 'x' }));
+    expect(wakeUnavailable(push.root, launcher.sessionId)).toBe('unreadable since x'); // only the closed codes are ever echoed
+    const event = push.enqueue(task, source)!;
+    expect(sessionGate(push, 'claude', launcher.sessionId)).toMatchObject({ decision: 'block', reason: expect.stringContaining(event.eventId) });
+    rmSync(wakeUnavailablePath(push.root, launcher.sessionId));
+    expect(wakeUnavailable(push.root, launcher.sessionId)).toBeUndefined();
   });
 });
 
