@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWrite, mkdirSync, unlinkSync } from '../../engine-fs.js';
 import { emptyDecisionGraph, validateDecision, type DecisionRecord } from '../../decision-graph.js';
-import { reviewFacts } from '../../decision-context.js';
+import { changedPaths } from '../../decision-context.js';
 import { readRunEvents, recordRunEvent } from '../../run-events.js';
 import { RUN_STATUS, STAGE_STATUS, readStageOutput, rependStageStatus, writeStageStatus, writeRunState, isPendingStageStatus, type StoreState } from '../../store.js';
 import { loadDefaults, type StageConfig, type WorkflowConfig } from '../sched_admission/configuration.js';
@@ -114,7 +114,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     } else if (source.retry_to?.length && !source.decision) {
       choice = validateDecision(stage, JSON.stringify({ successor: declaration.default, reason: 'Completed repair returns to its rejecting gate.' }));
     } else {
-      choice = validateDecision(stage, readStageOutput(project, run, source.id), source.decision?.kind === 'review' ? reviewFacts(project, directory, state).files : []);
+      choice = validateDecision(stage, readStageOutput(project, run, source.id), source.decision?.kind === 'review' ? changedPaths(project, state) : []);
     }
     if (source.decision?.kind === 'shape') {
       const raw = JSON.parse(readStageOutput(project, run, source.id));

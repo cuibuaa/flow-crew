@@ -27,6 +27,7 @@ const EngineDefaultsSchema = z.object({
   model: nonempty,
   reasoning_effort: nonempty,
   adapter: nonempty,
+  adapter_input_limit_chars: z.object({ codex: positive, claude: positive }),
   session_reuse: z.boolean(),
 });
 export type EngineDefaults = z.infer<typeof EngineDefaultsSchema>;
@@ -103,6 +104,12 @@ export function loadEngineDefaults(): EngineDefaults {
   _cache = parsed;
   _cacheMtime = mtime;
   return parsed;
+}
+
+/** Declared prompt size limit of an adapter; an undeclared one gets the smallest declared limit. */
+export function adapterInputLimit(adapter?: { sessionKind?: string }): number {
+  const limits = loadEngineDefaults().adapter_input_limit_chars;
+  return limits[adapter?.sessionKind as keyof typeof limits] ?? Math.min(...Object.values(limits));
 }
 
 /** Per-process measurement override; only literal 0/1 are accepted. */

@@ -62,7 +62,7 @@ export function providerFailureFromEvent(provider: ProviderFailure['provider'], 
   const error = event.error && typeof event.error === 'object' ? event.error as Record<string, unknown> : undefined;
   return providerFailureFromDiagnostic({ provider, eventType: type as ProviderTerminalDiagnostic['eventType'],
     message: nativeDiagnostic(event) ?? String(event.subtype ?? type),
-    code: error?.code ?? error?.status_code ?? error?.status ?? error?.type ?? event.code ?? event.status_code ?? event.status });
+    code: (error?.data as Record<string, unknown> | undefined)?.input_error_code ?? error?.code ?? error?.status_code ?? error?.status ?? error?.type ?? event.code ?? event.status_code ?? event.status });
 }
 
 /** Keep the observed exit beside its provider-owned cause. */

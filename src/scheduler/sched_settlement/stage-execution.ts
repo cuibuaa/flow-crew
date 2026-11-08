@@ -84,7 +84,7 @@ export function decideStageRetry(
 ): 'engine_void' | 'retry' | 'stop' {
   if (result.engineVoid || result.terminationCause === 'engine_void') return 'engine_void';
   if (result.exitCode === 0 || ['stage_abort', 'cancelled', 'host_restart'].includes(result.terminationCause ?? '')) return 'stop';
-  if (result.providerFailure?.kind === 'authentication') return 'stop';
+  if (result.providerFailure?.kind === 'authentication' || result.providerFailure?.kind === 'input_too_large') return 'stop';
   const limit = result.providerFailure?.kind === 'transient' || result.terminationCause === 'attempt_timeout' ? technicalLimit : failureLimit;
   return retries < limit ? 'retry' : 'stop';
 }
@@ -209,7 +209,7 @@ export async function executeSingleStage(
     }
     if (result.providerFailure && result.providerFailure.kind !== 'refusal') {
       const detail = `Upstream adapter failure exhausted technical recovery for ${stage.id}: ${result.providerFailure?.kind}`;
-      concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: 'adapter_failure', detail, pendingStageNote: detail, eventFields: () => ({
+      concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: result.providerFailure.kind === 'input_too_large' ? 'input_too_large' : 'adapter_failure', detail, pendingStageNote: detail, eventFields: () => ({
         iteration: state.currentIteration ?? 1, stageId: stage.id, detail, source: 'scheduler', level: 'warning',
       }) });
       return;

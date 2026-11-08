@@ -163,7 +163,7 @@ export async function executeReadyBatch(
     }
     if (exhaustedAdapterFailure) {
       const detail = `Upstream adapter failure exhausted technical recovery for ${exhaustedAdapterFailure.stageId}: ${exhaustedAdapterFailure.kind}`;
-      state = await concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: 'adapter_failure', detail, eventFields: () => ({
+      state = await concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: exhaustedAdapterFailure.kind === 'input_too_large' ? 'input_too_large' : 'adapter_failure', detail, eventFields: () => ({
         iteration: state.currentIteration ?? 1,
         stageId: exhaustedAdapterFailure.stageId,
         detail,

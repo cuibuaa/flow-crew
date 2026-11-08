@@ -1,6 +1,7 @@
 import { unlinkSync } from '../../engine-fs.js';
 import { decisionSchema } from '../../decision-graph.js';
 import { decisionInput, focusedReviewInput } from '../../decision-context.js';
+import { adapterInputLimit } from '../../config.js';
 import { confirmedRepairFindings, buildGateFixCorrectionContract, gateArchiveCoordinate, appendGateEvidenceInstruction } from '../sched_settlement/gate-archives.js';
 // Boundary: Prepare and execute one ordinary stage with admitted prompt/context, shared attempt budgets, session rules and a supplied live write guard.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
@@ -141,7 +142,7 @@ export async function executeOrdinaryStage(
       const reviewDecision = sorted.find(s => s.decision?.kind === 'review' && s.decision.successors.includes(stage.id));
       if (reviewDecision) resolvedPrompt += `\n\n${focusedReviewInput(projectDir, runDirPath, state, reviewDecision.id, stage)}${reviewDecision.decision?.successors[1] === stage.id ? '\nPerform the full independent review; these risks do not narrow coverage.' : ''}`;
       const isolatedInput = stage.decision?.kind === 'shape' || stage.decision?.kind === 'review'
-        ? decisionInput(stage, projectDir, runDirPath, state)
+        ? decisionInput(stage, projectDir, runDirPath, state, adapterInputLimit(stageAdapter))
         : undefined;
       const result = await runStage(stageAdapter, {
         stageId: stage.id,

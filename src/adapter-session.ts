@@ -2,6 +2,7 @@ import { atomicWrite, mkdirSync, rmSync } from './engine-fs.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { RunResult } from './adapters/base.js';
+import { isRetryableAdapterFailure } from './adapters/failure.js';
 
 const SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ADAPTER_NAMESPACE = /^[a-z][a-z0-9_-]*$/i;
@@ -125,5 +126,5 @@ export function finalizeSessionHome(home: string, exitCode: number, preserve = f
 export function shouldStartFreshSession(result: Pick<RunResult, 'exitCode' | 'providerFailure'> & { spawnError?: unknown },
   resumeId?: string, nativeId?: string): boolean {
   return !!resumeId && !nativeId && result.exitCode !== 0 && ![124, 125, 137].includes(result.exitCode)
-    && !result.spawnError && result.providerFailure?.kind !== 'authentication' && result.providerFailure?.kind !== 'refusal';
+    && !result.spawnError && isRetryableAdapterFailure(result.providerFailure?.kind);
 }
