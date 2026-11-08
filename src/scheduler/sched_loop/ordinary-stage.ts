@@ -144,7 +144,7 @@ export async function executeOrdinaryStage(
       const isolatedInput = stage.decision?.kind === 'shape' || stage.decision?.kind === 'review'
         ? decisionInput(stage, projectDir, runDirPath, state, adapterInputLimit(stageAdapter))
         : undefined;
-      const result = await runStage(stageAdapter, {
+      const result = await runStage(isolatedInput?.adapter ?? stageAdapter, {
         stageId: stage.id,
         role: ['shape', 'review'].includes(stage.decision?.kind ?? '') ? { ...agent, tools: [] } : agent,
         dependsOn: stage.depends_on ?? [],

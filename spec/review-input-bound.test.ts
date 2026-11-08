@@ -3,17 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 import { stringify } from 'yaml';
-import type { Adapter, AgentConfig } from '../src/adapters/base.js';
+import type { Adapter, AgentConfig, RunOpts } from '../src/adapters/base.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { classifyAdapterFailure, isRetryableAdapterFailure } from '../src/adapters/failure.js';
 import { providerFailureFromEvent } from '../src/provider-result.js';
 import { adapterInputLimit, loadEngineDefaults } from '../src/config.js';
-import { changedPaths, decisionInput } from '../src/decision-context.js';
-import { decisionSchema } from '../src/decision-graph.js';
+import { decisionInput } from '../src/decision-context.js';
+import { appendEvidence, evidenceContext } from '../src/evidence-ledger.js';
+import { decisionSchema, POST_AUTHOR_PROMPT } from '../src/decision-graph.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
-import { WorkflowConfigSchema } from '../src/scheduler.js';
+import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
 import { executeReadyBatch } from '../src/scheduler/sched_loop/stage-batch.js';
 import { fcGlobalDir, setFcGlobalDir, readRunState, readStageStatus } from '../src/store.js';
 import { runStage } from '../src/worker.js';
@@ -23,12 +23,14 @@ import { isolatedProjectCommand } from './test-support/isolated-project-command.
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
 const CODEX_LIMIT = 1_048_576;
+const agents = join(import.meta.dirname, '../config/agents');
+const contract = { version: 1, produces: [], reads: [] };
+const brief = '# Coherent change\n\n## Acceptance criteria\n1. Produce docs/report.md with a greeting.\n';
 const stage = StageConfigSchema.parse({ id: 'assess', role: 'planner', scope: [],
   decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' } });
 const role: AgentConfig = { name: 'planner', description: '', model: 'test', reasoning_effort: 'low', tools: [], prompt: '' };
 let root: string, project: string, prior: string;
 
-const sha = (path: string) => createHash('sha256').update(readFileSync(join(project, path))).digest('hex');
 const git = (...args: string[]) => isolatedProjectCommand('git', args, project, root);
 function commitFile(path: string, content: string) {
   mkdirSync(join(project, path, '..'), { recursive: true });
@@ -42,16 +44,11 @@ function legacyDiff(untracked: string[]): string {
   for (const file of untracked) diff += isolatedProjectCommand('sh', ['-c', 'git diff --no-index --no-ext-diff --no-textconv -- /dev/null "$0" || true', file], project, root);
   return diff;
 }
-/** What the adapter receives for the review decision, through the real worker. */
-async function adapterInput(limit?: number): Promise<{ prompt: string; facts: Record<string, any> }> {
-  const created = createRun(project, 'fixture', 'name: fixture', ['assess']);
-  const input = decisionInput(stage, project, created.runDirPath, readRunState(project, created.runId), limit);
-  let prompt = '';
-  const adapter: Adapter = { async run(user) { prompt = user; return { output: '', exitCode: 1, duration_ms: 1 }; } };
-  await runStage(adapter, { stageId: 'assess', role, dependsOn: [], promptTemplate: '', timeout_ms: 60_000, projectDir: project, runId: created.runId,
-    runDir: created.runDirPath, retries: 0, artifactContract: fixtureArtifactContract('assess'), outputSchema: decisionSchema(stage),
-    decisionResult: true, isolatedInput: input });
-  return { prompt, facts: JSON.parse(input.user) };
+function gateVerdict(opts: RunOpts) {
+  const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+  return JSON.stringify({ pass: true, reason: 'Independent experiment accepted.',
+    criteria: Object.fromEntries(criteria.map(c => [c.id, { status: 'pass', evidence: 'Independent experiment on the produced output.' }])),
+    audit_findings: { version: 1, findings: [] }, remaining_work: [] });
 }
 
 beforeEach(() => {
@@ -63,7 +60,7 @@ beforeEach(() => {
 });
 afterEach(() => { setFcGlobalDir(prior); vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
 
-describe('review input stays within the adapter limit', () => {
+describe('the review decision gets the whole diff or none of it', () => {
   it('declares the codex limit with its reason in configuration', () => {
     expect(loadEngineDefaults().adapter_input_limit_chars.codex).toBe(CODEX_LIMIT);
     expect(adapterInputLimit({ sessionKind: 'codex' })).toBe(CODEX_LIMIT);
@@ -71,60 +68,104 @@ describe('review input stays within the adapter limit', () => {
     expect(readFileSync(join(import.meta.dirname, '../config/defaults.yaml'), 'utf8')).toMatch(/codex: 1048576/);
   });
 
-  it('the #2456 shape: 25 MB of untracked evidence plus a small code change', async () => {
+  it('the #2456 shape: many tiny evidence files plus new source files, together over the bound, go to the full review without a model call', async () => {
     writeFileSync(join(project, 'src/app.ts'), 'export const greeting = "CODE_CHANGE_MARKER";\n');
-    writeFileSync(join(project, 'src/added.ts'), 'export const added = true;\n');
-    mkdirSync(join(project, 'evidence'));
-    const line = `${JSON.stringify({ event: 'trace', payload: 'x'.repeat(200) })}\n`;
-    for (let i = 0; i < 25; i++) writeFileSync(join(project, `evidence/trace_${String(i).padStart(2, '0')}.jsonl`), line.repeat(Math.ceil(1_000_000 / line.length)));
-    const changed = ['src/app.ts', 'src/added.ts', ...Array.from({ length: 25 }, (_, i) => `evidence/trace_${String(i).padStart(2, '0')}.jsonl`)];
+    mkdirSync(join(project, 'docs/evidence'), { recursive: true });
+    for (let i = 0; i < 1000; i++) writeFileSync(join(project, `docs/evidence/note_${String(i).padStart(4, '0')}.jsonl`), `${JSON.stringify({ event: 'trace', n: i, payload: 'x'.repeat(560) })}\n`);
+    mkdirSync(join(project, 'tools/consolidation'), { recursive: true });
+    for (const name of ['parity', 'defects', 'closure']) writeFileSync(join(project, `tools/consolidation/${name}.py`), `# ${name}\n${'value = 1\n'.repeat(15_000)}`);
+    const calls: Array<{ stageId: string; prompt: string }> = [];
+    // Declares codex, so the engine's own lookup (adapterInputLimit(stageAdapter) in ordinary-stage) supplies the bound.
+    const adapter: Adapter = { sessionKind: 'codex', async run(prompt, _role, opts) {
+      calls.push({ stageId: opts.stageId, prompt });
+      return { output: opts.stageId === 'review_full' ? gateVerdict(opts) : '', exitCode: 0, duration_ms: 1 };
+    } };
+    const workflow = WorkflowConfigSchema.parse({ name: 'oversize-change', stages: [
+      { id: 'review_assess', role: 'qa', scope: [], decision: { kind: 'review', successors: ['review', 'review_full'], default: 'review_full' }, artifact_contract: contract },
+      { id: 'review', role: 'qa', scope: [], depends_on: ['review_assess'], is_gate: true, artifact_contract: fixtureArtifactContract('review', true) },
+      { id: 'review_full', role: 'qa', scope: [], depends_on: ['review_assess'], is_gate: true, artifact_contract: fixtureArtifactContract('review_full', true) },
+      { id: 'repair', role: 'coder', scope: [], depends_on: ['review', 'review_full'], retry_to: ['review', 'review_full'], condition: 'review.pass == false', artifact_contract: contract },
+    ] });
+    const state = await runWorkflow(workflow, JSON.stringify(workflow), project, adapter, new Map(), undefined, agents, undefined, brief, true);
+    expect(state.status, state.failureReason).toBe('complete');
+    // No model call for the decision, so no diff text and no file list was sent anywhere.
+    expect(calls.map(call => call.stageId)).toEqual(['review_full']);
+    const record = state.decisionGraph!.records.find(entry => entry.stageId === 'review_assess')!;
+    expect(record).toMatchObject({ successor: 'review_full', outcome: 'chosen', risk_areas: [] });
+    const [, measured, files, bound] = record.reason.match(/^diff_exceeds_inline_bound: .*at least (\d+) characters across (\d+) changed files, over the (\d+) characters/)!.map(Number);
+    expect(files).toBe(1004);
+    expect(bound).toBeLessThan(CODEX_LIMIT);
+    expect(measured).toBeGreaterThan(bound);
+    expect(state.stages.review.status).toBe('skipped');
+    // The full review reads the worktree itself: its prompt carries the usual 3 KB excerpt and the path of the full patch, not the 1 MB diff.
+    expect(calls[0].prompt.length).toBeLessThan(60_000);
+    expect(calls[0].prompt).toContain('change.diff');
+  }, 120_000);
 
-    const { prompt, facts } = await adapterInput(CODEX_LIMIT);
-    expect(prompt.length).toBeLessThanOrEqual(CODEX_LIMIT);
-    expect(JSON.stringify(facts).length).toBeLessThan(CODEX_LIMIT);
-    // Every changed file is named with its status, size and content hash.
-    expect(facts.manifest.map((entry: { path: string }) => entry.path).sort()).toEqual([...changed].sort());
-    for (const entry of facts.manifest) {
-      expect(entry.sha256).toBe(sha(entry.path));
-      expect(entry.size).toBe(readFileSync(join(project, entry.path)).length);
-    }
-    expect(facts.manifest.find((entry: { path: string }) => entry.path === 'src/app.ts')).toMatchObject({ tracked: true, status: 'M', inlined: true });
-    // The code change is shown; the evidence tree is named, not pasted.
-    expect(facts.diff).toContain('CODE_CHANGE_MARKER');
-    expect(facts.diff).toContain('export const added = true;');
-    expect(facts.diff).not.toContain('"event"');
-    const omitted = facts.manifest.filter((entry: { inlined: boolean }) => !entry.inlined);
-    expect(omitted.length).toBeGreaterThan(0);
-    expect(omitted.every((entry: { path: string }) => entry.path.startsWith('evidence/'))).toBe(true);
-    expect(facts.note).toContain('read them from the worktree');
-    expect(changedPaths(project, readRunState(project, createRun(project, 'fixture', 'name: fixture', ['x']).runId)).sort()).toEqual([...changed].sort());
-  }, 60_000);
-
-  it('a change that fits yields exactly the diff text git prints, in git order', async () => {
+  it('a change that fits gives the assessor exactly the input it got before', () => {
     commitFile('src/other.ts', 'export const other = 1;\n');
     writeFileSync(join(project, 'src/app.ts'), 'export const greeting = "changed";\n');
     writeFileSync(join(project, 'src/other.ts'), 'export const other = 2;\n');
-    // Size order and path order disagree, so a reordered diff would show.
     writeFileSync(join(project, 'a_large.txt'), 'line\n'.repeat(2000));
     writeFileSync(join(project, 'b_small.txt'), 'tiny\n');
-    const { facts } = await adapterInput(CODEX_LIMIT);
-    expect(facts.diff).toBe(legacyDiff(['a_large.txt', 'b_small.txt']));
-    expect(facts.diff).toContain('diff --git a/src/other.ts');
-    expect(facts.manifest.every((entry: { inlined: boolean }) => entry.inlined)).toBe(true);
-    expect(facts.manifest.map((entry: { path: string }) => entry.path)).toEqual(['src/app.ts', 'src/other.ts', 'a_large.txt', 'b_small.txt']);
-    expect(facts).not.toHaveProperty('note');
+    const created = createRun(project, 'fixture', 'name: fixture', ['assess']);
+    const state = readRunState(project, created.runId);
+    const input = decisionInput(stage, project, created.runDirPath, state, CODEX_LIMIT);
+    expect(input.adapter).toBeUndefined();
+    expect(JSON.parse(input.user)).toEqual({ task: state.taskDescription, files: ['src/app.ts', 'src/other.ts', 'a_large.txt', 'b_small.txt'],
+      diff: legacyDiff(['a_large.txt', 'b_small.txt']), validation: { status: 'No configured validation facts have been recorded.' } });
+    // The prompt is the decision prompt as it was: no extra instruction, and still no tools.
+    expect(input.system).toBe(POST_AUTHOR_PROMPT);
+    expect(input.system).toContain('Do not use tools');
   });
 
-  it('stays within a small limit by shortening the manifest, and says so', async () => {
-    writeFileSync(join(project, 'src/app.ts'), 'export const greeting = "CODE_CHANGE_MARKER";\n');
-    mkdirSync(join(project, 'many'));
-    for (let i = 0; i < 400; i++) writeFileSync(join(project, `many/file_${i}.txt`), `${i}\n`);
-    const limit = 65_536 + 30_000;
-    const { prompt, facts } = await adapterInput(limit);
-    expect(prompt.length).toBeLessThanOrEqual(limit);
-    expect(facts.manifest.length).toBeLessThan(401);
-    expect(facts.note).toContain('beyond the manifest');
-    expect(facts.diff).toContain('CODE_CHANGE_MARKER');
+  it('is decided by size alone: the same files over a small bound go to the full review whatever their names', () => {
+    writeFileSync(join(project, 'src/app.ts'), 'export const greeting = "changed";\n');
+    writeFileSync(join(project, 'new_source.py'), 'x = 1\n'.repeat(100));
+    const created = createRun(project, 'fixture', 'name: fixture', ['assess']);
+    const state = readRunState(project, created.runId);
+    const fits = decisionInput(stage, project, created.runDirPath, state, 65_536 + 5_000);
+    expect(fits.adapter).toBeUndefined();
+    const over = decisionInput(stage, project, created.runDirPath, state, 65_536 + 600);
+    expect(over.adapter).toBeDefined();
+    expect(over.user).not.toContain('x = 1');
+    expect(over.user).not.toContain('CODE');
+  });
+});
+
+describe('review stages keep their evidence inside the adapter limit', () => {
+  const attemptFacts = (stageId: string, files: number) => appendEvidence(created.runDirPath, { kind: 'attempt', stageId, attemptIndex: 1, attemptStartedAt: '2026-11-08T00:00:00.000Z',
+    exitCode: 0, status: 'complete', treeHash: null, measurements: { inputTokens: null, outputTokens: null, durationMs: 1, provenance: 'adapter-reported' },
+    files: Array.from({ length: files }, (_, i) => ({ path: `docs/evidence/${stageId}/note_${String(i).padStart(5, '0')}.jsonl`, mode: 0o644, content: { state: 'absent' as const } })) });
+  let created: ReturnType<typeof createRun>;
+
+  async function reviewPrompt(): Promise<string> {
+    let prompt = '';
+    // No declared adapter kind: the smallest declared limit applies.
+    const adapter: Adapter = { async run(text) { prompt = text; return { output: '', exitCode: 1, duration_ms: 1 }; } };
+    await runStage(adapter, { stageId: 'review', role, dependsOn: [], promptTemplate: 'Review.', timeout_ms: 60_000, projectDir: project, runId: created.runId,
+      runDir: created.runDirPath, retries: 0, artifactContract: fixtureArtifactContract('review') });
+    return prompt;
+  }
+  beforeEach(() => { created = createRun(project, 'fixture', 'name: fixture', ['review']); });
+
+  it('inlines the ledger facts when they fit, and names the ledger with its counts when they do not', async () => {
+    attemptFacts('author', 20);
+    expect(await reviewPrompt()).toContain('Ledger facts:\n{"version":1');
+    // About 3 x 250,000 characters of per-file attempt facts: over what 600,000 leaves after the reserve.
+    for (const id of ['a', 'b', 'c']) attemptFacts(id, 2_500);
+    const prompt = await reviewPrompt();
+    expect(prompt.length).toBeLessThan(adapterInputLimit({}));
+    expect(prompt).not.toContain('Ledger facts:\n{');
+    expect(prompt).toMatch(/Ledger facts are not inlined \(ledger_exceeds_inline_bound\): \d+ facts from \d+ ledger entries, \d+ characters against the \d+ that fit/);
+    expect(prompt).toContain(join(created.runDirPath, 'evidence-ledger.jsonl'));
+    expect(prompt).not.toContain('note_00001');
+  }, 60_000);
+
+  it('applies the budget it is given and leaves an unbounded caller as before', () => {
+    attemptFacts('author', 20);
+    expect(evidenceContext(project, created.runDirPath, 'review')).toContain('Ledger facts:\n{"version":1');
+    expect(evidenceContext(project, created.runDirPath, 'review', null, 100)).toContain('ledger_exceeds_inline_bound');
   });
 });
 
@@ -135,13 +176,16 @@ describe('an adapter that refuses the input by size', () => {
     expect(classifyAdapterFailure(message)).toBe('input_too_large');
     expect(classifyAdapterFailure('anything', 'input_too_large')).toBe('input_too_large');
     expect(isRetryableAdapterFailure('input_too_large')).toBe(false);
-    // The same text without the provider's code is not interpreted as prose.
+    // The same text without the provider's code is not interpreted as prose; Claude has no observed size-refusal code, so its refusal stays unclassified.
     expect(classifyAdapterFailure('Input exceeds the maximum length of 1048576 characters.')).toBeUndefined();
+    expect(classifyAdapterFailure('Prompt is too long')).toBeUndefined();
     expect(providerFailureFromEvent('codex', { type: 'error', message: 'too long', error: { code: -32602, data: { input_error_code: 'input_too_large' } } }))
       .toMatchObject({ kind: 'input_too_large', provider: 'codex' });
   });
 
-  it('records one attempt, spends no retry and concludes with its own reason code', async () => {
+  // The real CLI prints thread.started, then its error line; the recorded #2456 log merges the streams,
+  // so the error line is delivered on either one.
+  it.each(['stdout', 'stderr'])('after a JSON event, the line on %s records one attempt, spends no retry and concludes with its own reason code', async stream => {
     const bin = join(root, 'bin'); mkdirSync(bin);
     const calls = join(root, 'calls.txt');
     writeFileSync(join(bin, 'codex'), `#!${process.execPath}\n` + String.raw`
@@ -150,7 +194,7 @@ process.stdin.resume();
 process.stdin.on('end', () => {
   fs.appendFileSync(process.env.FC_FIXTURE_CALLS, 'call\n');
   console.log(JSON.stringify({ type: 'thread.started', thread_id: '01a1ba92-1221-7410-9b54-3baa3eb139dd' }));
-  console.error(process.env.FC_FIXTURE_MESSAGE);
+  (process.env.FC_FIXTURE_STREAM === 'stdout' ? console.log : console.error)(process.env.FC_FIXTURE_MESSAGE);
   process.exitCode = 1;
 });
 `, { mode: 0o700 });
@@ -160,18 +204,18 @@ process.stdin.on('end', () => {
     vi.stubEnv('CODEX_SKILLS_CACHE', join(root, 'skills'));
     vi.stubEnv('PATH', `${bin}:/usr/bin:/bin`);
     vi.stubEnv('FC_FIXTURE_CALLS', calls);
+    vi.stubEnv('FC_FIXTURE_STREAM', stream);
     vi.stubEnv('FC_FIXTURE_MESSAGE', message);
     setEngineDefaults({ default_timeout_ms: 5_000, stage_technical_retries: 2 });
     const workflow = WorkflowConfigSchema.parse({ name: 'size-fixture', defaults: { max_iterations: 1, max_retries: 2 },
       stages: [{ id: 'work', role: 'fixture', scope: [], prompt_template: 'fixture', artifact_contract: fixtureArtifactContract('work') }] });
-    const created = createRun(project, workflow.name, stringify(workflow), ['work']);
-    await executeReadyBatch(workflow.stages, readRunState(project, created.runId), project, created.runId, created.runDirPath, workflow,
+    const run = createRun(project, workflow.name, stringify(workflow), ['work']);
+    await executeReadyBatch(workflow.stages, readRunState(project, run.runId), project, run.runId, run.runDirPath, workflow,
       new CodexAdapter(), new Map([['fixture', { ...role, name: 'fixture' }]]), project,
       new Map([['fixture', { name: 'fixture', description: '' }]]), new Map());
     expect(existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n') : []).toHaveLength(1);
-    const state = readRunState(project, created.runId);
-    expect(state).toMatchObject({ status: 'failed', reasonCode: 'input_too_large' });
-    const status = readStageStatus(project, created.runId, 'work');
+    expect(readRunState(project, run.runId)).toMatchObject({ status: 'failed', reasonCode: 'input_too_large' });
+    const status = readStageStatus(project, run.runId, 'work');
     expect(status).toMatchObject({ status: 'failed', retries: 0 });
     expect(status.attempts).toHaveLength(1);
     expect(status.attempts![0].providerFailure).toMatchObject({ kind: 'input_too_large', provider: 'codex' });

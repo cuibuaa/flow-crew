@@ -21,6 +21,7 @@ import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './a
 import { runProcessAbortSignal } from './adapters/base.js';
 export { classifyAdapterFailure } from './adapters/failure.js';
 import { appendEvidence, captureProjectTree, changedTreeFiles, evidenceContext } from './evidence-ledger.js';
+import { adapterInputLimit, INPUT_RESERVE_CHARS } from './config.js';
 import { FAILURE_READING_JSON_SCHEMA, FailureReadingSchema, failureReadingPrompt } from './validation-identity.js';
 import { createInvocationScratch } from './invocation-scratch.js';
 import { createHash } from 'node:crypto';
@@ -791,8 +792,10 @@ export async function runStage(
     const stateContext = opts.isolatedInput ? '' : runStateContext(opts.projectDir, opts.runId, opts.planRevision);
     // Fresh children read current facts and bytes. The own-stage predecessor
     // stays bound to the attempt that preceded this execution, not its children.
-    const currentEvidence = opts.isolatedInput ? '' : evidenceContext(opts.projectDir, opts.runDir, opts.stageId, previous ?? null);
-    const effectiveInvocationPrompt = `${currentEvidence ? `${currentEvidence}\n\n` : ''}${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${previousInvocation ? `# Previous invocation record\n${JSON.stringify(previousInvocation)}\n\n` : ''}${deadlineContext()}\n\n${stateContext}`;
+    const rest = `${prompt}${invocationPrompt === prompt ? '' : `\n\n${invocationPrompt}`}\n\n${guidanceBlock(additionalGuidance)}\n\n${previousInvocation ? `# Previous invocation record\n${JSON.stringify(previousInvocation)}\n\n` : ''}${deadlineContext()}\n\n${stateContext}`;
+    const currentEvidence = opts.isolatedInput ? '' : evidenceContext(opts.projectDir, opts.runDir, opts.stageId, previous ?? null,
+      adapterInputLimit(selectedAdapter) - INPUT_RESERVE_CHARS - rest.length);
+    const effectiveInvocationPrompt = `${currentEvidence ? `${currentEvidence}\n\n` : ''}${rest}`;
     const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
       // The public standalone worker API predates initialized run projections.
       // Keep it usable, but do not manufacture an authenticated run carrier.

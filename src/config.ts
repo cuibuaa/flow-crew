@@ -106,6 +106,9 @@ export function loadEngineDefaults(): EngineDefaults {
   return parsed;
 }
 
+/** Characters of an adapter's input limit kept free for what is added after a bounded section is sized (JSON keys, result contract, clock). */
+export const INPUT_RESERVE_CHARS = 65_536;
+
 /** Declared prompt size limit of an adapter; an undeclared one gets the smallest declared limit. */
 export function adapterInputLimit(adapter?: { sessionKind?: string }): number {
   const limits = loadEngineDefaults().adapter_input_limit_chars;

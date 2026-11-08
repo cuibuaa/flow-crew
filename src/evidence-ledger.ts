@@ -187,7 +187,7 @@ export function projectCommit(projectDir: string): string | undefined {
 
 /** Diff is a separate inspectable artifact, never a summary by the author. Git
  * supplies the patch; structured file identities also include untracked writes. */
-export function evidenceContext(projectDir: string, runDir: string, stageId?: string, previous?: { index: number; startedAt: string } | null): string {
+export function evidenceContext(projectDir: string, runDir: string, stageId?: string, previous?: { index: number; startedAt: string } | null, budget = Infinity): string {
   if (!existsSync(join(runDir, EVIDENCE_LEDGER))) writeFileSync(join(runDir, EVIDENCE_LEDGER), '', { flag: 'wx' });
   const entries = readEvidence(runDir);
   const validation = entries.filter((entry): entry is EvidenceEntry & ValidationFact => entry.kind === 'validation').at(-1);
@@ -259,5 +259,8 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
     + 'Configured validation belongs to the completed author/repair attempt; decisions consume its tree-bound results without rerunning the suite. '
     + 'A solely pre-existing configured failure cannot justify repair; unknown identity remains unknown. '
     + 'Independent experiments and every assigned acceptance criterion remain required. Read the complete diff artifact when its excerpt is truncated.\n'
-    + `Ledger facts:\n${ledgerText}${predecessorText}\nDiff:\n${patchExcerpt}`;
+    + (ledgerText.length + predecessorText.length <= budget ? `Ledger facts:\n${ledgerText}${predecessorText}`
+      // All or nothing: a ledger that does not fit the adapter's input limit is named, not clipped.
+      : `Ledger facts are not inlined (ledger_exceeds_inline_bound): ${facts.length} facts from ${entries.length} ledger entries, ${ledgerText.length + predecessorText.length} characters against the ${Math.max(0, budget)} that fit the adapter's input limit. Read ${join(runDir, EVIDENCE_LEDGER)} with your tools; the attempt facts carry the changed-file hashes and your own stage's latest attempt is its continuation evidence.`)
+    + `\nDiff:\n${patchExcerpt}`;
 }
