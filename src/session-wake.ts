@@ -1,11 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { atomicWrite, mkdirSync, unlinkSync } from './engine-fs.js';
+import { readFileSync, statSync } from 'node:fs';
+import { appendFileSync, mkdirSync, renameSync, unlinkSync } from './engine-fs.js';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { processIsAlive, processStartToken, processStartTokensMatch, type ProcessStartToken } from './run-lock.js';
+import { lockOwnerIdentity, parseLockOwner, publishLockOwner, recoverStaleLock, type LockObservation, type LockOwner } from './lock-publication.js';
 import type { SessionPush } from './session-push.js';
+import { clearSessionFailure, hasSessionFailure, recordSessionFailure } from './session-integration-errors.js';
 import { wrapUpPrompt } from './session-push.js';
 
 // Conservative supported floor: this is the version exercised by the native
@@ -26,35 +28,33 @@ export function claudeWakeCapability(): { supported: boolean; detail: string } {
   } catch { return { supported: false, detail: `Claude version unavailable; wake requires >= ${CLAUDE_WAKE_MIN_VERSION}. Install/upgrade Claude Code: claude update` }; }
 }
 
-interface Waiter {
-  session: string; pid: number; start: ProcessStartToken;
-  host: number; hostStart: ProcessStartToken; expiresAt: number; bootId?: string;
+interface Waiter extends LockOwner {
+  session: string; start: ProcessStartToken; host: number; hostStart: ProcessStartToken; expiresAt: number; bootId?: string;
 }
-const directory = (root: string) => join(root, 'waiters');
-// Linux start tokens are ticks since boot, so PID/start pairs alone can recur
-// after a reboot. POSIX lstart tokens already include the calendar date.
+export const sessionWaiterPath = (root: string, session: string): string =>
+  join(root, 'waiters', `${createHash('sha256').update(session).digest('hex')}.json`);
+// Linux start tokens recur after a reboot; calendar-based POSIX tokens do not.
 function bootId(): string | undefined {
   if (process.platform !== 'linux') return undefined;
   try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined; }
   catch { return undefined; }
 }
-function liveWaiters(root: string, session: string, now: number): Array<{ name: string; waiter: Waiter }> {
-  if (!existsSync(directory(root))) return [];
-  const boot = bootId();
-  if (process.platform === 'linux' && !boot) return [];
-  return readdirSync(directory(root)).filter(name => name.endsWith('.json')).flatMap(name => {
-    let waiter: Waiter;
-    try { waiter = JSON.parse(readFileSync(join(directory(root), name), 'utf8')); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
-    if (waiter.session !== session || waiter.expiresAt <= now
-        || (process.platform === 'linux' && waiter.bootId !== boot)) return [];
-    return processIsAlive(waiter.pid) && processStartTokensMatch(waiter.start, processStartToken(waiter.pid))
-      && processIsAlive(waiter.host) && processStartTokensMatch(waiter.hostStart, processStartToken(waiter.host))
-      ? [{ name, waiter }] : [];
-  });
+function readWaiter(path: string): { waiter?: Waiter; observation: LockObservation } | undefined {
+  try {
+    const stat = statSync(path);
+    const raw = readFileSync(path, 'utf8');
+    const owner = parseLockOwner(raw);
+    return { waiter: owner ? JSON.parse(raw) as Waiter : undefined,
+      observation: { owner, mtimeMs: stat.mtimeMs, signature: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${raw}` } };
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
 }
 export function hasClaudeWakeWaiter(root: string, session: string, now = Date.now()): boolean {
-  return liveWaiters(root, session, now).length > 0;
+  const waiter = readWaiter(sessionWaiterPath(root, session))?.waiter;
+  if (!waiter || waiter.session !== session || waiter.expiresAt <= now) return false;
+  const boot = bootId();
+  if (process.platform === 'linux' && (!boot || waiter.bootId !== boot)) return false;
+  return processIsAlive(waiter.pid) && processStartTokensMatch(waiter.start, processStartToken(waiter.pid))
+    && processIsAlive(waiter.host) && processStartTokensMatch(waiter.hostStart, processStartToken(waiter.host));
 }
 
 export interface WakeOptions {
@@ -73,27 +73,101 @@ export async function waitForClaudeWake(push: SessionPush, session: string, opti
   const start = processStartToken(process.pid);
   const hostStart = processStartToken(process.ppid);
   const boot = bootId();
-  if (!start || !hostStart || (process.platform === 'linux' && !boot)) return { code: 0 }; // no verifiable owner: gate remains blocking
+  if (!start || !hostStart || (process.platform === 'linux' && !boot)) throw new Error('Wake process identity unavailable; coverage cannot be registered');
   push.registerClaudeWake(session);
-  mkdirSync(directory(push.root), { recursive: true });
-  const name = `${process.hrtime.bigint().toString().padStart(24, '0')}-${randomUUID()}.json`;
-  const path = join(directory(push.root), name);
-  // Waiters are leases tied to two live process identities, not crash recovery records.
-  atomicWrite(path, JSON.stringify({ session, pid: process.pid, start, host: process.ppid, hostStart, expiresAt, bootId: boot } satisfies Waiter), { durability: 'replace-only', mode: 0o600 });
+  mkdirSync(join(push.root, 'waiters'), { recursive: true });
+  const path = sessionWaiterPath(push.root, session);
+  const token = randomUUID();
+  const recovered = (owner: LockObservation, reason: string): void => {
+    try { appendFileSync(join(push.registry.baseDir, 'infrastructure-recoveries.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), component: 'wake-lease', session, owner: owner.owner, reason })}\n`, { mode: 0o600, flush: true }); }
+    catch { /* a diagnostic failure cannot turn recovery into a model wake */ }
+  };
+  // Only registration and retirement mutate the slot. Serialize both with the
+  // existing writer boundary, then delete a detached, unique owner path outside
+  // it. An expiring owner's cleanup can never unlink its replacement's slot.
+  const detached: string[] = [];
+  const detach = (): void => {
+    const retired = join(push.root, 'waiters', `retired-${randomUUID()}.json`);
+    renameSync(path, retired);
+    detached.push(retired);
+  };
+  const removeDetached = (): void => { for (const file of detached.splice(0)) unlinkSync(file); };
+  let acquired = false;
+  try {
+    push.registry.withSessionWrite(() => {
+      for (;;) {
+        try {
+          publishLockOwner(path, { ...lockOwnerIdentity(), token, session, start, host: process.ppid, hostStart, expiresAt, bootId: boot });
+          acquired = true;
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          const current = readWaiter(path);
+          if (!current) continue;
+          const previous = current.waiter;
+          const leaseEnded = previous && (previous.expiresAt <= now() || (process.platform === 'linux' && boot && previous.bootId !== boot));
+          if (leaseEnded) {
+            detach(); recovered(current.observation, 'lease expired or belongs to a previous boot'); continue;
+          }
+          const reason = recoverStaleLock(current.observation, () => readWaiter(path)?.observation, detach);
+          if (reason) { recovered(current.observation, reason); continue; }
+          if (!hasClaudeWakeWaiter(push.root, session, now())) throw new Error('Wake lease owner cannot be verified; coverage unavailable', { cause: error });
+          break; // an existing verified owner keeps its lease
+        }
+      }
+    });
+  } finally { removeDetached(); }
+  if (!acquired) return { code: 0 };
+  const healthy = (): void => {
+    if (hasSessionFailure(push.root, 'claude', session, 'wake')) clearSessionFailure(push.root, 'claude', session, 'wake');
+  };
   try {
     for (;;) {
-      const live = liveWaiters(push.root, session, now()).sort((a, b) => a.name.localeCompare(b.name));
-      // One polling process per session. Simultaneous starters elect the same
-      // oldest owner; immutable event/attempt claims also cover handover races.
-      if (live.length && live[0].name !== name) return { code: 0 };
+      if (readWaiter(path)?.waiter?.token !== token) return { code: 0 };
       if (!processIsAlive(process.ppid) || !processStartTokensMatch(hostStart, processStartToken(process.ppid))) return { code: 0 };
-      const pending = push.pending(session).filter(event => event.target.frontend === 'claude');
-      for (const event of pending) {
-        if (push.claimWake(event)) return { code: 2, prompt: wrapUpPrompt(event, push.registry.baseDir) };
+      try {
+        const pending = push.pending(session, 'claude');
+        for (const event of pending) {
+          if (push.claimWake(event)) {
+            // A real event may wake even while another session view is broken.
+            // Only a complete successful state check proves read recovery.
+            try { push.openTasks('claude', session); healthy(); }
+            catch (error) {
+              try { recordSessionFailure(push.root, 'claude', session, 'wake', error); }
+              catch (diagnosticError) {
+                // This auxiliary check cannot revoke a claimed event. Retain
+                // both failures in the existing operator log when possible;
+                // async wake stderr is reserved for the actionable prompt.
+                try { appendFileSync(join(push.registry.baseDir, 'infrastructure-recoveries.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), component: 'session-read', frontend: 'claude', session, operation: 'wake', error: String(error), diagnosticError: String(diagnosticError) })}\n`, { mode: 0o600, flush: true }); }
+                catch { /* diagnostic storage cannot suppress the actionable result */ }
+              }
+            }
+            return { code: 2, prompt: wrapUpPrompt(event, push.registry.baseDir) };
+          }
+        }
+        const open = push.openTasks('claude', session);
+        healthy();
+        if (!open.length && !pending.length) return { code: 0 };
+        if (now() >= expiresAt) return { code: 2, prompt: 'FlowCrew wake coverage is expiring. Inspect this session’s FlowCrew task and pending events. Handle and explicitly ACK any pending event. If execution is still in flight, end this turn normally so the installed Stop hook renews wake coverage; do not wait in the foreground.' };
+      } catch (error) {
+        recordSessionFailure(push.root, 'claude', session, 'wake', error);
+        // Retain the live waiter across read/publication faults. A service
+        // repair can resume delivery without inventing an empty model turn.
+        if (now() >= expiresAt) return { code: 0 };
       }
-      if (!push.openTasks('claude', session).length && !pending.length) return { code: 0 };
-      if (now() >= expiresAt) return { code: 2, prompt: 'FlowCrew wake coverage is expiring. Inspect this session’s FlowCrew task and pending events. Handle and explicitly ACK any pending event. If execution is still in flight, end this turn normally so the installed Stop hook renews wake coverage; do not wait in the foreground.' };
       await pause(Math.min(options.pollMs ?? 1000, Math.max(1, expiresAt - now())));
     }
-  } finally { if (existsSync(path)) unlinkSync(path); }
+  } finally {
+    try {
+      try {
+        push.registry.withSessionWrite(() => { if (readWaiter(path)?.waiter?.token === token) detach(); });
+      } finally { removeDetached(); }
+    } catch (error) {
+      // Retirement cannot replace a claimed event or coverage-renewal result.
+      // Leave the slot for identity/expiry recovery by the next registrant;
+      // never unlink it without serialization, where a replacement could win.
+      try { appendFileSync(join(push.registry.baseDir, 'infrastructure-recoveries.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), component: 'wake-lease', session, token, operation: 'retire', deferred: true, error: String(error) })}\n`, { mode: 0o600, flush: true }); }
+      catch { /* diagnostic storage cannot suppress the actionable result */ }
+    }
+  }
 }

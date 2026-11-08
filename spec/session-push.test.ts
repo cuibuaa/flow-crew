@@ -508,6 +508,24 @@ describe('durable delivery and business ACK', () => {
 });
 
 describe('shared progress and turn gate', () => {
+  it('publishes history only for the current run stages, regardless of historical workflow stage names', async () => {
+    const { registry, task } = fixture('claude');
+    const push = new SessionPush(registry);
+    const history = Array.from({ length: 1000 }, (_, index) => ({
+      workflowName: 'same-workflow', status: 'complete', stages: { [`old-${index}`]: { status: 'complete', duration_ms: 1000 } },
+    }));
+    await push.ensureDisplay(task, { workflowName: 'same-workflow', status: 'running', stages: { current: { status: 'running' } } }, history);
+    expect(push.display(task.id).history).toEqual({ runs: 1000, stages: {} });
+  });
+
+  it('the Codex queue needs no renewable lease; only a pending event opens its model turn', () => {
+    const { registry, task, launcher } = fixture('codex');
+    const push = new SessionPush(registry);
+    expect(sessionGate(push, 'codex', launcher.sessionId)).toEqual({});
+    const event = push.enqueue(task, source)!;
+    expect(sessionGate(push, 'codex', launcher.sessionId)).toMatchObject({ decision: 'block', reason: expect.stringContaining(event.eventId) });
+  });
+
   it('uses exact elapsed seconds, workflow medians and repair frequency; missing history is unknown', () => {
     const run = { workflowName: 'tiny', status: 'running', startedAt: '2020-01-01T00:00:00Z', stages: { build: { status: 'running', startedAt: '2020-01-01T00:00:00Z' }, repair: { status: 'pending' } } };
     const history = [

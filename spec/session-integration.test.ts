@@ -67,6 +67,27 @@ function fixtureTrust(root: string, codexHome: string) {
 }
 
 describe('installer-owned front-end integration', () => {
+  it('generates the loaded-host command limits from one installer definition', () => {
+    const f = fixture();
+    const root = join(f.home, '.claude');
+    expect(integrate('install', 'claude', root, f.env).status).toBe(0);
+    const config = JSON.parse(readFileSync(join(root, 'settings.json'), 'utf8'));
+    const manifest = JSON.parse(readFileSync(join(root, 'hooks', 'flowcrew-session.json'), 'utf8'));
+    expect(manifest.limits).toEqual({ commandMs: 40_000, hookSeconds: 45, statusMs: 10_000, wakeMs: 3650_000, wakeSeconds: 3660 });
+    for (const event of ['Stop', 'SessionStart']) {
+      expect(config.hooks[event].map((group: { hooks: unknown[] }) => group.hooks[0])).toEqual([
+        { type: 'command', command: `${manifest.command} ${event}`, timeout: 45 },
+        { type: 'command', command: `${manifest.command} Wake`, timeout: 3660, asyncRewake: true },
+      ]);
+    }
+    expect(config.statusLine).toEqual({ type: 'command', command: `${manifest.command} --statusline` });
+    const shim = readFileSync(join(root, 'hooks', 'flowcrew-session.mjs'), 'utf8');
+    expect(shim).toContain(JSON.stringify(manifest.limits));
+    expect(shim).toContain('settings.limits.statusMs');
+    expect(shim).toContain('settings.limits.commandMs');
+    expect(shim).toContain('settings.limits.wakeMs');
+  });
+
   it.each(['claude', 'codex'] as const)('%s generated Stop hook separates the documented human warning and model continuation; list/watch use the human text', frontend => {
     const f = fixture();
     const frontendRoot = frontend === 'claude' ? join(f.home, '.claude') : f.codexHome;
@@ -126,13 +147,13 @@ describe('installer-owned front-end integration', () => {
     } });
     const push = new SessionPush(registry);
     const child = spawn(process.execPath, [join(root, 'hooks', 'flowcrew-session.mjs'), 'Wake'], {
-      cwd: f.project, env: { ...f.env, HOME: f.home, FC_HOME: f.env.FC_HOME }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000,
+      cwd: f.project, env: { ...f.env, HOME: f.home, FC_HOME: f.env.FC_HOME }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 30_000,
     });
     const done = new Promise<void>((resolve, reject) => { child.on('error', reject); child.on('close', () => resolve()); });
     child.stdin.end(JSON.stringify({ session_id: 'own-session' }));
     let worker: number | undefined;
     try {
-      for (let i = 0; i < 100 && !hasClaudeWakeWaiter(push.root, 'own-session'); i++) await sleep(20);
+      for (let i = 0; i < 500 && !hasClaudeWakeWaiter(push.root, 'own-session'); i++) await sleep(20);
       expect(hasClaudeWakeWaiter(push.root, 'own-session')).toBe(true);
       const directory = join(push.root, 'waiters');
       worker = JSON.parse(readFileSync(join(directory, readdirSync(directory)[0]), 'utf8')).pid;
@@ -171,7 +192,7 @@ describe('installer-owned front-end integration', () => {
     const input = JSON.stringify({ session_id: 'own-session', hook_event_name: eventName, permission_mode: mode });
     const hook = join(root, 'hooks', 'flowcrew-session.mjs');
     const child = spawn(process.execPath, [hook, 'Wake'], {
-      cwd: f.project, env: { ...f.env, HOME: f.home, FC_HOME: f.env.FC_HOME }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000,
+      cwd: f.project, env: { ...f.env, HOME: f.home, FC_HOME: f.env.FC_HOME }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 30_000,
     });
     let output = '';
     child.stdout.on('data', data => { output += data; });
@@ -179,8 +200,8 @@ describe('installer-owned front-end integration', () => {
     const done = new Promise<number | null>((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
     child.stdin.end(input);
     try {
-      for (let i = 0; i < 100 && !hasClaudeWakeWaiter(push.root, 'own-session'); i++) await sleep(20);
-      expect(hasClaudeWakeWaiter(push.root, 'own-session')).toBe(true);
+      for (let i = 0; i < 500 && !hasClaudeWakeWaiter(push.root, 'own-session'); i++) await sleep(20);
+      expect(hasClaudeWakeWaiter(push.root, 'own-session'), output).toBe(true);
       // A second ordinary turn starts another Stop; it retires silently while
       // the original async waiter continues to cover the launching session.
       expect(command(process.execPath, [hook, 'Wake'], f.env, input).status).toBe(0);
@@ -201,7 +222,7 @@ describe('installer-owned front-end integration', () => {
       if (child.exitCode === null) child.kill('SIGTERM');
       await done;
     }
-  });
+  }, 60_000);
 
   it('doctor checks wake capability without creating an engine store', () => {
     const f = fixture();
@@ -245,7 +266,7 @@ describe('installer-owned front-end integration', () => {
     expect(result.stdout).toContain('Working independently');
   });
 
-  it('bootstraps legacy launcher rows before allowing an own session to stop, without a daemon', () => {
+  it('reports legacy views once and lets a service writer rebuild them before reads resume', () => {
     const f = fixture();
     const root = join(f.home, '.claude');
     expect(integrate('install', 'claude', root, f.env).status).toBe(0);
@@ -258,7 +279,11 @@ describe('installer-owned front-end integration', () => {
     const hook = join(root, 'hooks', 'flowcrew-session.mjs');
     const result = command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'own-session' }));
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).decision).toBe('block');
+    expect(JSON.parse(result.stdout)).toEqual({ systemMessage: expect.stringContaining('Session task view unavailable') });
+    expect(existsSync(join(f.env.FC_HOME, 'session-push', 'task-index', 'ready'))).toBe(false);
+    expect(command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'own-session' })).stdout).toBe('');
+    new TaskRegistry({ baseDir: f.env.FC_HOME }).ensureSessionTaskIndexes();
+    expect(JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'own-session' })).stdout).decision).toBe('block');
     expect(existsSync(join(f.env.FC_HOME, 'session-push', 'task-index', 'ready'))).toBe(true);
     writeFileSync(hook, readFileSync(hook, 'utf8').replace(JSON.stringify(join(packageRoot, 'dist', 'cli.js')), JSON.stringify(join(f.root, 'missing-cli.js'))));
     const unrelated = command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'unrelated' }));
@@ -282,7 +307,7 @@ describe('installer-owned front-end integration', () => {
     expect(JSON.parse(result.stdout).decision).toBe('block');
   });
 
-  it.each(['Stop', 'Wake'])('missing CLI errors fail closed for the installed %s hook', event => {
+  it.each(['Stop', 'Wake'])('missing CLI errors are recorded once for the operator by the installed %s hook', event => {
     const f = fixture();
     const root = join(f.home, '.claude');
     expect(integrate('install', 'claude', root, f.env).status).toBe(0);
@@ -292,9 +317,62 @@ describe('installer-owned front-end integration', () => {
     const path = join(root, 'hooks', 'flowcrew-session.mjs');
     writeFileSync(path, readFileSync(path, 'utf8').replace(JSON.stringify(join(packageRoot, 'dist', 'cli.js')), JSON.stringify(join(f.root, 'missing-cli.js'))));
     const result = command(process.execPath, [path, event], f.env, JSON.stringify({ session_id: 'own-session' }));
-    expect(result.status).toBe(2);
-    expect(result.stderr).toContain('missing-cli.js');
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    if (event === 'Stop') expect(JSON.parse(result.stdout)).toEqual({ systemMessage: expect.stringContaining('missing-cli.js') });
+    const incidents = readdirSync(join(f.env.FC_HOME, 'session-push', 'integration-errors')).filter(name => name.endsWith('.json'));
+    expect(incidents).toHaveLength(1);
+    expect(readFileSync(join(f.env.FC_HOME, 'session-push', 'integration-errors', incidents[0]), 'utf8')).toContain('missing-cli.js');
+    expect(command(process.execPath, [path, event], f.env, JSON.stringify({ session_id: 'own-session' })).stdout).toBe('');
   });
+
+  it('healthy waiter reads do not clear missing-hook incidents; only repaired definitions start a new incident period', async () => {
+    const f = fixture();
+    const root = join(f.home, '.claude');
+    expect(integrate('install', 'claude', root, f.env).status).toBe(0);
+    const configPath = join(root, 'settings.json');
+    const original = readFileSync(configPath, 'utf8');
+    const config = JSON.parse(original);
+    const registry = new TaskRegistry({ baseDir: f.env.FC_HOME });
+    registry.create({ projectDir: f.project, status: 'running', launcher: {
+      frontend: 'claude', sessionId: 'own-session', cwd: f.project, ledgerRoot: join(f.root, 'ledger'),
+    } });
+    const push = new SessionPush(registry);
+    const hook = join(root, 'hooks', 'flowcrew-session.mjs');
+    const input = JSON.stringify({ session_id: 'own-session' });
+    const worker = spawn(process.execPath, [join(packageRoot, 'dist', 'cli.js'), 'session-push', 'wake'], {
+      env: f.env, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const closed = new Promise(resolve => worker.once('close', resolve));
+    worker.stdin.end(input);
+    try {
+      const deadline = Date.now() + 10_000;
+      while (!hasClaudeWakeWaiter(push.root, 'own-session')) {
+        if (Date.now() >= deadline) throw Error('fixture waiter readiness deadline');
+        await sleep(20);
+      }
+      for (const event of ['Stop', 'SessionStart']) {
+        config.hooks[event] = config.hooks[event].filter((group: { hooks: { asyncRewake?: boolean }[] }) => !group.hooks.some(hook => hook.asyncRewake));
+      }
+      writeFileSync(configPath, JSON.stringify(config));
+      const first = command(process.execPath, [hook, 'Stop'], f.env, input);
+      expect(first.status, first.stderr).toBe(0);
+      expect(JSON.parse(first.stdout)).toEqual({ systemMessage: expect.stringContaining('async wake hook is disabled or missing') });
+      await sleep(1200); // at least one healthy tick in the still-running waiter
+      expect(command(process.execPath, [hook, 'Stop'], f.env, input).stdout).toBe('');
+      const recoveries = join(f.env.FC_HOME, 'infrastructure-recoveries.jsonl');
+      expect(existsSync(recoveries) ? readFileSync(recoveries, 'utf8') : '').not.toContain('configuration');
+      writeFileSync(configPath, original);
+      expect(command(process.execPath, [hook, 'Stop'], f.env, input).stdout).toBe('');
+      expect(readFileSync(recoveries, 'utf8')).toContain('"cause":"configuration"');
+      writeFileSync(configPath, JSON.stringify(config));
+      expect(JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, input).stdout)).toEqual({ systemMessage: expect.stringContaining('async wake hook is disabled or missing') });
+      expect(command(process.execPath, [hook, 'Stop'], f.env, input).stdout).toBe('');
+    } finally {
+      if (worker.exitCode === null && worker.signalCode === null) worker.kill('SIGKILL');
+      await closed;
+    }
+  }, 60_000);
 
   it('upgrades pre-wake installations in place, preserves inbound policy, and repairs hook drift', () => {
     const f = fixture();
@@ -322,7 +400,7 @@ describe('installer-owned front-end integration', () => {
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(original);
   });
 
-  it.each(['2.1.287 (Claude Code)', 'unknown'])('doctor reports unsupported Claude %s and the installed hook retains foreground blocking', version => {
+  it.each(['2.1.287 (Claude Code)', 'unknown'])('doctor and the installed hook report unsupported Claude %s without an empty-turn loop', version => {
     const f = fixture();
     writeFileSync(join(f.bin, 'claude'), `#!${process.execPath}\nconsole.log(${JSON.stringify(version)});\n`);
     const root = join(f.home, '.claude');
@@ -335,7 +413,9 @@ describe('installer-owned front-end integration', () => {
     const hook = join(root, 'hooks', 'flowcrew-session.mjs');
     const input = JSON.stringify({ session_id: 'own-session' });
     expect(command(process.execPath, [hook, 'Wake'], f.env, input).status).toBe(0);
-    expect(JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, input).stdout).decision).toBe('block');
+    const warning = JSON.parse(command(process.execPath, [hook, 'Stop'], f.env, input).stdout);
+    expect(warning).toEqual({ systemMessage: expect.stringContaining('wake requires') });
+    expect(command(process.execPath, [hook, 'Stop'], f.env, input).stdout).toBe('');
   });
 
   it.each(['claude', 'codex'])('merges %s hooks idempotently, preserves adjacent hooks and restores the status line on uninstall', frontend => {
@@ -456,7 +536,7 @@ describe('installer-owned front-end integration', () => {
     expect(existsSync(join(f.codexHome, 'hooks', 'flowcrew-session.mjs'))).toBe(false);
   });
 
-  it('keeps existing status output, renders engine progress and suppresses the old monitor warning only with live delivery coverage', async () => {
+  it('renders scoped engine progress and saves the previous status definition for restoration without executing it', async () => {
     const f = fixture();
     const root = join(f.home, '.claude');
     mkdirSync(root, { recursive: true });
@@ -475,12 +555,14 @@ describe('installer-owned front-end integration', () => {
       const input = JSON.stringify({ session_id: 'own-session' });
       const covered = command(process.execPath, [hook, '--statusline'], f.env, input);
       expect(covered.status, covered.stderr).toBe(0);
-      expect(covered.stdout).toContain('existing output');
+      expect(covered.stdout).not.toContain('existing output');
+      expect(JSON.parse(readFileSync(join(root, 'hooks', 'flowcrew-session.json'), 'utf8')).previousStatusLine.command).toContain('existing output');
       expect(covered.stdout).toContain('remaining unknown');
       expect(covered.stdout).not.toContain('无 monitor');
       await new Promise<void>(resolve => server.close(() => resolve()));
       const uncovered = command(process.execPath, [hook, '--statusline'], f.env, input);
-      expect(uncovered.stdout).toContain('无 monitor');
+      expect(uncovered.stdout).not.toContain('无 monitor');
+      expect(uncovered.stdout).toContain('push target unavailable');
     } finally {
       if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
     }
@@ -494,11 +576,14 @@ describe('installer-owned front-end integration', () => {
     const start = command(process.execPath, [hook, 'SessionStart'], f.env, JSON.stringify({ session_id: 'own-session', hook_event_name: 'SessionStart' }));
     expect(start.status, start.stderr).toBe(0);
     const missing = command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ hook_event_name: 'Stop' }));
-    expect(missing.status).toBe(2);
-    expect(missing.stderr).toContain('no session identifier');
-    new TaskRegistry({ baseDir: f.env.FC_HOME }).create({ projectDir: f.project, status: 'running', launcher: {
+    expect(missing.status).toBe(0);
+    expect(JSON.parse(missing.stdout)).toEqual({ systemMessage: expect.stringContaining('no session identifier') });
+    expect(missing.stderr).toBe('');
+    const registry = new TaskRegistry({ baseDir: f.env.FC_HOME });
+    const task = registry.create({ projectDir: f.project, status: 'running', launcher: {
       frontend: frontend as 'claude' | 'codex', sessionId: 'own-session', cwd: f.project, ledgerRoot: join(f.root, 'ledger'),
     } });
+    new SessionPush(registry).enqueue(task, { type: 'operator_wrap_up_required', runId: 'fixture-run', timestamp: new Date().toISOString() });
     const stop = command(process.execPath, [hook, 'Stop'], f.env, JSON.stringify({ session_id: 'own-session', hook_event_name: 'Stop', stop_hook_active: true }));
     expect(stop.status, stop.stderr).toBe(0);
     expect(JSON.parse(stop.stdout)).toMatchObject({ decision: 'block', reason: expect.stringContaining('wrap-up is open') });

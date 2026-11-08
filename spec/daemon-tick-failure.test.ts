@@ -32,7 +32,8 @@ it.each(['startup', 'interval', 'response'])(
     mkdirSync(home); mkdirSync(dist);
     writeFileSync(join(dist, 'runtime.js'), 'export const fixture = true;\n');
     if (source === 'startup') writeFileSync(arm, 'arm');
-    // Exercise the real daemon entry points and real five-second lock timeout.
+    // Exercise the real daemon entry points and real five-second writer-lock timeout.
+    // Health reads do not lock; the push service publishes its task view under the writer lock.
     // Only shorten the producer interval; the filesystem and failure stay real.
     writeFileSync(runner, `
 import fs from 'node:fs';
@@ -86,7 +87,8 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
       expect(readFileSync(succeeded, 'utf8')).toBe('succeeded');
       expect(errors).toContain('daemon tick failed:');
       expect(errors).toContain('owner metadata is unreadable');
-      expect(errors).toContain('TaskRegistry.health');
+      expect(errors).toContain('TaskRegistry.ensureSessionTaskIndexes');
+      expect(errors).not.toContain('TaskRegistry.health');
       await sendRpc(socket, { cmd: 'stop' });
       await closed;
       expect(child.exitCode, errors).toBe(0);

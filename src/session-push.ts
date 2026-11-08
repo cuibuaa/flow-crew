@@ -1,7 +1,7 @@
 import { readOptionalJsonlFile } from './jsonl.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, lstatSync } from 'node:fs';
-import { atomicWrite, mkdirSync } from './engine-fs.js';
+import { atomicWrite, closeSync, fsyncSync, linkSync, mkdirSync, openSync, renameSync, unlinkSync } from './engine-fs.js';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { RunEvent } from './run-events.js';
@@ -9,7 +9,7 @@ import type { StoreState } from './store.js';
 import { isPausedRunStatus, isTerminalRunStatus, isSuccessfulRunStatus } from './lifecycle-status.js';
 import { TaskRegistry, TASK_LIST_STATUS, isActiveTaskStatus, hasLiveForegroundOwner, sessionTaskIndexPath, type TaskEntry } from './task-registry.js';
 import { codexRequest, queueCodex, sendClaude, notifyFallback } from './session-push-transport.js';
-import { publicTaskEntries, readTaskLedger } from './fc-tasks.js';
+import { publicTaskEntries, readTaskLedger, refreshOpenTaskLedger, type LedgerReadResult } from './fc-tasks.js';
 import { hasClaudeWakeWaiter } from './session-wake.js';
 
 export interface LaunchTarget {
@@ -98,6 +98,16 @@ function load<T>(path: string): T | undefined {
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
 }
 
+function loadText(path: string): string | undefined {
+  try { return readFileSync(path, 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+}
+
+function syncDirectory(path: string): void {
+  const fd = openSync(path, 'r');
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
 /** fsync then atomic publish. Exclusive records (event/ACK) are immutable;
  * retries and acknowledgements never overwrite each other's state. */
 function publish(path: string, value: unknown, exclusive = false): boolean {
@@ -164,9 +174,54 @@ export class SessionPush {
     return readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/u.test(name))
       .map(name => load<PushEvent>(join(directory, name))!).filter(Boolean).map(normalizePushEvent);
   }
-  pending(session?: string): PushEvent[] {
-    return this.events().filter(event => (!session || event.target.sessionId === session)
-      && !this.acknowledged(event.eventId) && !this.superseded(event)).map(event => this.describe(event));
+  private pendingDirectory(frontend: LaunchTarget['frontend'], session: string): string {
+    return join(this.root, 'pending', key([frontend, session]));
+  }
+  private indexEventUnlocked(event: PushEvent): void {
+    const path = join(this.pendingDirectory(event.target.frontend, event.target.sessionId), `${safeId(event.eventId)}.json`);
+    if (this.acknowledged(event.eventId) || this.superseded(event)) {
+      try { unlinkSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    } else {
+      mkdirSync(resolve(path, '..'), { recursive: true });
+      try { linkSync(this.eventPath(event.eventId), path); syncDirectory(resolve(path, '..')); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    }
+  }
+  private indexEvent(event: PushEvent): void {
+    const path = join(this.pendingDirectory(event.target.frontend, event.target.sessionId), `${safeId(event.eventId)}.json`);
+    // Immutable links already in their desired disposition need no publication.
+    const retired = this.acknowledged(event.eventId) || this.superseded(event);
+    const exists = existsSync(path);
+    if (retired ? !exists : exists) return;
+    this.registry.withSessionWrite(() => this.indexEventUnlocked(event));
+  }
+  /** Writer-side migration. A reader must never discover ownership by scanning
+   * the global outbox. Immutable event and ACK records remain authoritative. */
+  private ensureEventIndex(): void {
+    const ready = join(this.root, 'pending', 'ready');
+    if (existsSync(ready)) return;
+    this.registry.withSessionWrite(() => {
+      if (existsSync(ready)) return;
+      for (const event of this.events()) this.indexEventUnlocked(event);
+      publish(ready, { version: 1 });
+    });
+  }
+  pending(session?: string, frontend?: LaunchTarget['frontend']): PushEvent[] {
+    if (!session) return this.events().filter(event => !this.acknowledged(event.eventId) && !this.superseded(event)).map(event => this.describe(event));
+    if (!existsSync(join(this.root, 'pending', 'ready')) && existsSync(join(this.root, 'events'))) {
+      throw new Error('Session event view unavailable; restart the FlowCrew push service to rebuild it');
+    }
+    return (frontend ? [frontend] : ['claude', 'codex'] as const).flatMap(kind => {
+      const directory = this.pendingDirectory(kind, session);
+      let names: string[];
+      try { names = readdirSync(directory); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+      return names.map(name => load<PushEvent>(join(directory, name))).filter((event): event is PushEvent => !!event)
+        .filter(event => {
+          if (event.target.frontend !== kind || event.target.sessionId !== session) throw new Error('Invalid session event view');
+          return !this.acknowledged(event.eventId) && !this.superseded(event);
+        }).map(normalizePushEvent);
+    });
   }
   /** A delivery disposition retires the obligation without forging a business ACK.
    * The push service observes run records; it never writes into another run. */
@@ -200,21 +255,26 @@ export class SessionPush {
     };
   }
   sessionTasks(frontend: LaunchTarget['frontend'], sessionId: string): TaskEntry[] {
-    if (!existsSync(join(this.root, 'task-index', 'ready'))) this.registry.ensureSessionTaskIndexes();
+    if (existsSync(join(this.root, 'task-index', 'dirty'))) throw new Error('Session task view publication interrupted; the next registry writer or push-service sweep will repair it');
+    const ready = loadText(join(this.root, 'task-index', 'ready'));
+    if (ready !== '2\n') {
+      if (!existsSync(this.registry.registryPath)) return [];
+      throw new Error('Session task view unavailable; restart the FlowCrew push service to rebuild it');
+    }
     return (load<number[]>(sessionTaskIndexPath(this.registry.baseDir, { frontend, sessionId })) ?? [])
-      .map(id => this.registry.get(id))
-      .filter((task): task is TaskEntry => task?.launcher?.frontend === frontend && task.launcher.sessionId === sessionId);
+      .map(id => this.registry.get(id, { frontend, sessionId }))
+      .filter((task): task is TaskEntry => !!task && task.launcher?.frontend === frontend && task.launcher.sessionId === sessionId);
   }
   openTasks(frontend: LaunchTarget['frontend'], session: string, allowExecuting = false): TaskEntry[] {
-    return this.sessionTasks(frontend, session)
-      .filter(task => {
-        const ledger = readTaskLedger(task.launcher!.ledgerRoot, session);
-        const entry = publicTaskEntries(ledger).find(entry => entry.flowcrewTaskId === task.id);
-        if (ledger.issues.length) return true;
-        if (isActiveTaskStatus(task.status)) return !allowExecuting;
-        return entry?.status !== 'completed' || !this.events().some(event => event.taskId === task.id
-          && event.runId === (task.run_id || `task-${task.id}`) && (this.acknowledged(event.eventId) || this.superseded(event)));
-      });
+    return this.sessionTasks(frontend, session).filter(task => !allowExecuting || !isActiveTaskStatus(task.status));
+  }
+  private closeHandledTask(task: TaskEntry, events: PushEvent[], ledger = readTaskLedger(task.launcher!.ledgerRoot, task.launcher!.sessionId, Number.MAX_SAFE_INTEGER)): boolean {
+    const closed = !ledger.issues.length && publicTaskEntries(ledger).some(entry => entry.flowcrewTaskId === task.id && entry.status === 'completed');
+    const currentRun = task.run_id || `task-${task.id}`;
+    if (!closed || !events.some(event => event.runId === currentRun)
+        || !events.every(event => this.acknowledged(event.eventId) || this.superseded(event))) return false;
+    this.registry.closeSessionTask(task);
+    return !isActiveTaskStatus(task.status);
   }
   deliveryReady(task: TaskEntry): boolean {
     if (!task.launcher) return false;
@@ -222,17 +282,18 @@ export class SessionPush {
     if (target.frontend === 'claude' && !hasClaudeWakeWaiter(this.root, target.sessionId, this.now())) {
       try { if (!target.socket || !lstatSync(target.socket).isSocket()) return false; } catch { return false; }
     }
-    return this.pending(target.sessionId).filter(event => event.taskId === task.id)
+    return this.pending(target.sessionId, target.frontend).filter(event => event.taskId === task.id)
       .every(event => !load<DeliveryState>(this.deliveryPath(event.eventId))?.error);
   }
   enqueue(task: TaskEntry, source: Pick<RunEvent, 'type' | 'timestamp' | 'runId' | 'attemptIndex' | 'detail' | 'stageId' | 'attemptStartedAt' | 'requestId' | 'runStatus' | 'providerFailure' | 'adapterFailureKind' | 'exitCode'>, identity: unknown = source): PushEvent | undefined {
     if (!task.launcher) return undefined;
+    this.ensureEventIndex();
     const eventId = key([task.id, source.runId, identity]);
     const existing = load<PushEvent>(this.eventPath(eventId))
       // Old fallback observations hashed the zero-based launch sequence.
       ?? (Array.isArray(identity) ? load<PushEvent>(this.eventPath(key([task.id, source.runId,
         identity.map(value => typeof value === 'number' ? value - 1 : value)]))) : undefined);
-    if (existing) return normalizePushEvent(existing);
+    if (existing) { this.indexEvent(normalizePushEvent(existing)); return normalizePushEvent(existing); }
     const event: PushEvent = this.describe({
       version: 1, eventId, taskId: task.id,
       runId: source.runId, launch: task.launch, attemptIndex: source.attemptIndex, kind: source.type,
@@ -242,8 +303,10 @@ export class SessionPush {
       failureIdentity: providerFailureIdentity(source) || source.adapterFailureKind
         || (source.exitCode === undefined ? undefined : `exit ${source.exitCode}`),
     });
-    publish(this.eventPath(event.eventId), event, true);
-    return event;
+    const canonical = publish(this.eventPath(event.eventId), event, true)
+      ? event : normalizePushEvent(load<PushEvent>(this.eventPath(event.eventId))!);
+    this.indexEvent(canonical);
+    return canonical;
   }
   /** Capture before a manual retry can discard this task's old run binding. */
   capture(task: TaskEntry): void { if (task.launcher) this.collect(task, this.run(task)); }
@@ -252,7 +315,21 @@ export class SessionPush {
     const event = stored && normalizePushEvent(stored);
     if (!event) throw new Error('Unknown event id');
     if (event.target.sessionId !== session) throw new Error('Event belongs to a different launching session');
-    publish(this.ackPath(id), { eventId: id, sessionId: session, acknowledgedAt: new Date(this.now()).toISOString() }, true);
+    this.registry.withSessionWrite(() => {
+      if (this.acknowledged(id)) { this.indexEventUnlocked(event); return; }
+      const directory = this.pendingDirectory(event.target.frontend, session);
+      mkdirSync(join(this.root, 'acks'), { recursive: true });
+      // Moving the immutable event link publishes ACK and retires the pending
+      // obligation in one operation. No killed ACK writer leaves closed history
+      // in the directory polled by this session. Legacy ACK receipts stay intact.
+      mkdirSync(directory, { recursive: true });
+      try { linkSync(this.eventPath(id), join(directory, `${safeId(id)}.json`)); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      renameSync(join(directory, `${safeId(id)}.json`), this.ackPath(id));
+      for (const path of [directory, join(this.root, 'acks')]) syncDirectory(path);
+    });
+    const task = this.registry.get(event.taskId);
+    if (task?.launcher) this.closeHandledTask(task, this.events().filter(candidate => candidate.taskId === task.id));
     return event;
   }
   refreshSession(frontend: LaunchTarget['frontend'], sessionId: string, socket?: string): void {
@@ -336,7 +413,9 @@ export class SessionPush {
     if (!task.launcher) return;
     const display = this.display(task.id);
     display.progress = run;
-    display.history = summarizeProgressHistory(run?.workflowName, history);
+    const summary = summarizeProgressHistory(run?.workflowName, history);
+    display.history = { ...summary, stages: Object.fromEntries(Object.keys(run?.stages ?? {}).flatMap(stage =>
+      summary.stages[stage] ? [[stage, summary.stages[stage]]] : [])) };
     display.refreshedAt = this.now();
     if (task.launcher.frontend === 'codex' && (!display.retryAt || display.retryAt <= this.now())) {
       try {
@@ -443,6 +522,8 @@ export class SessionPush {
     if (dirty) publish(this.deliveryPath(event.eventId), state);
   }
   async sweep(foregroundTaskId?: number): Promise<void> {
+    this.registry.ensureSessionTaskIndexes();
+    this.ensureEventIndex();
     const tasks = this.registry.list({ status: TASK_LIST_STATUS.ALL });
     const owns = (task: TaskEntry) => foregroundTaskId === undefined
       ? !hasLiveForegroundOwner(task) : task.id === foregroundTaskId && task.foregroundOwner?.pid === process.pid;
@@ -454,14 +535,19 @@ export class SessionPush {
       }) };
     }
     const history = this.historyCache.runs;
+    const events = this.events();
+    const ledgers = new Map<string, LedgerReadResult>();
     for (const task of launched) {
       try {
-        const ledger = readTaskLedger(task.launcher!.ledgerRoot, task.launcher!.sessionId);
-        const closed = !ledger.issues.length && publicTaskEntries(ledger).some(entry => entry.flowcrewTaskId === task.id && entry.status === 'completed');
-        const events = this.events().filter(event => event.taskId === task.id);
-        const currentRun = task.run_id || `task-${task.id}`;
-        if (closed && events.some(event => event.runId === currentRun)
-            && events.every(event => this.acknowledged(event.eventId) || this.superseded(event)) && !isActiveTaskStatus(task.status)) continue;
+        const ledgerKey = JSON.stringify([task.launcher!.ledgerRoot, task.launcher!.sessionId]);
+        let ledger = ledgers.get(ledgerKey);
+        if (!ledger) {
+          ledger = refreshOpenTaskLedger(task.launcher!.ledgerRoot, task.launcher!.sessionId);
+          ledgers.set(ledgerKey, ledger);
+        }
+        const taskEvents = events.filter(event => event.taskId === task.id);
+        for (const event of taskEvents) this.indexEvent(event); // repair a crash between event and index publication
+        if (this.closeHandledTask(task, taskEvents, ledger)) continue;
         const run = this.run(task);
         this.collect(task, run);
         await this.ensureDisplay(task, run, history);

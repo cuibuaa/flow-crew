@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { atomicWrite, appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, unlinkSync, writeFileSync, writeSync } from './engine-fs.js';
-import { constants, existsSync, fstatSync, fsyncSync, readFileSync, readSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { atomicWrite, appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, unlinkSync, writeSync } from './engine-fs.js';
+import { constants, existsSync, fstatSync, fsyncSync, readFileSync, readdirSync, readSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
+import { dirname, join } from 'node:path';
 import { fcGlobalDir } from './store.js';
 import { TASK_STATUS, isActiveTaskStatus, isKnownTaskStatus, type TaskStatus } from './lifecycle-status.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
@@ -338,7 +338,8 @@ export class TaskRegistry {
     this.now = opts.now ?? (() => new Date());
     this.lockTimeoutMs = opts.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
     this.lockPollMs = opts.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
-    this.warn = opts.warn ?? ((message) => console.warn(message));
+    this.warn = opts.warn ?? ((message) => appendFileSync(join(this.baseDir, 'infrastructure-recoveries.jsonl'),
+      `${JSON.stringify({ at: new Date().toISOString(), component: 'registry', message })}\n`, { mode: 0o600, flush: true }));
     this.syncFile = opts.syncFile ?? fsyncSync;
     if (opts.createDirectories !== false) mkdirSync(this.tasksDir, { recursive: true });
   }
@@ -392,9 +393,9 @@ export class TaskRegistry {
   }
 
   list(filter: TaskListFilter = {}): TaskEntry[] {
-    return this.withLock(() => {
-      // Select inside the coherent locked cache; only mutable public results
-      // need copies. Terminal payloads never cross an active-list boundary.
+    {
+      // Select from the observed append-log prefix; public results receive
+      // copies. Terminal payloads never cross an active-list boundary.
       const registry = this.readLatestUnlocked();
       const selected = filter.status === TASK_LIST_STATUS.ACTIVE ? registry.activeTasks : registry.tasks;
       let tasks = Array.from(selected.values()).filter((task) => (
@@ -404,14 +405,25 @@ export class TaskRegistry {
       )).sort((a, b) => a.id - b.id);
       if (filter.limit && filter.limit > 0) tasks = tasks.slice(-filter.limit);
       return tasks.map((task) => structuredClone(task));
-    });
+    }
   }
 
-  get(id: number): TaskEntry | undefined {
-    return this.withLock(() => {
-      const task = this.readLatestUnlocked().tasks.get(id);
-      return task ? structuredClone(task) : undefined;
-    });
+  get(id: number, session?: Pick<LaunchTarget, 'frontend' | 'sessionId'>): TaskEntry | undefined {
+    if (session) {
+      if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Invalid session task id');
+      // An atomic latest-record projection is published by the registry writer.
+      // Session readers never fold tasks.jsonl or participate in its lock.
+      try {
+        const task: TaskEntry = JSON.parse(readFileSync(join(this.tasksDir, String(id), 'current.json'), 'utf8'));
+        if (task.id !== id) throw new Error('Invalid session task record');
+        return task.launcher?.frontend === session.frontend && task.launcher.sessionId === session.sessionId ? task : undefined;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`Session task #${id} record unavailable; restart the push service to rebuild it`, { cause: error });
+        throw error;
+      }
+    }
+    const task = this.readLatestUnlocked().tasks.get(id);
+    return task ? structuredClone(task) : undefined;
   }
 
   update(id: number, patch: Partial<Omit<TaskEntry, 'id' | 'created_at' | 'tick_log_path'>>): TaskEntry {
@@ -438,7 +450,7 @@ export class TaskRegistry {
   }
 
   snapshot(): TaskRegistrySnapshot {
-    return this.withLock(() => {
+    {
       const registry = this.readLatestUnlocked();
       return {
         tasks: Array.from(registry.tasks.values())
@@ -446,12 +458,12 @@ export class TaskRegistry {
           .map((task) => structuredClone(task)),
         unreadableRecords: registry.unreadableRecords,
       };
-    });
+    }
   }
 
   /** A writer cannot infer missing ownership from an unknown task lifecycle. */
   hasUnknownTaskStatuses(): boolean {
-    return this.withLock(() => this.readLatestUnlocked().unknownTaskStatuses);
+    return this.readLatestUnlocked().unknownTaskStatuses;
   }
 
   /** Serialize orphan recovery with binding writers. Acquire registry before
@@ -487,11 +499,11 @@ export class TaskRegistry {
   }
 
   health(): TaskRegistryHealth {
-    return this.withLock(() => ({ unreadableRecords: this.readLatestUnlocked().unreadableRecords }));
+    return { unreadableRecords: this.readLatestUnlocked().unreadableRecords };
   }
 
   metrics(): TaskRegistryMetrics {
-    return this.withLock(() => this.metricsFromCache(this.readLatestUnlocked()));
+    return this.metricsFromCache(this.readLatestUnlocked());
   }
 
   /**
@@ -500,7 +512,7 @@ export class TaskRegistry {
    * unless `apply: true` is explicit.
    */
   repair(options: RegistryMaintenanceOptions = {}): RegistryMaintenanceReport {
-    return this.withLock(() => {
+    const operation = (): RegistryMaintenanceReport => {
       const sourceBytes = this.readRegistryBytes();
       const raw = sourceBytes.toString('utf-8');
       const plan = this.planRepair(raw);
@@ -525,8 +537,7 @@ export class TaskRegistry {
       }
 
       if (options.apply) {
-        const tasks = this.readLatestUnlocked().tasks;
-        this.writeSessionTaskIndexes(tasks, [...tasks.values()].flatMap((task) => task.launcher ? [task.launcher] : []));
+        this.rebuildSessionTaskIndexes();
       }
 
       return {
@@ -543,7 +554,8 @@ export class TaskRegistry {
         before: plan.before,
         after: plan.after,
       };
-    });
+    };
+    return options.apply ? this.withLock(operation) : operation();
   }
 
   /**
@@ -553,7 +565,7 @@ export class TaskRegistry {
    * repaired first. Dry-run is the default.
    */
   compact(options: RegistryMaintenanceOptions = {}): RegistryMaintenanceReport {
-    return this.withLock(() => {
+    const operation = (): RegistryMaintenanceReport => {
       const sourceBytes = this.readRegistryBytes();
       const raw = sourceBytes.toString('utf-8');
       const plan = this.planCompact(raw);
@@ -592,7 +604,8 @@ export class TaskRegistry {
         before: plan.before,
         after: plan.after,
       };
-    });
+    };
+    return options.apply ? this.withLock(operation) : operation();
   }
 
   appendTick(id: number, tick: TaskTick): void {
@@ -985,7 +998,7 @@ export class TaskRegistry {
       cache.mtimeMs = after.mtimeMs;
       cache.ctimeMs = after.ctimeMs;
 
-      // No cache reference escapes the lock/public cloning boundary. A valid
+      // No cache reference escapes the public cloning boundary. A valid
       // unterminated tail remains an overlay until completed by an append.
       const tasks = cache.pendingTask ? new Map(cache.tasks) : cache.tasks;
       const activeTasks = cache.pendingTask ? new Map(cache.activeTasks) : cache.activeTasks;
@@ -1019,6 +1032,7 @@ export class TaskRegistry {
     const previousLauncher = current.tasks.get(entry.id)?.launcher;
     const cache = this.registryCache;
     const needsSeparator = Boolean(cache && cache.pending.length > 0 && cache.pending.toString('utf-8').trim().length > 0);
+    this.writeAtomic(join(this.baseDir, 'session-push', 'task-index', 'dirty'), 'dirty\n');
     const bytes = Buffer.from(`${needsSeparator ? '\n' : ''}${JSON.stringify(entry)}\n`, 'utf-8');
     const existed = existsSync(this.registryPath);
     let fd: number | undefined;
@@ -1046,37 +1060,84 @@ export class TaskRegistry {
     // Acknowledgement follows sync. Folding the newly durable suffix keeps the
     // hot cache coherent without rereading any historical byte.
     const tasks = this.readLatestUnlocked().tasks;
-    if (!existsSync(join(this.baseDir, 'session-push', 'task-index', 'ready'))) {
-      this.writeSessionTaskIndexes(tasks, [...tasks.values()].flatMap(task => task.launcher ? [task.launcher] : []));
-    } else if (!isDeepStrictEqual(previousLauncher, entry.launcher)) {
+    if (!this.sessionIndexesReady()) {
+      this.rebuildSessionTaskIndexes();
+    } else {
+      this.writeAtomic(join(this.tasksDir, String(entry.id), 'current.json'), `${JSON.stringify(entry)}\n`);
       this.writeSessionTaskIndexes(tasks, [previousLauncher, entry.launcher].filter((launcher): launcher is LaunchTarget => Boolean(launcher)));
     }
+    unlinkSync(join(this.baseDir, 'session-push', 'task-index', 'dirty'));
   }
 
-  /** Bootstrap legacy launcher rows before trusting a missing session index. */
+  /** Session event publication and ACK retirement share the registry's existing
+   * writer serialization; display/check paths never enter this boundary. */
+  withSessionWrite(action: () => void): void { this.withLock(action); }
+
+  /** Bootstrap and interrupted-publication repair are writer/service work. */
   ensureSessionTaskIndexes(): void {
+    this.withLock(() => { if (!this.sessionIndexesReady()) this.rebuildSessionTaskIndexes(); });
+  }
+
+  private rebuildSessionTaskIndexes(): void {
+    const tasks = this.readLatestUnlocked().tasks;
+    for (const task of tasks.values()) {
+      mkdirSync(join(this.tasksDir, String(task.id)), { recursive: true });
+      this.writeAtomic(join(this.tasksDir, String(task.id), 'current.json'), `${JSON.stringify(task)}\n`);
+    }
+    // Rebuild the complete ownership projection, including sessions whose last
+    // launcher was removed or rebound by the interrupted append.
+    this.writeSessionTaskIndexes(tasks, [...tasks.values()].flatMap(task => task.launcher ? [task.launcher] : []), true);
+  }
+
+  private sessionIndexesReady(): boolean {
+    try { return readFileSync(join(this.baseDir, 'session-push', 'task-index', 'ready'), 'utf8') === '2\n'; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  }
+
+  private closureIdentity(task: TaskEntry): string {
+    return JSON.stringify([task.launcher?.frontend, task.launcher?.sessionId, task.run_id, task.launch]);
+  }
+
+  /** Called by the wrap-up writer only after ledger completion AND event ACK.
+   * A retry/new run has a different identity and automatically reopens the view. */
+  closeSessionTask(task: TaskEntry): void {
     this.withLock(() => {
-      if (existsSync(join(this.baseDir, 'session-push', 'task-index', 'ready'))) return;
       const tasks = this.readLatestUnlocked().tasks;
-      this.writeSessionTaskIndexes(tasks, [...tasks.values()].flatMap((task) => task.launcher ? [task.launcher] : []));
+      const current = tasks.get(task.id);
+      if (!current?.launcher || this.closureIdentity(current) !== this.closureIdentity(task)) return;
+      this.writeAtomic(join(this.tasksDir, String(task.id), 'session-closed.json'), this.closureIdentity(current));
+      this.writeSessionTaskIndexes(tasks, [current.launcher]);
     });
   }
 
-  private writeSessionTaskIndexes(tasks: ReadonlyMap<number, TaskEntry>, launchers: LaunchTarget[]): void {
-    const sessions = new Map(launchers.map((launcher) => [sessionTaskIndexPath(this.baseDir, launcher), [] as number[]]));
-    for (const task of tasks.values()) {
-      if (task.launcher) sessions.get(sessionTaskIndexPath(this.baseDir, task.launcher))?.push(task.id);
+  private writeSessionTaskIndexes(tasks: ReadonlyMap<number, TaskEntry>, launchers: LaunchTarget[], rebuild = false): void {
+    const sessions = new Map(launchers.map(launcher => [sessionTaskIndexPath(this.baseDir, launcher), [] as number[]]));
+    const directory = join(this.baseDir, 'session-push', 'task-index');
+    if (rebuild && existsSync(directory)) {
+      for (const name of readdirSync(directory)) {
+        if (/^[a-f0-9]{64}\.json$/u.test(name) && !sessions.has(join(directory, name))) sessions.set(join(directory, name), []);
+      }
     }
-    for (const [path, ids] of sessions) {
-      const content = `${JSON.stringify(ids)}\n`;
+    for (const task of tasks.values()) {
+      if (!task.launcher) continue;
+      const selected = sessions.get(sessionTaskIndexPath(this.baseDir, task.launcher));
+      if (!selected) continue;
+      if (!isActiveTaskStatus(task.status)) {
+        try { if (readFileSync(join(this.tasksDir, String(task.id), 'session-closed.json'), 'utf8') === this.closureIdentity(task)) continue; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
+      selected.push(task.id);
+    }
+    for (const [path, entries] of sessions) {
+      const content = `${JSON.stringify(entries)}\n`;
       try { if (readFileSync(path, 'utf8') === content) continue; } catch { /* index not yet written */ }
       mkdirSync(dirname(path), { recursive: true });
       this.writeAtomic(path, content);
     }
     const ready = join(this.baseDir, 'session-push', 'task-index', 'ready');
-    if (!existsSync(ready)) {
+    if (!this.sessionIndexesReady()) {
       mkdirSync(dirname(ready), { recursive: true });
-      this.writeAtomic(ready, 'ready\n');
+      this.writeAtomic(ready, '2\n');
     }
   }
 
@@ -1174,6 +1235,11 @@ export class TaskRegistry {
       }
     }
     try {
+      const dirty = join(this.baseDir, 'session-push', 'task-index', 'dirty');
+      if (existsSync(dirty)) {
+        this.rebuildSessionTaskIndexes();
+        unlinkSync(dirty);
+      }
       return fn();
     } finally {
       try {

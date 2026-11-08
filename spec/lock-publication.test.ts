@@ -76,7 +76,7 @@ describe('atomic owner publication', () => {
         if (owner.pid !== process.pid || owner.processStartTime !== '4242' || typeof owner.token !== 'string') incomplete.push('incomplete owner');
       } catch { incomplete.push('unreadable owner'); }
     };
-    if (kind === 'registry') registry().health();
+    if (kind === 'registry') registry().create({ projectDir: root });
     else writeLedger();
     boundary.observe = undefined;
     expect(observations).toBeGreaterThan(0);
@@ -90,21 +90,21 @@ describe('atomic owner publication', () => {
     const old = new Date(Date.now() - 60_000);
     for (const processStartTime of [undefined, '4242']) {
       writeFileSync(path, JSON.stringify({ pid: 2_147_483_647, processStartTime, acquiredAt: new Date().toISOString(), token: 'dead' }));
-      expect(() => registry().health()).not.toThrow();
+      expect(() => registry().create({ projectDir: root })).not.toThrow();
     }
 
     writeFileSync(path, JSON.stringify({ pid: process.pid, acquiredAt: old.toISOString(), token: 'live' }));
     utimesSync(path, old, old);
-    expect(() => registry().health()).toThrow(/waiting for task registry lock/u);
+    expect(() => registry().create({ projectDir: root })).toThrow(/waiting for task registry lock/u);
     expect(JSON.parse(readFileSync(path, 'utf-8')).token).toBe('live');
     rmSync(path);
 
     for (const legacy of ['', '{"pid":']) {
       writeFileSync(path, legacy);
-      expect(() => registry().health()).toThrow(/owner metadata is unreadable/u);
+      expect(() => registry().create({ projectDir: root })).toThrow(/owner metadata is unreadable/u);
       expect(readFileSync(path, 'utf-8')).toBe(legacy);
       utimesSync(path, old, old);
-      expect(() => registry().health()).not.toThrow();
+      expect(() => registry().create({ projectDir: root })).not.toThrow();
     }
   });
 
@@ -159,7 +159,7 @@ describe('lock process identity', () => {
         throw Object.assign(new Error('other user process'), { code: 'EPERM' });
       });
       const path = kind === 'registry' ? join(root, 'tasks.lock') : ledgerPath();
-      const act = () => kind === 'registry' ? registry().health() : writeLedger();
+      const act = () => kind === 'registry' ? registry().create({ projectDir: root }) : writeLedger();
       const install = (processStartTime?: string) => {
         const owner = JSON.stringify({ version: 1, pid: process.pid, processStartTime,
           acquiredAt: new Date(Date.now() - 60_000).toISOString(), token: 'c'.repeat(32) });
@@ -199,7 +199,7 @@ describe('lock process identity', () => {
     boundary.procStat = new Error('procfs unavailable');
     const path = kind === 'registry' ? join(root, 'tasks.lock') : ledgerPath();
     const ownerPath = kind === 'registry' ? path : join(path, 'owner');
-    const act = () => kind === 'registry' ? registry().health() : writeLedger();
+    const act = () => kind === 'registry' ? registry().create({ projectDir: root }) : writeLedger();
     const owners: Record<string, unknown>[] = [];
     boundary.observe = () => {
       if (existsSync(ownerPath)) owners.push(JSON.parse(readFileSync(ownerPath, 'utf-8')));

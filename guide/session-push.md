@@ -9,7 +9,7 @@ flowcrew doctor
 
 The installer detects Claude Code and Codex. `--claude` and `--codex` select one;
 `--project` selects project settings. It merges Stop/SessionStart hooks, preserves
-other hooks, and wraps an existing Claude status command. Codex's native config
+other hooks, and installs the session status command. The previous status definition is saved for uninstall; it is not executed on each refresh. Codex's native config
 editor enrolls only the two installed FlowCrew hook hashes. A project-local Codex
 installation requires an already trusted project layer; otherwise install globally.
 Claude Code >= 2.1.308 also gets an `asyncRewake` hook at Stop and SessionStart. Restart Claude after
@@ -46,8 +46,8 @@ Claude delivery uses its live Stop waiter once the session has registered wake c
 while that session is busy or closed it waits for the next live waiter. Only legacy
 sessions that have never registered a waiter use the session inbox;
 Codex delivery uses `codex queue`. Delivery
-does not require installed hooks. Stop/SessionStart hooks add the turn gate and
-refresh Claude's address after a reopen; they never launch an audit worker.
+does not require installed hooks. Stop/SessionStart hooks add the turn gate; SessionStart
+refreshes Claude's address after a reopen. They never launch an audit worker.
 A closed session waits for reopening. Claude retries a missing socket; Codex's
 queue persists its input until the session resumes. Once a transport accepts an
 event, unacknowledged inbox/queue reminders wait thirty minutes. Failed sends back off by two,
@@ -94,18 +94,63 @@ flowcrew session-push ack --event <event-id> --session <launch-session-id>
 ```
 
 ACK is durable and idempotent. It does not mark the session ledger complete.
-The shared gate lets an executing Claude task end its turn when a live waiter covers
-that session and no event is pending. It still blocks unacknowledged events, terminal
-wrap-up, and unreadable state. Without a supported installed wake hook and live
-waiter it retains the previous foreground blocking behavior. Codex keeps its existing
-gate. The engine
-does not invoke the wrap-up itself. If standalone Codex creation fails, the gate
-reports the error and asks the frontend to create a standalone thread, then bind
-that newly created thread with `session-push bind-display` and the exact task and
-launching-session IDs. It never uses a subagent for display.
+Only pending events and a Claude wake lease that must be renewed can open a model
+turn. A live waiter covers all this session's open tasks, including terminal-before-event
+publication. Codex's durable queue has no expiring lease, so open execution alone does
+not block Stop. A pending event still blocks either frontend until explicit ACK.
+Missing Codex display creation is retried by the service; a pending event can also
+ask the frontend to create and bind a standalone display with `session-push bind-display`.
+The engine never invokes wrap-up or creates a display subagent.
+
+Read or command failures produce a human `systemMessage` once per affected session,
+operation and structured cause, without a model `reason` or exit 2. The status line retains the diagnostic.
+The waiter retries state reads while its lease is live; a complete healthy state check
+clears only a read incident. The shim verifies repaired hook definitions or a successful
+command, and the CLI verifies restored version support, before clearing those respective
+causes and recording recovery for the operator. A known wake failure suppresses
+renewal-only Stop continuations, preventing empty-turn retry loops. Pending events
+always take priority. Unsupported Claude versions and missing/disabled async definitions
+use this same operator diagnostic instead of foreground waiting. Check `flowcrew doctor`
+and repair the integration to restore automatic wake delivery.
+
+Session reads open only the calling session's open state: the registry writer publishes
+`tasks/<id>/current.json` and an open task index, event writers publish immutable links
+in `session-push/pending/<session-key>/`, and ledger writers publish `.flowcrew-open/`
+views containing open entries plus a scalar completed count. Event ownership comes from
+its recorded launcher, never message text. ACK atomically moves a pending event link
+into `session-push/acks/`; old ACK receipts remain valid. Terminal tasks leave the index
+after explicit ledger completion and ACK, as observed by the writer/service. A new run,
+launch or session binding invalidates the closure receipt.
+
+Readers never acquire the exclusive registry lock or rebuild a legacy store. A missing
+or interrupted view is reported to the operator. Registry writers and the push service
+repair/migrate views from canonical history; ordinary foreground/background sweeps do
+this automatically. General registry inspection also reads without the writer lock;
+mutations retain append, sync, integrity checks and PID/start-token stale-lock recovery.
+Recovery diagnostics are appended to `FC_HOME/infrastructure-recoveries.jsonl` and never
+sent as a blocking model error. Full historical ledger inspection remains available
+through explicit `fc_tasks list`, `render` and `reconcile`; the installed status command
+uses the open view and never delegates to an arbitrary previous status command. It
+disables the manual renderer’s legacy description/filename-based agent ETA enrichment;
+independent ledger rows remain visible without scanning global agent history. Published
+workflow progress retains only stage statistics used by the current run.
+The service migration requests a full history census through the existing explicit
+larger-scan option; ordinary manual reads retain their 1,000-entry and 4,096-directory-entry
+defaults. Larger explicit censuses retain the per-file, total data and directory-name
+byte limits. A sweep reads each session ledger and the outbox once, rather than
+repeating the same census for every task in that session.
+
+The installer owns all command ceilings in `skills/session-integration.mjs`: synchronous
+CLI work gets 40 seconds and its native hook gets 45 seconds, leaving 5 seconds to
+publish the result under load. The bounded status read gets 10 seconds. The wake lease
+renews at 3600 seconds, ahead of its 3650-second shim and 3660-second native deadlines.
+Reinstall after deployment with `bash skills/install.sh --claude --global` (or the
+original project scope), restart Claude, and run `flowcrew doctor`. Let the deployed
+push service complete its writer-side migration before relying on the new status view.
+These are operator deployment steps; installation does not change inbound permission policy.
 
 The supported live transport baseline is Codex 0.163.0 and Claude Code 2.1.308 on
-Linux. Earlier Claude releases retain blocking even if they advertise asyncRewake;
+Linux. Earlier Claude releases report unsupported wake coverage even if they advertise asyncRewake;
 the first supporting version is unknown. The inbox frame and Codex protocol must be checked when upgrading frontends;
 inbox authentication on other platforms has not been established. A transport
 failure is recorded and falls back through the notifier; it is never audit success.

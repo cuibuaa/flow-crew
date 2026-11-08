@@ -33,14 +33,18 @@ if (config.hooks && (typeof config.hooks !== 'object' || Array.isArray(config.ho
 const owned = handler => handler?.type === 'command' && typeof handler.command === 'string'
   && ['Stop', 'SessionStart', 'Wake'].some(event => handler.command === `${command} ${event}`
     || (previous.command && handler.command === `${previous.command} ${event}`));
-const definition = event => ({ hooks: [{ type: 'command', command: `${command} ${event}`, timeout: 15 }] });
+// Loaded-host headroom: 40s for a bounded CLI read, plus 5s to publish the
+// result before the frontend kills the shim. Status is a cheap display read
+// with its own 10s ceiling. Wake must renew at 3600s before either outer limit.
+const limits = { commandMs: 40_000, hookSeconds: 45, statusMs: 10_000, wakeMs: 3650_000, wakeSeconds: 3660 };
+const definition = event => ({ hooks: [{ type: 'command', command: `${command} ${event}`, timeout: limits.hookSeconds }] });
 // The worker rolls over at 3600s; its shim has a 3650s safety deadline, before
 // Claude's own 3660s deadline. Expiry therefore wakes instead of going silent.
-const wakeDefinition = { hooks: [{ type: 'command', command: `${command} Wake`, timeout: 3660, asyncRewake: true }] };
+const wakeDefinition = { hooks: [{ type: 'command', command: `${command} Wake`, timeout: limits.wakeSeconds, asyncRewake: true }] };
 const present = event => (config.hooks?.[event] || []).some(group => isDeepStrictEqual(group, definition(event)));
 const statusCommand = `${command} --statusline`;
 const settings = {
-  cli: join(packageRoot, 'dist', 'cli.js'), frontend,
+  cli: join(packageRoot, 'dist', 'cli.js'), frontend, limits,
   ...(frontend === 'claude' ? { wakeConfigPath: configPath, wakeDefinition } : {}),
   previousStatusLine: previous.previousStatusLine ?? (config.statusLine?.command === statusCommand ? undefined : config.statusLine),
 };
