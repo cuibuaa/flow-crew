@@ -1,3 +1,4 @@
+import { classifyEnding, type EndingCause } from './attempt-ending.js';
 import { mkdirSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -26,6 +27,7 @@ import {
   releaseLaunchIntent,
 } from './run-lock.js';
 import {
+  isContinuingStage,
   isPausedRunStatus,
   isSuccessfulRunStatus,
   isTerminalRunStatus,
@@ -34,7 +36,7 @@ import {
   readRunState,
   resolveRunStatus,
   reserveRun,
-  RUN_STATUS,
+  RUN_STATUS, STAGE_STATUS,
   runsRoot,
   updateRunState,
 } from './store.js';
@@ -43,7 +45,7 @@ import { assertContinuationCompatible, recordContinuationRefusal } from './engin
 import { checkpointConsumers } from './restart-recovery.js';
 import { unitIsStopped } from './run-control.js';
 import { verifyBriefAdmission, type BriefAdmissionRecord } from './brief-preflight.js';
-import { reconcileHostInterruptedRun } from './restart-recovery.js';
+import { readHostBootId, reconcileHostInterruptedRun } from './restart-recovery.js';
 import { resolveRunIdentity } from './cancellation-policy.js';
 import { workflowContinuation } from './scheduler/sched_loop/launch.js';
 import {
@@ -84,6 +86,7 @@ interface BoundRun {
   path: string;
   status: string;
   failureReason?: string;
+  reasonCode?: string;
   resumeAuthorized?: boolean;
   /** Parked runs with released deployment holds continue without a crash retry. */
   retryExemptContinuation?: boolean;
@@ -93,7 +96,7 @@ export interface DeploymentStatus {
   hold?: DeploymentHold;
   ready: boolean;
   released?: boolean;
-  tasks: Array<{ id: number; runId?: string; status: string; settled: boolean; detail?: string }>;
+  tasks: Array<{ id: number; runId?: string; status: string; settled: boolean; stages?: string[]; detail?: string }>;
   errors: string[];
 }
 
@@ -411,7 +414,7 @@ export class Orchestrator {
           detail = 'Bound run is unreadable';
         } else if (task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.CANCELLING) settled = false;
         if (!detail) detail = `unit=${unit.kind}${settled ? '; queued launch fenced' : ''}`;
-        return { id: task.id, runId: bound?.runId, status: bound?.status ?? task.status, settled, detail };
+        return { id: task.id, runId: bound?.runId, stages: bound ? Object.entries(readRunState(task.projectDir, bound.runId).stages).filter(([, stage]) => stage.status === STAGE_STATUS.RUNNING || stage.attempts?.at(-1)?.status === 'closed').map(([id]) => id) : [], status: bound?.status ?? task.status, settled, detail };
       } catch (error) {
         controlErrors++;
         detail = error instanceof Error ? error.message : String(error);
@@ -423,12 +426,14 @@ export class Orchestrator {
     return { hold, ready: Boolean(hold && !hold.releasedAt) && controlErrors === 0 && tasks.every(task => task.settled), tasks, errors };
   }
 
-  async continueDeployment(): Promise<DeploymentStatus> {
+  async continueDeployment(abandonHold?: string): Promise<DeploymentStatus> {
     const snapshot = await this.deploymentStatus();
     const hold = snapshot.hold;
     if (!hold) throw new Error('No deployment hold exists');
     if (hold.releasedAt || readDeploymentHold()?.releasedAt) return { ...snapshot, released: true };
-    if (!snapshot.ready) return { ...snapshot, errors: [...snapshot.errors, 'Deployment hold is not settled; old owners may still be active. Hold remains in effect.'] };
+    if (abandonHold && hold.stopRequestedAt !== null) throw new Error('Deployment stop was requested; retain the recovery hold');
+    if (abandonHold && abandonHold !== hold.id) throw new Error('Deployment hold changed; cannot abandon it');
+    if (!snapshot.ready && !abandonHold) return { ...snapshot, errors: [...snapshot.errors, 'Deployment hold is not settled; old owners may still be active. Hold remains in effect.'] };
     const errors: string[] = [];
     const compatible: Array<{ task: TaskEntry; runId: string }> = [];
     const releaseRun = (task: TaskEntry, runId: string): boolean => {
@@ -466,7 +471,7 @@ export class Orchestrator {
         if (latest && latest.status !== TASK_STATUS.CANCELLED && latest.status !== TASK_STATUS.CANCELLING) this.failClosed(latest, detail);
       }
     }
-    if (errors.length) return { ...snapshot, ready: false, released: false, errors };
+    if (errors.length && !abandonHold) return { ...snapshot, ready: false, released: false, errors };
     for (const { task, runId } of compatible) {
       const latest = this.registry.get(task.id);
       if (!latest || latest.status === TASK_STATUS.CANCELLED || latest.status === TASK_STATUS.CANCELLING) continue;
@@ -474,7 +479,7 @@ export class Orchestrator {
       queueRun(task, runId);
       if (!releaseRun(task, runId)) throw new Error(`Held run ${runId} changed during continuation; hold remains active`);
     }
-    releaseDeploymentHold(hold);
+    releaseDeploymentHold(hold, undefined, Boolean(abandonHold));
     return { ...snapshot, ready: errors.length === 0, released: true, errors };
   }
 
@@ -600,12 +605,8 @@ export class Orchestrator {
       if (this.waitForBoundHold(task, bound)) return;
       const recovery = this.boundRunRecoveryDecision(task, bound);
       if (recovery.kind === 'stop') return;
-      if (task.defer_kind !== 'retry' && !bound.retryExemptContinuation) {
-        task = this.registry.update(task.id, {
-          defer_kind: 'retry',
-          defer_reason: recovery.reason,
-        });
-      }
+      if (!this.chargeLaunchEnding(task, recovery.cause, recovery.reason)) return;
+      task = this.registry.update(task.id, { defer_kind: 'wait', defer_reason: recovery.reason });
     }
     if (!bound && task.run_id && !readRunReservation(task.projectDir, task.run_id, this.now().getTime())) {
       this.failClosed(task, `bound run ${task.run_id} is unreadable and has no valid reservation; refusing to replay brief`);
@@ -686,7 +687,7 @@ export class Orchestrator {
     // reuse a transient unit name, and that refusal degrades to an untracked
     // detached child.
     const consumesAttempt = task.defer_kind === 'retry';
-    const usedBefore = consumesAttempt || Boolean(task.started_at) || task.launch > 1 || bound?.retryExemptContinuation === true;
+    const usedBefore = task.lastEnding?.launch === task.launch || consumesAttempt || Boolean(task.started_at) || task.launch > 1 || bound?.retryExemptContinuation === true;
     const attempt = consumesAttempt ? task.attempt + 1 : task.attempt;
     const launch = usedBefore ? task.launch + 1 : task.launch;
     const unit = !usedBefore
@@ -695,7 +696,7 @@ export class Orchestrator {
         ? `flowcrew-task-${task.id}-attempt-${attempt}.service`
         : `flowcrew-task-${task.id}-attempt-${attempt}-launch-${launch}.service`;
     const updated = this.registry.update(task.id, {
-      status: 'running', attempt, launch, systemd_unit: unit,
+      status: 'running', attempt, launch, launchBootId: readHostBootId(), systemd_unit: unit,
       started_at: this.now().toISOString(), not_before: undefined, defer_reason: undefined, defer_kind: undefined,
     });
     this.launchingTaskIds.add(task.id);
@@ -780,7 +781,7 @@ export class Orchestrator {
           ? `unit terminated by ${state.signal} (normalized exit ${state.exitCode})`
           : `unit exited with code ${state.exitCode}`;
         if (await this.reconcileBoundRunAfterExit(task, reason)) return;
-        await this.retryOrStuck(task, reason);
+        await this.retryOrStuck(task, reason, state.signal ? 'process_death' : 'work_failed');
         return;
       }
       case 'terminal-unknown':
@@ -812,6 +813,7 @@ export class Orchestrator {
         runId?: unknown;
         status?: unknown;
         failureReason?: unknown;
+        reasonCode?: unknown;
         engineCheckpoint?: unknown;
         projectDir?: string;
         recovery?: { kind?: string };
@@ -823,6 +825,7 @@ export class Orchestrator {
         runId: identity.runId,
         path,
         status: status.kind === 'known' ? status.status : parsed.status,
+        ...(typeof parsed.reasonCode === 'string' ? { reasonCode: parsed.reasonCode } : {}),
         ...(typeof parsed.failureReason === 'string' ? { failureReason: parsed.failureReason } : {}),
         resumeAuthorized: parsed.recovery?.kind === 'resumable' || Boolean(parsed.deploymentHold?.releasedAt),
         retryExemptContinuation: parsed.status === RUN_STATUS.PARKED
@@ -839,16 +842,26 @@ export class Orchestrator {
       this.defer(task, `${prefix}deployment hold: run ${bound.runId} parked at settled stage boundary`, 'wait', task.run_id);
       return true;
     }
+    const recovery = readRunState(task.projectDir, bound.runId).recovery;
+    if (recovery?.cause === 'provider_quota' && this.now().getTime() < Date.parse(recovery.notBefore ?? '')) {
+      this.chargeLaunchEnding(task, 'provider_quota', recovery.reason);
+      this.defer(task, recovery.reason, 'wait', task.run_id);
+      const next = Date.parse(recovery.notBefore!);
+      this.deferredUntil.set(task.id, next);
+      this.registry.update(task.id, { not_before: recovery.notBefore });
+      return true;
+    }
     if (bound.resumeAuthorized) return false;
     this.failClosed(task, `${prefix}bound run ${bound.runId} has no proven continuation authority; ${bound.failureReason ?? 'RECOVERY_FATE_UNKNOWN: inspect the run recovery record before starting new work'}`);
     return true;
   }
 
   private isSingleFlightCollision(bound: BoundRun): boolean {
-    return bound.status === RUN_STATUS.FAILED && bound.failureReason?.startsWith('Single-in-flight') === true;
+    return bound.status === RUN_STATUS.FAILED && bound.reasonCode === 'launch_conflict';
   }
 
   private deferSingleFlightCollision(task: TaskEntry, bound: BoundRun): void {
+    this.chargeLaunchEnding(task, classifyEnding({ launchConflict: true }), 'Project launch collision');
     if (task.run_id) releaseLaunchIntent(task.projectDir, task.run_id);
     const unbound = this.registry.update(task.id, {
       run_id: undefined,
@@ -897,7 +910,7 @@ export class Orchestrator {
           // the same hold instead of spending a crash retry behind its fence.
           parkAtDeploymentBoundary(task.projectDir, bound.runId);
           this.defer(task, `deployment hold; ${recovery.reason}`, 'wait', task.run_id);
-        } else await this.retryOrStuck(task, recovery.reason);
+        } else await this.retryOrStuck(task, recovery.reason, recovery.cause);
       }
       return true;
     }
@@ -917,14 +930,14 @@ export class Orchestrator {
     task: TaskEntry,
     bound: BoundRun,
     prefix?: string,
-  ): { kind: 'resume'; reason: string } | { kind: 'stop' } {
+  ): { kind: 'resume'; reason: string; cause: EndingCause } | { kind: 'stop' } {
     const observed = inspectRunScheduler(bound.runId, bound.path);
     const leading = prefix ? `${prefix}; ` : '';
     if (observed.kind === 'live') {
       this.defer(
         task,
         `${leading}bound run ${bound.runId} still owns live scheduler pid ${observed.pid}; waiting for that exact process`,
-        'retry',
+        'wait',
         task.run_id,
       );
       return { kind: 'stop' };
@@ -964,8 +977,18 @@ export class Orchestrator {
       return { kind: 'stop' };
     }
     const pid = observed.kind === 'missing' ? '' : ` pid ${observed.pid}`;
+    const state = readRunState(task.projectDir, bound.runId);
+    const recovery = state.recovery;
+    // A recovered launch can die before its scheduler consumes the old record.
+    // That record has already paid for its own launch, not this later death.
+    const continuationAt = bound.retryExemptContinuation ? state.deploymentHold?.releasedAt : recovery?.at;
+    const consumedRecovery = continuationAt && task.lastEnding?.continuationAt === continuationAt && task.lastEnding.launch < task.launch;
     return {
       kind: 'resume',
+      cause: task.lastEnding?.launch === task.launch ? task.lastEnding.cause
+        : consumedRecovery ? classifyEnding({ interrupted: true, fromBoot: task.launchBootId, toBoot: readHostBootId() })
+        : bound.retryExemptContinuation ? 'complete'
+        : recovery?.cause ?? classifyEnding({ interrupted: true, fromBoot: recovery?.fromBoot ?? task.launchBootId, toBoot: recovery?.toBoot ?? readHostBootId() }),
       reason: `${leading}bound run ${bound.runId} scheduler is ${observed.kind}${pid}; resuming that exact run`,
     };
   }
@@ -1010,6 +1033,14 @@ export class Orchestrator {
       const status = bound?.status === RUN_STATUS.REALITY_GATE_FAILED
         ? TASK_STATUS.REALITY_GATE_FAILED
         : successful ? TASK_STATUS.DONE : TASK_STATUS.FAILED;
+      const runState = bound ? readRunState(task.projectDir, bound.runId) : undefined;
+      const stages = Object.values(runState?.stages ?? {});
+      const cause = bound?.status === RUN_STATUS.CANCELLED ? 'cancelled'
+        : stages.some(stage => stage.attempts?.at(-1)?.endingCause === 'engine_void') ? 'engine_void'
+        : stages.some(stage => stage.attempts?.at(-1)?.endingCause === 'environment_gap') ? 'environment_gap'
+        : stages.some(isContinuingStage) ? 'work_unfinished'
+        : successful ? 'complete' : 'work_failed';
+      this.chargeLaunchEnding(task, cause, message);
       this.registry.update(task.id, {
         status,
         completed_at: completed,
@@ -1036,14 +1067,40 @@ export class Orchestrator {
     await this.retryOrStuck(task, 'unit exited without commit or changes');
   }
 
-  private async retryOrStuck(task: TaskEntry, reason: string): Promise<void> {
+  /** Launch counters belong to their cause. A durable launch identity makes
+   * repeated daemon observations idempotent, including a crash during queuing. */
+  private chargeLaunchEnding(task: TaskEntry, cause: EndingCause, reason: string): boolean {
+    task = this.registry.get(task.id) ?? task;
+    const bound = this.readBoundRun(task);
+    const state = bound ? readRunState(task.projectDir, bound.runId) : undefined;
+    if (task.lastEnding?.launch !== task.launch) task = this.registry.update(task.id, {
+      lastEnding: { launch: task.launch, cause,
+        continuationAt: bound?.retryExemptContinuation ? state?.deploymentHold?.releasedAt : state?.recovery?.at },
+      processDeaths: (task.processDeaths ?? 0) + Number(cause === 'process_death'),
+    });
+    if (cause === 'unknown' || cause === 'process_death' && (task.processDeaths ?? 0) >= task.max_attempts) {
+      this.failClosed(task, `${reason}; ${cause === 'unknown' ? 'launch cause unknown' : `process crash budget exhausted (${task.processDeaths}/${task.max_attempts})`}`);
+      return false;
+    }
+    return true;
+  }
+
+  private async retryOrStuck(task: TaskEntry, reason: string, cause: EndingCause = 'work_failed'): Promise<void> {
     // A unit that died because the project was already busy is NOT a crash —
     // retrying it immediately just loses the same race again. Wait it out
     // without consuming the retry budget.
     invalidateRunLockCache();
     const busy = this.busyFor(task.projectDir, task.run_id);
     if (busy) {
+      this.chargeLaunchEnding(task, classifyEnding({ launchConflict: true }), reason);
       this.defer(task, `${reason}; project busy (run ${busy})`, 'wait', task.run_id);
+      return;
+    }
+    const boot = readHostBootId();
+    if (task.launchBootId && boot && task.launchBootId !== boot) cause = classifyEnding({ interrupted: true, fromBoot: task.launchBootId, toBoot: boot });
+    if (!this.chargeLaunchEnding(task, cause, reason)) return;
+    if (cause === 'host_restart' || cause === 'process_death') {
+      this.defer(task, reason, 'wait', task.run_id);
       return;
     }
     if (task.attempt < task.max_attempts) {

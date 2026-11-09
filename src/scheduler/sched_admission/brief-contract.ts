@@ -27,6 +27,7 @@ export function recordConfirmNotRun(runDirPath: string, confirm: ResearchConfirm
 }
 
 export interface ParsedBriefFrontmatter {
+  maxContinuations?: number;
   /** Task authoring requirements; independent of engine admission. */
   plannerPolicies?: PlannerPolicyName[];
   workflowError?: string;
@@ -139,6 +140,12 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
   const stripped = frontmatter.body;
   if (!parsed || typeof parsed !== 'object') return { stripped, frontmatterError: 'frontmatter parsed but is not a YAML mapping/object' };
   const out: ParsedBriefFrontmatter = { stripped };
+  const continuations = (parsed as Record<string, unknown>).max_continuations;
+  if (continuations !== undefined) {
+    if (!Number.isSafeInteger(continuations) || Number(continuations) < 0) return { stripped,
+      frontmatterError: 'max_continuations must be a finite nonnegative integer', workflowError: 'max_continuations must be a finite nonnegative integer' };
+    out.maxContinuations = Number(continuations);
+  }
   try { out.plannerPolicies = parsePlannerPolicySelection((parsed as Record<string, unknown>).planner_policies); }
   catch (error) {
     const reason = error instanceof Error ? error.message : String(error);

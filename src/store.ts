@@ -1,3 +1,4 @@
+import { classifyEnding, type EndingCause } from './attempt-ending.js';
 import { processLiveness } from './process-liveness.js';
 import { resolveCampaignStorageKey } from './campaigns.js';
 import { observeRunStatusChange } from './run-events.js';
@@ -137,6 +138,7 @@ export interface StageAttempt extends InvocationUsage {
   tokenUsage?: AttemptTokenUsage;
   error?: string;
   terminationCause?: AttemptTerminationCause;
+  endingCause?: EndingCause;
   engineVoid?: boolean;
   adapterFailureKind?: AdapterFailureKind;
   writes?: string[];
@@ -183,6 +185,14 @@ export interface StageStatus extends InvocationUsage {
  * permission to reset the workflow's spent iteration budget. */
 export function isContinuingStage(stage: StageStatus): boolean {
   return Boolean(stage.continuation) && (stage.status === STAGE_STATUS.COMPLETE || stage.status === STAGE_STATUS.PENDING);
+}
+
+/** The declaration limits each stage's retained budget slices; interruptions
+ * have no continuation marker and spend neither this allowance nor iterations. */
+export function continuationExhausted(state: StoreState): boolean {
+  return state.maxContinuations !== undefined && Object.values(state.stages).some(stage =>
+    stage.continuation && (stage.attempts ?? []).filter(attempt => attempt.continuation
+      && (attempt.iteration ?? 1) === (state.currentIteration ?? 1)).length > state.maxContinuations!);
 }
 
 /**
@@ -566,6 +576,7 @@ export interface StoreState {
   currentIteration?: number;
   gateRetryRound?: { iteration: number; round: number };
   maxIterations?: number;
+  maxContinuations?: number;
   maxRetries?: number;
   /** Historical metadata only; execution never consults these flags. */
   autoApproveRetries?: boolean;
@@ -1678,13 +1689,13 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
 }
 
 /** Close exactly the current interrupted execution without inventing another attempt. */
-export function interruptedStageStatus(previous: StageStatus, completedAt: string, error: string, terminationCause: 'cancelled' | 'host_restart' = 'cancelled'): StageStatus {
+export function interruptedStageStatus(previous: StageStatus, completedAt: string, error: string, terminationCause: 'cancelled' | 'host_restart' | 'exit' = 'cancelled', endingCause: EndingCause = terminationCause === 'exit' ? 'unknown' : terminationCause): StageStatus {
   const attempt = previous.attempts?.at(-1);
-  if (attempt?.status === 'closed') return settledStageAttemptStatus(previous, attempt.index, { exitCode: 143, error, terminationCause });
+  if (attempt?.status === 'closed') return settledStageAttemptStatus(previous, attempt.index, { exitCode: 143, error, terminationCause, endingCause });
   if (attempt?.status === 'running') return completedStageAttemptStatus(previous, previous.retries, {
     // Sampled calls are a lower bound: interruption supplies no final usage.
     ...sumInvocationUsage([{ ...attempt, tokenUsage: 'unknown', costUsage: 'unknown' }]),
-    terminationCause, exitCode: 143, completedAt, duration_ms: Math.max(0, Date.parse(completedAt) - Date.parse(attempt.startedAt)), error,
+    terminationCause, endingCause, exitCode: 143, completedAt, duration_ms: Math.max(0, Date.parse(completedAt) - Date.parse(attempt.startedAt)), error,
   });
   return previous.status === STAGE_STATUS.RUNNING ? { ...previous, status: STAGE_STATUS.FAILED } : previous;
 }
@@ -1719,12 +1730,10 @@ function projectAttemptCauses(status: StageStatus): StageStatus {
   for (const attempt of status.attempts ?? []) {
     if (attempt.terminationCause !== undefined || attempt.status === 'running') continue;
     const legacy = attempt.timeout?.terminationCause;
-    // A legacy restart marker requires intent even when an old nested cause
-    // disagrees. Neither legacy field authenticates an interruption.
-    const cause = attempt.error?.startsWith('HOST_RESTART_INTERRUPTED:') ? 'host_restart'
-      : legacy ? (legacy === 'attempt_timeout' || legacy === 'stage_abort' ? legacy : 'exit')
-        : attempt.exitCode === 143 ? 'cancelled'
-        : attempt.exitCode === 124 || attempt.error?.startsWith('timed out after') ? 'attempt_timeout'
+    // Historical structured fields remain readable. Diagnostic text supplies
+    // no execution authority, including a purported restart marker.
+    const cause = legacy ? (legacy === 'attempt_timeout' || legacy === 'stage_abort' ? legacy : 'exit')
+      : attempt.exitCode === 124 ? 'attempt_timeout'
         : attempt.exitCode === 137 ? 'stage_abort'
         : attempt.engineVoid ? 'engine_void' : undefined;
     // Ordinary old outcomes need no new field: a no-op publication must retain
@@ -1868,6 +1877,7 @@ export interface CompleteStageAttemptInput extends InvocationUsage {
   artifacts?: string[];
   error?: string;
   terminationCause?: AttemptTerminationCause;
+  endingCause?: EndingCause;
   engineVoid?: boolean;
   adapterFailureKind?: AdapterFailureKind;
   tokens_in?: number;
@@ -1925,6 +1935,7 @@ export function completedStageAttemptStatus(
     invocations: completion.invocations ?? current.invocations,
     error: completion.error,
     terminationCause: completion.terminationCause ?? 'exit',
+    endingCause: completion.endingCause ?? classifyEnding({ ...completion, cancelled: ['cancelled', 'stage_abort'].includes(completion.terminationCause ?? ''), unfinished: Boolean(completion.continuation) }),
     engineVoid: completion.engineVoid,
     adapterFailureKind: completion.adapterFailureKind,
     writes: completion.writes,
@@ -1998,14 +2009,14 @@ export function closeStageAttempt(
 /** One owner projects a closed execution's final classification onto its stage. */
 export function settledStageAttemptStatus(
   previous: StageStatus, attemptIndex: number,
-  failure?: { exitCode: number; error: string; terminationCause?: AttemptTerminationCause },
+  failure?: { exitCode: number; error: string; terminationCause?: AttemptTerminationCause; endingCause?: EndingCause },
 ): StageStatus {
   const attempts = (previous.attempts ?? []).map(attempt => ({ ...attempt }));
   const attempt = attempts.at(-1);
   if (!attempt || attempt.index !== attemptIndex || attempt.status === 'running') {
     throw new Error(`Cannot settle attempt ${attemptIndex}: current execution is not the matching closed child`);
   }
-  if (failure) Object.assign(attempt, failure, { terminationCause: failure.terminationCause ?? 'exit' });
+  if (failure) Object.assign(attempt, failure, { terminationCause: failure.terminationCause ?? 'exit', endingCause: failure.endingCause ?? classifyEnding({ ...failure, engineVoid: attempt.engineVoid || failure.terminationCause === 'engine_void', cancelled: ['cancelled', 'stage_abort'].includes(failure.terminationCause ?? '') }) });
   if (attempt.exitCode !== 0) delete attempt.continuation;
   attempt.status = attempt.exitCode !== 0 ? 'failed' : 'complete';
   return {
@@ -2020,7 +2031,7 @@ export function settledStageAttemptStatus(
 
 export function settleStageAttempt(
   projectDir: string, runId: string, stageId: string, attemptIndex: number,
-  failure?: { exitCode: number; error: string; terminationCause?: AttemptTerminationCause },
+  failure?: { exitCode: number; error: string; terminationCause?: AttemptTerminationCause; endingCause?: EndingCause },
 ): StageStatus {
   const status = settledStageAttemptStatus(readStageStatus(projectDir, runId, stageId), attemptIndex, failure);
   writeStageStatus(projectDir, runId, stageId, status);
@@ -2043,7 +2054,7 @@ export function attachStageConstraintAudit(
   attempts[index] = {
     ...attempts[index],
     constraintAudit: audit,
-    ...(violationError ? { status: 'failed', exitCode: 1, error: violationError, continuation: undefined } : {}),
+    ...(violationError ? { status: 'failed', exitCode: 1, endingCause: classifyEnding({ exitCode: 1, engineVoid: attempts[index].engineVoid }), error: violationError, continuation: undefined } : {}),
   };
   const updated: StageStatus = {
     ...status,

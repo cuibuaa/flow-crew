@@ -28,7 +28,7 @@ Parser field names are listed exactly.
 | `default_timeout_ms` | 10800000 | Normal execution budget including wrap-up; see [timing](agent-protocol.md#stage-budgets-and-retained-continuation) |
 | `stage_idle_timeout_ms` | 600000 | Minimum observed silence before watchdog abort |
 | `validation_timeout_ms` | 60000 | Author batch budget divided among commands, narrowed by remaining author time; requested base evidence uses remaining gate time |
-| `max_iterations` | 5 | Workflow iteration limit, including each retained budget slice |
+| `max_iterations` | 5 | Workflow iteration limit; also bounds unfinished slices unless the brief declares `max_continuations` |
 | `gate_retry_loops` | 3 | Gate repair-loop bound |
 | `stage_technical_retries` | 1 | Technical execution retry bound; fallback ordinary retry default |
 | `plan_stage_retries` | 2 | Re-prompts for an empty or invalid injected plan |

@@ -109,11 +109,37 @@ consumers or publish a passing gate verdict. The next workflow iteration preserv
 admitted DAG, files and completed predecessors, and reopens the unfinished slice and its
 consumers. The next author receives its own predecessor’s structured final record,
 validation fact and delivered guidance IDs through the evidence ledger, plus the current
-diff and repository paths. Transcripts and live logs are never handoff input. Each slice spends one of the existing finite `max_iterations`; exhaustion is
+diff and repository paths. Transcripts and live logs are never handoff input. Without a declaration, each slice spends one of the existing finite `max_iterations`.
+Brief frontmatter may declare `max_continuations: N`, a finite nonnegative integer.
+Then each stage gets at most N additional unfinished slices within its current workflow
+iteration; completed predecessors stay retained. Zero allows the first slice only. The
+declaration is persisted with the admitted brief and cannot be renewed by a restart.
+Neither research progress nor lack of a product diff changes this allowance. Exhaustion is
 `incomplete` with retained work, without timeout retry growth. A configured research wall
 ceiling also prevents another slice at a budget boundary. Cancel/resume preserves spent
 iterations. Gates have independent stage budgets. Validation settlement uses the remaining author
 budget, capped by its whole-batch bound; it cannot consume the gate budget.
+
+## Ending causes and resource waits
+
+Code classifies each execution from boot/process/exit/deadline facts and validated results.
+A changed boot resumes the same run without a work retry; a same-host controller crash
+uses a separate finite crash count. Work failures retain the configured retry ceiling.
+Unknown ownership stays a refusal. Process termination metadata remains readable for
+existing consumers; `endingCause` owns budget policy.
+
+An author can report `status: "environment_gap"`, with its existing `summary` stating
+the missing capability, observations, and remaining work. This closed status keeps the
+ordinary answer schema compatible with native generation. The engine retains it in attempt evidence and sends
+it to the independent read-only gate once, without renewing the work or continuation
+budget. The gate alone decides whether the stated gap permits acceptance under its
+criteria. A gap is not an instruction to waive a required product or a confirmed finding.
+
+A native provider error with typed code `usage_limit_reached` or `quota_exceeded` and
+`reset_at` (Unix seconds or an ISO timestamp) parks the run until that reset. The daemon
+then resumes the same run without a work retry. A message mentioning a reset without
+these structured facts cannot authorize a quota wait; no diagnostic keyword classifier
+supplies the missing authority.
 
 ## Artifact locations
 

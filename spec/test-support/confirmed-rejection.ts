@@ -12,7 +12,7 @@ afterEach(() => { for (const path of scratch.splice(0)) rmSync(path, { recursive
  * they still exercise repair budgets/replans under the confirmed-finding rule.
  * The new gate-repair-confirmation spec separately probes an actual product file.
  * Nothing in production derives confirmation from a verdict or writes this flag. */
-export function withConfirmedRejections(adapter: Adapter): Adapter {
+export function withConfirmedRejections(adapter: Adapter, timeoutMs = 5000): Adapter {
   const root = mkdtempSync(join(tmpdir(), 'confirmed-rejection-fixture-')); scratch.push(root);
   const marker = join(root, 'predicate');
   writeFileSync(marker, 'clear');
@@ -32,7 +32,7 @@ export function withConfirmedRejections(adapter: Adapter): Adapter {
     const { runProjectCommand } = await import('../../src/project-validation.js');
     const response = await runProjectCommand({ role: 'test', command: '/bin/sh',
       args: ['-c', `${client} '${request.replaceAll("'", "'\\''")}'`], display: 'Fixture reproduction',
-      cwd: opts.workDir, runDir: opts.runDir, timeoutMs: 5000 });
+      cwd: opts.workDir, runDir: opts.runDir, timeoutMs });
     const recorded = JSON.parse(response.stdout!).record;
     if (response.exitCode !== 0 || recorded.exitCode !== 1) throw new Error('Fixture predicate did not reproduce');
     const reproduction = recorded.sequence;

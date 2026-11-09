@@ -6,7 +6,7 @@ import { StageConfig, WorkflowConfig } from '../sched_admission/configuration.js
 import { clearGateContinuationsForStages } from '../sched_admission/sessions.js';
 import { isTerminalStatus } from '../sched_policy/identity.js';
 import { recoverTerminalStudyCompletion } from '../sched_settlement/completion.js';
-import { StoreState, RUN_STATUS, isContinuingStage, isPausedRunStatus, readRunState } from '../../store.js';
+import { StoreState, continuationExhausted, RUN_STATUS, isContinuingStage, isPausedRunStatus, readRunState } from '../../store.js';
 import { settleGateRetries } from './gate-loop.js';
 import { concludeWorkflowIteration } from './iteration-outcome.js';
 import { prepareWorkflowIteration } from './iteration-setup.js';
@@ -34,9 +34,9 @@ export async function runWorkflowIterations(
     const wallExhausted = maxWall !== undefined && Date.now() - Date.parse(state.startedAt) >= maxWall * 3_600_000;
     recordRunEvent(projectDir, runId, { type: 'iteration_completed', runId, timestamp: new Date().toISOString(), iteration,
       detail: `Retained budget handoff for ${stageIds.join(', ')}; ${iteration}/${maxIterations} iterations spent`, source: 'scheduler' });
-    if (iteration >= maxIterations || wallExhausted) {
+    if (state.maxContinuations === undefined && iteration >= maxIterations || wallExhausted || continuationExhausted(state)) {
       await concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'bounded_attempts',
-        detail: `Retained stage work needs continuation, but ${wallExhausted ? 'research wall budget' : 'iteration budget'} is exhausted (${iteration}/${maxIterations}).`,
+        detail: `Retained stage work needs continuation, but ${continuationExhausted(state) ? 'declared continuation budget' : wallExhausted ? 'research wall budget' : 'iteration budget'} is exhausted (${iteration}/${maxIterations}).`,
         eventFields: () => ({ iteration, detail: state.failureReason }), writeCampaignEntry });
     }
     return true;
@@ -69,6 +69,7 @@ export async function runWorkflowIterations(
 
     if (await budgetBoundary(state, iteration)) {
       if (state.status !== RUN_STATUS.RUNNING) return state;
+      if (state.maxContinuations !== undefined) iteration--; // declaration owns slices; preserve the workflow iteration
       continue;
     }
 
@@ -95,6 +96,7 @@ export async function runWorkflowIterations(
     state = readRunState(projectDir, runId);
     if (await budgetBoundary(state, iteration)) {
       if (state.status !== RUN_STATUS.RUNNING) return state;
+      if (state.maxContinuations !== undefined) iteration--; // declaration owns slices; preserve the workflow iteration
       continue;
     }
     const exhaustedResearch = await settleExhaustedResearchGates(state, sorted, iteration, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);

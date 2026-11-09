@@ -8,10 +8,13 @@ export interface ProviderTerminalDiagnostic {
   eventType: 'error' | 'turn.failed' | 'result' | 'cli_diagnostic';
   message: string;
   code?: unknown;
+  resetAt?: unknown;
 }
 
 export interface ProviderFailure {
   kind: ProviderFailureKind;
+  /** Provider-owned reset instant; never extracted from diagnostic prose. */
+  resetAt?: string;
   provider: ProviderTerminalDiagnostic['provider'];
   source: 'native_stdout' | 'cli_diagnostic';
   eventType: ProviderTerminalDiagnostic['eventType'];
@@ -43,10 +46,14 @@ export function providerDiagnosticReason(message: string): string {
 
 /** Only classified evidence selects a provider-specific recovery policy. */
 export function providerFailureFromDiagnostic(diagnostic: ProviderTerminalDiagnostic): ProviderFailure | undefined {
-  const kind = classifyAdapterFailure(diagnostic.message, diagnostic.code);
+  const resetMs = typeof diagnostic.resetAt === 'number' ? diagnostic.resetAt * 1000
+    : typeof diagnostic.resetAt === 'string' ? Date.parse(diagnostic.resetAt) : NaN;
+  const resetAt = Number.isFinite(resetMs) && resetMs > 0 && resetMs <= 8.64e15 ? new Date(resetMs).toISOString() : undefined;
+  const quota = ['usage_limit_reached', 'quota_exceeded'].includes(String(diagnostic.code)) && resetAt;
+  const kind = quota ? 'quota' : classifyAdapterFailure(diagnostic.message, diagnostic.code);
   if (!kind) return undefined;
   return {
-    kind, provider: diagnostic.provider, source: diagnostic.eventType === 'cli_diagnostic' ? 'cli_diagnostic' : 'native_stdout', eventType: diagnostic.eventType,
+    kind, ...(quota ? { resetAt } : {}), provider: diagnostic.provider, source: diagnostic.eventType === 'cli_diagnostic' ? 'cli_diagnostic' : 'native_stdout', eventType: diagnostic.eventType,
     reason: providerDiagnosticReason(diagnostic.message),
     diagnosticSha256: createHash('sha256').update(diagnostic.message).digest('hex'),
   };
@@ -60,9 +67,16 @@ export function providerFailureFromEvent(provider: ProviderFailure['provider'], 
   if (type !== 'error' && !(provider === 'codex' && type === 'turn.failed')
     && !(provider === 'claude' && type === 'result' && (event.is_error === true || typeof event.subtype === 'string' && event.subtype.startsWith('error')))) return undefined;
   const error = event.error && typeof event.error === 'object' ? event.error as Record<string, unknown> : undefined;
+  // Quota and typed authentication cannot recover through an HTTP retry.
+  // Other native types retain their position after nested HTTP, before wrappers.
+  const nativeKind = classifyAdapterFailure('', error?.type);
+  const priorityType = ['usage_limit_reached', 'quota_exceeded'].includes(String(error?.type))
+    || nativeKind === 'authentication' ? error?.type : undefined;
   return providerFailureFromDiagnostic({ provider, eventType: type as ProviderTerminalDiagnostic['eventType'],
     message: nativeDiagnostic(event) ?? String(event.subtype ?? type),
-    code: (error?.data as Record<string, unknown> | undefined)?.input_error_code ?? error?.code ?? error?.status_code ?? error?.status ?? error?.type ?? event.code ?? event.status_code ?? event.status });
+    resetAt: error?.reset_at ?? event.reset_at ?? (error?.data as Record<string, unknown> | undefined)?.reset_at,
+    code: (error?.data as Record<string, unknown> | undefined)?.input_error_code ?? error?.code ?? priorityType
+      ?? error?.status_code ?? error?.status ?? (nativeKind ? error?.type : undefined) ?? event.code ?? event.status_code ?? event.status ?? error?.type });
 }
 
 /** Keep the observed exit beside its provider-owned cause. */

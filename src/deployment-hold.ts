@@ -4,11 +4,12 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { fcGlobalDir, RUN_STATUS, STAGE_STATUS, updateRunState, type StoreState } from './store.js';
+import { fcGlobalDir, RUN_STATUS, STAGE_STATUS, updateRunState, withRunStateLock, type StoreState } from './store.js';
 import { atomicWrite, mkdirSync } from './engine-fs.js';
 
 const HoldSchema = z.object({
   version: z.literal(1), id: z.string().uuid(), requestedAt: z.string().datetime(),
+  stopRequestedAt: z.string().datetime().nullable().optional(),
   releasedAt: z.string().datetime().optional(),
 }).strict();
 export type DeploymentHold = z.infer<typeof HoldSchema>;
@@ -27,18 +28,34 @@ export function deploymentHeld(baseDir = fcGlobalDir()): boolean {
 }
 
 export function requestDeploymentHold(baseDir = fcGlobalDir()): DeploymentHold {
-  const previous = readDeploymentHold(baseDir);
-  if (previous && !previous.releasedAt) return previous;
-  const hold: DeploymentHold = { version: 1, id: randomUUID(), requestedAt: new Date().toISOString() };
   mkdirSync(baseDir, { recursive: true });
-  atomicWrite(join(baseDir, 'deployment-hold.json'), JSON.stringify(hold, null, 2));
-  return hold;
+  return withRunStateLock(baseDir, () => {
+    const previous = readDeploymentHold(baseDir);
+    if (previous && !previous.releasedAt) return previous;
+    const hold: DeploymentHold = { version: 1, id: randomUUID(), requestedAt: new Date().toISOString(), stopRequestedAt: null };
+    atomicWrite(join(baseDir, 'deployment-hold.json'), JSON.stringify(hold, null, 2));
+    return hold;
+  });
 }
 
-export function releaseDeploymentHold(hold: DeploymentHold, baseDir = fcGlobalDir()): void {
-  const current = readDeploymentHold(baseDir);
-  if (current?.id !== hold.id) throw new Error('Deployment hold changed; refusing to release another hold');
-  atomicWrite(join(baseDir, 'deployment-hold.json'), JSON.stringify({ ...current, releasedAt: current.releasedAt ?? new Date().toISOString() }, null, 2));
+/** Persist before sending stop: a lost reply still needs a recovery fence. */
+export function markDeploymentStopping(hold: DeploymentHold, baseDir = fcGlobalDir()): void {
+  withRunStateLock(baseDir, () => {
+    const current = readDeploymentHold(baseDir);
+    if (current?.id !== hold.id || current.releasedAt) throw new Error('Deployment hold changed before stop');
+    atomicWrite(join(baseDir, 'deployment-hold.json'), JSON.stringify({ ...current,
+      stopRequestedAt: current.stopRequestedAt ?? new Date().toISOString() }, null, 2));
+  });
+}
+
+/** Abandonment checks the phase under the same lock that publishes stop intent. */
+export function releaseDeploymentHold(hold: DeploymentHold, baseDir = fcGlobalDir(), beforeStop = false): void {
+  withRunStateLock(baseDir, () => {
+    const current = readDeploymentHold(baseDir);
+    if (current?.id !== hold.id) throw new Error('Deployment hold changed; refusing to release another hold');
+    if (beforeStop && current.stopRequestedAt !== null) throw new Error('Deployment stop was requested; retain the recovery hold');
+    atomicWrite(join(baseDir, 'deployment-hold.json'), JSON.stringify({ ...current, releasedAt: current.releasedAt ?? new Date().toISOString() }, null, 2));
+  });
 }
 
 /** Called only after all children, monitors, audits and group settlement join.

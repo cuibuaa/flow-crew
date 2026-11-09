@@ -38,7 +38,7 @@ import { terminalArtifactStatusMismatch } from './terminal-artifact-status.js';
 import { readOperationalProjection, type OperationalRunState } from './cli-events.js';
 import { inspectRunScheduler } from './run-lock.js';
 import { fcGlobalDir } from './store.js';
-import { readDeploymentHold } from './deployment-hold.js';
+import { markDeploymentStopping, readDeploymentHold } from './deployment-hold.js';
 import { readRunIndexRecords } from './run-index.js';
 import { assertDistFresh, buildProjectRoot, pinBuildRuntime } from './build-manifest.js';
 import { processIsAlive } from './process-liveness.js';
@@ -310,7 +310,7 @@ async function serve(socketPath: string, logPath: string, distDir: string): Prom
     }
     if (req.cmd === 'hold') return orchestrator.holdDeployment();
     if (req.cmd === 'hold-status') return orchestrator.deploymentStatus();
-    if (req.cmd === 'continue') return orchestrator.continueDeployment();
+    if (req.cmd === 'continue') return orchestrator.continueDeployment(req.abandonHold);
     if (req.cmd === 'list') return handleDaemonListRequest(registry, req);
     if (req.cmd === 'show') {
       const task = registry.get(req.id);
@@ -411,7 +411,7 @@ async function holdAndWait(socketPath: string, timeoutMs: number, controls: Daem
   while (!result.ready && Date.now() < deadline) {
     await controls.delay(Math.min(200, Math.max(1, deadline - Date.now())));
     if (Date.now() >= deadline) break;
-    result = deploymentStatus(await controls.sendRpc(socketPath, { cmd: 'hold-status' }, Math.max(1, Math.min(2000, deadline - Date.now()))));
+    result = deploymentStatus(await controls.sendRpc(socketPath, { cmd: 'hold-status' }, 2000));
   }
   return result;
 }
@@ -422,6 +422,8 @@ async function deployDaemon(
 ): Promise<number> {
   let step = 'hold';
   const projectRoot = buildProjectRoot(distDir);
+  const priorHold = readDeploymentHold();
+  let stopRequested = Boolean(priorHold && !priorHold.releasedAt && priorHold.stopRequestedAt !== null);
   try {
     const timeoutMs = Number(parsed.values.get('--timeout-ms') ?? '60000');
     if (parsed.flags.has('--force')) throw new Error('Deployment cannot bypass safety checks with --force');
@@ -431,7 +433,7 @@ async function deployDaemon(
     if (controls.findSocketOwnerPid(socketPath) === undefined) await startDetachedAndWait(socketPath, logPath, controls);
     const held = await holdAndWait(socketPath, timeoutMs, controls);
     stdout.write(`${JSON.stringify(held, null, 2)}\n`);
-    if (!held.ready) throw new Error('Hold is not settled; inspect flowcrew daemon hold-status');
+    if (!held.ready) throw new Error(`Hold is not settled: ${held.tasks.filter(task => !task.settled).map(task => `task #${task.id} run ${task.runId ?? 'unbound'} stage ${task.stages?.join(', ') || 'unknown'} (${task.detail ?? task.status})`).join('; ') || held.errors.join('; ') || 'no settled acknowledgement'}`);
     const hold = readDeploymentHold();
     if (!hold || hold.releasedAt || hold.id !== held.hold?.id) throw new Error('Daemon hold does not match this FC_HOME');
     const previous = await verifiedDaemonStatus(socketPath, controls);
@@ -440,6 +442,8 @@ async function deployDaemon(
       throw new Error('Cannot bind the held daemon to this deployment checkout');
     }
     step = 'stop';
+    markDeploymentStopping(hold);
+    stopRequested = true;
     await controls.sendRpc(socketPath, { cmd: 'stop' });
     if (!await waitForOwnerRelease(socketPath, previous.pid, controls, 40)) throw new Error('Held daemon did not release its socket');
     step = 'build';
@@ -464,10 +468,19 @@ async function deployDaemon(
     stdout.write('Deployment complete; hold released.\n');
     return 0;
   } catch (error) {
+    if (!stopRequested) {
+      try {
+        const hold = readDeploymentHold();
+        if (hold && !hold.releasedAt) {
+          const released = deploymentStatus(await controls.sendRpc(socketPath, { cmd: 'continue', abandonHold: hold.id }));
+          if (!released.released) stderr.write(`Hold release refused: ${released.errors.join('; ')}.\n`);
+        }
+      } catch (cleanupError) { stderr.write(`Hold release failed: ${errorMessage(cleanupError)}.\n`); }
+    }
     let holdState = 'hold state unverified; inspect daemon hold-status';
     try {
       const hold = readDeploymentHold();
-      holdState = hold && !hold.releasedAt ? 'hold remains active' : hold?.releasedAt ? 'hold already released; verify tasks before retrying' : 'no hold recorded';
+      holdState = hold && !hold.releasedAt ? 'hold remains active' : hold?.releasedAt ? stopRequested ? 'hold already released; verify tasks before retrying' : 'hold released; launches remain possible' : 'no hold recorded';
     } catch { /* corrupt control state remains a refusal */ }
     stderr.write(`DEPLOY STOPPED at ${step}: ${errorMessage(error)}. ${holdState}. Retry flowcrew daemon deploy --socket ${JSON.stringify(socketPath)} from ${projectRoot} (same FC_HOME).\n`);
     return rpcErrorExitCode(error);

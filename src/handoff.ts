@@ -41,7 +41,7 @@ const object = (properties: Record<string, Schema>, optional: Record<string, Sch
 // An explicit empty list certifies no work remains at wrap-up.
 const completion = { remaining_work: strings };
 export const HANDOFF_SCHEMA = object({
-  status: { type: 'string', enum: ['delivered', 'blocked'] }, summary: text,
+  status: { type: 'string', enum: ['delivered', 'blocked', 'environment_gap'] }, summary: text,
   caveats: strings, ...completion,
 });
 
@@ -162,6 +162,7 @@ export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(op
     body,
     criterionBlock,
     researchCandidateBlock,
+    '## Environment gaps\nIf your active result schema offers the environment_gap status and this environment cannot supply a capability or resource needed for the work, report status: "environment_gap", with summary stating what is missing, what you observed, and what remains. This is a structured declaration, not a work failure. The engine sends it to the independent gate without retrying it. Only the gate decides acceptance under its criteria. Do not use it merely because work is unfinished.',
     opts.isGate ? '## Reproduced findings and validation\nA finding to be repaired must cite its reproduction record: set reproduction to the integer sequence in evidence-ledger.jsonl. Run a targeted command with exit 0 meaning the defect is absent and a positive exit meaning it is present. Use the injected engine-recorded command endpoint through your native shell tool, supplying command, absolute cwd and shell as JSON; the engine executes and records it and returns record.sequence. This works even when a native transport omits cwd and shell. Native commands are also eligible when their structured events include explicit absolute cwd and shell, exit and output. The recorded command is replayed with that shell (-c) in that cwd and the same engine command environment. Include any required shell options in an explicit executable invocation in the command. The engine records the complete command, context, structured exit code, output digest and tree hash; read the ledger after the command completes and cite its sequence. Missing execution context, a missing citation, a passing command or a changed tree is an unconfirmed observation and opens no repair. Do not run configured validation inside the gate. For each failed, unfinished or unrun command, return validation_review.commands with its exact role/display, disposition caused_by_change|already_failing|environment|unknown and reason. You alone judge causation from logs, diff and optional base evidence. To settle a failure needing base, return validation_review.request_base with exact role/display; the engine obtains one bounded base batch and returns the facts for your final verdict in this attempt. Otherwise return request_base: []. Missing or invalid dispositions stay unknown and unverified. A caused_by_change disposition prevents acceptance; repair still needs the independent confirmed reproduction above. Host load is telemetry only. Failed, unfinished and unrun commands remain unverified even on acceptance. Keep independent read-only scope [] and run your own experiments.' : '',
     anchor,
     skillsContent,

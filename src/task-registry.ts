@@ -1,3 +1,4 @@
+import type { EndingCause } from './attempt-ending.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { atomicWrite, appendFileSync, closeSync, copyFileSync, mkdirSync, openSync, unlinkSync, writeSync } from './engine-fs.js';
 import { constants, existsSync, fstatSync, fsyncSync, readFileSync, readdirSync, readSync } from 'node:fs';
@@ -88,6 +89,10 @@ export interface TaskEntry {
   run_id?: string;
   status: TaskStatus;
   attempt: number;
+  /** Last settled launch, idempotently charged before queuing its successor. */
+  lastEnding?: { launch: number; cause: EndingCause; continuationAt?: string };
+  processDeaths?: number;
+  launchBootId?: string;
   /** Actual launch, starting at one; independent of retry budget consumption. */
   launch: number;
   max_attempts: number;
@@ -437,6 +442,10 @@ export class TaskRegistry {
       const next = this.externalizeInlineBrief({
         ...current,
         ...patch,
+        ...(patch.status && ([TASK_STATUS.DONE, TASK_STATUS.FAILED, TASK_STATUS.STUCK, TASK_STATUS.CANCELLED, TASK_STATUS.REALITY_GATE_FAILED] as readonly TaskStatus[]).includes(patch.status)
+          && !patch.lastEnding && current.lastEnding?.launch !== current.launch
+          ? { lastEnding: { launch: current.launch, cause: (patch.status === TASK_STATUS.CANCELLED ? 'cancelled'
+            : patch.status === TASK_STATUS.DONE ? 'complete' : patch.status === TASK_STATUS.STUCK ? 'unknown' : 'work_failed') as EndingCause } } : {}),
         id: current.id,
         created_at: current.created_at,
         tick_log_path: current.tick_log_path,

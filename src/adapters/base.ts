@@ -1,3 +1,4 @@
+import type { EndingCause } from '../attempt-ending.js';
 import { appendFileSync, mkdirSync } from '../engine-fs.js';
 
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
@@ -106,6 +107,7 @@ export interface RunResult extends InvocationUsage {
   effectiveTimeoutMs?: number;
   /** Worker-owned authoritative termination attribution. */
   terminationCause?: AttemptTerminationCause;
+  endingCause?: EndingCause;
   engineVoid?: boolean;
   /** Original launch failure; ENOENT can name a missing cwd or interpreter too. */
   spawnError?: {

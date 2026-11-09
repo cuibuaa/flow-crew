@@ -559,3 +559,37 @@ it('can explicitly continue an unregistered foreground run after releasing the s
   expect(readStageStatus(project, held.runId, 'producer')).toEqual(producer);
   expect(completed.engineHistory?.map(entry => entry.kind)).toEqual(['start', 'resume']);
 });
+
+
+it('SI abandoning an unsettled hold keeps the running owner and permits new launches', async () => {
+  const { runId } = createRun(project, 'fixture', 'name: fixture', ['active']);
+  beginStageAttempt(project, runId, 'active', 0);
+  const running = registry.create({ ...admitted(), projectDir: project, run_id: runId, status: 'running' });
+  const before = readStageStatus(project, runId, 'active');
+  const hold = requestDeploymentHold();
+  const status = await orchestrator.deploymentStatus();
+  expect(status.ready).toBe(false);
+  expect(status.tasks).toContainEqual(expect.objectContaining({ id: running.id, stages: ['active'], settled: false }));
+  expect((await orchestrator.continueDeployment()).released).not.toBe(true);
+  expect((await orchestrator.continueDeployment(hold.id)).released).toBe(true);
+  expect(deploymentHeld()).toBe(false);
+  expect(readStageStatus(project, runId, 'active')).toEqual(before);
+  const second = join(root, 'second'); mkdirSync(second);
+  const launched = await orchestrator.register({ ...admitted(), projectDir: second });
+  expect(launched.status, launched.notes).toBe('running');
+  expect(launches).toHaveLength(1);
+});
+
+
+it('SI repair abandon must revalidate stop intent after awaiting supervisor observation', async () => {
+  const hold = requestDeploymentHold();
+  const entered = barrier(), release = barrier();
+  units.isActiveMany = async () => { entered.resolve(); await release.promise; return new Map(); };
+  const abandoning = orchestrator.continueDeployment(hold.id);
+  await entered.promise;
+  deployment.markDeploymentStopping(hold);
+  release.resolve();
+  await expect(abandoning).rejects.toThrow('Deployment stop was requested');
+  expect(readDeploymentHold()?.stopRequestedAt).toEqual(expect.any(String));
+  expect(readDeploymentHold()?.releasedAt, 'stop recovery fence must survive an in-flight abandonment').toBeUndefined();
+});

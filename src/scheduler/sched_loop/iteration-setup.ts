@@ -110,7 +110,7 @@ export async function prepareWorkflowIteration(
         }
       }
       for (const id of reset) {
-        state.stages[id] = rependStageStatus(state.stages[id], 0);
+        state.stages[id] = rependStageStatus(state.stages[id], state.maxContinuations === undefined ? 0 : state.stages[id].retries);
         writeStageStatus(projectDir, runId, id, state.stages[id]);
         injectedDispatchStages.delete(id);
       }

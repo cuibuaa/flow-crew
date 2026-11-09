@@ -1,6 +1,6 @@
 import { atomicWrite } from '../../engine-fs.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
-import { decideStageRetry } from '../sched_settlement/stage-execution.js';
+import { decideStageRetry, parkProviderQuota, stageRetryCharge } from '../sched_settlement/stage-execution.js';
 // Select one shared-tree author and settle technical/failure/validation outcomes before terminal decisions.
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
@@ -117,12 +117,13 @@ export async function executeReadyBatch(
     } | undefined;
 
     for (const { stage, result, currentRetries } of results) {
-      const decision = decideStageRetry(result, currentRetries, configuredTechnicalRetryLimit(), failureRetryLimit(stage, workflow));
+      if (parkProviderQuota(state, projectDir, runId, stage.id, result)) return { kind: 'settled', state };
+      const decision = decideStageRetry(result, stageRetryCharge(readStageStatus(projectDir, runId, stage.id), result, currentRetries), configuredTechnicalRetryLimit(), failureRetryLimit(stage, workflow));
       if (decision === 'engine_void') throw new Error(result.friendlyError);
       const isAdapterFailure = !!result.providerFailure && result.providerFailure.kind !== 'refusal';
       if (decision === 'retry') {
         const failedStatus = readStageStatus(projectDir, runId, stage.id);
-        const retryStatus = rependStageStatus(failedStatus, currentRetries + 1, failedStatus.error);
+        const retryStatus = rependStageStatus(failedStatus, currentRetries + Number(result.endingCause !== 'process_death'), failedStatus.error);
         writeStageStatus(projectDir, runId, stage.id, retryStatus);
         state.stages[stage.id] = retryStatus;
         log.warn({ stage: stage.id, retry: currentRetries + 1, decision }, 'Retrying stage');

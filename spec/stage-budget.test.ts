@@ -1,6 +1,9 @@
+import { readEvidence } from '../src/evidence-ledger.js';
+import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
-import { providerFailureFromDiagnostic } from '../src/provider-result.js';
+import * as contractProbe from '../src/stage-artifact-contract.js';
+import { providerFailureFromEvent, providerFailureFromDiagnostic } from '../src/provider-result.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,13 +17,13 @@ import { ClaudeAdapter } from '../src/adapters/claude.js';
 import { ATTEMPT_CLOSE_OBSERVATION_TOLERANCE_MS, stageWrapUpTiming, type AttemptDeadlineClock } from '../src/attempt-deadline.js';
 import { HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from '../src/handoff.js';
 import { createRun } from './test-support/create-run.js';
-import { beginStageAttempt, completeStageAttempt, attachStageConstraintAudit, isContinuingStage, readRunState, readStageStatus, updateRunState, writeStageStatus } from '../src/store.js';
+import { beginStageAttempt, completeStageAttempt, attachStageConstraintAudit, isContinuingStage, runDir, readRunState, readStageStatus, updateRunState, writeStageStatus } from '../src/store.js';
 import { readRunEvents } from '../src/run-events.js';
-import { WorkflowConfigSchema, normalizeStageContracts, findAllReady, readGateEvaluation, tryTerminateOnTerminalState, runWorkflow } from '../src/scheduler.js';
+import { WorkflowConfigSchema, normalizeStageContracts, findAllReady, tryTerminateOnTerminalState, runWorkflow } from '../src/scheduler.js';
 import { StageWatchdog } from '../src/stage-watchdog.js';
 import { recordGateValidationDelta, settledGateValidationExecution } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { RUN_VALIDATION_BASELINE_FILE } from '../src/scheduler/sched_policy/terminal.js';
-import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
+import { decideStageRetry, executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
 import { executeIteration } from '../src/scheduler/sched_loop/iteration.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
@@ -458,7 +461,7 @@ describe('authored completion at the budget boundary', () => {
     const { result, calls } = await finishWorkflowAtWrap('work', duringWrap);
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(1);
-    expect(calls).toEqual(['done:1', 'work:1', ...(duringWrap ? ['work:1'] : []), 'review:1']);
+   expect(calls).toEqual(['done:1', 'work:1', ...(duringWrap ? ['work:1'] : []), 'review:1']);
     expect(result.stages.work.attempts).toHaveLength(1);
     expect(result.stages.work.attempts?.[0].continuation).toBeUndefined();
     expect(result.stages.work.continuation).toBeUndefined();
@@ -469,7 +472,7 @@ describe('authored completion at the budget boundary', () => {
     const { result, calls } = await finishWorkflowAtWrap('review', duringWrap);
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(1);
-    expect(calls).toEqual(['done:1', 'work:1', 'review:1', ...(duringWrap ? ['review:1'] : [])]);
+   expect(calls).toEqual(['done:1', 'work:1', 'review:1', ...(duringWrap ? ['review:1'] : [])]);
     expect(result.stages.review.attempts).toHaveLength(1);
     expect(result.stages.review.attempts?.[0].continuation).toBeUndefined();
     expect(readGateEvaluation(project, 'review', result.runId)).toMatchObject({ pass: true });
@@ -505,7 +508,7 @@ describe('authored completion at the budget boundary', () => {
       undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
-    expect(calls).toEqual(['done:1', 'work:1', 'work:1', 'work:2', 'review:1']);
+   expect(calls).toEqual(['done:1', 'work:1', 'work:1', 'work:2', 'review:1']);
     expect(result.stages.work.attempts?.[0].continuation).toMatchObject({ reason: 'stage_budget', forced: false });
     expect(result.stages.work.continuation).toBeUndefined();
   });
@@ -602,7 +605,7 @@ describe('durable bounded continuation', () => {
     const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
-    expect(calls).toEqual(['done:1', 'work:1', 'work:1', 'work:2', 'review:1']);
+   expect(calls).toEqual(['done:1', 'work:1', 'work:1', 'work:2', 'review:1']);
     expect(result.stages.work.attempts?.map(attempt => attempt.status)).toEqual(['complete', 'complete']);
     expect(result.stages.work.attempts?.[0].continuation).toMatchObject({ forced: false });
     expect(result.stages.work.continuation).toBeUndefined();
@@ -739,7 +742,7 @@ describe('durable bounded continuation', () => {
     const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
     expect(result.status, result.failureReason).toBe('complete');
     expect(result.currentIteration).toBe(2);
-    expect(calls).toEqual(['work:1', 'work:1', 'work:2', 'review:1']);
+   expect(calls).toEqual(['work:1', 'work:1', 'work:2', 'review:1']);
     expect(result.queryState?.planHistory).toHaveLength(1);
     expect(result.dispatchedStages?.map((stage: unknown) => (stage as {
       id: string;
@@ -764,7 +767,7 @@ describe('durable bounded continuation', () => {
     const calls: string[] = [];
     const adapter: Adapter = { async run(_prompt, _role, opts) { calls.push(opts.stageId); return completed(opts); } };
     const result = await executeIteration(workflow.stages, project, created.runId, created.runDirPath, workflow, adapter, new Map([['coder', role]]), root, new Map([['coder', { name: 'coder', description: '' }]]), new Set(), new Map());
-    expect(calls).toEqual([]);
+   expect(calls).toEqual([]);
     expect(result.stages.other.status).toBe('pending');
   });
   it('B24 terminal settlement defers retained budget work at every entrance, including the next iteration', async () => {
@@ -832,6 +835,7 @@ describe('durable bounded continuation', () => {
     const adapter: Adapter = { async run(_prompt, _role, opts) { time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); return completed(opts); } };
     await expect(runStage(adapter, { ...options(created, time), settlementBoundary: async phase => { if (phase === 'attempt_closed') throw new Error('Actual settlement refusal'); return false; } })).rejects.toThrow('Actual settlement refusal');
     const status = readStageStatus(project, created.runId, 'work'); expect(status.status).toBe('failed'); expect(status.continuation).toBeUndefined(); expect(status.attempts?.at(-1)?.continuation).toBeUndefined();
+    expect(readEvidence(created.runDirPath)).toContainEqual(expect.objectContaining({ kind: 'attempt', exitCode: 1, endingCause: 'work_failed', continuation: false }));
   });
 
   it('B30 a scope audit refusal removes the budget marker from both history and projection', () => {
@@ -839,6 +843,7 @@ describe('durable bounded continuation', () => {
     completeStageAttempt(project, created.runId, 'work', 0, { exitCode: 0, duration_ms: 1, continuation: { reason: 'stage_budget', forced: false, handoff: 'stages/work/output_attempt_1.md' } });
     const status = attachStageConstraintAudit(project, created.runId, 'work', 1, { path: 'stages/work/audit.json', declaredScope: [], effectiveScope: [], violationCount: 1, unverifiedCount: 0 }, 'Actual scope refusal');
     expect(status.status).toBe('failed'); expect(status.continuation).toBeUndefined(); expect(status.attempts?.at(-1)?.continuation).toBeUndefined();
+    expect(status.attempts?.at(-1)?.endingCause).toBe('work_failed');
   });
 
   it('B32 returns a durable final refusal without a success continuation', async () => {
@@ -850,7 +855,343 @@ describe('durable bounded continuation', () => {
       return false;
     } });
     expect(result.exitCode).toBe(1); expect(result.continuation).toBeUndefined();
+    expect(result.endingCause).toBe('work_failed');
+    expect(readEvidence(created.runDirPath)).toContainEqual(expect.objectContaining({ kind: 'attempt', exitCode: 1, endingCause: 'work_failed', continuation: false }));
     expect(readStageStatus(project, created.runId, 'work').status).toBe('failed');
   });
 
+});
+
+
+describe('cause-owned budget handoff', () => {
+  it('SI an unreviewed environment gap remains negative without spending another attempt', async () => {
+    const created = createRun(project, 'fixture', 'name: fixture', ['work']);
+    const adapter: Adapter = { run: vi.fn(async () => ({ exitCode: 0, duration_ms: 1, output: JSON.stringify({
+      status: 'environment_gap', summary: 'Required renderer is unavailable.', caveats: [], remaining_work: ['Obtain rendering evidence.'] }) })) };
+    const result = await runStage(adapter, options(created));
+    expect(result.exitCode).toBe(1);
+    expect(result.endingCause).toBe('environment_gap');
+    expect(decideStageRetry(result, 0, 5, 5)).toBe('stop');
+    expect(adapter.run).toHaveBeenCalledTimes(1);
+    expect(readEvidence(created.runDirPath)).toContainEqual(expect.objectContaining({ kind: 'attempt', exitCode: 1,
+      endingCause: 'environment_gap', environmentGap: { reason: 'Required renderer is unavailable.' } }));
+  });
+
+  it.each([true, false])('SI environment gap reaches an independent gate once (accept=%s)', async accept => {
+    const { roles, workflow } = workflowFixture(5);
+    workflow.defaults.max_retries = 3;
+    let time = manualClock();
+    const calls: string[] = [];
+    const gap = { reason: 'The fixture has no renderer; rendering evidence remains unmeasured.' };
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      calls.push(opts.stageId);
+      if (opts.stageId === 'work') {
+        time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
+        return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ status: 'environment_gap', summary: gap.reason,
+          caveats: [], remaining_work: ['Obtain rendering evidence in a capable environment.'] }) };
+      }
+      if (opts.stageId === 'review') {
+        expect(prompt).toContain(gap.reason);
+        expect(prompt).toContain('environment_gap');
+        expect(workflow.stages.find(stage => stage.id === 'review')!.scope).toEqual([]);
+        if (!accept) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: 'The required evidence is absent.', criteria: {},
+          audit_findings: { version: 1, findings: [] }, repairability: { version: 1, disposition: 'irreparable', evidence: gap.reason } }) };
+      }
+      return withRemaining(completed(opts, 'Complete.'), []);
+    } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+      undefined, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+   expect(calls).toEqual(['done', 'work', 'review']);
+    expect(result.status, result.failureReason).toBe(accept ? 'complete' : 'escalated');
+    expect(result.stages.work.attempts).toHaveLength(1);
+    expect(result.stages.work.attempts![0].endingCause).toBe('environment_gap');
+    expect(result.stages.work.continuation).toBeUndefined();
+    expect(readEvidence(runDir(project, result.runId))).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: 'work', endingCause: 'environment_gap', environmentGap: gap }));
+  });
+
+  it.each([0, 1, 4, undefined])('SI unfinished work obeys the declaration or default ceiling (%s)', async declared => {
+    const { roles, workflow } = workflowFixture(3);
+    let time = manualClock();
+    const calls: string[] = [];
+    const brief = declared === undefined ? '# Finish the research.' : `---\nmax_continuations: ${declared}\n---\n# Finish the research.`;
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      calls.push(opts.stageId);
+      if (opts.stageId === 'work') {
+        time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
+        return withRemaining(completed(opts), ['Research the remaining cases, even with no product diff.']);
+      }
+      return withRemaining(completed(opts, 'Complete.'), []);
+    } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+      undefined, brief, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
+    const attempts = declared === undefined ? 3 : declared + 1;
+    expect(result.status).toBe('incomplete');
+    expect(result.currentIteration).toBe(declared === undefined ? attempts : 1);
+    expect(result.stages.work.attempts).toHaveLength(attempts);
+    expect(result.stages.done.attempts).toHaveLength(1);
+    expect(result.stages.work.attempts!.every(attempt => attempt.endingCause === 'work_unfinished')).toBe(true);
+    expect(calls.filter(id => id === 'review')).toHaveLength(0);
+    expect(result.stages.work.continuation?.summary).toContain('Research the remaining cases');
+    expect(result.failureReason).toContain(declared === undefined ? 'iteration budget' : 'declared continuation budget');
+    expect(() => workflowContinuation(result, project, result.runId, workflow)).toThrow('budget exhausted');
+  });
+
+  it('SI rejects malformed continuation declarations instead of silently using a different allowance', async () => {
+    for (const value of [-1, 1.5, 'one', null, '.inf'])
+      expect(parseBriefFrontmatter(`---\nmax_continuations: ${value}\n---\n# Task`).workflowError).toContain('max_continuations');
+    const { roles, workflow } = workflowFixture(3);
+    const run = vi.fn();
+    const result = await runWorkflow(workflow, stringify(workflow), project, { run }, new Map(), undefined, roles,
+      undefined, '---\nmax_continuations: -1\n---\n# Task', false, undefined, false);
+    expect(result.status).toBe('failed');
+    expect(result.failureReason).toContain('max_continuations');
+    expect(readRunState(project, result.runId).status).toBe('failed');
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('SI declared continuations retain the work failure ceiling for their iteration', async () => {
+    const { roles, workflow } = workflowFixture(3);
+    workflow.defaults.max_retries = 1;
+    let time = manualClock();
+    const workAttempts = new Set<number>();
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      if (opts.stageId !== 'work') return withRemaining(completed(opts, 'Complete.'), []);
+      workAttempts.add(opts.attemptIndex ?? 0);
+      if (opts.attemptIndex === 2) {
+        time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
+        return withRemaining(completed(opts), ['Finish the retained work.']);
+      }
+      return { exitCode: 1, duration_ms: 1, output: 'Controlled work failure.' };
+    } };
+    const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+      undefined, '---\nmax_continuations: 1\n---\n# Finish retained work.', false, undefined, false, undefined,
+      () => { time = manualClock(); return time.clock; });
+    expect([...workAttempts]).toEqual([1, 2, 3]);
+    expect(result.stages.work.retries).toBe(1);
+    expect(result.stages.work.attempts?.map(attempt => attempt.endingCause)).toEqual(['work_failed', 'work_unfinished', 'work_failed']);
+    expect(result.currentIteration).toBe(1);
+    expect(result.stages.done.attempts).toHaveLength(1);
+    expect(result.status).toBe('incomplete');
+  });
+});
+
+
+it('SI typed provider quota parks without retries and resumes the same stage after its reset', async () => {
+  const { roles, workflow } = workflowFixture(3);
+  const reset = Date.now() + 60_000;
+  const quota = providerFailureFromEvent('codex', { type: 'turn.failed', error: {
+    code: 'usage_limit_reached', reset_at: new Date(reset).toISOString(), message: 'Opaque provider diagnostic.' } })!;
+  const calls: string[] = [];
+  let stopped = false;
+  const adapter: Adapter = { async run(_prompt, _role, opts) {
+    calls.push(opts.stageId);
+    if (opts.stageId === 'work' && !stopped) {
+      stopped = true;
+      return { exitCode: 1, duration_ms: 1, output: '', providerFailure: quota };
+    }
+    return withRemaining(completed(opts, 'Complete.'), []);
+  } };
+  const run = (existing?: string) => runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+    existing, undefined, false, undefined, false);
+  const parked = await run();
+  expect(parked.status, parked.failureReason).toBe('parked');
+  expect(calls).toEqual(['done', 'work']);
+  expect(parked.stages.work).toMatchObject({ status: 'pending', retries: 0 });
+  expect(parked.stages.work.attempts).toHaveLength(1);
+  expect(parked.stages.work.attempts![0].endingCause).toBe('provider_quota');
+  expect(parked.recovery).toMatchObject({ cause: 'provider_quota', notBefore: new Date(reset).toISOString() });
+  expect((await run(parked.runId)).status).toBe('parked');
+  expect(calls).toEqual(['done', 'work']);
+  vi.spyOn(Date, 'now').mockReturnValue(reset + 1);
+  const resumed = await run(parked.runId);
+  expect(resumed.status, resumed.failureReason).toBe('complete');
+  expect(calls).toEqual(['done', 'work', 'work', 'review']);
+  expect(resumed.currentIteration).toBe(1);
+  expect(resumed.stages.work.retries).toBe(0);
+  expect(resumed.stages.done.attempts).toHaveLength(1);
+});
+
+
+it.each([true, false])('SI process deaths are bounded separately from repeated work failures (crash=%s)', async crash => {
+  const { roles, workflow } = workflowFixture(3);
+  workflow.defaults.max_retries = 1;
+  const calls: string[] = [];
+  const adapter: Adapter = { async run(_prompt, _role, opts) {
+    calls.push(opts.stageId);
+    return opts.stageId === 'work' ? { exitCode: crash ? 137 : 1, duration_ms: 1, output: 'Fixture failure.',
+      ...(crash ? { processSignal: 'SIGKILL' as const, processExitCode: null } : {}) }
+      : withRemaining(completed(opts, 'Complete.'), []);
+  } };
+  const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+    undefined, undefined, false, undefined, false);
+  expect(calls.filter(id => id === 'work')).toHaveLength(2);
+  expect(result.stages.work.attempts).toHaveLength(2);
+  expect(result.stages.work.attempts!.every(attempt => attempt.endingCause === (crash ? 'process_death' : 'work_failed'))).toBe(true);
+  expect(result.stages.work.retries).toBe(crash ? 0 : 1);
+  expect(result.status).toBe('incomplete');
+});
+
+
+it('SI verified success after provider cleanup is complete and never starts a crash retry', async () => {
+  const { roles, workflow } = workflowFixture(3);
+  const calls: string[] = [];
+  const adapter: Adapter = { async run(_prompt, _role, opts) {
+    calls.push(opts.stageId);
+    return { ...withRemaining(completed(opts, 'Complete.'), []),
+      ...(opts.stageId === 'work' ? { processSignal: 'SIGKILL' as const, processExitCode: null } : {}) };
+  } };
+  const result = await runWorkflow(workflow, stringify(workflow), project, adapter, new Map(), undefined, roles,
+    undefined, undefined, false, undefined, false);
+  expect(result.status, result.failureReason).toBe('complete');
+  expect(calls).toEqual(['done', 'work', 'review']);
+  expect(result.stages.work.attempts).toHaveLength(1);
+  expect(result.stages.work.attempts![0]).toMatchObject({ endingCause: 'complete', exitCode: 0, processSignal: 'SIGKILL' });
+});
+
+
+it.each([false, true])('SI a gate rejection cannot spend another attempt on a declared environment gap even with a confirmed finding (repair discovers=%s)', async repairDiscovers => {
+  const { roles, workflow } = workflowFixture(3);
+  const calls: string[] = [];
+  const gap = { reason: 'Renderer unavailable; visual evidence cannot be supplied in this environment.' };
+  const adapter: Adapter = { async run(prompt, _role, opts) {
+    calls.push(opts.stageId);
+    if (opts.stageId === (repairDiscovers ? 'repair' : 'work')) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
+      status: 'environment_gap', summary: gap.reason, caveats: [], remaining_work: ['Obtain the required visual evidence.'] }) };
+    if (opts.stageId === 'review') {
+      if (!repairDiscovers && calls.filter(id => id === 'review').length > 1) return withRemaining(completed(opts, 'Complete.'), []);
+      if (!repairDiscovers || calls.filter(id => id === 'review').length > 1) expect(prompt).toContain(gap.reason);
+      return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ pass: false, reason: gap.reason, criteria: {},
+        audit_findings: { version: 1, findings: [{ id: 'missing_visual', paths: ['work.txt'], reason: gap.reason, criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] }, repairability: { version: 1, disposition: 'repairable', evidence: gap.reason } }) };
+    }
+    return withRemaining(completed(opts, 'Complete.'), []);
+  } };
+  const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter, 20_000), new Map(), undefined, roles,
+    undefined, undefined, false, undefined, false, undefined, () => manualClock().clock);
+  expect(calls).toEqual(repairDiscovers ? ['done', 'work', 'review', 'repair', 'review'] : ['done', 'work', 'review']);
+  expect(result.status, result.failureReason).toBe('incomplete');
+  expect(readGateEvaluation(project, 'review', result.runId)?.findings?.confirmed).toHaveLength(1);
+  expect(result.stages.repair.attempts ?? []).toHaveLength(repairDiscovers ? 1 : 0);
+  expect(result.decisionGraph?.records.filter(record => record.stageId === 'review').at(-1)?.reason).toContain(`Environment gap already reported by ${repairDiscovers ? 'repair' : 'work'}`);
+}, 60_000);
+
+
+it.each(['gap', 'refusal', 'cancellation'] as const)('SI repair a validated gap at deadline preserves %s precedence', async disposition => {
+  const created = createRun(project, 'fixture', 'name: fixture', ['work']);
+  const time = manualClock();
+  const cancellation = new AbortController();
+  const adapter: Adapter = { async run() {
+    return { exitCode: 0, duration_ms: 1, output: JSON.stringify({status:'environment_gap', summary:'Renderer missing.', caveats:[], remaining_work:['Obtain visual evidence.']}) };
+  } };
+  const inspect = contractProbe.inspectStageArtifactContract;
+  vi.spyOn(contractProbe,'inspectStageArtifactContract').mockImplementation((...args) => {
+    const audit = inspect(...args);
+    time.advanceTo(stageWrapUpTiming(budget).hardLimitMs + 1);
+    if (disposition === 'refusal') audit.violations.push({ kind: 'declared_artifact', source: 'declaration', mention: 'work.txt', path: join(project, 'work.txt'), reason: 'Fixture settlement refused.' });
+    if (disposition === 'cancellation') cancellation.abort();
+    return audit;
+  });
+  const result = await withRunProcessOwnership(project, created.runId,
+    () => runStage(adapter, { ...options(created, time), gateReviewed: true }), cancellation.signal);
+  expect(contractProbe.inspectStageArtifactContract).toHaveBeenCalled();
+  const endingCause = disposition === 'gap' ? 'environment_gap' : disposition === 'refusal' ? 'work_failed' : 'cancelled';
+  expect(result.endingCause).toBe(endingCause);
+  expect(result.continuation).toBeUndefined();
+  expect(readStageStatus(project, created.runId, 'work').attempts!.at(-1)!.endingCause).toBe(endingCause);
+  expect(readEvidence(created.runDirPath)).toContainEqual(expect.objectContaining({ kind: 'attempt', endingCause, continuation: false }));
+});
+
+function withTextReproduction(adapter: Adapter): Adapter {
+ return { async run(prompt,role,opts) {
+  const result=await adapter.run(prompt,role,opts);
+  if(result.exitCode || !opts.outputSchema?.anyOf)return result;
+  const verdict=JSON.parse(result.output);
+  if(verdict.pass!==false)return result;
+  const client=prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
+  const snippet="process.exit(require('node:fs').readFileSync('work.txt','utf8')==='correct text'?0:1)";
+  const command=JSON.stringify(process.execPath)+' -e '+"'"+snippet.replaceAll("'", "'\\''")+"'";
+  const request=JSON.stringify({command,cwd:opts.workDir,shell:'/bin/sh'});
+  const {runProjectCommand}=await import('../src/project-validation.js');
+  const response=await runProjectCommand({role:'test',command:'/bin/sh',args:['-c',`${client} '${request.replaceAll("'", "'\\''")}'`],display:'Independently reproduce wrong work.txt',cwd:opts.workDir,runDir:opts.runDir,timeoutMs:20000});
+  const recorded=JSON.parse(response.stdout!).record;
+  expect(response.exitCode).toBe(0);expect(recorded.exitCode).toBe(1);
+  verdict.audit_findings.findings=verdict.audit_findings.findings.map((finding:Record<string,unknown>)=>({...finding,reproduction:recorded.sequence}));
+  return {...result,output:JSON.stringify(verdict)};
+ }};
+}
+
+it.each(['disjoint','absent','broad','narrow'] as const)('SI repair accepted gap permits independently reproduced text repair with %s criterion mapping', async mapping => {
+  const {roles,workflow} = workflowFixture(3);
+  const brief='---\noutputs: [work.txt]\n---\n# Produce text with an optional renderer\n\n## Requirements\n1. A missing optional renderer may be accepted using textual evidence.\n2. work.txt contains correct text.';
+  const {extractBriefCriteria}=await import('../src/brief-criteria.js');
+  const refs=extractBriefCriteria(brief).criteria.map(c=>c.id);expect(refs).toHaveLength(2);
+  workflow.stages.find(s=>s.id==='review')!.criterion_refs=refs;
+  workflow.stages.find(s=>s.id==='repair')!.criterion_refs=[refs[1]];
+  workflow.stages.find(s=>s.id==='work')!.scope = mapping === 'disjoint' ? [] : ['work.txt'];
+  if (mapping === 'broad' || mapping === 'narrow') workflow.stages.find(s=>s.id==='work')!.criterion_refs = mapping === 'broad' ? refs : [refs[0]];
+  workflow.stages.splice(2,0,{...workflow.stages[1],id:'text',scope:['work.txt'],depends_on:['work']});
+  workflow.stages.find(s=>s.id==='review')!.depends_on=['text'];
+  normalizeStageContracts(workflow.stages);
+  const calls:string[]=[];
+  const adapter:Adapter={async run(_prompt,_role,opts){
+    calls.push(opts.stageId);
+    if(opts.stageId==='work') return {exitCode:0,duration_ms:1,output:JSON.stringify({status:'environment_gap',summary:'Optional renderer missing; textual evidence can satisfy the brief.',caveats:[],remaining_work:['Optional visual evidence unavailable.']})};
+    if(opts.stageId==='text') writeFileSync(join(project,'work.txt'),'wrong text');
+    if(opts.stageId==='repair') writeFileSync(join(project,'work.txt'),'correct text');
+    if(opts.stageId==='review' && !calls.includes('repair')) return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'Renderer gap accepted under criteria; independently reproduced text typo must be fixed.',criteria:{[refs[0]]:{status:'pass',evidence:'The stated optional renderer gap is accepted using delivered textual evidence.'},[refs[1]]:{status:'fail',evidence:'work.txt contains wrong text.'}},audit_findings:{version:1,findings:[{id:'text_typo',paths:['work.txt'],reason:'Text is wrong; renderer is unrelated.',criterion_ids:[refs[1]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'Repair work.txt only; no renderer invocation or gap reopening.'}})};
+    return withRemaining(completed(opts,'Complete.'),[]);
+  }};
+  const result=await runWorkflow(workflow,stringify(workflow),project,withTextReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,false,undefined,()=>manualClock().clock);
+  expect(calls).toEqual(['done','work','text','review','repair','review']);
+  expect(result.status).toBe('complete');
+  expect(readFileSync(join(project,'work.txt'),'utf8')).toBe('correct text');
+  expect(result.stages.work.attempts).toHaveLength(1);
+  expect(result.stages.repair.attempts).toHaveLength(1);
+});
+
+function withRendererReproduction(adapter: Adapter): Adapter {
+ return {async run(prompt,role,opts) {
+  const result=await adapter.run(prompt,role,opts);
+  if(result.exitCode || !opts.outputSchema?.anyOf)return result;
+  const verdict=JSON.parse(result.output);if(verdict.pass!==false)return result;
+  const client=prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
+  const request=JSON.stringify({command:'/bin/sh -c \'test -x ./renderer\'',cwd:opts.workDir,shell:'/bin/sh'});
+  const {runProjectCommand}=await import('../src/project-validation.js');
+  const response=await runProjectCommand({role:'test',command:'/bin/sh',args:['-c',`${client} '${request.replaceAll("'", "'\\''")}'`],display:'Reproduce same missing renderer capability',cwd:opts.workDir,runDir:opts.runDir,timeoutMs:20000});
+  expect(response.exitCode).toBe(0);const record=JSON.parse(response.stdout!).record;expect(record.exitCode).toBe(1);
+  verdict.audit_findings.findings=verdict.audit_findings.findings.map((f:Record<string,unknown>)=>({...f,reproduction:record.sequence}));
+  return {...result,output:JSON.stringify(verdict)};
+ }};
+}
+
+it.each(['absent','broad','narrow'] as const)('SI repair shared ownership cannot reopen the same renderer gap with %s criterion mapping',async mapping=>{
+ const {roles,workflow}=workflowFixture(3);
+ const brief='---\noutputs: [work.txt]\n---\n# Renderer work\n\n## Requirements\n1. The renderer executable supplies visual evidence.\n2. work.txt contains correct text.';
+ const {extractBriefCriteria}=await import('../src/brief-criteria.js');const refs=extractBriefCriteria(brief).criteria.map(c=>c.id);expect(refs).toHaveLength(2);
+ workflow.stages.find(s=>s.id==='work')!.scope=['renderer','work.txt'];
+ workflow.stages.find(s=>s.id==='work')!.criterion_refs=[refs[0]];
+ workflow.stages.find(s=>s.id==='repair')!.scope=['renderer','work.txt'];
+ workflow.stages.find(s=>s.id==='repair')!.criterion_refs=[refs[0]];
+ workflow.stages.find(s=>s.id==='review')!.criterion_refs=refs;
+ const text={...workflow.stages[1],id:'text',scope:['renderer','work.txt'],depends_on:['work']};
+ if(mapping==='absent')delete text.criterion_refs;else text.criterion_refs=mapping==='broad'?refs:[refs[1]];
+ workflow.stages.splice(2,0,text);workflow.stages.find(s=>s.id==='review')!.depends_on=['text'];normalizeStageContracts(workflow.stages);
+ const calls:string[]=[],rendererProbes:string[]=[];
+ const adapter:Adapter={async run(_prompt,_role,opts){
+  calls.push(opts.stageId);
+  if(opts.stageId==='work'||opts.stageId==='repair') {
+   rendererProbes.push(opts.stageId);expect(existsSync(join(project,'renderer'))).toBe(false);
+   return {exitCode:0,duration_ms:1,output:JSON.stringify({status:'environment_gap',summary:'The required renderer executable is unavailable in this environment.',caveats:[],remaining_work:['Supply visual evidence with renderer.']})};
+  }
+  if(opts.stageId==='text')writeFileSync(join(project,'work.txt'),'correct text');
+  if(opts.stageId==='review')return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'The renderer is absent; text is correct.',criteria:{[refs[0]]:{status:'fail',evidence:'Renderer unavailable.'},[refs[1]]:{status:'pass',evidence:'Correct text exists.'}},audit_findings:{version:1,findings:[{id:'missing_renderer',paths:['renderer'],reason:'Same renderer capability missing.',criterion_ids:[refs[0]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'The renderer is absent.'}})};
+  return withRemaining(completed(opts,'Complete.'),[]);
+ }};
+ const result=await runWorkflow(workflow,stringify(workflow),project,withRendererReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,false,undefined,()=>manualClock().clock);
+ expect(rendererProbes).toEqual(['work']);
+ expect(calls).toEqual(['done','work','text','review']);
+ expect(result.status).toBe('incomplete');
+ expect(result.stages.work.attempts).toHaveLength(1);
+ expect(result.stages.repair.attempts ?? []).toHaveLength(0);
+ expect(readGateEvaluation(project,'review',result.runId)?.findings?.confirmed).toHaveLength(1);
+ expect(result.decisionGraph?.records.find(record => record.stageId === 'review')?.reason).toContain('Environment gap already reported by work');
 });

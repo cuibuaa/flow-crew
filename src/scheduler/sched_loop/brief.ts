@@ -84,7 +84,8 @@ export function configureWorkflowBrief(
       taskDescription = stripped || briefContent;
       if (outputs?.length) taskDescription += `\n\nDeclared outputs (required by the brief):\n${outputs.map(output => `- ${output.path} (${output.expectedType})`).join('\n')}\nGuidance cannot remove these obligations. Report conflicting actual constraints rather than silently overriding either one.`;
       const s = readRunState(projectDir, runId);
-      if (terminalStates || research || outputs) {
+      if (terminalStates || research || outputs || parsed.maxContinuations !== undefined) {
+        if (!resumingExistingRun) s.maxContinuations = parsed.maxContinuations;
         if (terminalStates) {
           s.terminalStates = terminalStates;
           if (!resumingExistingRun) s.terminalArtifactBaselines = Object.fromEntries(

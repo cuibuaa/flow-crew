@@ -2,6 +2,8 @@ import { concludeRun } from '../sched_policy/run-completion.js';
 import { captureRepairRoundSnapshot, type RepairRoundSnapshot } from '../sched_scope/snapshots.js';
 import { ensureRollbackBaseline } from '../sched_scope/rollback-baseline.js';
 import { topoSort } from '../sched_admission/frontier.js';
+import { stageScopeOwnsPath } from '../sched_admission/dispatch.js';
+import type { AuditFinding } from '../../scoped-audit-repair.js';
 /** Settle declared edges at idle boundaries. All execution uses the ordinary scheduler. */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,7 +13,7 @@ import { changedPaths } from '../../decision-context.js';
 import { readRunEvents, recordRunEvent } from '../../run-events.js';
 import { RUN_STATUS, STAGE_STATUS, readStageOutput, rependStageStatus, writeStageStatus, writeRunState, isPendingStageStatus, type StoreState } from '../../store.js';
 import { loadDefaults, type StageConfig, type WorkflowConfig } from '../sched_admission/configuration.js';
-import { collectGateRuntimeFacts, classifyGateRecoveryFact, findGateRecoveryStages } from '../sched_settlement/gate-recovery.js';
+import { collectGateRuntimeFacts, classifyGateRecoveryFact, findGateRecoveryStages, gateReviewedAuthorIds } from '../sched_settlement/gate-recovery.js';
 import { archiveGateRoundEvidence, archiveRejectedGateRuntimeFacts, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
 import { injectDispatchedStages, terminateForGateContractRefusal, writeRepairRoundDiffArtifact } from './services.js';
 
@@ -94,10 +96,12 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     let choice: ReturnType<typeof validateDecision>;
     let unconfirmedRejection = false;
     let gateAccepted: boolean | undefined;
+    let rejectedFindings: AuditFinding[] = [];
     if (source.is_gate) {
       const facts = collectGateRuntimeFacts([source], state, project, run);
       const fact = facts.evaluations[0];
       gateAccepted = fact?.effectiveVerdict?.pass === true;
+      rejectedFindings = fact?.effectiveVerdict?.findings?.confirmed ?? [];
       if (fact?.rejectionKind === 'irreparable_rejection' || facts.contractRefusals.length) {
         if (terminateForGateContractRefusal(state, facts, project, run, iteration)) return state;
       }
@@ -144,10 +148,27 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     const limit = graph.maxVisits;
     const resumed = destination && isPendingStageStatus(state.stages[target]?.status ?? '') && (state.stages[target]?.attempts?.length ?? 0) > 0;
     const revisiting = Boolean(destination && (state.stages[target]?.attempts?.length || state.stages[target]?.status === STAGE_STATUS.COMPLETE));
-    if (unconfirmedRejection || wallExhausted || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
+    // A gap author's explicit responsibility confined to these finding criteria
+    // cannot be erased by another author's broad or absent mapping. Otherwise
+    // shared scope alone does not identify the confirmed defect as that gap.
+    const gapOwners = source.is_gate && gateAccepted === false ? rejectedFindings.flatMap(finding => {
+      const owners = gateReviewedAuthorIds(source, sorted).filter(id => {
+        const author = sorted.find(stage => stage.id === id)!;
+        return (!author.criterion_refs?.length || !finding.criterion_ids.length || finding.criterion_ids.some(ref => author.criterion_refs!.includes(ref)))
+          && finding.paths.some(path => stageScopeOwnsPath(author, path));
+      });
+      const gaps = owners.filter(id => state.stages[id]?.attempts?.at(-1)?.endingCause === 'environment_gap');
+      return owners.length === gaps.length ? gaps : gaps.filter(id => {
+        const refs = sorted.find(stage => stage.id === id)!.criterion_refs;
+        return refs?.length && refs.every(ref => finding.criterion_ids.includes(ref));
+      });
+    }) : [];
+    const repeatedGap = [target, ...gapOwners]
+      .find(id => state.stages[id]?.attempts?.at(-1)?.endingCause === 'environment_gap');
+    if (repeatedGap || unconfirmedRejection || wallExhausted || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
       || source.decision && destination?.is_gate && (destination.scope === undefined || destination.scope.length !== 0)
       || target !== 'continue' && (revisiting || source.is_gate) && !resumed && used >= limit) {
-      record.outcome = 'refused'; record.reason = unconfirmedRejection ? choice.reason : `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${choice.reason}`;
+      record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; no new attempt can close that same gap. ${choice.reason}` : unconfirmedRejection ? choice.reason : `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${choice.reason}`;
       delete record.successor;
     } else if (target === 'replan') {
       const planner = sorted.find(s => s.dynamic_dispatch);

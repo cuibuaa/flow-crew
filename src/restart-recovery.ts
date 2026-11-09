@@ -1,3 +1,4 @@
+import { classifyEnding, type EndingCause } from './attempt-ending.js';
 export { readHostBootId, checkpointConsumers } from './checkpoint-liveness.js';
 import { join, resolve } from 'node:path';
 import { sha256Canonical as digest } from './canonical-json.js';
@@ -21,12 +22,14 @@ export interface EngineCheckpoint {
   processes?: { pid: number; processStart?: ProcessStartToken }[];
 }
 export interface RestartRecovery {
+  cause?: EndingCause;
+  notBefore?: string;
   kind: 'resumable' | 'blocked' | 'resuming'; reason: string; at: string;
   fromBoot?: string; toBoot?: string; generation?: string; interruptedStages: string[];
 }
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const RecoveryIntentSchema = z.object({
-  version: z.literal(1), phase: z.enum(['prepared', 'committed']), at: z.string().datetime(),
+  version: z.literal(1), phase: z.enum(['prepared', 'committed']), cause: z.enum(['host_restart', 'process_death', 'unknown']).optional(), at: z.string().datetime(),
   binding: z.object({
     runId: z.string().min(1), projectDir: z.string().min(1), checkpoint: digestSchema,
     planRevision: z.object({ revision: z.number().int().nonnegative(), digest: digestSchema }).strict().optional(),
@@ -54,20 +57,26 @@ function binding(state: StoreState): RecoveryIntent['binding'] {
     currentIteration: state.currentIteration, maxIterations: state.maxIterations, maxRetries: state.maxRetries,
   };
 }
-function interruptionError(previous: EngineCheckpoint): string {
-  return `HOST_RESTART_INTERRUPTED: controller lost (boot ${previous.bootId ?? 'unknown'}); no authored product rejection or successful completion is inferred`;
+function interruptionError(previous: EngineCheckpoint, cause: EndingCause): string {
+  return `${cause.toUpperCase()}_INTERRUPTED: controller lost (boot ${previous.bootId ?? 'unknown'}); no authored product rejection or successful completion is inferred`;
 }
 /** Match the persisted interrupted attempt, retaining collected usage. */
-function closedAttempt(stage: RecoveryIntent['stages'][number], previous: EngineCheckpoint): StageAttempt {
+function closedAttempt(stage: RecoveryIntent['stages'][number], previous: EngineCheckpoint, cause: EndingCause): StageAttempt {
   return interruptedStageStatus({ status: STAGE_STATUS.RUNNING, retries: stage.retries, attempts: [stage.attempt as StageAttempt] },
-    stage.completedAt, interruptionError(previous), 'host_restart').attempts!.at(-1)!;
+    stage.completedAt, interruptionError(previous, cause), cause === 'host_restart' ? 'host_restart' : 'exit', cause).attempts!.at(-1)!;
 }
-function matchesStage(current: StageStatus | undefined, stage: RecoveryIntent['stages'][number], previous: EngineCheckpoint): boolean {
+function matchesStage(current: StageStatus | undefined, stage: RecoveryIntent['stages'][number], previous: EngineCheckpoint, cause: EndingCause, legacyIntent = false): boolean {
   const attempts = current?.attempts, attempt = attempts?.at(-1);
   if (!attempt || current?.retries !== stage.retries || digest(attempts!.slice(0, -1)) !== stage.prefixDigest) return false;
   if (current.status === STAGE_STATUS.RUNNING) return digest(attempt) === digest(stage.attempt);
-  return ([STAGE_STATUS.FAILED, STAGE_STATUS.PENDING] as readonly string[]).includes(current.status)
-    && digest(attempt) === digest(closedAttempt(stage, previous));
+  if (!([STAGE_STATUS.FAILED, STAGE_STATUS.PENDING] as readonly string[]).includes(current.status)) return false;
+  if (digest(attempt) === digest(closedAttempt(stage, previous, cause))) return true;
+  // Version-1 intents without cause authenticated the old host-interruption
+  // bytes. Match that exact reconstruction, retaining every other binding.
+  if (!legacyIntent || attempt.endingCause !== undefined) return false;
+  const legacy = closedAttempt(stage, previous, 'host_restart');
+  delete legacy.endingCause;
+  return digest(attempt) === digest(legacy);
 }
 
 // Capture at module load, as daemon identity does. A later disk replacement is
@@ -112,7 +121,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       if (digest(current) !== snapshot) throw new Error('RECOVERY_STATE_CHANGED: run changed before unknown-fate settlement');
       concludeRun(current, { status: RUN_STATUS.FAILED, reasonCode: 'recovery_blocked', detail: reason },
         (_state, notify) => { publish = notify; });
-      current.recovery = { kind: 'blocked', reason, at: current.completedAt!, interruptedStages: Object.keys(current.stages).filter(id => current.stages[id].status === STAGE_STATUS.RUNNING) };
+      current.recovery = { cause: 'unknown', kind: 'blocked', reason, at: current.completedAt!, interruptedStages: Object.keys(current.stages).filter(id => current.stages[id].status === STAGE_STATUS.RUNNING) };
     }, current => {
       publish?.();
       recordRunEvent(projectDir, runId, { type: 'recovery_reconciled', runId, timestamp: current.recovery!.at, detail: reason, source: 'scheduler', level: 'warning' });
@@ -121,6 +130,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
   if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir) || !state.engineCheckpoint || state.engineCheckpoint.version !== 2 || state.engineCheckpoint.runId !== runId || resolve(state.engineCheckpoint.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: checkpoint is not bound to this run/project');
   const boot = Object.hasOwn(evidence, 'currentBootId') ? evidence.currentBootId : readHostBootId();
   const previous = state.engineCheckpoint;
+  const cause = classifyEnding({ interrupted: true, fromBoot: previous.bootId, toBoot: boot });
   const errors: string[] = [];
   if (!previous.bootId || !boot || previous.bootId === boot) {
     if (!previous.processes) errors.push('RECOVERY_FATE_UNKNOWN: legacy checkpoint has no owned command groups and no proven previous-boot death');
@@ -148,7 +158,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
     if (digest(current.recoveryIntent) !== digest(authority) || digest(binding(current)) !== digest(authority.binding)) throw new Error('RECOVERY_INTENT_UNBOUND: interruption authority changed during reconciliation');
     if (Object.entries(current.stages).some(([id, status]) => status.status === STAGE_STATUS.RUNNING && !interruptedStages.includes(id))) throw new Error('RECOVERY_ATTEMPT_UNBOUND: running stage is absent from the durable interruption set');
     for (const stage of authority.stages) {
-      if (!matchesStage(current.stages[stage.stageId], stage, previous) || !matchesStage(readStageStatus(projectDir, runId, stage.stageId), stage, previous)) throw new Error(`RECOVERY_ATTEMPT_UNBOUND: ${stage.stageId} changed during reconciliation`);
+      if (!matchesStage(current.stages[stage.stageId], stage, previous, intent?.cause ?? cause, intent?.cause === undefined) || !matchesStage(readStageStatus(projectDir, runId, stage.stageId), stage, previous, intent?.cause ?? cause, intent?.cause === undefined)) throw new Error(`RECOVERY_ATTEMPT_UNBOUND: ${stage.stageId} changed during reconciliation`);
     }
   }
   if (intent && digest(intent.binding) !== digest(binding(state))) errors.push('RECOVERY_INTENT_UNBOUND: run, checkpoint, plan revision or iteration/retry budget differs from interruption intent');
@@ -158,7 +168,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       try {
         const current = readStageStatus(projectDir, runId, stageId);
         const stage = intent?.stages.find((stage) => stage.stageId === stageId);
-        if (stage ? !matchesStage(current, stage, previous) || !matchesStage(state.stages[stageId], stage, previous)
+        if (stage ? !matchesStage(current, stage, previous, intent?.cause ?? cause, intent?.cause === undefined) || !matchesStage(state.stages[stageId], stage, previous, intent?.cause ?? cause, intent?.cause === undefined)
           : current.status !== STAGE_STATUS.RUNNING || !['running', 'closed'].includes(current.attempts?.at(-1)?.status ?? '') || digest(current) !== digest(state.stages[stageId])) errors.push(`RECOVERY_ATTEMPT_UNBOUND: ${stageId} has no matching interrupted execution ledger`);
       } catch (error) { errors.push(`RECOVERY_ATTEMPT_UNBOUND: ${stageId}: ${String(error)}`); }
     }
@@ -167,14 +177,14 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       // Generic exit/143 is unauthenticated, regardless of display text. An
       // explicit cancellation remains distinct from host interruption.
       return stage.status === STAGE_STATUS.FAILED && (attempt?.terminationCause === 'host_restart'
-        || attempt?.terminationCause === 'exit' && attempt.exitCode === 143);
+        || attempt?.exitCode === 143 && attempt.endingCause !== 'cancelled' && attempt.terminationCause !== 'cancelled');
     })) {
       errors.push('RECOVERY_INTENT_REQUIRED: failed143 interruption has no durable engine intent; retain the failure and migrate with authenticated attempt evidence');
     }
   }
   if (!errors.length && !intent && interruptedStages.length) {
     const at = new Date().toISOString();
-    const parsed = RecoveryIntentSchema.safeParse({ version: 1, phase: 'prepared', at, binding: binding(state), stages: interruptedStages.map((stageId) => {
+    const parsed = RecoveryIntentSchema.safeParse({ version: 1, phase: 'prepared', cause, at, binding: binding(state), stages: interruptedStages.map((stageId) => {
       const current = readStageStatus(projectDir, runId, stageId), attempts = current.attempts!;
       return { stageId, retries: current.retries, attempt: attempts.at(-1), prefixDigest: digest(attempts.slice(0, -1)), completedAt: at, durationMs: Math.max(0, Date.parse(at) - Date.parse(attempts.at(-1)!.startedAt)) };
     }) });
@@ -199,7 +209,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       evidence.assertSchedulerAbsent?.();
       assertIntentAuthority(current, authority);
       // A closed failed143 attempt is retained, never completed a second time.
-      return interruptedStageStatus(ledger, stage.completedAt, interruptionError(previous), 'host_restart');
+      return interruptedStageStatus(ledger, stage.completedAt, interruptionError(previous, authority.cause ?? cause), (authority.cause ?? cause) === 'host_restart' ? 'host_restart' : 'exit', authority.cause ?? cause);
     });
     if (state.status !== RUN_STATUS.RUNNING) return state;
     state = updateStageStatusUnderRunLock(projectDir, runId, stage.stageId, (current, ledger) => {
@@ -210,7 +220,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
     });
     if (state.status !== RUN_STATUS.RUNNING) return state;
   }
-  const reason = errors.length ? errors.join('; ') : 'HOST_RESTART_RESUMABLE: interrupted executions retained; completed work and iteration budget preserved';
+  const reason = errors.length ? errors.join('; ') : `${(intent?.cause ?? cause).toUpperCase()}_RESUMABLE: interrupted executions retained; completed work and iteration budget preserved`;
   let published = false;
   let publish: (() => void) | undefined;
   updateRunState(projectDir, runId, (current) => {
@@ -222,7 +232,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
     if (digest(binding(current)) !== digest(binding(state))) throw new Error('RECOVERY_STATE_CHANGED: checkpoint, plan or budgets changed before recovery commit');
     if (!errors.length && intent) {
       assertIntentAuthority(current, intent);
-      if (intent.stages.some((stage) => current.stages[stage.stageId]?.status !== STAGE_STATUS.PENDING || !matchesStage(current.stages[stage.stageId], stage, previous))) throw new Error('RECOVERY_NOT_RUNNABLE: interrupted work must be pending before resumable publication');
+      if (intent.stages.some((stage) => current.stages[stage.stageId]?.status !== STAGE_STATUS.PENDING || !matchesStage(current.stages[stage.stageId], stage, previous, intent?.cause ?? cause, intent?.cause === undefined))) throw new Error('RECOVERY_NOT_RUNNABLE: interrupted work must be pending before resumable publication');
       current.recoveryIntent = { ...intent, phase: 'committed' };
     }
     if (errors.length) concludeRun(current, { status: RUN_STATUS.FAILED, reasonCode: 'recovery_blocked', detail: reason },
@@ -232,7 +242,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
       delete current.completedAt;
       current.failureReason = reason;
     }
-    current.recovery = { kind: errors.length ? 'blocked' : 'resumable', reason, at: new Date().toISOString(), fromBoot: previous.bootId, toBoot: boot, generation: previous.generation, interruptedStages };
+    current.recovery = { cause: intent?.cause ?? cause, kind: errors.length ? 'blocked' : 'resumable', reason, at: new Date().toISOString(), fromBoot: previous.bootId, toBoot: boot, generation: previous.generation, interruptedStages };
     published = true;
   }, (current) => {
     publish?.();

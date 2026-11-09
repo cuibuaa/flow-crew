@@ -1,3 +1,4 @@
+import { classifyEnding } from './attempt-ending.js';
 import { runProjectCommand, VALIDATION_SELECTION_JSON_SCHEMA } from './project-validation.js';
 import { startCommandRecorder } from './recorded-command.js';
 import { listProjectFiles } from './scheduler/sched_scope/path-capabilities.js';
@@ -1055,12 +1056,13 @@ export async function runStage(
   const finishedStageRecord = (record: Record<string, unknown>): boolean => {
     // A completed rejection keeps its existing authority. Otherwise require an
     // explicit empty list: delivered/pass alone can also describe partial work.
-    return Boolean(opts.decisionResult) || opts.isGate && record.pass === false
+    return Boolean(opts.decisionResult) || record.status === 'environment_gap' || opts.isGate && record.pass === false
       || Array.isArray(record.remaining_work) && record.remaining_work.length === 0
         && (opts.isGate ? record.pass === true : record.status === 'delivered');
   };
   let stageWorkFinished = false;
   let validatedStageRecord: Record<string, unknown> | undefined;
+  let unreviewedGap = false;
   let correctionReinvocations = 0;
   let baseEvidenceDelivered = false;
   const invokeAdapterWithCorrection = async (
@@ -1212,9 +1214,12 @@ export async function runStage(
     try {
       const record = stageRecord(result.output);
       validatedStageRecord = record;
-      blockedStageResult = record.status === 'blocked';
+      blockedStageResult = record.status === 'blocked' || record.status === 'environment_gap';
       stageWorkFinished = finishedStageRecord(record);
-      if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && record.status === 'blocked') throw new Error(`Blocked: ${record.summary}`);
+      if (!opts.dynamicDispatch && !opts.isGate && !opts.gateReviewed && blockedStageResult) {
+        unreviewedGap = record.status === 'environment_gap';
+        throw new Error(`Blocked: ${record.summary}`);
+      }
       for (const carrier of publicationCarriers(record)) {
         atomicWrite(join(opts.runDir, carrier), `${JSON.stringify(record)}\n`);
         enginePublishedCarriers.push(`run:${carrier}`);
@@ -1283,8 +1288,9 @@ export async function runStage(
   }
 
   const settlementRefused = result.exitCode === 125 || Boolean(result.exitCode !== 0 && result.friendlyError && !result.timedOut);
+  const environmentGap = (result.exitCode === 0 || unreviewedGap) && validatedStageRecord?.status === 'environment_gap';
   if (attemptDeadline.signal.aborted && !stageAborted) terminationCause = 'attempt_timeout';
-  const timedOut = !settlementRefused && !stageAborted && (
+  const timedOut = !environmentGap && result.providerFailure?.kind !== 'quota' && !settlementRefused && !stageAborted && (
     terminationCause === 'attempt_timeout'
     || result.exitCode === 124
     || result.timedOut === true
@@ -1306,11 +1312,11 @@ export async function runStage(
   }
   const structuredWrites = result.writeAttribution === 'structured' ? result.writes : undefined;
   const artifacts = diffScopedArtifacts(beforeSnapshot, opts.projectDir);
-  if (!result.engineVoid && !stageAborted
+  if (!result.engineVoid && !stageAborted && !environmentGap && result.providerFailure?.kind !== 'quota'
     && (result.exitCode === 0 && wrapUpRequestedAt && !stageWorkFinished || timedOut)) {
     const forced = timedOut;
     const retainedPaths = artifacts;
-    const summary = `Engine budget handoff. Done/evidence: retained changed files ${JSON.stringify(retainedPaths)} and the execution log at ${liveLogPath}. Their bytes are kept; unfinished duties are not certified complete. Remaining: complete the stage's declared duties and run unfinished checks; verify retained work before continuing. Disposition: ${forced ? 'bounded grace expired; child stopped with work kept' : 'cooperative wrap-up completed normally'}.`;
+    const summary = `Engine budget handoff. Done/evidence: retained changed files ${JSON.stringify(retainedPaths)} and the execution log at ${liveLogPath}. Their bytes are kept; unfinished duties are not certified complete. Remaining: ${JSON.stringify(validatedStageRecord?.remaining_work ?? ["Complete declared duties and unfinished checks; verify retained work before continuing."])}. Disposition: ${forced ? 'bounded grace expired; child stopped with work kept' : 'cooperative wrap-up completed normally'}.`;
     result.continuation = { reason: 'stage_budget', forced, summary,
       handoff: `stages/${opts.stageId}/output_attempt_${attemptIndex}.md` };
     result.exitCode = 0;
@@ -1329,6 +1335,7 @@ export async function runStage(
   if (timedOut || stageAborted || result.exitCode === 0) result.providerFailure = undefined;
   result.effectiveTimeoutMs = effectiveBudgetMs;
   result.terminationCause = terminationCause;
+  result.endingCause = classifyEnding({ ...result, cancelled: stageAborted, providerQuota: result.providerFailure?.kind === 'quota', environmentGap, unfinished: Boolean(result.continuation) });
 
   writeStageOutput(opts.projectDir, opts.runId, opts.stageId, result.output, attemptIndex);
 
@@ -1378,6 +1385,7 @@ export async function runStage(
     ...invocationUsageFields(result),
     invocations: result.invocations,
     terminationCause,
+    endingCause: result.endingCause,
     engineVoid: result.engineVoid,
     writes,
     writeAttribution,
@@ -1427,11 +1435,13 @@ export async function runStage(
     const value: unknown = JSON.parse(result.output);
     if (value && typeof value === 'object' && !Array.isArray(value)) finalRecord = value as Record<string, unknown>;
   } catch { /* No structured final answer; never substitute transcript or summary. */ }
+  const settled = final.attempts?.at(-1);
   appendEvidence(opts.runDir, { kind: 'attempt', stageId: opts.stageId, attemptIndex, attemptStartedAt,
-    exitCode: result.exitCode, status: final.status, treeHash: evidenceTreeAfter.hash,
+    exitCode: settled?.exitCode ?? result.exitCode, status: final.status, treeHash: evidenceTreeAfter.hash,
     files: changedTreeFiles(evidenceTreeBefore, evidenceTreeAfter),
     remainingWork: Array.isArray(validatedStageRecord?.remaining_work) ? validatedStageRecord.remaining_work as string[] : null,
-    continuation: Boolean(result.continuation), finalRecord,
+    continuation: Boolean(settled?.continuation), endingCause: settled?.endingCause ?? result.endingCause,
+    environmentGap: settled?.endingCause === 'environment_gap' ? { reason: String(validatedStageRecord!.summary) } : undefined, finalRecord,
     guidanceIds: [...submittedGuidanceIds], measurements: {
       inputTokens: result.tokens_in ?? null, outputTokens: result.tokens_out ?? null,
       durationMs: result.duration_ms, provenance: 'adapter-reported',
@@ -1451,10 +1461,10 @@ export async function runStage(
       verdict, owner: 'closed-schema-model' });
   }
   {
-    const settled = final.attempts?.at(-1);
     if (settled?.exitCode !== undefined) result.exitCode = settled.exitCode;
     if (result.exitCode !== 0) result.continuation = undefined;
     result.terminationCause = settled?.terminationCause ?? 'exit';
+    result.endingCause = settled?.endingCause;
     recordRunEvent(opts.projectDir, opts.runId, {
       type: result.exitCode === 0 ? 'attempt_finished' : 'attempt_failed',
       runId: opts.runId,

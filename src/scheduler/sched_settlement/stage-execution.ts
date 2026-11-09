@@ -1,3 +1,4 @@
+import { classifyEnding } from '../../attempt-ending.js';
 import { confirmedRepairFindings } from './gate-archives.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 import { appendGateEvidenceInstruction } from './gate-archives.js';
@@ -5,7 +6,7 @@ import { appendGateEvidenceInstruction } from './gate-archives.js';
 import { Adapter, AgentConfig, RunResult } from '../../adapters/base.js';
 import { loadAdapterByName } from '../../adapters/loader.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, nextTechnicalRetryBudget, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
-import { RUN_STATUS, StageAttemptSettlementError, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StageAttemptSettlementError, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
 import { stageRecordSchema } from '../../handoff.js';
 import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit, loadDefaults, parseAgent } from '../sched_admission/configuration.js';
@@ -77,16 +78,42 @@ export function recordSchedulerTechnicalAttemptResult(
     : { type: 'attempt_finished', effectiveBudgetMs });
 }
 
-/** Both scheduling paths spend the same persisted retry count, regardless of failure class. */
+/** Both scheduling paths consume the worker's ending; historical fixture/results
+ * without one use only their structured exit/control facts. */
 export function decideStageRetry(
-  result: Pick<RunResult, 'exitCode' | 'terminationCause' | 'engineVoid' | 'providerFailure'>,
+  result: Pick<RunResult, 'exitCode' | 'terminationCause' | 'endingCause' | 'engineVoid' | 'providerFailure'>,
   retries: number, technicalLimit: number, failureLimit: number,
 ): 'engine_void' | 'retry' | 'stop' {
-  if (result.engineVoid || result.terminationCause === 'engine_void') return 'engine_void';
-  if (result.exitCode === 0 || ['stage_abort', 'cancelled', 'host_restart'].includes(result.terminationCause ?? '')) return 'stop';
+  const cause = result.endingCause ?? classifyEnding({ ...result, engineVoid: result.engineVoid || result.terminationCause === 'engine_void', cancelled: ['stage_abort', 'cancelled', 'host_restart'].includes(result.terminationCause ?? '') });
+  if (cause === 'engine_void') return 'engine_void';
+  if (!['work_failed', 'process_death'].includes(cause)) return 'stop';
   if (result.providerFailure?.kind === 'authentication' || result.providerFailure?.kind === 'input_too_large') return 'stop';
-  const limit = result.providerFailure?.kind === 'transient' || result.terminationCause === 'attempt_timeout' ? technicalLimit : failureLimit;
+  const limit = cause === 'process_death' || result.providerFailure?.kind === 'transient' || result.terminationCause === 'attempt_timeout' ? technicalLimit : failureLimit;
   return retries < limit ? 'retry' : 'stop';
+}
+
+/** Process crashes use the existing immutable attempt history, not work retries.
+ * A completed stage execution starts a new chain; reboot records never charge it. */
+export function stageRetryCharge(status: StageStatus, result: RunResult, retries: number): number {
+  if (result.endingCause !== 'process_death') return retries;
+  const attempts = status.attempts ?? [];
+  let deaths = 0;
+  for (let index = attempts.length - 1; index >= 0 && attempts[index].status !== STAGE_STATUS.COMPLETE; index--)
+    deaths += Number(attempts[index].endingCause === 'process_death');
+  return Math.max(0, deaths - 1);
+}
+
+/** Quota is a resource wait using the existing parked-run recovery channel. */
+export function parkProviderQuota(state: StoreState, project: string, run: string, stage: string, result: RunResult): boolean {
+  if (result.endingCause !== 'provider_quota' || !result.providerFailure?.resetAt) return false;
+  const previous = readStageStatus(project, run, stage);
+  state.stages[stage] = rependStageStatus(previous, previous.retries, previous.error);
+  writeStageStatus(project, run, stage, state.stages[stage]);
+  state.status = RUN_STATUS.PARKED;
+  state.recovery = { cause: 'provider_quota', kind: 'resumable', notBefore: result.providerFailure.resetAt,
+    reason: `Provider quota exhausted; resume after ${result.providerFailure.resetAt}.`, at: new Date().toISOString(), interruptedStages: [stage] };
+  writeRunState(project, run, state);
+  return true;
 }
 
 export async function executeSingleStage(
@@ -194,14 +221,15 @@ export async function executeSingleStage(
       settlementBoundary,
     });
 
+    if (parkProviderQuota(state, projectDir, runId, stage.id, result)) return;
     recordSchedulerTechnicalAttemptResult(technicalRetry, result, prepared.budgetMs);
-    const decision = decideStageRetry(result, retries, maxTechnicalRetries, maxFailureRetries);
+    const decision = decideStageRetry(result, stageRetryCharge(readStageStatus(projectDir, runId, stage.id), result, retries), maxTechnicalRetries, maxFailureRetries);
     if (decision === 'engine_void') {
       throw new StageAttemptSettlementError(stage.id, readStageStatus(projectDir, runId, stage.id).attempts!.at(-1)!.index, new Error(result.friendlyError));
     }
     state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
     if (decision === 'retry') {
-      state.stages[stage.id] = rependStageStatus(state.stages[stage.id], retries + 1, state.stages[stage.id].error);
+      state.stages[stage.id] = rependStageStatus(state.stages[stage.id], retries + Number(result.endingCause !== 'process_death'), state.stages[stage.id].error);
       writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
       writeRunState(projectDir, runId, state);
       log.warn({ stage: stage.id, retry: retries + 1, decision }, 'Retrying stage (inner loop)');

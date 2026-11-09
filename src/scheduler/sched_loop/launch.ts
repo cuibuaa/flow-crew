@@ -13,7 +13,7 @@ import { claimSchedulerPid, removeSchedulerPidIfOwned } from '../sched_policy/id
 import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { snapshotShipSetupValidationBaseline } from '../sched_settlement/gate-validation.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
-import { RUN_STATUS, STAGE_STATUS, StoreState, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
+import { RUN_STATUS, STAGE_STATUS, StoreState, continuationExhausted, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
 import { atomicWrite, mkdirSync, rmSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -31,8 +31,9 @@ export function workflowContinuation(state: StoreState, projectDir: string, runI
       .failedGateIds.filter(id => state.stages[id]?.status === STAGE_STATUS.COMPLETE)
     : [];
   const budgetContinuation = Object.values(state.stages).some(isContinuingStage);
-  const iteration = currentIteration + Number(gateIds.length > 0 || budgetContinuation);
+  const iteration = currentIteration + Number(gateIds.length > 0 || budgetContinuation && state.maxContinuations === undefined);
   const maxIterations = state.maxIterations ?? admitted?.defaults.max_iterations ?? loadDefaults().max_iterations;
+  if (budgetContinuation && continuationExhausted(state)) throw new Error('Cannot resume: declared continuation budget exhausted.');
   if (iteration > maxIterations) throw new Error(`Cannot resume: iteration budget exhausted (${currentIteration}/${maxIterations}); no admitted iteration remains.`);
   return { iteration, gateIds };
 }
@@ -113,6 +114,7 @@ export function prepareWorkflowLaunch(
         archived = reconcileHostInterruptedRun(projectDir, runId);
         if (isPausedRunStatus(archived.status)) launchState = archived;
       }
+      if (archived.recovery?.cause === 'provider_quota' && Date.now() < Date.parse(archived.recovery.notBefore ?? '')) return { kind: 'settled', state: archived };
       if (archived.recovery?.kind === 'blocked') throw new Error(archived.recovery.reason);
       if (!launchUnchanged(archived)) return { kind: 'settled', state: archived };
       if (isResumableRunStatus(archived.status)) {

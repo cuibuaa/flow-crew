@@ -16,6 +16,7 @@ import { readRunStateView } from '../src/run-state-view.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { runStage } from '../src/worker.js';
+import { decideStageRetry } from '../src/scheduler/sched_settlement/stage-execution.js';
 
 const message = 'This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.';
 const refusalEvent = { type: 'turn.failed', error: { message } };
@@ -446,4 +447,65 @@ describe('provider-owned terminal failure contract', () => {
     expect(status.processExitCode).toBe(1);
   });
 
+});
+
+
+it.each([new CodexAdapter(), new ClaudeAdapter()])('SI native typed quota stops without immediate provider retries (%j)', async adapter => {
+  const error = { code: 'usage_limit_reached', reset_at: 2_000_000_000, message: 'Opaque provider stop.' };
+  const event = adapter.sessionKind === 'codex' ? { type: 'turn.failed', error } : { type: 'result', is_error: true, error };
+  writeFileSync(fixture, JSON.stringify({ stdout: jsonl(event) }));
+  const result = await stage(adapter);
+  expect(result.endingCause).toBe('provider_quota');
+  expect(result.providerFailure).toMatchObject({ kind: 'quota', resetAt: new Date(error.reset_at * 1000).toISOString() });
+  expect(readFileSync(fixture + '.calls', 'utf8').trim().split('\n')).toHaveLength(1);
+});
+
+it('SI quota text alone or reset alone cannot authorize a provider wait', () => {
+  for (const error of [
+    { message: 'Usage limit reached; resets at 2099-01-01T00:00:00Z.' },
+    { code: 'usage_limit_reached', message: 'Quota without a structured reset.' },
+    { code: 'other', reset_at: 2_000_000_000, message: 'Unrelated error.' },
+  ]) expect(providerFailureFromEvent('codex', { type: 'turn.failed', error })?.kind).not.toBe('quota');
+});
+
+
+it('SI a typed provider quota reason takes precedence over its generic HTTP status', () => {
+  const failure = providerFailureFromEvent('codex', { type: 'turn.failed', error: {
+    type: 'usage_limit_reached', status_code: 429, reset_at: 2_000_000_000, message: 'Opaque stop.' } });
+  expect(failure).toMatchObject({ kind: 'quota', resetAt: new Date(2_000_000_000_000).toISOString() });
+});
+
+
+it.each([new CodexAdapter(), new ClaudeAdapter()].flatMap(adapter =>
+  [false, true].map(rootStatus => ({ adapter, rootStatus }))))('SI repair native error type retains an explicit HTTP authentication status (%j)', async ({ adapter, rootStatus }) => {
+  const error = { type: rootStatus ? 'opaque_error' : 'error', ...(!rootStatus ? { status_code: 401 } : {}), message: 'Opaque provider failure.' };
+  const event = { ...(adapter.sessionKind === 'codex' ? { type: 'turn.failed', error } : { type: 'result', is_error: true, error }),
+    ...(rootStatus ? { status_code: 401 } : {}) };
+  writeFileSync(fixture, JSON.stringify({ stdout: jsonl(event) }));
+  const result = await stage(adapter);
+  expect(result.providerFailure?.kind).toBe('authentication');
+  expect(decideStageRetry(result, 0, 1, 3)).toBe('stop');
+});
+
+
+it.each([new CodexAdapter(), new ClaudeAdapter()].flatMap(adapter =>
+  [false, true].map(rootStatus => ({ adapter, rootStatus }))))('SI repair recognized native authentication retains priority over HTTP status (%j)', async ({ adapter, rootStatus }) => {
+  const error = { type: 'authentication_error', message: 'Opaque provider failure.', ...(!rootStatus ? { status_code: 429 } : {}) };
+  const event = { ...(adapter.sessionKind === 'codex' ? { type: 'turn.failed', error } : { type: 'result', is_error: true, error }),
+    ...(rootStatus ? { status_code: 429 } : {}) };
+  writeFileSync(fixture, JSON.stringify({ stdout: jsonl(event) }));
+  const result = await stage(adapter);
+  expect(result.providerFailure?.kind).toBe('authentication');
+  expect(decideStageRetry(result, 0, 1, 3)).toBe('stop');
+});
+
+
+it.each([new CodexAdapter(), new ClaudeAdapter()].flatMap(adapter =>
+  ['status_code', 'status'].map(field => ({ adapter, field }))))('SI repair nested HTTP authentication outranks a transient native type (%j)', async ({ adapter, field }) => {
+  const error = { type: 'api_error', [field]: 401, message: 'Opaque provider failure.' };
+  const event = adapter.sessionKind === 'codex' ? { type: 'turn.failed', error } : { type: 'result', is_error: true, error };
+  writeFileSync(fixture, JSON.stringify({ stdout: jsonl(event) }));
+  const result = await stage(adapter);
+  expect(result.providerFailure?.kind).toBe('authentication');
+  expect(decideStageRetry(result, 0, 1, 3)).toBe('stop');
 });

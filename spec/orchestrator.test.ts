@@ -1,4 +1,5 @@
 import './test-support/policy-runtime.js';
+import * as bootFacts from '../src/checkpoint-liveness.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -28,6 +29,7 @@ import { waitForPathEvent } from './test-support/wait-for-path-event.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { captureEngineCheckpoint } from '../src/restart-recovery.js';
 import {
+  beginStageAttempt, completeStageAttempt, readStageStatus, writeStageStatus,
   fcGlobalDir,
   initializeReservedRun,
   readRunReservation,
@@ -409,6 +411,8 @@ describe('Orchestrator', () => {
     expect(registry.get(task.id)).toMatchObject({
       status: taskStatus,
       notes: `bound run ${runId} ended ${runStatus === 'stopped' ? 'cancelled' : runStatus}`,
+      lastEnding: { cause: runStatus === 'cancelled' || runStatus === 'stopped' ? 'cancelled'
+        : taskStatus === 'done' ? 'complete' : 'work_failed' },
     });
     expect(registry.readRecentTicks(task.id).at(-1)).toContain(`status=${taskStatus} `);
     expect(systemd.runs).toHaveLength(0);
@@ -830,7 +834,7 @@ describe('Orchestrator', () => {
     expect(systemd.runs).toHaveLength(0);
   });
 
-  it.each(['none', 'unreleased', 'released'] as const)('counts a parked recovery retry with a %s deployment hold', async hold => {
+  it.each(['none', 'unreleased', 'released'] as const)('separates a parked process recovery from work retries with a %s deployment hold', async hold => {
     const runId = 'parked-recovery';
     const admitted = admittedBrief('Resume the recovered work.');
     const runPath = writeRun(runId, 'parked');
@@ -838,7 +842,7 @@ describe('Orchestrator', () => {
     updateRunState(tempDir, runId, state => {
       state.taskDescription = admitted.brief_text;
       state.briefAdmission = admitted.brief_admission;
-      state.recovery = { kind: 'resumable', reason: 'Recovered fixture', at: new Date(clock).toISOString(), interruptedStages: [] };
+      state.recovery = { cause: 'process_death', kind: 'resumable', reason: 'Recovered fixture', at: new Date(clock).toISOString(), interruptedStages: [] };
       state.engineCheckpoint = captureEngineCheckpoint(tempDir, runId);
       state.stages = { work: { status: 'pending', retries: 0 } };
       if (hold !== 'none') state.deploymentHold = {
@@ -852,7 +856,7 @@ describe('Orchestrator', () => {
     await orchestrator.tickOnce();
 
     expect(systemd.runs).toHaveLength(1);
-    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: hold === 'released' ? 2 : 3 });
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 2 });
     expect(systemd.runs[0].unit).not.toBe(task.systemd_unit);
     expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
     expect(readFileSync(runJson, 'utf8')).toBe(before);
@@ -880,7 +884,7 @@ describe('Orchestrator', () => {
     expect(systemd.runs[0].unit).not.toBe(task.systemd_unit);
   });
 
-  it('consumes a retry for a non-parked run with a historical approved approval', async () => {
+  it('charges a same-host process death independently of work retries despite a historical approval', async () => {
     const runId = 'non-parked-approved';
     const admitted = admittedBrief('Recover the interrupted work.');
     writeRun(runId, 'running', { requestId: 'historical-approval', pausedAt: new Date(clock).toISOString() });
@@ -897,8 +901,8 @@ describe('Orchestrator', () => {
     await orchestrator.tickOnce();
 
     expect(systemd.runs).toHaveLength(1);
-    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 3 });
-    expect(systemd.runs[0].unit).toBe(`flowcrew-task-${task.id}-attempt-3.service`);
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 2, processDeaths: 1 });
+    expect(systemd.runs[0].unit).not.toBe(task.systemd_unit);
   });
 
   it.each(['failed', 'incomplete', 'complete'])('launches an explicit queued continuation of a %s run before reconciling its outcome', async status => {
@@ -1192,12 +1196,14 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     const after = registry.get(task.id)!;
     expect(after.status).toBe('deferred');
     expect(after.attempt).toBe(1);                             // budget intact
+    expect(after.lastEnding?.cause).toBe('launch_conflict');
     expect(after.defer_reason).toContain('project busy');
   });
 
   it('does not consume an attempt when the bound run records a single-in-flight collision', async () => {
     const runId = 'guard-collision';
     writeRun(runId, 'failed', undefined, 'Single-in-flight: another active run exists');
+    updateRunState(tempDir, runId, state => { state.reasonCode = 'launch_conflict'; });
     const task = registry.create({
       ...admittedBrief('task'),
       projectDir: tempDir,
@@ -1426,4 +1432,145 @@ describe('systemd inactive identity', () => {
       else process.env.FLOWCREW_TEST_LOAD_STATE = previousLoadState;
     }
   });
+});
+
+
+describe('interruption causes and automatic daemon recovery', () => {
+  it.each([false, true])('SI reboot recovery: two sequential deaths, same host=%s', async sameHost => {
+    const boot = vi.spyOn(bootFacts, 'readHostBootId').mockReturnValue('boot-a');
+    const runId = 'sequential-recovery';
+    const admitted = admittedBrief('Resume this exact run autonomously.');
+    const path = writeRun(runId, 'running');
+    updateRunState(tempDir, runId, state => {
+      state.taskDescription = admitted.brief_text; state.briefAdmission = admitted.brief_admission;
+      state.currentIteration = 1; state.maxIterations = 5;
+      state.engineCheckpoint = { ...captureEngineCheckpoint(tempDir, runId), pid: 2_147_483_647, processStart: undefined };
+    });
+    writeStageStatus(tempDir, runId, 'done', { status: 'complete', retries: 0 });
+    const done = readFileSync(join(path, 'stages/done/status.json'), 'utf8');
+    beginStageAttempt(tempDir, runId, 'work', 0);
+    const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'running', max_attempts: 2 });
+    registry.update(task.id, { started_at: new Date(clock).toISOString() });
+    for (const nextBoot of ['boot-b', 'boot-c']) {
+      boot.mockReturnValue(sameHost ? 'boot-a' : nextBoot);
+      const prior = registry.get(task.id)!;
+      systemd.states.set(prior.systemd_unit, FAILED_UNIT_EXIT);
+      // A fresh orchestrator is the returned daemon; no retry/resume command.
+      orchestrator = new Orchestrator({ registry, systemd, git, cliPath: '/tmp/fixture-cli.js', now: () => new Date(clock), isProjectBusy: () => null });
+      await orchestrator.tickOnce();
+      expect(registry.get(task.id)?.attempt).toBe(1);
+      if (sameHost && nextBoot === 'boot-c') {
+        expect(registry.get(task.id)).toMatchObject({ status: 'stuck', processDeaths: 2 });
+        expect(registry.get(task.id)?.notes).toContain('process crash budget exhausted');
+        expect(systemd.runs).toHaveLength(1);
+        return;
+      }
+      expect(registry.get(task.id)?.status, registry.get(task.id)?.notes).toBe('deferred');
+      advance(31_000);
+      await orchestrator.tickOnce();
+      const resumed = registry.get(task.id)!;
+      expect(resumed).toMatchObject({ status: 'running', attempt: 1, run_id: runId,
+        lastEnding: { cause: sameHost ? 'process_death' : 'host_restart' } });
+      expect(systemd.runs.at(-1)?.command).toContain(`'--existing-run-id' '${runId}'`);
+      expect(readFileSync(join(path, 'stages/done/status.json'), 'utf8')).toBe(done);
+      expect(readRunState(tempDir, runId)).toMatchObject({ currentIteration: 1, maxIterations: 5 });
+      expect(readStageStatus(tempDir, runId, 'work').attempts?.at(-1)?.endingCause).toBe(sameHost ? 'process_death' : 'host_restart');
+      // Scripted scheduler starts its next execution after the daemon launch.
+      updateRunState(tempDir, runId, state => {
+        state.status = 'running'; state.recovery!.kind = 'resuming';
+        state.engineCheckpoint = { ...captureEngineCheckpoint(tempDir, runId), pid: 2_147_483_647, processStart: undefined };
+      });
+      beginStageAttempt(tempDir, runId, 'work', 0);
+    }
+    completeStageAttempt(tempDir, runId, 'work', 0, { exitCode: 0, duration_ms: 1 });
+    updateRunState(tempDir, runId, state => { state.status = 'complete'; });
+    systemd.states.set(registry.get(task.id)!.systemd_unit, CLEAN_UNIT_EXIT);
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: 'done', attempt: 1, launch: 3, processDeaths: 0 });
+    expect(readStageStatus(tempDir, runId, 'work').attempts).toHaveLength(3);
+  });
+});
+
+
+it('SI returned daemon waits for a typed quota reset then launches the same run without charging work', async () => {
+  const runId = 'quota-reset';
+  const admitted = admittedBrief('Resume after the provider reset.');
+  writeRun(runId, 'parked');
+  const reset = clock + 90_000;
+  updateRunState(tempDir, runId, state => {
+    state.taskDescription = admitted.brief_text; state.briefAdmission = admitted.brief_admission;
+    state.stages = { work: { status: 'pending', retries: 0 } };
+    state.recovery = { cause: 'provider_quota', kind: 'resumable', notBefore: new Date(reset).toISOString(),
+      reason: 'Provider quota exhausted.', at: new Date(clock).toISOString(), interruptedStages: ['work'] };
+  });
+  const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'running', max_attempts: 1 });
+  registry.update(task.id, { started_at: new Date(clock).toISOString() });
+  systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
+  await orchestrator.tickOnce();
+  expect(registry.get(task.id)).toMatchObject({ status: 'deferred', attempt: 1, lastEnding: { cause: 'provider_quota' }, not_before: new Date(reset).toISOString() });
+  advance(89_999);
+  orchestrator = new Orchestrator({ registry, systemd, git, cliPath: '/tmp/fixture-cli.js', now: () => new Date(clock), isProjectBusy: () => null });
+  await orchestrator.tickOnce();
+  expect(systemd.runs).toHaveLength(0);
+  advance(1);
+  await orchestrator.tickOnce();
+  expect(registry.get(task.id)).toMatchObject({ status: 'running', attempt: 1, run_id: runId });
+  expect(systemd.runs).toHaveLength(1);
+  expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
+});
+
+
+it('SI authenticated legacy boot facts resume without requiring a newly added cause field', async () => {
+  vi.spyOn(bootFacts, 'readHostBootId').mockReturnValue('boot-b');
+  const runId = 'legacy-boot-recovery';
+  const admitted = admittedBrief('Continue the retained run.');
+  writeRun(runId, 'parked');
+  updateRunState(tempDir, runId, state => {
+    state.taskDescription = admitted.brief_text; state.briefAdmission = admitted.brief_admission;
+    state.stages = { work: { status: 'pending', retries: 0 } };
+    state.currentIteration = 1; state.maxIterations = 5;
+    state.engineCheckpoint = captureEngineCheckpoint(tempDir, runId);
+    state.recovery = { kind: 'resumable', fromBoot: 'boot-a', toBoot: 'boot-b',
+      reason: 'Legacy recovery with structured boot facts.', at: new Date(clock).toISOString(), interruptedStages: ['work'] };
+  });
+  const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'deferred', max_attempts: 1 });
+  registry.update(task.id, { started_at: new Date(clock).toISOString() });
+  await orchestrator.tickOnce();
+  expect(registry.get(task.id), registry.get(task.id)?.notes).toMatchObject({ status: 'running', attempt: 1,
+    processDeaths: 0, lastEnding: { cause: 'host_restart' } });
+  expect(systemd.runs).toHaveLength(1);
+  expect(systemd.runs[0].command).toContain(`'--existing-run-id' '${runId}'`);
+});
+
+it.each(['host_restart', 'provider_quota', 'complete'] as const)('SI a consumed %s recovery cannot exempt later same-host startup deaths', async cause => {
+  vi.spyOn(bootFacts, 'readHostBootId').mockReturnValue('boot-b');
+  const runId = 'startup-deaths';
+  const admitted = admittedBrief('Continue retained work after recovery.');
+  writeRun(runId, 'parked');
+  updateRunState(tempDir, runId, state => {
+    state.taskDescription = admitted.brief_text; state.briefAdmission = admitted.brief_admission;
+    state.stages = { work: { status: 'pending', retries: 0 } };
+    state.engineCheckpoint = { ...captureEngineCheckpoint(tempDir, runId), pid: 2_147_483_647, processStart: undefined };
+    state.recovery = { cause, kind: 'resumable', fromBoot: 'boot-a', toBoot: 'boot-b',
+      ...(cause === 'provider_quota' ? { notBefore: new Date(clock - 1).toISOString() } : {}),
+      reason: 'Prior execution recovered.', at: new Date(clock - 1000).toISOString(), interruptedStages: ['work'] };
+    if (cause === 'complete') state.deploymentHold = { version: 1, id: 'released-fixture',
+      requestedAt: new Date(clock - 2000).toISOString(), heldAt: new Date(clock - 1500).toISOString(),
+      releasedAt: new Date(clock - 1000).toISOString() };
+  });
+  const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'deferred', max_attempts: 2 });
+  await orchestrator.tickOnce();
+  expect(registry.get(task.id)).toMatchObject({ status: 'running', attempt: 1, lastEnding: { cause } });
+  const recovered = readRunState(tempDir, runId);
+  for (let death = 1; death <= 2; death++) {
+    systemd.states.set(registry.get(task.id)!.systemd_unit, FAILED_UNIT_EXIT);
+    // The child never entered the scheduler, so the prior recovery stays intact.
+    orchestrator = new Orchestrator({ registry, systemd, git, cliPath: '/tmp/fixture-cli.js', now: () => new Date(clock), isProjectBusy: () => null });
+    await orchestrator.tickOnce();
+    expect(registry.get(task.id)).toMatchObject({ status: death === 2 ? 'stuck' : 'deferred',
+      attempt: 1, processDeaths: death, lastEnding: { cause: 'process_death' } });
+    expect(readRunState(tempDir, runId)).toEqual(recovered);
+    if (death === 1) { advance(31_000); await orchestrator.tickOnce(); }
+  }
+  expect(systemd.runs).toHaveLength(2);
 });

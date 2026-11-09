@@ -1,5 +1,5 @@
 /** `input_too_large`: the provider refused the input by size; the same input fails again, so it is never replayed. */
-export type ProviderFailureKind = 'refusal' | 'authentication' | 'transient' | 'input_too_large';
+export type ProviderFailureKind = 'refusal' | 'authentication' | 'transient' | 'input_too_large' | 'quota';
 
 /** A CLI that prints its error as `... (code N), data: {json}` carries the provider's reason code in that object. */
 export function diagnosticDataCode(diagnostic: string): unknown {
@@ -28,5 +28,5 @@ export function classifyAdapterFailure(diagnostic: string, code?: unknown): Prov
 
 /** Operator intervention and provider refusals cannot recover by replay. */
 export function isRetryableAdapterFailure(kind: ProviderFailureKind | undefined): boolean {
-  return kind !== 'authentication' && kind !== 'refusal' && kind !== 'input_too_large';
+  return kind !== 'authentication' && kind !== 'refusal' && kind !== 'input_too_large' && kind !== 'quota';
 }

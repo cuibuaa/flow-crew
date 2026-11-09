@@ -70,7 +70,7 @@ export type RpcRequest =
   | { cmd: 'tail'; id: number; lines?: number; follow?: boolean }
   | { cmd: 'status' }
   | { cmd: 'hold' | 'hold-status' }
-  | { cmd: 'continue' }
+  | { cmd: 'continue'; abandonHold?: string }
   | { cmd: 'stop' };
 
 export interface RegisterRpcResponse {

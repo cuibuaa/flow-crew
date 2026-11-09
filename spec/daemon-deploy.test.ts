@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { cmdDaemon, type DaemonProcessControls } from '../src/cli-daemon.js';
 import { BUILD_MANIFEST_FILENAME, createBuildManifest, expectedBuildOutputs } from '../src/build-manifest.js';
 import { createDaemonIdentity, writeDaemonIdentity } from '../src/daemon-identity.js';
-import { readDeploymentHold, releaseDeploymentHold, requestDeploymentHold } from '../src/deployment-hold.js';
+import { markDeploymentStopping, readDeploymentHold, releaseDeploymentHold, requestDeploymentHold } from '../src/deployment-hold.js';
 import { DaemonUnavailableError, RpcOutcomeUnknownError, type DaemonStatusRpcResponse, type RpcResponse } from '../src/orchestrator-rpc.js';
 import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
 
@@ -122,6 +122,7 @@ function fixture() {
 function expectHeldFailure(f: ReturnType<typeof fixture>, step: string) {
   expect(readDeploymentHold()).toBeDefined();
   expect(readDeploymentHold()?.releasedAt).toBeUndefined();
+  expect(readDeploymentHold()?.stopRequestedAt).toEqual(expect.any(String));
   expect(f.error).toContain(`DEPLOY STOPPED at ${step}:`);
   expect(f.error).toContain('hold remains active');
   expect(f.error).toContain('Retry flowcrew daemon deploy');
@@ -171,10 +172,12 @@ describe('daemon deployment through the durable hold', () => {
     expect(f.events).not.toContain('build');
   });
 
-  it('leaves an unsettled hold active without stopping or building on timeout', async () => {
+  it('releases an unsettled hold without stopping or building on timeout', async () => {
     const f = fixture(); f.pendingHold = 1;
     expect(await f.run(0)).toBe(1);
-    expectHeldFailure(f, 'hold');
+    expect(f.error).toContain('Hold is not settled');
+    expect(f.error).toContain('launches remain possible');
+    expect(readDeploymentHold()?.releasedAt).toBeDefined();
     expect(f.events).not.toContain('rpc:stop');
     expect(f.events).not.toContain('build');
   });
@@ -271,4 +274,72 @@ describe('daemon deployment through the durable hold', () => {
     expect(f.error).toContain('hold already released; verify tasks before retrying');
     expect(f.output).not.toContain('Deployment complete');
   });
+});
+
+
+it('SI deploy wait expiry names the unsettled task and stage, avoids a shortened transport deadline and releases the fence', async () => {
+  const f = fixture(); f.pendingHold = 100;
+  const sendRpc = f.controls.sendRpc;
+  f.controls.sendRpc = async (...args) => {
+    if (args[1].cmd === 'hold-status' && args[2] !== undefined && args[2] < 500)
+      throw new RpcOutcomeUnknownError(`daemon response timed out after ${args[2]}ms`);
+    const response = await sendRpc(...args);
+    return ['hold', 'hold-status'].includes(args[1].cmd) ? { ...response, tasks: [
+      { id: 17, runId: 'fixture-run', status: 'running', settled: false, stages: ['review_full'], detail: 'run=running' },
+    ] } : response;
+  };
+  expect(await f.run(1000), f.error).toBe(1);
+  expect(f.error).toContain('Hold is not settled');
+  expect(f.error).toContain('task #17');
+  expect(f.error).toContain('stage review_full');
+  expect(f.error).not.toContain('response timed out');
+  expect(f.error).toContain('launches remain possible');
+  expect(readDeploymentHold()?.releasedAt).toBeDefined();
+  expect(f.owner).toBe(oldPid);
+  expect(f.events).not.toContain('rpc:stop');
+  expect(f.events).not.toContain('build');
+});
+
+it('SI genuine daemon transport failure remains a transport failure', async () => {
+  const f = fixture(); f.pendingHold = 100;
+  const sendRpc = f.controls.sendRpc;
+  f.controls.sendRpc = async (...args) => {
+    if (args[1].cmd === 'hold-status') throw new RpcOutcomeUnknownError('fixture genuine transport failure');
+    return sendRpc(...args);
+  };
+  expect(await f.run(), f.error).toBe(2);
+  expect(f.error).toContain('fixture genuine transport failure');
+  expect(f.error).not.toContain('Hold is not settled');
+  expect(readDeploymentHold()?.releasedAt).toBeDefined();
+  expect(f.owner).toBe(oldPid);
+});
+
+it('SI a pre-existing stopped recovery hold survives a later wait timeout', async () => {
+  const f = fixture(); f.pendingHold = 100;
+  const requested = requestDeploymentHold();
+  markDeploymentStopping(requested);
+  const hold = readDeploymentHold();
+  expect(await f.run(0)).toBe(1);
+  expect(readDeploymentHold()).toEqual(hold);
+  expect(f.events).not.toContain('rpc:continue');
+});
+
+
+it('SI an earlier unsettled hold can be abandoned before any stop request', async () => {
+  const f = fixture(); f.pendingHold = 100;
+  requestDeploymentHold();
+  expect(await f.run(0)).toBe(1);
+  expect(readDeploymentHold()?.releasedAt).toBeDefined();
+  expect(f.events).not.toContain('rpc:stop');
+});
+
+
+it('SI a legacy hold with unknown stop status preserves its recovery fence', async () => {
+  const f = fixture(); f.pendingHold = 100;
+  const { stopRequestedAt: _unknown, ...legacy } = requestDeploymentHold();
+  writeFileSync(join(fcGlobalDir(), 'deployment-hold.json'), JSON.stringify(legacy));
+  expect(await f.run(0)).toBe(1);
+  expect(readDeploymentHold()).toEqual(legacy);
+  expect(f.events).not.toContain('rpc:continue');
+  expect(f.events).not.toContain('rpc:stop');
 });

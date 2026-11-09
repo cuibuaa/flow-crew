@@ -348,6 +348,38 @@ describe('independent restart crash-window falsifier', () => {
     expect(existsSync(join(directory, 'stages/work/status.json'))).toBe(true);
   });
 
+  function legacyCrash(point: string) {
+    prepare(); crash(point);
+    // The version-1 producer predates exactly these two optional fields.
+    // Preserve all authenticated binding, timing, attempt and prefix bytes.
+    for (const path of [join(directory, 'run.json'), join(directory, 'stages/work/status.json')]) {
+      const raw = JSON.parse(readFileSync(path, 'utf8'));
+      if (raw.recoveryIntent) delete raw.recoveryIntent.cause;
+      delete (raw.stages?.work ?? raw).attempts.at(-1).endingCause;
+      writeFileSync(path, JSON.stringify(raw));
+    }
+  }
+  it.each(['intent', 'stage_ledger', 'run_projection', 'pending_ledger', 'pending_projection', 'commit'])('SI repair resumes an authenticated legacy recovery at %s publication', point => {
+    legacyCrash(point);
+    const result = recover();
+    expect(result.recovery?.kind).toBe('resumable');
+    expect(result.stages.work.status).toBe('pending');
+    expect(result.stages.work.attempts).toHaveLength(1);
+    expect(result.stages.work.attempts![0].exitCode).toBe(143);
+  });
+  it.each(['run', 'checkpoint', 'attempt', 'prefix'])('SI repair legacy compatibility retains the %s binding', kind => {
+    legacyCrash('stage_ledger');
+    updateRunState(project, runId, state => {
+      if (kind === 'run') state.recoveryIntent!.binding.runId = 'unrelated';
+      if (kind === 'checkpoint') state.engineCheckpoint!.pid++;
+      if (kind === 'attempt') state.recoveryIntent!.stages[0].attempt.index++;
+      if (kind === 'prefix') state.recoveryIntent!.stages[0].prefixDigest = '0'.repeat(64);
+    });
+    const before = readFileSync(join(directory, 'stages/work/status.json'));
+    expect(recover().recovery?.kind).toBe('blocked');
+    expect(readFileSync(join(directory, 'stages/work/status.json'))).toEqual(before);
+  });
+
   it('validates all interrupted executions before partially closing any of them', () => {
     prepare(); beginStageAttempt(project, runId, 'writer', 0, startedAt);
     const ledger = readStageStatus(project, runId, 'writer'); ledger.attempts![0].index++;
@@ -407,7 +439,7 @@ describe('independent restart crash-window falsifier', () => {
     expect(readFileSync(join(directory, 'stages/work/status.json'))).toEqual(before);
   });
 
-  it.each([undefined, 'failed', 'complete', 'stage_abort', 'attempt_timeout'])('requires intent for a legacy marker with nested cause %s', nestedCause => {
+  it.each([undefined, 'failed', 'complete', 'stage_abort', 'attempt_timeout'])('requires intent for an unauthenticated legacy exit143 with nested cause %s', nestedCause => {
     prepare();
     completeStageAttempt(project, runId, 'work', 0, { exitCode: 143, duration_ms: 1, error: 'HOST_RESTART_INTERRUPTED: authored imitation' });
     for (const path of [join(directory, 'run.json'), join(directory, 'stages/work/status.json')]) {
@@ -418,7 +450,7 @@ describe('independent restart crash-window falsifier', () => {
       writeFileSync(path, JSON.stringify(raw));
     }
     const before = readFileSync(join(directory, 'stages/work/status.json'));
-    expect(readStageStatus(project, runId, 'work').attempts!.at(-1)!.terminationCause).toBe('host_restart');
+    expect(readStageStatus(project, runId, 'work').attempts!.at(-1)!.terminationCause).toBe(nestedCause === 'stage_abort' || nestedCause === 'attempt_timeout' ? nestedCause : nestedCause ? 'exit' : undefined);
     const state = recover();
     expect(state.recovery?.reason).toContain('RECOVERY_INTENT_REQUIRED:');
     expect(state.stages.work.status).toBe('failed');

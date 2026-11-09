@@ -213,7 +213,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
       unit: expect.not.stringMatching(unit), workingDirectory: project,
       command: expect.stringContaining(`'--existing-run-id' '${runId}'`),
     });
-    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 2 });
+    expect(registry.get(task.id)).toMatchObject({ status: 'running', run_id: runId, attempt: 1, processDeaths: 0, lastEnding: { cause: 'host_restart' } });
     expect(readRunState(project, runId)).toMatchObject({ status: 'parked', currentIteration: 2, maxIterations: 3, maxRetries: 4 });
     await orchestrator.tickOnce();
     expect(launch).toHaveBeenCalledTimes(1);
@@ -287,7 +287,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
     await orchestrator.tickOnce();
 
     expect(readRunState(project, runId)).toMatchObject({ status: 'parked', recovery: { kind: 'resumable' }, currentIteration: 2 });
-    expect(registry.get(task.id)).toMatchObject({ status: 'deferred', defer_kind: 'retry', attempt: 1, run_id: runId });
+    expect(registry.get(task.id)).toMatchObject({ status: 'deferred', defer_kind: 'wait', attempt: 1, run_id: runId, processDeaths: 1, lastEnding: { cause: 'process_death' } });
     expect(registry.get(task.id)?.defer_reason).toContain('resuming that exact run');
     expect(launch).not.toHaveBeenCalled();
   });
