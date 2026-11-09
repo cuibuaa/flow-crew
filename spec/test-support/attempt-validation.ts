@@ -23,7 +23,5 @@ export function seedAttemptValidation(projectDir: string, runId: string, current
   return appendEvidence(base, { kind: 'validation', validationVersion: VALIDATION_FACT_VERSION, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
     treeHash: tree.hash, executions: [{ target: 'attempt', cwd: projectDir, treeHash: tree.hash, treeAfterHash: tree.hash,
       commands: current.map(result => ({ ...result, ...plan.baseline.discovery.commands.find(command => command.role === result.role && (command.display === result.display || !result.display)), command: 'declared-fixture', args: [] })) }],
-    delta, failures: current.filter(result => result.state === 'failed').flatMap(result => result.failureIdentifiers.map(identifier => ({
-      role: result.role, identifier, classification: delta.find(entry => entry.role === result.role)?.state === 'regression' ? 'introduced' as const : 'pre-existing' as const,
-    }))), pass: delta.every(entry => entry.state === 'pass') });
+    delta, failures: [], pass: current.length > 0 && evaluateValidationDelta(undefined, current).every(entry => entry.state === 'verified') });
 }

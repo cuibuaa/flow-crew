@@ -216,7 +216,7 @@ describe('mixed language validation retains all measured commands', () => {
       return request.command === 'npm' ? { exitCode: 0, stdout: '1 passed' } : { exitCode: 1, stdout: 'FAILED tests/test_fixture.py::test_regression\n1 failed' };
     } });
     expect(calls).toHaveLength(2);
-    expect(evaluateValidationDelta(baseline, current.results).some(d => d.state === 'regression')).toBe(true);
+    expect(evaluateValidationDelta(baseline, current.results).some(d => d.state === 'unverified')).toBe(true);
     expect(reconcileProjectValidation(project, [{ role: 'test', command: 'npm', args: ['run', 'test'], evidencePath: 'brief' }]).commands.filter(c => c.role === 'test')).toHaveLength(1);
   });
   it('does not guess an executable test command from setup.py alone', () => {
@@ -246,8 +246,8 @@ describe('mixed language validation retains all measured commands', () => {
     const baseline = await runProjectValidationBaseline(project, { commands, runCommand: () => ({ exitCode: 0 }) });
     const js = baseline.results.find(result => result.display === 'npm run test')!;
     const otherRoles = baseline.results.filter(result => result.role !== 'test');
-    expect(evaluateValidationDelta(baseline, [...otherRoles, js]).filter(result => result.state === 'not_measured')).toHaveLength(1);
-    expect(evaluateValidationDelta(baseline, [...otherRoles, js, { ...js, display: 'different test command' }]).filter(result => result.state === 'not_measured')).toHaveLength(1);
-    expect(baseline.gateCriteria.filter(criterion => criterion.role === 'test').map(criterion => criterion.display)).toEqual(['npm run test', 'python -m pytest']);
+    expect(evaluateValidationDelta(baseline, [...otherRoles, js]).filter(result => result.state === 'unverified')).toHaveLength(1);
+    expect(evaluateValidationDelta(baseline, [...otherRoles, js, { ...js, display: 'different test command' }]).filter(result => result.state === 'unverified')).toHaveLength(1);
+    expect(baseline.gateCriteria).toEqual([]);
   });
 });

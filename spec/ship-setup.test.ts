@@ -701,11 +701,9 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(record.sourceVerification.inputs).toHaveLength(3);
     expect(record.targetVerification.inputs).toHaveLength(3);
     expect(record.validationBaseline.results).toContainEqual(expect.objectContaining({
-      role: 'test', state: 'unresolved', failureIdentity: 'unknown',
+      role: 'test', state: 'unverified', failureIdentity: 'unknown',
     }));
-    expect(record.validationBaseline.gateCriteria).toContainEqual(expect.objectContaining({
-      role: 'test', rule: 'baseline_unresolved',
-    }));
+    expect(record.validationBaseline.gateCriteria).toEqual([]);
   });
 
   it('keeps declared commands without inferring additional commands from a second language', async () => {
@@ -721,7 +719,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(report.state).toBe('ready');
     expect(report.validationBaseline?.discovery.commands.map(command => command.display)).toEqual(['npm run build', 'npm run test', 'npm run lint']);
     expect(runner).not.toHaveBeenCalled();
-    expect(report.validationBaseline?.gateCriteria.filter(criterion => criterion.role === 'test')).toHaveLength(1);
+    expect(report.validationBaseline?.gateCriteria).toEqual([]);
   });
 
   it.each([
@@ -733,9 +731,9 @@ describe('ship-setup fail-closed worktree transaction', () => {
     const runner = vi.fn<ValidationCommandRunner>(() => ({ exitCode: 1, stdout: output as string }));
     const report = await runShipSetup(setupArgs(), { createWorktree: successfulGit(), runValidationCommand: runner });
     expect(report).toMatchObject({ state: 'ready', validationBaseline: {
-      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unresolved',
+      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unverified',
         failureIdentity: 'unknown', failureIdentifiers: [] })]),
-      gateCriteria: expect.arrayContaining([expect.objectContaining({ role: 'test', rule: 'baseline_unresolved' })]),
+      gateCriteria: [],
     } });
     expect(runner).not.toHaveBeenCalled();
   });
@@ -821,11 +819,9 @@ describe('ship-setup fail-closed worktree transaction', () => {
           })],
         },
         results: [
-          expect.objectContaining({ role: 'test', state: 'unresolved' }),
+          expect.objectContaining({ role: 'test', state: 'unverified' }),
         ],
-        gateCriteria: expect.arrayContaining([
-          expect.objectContaining({ role: 'test', rule: 'baseline_unresolved' }),
-        ]),
+        gateCriteria: [],
       },
     });
     expect(baseline).not.toHaveBeenCalled();
@@ -961,7 +957,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(runner).not.toHaveBeenCalled();
     expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
       execution: 'skipped', discovery: { commands: [expect.objectContaining({ role: 'build', command: 'executable-that-does-not-exist', args: ['--verify'] })] },
-      results: expect.arrayContaining([expect.objectContaining({ role: 'build', state: 'unresolved', failureIdentity: 'unknown' })]),
+      results: expect.arrayContaining([expect.objectContaining({ role: 'build', state: 'unverified', failureIdentity: 'unknown' })]),
     } });
     expect(noReadyRecord()).toBe(false);
   });
@@ -1097,8 +1093,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
       branch: 'default-project-result',
     }));
     expect(stdout.value).toContain('Ship setup: READY');
-    expect(stdout.value).toContain('gate build: baseline_unresolved');
-    expect(stdout.value).toContain('gate test: baseline_unresolved');
+    expect(stdout.value).toContain('build: UNVERIFIED');
+    expect(stdout.value).toContain('test: UNVERIFIED');
     expect(noReadyRecord()).toBe(false);
   });
 
@@ -1351,7 +1347,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(runner).toHaveBeenCalledTimes(0);
     expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
       results: expect.arrayContaining([expect.objectContaining({ role: 'test', failureIdentity: 'unknown',
-        output: '', state: 'unresolved', reason: expect.stringContaining('deferred') })]),
+        output: '', state: 'unverified', reason: expect.stringContaining('deferred') })]),
     } });
     expect(noReadyRecord()).toBe(false);
   });
@@ -1364,7 +1360,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       createWorktree: successfulGit(), runValidationCommand: runner, stdout: stdout.writer,
     });
     expect(code).toBe(0);
-    expect(stdout.value).toContain('test: UNRESOLVED');
+    expect(stdout.value).toContain('test: UNVERIFIED');
     expect(noReadyRecord()).toBe(false);
   });
 
@@ -1379,7 +1375,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       runValidationCommand: runner,
     });
     expect(report).toMatchObject({ state: 'ready', blockers: [], validationBaseline: {
-      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unresolved', failureIdentity: 'unknown' })]),
+      results: expect.arrayContaining([expect.objectContaining({ role: 'test', state: 'unverified', failureIdentity: 'unknown' })]),
     } });
     expect(runner).not.toHaveBeenCalled(); expect(noReadyRecord()).toBe(false);
   });
@@ -1400,8 +1396,8 @@ describe('ship-setup fail-closed worktree transaction', () => {
       blockers: [],
       validationBaseline: {
         results: expect.arrayContaining([
-          expect.objectContaining({ role: 'build', state: 'unresolved' }),
-          expect.objectContaining({ role: 'test', state: 'unresolved', failureIdentity: 'unknown' }),
+          expect.objectContaining({ role: 'build', state: 'unverified' }),
+          expect.objectContaining({ role: 'test', state: 'unverified', failureIdentity: 'unknown' }),
         ]),
       },
     });

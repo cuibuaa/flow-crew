@@ -64,7 +64,7 @@ function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = tru
   const reason = state === 'unresolved'
     ? 'Green baseline no longer passes, but current failure identity/count is unavailable'
     : state === 'regression' ? 'A green baseline no longer passes' : 'Green baseline remains green';
-  const fact = seed ? seedAttemptValidation(projectDir, runId, [], { delta: [{ role: 'test', display: 'npm run test', state, reason, newFailureIdentifiers: state === 'regression' ? ['spec/retained-failure.test.ts'] : [] }] }) : undefined;
+  const fact = seed ? seedAttemptValidation(projectDir, runId, [{ role: 'test', display: 'npm run test', state: state === 'pass' ? 'passed' : 'failed', exitCode: state === 'pass' ? 0 : 1, durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'unknown' }], { delta: [{ role: 'test', display: 'npm run test', state, reason, newFailureIdentifiers: state === 'regression' ? ['spec/retained-failure.test.ts'] : [] }] }) : undefined;
   writeFileSync(join(runDirPath, `validation_delta_${gateId}.json`), JSON.stringify({
     treeHash: captureProjectTree(projectDir).hash, ...(fact ? { ledgerSequence: fact.sequence } : {}),
     version: 2, stageId: gateId, checkedAt: completedAt, pass: state === 'pass',
@@ -82,7 +82,7 @@ function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = tru
 
 describe('typed gate recovery routes', () => {
   it.each([
-    ['validation_regression', 'Gate contract violation: unrelated wording', 'repairable_failure'],
+    ['validation_regression', 'Gate contract violation: unrelated wording', 'engine_contract_or_evidence_rejection'],
     ['validation_unresolved', 'Review omitted the research outcome', 'engine_contract_or_evidence_rejection'],
     ['research_outcome_absent', 'No prefix is required to describe this refusal', 'omitted_research_outcome'],
   ] as const)('routes %s by the engine refusal type', (kind, reason, rejectionKind) => {
@@ -169,16 +169,16 @@ describe('settled gate results', () => {
     expect(row.terminalStudyComplete).toBe(true);
   });
 
-  it('records introduced regression as a rejected gate without changing the completed process result', () => {
-    const verdictSha256 = writeVerdict({ pass: true, reason: 'The model accepted the output' });
+  it('blocks acceptance on an independent causal disposition without changing the completed process result', () => {
+    const verdictSha256 = writeVerdict({ pass: true, reason: 'The independent gate attributes the failed test to the change', validation_review: { commands: [{ role: 'test', display: 'npm run test', disposition: 'caused_by_change', reason: 'Independent product comparison' }], request_base: [] } });
     writeValidation('regression');
     settleGateEvaluation(projectDir, runId, gateId);
     const status = readStageStatus(projectDir, runId, gateId);
     expect(status).toMatchObject({ status: 'complete', exitCode: 0,
       attempts: [{ status: 'complete', exitCode: 0 }],
-      gate: { pass: false, kind: 'validation_regression', verdictSha256, refusal: { kind: 'validation_regression' } } });
+      gate: { pass: false, kind: 'audit_findings', verdictSha256, refusal: { kind: 'audit_findings' } } });
     expect(classifyGateRecoveryFact(gateId, { pass: true }, status.gate!).rejectionKind)
-      .toBe('repairable_failure');
+      .toBe('engine_contract_or_evidence_rejection');
   });
 
   it('retains unknown evidence without vetoing an independent acceptance or relabeling validation as passing', () => {
@@ -203,21 +203,12 @@ describe('settled gate results', () => {
     const facts = collectGateRuntimeFacts([gate, repair], readRunState(projectDir, runId), projectDir, runId);
     expect(facts.allPass).toBe(false);
     expect(readStageStatus(projectDir, runId, gateId)).toMatchObject({ status: 'failed', exitCode: 1 });
-    if (validation === 'regression') {
-      const result = readStageStatus(projectDir, runId, gateId).gate;
-      expect(result).toMatchObject({ pass: false, kind: 'validation_regression', verdictSha256: null });
-      expect(readGateEvaluation(projectDir, gateId, runId)).toEqual(result);
-      expect(facts.rejectedGateIds).toEqual([gateId]);
-      const fact = classifyGateRecoveryFact(gateId, null, result!);
-      expect(findGateRecoveryStages([gate, repair], [gateId], undefined, { [gateId]: fact }).map(stage => stage.id)).toEqual([]);
-    } else {
-      expect(readStageStatus(projectDir, runId, gateId).gate).toBeUndefined();
-      expect(facts.rejectedGateIds).toEqual([]);
-    }
+    expect(readStageStatus(projectDir, runId, gateId).gate).toBeUndefined();
+    expect(facts.rejectedGateIds).toEqual([]);
   });
 
   it.each(['pass', 'regression'] as const)('retains a settled %s decision when the authored and validation aliases change', initial => {
-    const verdictSha256 = writeVerdict({ pass: true, reason: 'Original authored bytes' });
+    const verdictSha256 = writeVerdict({ pass: true, reason: 'Original authored bytes', ...(initial === 'regression' ? { validation_review: { commands: [{ role: 'test', display: 'npm run test', disposition: 'caused_by_change', reason: 'Independent product comparison' }], request_base: [] } } : {}) });
     writeValidation(initial);
     settleGateEvaluation(projectDir, runId, gateId);
     const original = readStageStatus(projectDir, runId, gateId).gate;
@@ -266,12 +257,25 @@ describe('settled gate results', () => {
       const facts = collectGateRuntimeFacts([gate, repair], readRunState(projectDir, runId), projectDir, runId);
       const entry = facts.evaluations[0];
       expect(entry.authoredVerdict).toEqual({ pass: true });
-      expect(entry.rejectionKind).toBe(kind ? 'repairable_failure' : 'engine_contract_or_evidence_rejection');
+      expect(entry.rejectionKind).toBe(kind ? undefined : 'engine_contract_or_evidence_rejection');
+      if (kind) expect(entry.effectiveVerdict?.pass).toBe(true);
       const fact = classifyGateRecoveryFact(gateId, entry.authoredVerdict, entry.effectiveVerdict);
       expect(findGateRecoveryStages([gate, repair], facts.rejectedGateIds, undefined, { [gateId]: fact })
         .map(stage => stage.id)).toEqual([]);
     },
   );
+
+  it.each(['validation_regression', 'validation_unresolved'] as const)('reads a kind-only historical %s as facts without overriding the independent gate', kind => {
+    const digest = writeVerdict({ pass: true, reason: 'Independent acceptance of the unverified command' });
+    writeValidation('regression');
+    const status = readStageStatus(projectDir, runId, gateId);
+    status.gate = { pass: false, kind, verdictSha256: digest, reason: 'Historical code-owned validation veto' };
+    writeStageStatus(projectDir, runId, gateId, status);
+    const verdict = readGateEvaluation(projectDir, gateId, runId)!;
+    expect(verdict.pass).toBe(true);
+    expect(verdict.validation?.[0]).toMatchObject({ exitCode: 1, measurement: 'unverified', disposition: 'unknown' });
+    expect(readStageStatus(projectDir, runId, gateId).gate?.pass).toBe(false);
+  });
 
   it('does not accept an engine refusal classification supplied by the author', () => {
     writeVerdict({ pass: false, reason: 'Author rejected the output', refusal: { kind: 'validation_unresolved' } });
@@ -297,7 +301,7 @@ describe('stage group settlement boundaries', () => {
     const gate = parseDispatchedStageConfig({ id: gateId, role: 'qa', is_gate: true });
     await expect(settleStageGroup(projectDir, runId, [gate])).resolves.toBeUndefined();
     expect(readStageStatus(projectDir, runId, gateId)).toMatchObject({ status: 'complete', exitCode: 0,
-      gate: { pass: false, kind: 'validation_unresolved' } });
+      gate: { pass: true, kind: 'pass' } });
     expect(record).toHaveBeenCalledOnce();
   });
 
@@ -353,11 +357,11 @@ describe('stage group settlement boundaries', () => {
     expect(f.executed).toEqual(['first', gateId, 'deferred']);
     expect(readFileSync(join(projectDir, 'product.ts'), 'utf8')).toBe('regressed');
     expect(readStageStatus(projectDir, runId, gateId)).toMatchObject({ status: 'complete', exitCode: 0,
-      gate: { pass: false, kind: 'validation_regression' } });
-    expect(readRunState(projectDir, runId).stages[gateId].gate).toMatchObject({ pass: false, kind: 'validation_regression' });
+      gate: { pass: true, kind: 'pass' } });
+    expect(readRunState(projectDir, runId).stages[gateId].gate).toMatchObject({ pass: true, kind: 'pass' });
     const events = readRunEvents(projectDir, runId).filter(event => event.type === 'stage_complete');
     expect(events.map(event => event.stageId)).toEqual(['first', gateId, 'deferred']);
-    expect(events.find(event => event.stageId === gateId)?.gate).toMatchObject({ pass: false, kind: 'validation_regression' });
+    expect(events.find(event => event.stageId === gateId)?.gate).toMatchObject({ pass: true, kind: 'pass' });
     expect(f.bind).toHaveBeenCalledOnce();
     expect(f.retry).toHaveBeenCalledOnce();
     expect(f.commands).toHaveBeenCalledOnce();
@@ -366,7 +370,7 @@ describe('stage group settlement boundaries', () => {
 });
 
 describe('validation at the review boundary', () => {
-  it.each(['repaired', 'exhausted', 'launch_error'] as const)('records a green baseline regression without inferring uncited repair: %s', async outcome => {
+  it.each(['repaired', 'exhausted', 'launch_error'] as const)('records a failed command without inferring causation or uncited repair: %s', async outcome => {
     for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
     const baseline: projectValidation.ProjectValidationBaseline = {
       version: 1, projectDir,
@@ -407,21 +411,11 @@ describe('validation at the review boundary', () => {
     const final = await runWorkflow(workflow, '', projectDir, adapter, new Map(), undefined, join(import.meta.dirname, '..', 'config', 'agents'), undefined,
       'Review the completed fixture using its configured validation.', true);
     const repairs = adapter.calls.filter(call => call.stageId === 'repair');
-    if (outcome === 'launch_error') {
-      expect(final.status, final.failureReason).toBe('complete');
-      expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0,
-        gate: { pass: true, kind: 'pass' } });
-      expect(repairs).toHaveLength(0);
-      expect(commands).toHaveBeenCalledTimes(1);
-      expect(readEvidence(runDir(projectDir, final.runId)).filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(false);
-    } else {
-      expect(final.status, final.failureReason).toBe('incomplete');
-      expect(repairs).toHaveLength(0);
-      expect(commands).toHaveBeenCalledTimes(2);
-      const gateEvents = readRunEvents(projectDir, final.runId)
-        .filter(event => event.type === 'stage_complete' && event.stageId === gateId);
-      expect(gateEvents[0]).toMatchObject({ gate: { pass: false, kind: 'validation_regression' } });
-      expect(final.stages[gateId].gate).toMatchObject({ pass: false, kind: 'validation_regression' });
-    }
+    expect(final.status, final.failureReason).toBe('complete');
+    expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0, gate: { pass: true, kind: 'pass' } });
+    expect(repairs).toHaveLength(0);
+    expect(commands).toHaveBeenCalledTimes(1);
+    expect(final.validation?.every(result => result.measurement === 'unverified')).toBe(true);
+    expect(readEvidence(runDir(projectDir, final.runId)).filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(false);
   });
 });

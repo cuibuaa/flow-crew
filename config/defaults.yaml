@@ -7,13 +7,10 @@ default_timeout_ms: 10800000
 # Changed output, artifact, CPU/I/O or provider socket receive counters advance progress.
 stage_idle_timeout_ms: 600000
 
-# Bound the whole configured validation batch, including a lazy base comparison.
+# Bound the configured batch; each remaining command receives a share.
 # One batch per judged tree; unfinished facts go to the independent gate.
 # Gates consume recorded results and never rerun the configured suite.
 validation_timeout_ms: 60000
-# Results above this host-wide one-minute load per logical CPU are not measured.
-validation_load_ceiling_per_cpu: 1
-validation_load_wait_seconds: 1
 
 # Scheduler progress is published on its own loop; an independent process
 # warns when a live, identity-bound scheduler stops advancing it.

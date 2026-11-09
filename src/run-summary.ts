@@ -387,11 +387,13 @@ function renderEngineGateConclusions(runDir: string, state: StoreState): string 
 /** Render command receipts, not test claims recovered from agent prose. Alias
  * receipts name their immutable version so a reader can reproduce this view.
  * Keep earlier validation failures; bound aliases of the same execution deduplicate. */
-function renderValidation(runDir: string): string {
-  const sections: string[] = [];
+function renderValidation(runDir: string, state: StoreState): string {
+  const sections: string[] = state.validation?.length ? ['Current tree: ' + state.validation.map(result =>
+    `${result.display ?? result.role}: ${projectValidationResult(result).measurement} (direct exit ${result.exitCode ?? 'absent'})`).join('; ')] : [];
   const seen = new Set<string>();
   for (const name of readdirSync(runDir).filter(name => /^validation_delta_.+\.json$/.test(name)).sort()) {
     const raw = readJson<GateValidationDeltaArtifact>(join(runDir, name));
+    if (raw?.current?.some(result => !result)) sections.push('Command receipt unavailable or invalid.');
     const receipt = raw && Array.isArray(raw.delta) && projectValidationDelta(runDir, raw);
     if (!receipt) {
       sections.push(`- ${name}: validation receipt unavailable or invalid.`);
@@ -400,7 +402,7 @@ function renderValidation(runDir: string): string {
     const identity = JSON.stringify([receipt.stageId, receipt.checkedAt, receipt.current, receipt.delta]);
     if (seen.has(identity)) continue;
     seen.add(identity);
-    const lines = [`### ${receipt.stageId} — comparison ${receipt.delta.some(entry => entry.state === 'not_measured') ? 'not measured (neither pass nor failure)' : receipt.pass ? 'passed' : 'failed/unresolved'}`,
+    const lines = [`### ${receipt.stageId} — comparison ${receipt.pass ? 'verified' : 'unverified'}`,
       `Checked: ${receipt.checkedAt ?? 'unknown'}; receipt: \`${receipt.immutablePath || name}\`.`];
     for (const result of receipt.current) {
       if (!result || typeof result.output !== 'string' || !Array.isArray(result.failureIdentifiers)) {
@@ -408,18 +410,19 @@ function renderValidation(runDir: string): string {
         continue;
       }
       const { state, measurement } = projectValidationResult(result);
-      lines.push(`- \`${result.display ?? result.role}\` — ${measurement === 'not_measured' ? 'not measured (neither pass nor failure; no author action)' : `${state} (${measurement.replaceAll('_', ' ')})`}; direct exit ${Number.isInteger(result.exitCode) ? result.exitCode : 'unknown'}; ${result.durationMs}ms; recorded state ${'storedState' in result ? result.storedState : result.state}; runner error ${JSON.stringify(result.error ?? null)}; load ${JSON.stringify(result.load ?? null)}${result.reason ? `; recorded reason: ${result.reason}` : ''}`);
+      lines.push(`- \`${result.display ?? result.role}\` — ${`${state} (${measurement})`}; direct exit ${Number.isInteger(result.exitCode) ? result.exitCode : 'unknown'}; ${result.durationMs}ms; recorded state ${'storedState' in result ? result.storedState : result.state}; runner error ${JSON.stringify(result.error ?? null)}; load ${JSON.stringify(result.load ?? null)}${result.reason ? `; recorded reason: ${result.reason}` : ''}`);
+      if (result.command) lines.push(`Execution: ${JSON.stringify({ command: result.command, args: result.args, env: result.env ?? {} })}.`);
       if (result.unfinished) lines.push('Validation unfinished; no completed result or passing totals inferred.');
       lines.push(`Declared reporter totals: tests run ${result.testsRun ?? 'unknown'}; failures ${result.failureCount ?? 'unknown'}.`);
       for (const failure of result.failureIdentifiers) lines.push(`  - Failure: ${failure}`);
     }
     for (const delta of receipt.delta) lines.push(delta
-      ? `- ${delta.display ?? delta.role} baseline comparison: ${delta.state} — ${delta.reason}`
+      ? `- ${delta.display ?? delta.role} command coverage: ${delta.state} — ${delta.reason}`
       : 'Baseline comparison entry unavailable or invalid.');
     sections.push(lines.join('\n\n'));
   }
   const selection = readJson<{ baseline?: { discovery?: unknown } }>(join(runDir, 'validation_baseline.json'))?.baseline?.discovery;
-  return '## Configured validation\n\n' + (sections.join('\n\n') || `No engine validation receipts recorded; validation unmeasured. Command selection: ${JSON.stringify(selection ?? 'unavailable')}.`);
+  return '## Configured validation\n\n' + (sections.join('\n\n') || `No engine validation receipts recorded; validation unverified. Command selection: ${JSON.stringify(selection ?? 'unavailable')}.`);
 }
 
 function renderRunOutcome(state: StoreState): string {
@@ -453,7 +456,7 @@ export function renderRunSummary(projectDir: string, runDir: string, state: Stor
     (record.assumptions ?? []).map(assumption => `- ${record.stageId}: ${assumption}`));
   if (assumptions.length) records.details += `\n\n## Chooser assumptions\n\n${assumptions.join('\n')}`;
   const engineGateSection = renderEngineGateConclusions(runDir, state);
-  const validationSection = renderValidation(runDir);
+  const validationSection = renderValidation(runDir, state);
   const runOutcome = renderRunOutcome(state);
   const git = collectGitChanges(projectDir, state.baseCommit);
   const filesSection = renderFilesSection(git);

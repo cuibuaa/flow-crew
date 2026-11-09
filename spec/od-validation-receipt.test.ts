@@ -10,7 +10,7 @@ import { runProjectValidationBaseline, runValidationCommand } from '../src/proje
 import { parseDispatchedStageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { createScopeSafeStageRunner } from '../src/scheduler/sched_scope/stage-group.js';
 import { executeSingleStage } from '../src/scheduler/sched_settlement/stage-execution.js';
-import { bindReviewedGateValidation, gateValidationRefusal, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { bindReviewedGateValidation, gateValidationRefusal, currentValidationResults, recordGateValidationDelta } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { createRun } from './test-support/create-run.js';
 import { beginStageAttempt, completeStageAttempt, fcGlobalDir, readRunState, readStageStatus, setFcGlobalDir, writeRunState, writeStageStatus } from '../src/store.js';
 import { fixtureArtifactContract, fixtureResult } from './test-support/declared-dispatch.js';
@@ -73,7 +73,7 @@ describe('configured validation has one attempt owner and read-only gate binding
     expect(new Set(receipts.map(receipt => receipt.checkedAt)).size).toBe(3);
   });
 
-  it('waits for peer closure and catches a real regression written after review', async () => {
+  it('waits for peer closure and exposes a later failed command as unverified', async () => {
     const f = await fixture();
     const peer = parseDispatchedStageConfig({ id: 'peer', role: 'writer', scope: ['product.ts'],
       artifact_contract: fixtureArtifactContract('peer') });
@@ -103,7 +103,8 @@ describe('configured validation has one attempt owner and read-only gate binding
       return result;
     });
     expect(readFileSync(f.counter, 'utf8').trim().split('\n').filter(Boolean)).toHaveLength(1);
-    expect(gateValidationRefusal(project, f.runId, 'review')).toMatchObject({ pass: false, reason: expect.stringContaining('test_missing_result') });
+    expect(currentValidationResults(project, f.runId)).toEqual([expect.objectContaining({ state: 'failed', measurement: 'unverified', failureIdentifiers: expect.arrayContaining([expect.stringContaining('test_missing_result')]) })]);
+    expect(gateValidationRefusal(project, f.runId, 'review')).toBeUndefined();
   });
 
   it.each(['gate-write', 'peer-write', 'peer-unknown', 'generated-write', 'baseline-change', 'prior-write'])(
@@ -129,12 +130,12 @@ describe('configured validation has one attempt owner and read-only gate binding
       expect(bound).toBe(kind === 'prior-write');
       if (!bound) await recordGateValidationDelta(project, f.runId, 'review');
       expect(readFileSync(f.counter, 'utf8')).toBe('');
-      if (kind !== 'prior-write' && kind !== 'baseline-change') expect(gateValidationRefusal(project, f.runId, 'review')?.pass).toBe(false);
+      if (kind !== 'prior-write' && kind !== 'baseline-change') expect(currentValidationResults(project, f.runId)).toEqual([expect.objectContaining({ state: 'unverified', exitCode: null })]);
       if (kind === 'baseline-change') expect(gateValidationRefusal(project, f.runId, 'review')).toBeUndefined();
     },
   );
 
-  it('keeps a newly measured test regression as a gate rejection', async () => {
+  it('keeps a newly measured test failure unverified without inventing a gate rejection', async () => {
     const f = await fixture();
     const attempt = { index: 1, startedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z', status: 'complete', writes: [], writeAttribution: 'snapshot' as const };
     writeStageStatus(project, f.runId, 'review', { status: 'complete', retries: 0, attempts: [attempt] });
@@ -143,7 +144,8 @@ describe('configured validation has one attempt owner and read-only gate binding
       ...result, state: 'failed', exitCode: 1, failureIdentifiers: ['test_missing_result'], failureIdentity: 'known',
     }));
     await recordGateValidationDelta(project, f.runId, 'review', { runCommand: () => { throw Error('Decisions cannot run the suite'); } });
-    expect(gateValidationRefusal(project, f.runId, 'review')).toMatchObject({ pass: false, reason: expect.stringContaining('test_missing_result') });
+    expect(currentValidationResults(project, f.runId)).toEqual([expect.objectContaining({ state: 'failed', measurement: 'unverified', failureIdentifiers: expect.arrayContaining([expect.stringContaining('test_missing_result')]) })]);
+    expect(gateValidationRefusal(project, f.runId, 'review')).toBeUndefined();
   });
 });
 

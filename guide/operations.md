@@ -50,25 +50,17 @@ isolate target writes; internal
 links are relocated within the target tree. Existing target entries resolving outside it or
 content/type collisions refuse. Do not replace a refusal with manual source symlinks.
 
-Setup discovers validation from configuration or the brief's explicit argv declarations.
-It executes the target baseline under the configured command bound and writes a ready record
-bound to the exact brief digest and canonical target. A failed setup can leave a diagnostic
-worktree; it does not publish a ready record for a blocker.
+Setup reads project/brief validation declarations without executing a baseline. The ready
+record binds selection to the exact brief and target. Successful author settlement runs one
+bounded batch per tree; each command receives its share so later commands get an allowance.
+An existing tree's facts are reused by later stages, with no automatic dependency install.
 
-Ordinary red checks can establish `no_regression_from_baseline`. A declared structured runner
-report owns failure identity; otherwise a closed-schema model reads bounded output, with
-truncation forcing partial evidence. No test-output spelling supplies identities in code.
-Red-to-red comparisons require complete identities and counts; unknown or partial evidence
-leaves the comparison unresolved. Green-to-red is a regression, and red-to-green passes.
-Unlaunchable commands do not establish a comparable result. An unresolved comparison withholds
-final certification without vetoing a repair backed by a confirmed reproduction. Missing tools
-are environment problems; inspect the record's readiness and reasons rather than assuming
-every nonzero child exit has the same setup outcome.
-
-Exit 127 is not universally a refusal: an unlaunchable brief-declared command or a project
-whose commands cannot launch blocks readiness. A discovered missing command can remain an
-environment gap when other commands launch; a runner inferred only from a legacy INI file
-can remain a gap even when nothing launches. Inspect provenance, not just the exit number.
+Validation records raw exits, bounded logs, duration and start/end load. The independent gate
+uses `validation_review` dispositions to decide causation; it alone may request isolated base
+evidence. Missing or malformed dispositions remain unknown. A failure attributed to the change
+blocks acceptance, and only a confirmed independent reproduction can authorize repair.
+Exit 127 is not universally a refusal. Missing tools, flaky tests and high host load receive no code-owned causal category; the independent gate supplies the disposition.
+Failed, unfinished and unrun commands stay unverified in accepted terminal records and reports.
 
 Sources: [preflight](../src/cli-ship-preflight.ts), [setup](../src/cli-ship-setup.ts),
 [validation and deltas](../src/project-validation.ts),

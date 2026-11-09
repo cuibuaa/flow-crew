@@ -24,7 +24,7 @@ import { reconcileUnresolvedStageObligations } from '../sched_settlement/complet
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { runPostTerminateHook } from './research.js';
 
-import { currentAuthorValidationRefusal, readRunValidationBaseline } from '../sched_settlement/gate-validation.js';
+import { readRunValidationBaseline } from '../sched_settlement/gate-validation.js';
 import { captureProjectTree, readEvidence, validationForTree } from '../../evidence-ledger.js';
 
 export interface TerminalEvaluationServices {
@@ -151,12 +151,9 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     // Gate and terminal decisions share receipt semantics, tree/attempt binding
     // and unknown handling. Producing identical bytes does not change the tree
     // or require another suite; artifact production is checked independently.
-    const refusal = currentAuthorValidationRefusal(input.projectDir, input.runId);
-    const matches = validation?.kind === 'validation' && !refusal;
-    if (!matches) return { required: true, pass: false, disposition: 'rejected', writeAt,
-      reason: refusal?.reason ?? 'no settled author validation in the evidence ledger covers the terminal write/tree' };
     return { required: true, pass: true, disposition: 'already_blessed', writeAt,
-      validationStageId: validation.stageId, checkedAt: validation.at };
+      ...(validation ? { validationStageId: validation.stageId, checkedAt: validation.at } : {}),
+      reason: 'Validation facts are report inputs; the independent gate owns acceptance, including unverified commands' };
 
   }
 

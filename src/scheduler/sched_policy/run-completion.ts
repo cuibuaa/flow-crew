@@ -1,3 +1,5 @@
+import { currentValidationResults } from '../sched_settlement/gate-validation.js';
+import { projectValidationResult } from '../../project-validation.js';
 // Boundary: Settle terminal research evidence before publishing a run's truthful outcome.
 import { rejectPendingResearchGateCandidates } from '../../research-candidate.js';
 import { readOptionalJsonlFile } from '../../jsonl.js';
@@ -59,6 +61,10 @@ export function concludeRun(state: StoreState, outcome: RunConclusion, commit?: 
     stage.error = outcome.pendingStageNote;
   }
   const finish = (): StoreState => {
+    state.validation = currentValidationResults(state.projectDir, state.runId).map(result => ({
+      role: result.role, display: result.display, command: result.command, args: result.args, env: result.env, exitCode: result.exitCode, error: result.error, unfinished: result.unfinished, dependencyPreparationFailed: result.dependencyPreparationFailed, storedState: result.storedState ?? result.state,
+      load: result.load, sourceBound: result.sourceBound, ...projectValidationResult(result),
+    }));
     state.status = outcome.status;
     state.reasonCode = outcome.reasonCode;
     if (outcome.detail !== undefined) state.failureReason = outcome.detail;

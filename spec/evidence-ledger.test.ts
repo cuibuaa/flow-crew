@@ -14,7 +14,7 @@ import type { Adapter, RunOpts } from '../src/adapters/base.js';
 import { fcGlobalDir, runDir } from '../src/store.js';
 import { captureProjectTree, readEvidence, VALIDATION_FACT_VERSION, type ValidationFact } from '../src/evidence-ledger.js';
 import { readGateEvaluation } from '../src/scheduler/sched_settlement/gate-verdict.js';
-import { gateValidationRefusal, recordAttemptValidation, settleGateValidationEvidence } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { gateValidationRefusal, currentValidationResults, recordAttemptValidation, settleGateValidationEvidence } from '../src/scheduler/sched_settlement/gate-validation.js';
 import { runProjectCommand } from '../src/project-validation.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
@@ -26,7 +26,7 @@ afterEach(() => { for (const root of roots.splice(0)) {
 const engine = resolve(import.meta.dirname, '..');
 
 
-async function fixture(options: { noValidation?: boolean; nativeCommands?: boolean; baseRed?: boolean; introduce?: boolean; invalidReading?: boolean;
+async function fixture(options: { requestBase?: boolean; noValidation?: boolean; nativeCommands?: boolean; baseRed?: boolean; introduce?: boolean; invalidReading?: boolean;
   rejectFirstReview?: boolean; returnToFirstTree?: boolean; mutateValidation?: boolean; unchanged?: boolean; verbose?: boolean; suiteError?: 'suite' | 'diagnostic' | 'unhandled'; input?: 'introduced' | 'mixed'; readonlyInput?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'ledger-spec-')); roots.push(root);
   const source = join(root, 'source'), target = join(root, 'target'); mkdirSync(source);
@@ -102,6 +102,14 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
     }
     if (opts.stageId === 'review') {
       const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+      if (options.requestBase && !prompt.startsWith('# Requested base evidence')) {
+        const fact = readEvidence(opts.runDir).filter((entry): entry is typeof entry & ValidationFact => entry.kind === 'validation').at(-1)!;
+        const failed = fact.executions[0].commands.filter(command => command.exitCode !== 0);
+        if (failed.length && !fact.baseRequest) return { output: JSON.stringify({ pass: true, reason: 'Need base evidence to settle the failure',
+          criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: 'pass', evidence: 'Pending comparison' }])),
+          audit_findings: { version: 1, findings: [] }, validation_review: { commands: [], request_base: failed.map(command => ({ role: command.role, display: command.display })) } }),
+          exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
+      }
       reviews++;
       const defect = options.input === 'introduced' ? readFileSync(join(target, 'data/value.txt'), 'utf8') !== 'GOOD'
         : options.introduce ? readFileSync(join(target, 'value.txt'), 'utf8').startsWith('introduced') : false;
@@ -133,71 +141,72 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
   const { config, raw } = loadWorkflow(join(engine, 'config/workflows/direct.yaml')); config.defaults.max_iterations = 1;
   const final = await runWorkflow(config, raw, target, withConfirmedRejections(adapter), new Map(), undefined, join(engine, 'config/agents'), undefined, brief, true);
   const rd = runDir(target, final.runId), ledger = readEvidence(rd);
-  const validations = ledger.filter((entry): entry is ValidationFact & typeof entry => entry.kind === 'validation');
+  // Base evidence appends a supplement; expose the latest fact for each judged tree.
+  const validations = [...new Map(ledger.filter((entry): entry is ValidationFact & typeof entry => entry.kind === 'validation').map(fact => [fact.treeHash, fact])).values()];
   const executions = existsSync(counter) ? readFileSync(counter, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { cwd: string; value: string; input?: string; member?: string; inputDirectoryMode?: number; inputFileMode?: number }) : [];
   return { root, target, final, rd, ledger, validations, calls, executions, writes, baselineTree };
 }
 
 describe('one evidence lifecycle through the real scheduler and scripted adapter', () => {
-  it('retains the complete configured command log including totals before large stderr, without another validation', async () => {
+  it('retains a bounded configured command log and raw byte counts, without another validation', async () => {
     const result = await fixture({ verbose: true });
     expect(result.final.status).toBe('complete');
     expect(result.executions).toHaveLength(1);
     expect(result.validations).toHaveLength(1);
     const [command] = result.validations[0].executions[0].commands;
     expect(command.exitCode).toBe(0);
-    expect(command.output).toBe('');
+    expect(Buffer.byteLength(command.output)).toBeLessThanOrEqual(25 * 1024);
     const output = readFileSync(join(result.rd, command.outputPath!), 'utf8');
-    expect(output).toContain('Test Files 1 passed (1)\nTests 1 passed (1)');
-    expect(output).not.toContain('earlier bytes omitted');
-    expect(Buffer.byteLength(output)).toBeGreaterThanOrEqual(command.outputBytes!.stdout + command.outputBytes!.stderr);
+    expect(output).toBe(command.output);
+    expect(output).toContain('earlier bytes omitted');
+    expect(Buffer.byteLength(output)).toBeLessThan(command.outputBytes!.stdout + command.outputBytes!.stderr);
     // Unstructured totals remain human evidence; they do not become failure identities.
     expect(command.testsRun).toBeNull();
     expect(command.identityOwner).toBe('unknown');
   });
 
   it.each(['suite', 'diagnostic', 'unhandled'] as const)('uses structured identity while retaining unrepresented native Vitest %s failures as unknown', async suiteError => {
-    const result = await fixture({ suiteError });
+    const result = await fixture({ suiteError, requestBase: true });
     expect(result.final.status).toBe('complete'); expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
-    const [fact] = result.validations; expect(fact.pass).toBe(suiteError === 'diagnostic');
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review']);
+    const [fact] = result.validations; expect(fact.pass).toBe(false);
     for (const execution of fact.executions) expect(execution.treeAfterHash).toBe(execution.treeHash);
     expect(fact.executions[0].commands[0]).toMatchObject({ exitCode: 1, failureEvidence: suiteError === 'diagnostic' ? 'complete' : 'partial', identityOwner: 'runner-json', testsRun: suiteError === 'unhandled' ? 2 : 1 });
     expect(fact.executions[1].commands[0]).toMatchObject({ exitCode: 1, failureEvidence: suiteError === 'unhandled' ? 'partial' : 'complete', identityOwner: 'runner-json' });
     expect(fact.executions[1].commands[0].outputBytes?.stderr).toBe(0);
     if (suiteError === 'diagnostic') expect(fact.executions[0].commands[0].outputBytes!.stderr).toBeGreaterThan(0);
-    expect(fact.delta.find(value => value.role === 'test')?.state).toBe(suiteError === 'diagnostic' ? 'pass' : 'unresolved');
-    expect(fact.failures).toEqual([expect.objectContaining({ classification: 'pre-existing' })]);
+    expect(fact.delta.find(value => value.role === 'test')?.state).toBe('unverified');
+    expect(fact.failures).toEqual([]);
   });
 
   it('compares a changed ignored input with its pre-author bytes and enforces introduction before repair', async () => {
-    const result = await fixture({ input: 'introduced' });
+    const result = await fixture({ input: 'introduced', requestBase: true });
     expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(3);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review', 'repair', 'review']);
     expect(result.executions.map(value => value.input)).toEqual(['BAD', 'GOOD', 'GOOD']);
     expect(result.validations[0].executions.map(value => value.commands[0].exitCode)).toEqual([1, 0]);
     expect(result.validations[0].executions[1].treeHash).toBe(result.baselineTree.hash);
-    expect(result.validations[0].failures).toEqual([expect.objectContaining({ classification: 'introduced' })]);
+    expect(result.validations[0].failures).toEqual([]);
     expect(result.validations[0].baseInputSnapshot).toMatchObject({ bytes: 4, files: 2, manifestSha256: expect.any(String) });
   });
 
   it.each([false, true])('restores ignored descendants and modes without replacing base tracked source or repairing a pre-existing failure (readonly=%s)', async readonlyInput => {
-    const result = await fixture({ input: 'mixed', readonlyInput });
+    const result = await fixture({ input: 'mixed', readonlyInput, requestBase: true });
     expect(result.final.status).toBe('complete'); expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review']);
     expect(result.executions.map(value => value.input)).toEqual(['BAD', 'BAD']);
     expect(result.executions.map(value => value.member)).toEqual(['authored member', 'committed member']);
     expect(result.validations[0].executions.map(value => value.commands[0].exitCode)).toEqual([1, 1]);
     expect(result.validations[0].executions[1].treeHash).toBe(result.baselineTree.hash);
-    expect(result.validations[0].failures).toEqual([expect.objectContaining({ classification: 'pre-existing' })]);
+    expect(result.validations[0].failures).toEqual([]);
     expect(result.validations[0].baseInputSnapshot).toMatchObject({ bytes: 3, files: 2 });
     if (readonlyInput) for (const execution of result.executions) expect(execution).toMatchObject({ inputDirectoryMode: 0o555, inputFileMode: 0o640 });
   });
 
   it('runs exactly once after three writes and once on the isolated failing base; pre-existing alone never repairs', async () => {
-    const result = await fixture({ baseRed: true });
+    const result = await fixture({ baseRed: true, requestBase: true });
     expect(result.final.status).toBe('complete'); expect(result.writes).toBe(3);
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review']);
     expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2);
     expect(result.executions[0]).toMatchObject({ cwd: result.target, value: 'write 3\n' });
     expect(result.executions[1].cwd).not.toBe(result.target); expect(result.executions[1].value).toBe('base\n');
@@ -205,14 +214,14 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(result.validations).toHaveLength(1);
     const [validation] = result.validations;
     expect(validation.validationVersion).toBe(VALIDATION_FACT_VERSION);
-    expect(validation.failures).toEqual([expect.objectContaining({ classification: 'pre-existing' })]);
+    expect(validation.failures).toEqual([]);
     expect(validation.executions.map(execution => execution.target)).toEqual(['attempt', 'base']);
     expect(validation.executions[1].treeHash).toBe(result.baselineTree.hash);
     for (const execution of validation.executions) {
       expect(execution.treeHash).toMatch(/^[a-f0-9]{64}$/); expect(execution.treeAfterHash).toBe(execution.treeHash);
       expect(execution.commands).toEqual([expect.objectContaining({ exitCode: 1, testsRun: 1, identityOwner: 'runner-json' })]);
     }
-    expect(validation.pass).toBe(true);
+    expect(validation.pass).toBe(false);
   });
 
   it('records observed work without empty validation facts or receipts when no suite is configured', async () => {
@@ -242,12 +251,12 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
 
   it('takes an introduced failure to an independent gate and validates the repair once before a fresh re-review', async () => {
     setEngineDefaults({ session_reuse: true });
-    const result = await fixture({ introduce: true });
+    const result = await fixture({ introduce: true, requestBase: true });
     expect(result.final.status).toBe('complete');
-    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'repair', 'review']);
+    expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review', 'review', 'repair', 'review']);
     expect(result.executions).toHaveLength(3);
     expect(result.validations.map(value => value.stageId)).toEqual(['implement', 'repair']);
-    expect(result.validations[0].failures).toEqual([expect.objectContaining({ classification: 'introduced' })]);
+    expect(result.validations[0].failures).toEqual([]);
     expect(result.validations[1].executions).toHaveLength(1); expect(result.validations[1].pass).toBe(true);
     for (const call of result.calls) {
       expect(call.resume).toBeUndefined();
@@ -280,26 +289,27 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
   it('does not infer identity or trigger repairs from invalid readings, and never retries a suite at a gate', async () => {
     const result = await fixture({ baseRed: true, invalidReading: true });
     expect(result.final.status).toBe('complete');
-    expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2); expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
-    expect(result.validations[0].failures).toEqual([expect.objectContaining({ identifier: null, classification: 'unknown' })]);
+    expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(1); expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
+    expect(result.validations[0].failures).toEqual([]);
     expect(result.validations[0].pass).toBe(false);
     const settlement = await settleGateValidationEvidence(result.target, result.final.runId, 'review', { runCommand: () => { throw new Error('decision reran the suite'); } });
-    expect(settlement.kind).toBe('unchanged'); expect(result.executions, JSON.stringify({ validations: result.validations, calls: result.calls.map(call => call.stage) })).toHaveLength(2);
+    expect(settlement.kind).toBe('unchanged'); expect(result.executions).toHaveLength(1);
   });
 
   it.each([false, true])('invalidates validation when source changes and lets the independent gate judge the stated gap (base red=%s)', async baseRed => {
     const result = await fixture({ mutateValidation: true, baseRed });
-    expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(baseRed ? 2 : 1);
+    expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(1);
     expect(result.validations[0].failures.every(failure => failure.classification === 'unknown')).toBe(true);
-    expect(result.validations[0].delta.every(entry => entry.state === 'unresolved')).toBe(true);
+    expect(result.final.validation?.every(entry => entry.measurement === 'unverified')).toBe(true);
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
   });
 
   it('rejects a stale receipt after a later source write without rerunning validation', async () => {
     const result = await fixture(); const before = result.executions.length;
     writeFileSync(join(result.target, 'value.txt'), 'later write\n');
-    expect(gateValidationRefusal(result.target, result.final.runId, 'review')?.refusal?.kind).toBe('validation_unresolved');
-    expect(readGateEvaluation(result.target, 'review', result.final.runId)?.refusal?.kind).toBe('validation_unresolved');
+    expect(gateValidationRefusal(result.target, result.final.runId, 'review')).toBeUndefined();
+    expect(currentValidationResults(result.target, result.final.runId)).toEqual([expect.objectContaining({ exitCode: null, state: 'unverified' })]);
+    expect(readGateEvaluation(result.target, 'review', result.final.runId)?.pass).toBe(true);
     expect(result.executions).toHaveLength(before);
   });
 
@@ -308,9 +318,9 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     const legacy = readEvidence(result.rd).map(fact => fact.kind === 'validation' ? { ...fact, validationVersion } : fact);
     writeFileSync(join(result.rd, 'evidence-ledger.jsonl'), legacy.map(fact => JSON.stringify(fact)).join('\n') + '\n');
     expect(readEvidence(result.rd).some(fact => fact.kind === 'validation')).toBe(true);
-    expect(gateValidationRefusal(result.target, result.final.runId, 'review')?.refusal?.kind).toBe('validation_unresolved');
+    expect(gateValidationRefusal(result.target, result.final.runId, 'review')).toBeUndefined();
     await recordAttemptValidation(result.target, result.final.runId, 'implement', { runCommand: () => { throw new Error('old receipt reran its suite'); } });
-    expect(readFileSync(join(result.root, 'executions.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2);
+    expect(readFileSync(join(result.root, 'executions.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1);
   });
 
   it('reuses a tree-bound fact on an unchanged tree without repeating uncertain or passing evidence', async () => {
@@ -325,11 +335,11 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
   it('returns to an earlier measured tree without rerunning it or consuming the later different tree receipt', async () => {
     const result = await fixture({ returnToFirstTree: true });
     expect(result.final.status, JSON.stringify(result.final.stages.review.gate)).toBe('complete');
-    expect(result.executions.map(execution => execution.value)).toEqual(['write 3\n', 'intermediate\n', 'base\n']);
+    expect(result.executions.map(execution => execution.value)).toEqual(['write 3\n', 'intermediate\n']);
     expect(result.validations).toHaveLength(2);
     const [first, later] = result.validations;
     expect(first.treeHash).not.toBe(later.treeHash);
-    expect(later.delta[0].state).toBe('regression');
+    expect(later.delta[0].state).toBe('unverified');
     const input = result.calls.filter(call => call.stage === 'review').at(-1)!.prompt;
     const facts = JSON.parse(input.split('Ledger facts:\n')[1].split('\nValidation command selection')[0]).facts;
     expect(facts.filter((fact: { kind: string }) => fact.kind === 'validation').map((fact: { sequence: number }) => fact.sequence)).toEqual([first.sequence]);

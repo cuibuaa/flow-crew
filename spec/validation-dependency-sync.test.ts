@@ -65,7 +65,7 @@ async function fixture(mode: 'root' | 'shell' | 'child-process' = 'root') {
   const npm = async (args: string[], directory = packageDir) => {
     const result = await runValidationCommand({ role: 'build', command: 'npm', args,
       display: `fixture npm ${args.join(' ')}`, cwd: directory,
-      env: { ...process.env, HOME: home, npm_config_cache: cache, npm_config_userconfig: userConfig } });
+      env: { HOME: home, npm_config_cache: cache, npm_config_userconfig: userConfig } });
     expect(result.exitCode, result.error ?? result.stderr).toBe(0);
   };
   const lock = async (directory = packageDir) => {
@@ -142,7 +142,7 @@ describe('validation dependencies follow the current lockfile', () => {
     expectConfiguredPass(await runProjectValidationBaseline(project.project));
   });
 
-  it('still rejects an import absent from the lockfile', async () => {
+  it('records an import absent from the lockfile as failed and unverified for the gate', { timeout: 120_000 }, async () => {
     const project = await fixture();
     const baseline = await runProjectValidationBaseline(project.project);
     expectConfiguredPass(baseline);
@@ -155,7 +155,8 @@ describe('validation dependencies follow the current lockfile', () => {
     const live = await recordGateValidationDelta(project.project, run.runId, 'review');
     expect(live?.pass).toBe(false);
     expect(live?.current.every(result => result.state === 'failed'), JSON.stringify(live?.current)).toBe(true);
-    expect(gateValidationRefusal(project.project, run.runId, 'review')?.reason).toContain('Introduced validation failures');
+    expect(gateValidationRefusal(project.project, run.runId, 'review')).toBeUndefined();
+    expect(live?.delta.every(result => result.state === 'unverified')).toBe(true);
   });
 
   it('refuses an inconsistent manifest and lockfile despite a previously installed dependency', { timeout: 60_000 }, async () => {

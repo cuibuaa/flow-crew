@@ -291,7 +291,7 @@ describe('engine self-collision after-state replays and controls', () => {
     });
   });
 
-  it('5 — rejects a prior-attempt delta by execution identity and preserves immutable attempt evidence', async () => {
+  it('5 — preserves immutable attempt evidence and raw coverage without vetoing independent review', async () => {
     const root = temporaryRoot('item-5');
     const projectDir = join(root, 'project');
     const stateRoot = join(root, 'state');
@@ -324,7 +324,7 @@ describe('engine self-collision after-state replays and controls', () => {
       }),
     });
     const currentRegression = readGateEvaluation(projectDir, 'qa', created.runId);
-    expect(currentRegression).toMatchObject({ pass: false, reason: expect.stringContaining('Introduced validation failures') });
+    expect(currentRegression).toMatchObject({ pass: true, validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified', exitCode: 1 })]) });
     const immutableFailure = readFileSync(join(created.runDirPath, failed!.immutablePath!), 'utf-8');
     const second = {
       index: 2,
@@ -338,8 +338,7 @@ describe('engine self-collision after-state replays and controls', () => {
       recordedAt: new Date().toISOString(),
     })}\n`);
     const stale = readGateEvaluation(projectDir, 'qa', created.runId);
-    expect(stale).toMatchObject({ pass: false, reason: expect.stringContaining('missing, stale') });
-    expect(stale?.reason).toContain('no suite is rerun by a decision');
+    expect(stale).toMatchObject({ pass: true, validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]) });
 
     seedAttemptValidation(projectDir, created.runId, validationBaseline(projectDir).results.map(result => ({ ...result, state: 'passed', exitCode: 0, failureIdentity: 'none', failureIdentifiers: [], failureCount: 0 })));
     const passing = await recordGateValidationDelta(projectDir, created.runId, 'qa', {

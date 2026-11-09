@@ -11,7 +11,10 @@ export function summarizeRunStateView(view: RunStateView): object {
   return {
     version: view.version, observedAt: view.observedAt, snapshot: view.snapshot.runStateSha256, run: view.run,
     plan: { revision: view.plan.revision, stages: view.plan.stages.length, historyEntries: view.plan.history.length },
-    stages: Object.fromEntries(Object.entries(view.stages).map(([id, stage]) => [id, { status: stage.status, attempt: stage.attempts?.at(-1)?.index, error: stage.error }])),
+    ...(view.validation ? { validation: view.validation } : {}),
+    stages: Object.fromEntries(Object.entries(view.stages).map(([id, stage]) => [id, { status: stage.status, attempt: stage.attempts?.at(-1)?.index, error: stage.error,
+      ...(stage.gate?.validation || stage.acceptedFrom?.verdict.validation ? { validation: stage.gate?.validation ?? stage.acceptedFrom?.verdict.validation } : {}),
+    }])),
     artifacts: view.artifacts.slice(0, 64), omittedArtifacts: Math.max(0, view.artifacts.length - 64),
     budget: view.budget,
     openFindings: view.audits.openFindings,

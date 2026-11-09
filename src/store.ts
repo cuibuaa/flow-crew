@@ -486,6 +486,8 @@ export interface RunStateFormat {
 }
 
 export interface StoreState {
+  /** Current-tree raw command coverage, independent of run acceptance. */
+  validation?: GateVerdict['validation'];
   deploymentHold?: import('./deployment-hold.js').RunDeploymentHold;
   continuationFailure?: { at: string; reason: string; generation?: string };
   /** Observed scheduler admissions only; legacy starts are never fabricated. */
@@ -655,8 +657,8 @@ function appendCampaignEvent(campaignStorageKey: string, event: Record<string, u
 /** Gate verdict fields returned in the final structured answer and published by the engine. */
 export interface GateVerdict {
   findings?: import('./scoped-audit-repair.js').FindingAssessment;
-  validation?: Array<Pick<import('./project-validation.js').ValidationCommandResult, 'exitCode' | 'load' | 'error' | 'unfinished' | 'dependencyPreparationFailed'>
-    & { role: string; display?: string; state?: import('./project-validation.js').ValidationCommandResult['state']; storedState?: import('./project-validation.js').ValidationCommandResult['state']; measurement: import('./project-validation.js').ValidationMeasurement }>;
+  validation?: Array<Pick<import('./project-validation.js').ValidationCommandResult, 'command' | 'args' | 'env' | 'exitCode' | 'load' | 'error' | 'unfinished' | 'dependencyPreparationFailed' | 'sourceBound'>
+    & { role: string; display?: string; state?: import('./project-validation.js').ValidationCommandResult['state']; storedState?: string; disposition?: 'caused_by_change' | 'already_failing' | 'environment' | 'unknown'; measurement: import('./project-validation.js').ValidationMeasurement }>;
   pass: boolean;
   reason?: string;
   repairability?: { version: 1; disposition: 'repairable' | 'irreparable'; evidence: string };

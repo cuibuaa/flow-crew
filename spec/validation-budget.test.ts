@@ -2,7 +2,7 @@ import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { parse as parseYaml } from 'yaml';
 import { join, resolve } from 'node:path';
@@ -12,7 +12,8 @@ import { loadWorkflow, runWorkflow } from '../src/scheduler.js';
 import { readEvidence, evidenceContext, type ValidationFact } from '../src/evidence-ledger.js';
 import { runDir, readStageStatus } from '../src/store.js';
 import { renderRunSummary } from '../src/run-summary.js';
-import { currentAuthorValidationRefusal, recordAttemptValidation, snapshotShipSetupValidationBaseline } from '../src/scheduler/sched_settlement/gate-validation.js';
+import { recordAttemptValidation, snapshotShipSetupValidationBaseline } from '../src/scheduler/sched_settlement/gate-validation.js';
+import * as validationOwner from '../src/project-validation.js';
 import { evaluateValidationDelta, runProjectValidationBaseline, runProjectCommand } from '../src/project-validation.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
@@ -87,7 +88,7 @@ describe('completed author work reaches its independent gate within the validati
       expect(gateAt - childReadyAt).toBeLessThan(8000);
       expect(processLiveness(owned!.pid, owned!.token)).toBe('dead');
       expect(result.final.status).toBe('complete'); expect(calls).toEqual(['implement', 'review']);
-      expect(result.validations[0]).toMatchObject({ pass: false, executions: [{ commands: [{ unfinished: true, state: 'not_measured' }] }] });
+      expect(result.validations[0]).toMatchObject({ pass: false, executions: [{ commands: [{ unfinished: true, state: 'unverified' }] }] });
       expect(gateInput).toContain('"unfinished":true'); expect(gateInput).toContain('"pass":false');
       expect(renderRunSummary(root, result.rd, result.final)).toContain('Validation unfinished');
     } finally { clearInterval(watch); clearTimeout(cleanupTimer); retire(); }
@@ -117,7 +118,7 @@ describe('completed author work reaches its independent gate within the validati
     const [fact] = result.validations; expect(result.validations).toHaveLength(1); expect(fact.pass).toBe(false);
     expect(fact.executions).toHaveLength(1); // no eager base and no time to compare the build
     const test = fact.executions[0].commands.find(command => command.role === 'test')!;
-    expect(test).toMatchObject({ unfinished: true, state: 'not_measured', measurement: 'not_measured', failureIdentity: 'unknown' });
+    expect(test).toMatchObject({ unfinished: true, state: 'unverified', measurement: 'unverified', failureIdentity: 'unknown' });
     expect(test.exitCode).not.toBe(0); expect(test.reason).toContain('unfinished');
     expect(gateInput).toContain('"unfinished":true'); expect(gateInput).toContain('"pass":false');
     expect(renderRunSummary(root, result.rd, result.final)).toContain('Validation unfinished');
@@ -146,7 +147,7 @@ describe('completed author work reaches its independent gate within the validati
     expect(result.final.status, JSON.stringify(result.final)).toBe('complete');
     expect(calls).toEqual(['implement', 'review']);
     expect(result.validations).toHaveLength(1);
-    expect(result.validations[0]).toMatchObject({ pass: false, executions: [{ target: 'attempt', commands: [{ unfinished: true, state: 'not_measured' }] }] });
+    expect(result.validations[0]).toMatchObject({ pass: false, executions: [{ target: 'attempt', commands: [{ unfinished: true, state: 'unverified' }] }] });
     expect(gateInput).toContain('"unfinished":true');
     expect(renderRunSummary(root, result.rd, result.final)).toContain('Validation unfinished');
     console.log('BUDGET_CLAMP_FACTS=' + JSON.stringify({ authorExit: author.exitCode,
@@ -169,18 +170,58 @@ describe('completed author work reaches its independent gate within the validati
     expect(result.validations[0].attemptIndex).toBe(2);
   });
 
-  it('bounds the batch as a whole, retaining completed failures and not launching commands after expiry', async () => {
-    setEngineDefaults({ validation_timeout_ms: 100 });
+  it('reserves test and lint allowance even when the build hangs silently', { timeout: 60_000 }, async () => {
+    setEngineDefaults({ validation_timeout_ms: 12000 });
     const root = project();
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       if (opts.stageId === 'review') return success(verdict(opts));
       mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
       return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
     } };
-    const { validations } = await workflow(root, adapter, `validation:\n  commands:\n    build:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', 'setInterval(()=>{},1000)']\n    lint:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', "require('fs').writeFileSync('unexpected','ran')"]\n`);
-    expect(existsSync(join(root, 'unexpected'))).toBe(false);
-    expect(validations[0].executions[0].commands.every(command => command.unfinished && command.state === 'not_measured')).toBe(true);
+    const { final, validations, rd } = await workflow(root, adapter, `validation:\n  commands:\n    build:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', 'setInterval(()=>{},1000)']\n    test:\n      command: /bin/sh\n      args: ['-c', 'exit 0']\n    lint:\n      command: /bin/sh\n      args: ['-c', 'exit 0']\n`);
+    const commands = validations[0].executions[0].commands;
+    expect(commands[0]).toMatchObject({ unfinished: true, state: 'unverified' });
+    expect(commands.slice(1).map(command => command.exitCode)).toEqual([0, 0]);
+    expect(final.status).toBe('complete');
+    expect(final.validation?.[0]).toMatchObject({ measurement: 'unverified' });
+    expect(renderRunSummary(root, rd, final)).toContain('unverified');
   });
+
+  it('bounds a near-idle suite after its worker dies and still starts the next command', { timeout: 60_000 }, async () => {
+    setEngineDefaults({ validation_timeout_ms: 12000 });
+    const root = project(); let gateInput = '';
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      if (opts.stageId === 'review') { gateInput = prompt; return success(verdict(opts)); }
+      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
+      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
+    } };
+    const program = `const c=require('child_process').spawn(process.execPath,['-e','process.kill(process.pid,"SIGKILL")']);c.once('exit',(_code,signal)=>{console.log('worker died '+signal);setInterval(()=>{},1000)});`;
+    const result = await workflow(root, adapter, `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', ${JSON.stringify(program)}]\n    lint: {command: /bin/sh, args: ['-c', 'exit 0']}\n`);
+    const commands = result.validations[0].executions[0].commands;
+    expect(commands[1]).toMatchObject({ exitCode: 0, state: 'passed' });
+    expect(commands[0]).toMatchObject({ unfinished: true, state: 'unverified', measurement: 'unverified' });
+    expect(commands[0].output).toContain('worker died SIGKILL');
+    expect(gateInput).toContain('worker died SIGKILL');
+    expect(result.final.status).toBe('complete');
+    expect(result.final.validation?.[0].measurement).toBe('unverified');
+  });
+
+});
+
+it('reserves each command its share of the remaining batch without a stall detector', async () => {
+  setEngineDefaults({ validation_timeout_ms: 6000 });
+  let elapsed = 0;
+  const allowances: number[] = [];
+  const batch = await runProjectValidationBaseline(project(), { now: () => elapsed,
+    commands: (['build', 'test', 'lint'] as const).map(role => ({ role, command: 'fixture', args: [], display: role })),
+    runCommand: request => {
+      allowances.push(request.timeoutMs!);
+      elapsed += request.role === 'build' ? request.timeoutMs! : 10;
+      return request.role === 'build' ? { exitCode: null, unfinished: true } : { exitCode: 0 };
+    },
+  });
+  expect(allowances).toEqual([2000, 2000, 3990]);
+  expect(batch.results.map(result => result.exitCode)).toEqual([null, 0, 0]);
 });
 
 describe('final results own the comparison population', () => {
@@ -191,7 +232,7 @@ describe('final results own the comparison population', () => {
       runCommand: request => ({ exitCode: request.role === 'test' ? 1 : 0 }) });
     const final = await runProjectValidationBaseline(project(), { commands: [build], runCommand: () => ({ exitCode: 0 }) });
     expect(evaluateValidationDelta(base, final.results, undefined, [build])).toEqual([
-      expect.objectContaining({ role: 'build', state: 'pass' }),
+      expect.objectContaining({ role: 'build', state: 'verified' }),
     ]);
     expect(base.results.find(result => result.role === 'test')).toMatchObject({ state: 'failed', failureIdentity: 'unknown' });
   });
@@ -205,7 +246,7 @@ describe('declarations or one repository-reading model choose commands', () => {
       '---\nvalidation: {commands: {test: {command: declared, args: [brief]}}}\n---\n# Goal', project())).toThrow('Validation command conflict');
   });
 
-  it.each(['selected', 'empty', 'omitted'] as const)('settles %s selection in the author result without another model call', async shape => {
+  it.each(['selected', 'empty', 'omitted', 'invalid'] as const)('settles %s selection in the author result without another model call', async shape => {
     const root = project(), calls: string[] = []; let gateInput = '';
     writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'do-not-guess' }, packageManager: 'npm@10' }));
     const adapter: Adapter = { async run(prompt, _role, opts) {
@@ -215,7 +256,7 @@ describe('declarations or one repository-reading model choose commands', () => {
       expect(opts.outputSchema?.properties?.validation).toBeDefined();
       mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
       const validation = { commands: shape === 'empty' ? {} : { test: { command: process.execPath, args: ['-e', 'process.exitCode=0'] } }, reason: 'Read the fixture repository and choose its command explicitly.' };
-      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [], ...(shape === 'omitted' ? {} : { validation }) }, ['docs/value.txt']);
+      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [], ...(shape === 'omitted' ? {} : { validation: shape === 'invalid' ? { commands: 'invalid', reason: 'Unavailable selection' } : validation }) }, ['docs/value.txt']);
     } };
     const result = await workflow(root, adapter, '');
     expect(result.final.status, JSON.stringify({ final: result.final, validations: result.validations, calls })).toBe('complete'); expect(calls).toEqual(['implement', 'review']);
@@ -245,15 +286,19 @@ console.log(JSON.stringify({complete:true,numTotalTests:ids.length,numFailedTest
     if (opts.stageId === 'review') {
       const defect = readFileSync(join(root, 'resource.txt'), 'utf8') !== (kind === 'cache' ? 'STATE' : '0-5');
       if (!defect) return success(verdict(opts));
-      const refusal = currentAuthorValidationRefusal(root, readRunId(opts));
-      expect(refusal?.refusal?.kind, JSON.stringify({ refusal, validation: readEvidence(opts.runDir).filter(fact => fact.kind === 'validation') })).toBe('validation_regression');
-      if (!confirm) return success(verdict(opts)); // engine must still block a mechanical introduction
+      const results = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation').at(-1)!;
+      if (results.kind !== 'validation') throw Error('No validation facts');
+      const test = results.executions[0].commands.find(command => command.role === 'test')!;
+      expect(test.exitCode).toBe(1);
+      const review = { commands: [{ role: 'test', display: test.display, disposition: 'caused_by_change',
+        reason: kind === 'cache' ? 'The added cache contract is unmet atop two independent environment failures; not proof of a newly introduced business bug' : 'Worker CPU execution differs from the declared constraint; integration mismatch' }], request_base: [] };
+      if (!confirm) return success({ ...verdict(opts), validation_review: review });
       const predicate = `require('fs').readFileSync('resource.txt','utf8')===${JSON.stringify(kind === 'cache' ? 'STATE' : '0-5')}`;
       const request = { command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(${predicate}?0:1)`)}`, cwd: root, shell: '/bin/sh' };
       const client = prompt.split('## Engine-recorded command\nRun ')[1].split(" '<JSON>'")[0];
       const response = await runProjectCommand({ role: 'test', command: '/bin/sh', args: ['-c', `${client} '${JSON.stringify(request).replaceAll("'", "'\\''")}'`], display: 'Independent audit predicate', cwd: root, timeoutMs: 30000 });
       expect(response.exitCode).toBe(0); const record = JSON.parse(response.stdout!).record; expect(record.exitCode).toBe(1);
-      return success(verdict(opts, false, [{ id: kind, paths: ['resource.txt'], reason: kind === 'cache' ? 'Shared cache must persist with tool state' : 'Worker must honor declared CPUs; integration adaptation, not algorithm regression', criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction: record.sequence }]));
+      return success({ ...verdict(opts, false, [{ id: kind, paths: ['resource.txt'], reason: kind === 'cache' ? 'Shared cache must persist with tool state' : 'Worker must honor declared CPUs; integration adaptation, not algorithm regression', criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction: record.sequence }]), validation_review: review });
     }
     if (opts.stageId === 'implement') {
       writeFileSync(join(root, 'contract.txt'), 'new'); if (kind === 'cpu') writeFileSync(join(root, 'resource.txt'), '6-7');
@@ -264,30 +309,185 @@ console.log(JSON.stringify({complete:true,numTotalTests:ids.length,numFailedTest
   const result = await workflow(root, adapter, `validation:\n  commands:\n    build:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', 'process.exitCode=0']\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: [check.mjs]\n      report: {format: vitest-json}\n`);
   return { ...result, root, calls };
 }
-function readRunId(opts: RunOpts): string { return JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8')).runId; }
 
 describe('11/05 useful catches survive delayed validation', () => {
-  it.each(['cache', 'cpu'] as const)('blocks the audit %s assertion even when a gate tries to accept it', { timeout: 60_000 }, async kind => {
+  it.each(['cache', 'cpu'] as const)('blocks the audit %s assertion when the independent gate attributes it to the change despite pass=true', { timeout: 60_000 }, async kind => {
     const result = await catchFixture(kind, false);
     expect(result.final.status, JSON.stringify({ gate: result.final.stages.review.gate, validations: result.validations })).toBe('incomplete');
-    expect(result.final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'validation_regression' } });
+    expect(result.final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'audit_findings' } });
     expect(result.calls).toEqual(['implement', 'review']);
-    expect(result.validations[0].delta.find(entry => entry.role === 'test')?.state).toBe('regression');
+    expect(result.validations[0].delta.find(entry => entry.role === 'test')?.state).toBe('unverified');
   });
 
   it.each(['cache', 'cpu'] as const)('authorizes confirmed %s repair while retaining the original assertion and prior failures', { timeout: 120_000 }, async kind => {
     const result = await catchFixture(kind, true);
     expect(result.final.status, JSON.stringify({ gate: result.final.stages.review, validations: result.validations, calls: result.calls })).toBe('complete'); expect(result.calls).toEqual(['implement', 'review', 'repair', 'review']);
-    const first = result.validations[0]; expect(first.delta.find(entry => entry.role === 'test')?.state).toBe('regression');
-    expect(first.executions.map(execution => execution.commands.map(command => command.role))).toEqual([['build','test'], ['test']]);
-    expect(first.failures.filter(failure => failure.classification === 'introduced')).toHaveLength(1);
+    const first = result.validations[0]; expect(first.delta.find(entry => entry.role === 'test')?.state).toBe('unverified');
+    expect(first.executions.map(execution => execution.commands.map(command => command.role))).toEqual([['build','test']]);
+    expect(first.failures).toEqual([]);
     if (kind === 'cache') {
-      expect(first.executions.map(execution => execution.commands.find(command => command.role === 'test')!.failureCount)).toEqual([3, 2]);
-      expect(first.failures.filter(failure => failure.classification === 'pre-existing')).toHaveLength(2);
-      expect(first.delta.find(entry => entry.role === 'test')!.newFailureIdentifiers.join('')).toContain('test_vast_shared_search_state_lives_with_tool_state_not_tmp');
+      expect(first.executions.map(execution => execution.commands.find(command => command.role === 'test')!.failureCount)).toEqual([3]);
+      expect(first.executions[0].commands.find(command => command.role === 'test')!.failureIdentifiers.filter(id => id.includes('environment_missing_key'))).toHaveLength(2);
+      expect(first.delta.find(entry => entry.role === 'test')!.state).toBe('unverified');
+      expect(result.validations[1].executions[0].commands.find(command => command.role === 'test')).toMatchObject({ exitCode: 1, failureCount: 2 });
+      expect(result.final.validation?.find(command => command.role === 'test')).toMatchObject({ exitCode: 1, measurement: 'unverified' });
     }
-    expect(result.validations).toHaveLength(2); expect(result.validations[1].pass, JSON.stringify(result.validations[1])).toBe(true);
+    expect(result.validations).toHaveLength(2); expect(result.validations[1].pass, JSON.stringify(result.validations[1])).toBe(kind !== 'cache');
     expect(readEvidence(result.rd).some(entry => entry.kind === 'command' && entry.reproductionOf !== undefined && entry.exitCode === 0)).toBe(true);
     expect(evidenceContext(result.root, result.rd)).not.toContain('AUTHOR_TRANSCRIPT');
   });
+});
+
+
+describe('declared validation environment preserves data isolation', () => {
+  it('keeps outside data unchanged through a worktree symlink and records the isolating input', async () => {
+    const root = project(), outside = project(), isolated = project();
+    writeFileSync(join(outside, 'ledger'), 'original');
+    symlinkSync(outside, join(root, 'data'), 'dir');
+    const program = "require('fs').appendFileSync(require('path').join(process.env.PROJECT_STATE || 'data','ledger'),'measured')";
+    const adapter: Adapter = { async run(_prompt, _role, opts) {
+      if (opts.stageId === 'review') return success(verdict(opts));
+      const measured = await runProjectCommand({ role: 'test', command: process.execPath, args: ['-e', program],
+        display: 'stage measurement', cwd: root, env: { PROJECT_STATE: isolated }, timeoutMs: 5000 });
+      expect(measured.exitCode).toBe(0);
+      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'value');
+      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
+    } };
+    const result = await workflow(root, adapter, `validation:\n  commands:\n    test:\n      command: ${JSON.stringify(process.execPath)}\n      args: ['-e', ${JSON.stringify(program)}]\n      env: {PROJECT_STATE: ${JSON.stringify(isolated)}}\n`);
+    expect(result.final.status).toBe('complete');
+    expect(readFileSync(join(outside, 'ledger'), 'utf8')).toBe('original');
+    expect(readFileSync(join(isolated, 'ledger'), 'utf8')).toBe('measuredmeasured');
+    expect(result.validations[0].executions[0].commands[0]).toMatchObject({ exitCode: 0, env: { PROJECT_STATE: isolated } });
+    expect(renderRunSummary(root, result.rd, result.final)).toContain(JSON.stringify({ PROJECT_STATE: isolated }));
+  });
+
+  it('does not execute when control isolation would drop an explicitly selected environment variable', async () => {
+    const root = project();
+    const result = await runProjectValidationBaseline(root, { commands: [{ role: 'test', display: 'explicit reserved input',
+      command: process.execPath, args: ['-e', "require('fs').writeFileSync('executed','bad')"], env: { NODE_OPTIONS: '--no-warnings' } }] });
+    expect(existsSync(join(root, 'executed'))).toBe(false);
+    expect(result.results[0]).toMatchObject({ exitCode: null, state: 'unverified', reason: expect.stringContaining('cannot be preserved') });
+  });
+});
+
+
+describe('only independent gate dispositions own causation', () => {
+  it.each(['already_failing', 'environment', 'unknown', 'omitted', 'invalid', 'duplicate'] as const)('accepts a failed command honestly with %s disposition', async shape => {
+    const root = project(); let gateInput = '';
+    const display = '/bin/sh -c exit 127';
+    const entry = { role: 'test', display, disposition: shape === 'omitted' || shape === 'invalid' || shape === 'duplicate' ? 'unknown' : shape, reason: 'Independent fixture inspected the failure and product' };
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      if (opts.stageId === 'review') {
+        gateInput = prompt;
+        return success({ ...verdict(opts), ...(shape === 'omitted' ? {} : { validation_review: shape === 'invalid' ? { commands: 'invalid', request_base: [] } : {
+          commands: shape === 'duplicate' ? [entry, { ...entry, disposition: 'caused_by_change' }] : [entry], request_base: [],
+        } }) });
+      }
+      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'correct');
+      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
+    } };
+    const result = await workflow(root, adapter, "validation:\n  commands:\n    build: {command: /bin/sh, args: ['-c', 'exit 0']}\n    test: {command: /bin/sh, args: ['-c', 'exit 127']}\n");
+    expect(gateInput).toContain('"exitCode":127');
+    expect(result.final.status).toBe('complete');
+    expect(result.validations).toHaveLength(1);
+    expect(result.validations[0].executions.map(execution => execution.target)).toEqual(['attempt']);
+    expect(result.final.validation?.find(command => command.role === 'test')).toMatchObject({ exitCode: 127, state: 'failed', measurement: 'unverified' });
+    expect(result.final.stages.review.gate?.validation?.find(command => command.role === 'test')).toMatchObject({
+      exitCode: 127, measurement: 'unverified', disposition: ['omitted', 'invalid', 'duplicate'].includes(shape) ? 'unknown' : shape,
+    });
+    expect(renderRunSummary(root, result.rd, result.final)).toContain('failed (unverified)');
+  });
+
+  it('requests base only through the gate and leaves a known flaky green base unverified', async () => {
+    const root = project(), counter = join(project(), 'flaky-count');
+    const program = "import fs from 'node:fs';const p=process.argv[2];const n=fs.existsSync(p)?Number(fs.readFileSync(p,'utf8')):0;fs.writeFileSync(p,String(n+1));const code=n%2===0?1:0;console.log('flaky assertion invocation '+n+' exit '+code);process.exitCode=code;";
+    writeFileSync(join(root, 'check.mjs'), program);
+    for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'flaky base']]) isolatedProjectCommand('git', args, root, root);
+    // The unchanged base program demonstrably alternates red and green. The
+    // subsequent configured final/base pair is red/green without a code change.
+    const probes = [];
+    for (let n = 0; n < 2; n++) probes.push((await runProjectCommand({ role: 'test', command: process.execPath, args: ['check.mjs', counter], display: 'independent base flake probe', cwd: root, timeoutMs: 5000 })).exitCode);
+    expect(probes).toEqual([1, 0]);
+    let reviews = 0; const observedTargets: string[][] = [];
+    const adapter: Adapter = { async run(prompt, _role, opts) {
+      if (opts.stageId === 'review') {
+        reviews++;
+        const commands = [{ role: 'test', display: `${process.execPath} check.mjs ${counter}`, disposition: reviews === 1 ? 'unknown' : 'already_failing', reason: 'The unchanged base program was independently observed red and green; a green sample cannot establish introduction' }];
+        if (reviews === 1) {
+          const facts = readEvidence(opts.runDir).filter(entry => entry.kind === 'validation');
+          observedTargets.push((facts[0] as ValidationFact).executions.map(execution => execution.target));
+        } else {
+          expect(prompt).toContain('# Requested base evidence');
+          expect(prompt).toContain('flaky assertion invocation');
+          expect(prompt).toContain('"target":"base"');
+        }
+        return success({ ...verdict(opts), validation_review: { commands, request_base: reviews === 1 ? [{ role: 'test', display: `${process.execPath} check.mjs ${counter}` }] : [] } });
+      }
+      mkdirSync(join(root, 'docs'), { recursive: true }); writeFileSync(join(root, 'docs/value.txt'), 'correct');
+      return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
+    } };
+    const result = await workflow(root, adapter, `validation:\n  commands:\n    test: {command: ${JSON.stringify(process.execPath)}, args: [check.mjs, ${JSON.stringify(counter)}]}\n`);
+    expect(observedTargets).toEqual([['attempt']]);
+    expect(reviews).toBe(2); expect(result.final.status).toBe('complete');
+    expect(result.validations).toHaveLength(2);
+    expect(result.validations[1].executions.map(execution => [execution.target, execution.commands[0].exitCode])).toEqual([['attempt', 1], ['base', 0]]);
+    expect(result.final.stages.review.gate?.validation?.[0]).toMatchObject({ disposition: 'already_failing', measurement: 'unverified' });
+    expect(result.final.validation?.[0]).toMatchObject({ measurement: 'unverified', exitCode: 1 });
+  });
+
+  it('keeps failed, unfinished and unrun commands unknown without a valid gate output', () => {
+    const results = [
+      { role: 'build' as const, display: 'build', state: 'failed' as const, exitCode: 4 },
+      { role: 'test' as const, display: 'test', state: 'unverified' as const, exitCode: 0, unfinished: true },
+      { role: 'lint' as const, display: 'lint', state: 'unverified' as const, exitCode: null },
+    ].map(value => ({ ...value, durationMs: 0, output: '', failureIdentity: 'unknown' as const, failureIdentifiers: [] }));
+    for (const review of [undefined, {}, { commands: [{ role: 'build', display: 'build', disposition: 'made_up', reason: 'no' }], request_base: [] }]) {
+      expect(validationOwner.validationDispositions(results, review).map(entry => entry.disposition)).toEqual(['unknown', 'unknown', 'unknown']);
+      expect(evaluateValidationDelta(undefined, results).map(entry => entry.state)).toEqual(['unverified', 'unverified', 'unverified']);
+    }
+  });
+});
+
+
+it('accepts a repository-selected missing test honestly alongside a working build', async () => {
+  const root = project(), calls: string[] = []; let gateInput = '';
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"', test: 'exit 127' } }));
+  const adapter: Adapter = { async run(prompt, _role, opts) {
+    calls.push(opts.stageId);
+    if (opts.stageId === 'review') { gateInput = prompt; return success(verdict(opts)); }
+    expect(prompt).toContain('# Validation command selection');
+    mkdirSync(join(root, 'docs')); writeFileSync(join(root, 'docs/value.txt'), 'correct');
+    return success({ status: 'delivered', summary: 'Correct value', caveats: [], remaining_work: [], validation: {
+      commands: { build: { command: 'npm', args: ['run', 'build'] }, test: { command: 'npm', args: ['run', 'test'] } },
+      reason: 'Read the repository scripts and select both declared entry points',
+    } }, ['docs/value.txt']);
+  } };
+  const result = await workflow(root, adapter, '');
+  expect(calls).toEqual(['implement', 'review']);
+  expect(gateInput).toContain('"exitCode":127');
+  expect(result.validations[0].executions[0].commands.map(command => command.exitCode)).toEqual([0, 127]);
+  expect(result.final.status).toBe('complete');
+  expect(result.final.stages.review.gate?.validation?.find(command => command.role === 'test')).toMatchObject({ disposition: 'unknown', exitCode: 127, measurement: 'unverified' });
+  expect(result.final.validation?.find(command => command.role === 'test')).toMatchObject({ state: 'failed', exitCode: 127, measurement: 'unverified' });
+  expect(renderRunSummary(root, result.rd, result.final)).toContain('npm run test: unverified');
+});
+
+it('reuses declared destructive preparation on the same tree at a later stage', async () => {
+  const root = project();
+  isolatedProjectCommand('git', ['init', '-q'], root, root);
+  writeFileSync(join(root, '.gitignore'), 'node_modules\n');
+  const prepare = "const f=require('fs');f.rmSync('node_modules',{recursive:true,force:true});f.mkdirSync('node_modules');f.writeFileSync('node_modules/prepared','once')";
+  const adapter: Adapter = { async run(_prompt, _role, opts) {
+    if (opts.stageId === 'review') return success(verdict(opts));
+    mkdirSync(join(root, 'docs')); writeFileSync(join(root, 'docs/value.txt'), 'value');
+    return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
+  } };
+  const result = await workflow(root, adapter, `validation:\n  commands:\n    build: {command: ${JSON.stringify(process.execPath)}, args: ['-e', ${JSON.stringify(prepare)}]}\n    test: {command: /bin/sh, args: ['-c', 'exit 0']}\n`);
+  expect(result.final.status).toBe('complete');
+  expect(readFileSync(join(root, 'node_modules', 'prepared'), 'utf8')).toBe('once');
+  writeFileSync(join(root, 'node_modules', 'keep'), 'later installed data');
+  const receipt = await recordAttemptValidation(root, result.final.runId, 'review', { runCommand: () => { throw Error('Repeated preparation'); } });
+  expect(receipt).toMatchObject({ sequence: result.validations[0].sequence });
+  expect(readFileSync(join(root, 'node_modules', 'keep'), 'utf8')).toBe('later installed data');
+  expect(readEvidence(result.rd).filter(entry => entry.kind === 'validation')).toHaveLength(1);
 });

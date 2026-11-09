@@ -34,7 +34,7 @@ describe('setup records declarations without executing or caching validation', (
       const report = await runShipSetup(args(), { globalDir: () => state, runValidationCommand: runCommand });
       expect(report.state, JSON.stringify(report)).toBe('ready'); expect(report.baselineReuse).toBeUndefined();
       expect(report.validationBaseline).toMatchObject({ execution: 'skipped', results: expect.arrayContaining([
-        expect.objectContaining({ role: 'test', state: 'unresolved', failureIdentity: 'unknown', reason: expect.stringContaining('deferred') }),
+        expect.objectContaining({ role: 'test', state: 'unverified', failureIdentity: 'unknown', reason: expect.stringContaining('deferred') }),
       ]) });
     }
     expect(runCommand).not.toHaveBeenCalled(); expect(existsSync(join(state, 'ship-setups/baselines'))).toBe(false);

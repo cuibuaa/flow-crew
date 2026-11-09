@@ -332,13 +332,13 @@ describe('engine-assembled terminal reports', () => {
           { role: 'lint', state: 'unresolved', reason: 'no comparable execution' }],
       }));
       const report = await generateRunSummary(project, id);
-      expect(report).toContain('`npm run test` — failed (load unknown); direct exit 1; 43ms');
+      expect(report).toContain('`npm run test` — failed (unverified); direct exit 1; 43ms');
       expect(report).toContain(totals ? 'Declared reporter totals: tests run 10; failures 1.' : 'Declared reporter totals: tests run unknown; failures unknown.');
       expect(report).not.toContain('Tests 9999 passed');
       expect(report).toContain('Failure: greeting > locale');
-      expect(report).toContain('`npm run lint` — launch_error (load unknown); direct exit unknown');
-      expect(report).toContain('test baseline comparison: regression');
-      expect(report).toContain('lint baseline comparison: unresolved');
+      expect(report).toContain('`npm run lint` — unverified (unverified); direct exit unknown');
+      expect(report).toContain('test command coverage: unverified');
+      expect(report).toContain('lint command coverage: unverified');
       expect(report).toContain('validation_delta_review_attempt_1_exact.json');
     });
   });
@@ -355,7 +355,7 @@ describe('engine-assembled terminal reports', () => {
       writeFileSync(join(directory, 'validation_delta_review.json'), JSON.stringify(accepted));
       const report = await generateRunSummary(project, id);
       expect(report).toContain('direct exit 1');
-      expect(report).toContain('Locale failed');
+      expect(report).toContain('Command unverified; independent gate owns disposition');
       expect(report?.match(/direct exit 0/g)).toHaveLength(1);
       expect(report).toContain('validation_delta_review_attempt_1_failed.json');
       expect(report).toContain('validation_delta_review_attempt_2_passed.json');

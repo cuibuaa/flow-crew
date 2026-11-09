@@ -1,3 +1,4 @@
+import { VALIDATION_REVIEW_JSON_SCHEMA, ValidationReviewSchema, ValidationSelectionSchema } from './project-validation.js';
 // Module: handoff
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -79,13 +80,25 @@ export function stageRecordSchema(opts: Pick<HandoffOpts, 'isGate' | 'criterionR
   const fail = object({ reason: text, criteria: criteria(false), audit_findings, pass: { type: 'boolean', enum: [false] }, repairability: object({
     version: { type: 'integer', enum: [1] }, disposition: { type: 'string', enum: ['repairable', 'irreparable'] }, evidence: text,
   }) }, completion);
+  for (const variant of [pass, fail]) variant.properties!.validation_review = VALIDATION_REVIEW_JSON_SCHEMA;
   if (opts.extendedVerdict) pass.additionalProperties = fail.additionalProperties = true;
   return { type: 'object', anyOf: [pass, fail] };
 }
 
 export function parseStageRecord(output: string, schema: Schema): Record<string, unknown> {
   const record: unknown = JSON.parse(output);
-  const errors = validate(record, schema, '$');
+  // Optional model judgments confer authority only through their own fixed
+  // schema. Bad judgment output stays unknown; it cannot void the independent
+  // verdict or the completed author work around it. Keep the raw record for audit.
+  const checked = record && typeof record === 'object' && !Array.isArray(record) ? { ...record } as Record<string, unknown> : record;
+  const optional = (schema: Schema, key: string): boolean => Boolean(schema.properties?.[key] && !schema.required?.includes(key)
+    || schema.anyOf?.some(variant => optional(variant, key)));
+  if (checked && typeof checked === 'object' && !Array.isArray(checked)) {
+    for (const [key, contract] of [['validation', ValidationSelectionSchema], ['validation_review', ValidationReviewSchema]] as const) {
+      if (optional(schema, key) && !contract.safeParse((checked as Record<string, unknown>)[key]).success) delete (checked as Record<string, unknown>)[key];
+    }
+  }
+  const errors = validate(checked, schema, '$');
   if (errors.length) throw new Error(`STAGE_RECORD_INVALID: ${errors.join('; ')}`);
   return record as Record<string, unknown>;
 }
@@ -149,7 +162,7 @@ export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(op
     body,
     criterionBlock,
     researchCandidateBlock,
-    opts.isGate ? '## Reproduced findings and validation\nA finding to be repaired must cite its reproduction record: set reproduction to the integer sequence in evidence-ledger.jsonl. Run a targeted command with exit 0 meaning the defect is absent and a positive exit meaning it is present. Use the injected engine-recorded command endpoint through your native shell tool, supplying command, absolute cwd and shell as JSON; the engine executes and records it and returns record.sequence. This works even when a native transport omits cwd and shell. Native commands are also eligible when their structured events include explicit absolute cwd and shell, exit and output. The recorded command is replayed with that shell (-c) in that cwd and the same engine command environment. Include any required shell options in an explicit executable invocation in the command. The engine records the complete command, context, structured exit code, output digest and tree hash; read the ledger after the command completes and cite its sequence. Missing execution context, a missing citation, a passing command or a changed tree is an unconfirmed observation and opens no repair. Do not run configured validation inside the gate. Receipts classified not_measured are not measured, neither pass nor failure; ask nothing of the author on their account. Receipts without load fields are load unknown. Keep independent read-only scope [] and run your own experiments.' : '',
+    opts.isGate ? '## Reproduced findings and validation\nA finding to be repaired must cite its reproduction record: set reproduction to the integer sequence in evidence-ledger.jsonl. Run a targeted command with exit 0 meaning the defect is absent and a positive exit meaning it is present. Use the injected engine-recorded command endpoint through your native shell tool, supplying command, absolute cwd and shell as JSON; the engine executes and records it and returns record.sequence. This works even when a native transport omits cwd and shell. Native commands are also eligible when their structured events include explicit absolute cwd and shell, exit and output. The recorded command is replayed with that shell (-c) in that cwd and the same engine command environment. Include any required shell options in an explicit executable invocation in the command. The engine records the complete command, context, structured exit code, output digest and tree hash; read the ledger after the command completes and cite its sequence. Missing execution context, a missing citation, a passing command or a changed tree is an unconfirmed observation and opens no repair. Do not run configured validation inside the gate. For each failed, unfinished or unrun command, return validation_review.commands with its exact role/display, disposition caused_by_change|already_failing|environment|unknown and reason. You alone judge causation from logs, diff and optional base evidence. To settle a failure needing base, return validation_review.request_base with exact role/display; the engine obtains one bounded base batch and returns the facts for your final verdict in this attempt. Otherwise return request_base: []. Missing or invalid dispositions stay unknown and unverified. A caused_by_change disposition prevents acceptance; repair still needs the independent confirmed reproduction above. Host load is telemetry only. Failed, unfinished and unrun commands remain unverified even on acceptance. Keep independent read-only scope [] and run your own experiments.' : '',
     anchor,
     skillsContent,
   ].filter(Boolean);

@@ -1282,7 +1282,7 @@ function renderHuman(report: ShipSetupReport, writer: Writer): void {
   if (report.state === 'ready') {
     writer.write(`Validation baseline: ${report.validationBaseline.discovery.state.toUpperCase()}\n`);
     for (const result of report.validationBaseline.results) {
-      writer.write(`  ${result.role}: ${unmeasured(result) ? 'ENVIRONMENT GAP' : projectValidationResult(result).state.toUpperCase()}${result.exitCode === undefined ? '' : ` exit=${result.exitCode}`}\n`);
+      writer.write(`  ${result.role}: ${unmeasured(result) ? 'UNVERIFIED' : projectValidationResult(result).state.toUpperCase()}${result.exitCode === undefined ? '' : ` exit=${result.exitCode}`}\n`);
     }
     for (const criterion of report.validationBaseline.gateCriteria) {
       writer.write(`  gate ${criterion.role}: ${criterion.rule} — ${criterion.description}\n`);

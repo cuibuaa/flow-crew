@@ -155,7 +155,7 @@ afterEach(() => {
 });
 
 describe('engine behaviour contracts', () => {
-  it('enforces the run-local setup baseline at the gate consumer', async () => {
+  it('exposes the run-local command facts without classifying causation at the gate consumer', async () => {
     const root = temporaryRoot();
     const projectDir = join(root, 'project');
     mkdirSync(projectDir);
@@ -193,13 +193,13 @@ describe('engine behaviour contracts', () => {
     write(join(control.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true }));
     const noBaselineVerdict = readGateEvaluation(projectDir, 'qa', control.runId);
     expect(prompt).not.toContain('Engine-enforced validation baseline');
-    expect(unchanged?.pass).toBe(true);
+    expect(unchanged?.pass).toBe(false);
     expect(unchangedVerdict?.pass).toBe(true);
     expect(regressed?.pass).toBe(false);
     expect(regressed?.immutablePath).not.toBe(unchanged?.immutablePath);
     expect(existsSync(join(created.runDirPath, unchanged!.immutablePath!))).toBe(true);
     expect(existsSync(join(created.runDirPath, regressed!.immutablePath!))).toBe(true);
-    expect(regressedVerdict).toMatchObject({ pass: false, reason: expect.stringContaining('Introduced validation failures') });
+    expect(regressedVerdict).toMatchObject({ pass: true, validation: [expect.objectContaining({ exitCode: 1, measurement: 'unverified', disposition: 'unknown' })] });
     expect(noBaselineVerdict?.pass).toBe(true);
   });
 

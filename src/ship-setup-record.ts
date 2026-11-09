@@ -11,8 +11,8 @@ import type {
 import { fcGlobalDir } from './store.js';
 
 const VALIDATION_ROLES = new Set<ValidationRole>(['build', 'test', 'lint']);
-const RESULT_STATES = new Set<ValidationCommandResult['state']>([
-  'passed', 'failed', 'launch_error', 'not_configured', 'unresolved',
+const RESULT_STATES = new Set<string>([
+  'passed', 'failed', 'unverified', 'launch_error', 'not_configured', 'unresolved', 'not_measured',
 ]);
 const FAILURE_IDENTITIES = new Set<ValidationCommandResult['failureIdentity']>(['known', 'unknown', 'none']);
 const FAILURE_EVIDENCE = new Set<NonNullable<ValidationCommandResult['failureEvidence']>>(['complete', 'partial']);
@@ -45,6 +45,7 @@ function validCommand(value: unknown): value is ValidationCommand {
     && typeof item.command === 'string'
     && item.command.length > 0
     && stringArray(item.args)
+    && (item.env === undefined || Boolean(record(item.env) && Object.values(item.env as object).every(value => typeof value === 'string')))
     && typeof item.display === 'string'
     && item.display.length > 0);
 }
@@ -63,7 +64,7 @@ function validResult(value: unknown): value is ValidationCommandResult {
     && FAILURE_IDENTITIES.has(item.failureIdentity as ValidationCommandResult['failureIdentity'])
     && (item.failureCount === undefined
       || (Number.isSafeInteger(item.failureCount) && (item.failureCount as number) >= 0))
-    && (item.exitCode === undefined || Number.isInteger(item.exitCode))
+    && (item.exitCode === undefined || item.exitCode === null || Number.isInteger(item.exitCode))
     && (item.reason === undefined || typeof item.reason === 'string'));
   if (!shapeValid || !item) return false;
   if (item.failureEvidence === undefined) return true;
@@ -117,7 +118,7 @@ function validBaseline(value: unknown, canonicalTarget: string): value is Projec
   if (results.length !== rawResults.length || criteria.length !== rawCriteria.length) return false;
   return results.every((result) => {
     const criterion = criteria.find(candidate => candidate.role === result.role && (candidate.display === undefined || candidate.display === result.display));
-    if (result.failureEvidence === undefined && criterion?.baselineFailureEvidence === undefined) return true;
+    if (!criterion || result.failureEvidence === undefined && criterion.baselineFailureEvidence === undefined) return true;
     return result.failureEvidence === criterion?.baselineFailureEvidence;
   });
 }

@@ -92,7 +92,7 @@ describe('engine-recorded facts used at their decision boundaries', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('uses failed exits for green-to-red regressions while keeping launch failures unresolved', () => {
+  it('records failed exits and launch gaps without deciding causation from a green base', () => {
     const green = baseline(validationResult('passed'));
     const unknown = validationResult('failed', {
       exitCode: 2,
@@ -120,27 +120,11 @@ describe('engine-recorded facts used at their decision boundaries', () => {
       failureIdentifiers: ['spec/new.test.ts'],
     });
 
-    expect(evaluateValidationDelta(green, [unknown])[0]).toMatchObject({
-      state: 'regression',
-      reason: 'A green baseline no longer passes',
-      newFailureIdentifiers: [],
-    });
-    expect(evaluateValidationDelta(green, [partial])[0]).toMatchObject({
-      state: 'regression',
-      reason: 'A green baseline no longer passes',
-      newFailureIdentifiers: ['spec/known.test.ts'],
-    });
-    expect(evaluateValidationDelta(green, [launchError])[0]).toMatchObject({
-      state: 'unresolved',
-      reason: expect.stringContaining('launch_error'),
-      newFailureIdentifiers: [],
-    });
-    expect(evaluateValidationDelta(green, [completeNamed])[0]).toEqual({
-      role: 'test',
-      state: 'regression',
-      reason: 'A green baseline no longer passes',
-      newFailureIdentifiers: ['spec/new.test.ts'],
-    });
+    for (const result of [unknown, partial, launchError, completeNamed]) {
+      expect(evaluateValidationDelta(green, [result])[0]).toMatchObject({
+        state: 'unverified', reason: 'Command unverified; independent gate owns disposition', newFailureIdentifiers: [],
+      });
+    }
   });
 
   it('keeps approval state human-owned while projecting live, parked, ended, and orphaned run standing', () => {

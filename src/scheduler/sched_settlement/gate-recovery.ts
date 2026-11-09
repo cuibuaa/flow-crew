@@ -50,9 +50,7 @@ export function classifyGateRecoveryFact(
   effectiveVerdict: GateRecoveryFact['effectiveVerdict'],
 ): GateRecoveryFact {
   const kind = effectiveVerdict?.refusal?.kind;
-  const rejectionKind: GateRecoveryFact['rejectionKind'] = kind === 'validation_regression'
-    ? 'repairable_failure'
-    : kind === 'validation_unresolved' || kind === 'repairability'
+  const rejectionKind: GateRecoveryFact['rejectionKind'] = kind === 'repairability'
     ? 'engine_contract_or_evidence_rejection'
     : effectiveVerdict?.repairability?.disposition === 'irreparable'
     ? 'irreparable_rejection'

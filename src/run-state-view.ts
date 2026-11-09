@@ -1,3 +1,4 @@
+import { projectValidationResult } from './project-validation.js';
 import { parseJsonlWithDiagnostics } from './jsonl.js';
 import { stageAttemptKey } from './stage-live-log.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -298,6 +299,7 @@ export interface RunStateView {
   snapshot: { runStateRevision: number | null; runStateSha256: string; evidenceSha256: string; sources: EvidenceSource[] };
   run: { runId: string; projectDir: string; workflowName: string; status: unknown; statusResolution: ReturnType<typeof readArchivedRunState>['status']; startedAt: string; completedAt?: string; currentIteration: number | null; failureReason?: string };
   plan: { stages: unknown[]; source: 'dispatchedStages' | 'plan' | 'unavailable'; revision: z.infer<typeof PlanRevisionSchema> | null; history: z.infer<typeof PlanRevisionSchema>[]; decisions: Record<string, import('./plan-revisions.js').PlanRevisionDecision>; admissionClaim: 'recorded' | 'unknown' };
+  validation?: import('./store.js').GateVerdict['validation'];
   stages: Record<string, StageStatus>;
   histories: Pick<ArchivedStoreState, 'retiredStageUsage' | 'stageEvidence' | 'criterionDischarges' | 'unresolvedStageObligations' | 'auxiliaryAttempts'>;
   artifacts: ArtifactObservation[];
@@ -527,7 +529,13 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
       snapshot: { runStateRevision: state.stateFormat?.revision ?? null, runStateSha256: sha256(raw), evidenceSha256: sha256(JSON.stringify({ sources: fence.sources, artifacts })), sources: fence.sources },
       run: { runId, projectDir: state.projectDir, workflowName: state.workflowName, status: state.status, statusResolution: archived.status, startedAt: state.startedAt, completedAt: state.completedAt, currentIteration: state.currentIteration ?? null, failureReason: state.failureReason },
       plan: { stages, source, revision: queryState.planRevision ?? null, history: queryState.planHistory, decisions: state.planRevisionDecisions ?? {}, admissionClaim: queryState.planRevision ? 'recorded' : 'unknown' },
-      stages: state.stages,
+      ...(state.validation ? { validation: state.validation.map(result => ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) })) } : {}),
+      stages: Object.fromEntries(Object.entries(state.stages).map(([id, stage]) => [id, { ...stage,
+        ...(stage.gate?.validation ? { gate: { ...stage.gate, validation: stage.gate.validation.map(result => ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) })) } } : {}),
+        ...(stage.acceptedFrom?.verdict.validation ? { acceptedFrom: { ...stage.acceptedFrom, verdict: { ...stage.acceptedFrom.verdict,
+          validation: stage.acceptedFrom.verdict.validation.map(result => ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) })),
+        } } } : {}),
+      }])),
       histories: { retiredStageUsage: state.retiredStageUsage, stageEvidence: state.stageEvidence, criterionDischarges: state.criterionDischarges, unresolvedStageObligations: state.unresolvedStageObligations, auxiliaryAttempts: state.auxiliaryAttempts },
       artifacts, artifactContracts, budget: budgetView(state, observedAt),
       audits: { findings: queryState.findings, openFindings: queryState.findings.filter((finding) => finding.status === 'open'), verdicts },

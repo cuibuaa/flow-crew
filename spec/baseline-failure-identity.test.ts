@@ -27,7 +27,7 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
       commands: [{ role: 'test', command: 'fixture', args: [], display: 'fixture', report: { format: 'vitest-json' } }],
     });
     expect(testResult(baseline)).toMatchObject({ failureIdentity: 'known', identityOwner: 'runner-json', failureEvidence: 'partial', testsRun: 1 });
-    expect(evaluateValidationDelta(baseline, baseline.results).find(value => value.role === 'test')?.state).toBe('unresolved');
+    expect(evaluateValidationDelta(baseline, baseline.results).find(value => value.role === 'test')?.state).toBe('unverified');
   });
   it.each([undefined, false])('keeps a green exit with an incomplete declared population unknown (%j)', async complete => {
     const report = JSON.parse(nativeReport(false));
@@ -36,9 +36,9 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
       commands: [{ role: 'test', command: 'fixture', args: [], display: 'fixture', report: { format: 'vitest-json' } }],
     });
     expect(testResult(baseline)).toMatchObject({ exitCode: 0, failureIdentity: 'unknown', identityOwner: 'runner-json', reason: expect.stringContaining('partial') });
-    expect(baseline.gateCriteria[0].rule).toBe('baseline_unresolved');
-    expect(evaluateValidationDelta(undefined, baseline.results)[0].state).toBe('unresolved');
-    expect(evaluateValidationDelta(baseline, baseline.results)[0].state).toBe('unresolved');
+    expect(baseline.gateCriteria).toEqual([]);
+    expect(evaluateValidationDelta(undefined, baseline.results)[0].state).toBe('verified');
+    expect(evaluateValidationDelta(baseline, baseline.results)[0].state).toBe('verified');
   });
 
   it('decodes native reporter JSON using JSON.parse and the structured schema, excluding incidental fields', async () => {
@@ -71,7 +71,7 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
       expect(testResult(fragmented)).toMatchObject({ failureIdentity: 'known', failureEvidence: 'complete', outputBytes: { stdout: Buffer.byteLength(payload), stderr: 0 } });
       expect(testResult(fragmented).failureIdentifiers).toEqual(testResult(single).failureIdentifiers);
       expect(testResult(fragmented).failures?.[0].testId).toBe('测试 😀');
-      expect(evaluateValidationDelta(single, fragmented.results).find(value => value.role === 'test')?.state).toBe('pass');
+      expect(evaluateValidationDelta(single, fragmented.results).find(value => value.role === 'test')?.state).toBe('unverified');
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
@@ -101,7 +101,7 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
     expect(testResult(before)).toMatchObject({ failureEvidence: 'complete', failureCount: 1 });
     expect(testResult(after)).toMatchObject({ identityOwner: 'runner-json', failureEvidence: 'partial', failureCount: 1, testsRun: 1 });
     expect(testResult(after).failureIdentifiers).toEqual(testResult(before).failureIdentifiers);
-    expect(evaluateValidationDelta(before, after.results).find(value => value.role === 'test')?.state).toBe('unresolved');
+    expect(evaluateValidationDelta(before, after.results).find(value => value.role === 'test')?.state).toBe('unverified');
   });
 
   it('accounts for nested structured suite counts and keeps extra suite or snapshot failures partial', () => {
@@ -120,7 +120,7 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
     const after = await run({ exitCode: 1, stdout: nativeReport(true), stderr: 'opaque diagnostic bytes' }, options);
     expect(testResult(after)).toMatchObject({ failureIdentity: 'known', failureEvidence: 'complete', identityOwner: 'runner-json' });
     expect(testResult(after).failureIdentifiers).toEqual(testResult(before).failureIdentifiers);
-    expect(evaluateValidationDelta(before, after.results).find(value => value.role === 'test')?.state).toBe('pass');
+    expect(evaluateValidationDelta(before, after.results).find(value => value.role === 'test')?.state).toBe('unverified');
   });
 
   it('does not silently discard unsupported structured failure channels', async () => {
@@ -145,9 +145,9 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
         args: ['-e', `require('fs').writeFileSync('report.json',${JSON.stringify(report)});process.exitCode=1`] }] });
       expect(testResult(fresh)).toMatchObject({ failureIdentity: 'known', testsRun: 1, identityOwner: 'runner-json' });
       const escaped = await runProjectValidationBaseline(directory, { commands: [{ ...command, report: { format: 'vitest-json', path: '../outside.json' } }] });
-      expect(testResult(escaped)).toMatchObject({ state: 'launch_error', failureIdentity: 'unknown' });
+      expect(testResult(escaped)).toMatchObject({ state: 'unverified', failureIdentity: 'unknown' });
       const controlPath = await runProjectValidationBaseline(directory, { commands: [{ ...command, report: { format: 'vitest-json', path: 'auth.json' } }] });
-      expect(testResult(controlPath)).toMatchObject({ state: 'launch_error', failureIdentity: 'unknown', reason: expect.stringContaining('credential/control') });
+      expect(testResult(controlPath)).toMatchObject({ state: 'unverified', failureIdentity: 'unknown', reason: expect.stringContaining('credential/control') });
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
@@ -157,7 +157,7 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
     const baseline = await run({ exitCode: 1, stdout: output });
     expect(testResult(baseline)).toMatchObject({ failureIdentity: 'unknown', failureIdentifiers: [], identityOwner: 'unknown' });
     expect(testResult(baseline).failureCount).toBeUndefined();
-    expect(evaluateValidationDelta(baseline, baseline.results).find(value => value.role === 'test')?.state).toBe('unresolved');
+    expect(evaluateValidationDelta(baseline, baseline.results).find(value => value.role === 'test')?.state).toBe('unverified');
   });
 
   it('bounds opaque output without inventing identities or invoking a second owner', async () => {
@@ -177,16 +177,16 @@ describe('bounded identity ownership, replacing legacyFailureFacts and handwritt
     for (const duration of ['0.243s', '0.375s', '0.339s']) {
       const baseline = await run({ exitCode: 1, stdout: `FAIL\ttaglib\t${duration}\nFAIL\n` });
       expect(testResult(baseline)).toMatchObject({ failureIdentity: 'unknown', failureIdentifiers: [] });
-      expect(evaluateValidationDelta(baseline, baseline.results)[0].state).toBe('unresolved');
+      expect(evaluateValidationDelta(baseline, baseline.results)[0].state).toBe('unverified');
     }
   });
 
-  it('admits recovery to green and detects added declared failures', async () => {
+  it('records recovery to green and exposes added declared failures to the gate', async () => {
     const commands = [{ role: 'test' as const, command: 'fixture', args: [], display: 'fixture', report: { format: 'vitest-json' as const } }];
     const baseline = await run({ exitCode: 1, stdout: nativeReport(true) }, { commands });
     const improved = await run({ exitCode: 0 });
-    expect(evaluateValidationDelta(baseline, improved.results)[0].state).toBe('pass');
+    expect(evaluateValidationDelta(baseline, improved.results)[0].state).toBe('verified');
     const current = await run({ exitCode: 1, stdout: nativeReport(true, 2) }, { commands });
-    expect(evaluateValidationDelta(baseline, current.results)[0].state).toBe('regression');
+    expect(evaluateValidationDelta(baseline, current.results)[0].state).toBe('unverified');
   });
 });

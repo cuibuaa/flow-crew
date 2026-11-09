@@ -91,7 +91,7 @@ function evidenceGapLine(alert: Extract<WatchAlert, { kind: 'evidence_gap' }>): 
 }
 
 function alertLine(alert: WatchAlert): string {
-  if (alert.kind === 'validation_measurement') return `[VALIDATION] ${oneLine(alert.runId)} gate ${oneLine(alert.gateId)} ${oneLine(alert.role)}: ${alert.measurement.replaceAll('_', ' ')}${alert.measurement === 'not_measured' ? '; neither pass nor failure; no author action required' : ''}${alert.state ? `; state ${alert.state}` : ''}${alert.storedState ? `; recorded state ${alert.storedState}` : ''}`;
+  if (alert.kind === 'validation_measurement') return `[VALIDATION] ${oneLine(alert.runId)} gate ${oneLine(alert.gateId)} ${oneLine(alert.role)}: ${alert.measurement.replaceAll('_', ' ')}${alert.state ? `; state ${alert.state}` : ''}${alert.storedState ? `; recorded state ${alert.storedState}` : ''}`;
   if (alert.kind === 'evidence_gap') return evidenceGapLine(alert);
   const run = oneLine(alert.runId);
   if (alert.kind === 'terminal_status_mismatch') {

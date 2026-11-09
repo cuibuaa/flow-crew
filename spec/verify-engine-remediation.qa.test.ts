@@ -183,12 +183,12 @@ describe('independent engine-remediation verification', () => {
       attemptIndex: 1,
       executionId: expect.any(String),
       immutablePath: expect.any(String),
-      delta: expect.arrayContaining([{ role: 'build', display: 'node -e process.exit(0)', state: 'regression', reason: 'A green baseline no longer passes', newFailureIdentifiers: [] }]),
+      delta: expect.arrayContaining([{ role: 'build', display: 'node -e process.exit(0)', state: 'unverified', reason: 'Command unverified; independent gate owns disposition', newFailureIdentifiers: [] }]),
     });
     expect(existsSync(join(runDirectory, delta.immutablePath))).toBe(true);
     expect(readGateEvaluation(projectDir, 'qa', final.runId)).toMatchObject({
-      pass: false,
-      reason: expect.stringContaining('Introduced validation failures'),
+      pass: true,
+      validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]),
     });
     expect({
       producedByScheduler,

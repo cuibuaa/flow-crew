@@ -127,9 +127,9 @@ describe('engine boundary audit probes', () => {
       const asStages = (items: unknown[]) => items as Parameters<typeof findAllReady>[0];
       const nonGate = asStages([stage('baseline', { role: 'qa' }), work]);
       expect(findAllReady(nonGate, state as Parameters<typeof findAllReady>[1]).map((s) => s.id)).toContain('work');
-      // Control: a declared gate with the same verdict still needs its bound delta.
+      // A declared gate also consumes its independent verdict without a validation veto.
       const declaredGate = asStages([stage('baseline', { role: 'qa', is_gate: true }), work]);
-      expect(findAllReady(declaredGate, state as Parameters<typeof findAllReady>[1]).map((s) => s.id)).not.toContain('work');
+      expect(findAllReady(declaredGate, state as Parameters<typeof findAllReady>[1]).map((s) => s.id)).toContain('work');
     } finally {
       setFcGlobalDir(previousHome);
       rmSync(root, { recursive: true, force: true });

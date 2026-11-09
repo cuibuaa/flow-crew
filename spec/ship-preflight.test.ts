@@ -407,8 +407,8 @@ describe('ship-preflight validation baseline fact', () => {
     expect(runner).not.toHaveBeenCalled();
     expect(result.report.validationBaseline.execution).toBe('skipped');
     expect(result.report.validationBaseline.discovery.commands.map(command => command.role)).toEqual(['build', 'test', 'lint']);
-    expect(result.report.validationBaseline.results.every(result => result.state === 'unresolved')).toBe(true);
-    expect(result.report.validationBaseline.gateCriteria.every(criterion => criterion.rule === 'baseline_unresolved')).toBe(true);
+    expect(result.report.validationBaseline.results.every(result => result.state === 'unverified')).toBe(true);
+    expect(result.report.validationBaseline.gateCriteria).toEqual([]);
   });
 });
 

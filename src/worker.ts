@@ -25,7 +25,7 @@ import { adapterInputLimit, INPUT_RESERVE_CHARS } from './config.js';
 import { createHash } from 'node:crypto';
 import { buildStagePrompt, HANDOFF_SCHEMA, RECORDED_HANDOFF_SCHEMA, parseStageRecord } from './handoff.js';
 import type { Schema } from './reality-gate/checks/json-schema-match.js';
-import { recordValidationSelection, readRunValidationBaseline, recordGateValidationDelta, ensureAttemptValidationPlan, recordAttemptValidation } from './scheduler/sched_settlement/gate-validation.js';
+import { recordRequestedBaseValidation, recordValidationSelection, readRunValidationBaseline, recordGateValidationDelta, ensureAttemptValidationPlan, recordAttemptValidation } from './scheduler/sched_settlement/gate-validation.js';
 import { validateGateCriterionEvidence, validateGateRepairability, explicitPassContradiction } from './scheduler/sched_settlement/gate-evidence.js';
 import { AuditFindingsSchema } from './scoped-audit-repair.js';
 import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
@@ -518,7 +518,7 @@ export async function runStage(
     // Reuse the author result, not a third decision stage or another model call.
     if (opts.outputSchema?.properties) opts.outputSchema = { ...opts.outputSchema,
       properties: { ...opts.outputSchema.properties, validation: VALIDATION_SELECTION_JSON_SCHEMA } };
-    prompt += '\n\n# Validation command selection\nNo project or brief command declaration is available. Read the repository and choose validation commands in the optional validation field of your final result, using this fixed schema: '
+    prompt += '\n\n# Validation command selection\nNo project or brief command declaration is available. Read the repository and choose exact validation executable/argv and non-secret env inputs, preserving any data-isolating environment used in your measurements. Put required project inputs in each command env map; never rerun a bare command with an isolating variable omitted. Return commands in the optional validation field of your final result, using this fixed schema: '
       + JSON.stringify(VALIDATION_SELECTION_JSON_SCHEMA)
       + '. Use exact executable/argv and optional structured reporters; include dependency preparation in those commands if needed. Do not guess from names alone. An empty commands object states that no validation could be chosen, with the reason. Omitted or invalid selection remains explicitly unmeasured.';
   }
@@ -1062,6 +1062,7 @@ export async function runStage(
   let stageWorkFinished = false;
   let validatedStageRecord: Record<string, unknown> | undefined;
   let correctionReinvocations = 0;
+  let baseEvidenceDelivered = false;
   const invokeAdapterWithCorrection = async (
     selectedAdapter: Adapter,
     selectedRole: AgentConfig,
@@ -1119,7 +1120,20 @@ export async function runStage(
       }
       if (combined.exitCode !== 0 || !opts.outputSchema || opts.decisionResult) return combined;
       let recordError: string;
-      try { stageRecord(combined.output); return combined; }
+      try {
+        const record = stageRecord(combined.output);
+        if (opts.isGate && !baseEvidenceDelivered && !aggregateAbortSignal.aborted) {
+          const facts = await recordRequestedBaseValidation(opts.projectDir, opts.runId, record.validation_review, {
+            remainingMs: () => attemptDeadline.remainingMs(), abortSignal: aggregateAbortSignal,
+          });
+          if (facts) {
+            baseEvidenceDelivered = true;
+            invocationPrompt = `# Requested base evidence\n${JSON.stringify(facts)}\nJudge causation yourself. Return your final verdict with dispositions for every unverified command and request_base: []. The engine will not repeat this base batch.`;
+            continue;
+          }
+        }
+        return combined;
+      }
       catch (error) { recordError = `Stage record refused: ${error instanceof Error ? error.message : String(error)}`; }
       const instruction = `# Stage result correction\n${recordError}\nDo not repeat the completed work. Correct only the final JSON document using the retained work and evidence. Preserve the substantive result; never invent evidence or change a rejection to pass to satisfy the format.\n${JSON.stringify({ error: recordError, rejectedAnswer: combined.output })}`;
       if (correctionReinvocations >= 1 || aggregateAbortSignal.aborted) {

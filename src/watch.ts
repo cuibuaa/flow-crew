@@ -755,9 +755,14 @@ export function pollWatch(
     }
     stats.readableRuns += 1;
     const stages = state.stages && typeof state.stages === 'object' && !Array.isArray(state.stages) ? state.stages as JsonObject : undefined;
-    for (const [gateId, raw] of Object.entries(stages ?? {})) {
-      const stage = raw && typeof raw === 'object' ? raw as JsonObject : undefined;
-      const gate = stage?.gate && typeof stage.gate === 'object' ? stage.gate as JsonObject : undefined;
+    const validationSources: Array<[string, JsonObject | undefined]> = Array.isArray(state.validation)
+      ? [['current tree', { validation: state.validation }]]
+      : Object.entries(stages ?? {}).map(([id, raw]) => {
+        const stage = raw && typeof raw === 'object' ? raw as JsonObject : undefined;
+        const gate = stage?.gate ?? (stage?.acceptedFrom && typeof stage.acceptedFrom === 'object' ? (stage.acceptedFrom as JsonObject).verdict : undefined);
+        return [id, gate && typeof gate === 'object' ? gate as JsonObject : undefined];
+      });
+    for (const [gateId, gate] of validationSources) {
       if (!Array.isArray(gate?.validation)) continue;
       for (const result of gate.validation) {
         if (!result || typeof result.role !== 'string') continue;

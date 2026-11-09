@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Same bounded native fc-trial script for base and candidate, no providers.
+"""Historical validation-budget native replay, no providers.
+
+Its pinned base predates this round; use the current regression specs against
+the round base for current before/after claims.
 
 The author-stage default is scaled to 180 seconds in both private engine copies.
 --fixture-load explicitly declares a permissive ceiling with raw host telemetry
@@ -125,9 +128,9 @@ def main():
         passed = completed.returncode == 0 and bool(gate) and author.get('status') == 'complete' and len(validation) == 1
         if validation:
             commands = validation[0]['executions'][0]['commands']
-            passed = passed and any(command.get('unfinished') is True and command['state'] == 'not_measured' for command in commands)
+            passed = passed and any(command.get('unfinished') is True and command['state'] == 'unverified' for command in commands)
             passed = passed and len(validation[0]['executions']) == 1 and validation[0]['pass'] is False
-            if args.shape == 'build-silent': passed = passed and commands[0].get('exitCode') == 2 and commands[0]['state'] == 'failed' and commands[0]['measurement'] == 'measured'
+            if args.shape == 'build-silent': passed = passed and commands[0].get('exitCode') == 2 and commands[0]['state'] == 'failed' and commands[0]['measurement'] == 'unverified'
     facts['proof_passed'] = passed
     (args.evidence / 'proof.json').write_text(json.dumps(facts, indent=2) + '\n')
     # Harness has already retired its own marked children. Retire only our copy.

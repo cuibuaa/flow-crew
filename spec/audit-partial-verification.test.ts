@@ -83,14 +83,8 @@ describe('partial failure evidence audit', () => {
       failureCount: 1,
       reason: expect.stringContaining('partial'),
     });
-    expect(criterion).toMatchObject({
-      rule: 'no_regression_from_baseline',
-      baselineFailureEvidence: 'partial',
-      baselineFailureIdentifiers: [encoded(identifier)],
-      baselineFailureCount: 1,
-      description: expect.stringMatching(/lower bound.*not a proven whole-run count.*unresolved/i),
-    });
-    expect(testDelta(baseline, result)).toMatchObject({ state: 'unresolved' });
+    expect(criterion).toBeUndefined();
+    expect(testDelta(baseline, result)).toMatchObject({ state: 'unverified' });
   });
 
   it('keeps a count-only line unknown without a permitted identity owner', async () => {
@@ -197,11 +191,11 @@ describe('partial failure evidence audit', () => {
       });
       expect(result.failureCount, fixture.label).toBeUndefined();
       expect(result.failureEvidence, fixture.label).toBeUndefined();
-      expect(criterion?.description, fixture.label).toContain(result.reason);
+      expect(criterion, fixture.label).toBeUndefined();
     }
   });
 
-  it('preserves decisive transitions and refuses every red-to-red partial comparison', async () => {
+  it('records every partial or complete red result as unverified without a causal comparison', async () => {
     const partialBaseline = await baselineFor({
       exitCode: 1,
       stdout: '[... 64 earlier bytes omitted ...]\nFAIL spec/existing.test.ts\nTests 1 failed',
@@ -227,38 +221,14 @@ describe('partial failure evidence audit', () => {
       failureIdentifiers: [], failureIdentity: 'none',
     };
 
-    expect(testDelta(partialBaseline, completeNew)).toMatchObject({ state: 'unresolved' });
-    expect(testDelta(completeBaseline, partialCurrent)).toMatchObject({ state: 'unresolved' });
-    expect(testDelta(unknownBaseline, completeNew)).toMatchObject({
-      state: 'unresolved', reason: 'Baseline failure identity/count was unavailable',
-    });
-    expect(testDelta(unknownBaseline, testResult(unknownBaseline))).toMatchObject({
-      state: 'unresolved',
-    });
-    const unlaunched: ValidationCommandResult = {
-      role: 'test', state: 'launch_error', exitCode: 127, durationMs: 1, output: 'sh: karma: not found',
-      failureIdentifiers: [], failureIdentity: 'unknown',
-    };
-    const unlaunchedBaseline = { ...unknownBaseline, results: [unlaunched] };
-    expect(testDelta(unlaunchedBaseline, unlaunched)).toMatchObject({ state: 'unresolved' });
-    expect(testDelta(unlaunchedBaseline, passed)).toMatchObject({ state: 'pass' });
-    expect(testDelta(unlaunchedBaseline, completeNew)).toMatchObject({ state: 'unresolved', reason: 'Baseline was not executable/configured' });
-    expect(testDelta(greenBaseline, unlaunched)).toMatchObject({ state: 'unresolved' });
-    expect(testDelta(completeBaseline, testResult(unknownBaseline))).toMatchObject({
-      state: 'unresolved', reason: 'Current failure identity/count is unavailable',
-    });
-    expect(testDelta(completeBaseline, completeSame)).toMatchObject({ state: 'pass' });
-    expect(testDelta(completeBaseline, completeNew)).toMatchObject({
-      state: 'regression', newFailureIdentifiers: [encoded('spec/new.test.ts')],
-    });
-    expect(testDelta(completeBaseline, completeCountIncrease)).toMatchObject({
-      state: 'regression', reason: 'Known failure count increased',
-    });
-    expect(testDelta(greenBaseline, partialCurrent)).toMatchObject({
-      state: 'regression',
-      reason: 'A green baseline no longer passes',
-    });
-    expect(testDelta(partialBaseline, passed)).toMatchObject({ state: 'pass' });
+    const unlaunched = { role: 'test' as const, state: 'failed' as const, exitCode: 127, durationMs: 1,
+      output: 'sh: karma: not found', failureIdentifiers: [], failureIdentity: 'unknown' as const };
+    for (const base of [partialBaseline, completeBaseline, unknownBaseline, greenBaseline, { ...unknownBaseline, results: [unlaunched] }]) {
+      for (const current of [partialCurrent, completeSame, completeNew, completeCountIncrease, unlaunched, testResult(unknownBaseline)]) {
+        expect(testDelta(base, current)).toMatchObject({ state: 'unverified', newFailureIdentifiers: [] });
+      }
+      expect(testDelta(base, passed)).toMatchObject({ state: 'verified' });
+    }
   });
 
   it('round-trips partial and legacy records while rejecting inconsistent completeness', async () => {
@@ -293,11 +263,14 @@ describe('partial failure evidence audit', () => {
 
     const legacy = structuredClone(partial);
     delete testResult(legacy).failureEvidence;
-    delete legacy.gateCriteria.find(({ role }) => role === 'test')?.baselineFailureEvidence;
+    // Older receipts carried causal criteria; readers retain their consistency
+    // checks without generating these criteria for new facts.
+    legacy.gateCriteria = [{ role: 'test', rule: 'no_regression_from_baseline', baselineFailureIdentifiers: [], description: 'Historical criterion' }];
     writeRecord(legacy);
     expect(readShipSetupReadyValidationBaseline(canonicalProject, brief, globalRoot)).toEqual(legacy);
 
     const mismatch = structuredClone(partial);
+    mismatch.gateCriteria = [{ role: 'test', rule: 'no_regression_from_baseline', baselineFailureIdentifiers: [], description: 'Historical criterion' }];
     const mismatchCriterion = mismatch.gateCriteria.find(({ role }) => role === 'test');
     if (!mismatchCriterion) throw new Error('portable baseline omitted its test criterion');
     mismatchCriterion.baselineFailureEvidence = 'complete';

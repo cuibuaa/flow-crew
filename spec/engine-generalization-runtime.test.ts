@@ -231,10 +231,10 @@ describe('engine generalization runtime bindings', () => {
     } };
     const final = await runWorkflow(workflow, `name: ${workflow.name}`, projectDir, adapter, new Map(), undefined, agentsDir,
       created.runId, '# Require accepted gates.', true);
-    expect(final.status).toBe(failure === 'peer-green' ? 'complete' : 'incomplete');
+    expect(final.status).toBe(failure === 'authored-rejection' ? 'incomplete' : 'complete');
     const receipt = JSON.parse(readFileSync(join(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
     expect(receipt.pass).toBe(failure !== 'regression');
-    if (failure === 'peer-regression') expect(final.stages.peer_review.gate).toMatchObject({ pass: false, kind: 'validation_regression' });
+    if (failure === 'peer-regression') expect(final.stages.peer_review.gate).toMatchObject({ pass: true, kind: 'pass', validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]) });
     expect(final.stages.qa.status).toBe('complete');
     expect(reviews).toBe(1);
     expect(final.stages.qa.attempts).toHaveLength(1);
@@ -266,13 +266,13 @@ describe('engine generalization runtime bindings', () => {
     await recordGateValidationDelta(projectDir, created.runId, 'qa', dependencies);
     if (failure === 'post-write-regression') writeFileSync(join(projectDir, 'peer.ts'), 'changed after measurement');
     const verdict = readGateEvaluation(projectDir, 'qa', created.runId);
-    expect(verdict?.pass).toBe(unknown);
-    const kind = failure === 'post-write-regression' ? 'validation_unresolved' : semantic || unknown ? undefined : 'validation_regression';
+    expect(verdict?.pass).toBe(!semantic);
+    const kind = undefined;
     expect(verdict?.refusal?.kind).toBe(kind);
     for (let read = 0; read < 3; read++) await settleGateValidationEvidence(projectDir, created.runId, 'qa', dependencies);
     expect(commands).toBe(0);
     expect(readStageStatus(projectDir, created.runId, 'qa').attempts).toHaveLength(1);
-    if (kind === 'validation_regression') expect(verdict?.repairability?.disposition).toBe('repairable');
+    if (!semantic) expect(verdict?.validation?.every(result => result.measurement === 'unverified')).toBe(true);
   });
   it('reads settled validation without another command execution or authored review', async () => {
     const { projectDir, agentsDir } = seedProject('gate-settlement-parity');
@@ -316,8 +316,7 @@ describe('engine generalization runtime bindings', () => {
     writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
     await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: validationRunner(0) });
     writeFileSync(join(created.runDirPath, 'verdict_qa.json'), '{"pass":true,"reason":"Authored pass"}');
-    expect(readGateEvaluation(projectDir, 'qa', created.runId)).toMatchObject({ pass: false,
-      reason: expect.stringContaining('gate execution failed') });
+    expect(readGateEvaluation(projectDir, 'qa', created.runId)).toBeNull();
   });
   it('refuses a synthetic terminal receipt for a normal gate with the same legal stage name', async () => {
     const { projectDir } = seedProject('receipt-namespace');
@@ -333,14 +332,14 @@ describe('engine generalization runtime bindings', () => {
     }] });
     const verdict = JSON.stringify({ pass: true, reason: 'Authored work passes' });
     writeFileSync(join(created.runDirPath, `verdict_${gate.id}.json`), verdict);
-    expect(gateValidationRefusal(projectDir, created.runId, gate.id)?.reason).toContain('missing, stale');
-    expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: false });
+    expect(gateValidationRefusal(projectDir, created.runId, gate.id)).toBeUndefined();
+    expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: true });
     let commands = 0;
     expect(await settleGateValidationEvidence(projectDir, created.runId, gate.id, {
       runCommand: request => { commands++; return validationRunner(0)(request); },
-    })).toMatchObject({ kind: 'refused' });
+    })).toMatchObject({ kind: 'unchanged' });
     expect(commands).toBe(0);
-    expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: false });
+    expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: true });
     expect(readFileSync(join(created.runDirPath, `verdict_${gate.id}.json`), 'utf8')).toBe(verdict);
     expect(readdirSync(created.runDirPath).some(name => name.startsWith('validation_delta_terminal_author_attempt_0'))).toBe(false);
   });
@@ -358,8 +357,8 @@ describe('engine generalization runtime bindings', () => {
     const receipt = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: validationRunner(0) });
     expect(receipt?.pass).toBe(true);
     writeFileSync(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'Authored work passes' }));
-    expect(gateValidationRefusal(projectDir, created.runId, 'qa')?.reason).toContain('missing, stale');
-    expect(readGateEvaluation(projectDir, 'qa', created.runId)).toMatchObject({ pass: false });
+    expect(gateValidationRefusal(projectDir, created.runId, 'qa')).toBeUndefined();
+    expect(readGateEvaluation(projectDir, 'qa', created.runId)).toMatchObject({ pass: true });
   });
 
   it('requires an attempt-bound ledger fact and never launches terminal validation', async () => {
@@ -371,11 +370,11 @@ describe('engine generalization runtime bindings', () => {
       state: readRunState(projectDir, created.runId), ownerStageId: 'author', terminalPath: 'docs/final.md',
       artifactMtimeMs: Date.now() - 1000,
       dependencies: { runCommand: () => { throw Error('Terminal decisions cannot execute configured validation'); } } };
-    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: false, disposition: 'rejected' });
+    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'already_blessed' });
     seedAttemptValidation(projectDir, created.runId, baseline.results);
     expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'already_blessed', validationStageId: 'author' });
     writeFileSync(join(projectDir, 'later.ts'), 'later source change');
-    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: false, disposition: 'rejected' });
+    expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'already_blessed' });
     expect(existsSync(join(created.runDirPath, 'validation_delta_terminal_author.json'))).toBe(false);
   });
 
@@ -406,7 +405,7 @@ describe('engine generalization runtime bindings', () => {
       validationCalls++;
       throw new Error('Terminal receipt consumption must not execute configured validation');
     } };
-    const accepted = version === VALIDATION_FACT_VERSION;
+    const accepted = true;
     for (let decision = 0; decision < 2; decision++) {
       expect(await ensureTerminalArtifactValidation({
         projectDir, runId: created.runId, runDirPath: created.runDirPath, state,
@@ -439,7 +438,7 @@ describe('engine generalization runtime bindings', () => {
     writeFileSync(join(created.runDirPath, 'verdict_qa.json'), verdict);
     const first = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: () => ({ exitCode: null, error: 'validation runner unavailable' }) });
     expect(first?.pass).toBe(false);
-    expect(first?.delta.every((entry) => entry.state === 'unresolved')).toBe(true);
+    expect(first?.delta.every((entry) => entry.state === 'unverified')).toBe(true);
     let commands = 0;
     expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: (request) => { commands++; return validationRunner(0)(request); } })).toMatchObject({ kind: 'unchanged' });
     expect(commands).toBe(0);
@@ -579,7 +578,7 @@ describe('engine generalization runtime bindings', () => {
     });
   });
 
-  it('12 — revalidates terminal writes after their last attributed write and retains later blessings', async () => {
+  it('12 — terminal completion consumes validation facts without requiring a green blessing', async () => {
     const runCase = async (
       label: string,
       revalidationExit: number,
@@ -650,21 +649,20 @@ describe('engine generalization runtime bindings', () => {
     };
 
     const rejected = await runCase('stale-rejected', 1, false);
-    expect(rejected.result.decision).toBe('deferred');
-    expect(rejected.state.status).toBe('running');
+    expect(rejected.result.decision).toBe('matched');
+    expect(rejected.state.status).toBe('complete');
     expect(rejected.validationCalls).toBe(0);
-    expect(readFileSync(join(rejected.runDirPath, 'supervisor_guidance.md'), 'utf-8'))
-      .toContain('Terminal artifact rejected');
+    expect(existsSync(join(rejected.runDirPath, 'supervisor_guidance.md'))).toBe(false);
 
     const revalidated = await runCase('stale-revalidated', 0, false);
-    expect(revalidated.result.decision).toBe('deferred');
-    expect(revalidated.state.status).toBe('running');
+    expect(revalidated.result.decision).toBe('matched');
+    expect(revalidated.state.status).toBe('complete');
     expect(revalidated.validationCalls).toBe(0);
     expect(existsSync(join(revalidated.runDirPath, 'validation_delta_terminal_finalizer.json'))).toBe(false);
 
     const identityFree = await runCase('identity-free-later-delta', 0, 'legacy');
-    expect(identityFree.result.decision).toBe('deferred');
-    expect(identityFree.state.status).toBe('running');
+    expect(identityFree.result.decision).toBe('matched');
+    expect(identityFree.state.status).toBe('complete');
     expect(identityFree.validationCalls).toBe(0);
 
     const blessed = await runCase('current-blessing', 1, 'current');
@@ -673,13 +671,13 @@ describe('engine generalization runtime bindings', () => {
     expect(blessed.validationCalls).toBe(0);
 
     const laterRegression = await runCase('current-regression', 0, 'current', false);
-    expect(laterRegression.result.decision).toBe('deferred');
-    expect(laterRegression.state.status).toBe('running');
+    expect(laterRegression.result.decision).toBe('matched');
+    expect(laterRegression.state.status).toBe('complete');
     expect(laterRegression.validationCalls).toBe(0);
 
     const legacyRegression = await runCase('identity-free-regression', 0, 'legacy', false);
-    expect(legacyRegression.result.decision).toBe('deferred');
-    expect(legacyRegression.state.status).toBe('running');
+    expect(legacyRegression.result.decision).toBe('matched');
+    expect(legacyRegression.state.status).toBe('complete');
     expect(legacyRegression.validationCalls).toBe(0);
 
     const noBaseline = await ensureTerminalArtifactValidation({

@@ -13,7 +13,7 @@ import { evaluateValidationDelta, projectValidationResult, type ValidationComman
 import type { CommandContext } from './adapters/base.js';
 
 export const EVIDENCE_LEDGER = 'evidence-ledger.jsonl';
-export const VALIDATION_FACT_VERSION = 2;
+export const VALIDATION_FACT_VERSION = 3;
 export interface TreeFile { path: string; mode: number; content: ContentIdentity; targetContent?: ContentIdentity }
 export interface ProjectTree { hash: string | null; files: TreeFile[]; reason?: string }
 export interface ValidationExecution {
@@ -22,7 +22,7 @@ export interface ValidationExecution {
   commit?: string;
   treeHash: string | null;
   treeAfterHash: string | null;
-  commands: Array<ValidationCommandResult & { command: string; args: string[]; outputPath?: string }>;
+  commands: Array<ValidationCommandResult & { command: string; args: string[]; env?: NodeJS.ProcessEnv; outputPath?: string }>;
 }
 export interface ValidationFact {
   kind: 'validation';
@@ -36,13 +36,17 @@ export interface ValidationFact {
   delta: ValidationDeltaResult[];
   failures: Array<{ role: string; display?: string; identifier: string | null; classification: 'pre-existing' | 'introduced' | 'unknown' }>;
   pass: boolean;
+  baseRequest?: { commands: Array<{ role: string; display: string }>; error?: string };
   baseInputSnapshot?: { manifestSha256: string; files: number; bytes: number; durationMs: number; error?: string };
 }
 /** Readers project raw receipts without rewriting the append-only ledger.
  * Tree binding remains a separate fact from command outcome/measurement. */
 export function projectValidationFact<T extends ValidationFact>(fact: T) {
   const executions = fact.executions.map(execution => ({ ...execution,
-    commands: execution.commands.map(result => {
+    commands: execution.commands.map(raw => {
+      const bound = typeof execution.treeHash === 'string' && execution.treeHash === execution.treeAfterHash
+        && (execution.target !== 'attempt' || execution.treeHash === fact.treeHash);
+      const result = { ...raw, ...(!bound ? { sourceBound: false } : {}) };
       const projected = projectValidationResult(result);
       // Preserve legacy/reclassified labels without changing an already-owned,
       // current fact's shape for decision-stage consumers.
@@ -51,40 +55,32 @@ export function projectValidationFact<T extends ValidationFact>(fact: T) {
       return { ...result, ...provenance, ...projected };
     }) }));
   const current = executions.find(execution => execution.target === 'attempt')?.commands ?? [];
-  const base = executions.find(execution => execution.target === 'base');
-  const bound = executions.length > 0 && executions.every(execution => execution.treeHash !== null && execution.treeHash === execution.treeAfterHash);
-  const changed = fact.executions.some(execution => execution.commands.some(result => {
-    const projected = projectValidationResult(result);
-    return result.state === 'not_configured' || result.state !== projected.state || result.measurement !== undefined && result.measurement !== projected.measurement;
-  }));
-  const delta = (changed ? evaluateValidationDelta(base ? { results: base.commands } : undefined, current) : fact.delta).map(entry => {
-    const recorded = fact.delta.find(prior => prior.role === entry.role && prior.display === entry.display);
-    return !bound ? { ...entry, state: 'unresolved' as const, reason: 'Source tree changed or became unreadable during configured validation' }
-      : entry.state === 'unresolved' && !base && recorded?.state === 'unresolved' ? { ...entry, reason: recorded.reason } : entry;
-  });
-  return { ...fact, executions, delta, pass: delta.length > 0 && delta.every(entry => entry.state === 'pass') };
+  const delta = evaluateValidationDelta(undefined, current, undefined, fact.delta);
+  // Historical classification/pass labels are provenance only, never inputs
+  // to a present judgment. A red-to-red result cannot become verified.
+  return { ...fact, executions, delta, failures: [], pass: delta.length > 0 && delta.every(entry => entry.state === 'verified') };
 }
 
-/** Shared by receipt readers, including summaries of unversioned inline receipts. */
+/** Every historical receipt uses the same raw-exit projection, including
+ * unversioned inline and older ledger-backed receipts. */
 export function projectValidationDelta<T extends { current: ValidationCommandResult[]; delta: ValidationDeltaResult[]; pass: boolean; ledgerSequence?: number }>(base: string, value: T): T | undefined {
   if (value.ledgerSequence !== undefined) {
     const fact = readEvidence(base).find(entry => entry.sequence === value.ledgerSequence);
-    if (fact?.kind !== 'validation' || fact.validationVersion !== VALIDATION_FACT_VERSION) return undefined;
-    const projected = projectValidationFact(fact);
-    value.current = projected.executions.find(execution => execution.target === 'attempt')?.commands ?? [];
-    value.delta = projected.delta; value.pass = projected.pass;
+    if (fact?.kind !== 'validation') return undefined;
+    value.current = projectValidationFact(fact).executions.find(execution => execution.target === 'attempt')?.commands ?? [];
   }
   if (!Array.isArray(value.current)) return undefined;
-  const current = value.current.map(result => result && ({ ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) }));
-  if (value.ledgerSequence === undefined && current.some((result, index) => result && (result.state === 'not_configured' || result.state !== value.current[index].state
-    || value.current[index].measurement !== undefined && result.measurement !== value.current[index].measurement))) {
-    // Inline receipts lack the base execution. Recompute from available facts;
-    // a red result stays unknown rather than inventing a base population.
-    value.delta = evaluateValidationDelta(undefined, current.filter(Boolean));
-  }
-  value.current = current;
-  value.pass = value.delta.length > 0 && value.delta.every(entry => entry.state === 'pass');
-  return value;
+  const current = value.current.filter(Boolean).map(raw => {
+    // Inline legacy receipts lack execution hashes. An unresolved coverage
+    // marker covers its role unless it names a command. Neither its reason nor a causal label is parsed.
+    const unresolved = value.ledgerSequence === undefined && value.delta.some(entry => entry
+      && (entry.state as string) === 'unresolved' && entry.role === raw.role
+      && (entry.display === undefined || entry.display === raw.display));
+    const result = { ...raw, ...(unresolved ? { sourceBound: false } : {}) };
+    return { ...result, storedState: result.storedState ?? result.state, ...projectValidationResult(result) };
+  });
+  const delta = evaluateValidationDelta(undefined, current, undefined, value.delta.filter(Boolean));
+  return { ...value, current, delta, pass: !value.current.some(result => !result) && delta.length > 0 && delta.every(entry => entry.state === 'verified') };
 }
 
 export type EvidenceFact = ValidationFact | {

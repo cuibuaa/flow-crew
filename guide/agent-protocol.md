@@ -229,30 +229,53 @@ A reviewed author's `blocked` answer settles for the gate to confirm or reject; 
 blocked answer fails its stage. A pass still requires every assigned brief criterion, including
 any explicitly permitted negative/blocked report outcome.
 
-Configured validation belongs to the author/repair boundary, never the gate. A batch
-spends at most the smaller of `validation_timeout_ms` (60 seconds by default) and the
-remaining author budget, including any base comparison. Owned commands are retired on
-expiry even when silent. Settlement does not wait for inherited output pipes to close:
-deadline/abort closes the local streams and records an unfinished command. Linux command
-ownership retains observed descendants by ancestry and start token, including detached workers;
-other platforms retain process-group/direct-child retirement. Completed
-author output and earlier command exits survive. Unfinished and unstarted commands are
-explicitly `not_measured`, with `unfinished: true`, never a green exit or a green comparison.
-The independent gate has its own budget and decides acceptance from these facts.
+Configured validation records facts at successful author/repair settlement. One batch per
+source tree spends at most the smaller of `validation_timeout_ms` (60 seconds by default)
+and the author's remaining budget. Each command receives an equal share of the remaining
+batch time, so a hung build cannot consume the test allowance. If the author has already
+spent its entire budget, commands remain explicitly unrun; a very small allowance may
+expire before useful work. Source binding, integrity setup and cleanup also spend
+batch time. Synchronous filesystem work can delay deadline delivery and leave later
+commands unrun; a subprocess's share does not reserve filesystem throughput. These
+commands stay unverified. Shares apply to selected commands: if a declaration
+combines a build and tests inside one opaque shell program, the engine cannot
+reserve a separate allowance for its inner tests without parsing that program.
+No separate stall detector or load wait runs. Owned commands
+are retired on expiry, including inherited pipes, using the existing process owner.
 
-A tree gets at most one configured batch per run. Matching unchanged trees reuse the
-append-only fact, including uncertain results; writes invalidate coverage. Only measured
-final failures trigger an isolated base comparison, and only those failed commands run
-there. A passing final command is independent of unrelated base failures. A complete
-structured red-to-red comparison can confirm new stable failure IDs; a green-to-red
-command transition can establish introduction by exits. Partial/malformed identities stay
-unknown. Only confirmed independent findings authorize the existing repair path.
-Source and execution binding, isolated command environments, declared report freshness
-and base-input restoration remain mechanical guarantees. Readers preserve raw exits,
-errors and host-load facts and project their meaning without rewriting the ledger.
+Facts include exact executable/argv and the declared non-secret environment map, raw exit (null when absent), bounded output, duration,
+and start/end load. Unavailable load samples are `null` and never discard the command exit. Load is telemetry only. The three raw result states are passed, failed,
+and unverified (unfinished or no completed exit). Coverage is verified only for a completed
+exit 0 without a runner error and with source binding intact; every failed, unfinished or unrun command is unverified.
+Historical receipts retain execution-tree binding, and unresolved inline coverage stays unverified when hashes are unavailable.
+Projection never rewrites stored records. Typed engine-integrity violations still void execution; optional telemetry cannot swallow them.
 
-Projects may declare validation argv and reporters in `config/validation.json`, using
-the same `{commands: {build|test|lint: {command, args, report?}}}` declaration as brief
+The independent gate alone decides causation. Its optional `validation_review` has exactly
+`commands` and `request_base` arrays. Each disposition names an exact role/display and has
+`disposition: caused_by_change|already_failing|environment|unknown` plus a reason. Missing,
+invalid, duplicate or unrelated dispositions leave the command unknown and unverified.
+A `caused_by_change` disposition blocks acceptance; the existing independently reproduced,
+confirmed-finding rule still governs repair admission. A base pass or new reporter ID never
+establishes causation in code.
+
+Only a valid gate `request_base: [{role, display}]` obtains base evidence for unverified
+commands. The engine runs one bounded base batch in an isolated checkout, then returns its
+facts to the same gate attempt for a final verdict. Unavailable base evidence remains unknown;
+no automatic base execution, repeated batch or rule fallback occurs. The gate remains read-only
+with scope `[]`; preparation belongs to declared commands, with no engine-invented dependency
+install. Reusing a tree's facts avoids repeating installs in later stages.
+
+Accepted runs with any unverified command keep that label in gate inputs, run.json and reports;
+validation uncertainty alone neither rejects review nor ends a run incomplete.
+
+Declare project isolation inputs in each command's `env` map (or preserve them in
+the explicitly selected executable/argv). The engine overlays that map on ordinary
+inherited inputs and records it beside argv. If an explicit variable would be
+suppressed by control/credential isolation, the command stays unrun and unverified;
+the engine never silently executes with that variable missing. Do not declare secrets.
+
+Projects may declare validation argv, non-secret environment inputs and reporters in `config/validation.json`, using
+the same `{commands: {build|test|lint: {command, args, env?, report?}}}` declaration as brief
 frontmatter. Project declarations take
 precedence over overlapping brief declarations. An invalid project declaration refuses
 selection before execution; it never silently guesses another command. A report is declared as
@@ -261,10 +284,10 @@ stdout is JSON alone. File reports must be freshly written, remain within the pr
 and fit the 1 MiB evidence bound. Valid, exit-consistent exhaustive reports own failure
 identity even when stdout or stderr also carries human diagnostics. Incomplete suite,
 snapshot or global-error populations remain partial; malformed or exit-inconsistent
-reports remain unknown, without model fallback. Without a declared reporter, failure identity remains unknown. No model or text parser
-classifies introduction from arbitrary logs. Without any command declaration, the author
+reports remain unknown, without model fallback. Without a declared reporter, failure identity remains unknown. Only the independent gate model judges causation from logs and the diff; no code parser
+classifies introduction. Without any command declaration, the author
 model reads the repository and chooses commands via `ValidationSelectionSchema` in its existing result; an empty
-or invalid selection is explicitly unmeasured, with no discovery fallback.
+or invalid selection is explicitly unverified, with no discovery fallback.
 This repository declares its test reporter in `config/validation.json`; the reporter
 uses Vitest's structured global-error and completion facts to declare completeness.
 

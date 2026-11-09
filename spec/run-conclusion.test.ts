@@ -65,7 +65,7 @@ function settledReview(status: 'complete' | 'failed', extra: object = {}) {
 }
 
 describe('terminal conclusions from settled evidence', () => {
-  it('reports validation_unresolved for the eaf119 review exit 1 instead of bounded attempts', async () => {
+  it('does not give unknown validation a separate terminal failure route', async () => {
     settledReview('failed');
     writeFileSync(join(directory, 'verdict_review.json'), JSON.stringify({ pass: true }));
     const baseline = '{}\n';
@@ -78,7 +78,7 @@ describe('terminal conclusions from settled evidence', () => {
       current: [], delta: [{ role: 'test', state: 'unresolved', reason: 'vitest ENOENT; failure identity/count is unavailable', newFailureIdentifiers: [] }],
     }));
     const state = await finishIteration();
-    expect(state).toMatchObject({ status: 'incomplete', reasonCode: 'validation_unresolved' });
+    expect(state).toMatchObject({ status: 'incomplete', reasonCode: 'bounded_attempts' });
     expectOwnerConclusion('incomplete');
   });
 

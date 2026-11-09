@@ -4,14 +4,12 @@ import { concludeRun } from '../sched_policy/run-completion.js';
 import { StageConfig } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
 import { observeStableBlockage } from '../sched_policy/guidance.js';
-import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { isTerminalStatus } from '../sched_policy/identity.js';
 import { allDone, anyFailed } from '../sched_scope/stage-group.js';
 import { guardPlainCompletionWithStageObligations, reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { archiveRejectedGateRuntimeFacts, canonicalGateRoundArtifactDir, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
 import { loadGateContract } from '../sched_settlement/gate-contract.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
-import { closedGateValidationExecution, readValidationDelta, validationDeltaMatchesExecution } from '../sched_settlement/gate-validation.js';
 import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isPendingStageStatus, runDir, writeStageStatus } from '../../store.js';
 import { createResearchBudgetFinalizer } from './research-terminal.js';
@@ -244,15 +242,8 @@ export async function concludeWorkflowIteration(
       const failedStages = Object.values(state.stages).filter(stage => stage.status === STAGE_STATUS.FAILED);
       const providerRefused = failedStages.some(stage => stage.attempts?.at(-1)?.providerFailure?.kind === 'refusal'
         || stage.providerFailure?.kind === 'refusal');
-      const validationUnresolved = sorted.filter(stage => stage.is_gate).some(stage => {
-        const receipt = readValidationDelta(join(runDirPath, `validation_delta_${stage.id}.json`));
-        const baselinePath = join(runDirPath, RUN_VALIDATION_BASELINE_FILE);
-        return receipt?.stageId === stage.id && validationDeltaMatchesExecution(receipt, closedGateValidationExecution(projectDir, runId, stage.id))
-          && existsSync(baselinePath) && receipt.baselineSha256 === createHash('sha256').update(readFileSync(baselinePath)).digest('hex')
-          && receipt.delta.some(entry => entry.state === 'unresolved');
-      });
       state = await concludeRun(state, { status: RUN_STATUS.INCOMPLETE,
-        reasonCode: providerRefused ? 'provider_refusal' : validationUnresolved ? 'validation_unresolved' : 'bounded_attempts',
+        reasonCode: providerRefused ? 'provider_refusal' : 'bounded_attempts',
         detail, eventFields: () => ({ iteration, detail: state.status }), writeCampaignEntry });
       log.info({ runId, iteration }, 'Admitted stage and repair attempts exhausted, run incomplete');
       return { kind: 'settled', state };

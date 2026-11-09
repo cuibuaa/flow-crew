@@ -154,7 +154,13 @@ describe('configuration-driven project validation baseline', () => {
     }
     const runner = vi.fn(() => ({ exitCode: 0 }));
     const skipped = await runProjectValidationBaseline(root, { fs, skipExecution: true, runCommand: runner });
-    expect(skipped.execution).toBe('skipped'); expect(skipped.results[0].state).toBe('unresolved'); expect(runner).not.toHaveBeenCalled();
+    expect(skipped.execution).toBe('skipped'); expect(skipped.results[0].state).toBe('unverified'); expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('refuses conflicting declared environments instead of executing a bare command', () => {
+    const fs = memoryFs({ [join(root, 'config/validation.json')]: JSON.stringify({ commands: { test: { command: 'check', args: [], env: { PROJECT_STATE: '/workspace/private' } } } }) });
+    const result = reconcileProjectValidation(root, [{ role: 'test', command: 'check', args: [], evidencePath: 'brief#test' }], fs);
+    expect(result).toMatchObject({ state: 'unknown', commands: [], reason: expect.stringContaining('environment conflict') });
   });
 
   it.each([null, {}, { commands: { deploy: { command: 'deploy', args: [] } } }, { commands: { test: { command: 'check', args: 'not argv' } } }])('refuses invalid project declarations without a discovery fallback (%j)', async declaration => {
@@ -162,13 +168,13 @@ describe('configuration-driven project validation baseline', () => {
     await expect(runProjectValidationBaseline(root, { fs })).rejects.toThrow('Invalid');
   });
 
-  it('keeps launch errors and exit 127 unknown with explicit provenance', async () => {
+  it('records exit 127 and absent exits without an environment diagnosis', async () => {
     for (const response of [{ exitCode: 127 }, { exitCode: null, error: 'not available' }]) {
       const measured = await runProjectValidationBaseline(root, { fs: memoryFs({}),
         declaredCommands: [{ role: 'test', command: 'missing', args: [], evidencePath: 'brief#test' }], runCommand: () => response });
-      expect(measured.results[0]).toMatchObject({ state: 'launch_error', failureIdentity: 'unknown' });
+      expect(measured.results[0]).toMatchObject({ state: response.exitCode === null ? 'unverified' : 'failed', failureIdentity: 'unknown' });
       expect(measured.discovery.commands[0].provenance).toEqual({ source: 'brief', evidencePath: 'brief#test' });
-      expect(evaluateValidationDelta(measured, measured.results)[0].state).toBe('unresolved');
+      expect(evaluateValidationDelta(measured, measured.results)[0].state).toBe('unverified');
     }
   });
 
@@ -190,13 +196,13 @@ describe('configuration-driven project validation baseline', () => {
     } satisfies ProjectValidationBaseline;
 
     const unchanged = evaluateValidationDelta(baseline, [unconfigured('build'), red, unconfigured('lint')]);
-    expect(unchanged.map((entry) => entry.state)).toEqual(['not_measured', 'pass', 'not_measured']);
+    expect(unchanged.map((entry) => entry.state)).toEqual(['unverified', 'unverified', 'unverified']);
 
     const launchError = evaluateValidationDelta(baseline, [{ ...unconfigured('build'), state: 'launch_error' }, red, unconfigured('lint')]);
-    expect(launchError.find((entry) => entry.role === 'build')?.state).toBe('unresolved');
+    expect(launchError.find((entry) => entry.role === 'build')?.state).toBe('unverified');
   });
 
-  it('states absent roles as unmeasured, refuses receipt reuse after peer writes, and keeps command launch errors unresolved', async () => {
+  it('states absent roles and launch gaps as unverified and refuses stale receipt bindings', async () => {
     const roles = ['build', 'test', 'lint'] as const;
     const absent = (role: typeof roles[number]): ValidationCommandResult => ({
       role, state: 'not_configured', durationMs: 0, output: '',
@@ -210,7 +216,7 @@ describe('configuration-driven project validation baseline', () => {
       gateCriteria: [],
     } satisfies ProjectValidationBaseline;
     expect(evaluateValidationDelta(baseline, roles.map(absent)).map((entry) => entry.state))
-      .toEqual(['not_measured', 'not_measured', 'not_measured']);
+      .toEqual(['unverified', 'unverified', 'unverified']);
     const projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-validation-control-'));
     try {
       writeFileSync(join(projectDir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': {} } }));
@@ -241,16 +247,16 @@ describe('configuration-driven project validation baseline', () => {
         expect(configuredBaseline.results.find((result) => result.role === role))
           .toMatchObject({ state: 'passed', exitCode: 0 });
         expect(current.results.find((result) => result.role === role))
-          .toMatchObject({ state: 'launch_error', exitCode: 127 });
+          .toMatchObject({ state: 'failed', exitCode: 127 });
         expect(evaluateValidationDelta(configuredBaseline, current.results, undefined, current.discovery.commands).map((entry) => entry.state))
-          .toEqual(['unresolved']);
+          .toEqual(['unverified']);
       }
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }
   });
 
-  it('evaluates green and known-red baselines as deltas in both directions', () => {
+  it('projects raw exits without deciding causation from green or known-red bases', () => {
     const result = (
       role: 'build' | 'test' | 'lint',
       state: ValidationCommandResult['state'],
@@ -281,7 +287,7 @@ describe('configuration-driven project validation baseline', () => {
     const improved = evaluateValidationDelta(baseline, [
       result('build', 'passed'), result('test', 'passed'), result('lint', 'passed'),
     ]);
-    expect(improved.every((entry) => entry.state === 'pass')).toBe(true);
+    expect(improved.every((entry) => entry.state === 'verified')).toBe(true);
 
     const unchangedRed = evaluateValidationDelta(baseline, [
       result('build', 'passed'),
@@ -289,7 +295,7 @@ describe('configuration-driven project validation baseline', () => {
       result('lint', 'passed'),
     ]);
     expect(unchangedRed.find((entry) => entry.role === 'test')).toMatchObject({
-      state: 'pass', newFailureIdentifiers: [],
+      state: 'unverified', newFailureIdentifiers: [],
     });
 
     const regressed = evaluateValidationDelta(baseline, [
@@ -298,19 +304,19 @@ describe('configuration-driven project validation baseline', () => {
       result('lint', 'passed'),
     ]);
     expect(regressed).toContainEqual(expect.objectContaining({
-      role: 'build', state: 'regression', reason: expect.stringContaining('green'),
+      role: 'build', state: 'unverified', reason: expect.stringContaining('gate owns disposition'),
     }));
     expect(regressed).toContainEqual(expect.objectContaining({
-      role: 'test', state: 'regression', newFailureIdentifiers: ['spec/new.test.ts'],
+      role: 'test', state: 'unverified', newFailureIdentifiers: [],
     }));
   });
 
-  it('keeps red-to-red comparison sensitive to declared new IDs at the same failure count', async () => {
+  it('keeps red-to-red failures unverified even with different declared IDs', async () => {
     const measure = (id: string) => runProjectValidationBaseline(root, {
       commands: [{ role: 'test', command: 'check', args: [], display: 'check', report: { format: 'vitest-json' } }],
       runCommand: () => ({ exitCode: 1, stdout: validationReport([id]) }) });
     const baseline = await measure('old');
-    expect(evaluateValidationDelta(baseline, (await measure('new')).results)[0].state).toBe('regression');
+    expect(evaluateValidationDelta(baseline, (await measure('new')).results)[0].state).toBe('unverified');
   });
 
   it('keeps an unparseable red baseline unresolved rather than treating it as zero failures', async () => {
@@ -330,10 +336,7 @@ describe('configuration-driven project validation baseline', () => {
     });
     if (!test?.reason) throw new Error('unknown failure cause was not recorded');
     expect(test?.failureCount).toBeUndefined();
-    expect(baseline.gateCriteria.find((entry) => entry.role === 'test')).toMatchObject({
-      rule: 'no_regression_from_baseline',
-      description: expect.stringContaining(test.reason),
-    });
+    expect(baseline.gateCriteria).toEqual([]);
   });
 
   it('keeps incidental output opaque while declared structured totals own identity', async () => {
@@ -360,11 +363,11 @@ describe('configuration-driven project validation baseline', () => {
     });
 
     expect(baseline.results).toEqual([
-      expect.objectContaining({ role: 'build', state: 'launch_error', exitCode: 127 }),
-      expect.objectContaining({ role: 'test', state: 'launch_error', exitCode: 127 }),
-      expect.objectContaining({ role: 'lint', state: 'launch_error', exitCode: 127 }),
+      expect.objectContaining({ role: 'build', state: 'failed', exitCode: 127 }),
+      expect.objectContaining({ role: 'test', state: 'failed', exitCode: 127 }),
+      expect.objectContaining({ role: 'lint', state: 'failed', exitCode: 127 }),
     ]);
-    expect(baseline.results.every((result) => result.reason?.includes('could not run'))).toBe(true);
+    expect(baseline.results.every((result) => result.reason?.includes('No declared structured reporter'))).toBe(true);
     expect(baseline.gateCriteria.every((criterion) => criterion.rule === 'baseline_unresolved')).toBe(true);
   });
 });
