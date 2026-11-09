@@ -98,7 +98,8 @@ async function failedLaunchSignalProbe(root: string, mode: 'cancel' | 'hard-stop
   const response = await runValidationCommand({
     role: 'test', command: process.execPath, args: ['--input-type=module', '-e', script],
     cwd: root, display: 'bounded failed-launch signal observation',
-    env: { ...process.env, PATH: bin, HOME: root, USERPROFILE: root, FC_HOME: join(root, 'state') },
+    // The runner owns reserved control settings; declare only the probe's project inputs.
+    env: { PATH: bin, HOME: root, USERPROFILE: root },
   });
   expect(response.exitCode, response.stderr).toBe(0);
   return JSON.parse(response.stdout ?? '') as {

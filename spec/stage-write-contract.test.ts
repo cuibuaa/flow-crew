@@ -66,11 +66,13 @@ describe('stage writes follow the run product contract', () => {
     } };
     const result = await runStage(adapter, stageOptions());
     expect(result.exitCode, result.output).toBe(1);
+    expect(result.friendlyError).toContain('DECLARED_OUTPUT_REMOVED: report.md');
     expect(prompts).toHaveLength(2);
     expect(prompts[0]).toContain('"available":true');
     expect(prompts[1]).toContain('"available":false');
     expect(prompts[1]).not.toContain('"available":true');
-    expect(verdict()?.pass).toBe(false);
+    // The worker failed its product contract; it did not settle a gate verdict.
+    expect(verdict()).toBeNull();
   });
 
   it.each(['deleted', 'wrong-type'] as const)('returns an unarchivable %s product to repair before accepting PASS', kind => {

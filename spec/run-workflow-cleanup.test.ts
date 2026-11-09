@@ -25,7 +25,10 @@ vi.mock('../src/jsonl.js', async importOriginal => ({
 vi.mock('../src/research-candidate.js', () => ({
   rejectPendingResearchGateCandidates: (...args: unknown[]) => { fixture.calls.push('settle'); fixture.reject(...args); },
 }));
-vi.mock('../src/adapters/base.js', () => ({ withRunProcessOwnership: async (_project: string, _run: string, body: () => unknown) => body() }));
+vi.mock('../src/adapters/base.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/adapters/base.js')>(),
+  withRunProcessOwnership: async (_project: string, _run: string, body: () => unknown) => body(),
+}));
 vi.mock('../src/restart-recovery.js', () => ({ captureEngineCheckpoint: () => ({}) }));
 vi.mock('../src/run-lock.js', () => ({
   releaseLaunchIntent: () => { fixture.calls.push('release-intent'); },
