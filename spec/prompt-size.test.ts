@@ -54,6 +54,9 @@ afterEach(() => {
 describe('size-independent adapter prompt delivery', () => {
   it('refuses incomplete handoffs and verdicts using the same schema sent to generation', () => {
     expect(generationCompatibleSchema(HANDOFF_SCHEMA)).toBe(true);
+    const gap = { status: 'environment_gap', summary: 'Unavailable.', caveats: [], remaining_work: [] };
+    expect(() => parseStageRecord(JSON.stringify(gap), HANDOFF_SCHEMA)).toThrow('blocks');
+    expect(parseStageRecord(JSON.stringify({ ...gap, blocks: null }), HANDOFF_SCHEMA)).toMatchObject({ blocks: null });
     expect(() => parseStageRecord('{"status":"delivered"}', HANDOFF_SCHEMA)).toThrow('required');
     const verdict = stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] });
     expect(() => parseStageRecord('{"pass":true,"reason":"accepted"}', verdict)).toThrow('anyOf');

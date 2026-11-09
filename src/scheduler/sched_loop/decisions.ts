@@ -2,7 +2,7 @@ import { concludeRun } from '../sched_policy/run-completion.js';
 import { captureRepairRoundSnapshot, type RepairRoundSnapshot } from '../sched_scope/snapshots.js';
 import { ensureRollbackBaseline } from '../sched_scope/rollback-baseline.js';
 import { topoSort } from '../sched_admission/frontier.js';
-import { stageScopeOwnsPath } from '../sched_admission/dispatch.js';
+import { readEvidence } from '../../evidence-ledger.js';
 import type { AuditFinding } from '../../scoped-audit-repair.js';
 /** Settle declared edges at idle boundaries. All execution uses the ordinary scheduler. */
 import { existsSync, readFileSync } from 'node:fs';
@@ -148,22 +148,25 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     const limit = graph.maxVisits;
     const resumed = destination && isPendingStageStatus(state.stages[target]?.status ?? '') && (state.stages[target]?.attempts?.length ?? 0) > 0;
     const revisiting = Boolean(destination && (state.stages[target]?.attempts?.length || state.stages[target]?.status === STAGE_STATUS.COMPLETE));
-    // Responsibility can exclude a gap author, but overlapping declarations do
-    // not identify the gap or prove independence. Without a structured exclusion
-    // the confirmed predicate alone cannot authorize reopening that author's gap.
-    const gapOwners = source.is_gate && gateAccepted === false ? rejectedFindings.flatMap(finding =>
-      gateReviewedAuthorIds(source, sorted).filter(id => {
-        const author = sorted.find(stage => stage.id === id)!;
-        return state.stages[id]?.attempts?.at(-1)?.endingCause === 'environment_gap'
-          && (!author.criterion_refs?.length || !finding.criterion_ids.length || finding.criterion_ids.some(ref => author.criterion_refs!.includes(ref)))
-          && finding.paths.some(path => stageScopeOwnsPath(author, path));
-      })) : [];
-    const repeatedGap = [target, ...gapOwners]
-      .find(id => state.stages[id]?.attempts?.at(-1)?.endingCause === 'environment_gap');
+    // Gap identity belongs to the report, not the author's responsibility map.
+    const ledger = source.is_gate ? readEvidence(directory) : [];
+    const gaps = source.is_gate ? gateReviewedAuthorIds(source, sorted).flatMap(id => {
+      const attempt = state.stages[id]?.attempts?.at(-1);
+      if (attempt?.endingCause !== 'environment_gap') return [];
+      const fact = ledger.find(entry => entry.kind === 'attempt' && entry.stageId === id
+        && entry.attemptIndex === attempt.index && entry.attemptStartedAt === attempt.startedAt);
+      return [{ id, blocks: fact?.kind === 'attempt' ? fact.environmentGap?.blocks : undefined }];
+    }) : [];
+    const unspecified = gaps.filter(({ blocks }) => !blocks || !blocks.criterion_ids.length && !blocks.paths.length);
+    if (unspecified.length) record.reason += ` Environment gaps without declared blocks: ${unspecified.map(gap => gap.id).join(', ')}; relatedness unknown.`;
+    const repeatedGap = state.stages[target]?.attempts?.at(-1)?.endingCause === 'environment_gap' ? target
+      : gateAccepted === false ? gaps.find(({ blocks }) => blocks && (blocks.criterion_ids.length || blocks.paths.length)
+        && rejectedFindings.some(finding => (!blocks.criterion_ids.length || finding.criterion_ids.some(id => blocks.criterion_ids.includes(id)))
+          && (!blocks.paths.length || finding.paths.some(path => blocks.paths.includes(path)))))?.id : undefined;
     if (repeatedGap || unconfirmedRejection || wallExhausted || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
       || source.decision && destination?.is_gate && (destination.scope === undefined || destination.scope.length !== 0)
       || target !== 'continue' && (revisiting || source.is_gate) && !resumed && used >= limit) {
-      record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; recorded facts do not establish an independent repair; no new attempt authorized. ${choice.reason}` : unconfirmedRejection ? choice.reason : `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${choice.reason}`;
+      record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; no further attempt on that gap authorized. ${record.reason}` : unconfirmedRejection ? record.reason : `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${record.reason}`;
       delete record.successor;
     } else if (target === 'replan') {
       const planner = sorted.find(s => s.dynamic_dispatch);

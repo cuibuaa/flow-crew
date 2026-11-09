@@ -517,8 +517,8 @@ export async function runStage(
   if (attemptValidationPlan && !attemptValidationPlan.baseline.discovery.commands.length && attemptValidationPlan.source !== 'model-selection'
     && opts.outputSchema === HANDOFF_SCHEMA && existsSync(join(opts.runDir, 'task_brief.md'))) {
     // Reuse the author result, not a third decision stage or another model call.
-    if (opts.outputSchema?.properties) opts.outputSchema = { ...opts.outputSchema,
-      properties: { ...opts.outputSchema.properties, validation: VALIDATION_SELECTION_JSON_SCHEMA } };
+    if (opts.outputSchema?.properties) opts = { ...opts, outputSchema: { ...opts.outputSchema,
+      properties: { ...opts.outputSchema.properties, validation: VALIDATION_SELECTION_JSON_SCHEMA } } };
     prompt += '\n\n# Validation command selection\nNo project or brief command declaration is available. Read the repository and choose exact validation executable/argv and non-secret env inputs, preserving any data-isolating environment used in your measurements. Put required project inputs in each command env map; never rerun a bare command with an isolating variable omitted. Return commands in the optional validation field of your final result, using this fixed schema: '
       + JSON.stringify(VALIDATION_SELECTION_JSON_SCHEMA)
       + '. Use exact executable/argv and optional structured reporters; include dependency preparation in those commands if needed. Do not guess from names alone. An empty commands object states that no validation could be chosen, with the reason. Omitted or invalid selection remains explicitly unmeasured.';
@@ -1441,7 +1441,8 @@ export async function runStage(
     files: changedTreeFiles(evidenceTreeBefore, evidenceTreeAfter),
     remainingWork: Array.isArray(validatedStageRecord?.remaining_work) ? validatedStageRecord.remaining_work as string[] : null,
     continuation: Boolean(settled?.continuation), endingCause: settled?.endingCause ?? result.endingCause,
-    environmentGap: settled?.endingCause === 'environment_gap' ? { reason: String(validatedStageRecord!.summary) } : undefined, finalRecord,
+    environmentGap: settled?.endingCause === 'environment_gap' ? { reason: String(validatedStageRecord!.summary),
+      blocks: validatedStageRecord!.blocks as { criterion_ids: string[]; paths: string[] } | undefined ?? null } : undefined, finalRecord,
     guidanceIds: [...submittedGuidanceIds], measurements: {
       inputTokens: result.tokens_in ?? null, outputTokens: result.tokens_out ?? null,
       durationMs: result.duration_ms, provenance: 'adapter-reported',

@@ -37,8 +37,8 @@ describe('author results and reports carry only what the brief and readers need'
     // Empty arrays already validate, so the schema keeps every key required and
     // closed: removing them from `required` would end constrained generation.
     expect(generationCompatibleSchema(HANDOFF_SCHEMA)).toBe(true);
-    expect(parseStageRecord(JSON.stringify({ status: 'delivered', summary: 'Done.', caveats: [], remaining_work: [] }), HANDOFF_SCHEMA))
-      .toEqual({ status: 'delivered', summary: 'Done.', caveats: [], remaining_work: [] });
+    expect(parseStageRecord(JSON.stringify({ status: 'delivered', summary: 'Done.', caveats: [], remaining_work: [], blocks: null }), HANDOFF_SCHEMA))
+      .toEqual({ status: 'delivered', summary: 'Done.', caveats: [], remaining_work: [], blocks: null });
   });
 
   it('uses engine records without requesting extra evidence files', () => {

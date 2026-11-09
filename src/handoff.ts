@@ -43,12 +43,13 @@ const completion = { remaining_work: strings };
 export const HANDOFF_SCHEMA = object({
   status: { type: 'string', enum: ['delivered', 'blocked', 'environment_gap'] }, summary: text,
   caveats: strings, ...completion,
+  blocks: { anyOf: [object({ criterion_ids: strings, paths: strings }), { type: 'null' }] },
 });
 
 // Old results carry an author-reported file list. Deleting the read field would
 // hide those records; new generation uses the engine's existing write ledger.
 export const RECORDED_HANDOFF_SCHEMA: Schema = { ...HANDOFF_SCHEMA,
-  required: HANDOFF_SCHEMA.required!.filter(key => key !== 'remaining_work'), properties: {
+  required: HANDOFF_SCHEMA.required!.filter(key => key !== 'remaining_work' && key !== 'blocks'), properties: {
   ...HANDOFF_SCHEMA.properties, files_modified: strings,
   checks: { type: 'array', items: object({ command: text, exit_code: { type: 'integer' }, evidence: text }) },
 } };
@@ -162,7 +163,7 @@ export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(op
     body,
     criterionBlock,
     researchCandidateBlock,
-    '## Environment gaps\nIf your active result schema offers the environment_gap status and this environment cannot supply a capability or resource needed for the work, report status: "environment_gap", with summary stating what is missing, what you observed, and what remains. This is a structured declaration, not a work failure. The engine sends it to the independent gate without retrying it. Only the gate decides acceptance under its criteria. Do not use it merely because work is unfinished.',
+    '## Environment gaps\nIf your active result schema offers the environment_gap status and this environment cannot supply a capability or resource needed for the work, report status: "environment_gap", with summary stating what is missing, what you observed, and what remains. Set blocks to { criterion_ids: [...], paths: [...] } naming exactly the criteria and project-relative paths this gap blocks, independently of your stage responsibility mapping. Nonempty dimensions jointly constrain the blocked work; an empty dimension is unconstrained. Use null when the blocked work is unknown. Null, legacy omission or wholly empty blocks are reported as unknown to the gate. This is a structured declaration, not a work failure. The engine sends it to the independent gate without retrying it. Only the gate decides acceptance under its criteria. Do not use it merely because work is unfinished.',
     opts.isGate ? '## Reproduced findings and validation\nA finding to be repaired must cite its reproduction record: set reproduction to the integer sequence in evidence-ledger.jsonl. Run a targeted command with exit 0 meaning the defect is absent and a positive exit meaning it is present. Use the injected engine-recorded command endpoint through your native shell tool, supplying command, absolute cwd and shell as JSON; the engine executes and records it and returns record.sequence. This works even when a native transport omits cwd and shell. Native commands are also eligible when their structured events include explicit absolute cwd and shell, exit and output. The recorded command is replayed with that shell (-c) in that cwd and the same engine command environment. Include any required shell options in an explicit executable invocation in the command. The engine records the complete command, context, structured exit code, output digest and tree hash; read the ledger after the command completes and cite its sequence. Missing execution context, a missing citation, a passing command or a changed tree is an unconfirmed observation and opens no repair. Do not run configured validation inside the gate. For each failed, unfinished or unrun command, return validation_review.commands with its exact role/display, disposition caused_by_change|already_failing|environment|unknown and reason. You alone judge causation from logs, diff and optional base evidence. To settle a failure needing base, return validation_review.request_base with exact role/display; the engine obtains one bounded base batch and returns the facts for your final verdict in this attempt. Otherwise return request_base: []. Missing or invalid dispositions stay unknown and unverified. A caused_by_change disposition prevents acceptance; repair still needs the independent confirmed reproduction above. Host load is telemetry only. Failed, unfinished and unrun commands remain unverified even on acceptance. Keep independent read-only scope [] and run your own experiments.' : '',
     anchor,
     skillsContent,

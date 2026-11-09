@@ -874,7 +874,7 @@ describe('cause-owned budget handoff', () => {
     expect(decideStageRetry(result, 0, 5, 5)).toBe('stop');
     expect(adapter.run).toHaveBeenCalledTimes(1);
     expect(readEvidence(created.runDirPath)).toContainEqual(expect.objectContaining({ kind: 'attempt', exitCode: 1,
-      endingCause: 'environment_gap', environmentGap: { reason: 'Required renderer is unavailable.' } }));
+      endingCause: 'environment_gap', environmentGap: { reason: 'Required renderer is unavailable.', blocks: null } }));
   });
 
   it.each([true, false])('SI environment gap reaches an independent gate once (accept=%s)', async accept => {
@@ -906,7 +906,7 @@ describe('cause-owned budget handoff', () => {
     expect(result.stages.work.attempts).toHaveLength(1);
     expect(result.stages.work.attempts![0].endingCause).toBe('environment_gap');
     expect(result.stages.work.continuation).toBeUndefined();
-    expect(readEvidence(runDir(project, result.runId))).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: 'work', endingCause: 'environment_gap', environmentGap: gap }));
+    expect(readEvidence(runDir(project, result.runId))).toContainEqual(expect.objectContaining({ kind: 'attempt', stageId: 'work', endingCause: 'environment_gap', environmentGap: { ...gap, blocks: null } }));
   });
 
   it.each([0, 1, 4, undefined])('SI unfinished work obeys the declaration or default ceiling (%s)', async declared => {
@@ -1056,7 +1056,7 @@ it.each([false, true])('SI a gate rejection cannot spend another attempt on a de
   const adapter: Adapter = { async run(prompt, _role, opts) {
     calls.push(opts.stageId);
     if (opts.stageId === (repairDiscovers ? 'repair' : 'work')) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
-      status: 'environment_gap', summary: gap.reason, caveats: [], remaining_work: ['Obtain the required visual evidence.'] }) };
+      status: 'environment_gap', summary: gap.reason, blocks: { criterion_ids: [], paths: ['work.txt'] }, caveats: [], remaining_work: ['Obtain the required visual evidence.'] }) };
     if (opts.stageId === 'review') {
       if (!repairDiscovers && calls.filter(id => id === 'review').length > 1) return withRemaining(completed(opts, 'Complete.'), []);
       if (!repairDiscovers || calls.filter(id => id === 'review').length > 1) expect(prompt).toContain(gap.reason);
@@ -1120,8 +1120,9 @@ function withTextReproduction(adapter: Adapter): Adapter {
 }
 
 it.each((['disjoint','absent','broad','narrow'] as const).flatMap(mapping =>
-  (['narrow','broad','absent'] as const).map(otherMapping => ({mapping,otherMapping}))))(
-  'SI repair text finding after gap with author=$mapping other=$otherMapping', async ({mapping,otherMapping}) => {
+  (['narrow','broad','absent'] as const).map(otherMapping => ({mapping,otherMapping,binding:'criteria' as string}))).concat(
+    ['paths','joint','absent','empty'].map(binding => ({mapping:'broad' as const,otherMapping:'broad' as const,binding}))))(
+  'SI repair text finding after gap with author=$mapping other=$otherMapping binding=$binding', async ({mapping,otherMapping,binding}) => {
   const {roles,workflow} = workflowFixture(3);
   const brief='---\noutputs: [work.txt]\n---\n# Produce text with an optional renderer\n\n## Requirements\n1. A missing optional renderer may be accepted using textual evidence.\n2. work.txt contains correct text.';
   const {extractBriefCriteria}=await import('../src/brief-criteria.js');
@@ -1136,27 +1137,24 @@ it.each((['disjoint','absent','broad','narrow'] as const).flatMap(mapping =>
   workflow.stages.find(s=>s.id==='review')!.depends_on=['text'];
   normalizeStageContracts(workflow.stages);
   const calls:string[]=[];
-  const adapter:Adapter={async run(_prompt,_role,opts){
+  const adapter:Adapter={async run(prompt,_role,opts){
     calls.push(opts.stageId);
-    if(opts.stageId==='work') return {exitCode:0,duration_ms:1,output:JSON.stringify({status:'environment_gap',summary:'Optional renderer missing; textual evidence can satisfy the brief.',caveats:[],remaining_work:['Optional visual evidence unavailable.']})};
+    if(opts.stageId==='review'&&(binding==='absent'||binding==='empty'))expect(prompt).toContain(binding==='absent'?'"blocks":null':'"blocks":{"criterion_ids":[],"paths":[]}');
+    if(opts.stageId==='work') return {exitCode:0,duration_ms:1,output:JSON.stringify({status:'environment_gap',summary:'Optional renderer missing; textual evidence can satisfy the brief.',...(binding==='absent'?{}:{blocks:binding==='empty'?{criterion_ids:[],paths:[]}:binding==='paths'?{criterion_ids:[],paths:['renderer']}:{criterion_ids:[refs[0]],paths:binding==='joint'?['work.txt']:[]}}),caveats:[],remaining_work:['Optional visual evidence unavailable.']})};
     if(opts.stageId==='text') writeFileSync(join(project,'work.txt'),'wrong text');
     if(opts.stageId==='repair') writeFileSync(join(project,'work.txt'),'correct text');
     if(opts.stageId==='review' && !calls.includes('repair')) return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'Renderer gap accepted under criteria; independently reproduced text typo must be fixed.',criteria:{[refs[0]]:{status:'pass',evidence:'The stated optional renderer gap is accepted using delivered textual evidence.'},[refs[1]]:{status:'fail',evidence:'work.txt contains wrong text.'}},audit_findings:{version:1,findings:[{id:'text_typo',paths:['work.txt'],reason:'Text is wrong; renderer is unrelated.',criterion_ids:[refs[1]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'Repair work.txt only; no renderer invocation or gap reopening.'}})};
     return withRemaining(completed(opts,'Complete.'),[]);
   }};
   const result=await runWorkflow(workflow,stringify(workflow),project,withTextReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,false,undefined,()=>manualClock().clock);
-  // Broad/absent responsibility leaves gap identity unknown: the record has
-  // no criterion/resource binding for the gap. Prose cannot grant independence.
-  const independent=mapping==='disjoint'||mapping==='narrow';
-  expect(calls).toEqual(independent?['done','work','text','review','repair','review']:['done','work','text','review']);
-  expect(result.status).toBe(independent?'complete':'incomplete');
-  expect(readFileSync(join(project,'work.txt'),'utf8')).toBe(independent?'correct text':'wrong text');
+  expect(calls).toEqual(['done','work','text','review','repair','review']);
+  expect(result.status).toBe('complete');
+  expect(readFileSync(join(project,'work.txt'),'utf8')).toBe('correct text');
   expect(result.stages.work.attempts).toHaveLength(1);
-  expect(result.stages.repair.attempts??[]).toHaveLength(independent?1:0);
-  if(!independent){
-    expect(readGateEvaluation(project,'review',result.runId)?.findings?.confirmed).toHaveLength(1);
-    expect(result.decisionGraph?.records.find(record=>record.stageId==='review')?.reason).toContain('recorded facts do not establish an independent repair');
-  }
+  expect(result.stages.repair.attempts??[]).toHaveLength(1);
+  const fact=readEvidence(runDir(project,result.runId)).find(entry=>entry.kind==='attempt'&&entry.stageId==='work');
+  expect(fact?.kind==='attempt'&&fact.environmentGap?.blocks).toEqual(binding==='absent'?null:binding==='empty'?{criterion_ids:[],paths:[]}:binding==='paths'?{criterion_ids:[],paths:['renderer']}:{criterion_ids:[refs[0]],paths:binding==='joint'?['work.txt']:[]});
+  if(binding==='absent'||binding==='empty')expect(result.decisionGraph?.records.find(record=>record.stageId==='review')?.reason).toContain('Environment gaps without declared blocks: work; relatedness unknown');
 });
 
 function withRendererReproduction(adapter: Adapter): Adapter {
@@ -1174,15 +1172,16 @@ function withRendererReproduction(adapter: Adapter): Adapter {
  }};
 }
 
-it.each((['narrow','broad','absent'] as const).flatMap(authorMapping =>
- (['narrow','broad','absent'] as const).map(otherMapping => ({authorMapping,otherMapping}))))(
- 'SI repair shared ownership cannot reopen the same renderer gap with author=$authorMapping other=$otherMapping',async ({authorMapping,otherMapping})=>{
+it.each((['narrow','broad','absent','mismatched'] as const).flatMap(authorMapping =>
+ (['narrow','broad','absent'] as const).map(otherMapping => ({authorMapping,otherMapping,binding:'joint'}))).concat(
+  ['paths','criteria'].map(binding=>({authorMapping:'mismatched' as const,otherMapping:'broad' as const,binding}))))(
+ 'SI repair shared ownership cannot reopen the same renderer gap with author=$authorMapping other=$otherMapping binding=$binding',async ({authorMapping,otherMapping,binding})=>{
  const {roles,workflow}=workflowFixture(3);
  const brief='---\noutputs: [work.txt]\n---\n# Renderer work\n\n## Requirements\n1. The renderer executable supplies visual evidence.\n2. work.txt contains correct text.';
  const {extractBriefCriteria}=await import('../src/brief-criteria.js');const refs=extractBriefCriteria(brief).criteria.map(c=>c.id);expect(refs).toHaveLength(2);
  workflow.stages.find(s=>s.id==='work')!.scope=['renderer','work.txt'];
  if(authorMapping==='absent')delete workflow.stages.find(s=>s.id==='work')!.criterion_refs;
- else workflow.stages.find(s=>s.id==='work')!.criterion_refs=authorMapping==='broad'?refs:[refs[0]];
+ else workflow.stages.find(s=>s.id==='work')!.criterion_refs=authorMapping==='broad'?refs:[refs[authorMapping==='mismatched'?1:0]];
  workflow.stages.find(s=>s.id==='repair')!.scope=['renderer','work.txt'];
  workflow.stages.find(s=>s.id==='repair')!.criterion_refs=[refs[0]];
  workflow.stages.find(s=>s.id==='review')!.criterion_refs=refs;
@@ -1194,7 +1193,7 @@ it.each((['narrow','broad','absent'] as const).flatMap(authorMapping =>
   calls.push(opts.stageId);
   if(opts.stageId==='work'||opts.stageId==='repair') {
    rendererProbes.push(opts.stageId);expect(existsSync(join(project,'renderer'))).toBe(false);
-   return {exitCode:0,duration_ms:1,output:JSON.stringify({status:'environment_gap',summary:'The required renderer executable is unavailable in this environment.',caveats:[],remaining_work:['Supply visual evidence with renderer.']})};
+   return {exitCode:0,duration_ms:1,output:JSON.stringify({status:'environment_gap',summary:'The required renderer executable is unavailable in this environment.',blocks:{criterion_ids:binding==='paths'?[]:[refs[0]],paths:binding==='criteria'?[]:['renderer']},caveats:[],remaining_work:['Supply visual evidence with renderer.']})};
   }
   if(opts.stageId==='text')writeFileSync(join(project,'work.txt'),'correct text');
   if(opts.stageId==='review')return {exitCode:0,duration_ms:1,output:JSON.stringify({pass:false,reason:'The renderer is absent; text is correct.',criteria:{[refs[0]]:{status:'fail',evidence:'Renderer unavailable.'},[refs[1]]:{status:'pass',evidence:'Correct text exists.'}},audit_findings:{version:1,findings:[{id:'missing_renderer',paths:['renderer'],reason:'Same renderer capability missing.',criterion_ids:[refs[0]],invalidates_plan:false,repair_role:'coder'}]},repairability:{version:1,disposition:'repairable',evidence:'The renderer is absent.'}})};

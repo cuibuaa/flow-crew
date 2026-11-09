@@ -92,7 +92,7 @@ export type EvidenceFact = ValidationFact | {
   exitCode: number; status: string; treeHash: string | null;
   files: TreeFile[];
   remainingWork?: string[] | null; continuation?: boolean; endingCause?: import('./attempt-ending.js').EndingCause;
-  environmentGap?: { reason: string };
+  environmentGap?: { reason: string; blocks: { criterion_ids: string[]; paths: string[] } | null };
   finalRecord?: Record<string, unknown>; guidanceIds?: string[];
   measurements: { inputTokens: number | null; outputTokens: number | null; durationMs: number; provenance: 'adapter-reported' };
 } | {
