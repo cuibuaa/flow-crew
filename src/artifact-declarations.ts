@@ -1,4 +1,4 @@
-import { hasSeparatedRunLayout, runRecordPath, runStorageLayout, stageWorkPath } from './run-layout.js';
+import { hasSeparatedRunLayout, runRecordPath, stageWorkPath } from './run-layout.js';
 import type { DispatchAdmissionError } from './scheduler/sched_admission/dispatch.js';
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -7,7 +7,7 @@ import { ArtifactPathSchema, resolveArtifactLocation, artifactRootContains as co
 export { ArtifactPathSchema, resolveArtifactLocation } from './artifact-location.js';
 export type { ArtifactLocation } from './artifact-location.js';
 import type { StageStatus } from './store.js';
-import { fcGlobalDir, runsRoot, STAGE_STATUS } from './store.js';
+import { fcGlobalDir, runStoreRoots, STAGE_STATUS } from './store.js';
 import { containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isReservedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
@@ -115,38 +115,28 @@ export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces
   if (!runDirectory || (artifact.root === 'project' && !projectDirectory)) return false;
   const runRoot = realpathSync(runDirectory);
   const runRoots = new Set([runRoot]);
-  // Peer locations help prove writable aliases; they are not a complete
-  // inventory of engine records. Unresolved hardlinks never grant writes.
-  try {
-    for (const entry of readdirSync(runsRoot(), { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      try { runRoots.add(realpathSync(join(runsRoot(), entry.name))); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    }
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || existsSync(runsRoot())) throw error; }
+  const stores = runStoreRoots();
+  // Enumerate only engine-supplied stores. Captured records in project/work
+  // trees cannot enroll their directories as engine envelopes.
+  for (const store of stores) {
+    try {
+      for (const entry of readdirSync(store, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        try { runRoots.add(realpathSync(join(store, entry.name))); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || existsSync(store)) throw error; }
+  }
   const runTrees = [...runRoots].map(root => ({ root, separated: hasSeparatedRunLayout(root) }));
   const projectRoot = projectDirectory && realpathSync(projectDirectory);
   const writableRoots = [...(projectRoot ? [projectRoot] : []), ...runRoots];
   const ownedInRun = (root: string, separated: boolean, target: string): boolean =>
     contained(root, target) && (!separated || isReservedRunPath(relative(root, target).split(sep).join('/')));
-  const layouts = new Map<string, 1 | 2 | undefined>();
-  const layoutAt = (directory: string) => {
-    if (!layouts.has(directory)) layouts.set(directory, runStorageLayout(directory));
-    return layouts.get(directory);
-  };
-  // A project may contain another configured store. Bind each physical target
-  // to its enclosing run format before granting writes, even for an unlinked
-  // file or a future name. The same boundary governs writable-link accounting.
-  const ownedByRun = (target: string): boolean => {
-    if (runTrees.some(({ root, separated }) => ownedInRun(root, separated, target))) return true;
-    const boundary = writableRoots.filter(root => contained(root, target)).sort((a, b) => b.length - a.length)[0];
-    if (!boundary) return true;
-    for (let directory = target; ; directory = dirname(directory)) {
-      const layout = layoutAt(directory);
-      if (layout !== undefined && ownedInRun(directory, layout === 2, target)) return true;
-      if (directory === boundary) return false;
-    }
-  };
+  const ownedByRun = (target: string): boolean =>
+    runTrees.some(({ root, separated }) => ownedInRun(root, separated, target))
+    || stores.some(store => contained(store, target) && !runTrees.some(({ root, separated }) =>
+      dirname(root) === store && separated && contained(stageWorkPath(root), target)))
+    || !writableRoots.some(root => contained(root, target));
   const root = artifact.root === 'run' ? runRoot : projectRoot!;
   const output = resolve(root, artifact.path);
   if (artifact.kind === 'directory' && containsEngineOwnedGlobalPath(prospectivePhysicalPath(output), fcGlobalDir())) return true;
@@ -178,11 +168,13 @@ export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces
   // A hardlink has no target pathname. Prove that *all* its directory entries
   // are in writable locations, using nlink as the upper bound. A link outside
   // this inventory may be in any store's engine tree, so fail closed without
-  // trying to discover every FC_HOME. Never follow archive/input symlinks.
+  // trying to discover every FC_HOME. Attest within one writable domain: the
+  // project or known stage work trees. Never combine their counts or follow symlinks.
   if (!linkedOutputs.size) return false;
   const writableLinks = new Map<string, number>();
-  const folders = [...(projectRoot ? [projectRoot] : []),
-    ...runTrees.filter(tree => tree.separated).map(tree => stageWorkPath(tree.root))];
+  const work = runTrees.filter(tree => tree.separated).map(tree => stageWorkPath(tree.root));
+  const folders = work.some(root => contained(root, prospectivePhysicalPath(output)))
+    ? [...work] : projectRoot ? [projectRoot] : [];
   visitedDirectories.clear();
   while (folders.length) {
     const folder = folders.pop()!;
@@ -190,11 +182,6 @@ export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces
     visitedDirectories.add(folder);
     try { if (!lstatSync(folder).isDirectory()) continue; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
-    const layout = layoutAt(folder);
-    if (layout !== undefined) {
-      if (layout === 2) folders.push(stageWorkPath(folder));
-      continue;
-    }
     if (ownedByRun(folder) || isEngineOwnedGlobalPath(folder, fcGlobalDir())) continue;
     let entries;
     try { entries = readdirSync(folder, { withFileTypes: true }); }

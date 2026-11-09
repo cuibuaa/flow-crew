@@ -2,32 +2,27 @@ import { readFileSync } from 'node:fs';
 import { closeSync, openSync } from './engine-fs.js';
 import { readRunRecordFields } from './run-record-fields.js';
 import { prospectivePhysicalPath } from './engine-owned-carriers.js';
-import { basename, join, relative, isAbsolute } from 'node:path';
+import { join, relative, isAbsolute } from 'node:path';
 
 const separated = new Set<string>();
-/** Layout is an immutable run-format fact, never inferred from an authored
- * directory name or from the presence/absence of an individual record. */
-export function runStorageLayout(run: string): 1 | 2 | undefined {
-  if (separated.has(run)) return 2;
+/** Route a supplied run directory's records; this does not establish ownership. */
+export function hasSeparatedRunLayout(run: string): boolean {
+  if (separated.has(run)) return true;
   try {
     const descriptor = openSync(join(run, 'run.json'), 'r');
-    let state: { storageLayout?: unknown; runId?: unknown; projectDir?: unknown };
-    try { state = readRunRecordFields(descriptor, { storageLayout: 16, runId: 4096, projectDir: 32768 }).value as typeof state; }
+    let state: { storageLayout?: unknown };
+    try { state = readRunRecordFields(descriptor, { storageLayout: 16 }).value as typeof state; }
     finally { closeSync(descriptor); }
-    if (state?.storageLayout === 2) { separated.add(run); return 2; }
-    // A bound historical projection identifies the entire legacy envelope.
-    // An arbitrary directory (even one called engine/) does not select a layout.
-    if (state?.runId === basename(run) && typeof state.projectDir === 'string') return 1;
-    return undefined;
+    if (state?.storageLayout === 2) { separated.add(run); return true; }
+    return false;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
   }
   try {
-    if (JSON.parse(readFileSync(join(run, 'engine', '.run-reservation.json'), 'utf8')).storageLayout === 2) return 2;
+    if (JSON.parse(readFileSync(join(run, 'engine', '.run-reservation.json'), 'utf8')).storageLayout === 2) return true;
   } catch { /* no separated reservation */ }
-  return undefined;
+  return false;
 }
-export const hasSeparatedRunLayout = (run: string): boolean => runStorageLayout(run) === 2;
 export const engineDirectory = (run: string): string => join(run, 'engine');
 export const stageWorkPath = (run: string, ...path: string[]): string => join(hasSeparatedRunLayout(run) ? join(run, 'work') : run, ...path);
 /** Parent reception must not turn an authored alias into a trusted write to

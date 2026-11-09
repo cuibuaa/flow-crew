@@ -1,6 +1,7 @@
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
 import { runRecordPath, engineDirectory, stageWorkPath, requestPath, controlPath, hasSeparatedRunLayout } from './run-layout.js';
 import { processLiveness } from './process-liveness.js';
+import { prospectivePhysicalPath } from './engine-owned-carriers.js';
 import { resolveCampaignStorageKey } from './campaigns.js';
 import { observeRunStatusChange } from './run-events.js';
 import { latestInvocationInput } from './run-state-view.js';
@@ -644,6 +645,7 @@ export const FC_DIR = '.fc';
 // disciplinary). The env var works when set before module load; the setter
 // covers callers inside an already-loaded process (the CLI's rehearse path).
 let _fcGlobalDir = process.env.FC_HOME ? process.env.FC_HOME : join(homedir(), FC_DIR);
+const createdRunStores = new Set<string>();
 
 export function fcGlobalDir(): string {
   return _fcGlobalDir;
@@ -655,6 +657,11 @@ export function setFcGlobalDir(path: string): void {
 
 export function runsRoot(_projectDir?: string): string {
   return join(_fcGlobalDir, 'runs');
+}
+
+/** Store ownership comes from engine creation/selection, never authored records. */
+export function runStoreRoots(): string[] {
+  return [...new Set([prospectivePhysicalPath(resolve(runsRoot())), ...createdRunStores])];
 }
 
 export function campaignsRoot(): string {
@@ -936,7 +943,8 @@ export function extractTaskTitle(desc?: string): string {
 }
 
 export function ensureGlobalRunsDir(): void {
-  mkdirSync(join(_fcGlobalDir, 'runs'), { recursive: true });
+  mkdirSync(runsRoot(), { recursive: true });
+  createdRunStores.add(prospectivePhysicalPath(resolve(runsRoot())));
 }
 
 export function runDir(projectDir: string, runId: string): string {
