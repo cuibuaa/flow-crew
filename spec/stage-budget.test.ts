@@ -1,5 +1,6 @@
 import { readEvidence } from '../src/evidence-ledger.js';
 import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import * as contractProbe from '../src/stage-artifact-contract.js';
@@ -159,7 +160,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('unit 1\n');
     expect(readFileSync(join(project, 'handoff.txt'), 'utf8')).toContain('Remaining: unit 2');
     expect(parseStageRecord(result.output, RECORDED_HANDOFF_SCHEMA).summary).toContain('Done: unit 1');
-    expect(readFileSync(join(created.runDirPath, result.continuation!.handoff), 'utf8')).toBe(result.output);
+    expect(readFileSync(runRecordPath(created.runDirPath, result.continuation!.handoff), 'utf8')).toBe(result.output);
     expect(result.continuation?.summary).toContain('Remaining:');
     expect(readRunEvents(project, created.runId).map(event => event.type)).toEqual(expect.arrayContaining(['stage_wrap_up_requested', 'stage_wrap_up_delivered', 'stage_wrap_up_completed']));
     expect(time.timers.size).toBe(0);
@@ -185,7 +186,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     const time = manualClock();
     const fixture = nativeFixture(provider, time, 'cooperate', true);
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
-    const retainedHome = join(created.runDirPath, 'stages', 'work', `${provider}_home`);
+    const retainedHome = runRecordPath(created.runDirPath, 'stages', 'work', `${provider}_home`);
     mkdirSync(retainedHome, { recursive: true });
     writeFileSync(join(retainedHome, 'retained-session.txt'), 'unfinished session evidence');
     expect((await runStage(fixture.adapter, options(created, time))).exitCode).toBe(0);
@@ -212,7 +213,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(fixture.calls()).toHaveLength(2);
     expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('unit 1\n');
     expect(parseStageRecord(result.output, RECORDED_HANDOFF_SCHEMA).summary).toContain('Remaining:');
-    expect(readFileSync(join(created.runDirPath, result.continuation!.handoff), 'utf8')).toBe(result.output);
+    expect(readFileSync(runRecordPath(created.runDirPath, result.continuation!.handoff), 'utf8')).toBe(result.output);
     expect(result.continuation?.summary).toContain('work.txt');
     expect(readRunEvents(project, created.runId).some(event => event.type === 'stage_wrap_up_forced')).toBe(true);
     expect(time.timers.size).toBe(0);
@@ -230,7 +231,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(result.exitCode).toBe(0);
     expect(result.continuation).toBeUndefined();
     expect(calls).toBe(1);
-    expect(JSON.parse(readFileSync(join(created.runDirPath, 'verdict_work.json'), 'utf8'))).toMatchObject({ pass: false, reason: 'Actual defect' });
+    expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'verdict_work.json'), 'utf8'))).toMatchObject({ pass: false, reason: 'Actual defect' });
   });
   it.each(['watchdog', 'parent'] as const)('B05 keeps %s cancellation authoritative over a budget boundary', async (source) => {
     const time = manualClock();
@@ -241,8 +242,8 @@ describe('stage budget delivery through the shared guidance boundary', () => {
         if (source === 'parent')
           parent.abort('cancelled');
         else {
-          mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
-          atomicWrite(join(opts.runDir, 'signals', 'abort_work.json'), JSON.stringify({ version: 1, stageId: 'work', attemptIndex: 1, reason: 'Actual abort', timestamp: new Date().toISOString(), source: 'watchdog' }));
+          mkdirSync(runRecordPath(opts.runDir, 'signals'), { recursive: true });
+          atomicWrite(runRecordPath(opts.runDir, 'signals', 'abort_work.json'), JSON.stringify({ version: 1, stageId: 'work', attemptIndex: 1, reason: 'Actual abort', timestamp: new Date().toISOString(), source: 'watchdog' }));
         }
         return { exitCode: 0, duration_ms: budget + 1, output: 'cancelled' };
       } };
@@ -328,7 +329,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
         const stopped = new Promise<RunResult>(resolve => opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'idle', duration_ms: 1 }), { once: true }));
         const watchdog = new StageWatchdog(project, created.runId, { idleThresholdMs: 1000 });
         await watchdog.tick();
-        const initial = JSON.parse(readFileSync(join(created.runDirPath, 'stage_watchdog.json'), 'utf8')).stageProgress.work.lastProgressAt;
+        const initial = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'stage_watchdog.json'), 'utf8')).stageProgress.work.lastProgressAt;
         const now = vi.spyOn(Date, 'now').mockReturnValue(initial + 1000);
         try {
           await watchdog.tick();
@@ -385,7 +386,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
   it.each([undefined, ['Finish the independent review.']])('B17 a wrapping gate cannot publish acceptance with unknown or remaining work (%j)', async remaining => {
     const time = manualClock();
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
-    const carrier = join(created.runDirPath, 'verdict_work.json');
+    const carrier = runRecordPath(created.runDirPath, 'verdict_work.json');
     const trusted = remaining ? '{"pass":false,"reason":"trusted previous verdict"}\n' : undefined;
     if (trusted) atomicWrite(carrier, trusted);
     let calls = 0;
@@ -394,7 +395,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
         expect(prompt).toContain('# Stage budget wrap-up');
         expect(existsSync(carrier) ? readFileSync(carrier, 'utf8') : undefined).toBe(trusted);
       }
-      writeFileSync(carrier, '{"pass":true,"reason":"counterfeit unfinished review"}');
+      writeFileSync(stageWorkPath(created.runDirPath, 'verdict_work.json'), '{"pass":true,"reason":"counterfeit unfinished review"}');
       time.advanceTo(stageWrapUpTiming(budget).warningAfterMs);
       const partial = completed(opts, 'Review still needs another unit.');
       return remaining ? withRemaining(partial, remaining) : partial;
@@ -406,10 +407,7 @@ describe('stage budget delivery through the shared guidance boundary', () => {
     expect(parseStageRecord(result.output, stageRecordSchema({ isGate: true })).pass).toBe(true);
     expect(result.continuation?.summary).toContain('unfinished duties are not certified complete');
     expect(existsSync(carrier) ? readFileSync(carrier, 'utf8') : undefined).toBe(trusted);
-    expect(readRunEvents(project, created.runId)).toContainEqual(expect.objectContaining({
-      type: 'execution_notice', level: 'warning', stageId: 'work', files: [carrier],
-      detail: expect.stringContaining('engine-published carrier'),
-    }));
+    expect(readRunEvents(project, created.runId).some(event => event.detail?.includes('engine-published carrier'))).toBe(false);
     expect(readRunEvents(project, created.runId).some(event => event.detail?.includes('ENGINE_STATE_TAMPERED'))).toBe(false);
   });
 });
@@ -498,7 +496,7 @@ describe('authored completion at the budget boundary', () => {
           return partial;
         }
         expect(prompt).toContain('Own-stage continuation evidence');
-        expect(readFileSync(join(opts.runDir, 'stages/work/output_attempt_1.md'), 'utf8')).toBe(handoff);
+        expect(readFileSync(runRecordPath(opts.runDir, 'stages/work/output_attempt_1.md'), 'utf8')).toBe(handoff);
         expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('unit 1\n');
         writeFileSync(join(project, 'work.txt'), 'unit 1\nunit 2\n');
       }
@@ -672,7 +670,7 @@ describe('durable bounded continuation', () => {
     const time = manualClock();
     const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id));
     const rejected = JSON.stringify({ pass: false, reason: 'Retained defect' });
-    writeFileSync(join(created.runDirPath, 'verdict_review.json'), rejected);
+    writeFileSync(runRecordPath(created.runDirPath, 'verdict_review.json'), rejected);
     const stage = workflow.stages.find(stage => stage.id === 'repair')!;
     let calls = 0;
     const adapter: Adapter = { async run(prompt, _role, opts) {
@@ -689,7 +687,7 @@ describe('durable bounded continuation', () => {
     expect(status.attempts).toHaveLength(1);
     expect(status.timeout?.budgetMs).toBe(budget);
     expect(readFileSync(join(project, 'work.txt'), 'utf8')).toBe('partial repair');
-    expect(readFileSync(join(created.runDirPath, 'verdict_review.json'), 'utf8')).toBe(rejected);
+    expect(readFileSync(runRecordPath(created.runDirPath, 'verdict_review.json'), 'utf8')).toBe(rejected);
   });
   it('B19 repair execution refuses unknown child closure before any retry can launch', { timeout: 15000 }, async () => {
     const { roles, workflow } = workflowFixture(2);
@@ -822,12 +820,12 @@ describe('durable bounded continuation', () => {
     beginStageAttempt(project, created.runId, 'work', 0);
     completeStageAttempt(project, created.runId, 'work', 0, { exitCode: 0, duration_ms: 1,
       continuation: { reason: 'stage_budget', forced: false, handoff: 'stages/work/output_attempt_1.md' } });
-    atomicWrite(join(created.runDirPath, RUN_VALIDATION_BASELINE_FILE), JSON.stringify({ version: 1,
+    atomicWrite(runRecordPath(created.runDirPath, RUN_VALIDATION_BASELINE_FILE), JSON.stringify({ version: 1,
       capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline: { version: 1,
         projectDir: project, discovery: { state: 'not_configured', commands: [], missingRoles: ['build', 'test', 'lint'] }, results: [], gateCriteria: [] } }));
     expect(settledGateValidationExecution(project, created.runId, 'work')).toBeUndefined();
     expect(await recordGateValidationDelta(project, created.runId, 'work')).toBeUndefined();
-    expect(existsSync(join(created.runDirPath, 'validation_delta_work.json'))).toBe(false);
+    expect(existsSync(runRecordPath(created.runDirPath, 'validation_delta_work.json'))).toBe(false);
   });
 
   it('B29 a final settlement refusal cannot leave a retained-success marker', async () => {

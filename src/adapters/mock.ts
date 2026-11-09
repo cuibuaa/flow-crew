@@ -1,3 +1,4 @@
+import { stageWorkPath } from '../run-layout.js';
 import { mkdirSync, writeFileSync } from '../engine-fs.js';
 import { readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -45,7 +46,7 @@ export class MockAdapter implements Adapter {
       const files = fixture.write_files && typeof fixture.write_files === 'object' && !Array.isArray(fixture.write_files)
         ? fixture.write_files as Record<string, unknown> : {};
       const finalRecord = typeof files[finalPath] === 'string' ? files[finalPath] as string : undefined;
-      writeFixtureFiles(opts.runDir, Object.fromEntries(Object.entries(files).filter(([path]) => !opts.outputSchema || path !== finalPath)));
+      writeFixtureFiles(stageWorkPath(opts.runDir), Object.fromEntries(Object.entries(files).filter(([path]) => !opts.outputSchema || path !== finalPath)));
       if (result.exitCode === 0) result.output = scriptedRecord(result.output, opts, finalRecord);
       return result;
     } catch {

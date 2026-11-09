@@ -1,4 +1,5 @@
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
+import { runRecordPath } from './run-layout.js';
 import { mkdirSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -947,7 +948,7 @@ export class Orchestrator {
       this.failClosed(
         task,
         `${leading}bound run ${bound.runId} has ${observed.kind} scheduler identity${pid}: ${observed.detail}; `
-        + `inspect ${join(bound.path, 'scheduler.pid')} and then run flowcrew task retry ${task.id}`,
+        + `inspect ${runRecordPath(bound.path, 'scheduler.pid')} and then run flowcrew task retry ${task.id}`,
       );
       return { kind: 'stop' };
     }
@@ -1148,7 +1149,7 @@ export class Orchestrator {
     if (!task.run_id) return undefined;
     try {
       const runPath = this.boundRunPath(task.run_id);
-      const parsed = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as { stages?: unknown };
+      const parsed = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as { stages?: unknown };
       return parsed.stages;
     } catch {
       return undefined;
@@ -1638,7 +1639,7 @@ function readRunAdmission(task: TaskEntry): BriefAdmissionRecord | undefined {
   if (!task.run_id) return undefined;
   try {
     const runPath = isAbsolute(task.run_id) ? resolve(task.run_id) : join(runsRoot(), task.run_id);
-    const parsed = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as {
+    const parsed = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as {
       briefAdmission?: BriefAdmissionRecord;
     };
     return parsed.briefAdmission;
@@ -1651,9 +1652,9 @@ function readBoundRunBrief(task: TaskEntry): string | undefined {
   if (!task.run_id) return undefined;
   try {
     const runPath = isAbsolute(task.run_id) ? resolve(task.run_id) : join(runsRoot(), task.run_id);
-    const sidecar = join(runPath, 'task_brief.md');
+    const sidecar = runRecordPath(runPath, 'task_brief.md');
     if (existsSync(sidecar)) return readFileSync(sidecar, 'utf-8');
-    const parsed = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as { taskDescription?: unknown };
+    const parsed = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as { taskDescription?: unknown };
     return typeof parsed.taskDescription === 'string' ? parsed.taskDescription : undefined;
   } catch {
     return undefined;

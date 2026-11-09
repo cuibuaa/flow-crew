@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 // Boundary: Choose next iteration or truthful completion/failure from settled gates, required obligations and finite budgets; no stage execution.
 import { Adapter } from '../../adapters/base.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
@@ -66,7 +67,7 @@ export async function concludeWorkflowIteration(
             return stage?.is_gate === true;
           });
           for (const gid of gateStageIds) {
-            const vPath = join(runDir(projectDir, runId), `verdict_${gid}.json`);
+            const vPath = runRecordPath(runDir(projectDir, runId), `verdict_${gid}.json`);
             if (!existsSync(vPath)) continue;
             let v: Record<string, unknown>;
             try { v = JSON.parse(readFileSync(vPath, 'utf-8')); } catch { continue; }

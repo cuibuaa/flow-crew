@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -40,8 +41,8 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     const refs = extractBriefCriteria(task).criteria.map(criterion => criterion.id);
     for (const kind of ['gate', 'repair']) {
       const created = createRun(project, 'fixture', 'name: fixture', [kind]);
-      writeFileSync(join(created.runDirPath, 'task_brief.md'), task);
-      const criteriaPath = join(created.runDirPath, 'brief_criteria.json');
+      writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
+      const criteriaPath = runRecordPath(created.runDirPath, 'brief_criteria.json');
       writeFileSync(criteriaPath, JSON.stringify(extractBriefCriteria(task)));
       const calls: Array<{ system: string; user: string }> = [];
       const adapter: Adapter = { async run(user, role) {
@@ -66,8 +67,8 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     isolatedProjectCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'base value'], project, root);
     const base = isolatedProjectCommand('git', ['rev-parse', 'HEAD'], project, root).trim();
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
-    writeFileSync(join(created.runDirPath, 'task_brief.md'), task);
-    writeFileSync(join(created.runDirPath, 'validation_baseline.json'), JSON.stringify({ baseCommit: base }));
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
+    writeFileSync(runRecordPath(created.runDirPath, 'validation_baseline.json'), JSON.stringify({ baseCommit: base }));
     const options = { stageId: 'work', role: { name: 'coder', description: '', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'Current duties.' },
       dependsOn: [], promptTemplate: 'Inspect value.txt and preserve all duties.', timeout_ms: 20_000,
       projectDir: project, runId: created.runId, runDir: created.runDirPath, retries: 0,
@@ -129,7 +130,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
 
   it.each(['gate', 'repair'] as const)('keeps a root %s free of the campaign pivot narrative', async kind => {
     const created = createRun(project, 'fixture', 'name: fixture', ['gate', 'repair']);
-    writeFileSync(join(created.runDirPath, 'task_brief.md'), task);
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
     const gate = StageConfigSchema.parse({ id: 'gate', role: 'qa', scope: [], is_gate: true,
       artifact_contract: fixtureArtifactContract('gate') });
     const repair = StageConfigSchema.parse({ id: 'repair', role: 'coder', scope: [], retry_to: ['gate'],
@@ -167,7 +168,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
       if (opts.stageId === 'repair') { writeFileSync(join(project, 'greeting.txt'), 'required greeting\n'); output = JSON.stringify({ successor: 'assess', reason: 'REPAIR_NARRATIVE_SENTINEL' }); }
       if (opts.stageId === 'review') {
         const pass = ++reviews > 1;
-        const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+        const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
         output = JSON.stringify({ pass, reason: pass ? 'Independently correct.' : 'Wrong greeting.',
           criteria: Object.fromEntries(criteria.map(c => [c.id, { status: pass ? 'pass' : 'fail', evidence: 'greeting.txt' }])),
           audit_findings: { version: 1, findings: pass ? [] : [{ id: 'greeting', paths: ['greeting.txt'], reason: 'Wrong greeting.', criterion_ids: criteria.map(c => c.id), invalidates_plan: false, repair_role: 'coder' }] },
@@ -208,7 +209,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
 
   it('keeps isolated decision retries cold while retaining their exact own final record', async () => {
     const created = createRun(project, 'fixture', 'name: fixture', ['choose']);
-    writeFileSync(join(created.runDirPath, 'task_brief.md'), task);
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
     const stage = StageConfigSchema.parse({ id: 'choose', role: 'planner', scope: [],
       decision: { kind: 'shape', successors: ['implement', 'plan'], default: 'plan' } });
     const answer = { successor: 'implement', reason: 'Own previous choice.', metric_search: false, assumptions: [], missing_author_facts: [] };
@@ -233,7 +234,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
   it.each(['continuation', 'retry'] as const)('cold-starts a %s from its own final record, validation identity and delivered guidance ids', async kind => {
     writeFileSync(join(project, 'Makefile'), 'build:\n\t@true\ntest:\n\t@true\nlint:\n\t@true\n');
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
-    writeFileSync(join(created.runDirPath, 'task_brief.md'), task);
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
     const guidance = appendGuidanceEnvelope({ runDir: created.runDirPath, target: 'work', source: 'operator', body: 'Preserve the required greeting.', knownStageIds: ['work'] });
     const calls: Array<{ user: string; opts: RunOpts }> = [];
     let elapsedOffset = 0;

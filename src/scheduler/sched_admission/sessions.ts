@@ -1,7 +1,7 @@
+import { runRecordPath, requestPath } from '../../run-layout.js';
 /** Stage/session reuse and gate continuation lifecycle; reads/writes only the supplied run directory. */
 import { type StageStatus, type StoreState } from '../../store.js';
 import { type SessionMetadata, finalizeStageSessions } from '../../adapter-session.js';
-import { join } from 'node:path';
 import { unlinkSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { type StageConfig } from './configuration.js';
@@ -36,7 +36,7 @@ export interface GateVerdictCorrection {
 }
 
 export function gateVerdictCorrectionPath(runDirPath: string, gateId: string): string {
-  return join(runDirPath, 'gate_reevaluation', `verdict_correction_${gateId}.json`);
+  return requestPath(runDirPath, 'gate_reevaluation', `verdict_correction_${gateId}.json`);
 }
 
 function readAndConsumeGateVerdictCorrection(runDirPath: string, gateId: string): GateVerdictCorrection | undefined {
@@ -68,7 +68,7 @@ export function canResumeOwnGateSession(_stage: StageConfig, _session: SessionMe
 
 function clearContinuationArtifacts(runDirPath: string, gateId: string): void {
   finalizeStageSessions(runDirPath, gateId);
-  try { const path = join(runDirPath, 'stages', gateId, 'session.json'); unlinkSync(path); } catch { /* best effort */ }
+  try { const path = runRecordPath(runDirPath, 'stages', gateId, 'session.json'); unlinkSync(path); } catch { /* best effort */ }
   try { unlinkSync(gateVerdictCorrectionPath(runDirPath, gateId)); } catch { /* best effort */ }
 }
 

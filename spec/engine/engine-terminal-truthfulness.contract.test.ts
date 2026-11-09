@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../../src/run-layout.js';
 import { withConfirmedRejections } from '../test-support/confirmed-rejection.js';
 import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 import { artifacts } from '../spec_contracts/declared-fixtures.js';
@@ -51,7 +52,7 @@ function writeRoles(): string {
 function setupRun(stop: Record<string, unknown>, opts?: { confirmCommand?: string; baseline?: number; maxIterations?: number; resultMinimum?: number }): string {
   const created = createRun(projectDir, 'research', researchWorkflow.yaml, ['plan']);
   const rd = runDir(projectDir, created.runId);
-  writeFileSync(join(rd, 'scheduler.pid'), String(process.pid));
+  writeFileSync(runRecordPath(rd, 'scheduler.pid'), String(process.pid));
   const brief = [
     '---', 'research:', `  baseline: ${opts?.baseline ?? 0}`, '  policy: greedy_stack', '  higher_is_better: true',
     '  result_file: docs/research_round_result.json',
@@ -68,7 +69,7 @@ function setupRun(stop: Record<string, unknown>, opts?: { confirmCommand?: strin
     ...Object.entries(stop).map(([k, v]) => `    ${k}: ${v}`),
     '---', '# Test research task',
   ].join('\n');
-  writeFileSync(join(rd, 'task_brief.md'), brief);
+  writeFileSync(runRecordPath(rd, 'task_brief.md'), brief);
   const state = readRunState(projectDir, created.runId);
   state.autoApprove = true;
   state.campaignId = 'r3-test';
@@ -86,7 +87,7 @@ function loopAdapter(results: number[]): Adapter {
   return {
     async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]',
           '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
           '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
@@ -128,7 +129,7 @@ describe('FIX A — budget-exhaustion: incomplete (insufficient rounds) vs ceili
     const runId = setupRun({ beat: 999, halt_after_no_improvement: 3 }, { baseline: 0, maxIterations: 4 });
     const agentsDir = writeRoles();
     const final = await runWorkflow(researchWorkflow.config, researchWorkflow.yaml, projectDir, loopAdapter([0.1, 0.2, 0.3, 0.4]), new Map(), undefined, agentsDir, runId);
-    const journal = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_journal.json'), 'utf-8'));
+    const journal = JSON.parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'research_journal.json'), 'utf-8'));
     expect(journal.rounds.length).toBeGreaterThanOrEqual(3); // banked >= required
     expect(final.status).toBe('ceiling_hit');
     expect(final.status).not.toBe('incomplete');
@@ -141,10 +142,10 @@ describe('FIX B — integrity-rejected round count is surfaced in the terminal r
     const agentsDir = writeRoles();
     await runWorkflow(researchWorkflow.config, researchWorkflow.yaml, projectDir, loopAdapter([0, 0, 0, 0]), new Map(), undefined, agentsDir, runId);
     // The brief's declared result bound must have recorded rejections.
-    const rej = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_integrity_rejections.json'), 'utf-8'));
+    const rej = JSON.parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'research_integrity_rejections.json'), 'utf-8'));
     expect((rej.schema_mismatch ?? 0)).toBeGreaterThan(0);
     // The terminal event detail must surface that count (observability — honest work made visible).
-    const events = readFileSync(join(runDir(projectDir, runId), 'events.jsonl'), 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+    const events = readFileSync(runRecordPath(runDir(projectDir, runId), 'events.jsonl'), 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
     const completed = events.filter((e) => e.type === 'run_completed').at(-1);
     expect(completed).toBeDefined();
     expect(String(completed.detail)).toMatch(/integrity-rejected rounds:\s*\d+/);
@@ -162,7 +163,7 @@ describe('rejected research rounds settle their repair before the journal advanc
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           order.push('plan');
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: measure',
             '    role: researcher',
@@ -196,8 +197,8 @@ describe('rejected research rounds settle their repair before the journal advanc
         if (opts.stageId === 'audit_round') {
           gateCalls++;
           order.push(`audit_${gateCalls}`);
-          expect(existsSync(join(taskRunDir, 'research_journal.json'))).toBe(false);
-          writeFileSync(join(opts.runDir, 'fixture_verdict_audit_round.json'), JSON.stringify({
+          expect(existsSync(runRecordPath(taskRunDir, 'research_journal.json'))).toBe(false);
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_audit_round.json'), JSON.stringify({
             pass: gateCalls > 1,
             reason: gateCalls > 1 ? 'repair verified' : 'repair required',
           }));
@@ -205,7 +206,7 @@ describe('rejected research rounds settle their repair before the journal advanc
         }
         if (opts.stageId === 'repair_round') {
           order.push('repair');
-          expect(existsSync(join(taskRunDir, 'research_journal.json'))).toBe(false);
+          expect(existsSync(runRecordPath(taskRunDir, 'research_journal.json'))).toBe(false);
           writeFileSync(join(projectDir, 'docs', 'repair_marker.txt'), 'repaired\n');
           return fixtureResult(ok('repaired round 1'), opts);
         }
@@ -228,7 +229,7 @@ describe('rejected research rounds settle their repair before the journal advanc
     );
 
     expect(order).toEqual(['plan', 'measure', 'audit_1', 'repair', 'audit_2']);
-    const journal = JSON.parse(readFileSync(join(taskRunDir, 'research_journal.json'), 'utf-8')) as { rounds: unknown[] };
+    const journal = JSON.parse(readFileSync(runRecordPath(taskRunDir, 'research_journal.json'), 'utf-8')) as { rounds: unknown[] };
     expect(journal.rounds).toHaveLength(1);
     expect(final.currentIteration).toBe(1);
   });
@@ -246,16 +247,16 @@ describe('FIX C — summary.md Decision derives from the TERMINAL run.json statu
       research: { baseline: 0, policy: 'greedy_stack', higherIsBetter: true, stop: { beat: 99 } },
       taskDescription: 'test', completedAt: new Date().toISOString(),
     };
-    writeFileSync(join(rd, 'run.json'), JSON.stringify(state));
+    writeFileSync(runRecordPath(rd, 'run.json'), JSON.stringify(state));
     // STALE snapshot: last refreshed when the run was still improving → says continue/improved.
-    writeFileSync(join(rd, 'research_decision.json'), JSON.stringify({
+    writeFileSync(runRecordPath(rd, 'research_decision.json'), JSON.stringify({
       runningBest: 0.333, keptLabels: ['r1'], latestKept: true, consecutiveNoImprovement: 0,
       decision: 'continue', reason: 'latest round improved running-best to 0.333',
     }));
-    writeFileSync(join(rd, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'r1', result: 0.333 }] }));
+    writeFileSync(runRecordPath(rd, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'r1', result: 0.333 }] }));
     try {
       await generateRunSummary(projectDir, runId, emptyNarrativeAdapter);
-      const summary = readFileSync(join(rd, 'summary.md'), 'utf-8');
+      const summary = readFileSync(runRecordPath(rd, 'summary.md'), 'utf-8');
       const decisionLine = summary.split('\n').find((l) => l.includes('**Decision:**')) ?? '';
       expect(decisionLine).toContain('stop_ceiling');     // FIX C: reflects the terminal status
       expect(decisionLine).not.toContain('continue');     // not the stale snapshot decision
@@ -276,15 +277,15 @@ describe('FIX C — summary.md Decision derives from the TERMINAL run.json statu
       research: { baseline: 0, policy: 'greedy_stack', higherIsBetter: true, stop: { beat: 99 } },
       taskDescription: 'test', completedAt: new Date().toISOString(),
     };
-    writeFileSync(join(rd, 'run.json'), JSON.stringify(state));
-    writeFileSync(join(rd, 'research_decision.json'), JSON.stringify({
+    writeFileSync(runRecordPath(rd, 'run.json'), JSON.stringify(state));
+    writeFileSync(runRecordPath(rd, 'research_decision.json'), JSON.stringify({
       runningBest: 0.333, keptLabels: ['r1'], latestKept: false, consecutiveNoImprovement: 3,
       decision: 'stop_ceiling', reason: '3 consecutive rounds without improvement',
     }));
-    writeFileSync(join(rd, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'r1', result: 0.333 }] }));
+    writeFileSync(runRecordPath(rd, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'r1', result: 0.333 }] }));
     try {
       await generateRunSummary(projectDir, runId, emptyNarrativeAdapter);
-      const summary = readFileSync(join(rd, 'summary.md'), 'utf-8');
+      const summary = readFileSync(runRecordPath(rd, 'summary.md'), 'utf-8');
       const decisionLine = summary.split('\n').find((l) => l.includes('**Decision:**')) ?? '';
       expect(decisionLine).toContain('stop_ceiling');
       expect(decisionLine).toContain('3 consecutive rounds without improvement'); // consistent reason kept
@@ -302,7 +303,7 @@ describe('FIX D — a declared confirm that never runs (non-ship terminal) is re
     const agentsDir = writeRoles();
     const final = await runWorkflow(researchWorkflow.config, researchWorkflow.yaml, projectDir, loopAdapter([0.1, 0.2, 0.3, 0.4]), new Map(), undefined, agentsDir, runId);
     expect(['ceiling_hit', 'incomplete']).toContain(final.status); // a non-ship terminal
-    const confirmPath = join(runDir(projectDir, runId), 'research_confirm.json');
+    const confirmPath = runRecordPath(runDir(projectDir, runId), 'research_confirm.json');
     expect(existsSync(confirmPath)).toBe(true);
     const confirm = JSON.parse(readFileSync(confirmPath, 'utf-8'));
     expect(confirm.status).toBe('not_run');
@@ -315,7 +316,7 @@ describe('FIX D — a declared confirm that never runs (non-ship terminal) is re
     const agentsDir = writeRoles();
     const final = await runWorkflow(researchWorkflow.config, researchWorkflow.yaml, projectDir, loopAdapter([2.0]), new Map(), undefined, agentsDir, runId);
     expect(final.status).toBe('shipped');
-    const confirm = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_confirm.json'), 'utf-8'));
+    const confirm = JSON.parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'research_confirm.json'), 'utf-8'));
     expect(confirm.pass).toBe(true);        // the real confirm result, not the not_run stub
     expect(confirm.status).not.toBe('not_run');
   });

@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,7 +14,7 @@ import { fixtureResult } from './test-support/declared-dispatch.js';
 
 let root: string, project: string, previousStore: string;
 const contract = ArtifactContractSchema.parse({ version: 1, produces: [{
-  id: 'build', root: 'run', path: 'stages/author/build', kind: 'directory',
+  id: 'build', root: 'run', path: 'work/stages/author/build', kind: 'directory',
 }], reads: [] });
 const stage = { id: 'author', depends_on: [], artifact_contract: contract };
 
@@ -32,17 +33,17 @@ function workerOptions(created: ReturnType<typeof createRun>, artifactContract =
 }
 
 it.each(['file', 'directory'] as const)('refuses an escaping %s output root before starting stage code', async kind => {
-  const output = { id: 'report', root: 'run' as const, path: 'report', kind, nonempty: true };
+  const output = { id: 'report', root: 'run' as const, path: 'work/report', kind, nonempty: true };
   const created = createRun(project, 'scratch-output', 'name: scratch-output', [stage.id]);
   const outside = join(root, 'outside'); mkdirSync(outside);
   writeFileSync(join(outside, 'file'), 'Outside output.\n');
-  symlinkSync(kind === 'directory' ? outside : join(outside, 'file'), join(created.runDirPath, output.path));
+  symlinkSync(kind === 'directory' ? outside : join(outside, 'file'), runRecordPath(created.runDirPath, output.path));
   let called = false;
   await expect(runStage({ async run() {
     called = true;
     return { output: 'Must not start.', exitCode: 0, duration_ms: 1 };
   } }, workerOptions(created, ArtifactContractSchema.parse({ version: 1, produces: [contract.produces[0], output], reads: [] }))))
-    .rejects.toThrow('ARTIFACT_PATH_ESCAPE: run:report');
+    .rejects.toThrow('ARTIFACT_PATH_ESCAPE: run:work/report');
   expect(called).toBe(false);
 });
 
@@ -85,9 +86,9 @@ it.each((['failed', 'incomplete', 'cancelled'] as const).flatMap(status =>
     const earlier = readStageStatus(project, created.runId, 'done');
     const failedAttempts = readStageStatus(project, created.runId, stage.id).attempts!;
     const before = readRunState(project, created.runId);
-    const workflowBefore = readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf8');
-    const signal = join(created.runDirPath, 'signals/operator-note.txt');
-    mkdirSync(join(created.runDirPath, 'signals'), { recursive: true }); writeFileSync(signal, 'Retain operator context.\n');
+    const workflowBefore = readFileSync(runRecordPath(created.runDirPath, 'workflow.yaml'), 'utf8');
+    const signal = runRecordPath(created.runDirPath, 'signals/operator-note.txt');
+    mkdirSync(runRecordPath(created.runDirPath, 'signals'), { recursive: true }); writeFileSync(signal, 'Retain operator context.\n');
     const changedWorkflow = WorkflowConfigSchema.parse({ name: 'changed-project-workflow', defaults: { max_iterations: 9, max_retries: 7 },
       stages: [{ ...later, id: 'replacement', depends_on: [] }] });
     const calls: string[] = [], iterations: number[] = [];
@@ -107,7 +108,7 @@ it.each((['failed', 'incomplete', 'cancelled'] as const).flatMap(status =>
     expect(resumed).toMatchObject({ currentIteration: 2, maxIterations: 3, maxRetries: 0, startedAt: before.startedAt });
     expect(resumed.planControl).toEqual(before.planControl);
     expect(resumed.queryState?.planRevision).toEqual(before.queryState?.planRevision);
-    expect(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf8')).toBe(workflowBefore);
+    expect(readFileSync(runRecordPath(created.runDirPath, 'workflow.yaml'), 'utf8')).toBe(workflowBefore);
     expect(readFileSync(signal, 'utf8')).toBe('Retain operator context.\n');
     const attempts = readStageStatus(project, created.runId, stage.id).attempts!;
     const history = (entries: typeof attempts) => entries.map(({ index, startedAt, completedAt, status, exitCode, duration_ms, disposition, error,
@@ -151,7 +152,7 @@ it.each(['current', 'legacy settlement', 'accepted gate', 'unrecorded round', 'e
     beginStageAttempt(project, created.runId, id, 0, undefined, { role: 'coder', iteration: 2 });
     completeStageAttempt(project, created.runId, id, 0, { exitCode: 0, duration_ms: 1 });
   }
-  writeFileSync(join(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: !resumingRepair || admission === 'accepted gate', reason: resumingRepair ? 'Repair remains admitted.' : 'Earlier verification remains valid.' }));
+  writeFileSync(runRecordPath(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: !resumingRepair || admission === 'accepted gate', reason: resumingRepair ? 'Repair remains admitted.' : 'Earlier verification remains valid.' }));
   beginStageAttempt(project, created.runId, stage.id, 0, undefined, { role: 'coder',
     ...(admission === 'legacy settlement' ? {} : { iteration: admission === 'earlier' ? 1 : 2 }) });
   completeStageAttempt(project, created.runId, stage.id, 0, {
@@ -163,7 +164,7 @@ it.each(['current', 'legacy settlement', 'accepted gate', 'unrecorded round', 'e
     { ...readStageStatus(project, created.runId, stage.id), status: 'failed', error: 'Repair settlement failed.' });
   beginStageAttempt(project, created.runId, 'companion', 0, undefined, { role: 'coder', iteration: 2 });
   completeStageAttempt(project, created.runId, 'companion', 0, { exitCode: 0, duration_ms: 1 });
-  const consumed = join(created.runDirPath, 'gate_reevaluation/iteration_2/round_1'); mkdirSync(consumed, { recursive: true });
+  const consumed = runRecordPath(created.runDirPath, 'gate_reevaluation/iteration_2/round_1'); mkdirSync(consumed, { recursive: true });
   const consumedEvidence = JSON.stringify({ iteration: 2, round: 1, repairStageIds: [stage.id, 'companion'],
     completedAt: admission === 'unrecorded round'
       ? new Date(Date.parse(readStageStatus(project, created.runId, stage.id).attempts!.at(-1)!.startedAt) - 1).toISOString()
@@ -179,7 +180,7 @@ it.each(['current', 'legacy settlement', 'accepted gate', 'unrecorded round', 'e
   const resumed = await runWorkflow(workflow, stringify(workflow), project, { async run(_prompt, _role, opts) {
     calls.push(opts.stageId);
     if (opts.stageId === stage.id) writeFileSync(join(opts.runDir, contract.produces[0].path, 'result.txt'), 'Continued repair build.\n');
-    if (opts.stageId === 'review') writeFileSync(join(opts.runDir, 'fixture_verdict_review.json'),
+    if (opts.stageId === 'review') writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_review.json'),
       JSON.stringify({ pass: true, reason: 'Repair independently verified.', audit_findings: { version: 1, findings: [] } }));
     return fixtureResult({ output: 'Repair continued.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } }, new Map(), undefined, roles, created.runId);
@@ -194,10 +195,10 @@ it.each(['current', 'legacy settlement', 'accepted gate', 'unrecorded round', 'e
   } else expect(reviewed).toEqual(completed[1]);
   expect(resumed).toMatchObject({ currentIteration: 2, maxIterations: 3, maxRetries: repairRound, startedAt: before.startedAt });
   expect(resumed.planControl).toEqual(before.planControl);
-  if (resumingRepair) expect(JSON.parse(readFileSync(join(created.runDirPath, `gate_reevaluation/iteration_2/round_${repairRound}/repair_diff.json`), 'utf8')))
+  if (resumingRepair) expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, `gate_reevaluation/iteration_2/round_${repairRound}/repair_diff.json`), 'utf8')))
     .toMatchObject({ iteration: 2, round: repairRound, repairStageIds: [stage.id] });
   if (!resumingRepair || admission === 'unrecorded round') expect(readFileSync(join(consumed, 'repair_diff.json'), 'utf8')).toBe(consumedEvidence);
-  expect(existsSync(join(created.runDirPath, `gate_reevaluation/iteration_2/round_${repairRound + 1}/repair_diff.json`))).toBe(false);
+  expect(existsSync(runRecordPath(created.runDirPath, `gate_reevaluation/iteration_2/round_${repairRound + 1}/repair_diff.json`))).toBe(false);
   const repairAttempts = readStageStatus(project, created.runId, stage.id).attempts!;
   expect(repairAttempts[0]).toMatchObject(before.stages[stage.id].attempts![0]);
   expect(repairAttempts.map(attempt => attempt.exitCode)).toEqual(resumingRepair ? [settlementFailure ? 0 : 1, 0] : [0]);
@@ -213,7 +214,7 @@ it('refuses an output root aliased to its authored project', () => {
 it.each(['symlink', 'hardlink'])('refuses an engine-owned run member reached by a %s in the private build', alias => {
   const created = createRun(project, 'alias-carrier', 'name: alias-carrier\nstages: []\n', [stage.id]);
   const build = join(created.runDirPath, contract.produces[0].path); mkdirSync(build);
-  const carrier = join(created.runDirPath, 'run.json');
+  const carrier = runRecordPath(created.runDirPath, 'run.json');
   if (alias === 'symlink') symlinkSync(carrier, join(build, 'carrier.json'));
   else linkSync(carrier, join(build, 'carrier.json'));
   const errors = inspectArtifactDeclarations({ stages: [stage], projectDir: project, runDir: created.runDirPath });

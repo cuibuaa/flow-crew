@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import { concludeRun } from './run-completion.js';
 /** Research artifact identity, round ingestion/advancement, confirmation and best-effort terminal hooks; file inventory, rollback settlement and campaign writer are supplied. */
 import { type ResearchRound, evaluateResearch, evaluateResearchCeilingFloor } from '../../research-policy.js';
@@ -55,7 +56,7 @@ export async function runPostTerminateHook(
     ...(hook.env ?? {}),
   };
   const args = hook.args ?? [];
-  const logPath = join(ctx.runDir, 'post_terminate_hook.log');
+  const logPath = runRecordPath(ctx.runDir, 'post_terminate_hook.log');
   const startedAt = new Date().toISOString();
 
   await withEngineIntegrity({ projectDir: ctx.projectDir, runDir: ctx.runDir,
@@ -183,7 +184,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       const evidenceDigest = candidate?.sha256 ?? digestSources(sources);
       settleCandidate('rejected', detail);
       try {
-        writeFileSync(join(ctx.runDirPath, 'research_round_input_error.json'), `${JSON.stringify({
+        writeFileSync(runRecordPath(ctx.runDirPath, 'research_round_input_error.json'), `${JSON.stringify({
           error: detail,
           kind,
           resultFile: resultRel,
@@ -242,7 +243,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         round.outcome = 'no_candidate';
         const repairedAt = new Date().toISOString();
         try {
-          writeFileSync(join(ctx.runDirPath, 'research_round_contract_repair.json'), `${JSON.stringify({
+          writeFileSync(runRecordPath(ctx.runDirPath, 'research_round_contract_repair.json'), `${JSON.stringify({
             version: 1,
             repairedAt,
             kind: 'no_candidate_status_alias',
@@ -279,7 +280,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       : researchRoundEvidenceLink(ctx.projectDir, researchPaths.reportDir, round, state);
 
     // Journal lives in the run dir (framework-owned, agent-unreachable).
-    const journalPath = join(ctx.runDirPath, 'research_journal.json');
+    const journalPath = runRecordPath(ctx.runDirPath, 'research_journal.json');
     const journal: ResearchJournalArtifact = { rounds: [] };
     if (existsSync(journalPath)) {
       try {
@@ -314,7 +315,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
 
     const rejectGate = async (reason: string, message: string): Promise<StoreState | null> => {
       settleCandidate('rejected', `${reason}: ${message}`);
-      const rejPath = join(ctx.runDirPath, 'research_integrity_rejections.json');
+      const rejPath = runRecordPath(ctx.runDirPath, 'research_integrity_rejections.json');
       let rejData: Record<string, number> = {};
       if (existsSync(rejPath)) { try { rejData = JSON.parse(readFileSync(rejPath, 'utf-8')); } catch { /* reset */ } }
       rejData[reason] = (rejData[reason] || 0) + 1;
@@ -343,7 +344,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
           : undefined;
         if (terminalPath && terminalOwner) {
           const terminalReason = `Research ceiling: ${totalRej} integrity-gate rejections (reasons: ${Object.keys(rejData).join(',')})`;
-          writeFileSync(join(ctx.runDirPath, 'research_decision.json'), `${JSON.stringify({
+          writeFileSync(runRecordPath(ctx.runDirPath, 'research_decision.json'), `${JSON.stringify({
             version: 1,
             decision: 'stop_ceiling',
             terminalStatus: RUN_STATUS.CEILING_HIT,
@@ -352,8 +353,8 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
             reason: terminalReason,
             integrityRejectionCeiling: true,
           }, null, 2)}\n`, 'utf-8');
-          mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
-          writeFileSync(join(ctx.runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
+          mkdirSync(runRecordPath(ctx.runDirPath, 'signals'), { recursive: true });
+          writeFileSync(runRecordPath(ctx.runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
             version: 1,
             decision: 'stop_ceiling',
             terminalStatus: RUN_STATUS.CEILING_HIT,
@@ -379,8 +380,8 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         });
       }
       try {
-        mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
-        writeFileSync(join(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: rc.baseline, timestamp: new Date().toISOString(), rejected_reason: reason, rejected_label: label }), 'utf-8');
+        mkdirSync(runRecordPath(ctx.runDirPath, 'signals'), { recursive: true });
+        writeFileSync(runRecordPath(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: rc.baseline, timestamp: new Date().toISOString(), rejected_reason: reason, rejected_label: label }), 'utf-8');
       } catch { /* non-critical */ }
       return null;
     };
@@ -475,12 +476,12 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     } catch { /* non-critical */ }
 
     const evalResult = evaluateResearch(rc, journal.rounds);
-    try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(evalResult, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+    try { writeFileSync(runRecordPath(ctx.runDirPath, 'research_decision.json'), JSON.stringify(evalResult, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
 
     // Keep an immutable consumed copy immediately. A shipping round's mutable
     // result stays readable only through its confirm command; the journal label
     // already prevents a crash in this interval from counting the round twice.
-    const consumedPath = join(ctx.runDirPath, `research_round_${journal.rounds.length}_${noCandidate ? 'no_candidate_' : ''}consumed.json`);
+    const consumedPath = runRecordPath(ctx.runDirPath, `research_round_${journal.rounds.length}_${noCandidate ? 'no_candidate_' : ''}consumed.json`);
     const confirmNeedsResult = evalResult.decision === 'ship' && Boolean(rc.confirm) && !noCandidate;
     try {
       if (sourceBytes) {
@@ -510,8 +511,8 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       );
       
       try {
-        mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
-        writeFileSync(join(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: evalResult.runningBest, timestamp: new Date().toISOString() }), 'utf-8');
+        mkdirSync(runRecordPath(ctx.runDirPath, 'signals'), { recursive: true });
+        writeFileSync(runRecordPath(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: evalResult.runningBest, timestamp: new Date().toISOString() }), 'utf-8');
       } catch { /* non-critical */ }
       return null;
     }
@@ -533,7 +534,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       // The confirm command has settled. Consume the mutable slot even on a
       // refusal, so the next iteration cannot observe the same round as new.
       try { removeReviewedSource(); } catch { /* duplicate journal identity still prevents a replay */ }
-      try { writeFileSync(join(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: rc.confirm.command, requires: rc.confirm.requires }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+      try { writeFileSync(runRecordPath(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: rc.confirm.command, requires: rc.confirm.requires }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
       if (!confirmReport.pass) {
         const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
         log.warn({ runId: ctx.runId, command: rc.confirm.command, detail }, 'Confirm gate FAILED — candidate unconfirmed; excluding round and re-evaluating');
@@ -547,7 +548,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         } catch { /* non-critical */ }
         finalEval = evaluateResearch(rc, journal.rounds);
         finalEval.reason = `confirm gate failed on '${label}' (${detail}) — candidate excluded from kept stack | ${finalEval.reason}`;
-        try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(finalEval, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+        try { writeFileSync(runRecordPath(ctx.runDirPath, 'research_decision.json'), JSON.stringify(finalEval, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
         if (finalEval.decision === 'continue') {
           const marker = `[research-confirm-fail:round-${journal.rounds.length}]`;
           appendSchedulerGuidanceOnce(
@@ -558,8 +559,8 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
               + `▶ START ROUND ${journal.rounds.length + 1} — address the confirmation findings in the next candidate and write its measured result to ${resultRel}.`,
           );
           try {
-            mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
-            writeFileSync(join(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: finalEval.runningBest, confirmFailed: label, timestamp: new Date().toISOString() }), 'utf-8');
+            mkdirSync(runRecordPath(ctx.runDirPath, 'signals'), { recursive: true });
+            writeFileSync(runRecordPath(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: finalEval.runningBest, confirmFailed: label, timestamp: new Date().toISOString() }), 'utf-8');
           } catch { /* non-critical */ }
           log.info({ runId: ctx.runId, label, decision: finalEval.decision }, 'Confirm-failed candidate excluded — research budget remains, continuing loop');
           return null;
@@ -588,15 +589,15 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
               + `▶ START ROUND ${journal.rounds.length + 1} — choose the next direction from the brief and current evidence. Write its measured result to ${resultRel}.`,
           );
           try {
-            mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
-            writeFileSync(join(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: finalEval.runningBest, floorDeferred: floorCheck.reason, timestamp: new Date().toISOString() }), 'utf-8');
+            mkdirSync(runRecordPath(ctx.runDirPath, 'signals'), { recursive: true });
+            writeFileSync(runRecordPath(ctx.runDirPath, 'signals', 'research_continue.json'), JSON.stringify({ round: journal.rounds.length, runningBest: finalEval.runningBest, floorDeferred: floorCheck.reason, timestamp: new Date().toISOString() }), 'utf-8');
           } catch { /* non-critical */ }
           // The floor owns the effective decision. Leaving a durable
           // `stop_ceiling` fact here makes the conditional finalizer eligible at
           // the start of the next iteration, before the extra round just required.
           finalEval.decision = 'continue';
           finalEval.reason = `${finalEval.reason} | ceiling deferred: floor unmet (${floorCheck.reason})`;
-          try { writeFileSync(join(ctx.runDirPath, 'research_decision.json'), JSON.stringify(finalEval, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+          try { writeFileSync(runRecordPath(ctx.runDirPath, 'research_decision.json'), JSON.stringify(finalEval, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
           log.warn({ runId: ctx.runId, reason: floorCheck.reason }, 'Ceiling floor unmet — NOT terminating; steering next research round');
           return null;
         }
@@ -612,15 +613,15 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     if (policyTerminalOwner) {
       
       try {
-        writeFileSync(join(ctx.runDirPath, 'research_decision.json'), `${JSON.stringify({
+        writeFileSync(runRecordPath(ctx.runDirPath, 'research_decision.json'), `${JSON.stringify({
           ...finalEval,
           decision: terminalDecision,
           terminalStatus: policyTerminalStatus,
           terminalPath: policyTerminalPath,
           terminalOwner: policyTerminalOwner,
         }, null, 2)}\n`, 'utf-8');
-        mkdirSync(join(ctx.runDirPath, 'signals'), { recursive: true });
-        writeFileSync(join(ctx.runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
+        mkdirSync(runRecordPath(ctx.runDirPath, 'signals'), { recursive: true });
+        writeFileSync(runRecordPath(ctx.runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
           version: 1,
           decision: terminalDecision,
           terminalStatus: policyTerminalStatus,
@@ -629,7 +630,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
           reason: finalEval.reason,
         }, null, 2)}\n`, 'utf-8');
         const lastRound = journal.rounds.at(-1);
-        const lastConsumed = join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
+        const lastConsumed = runRecordPath(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
         if (lastRound?.outcome !== 'no_candidate' && !existsSync(resultAbs) && existsSync(lastConsumed)) {
           copyFileSync(lastConsumed, resultAbs);
           settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, resultRel);
@@ -654,7 +655,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     if (declaredPath) state.terminalArtifact = declaredPath;
     
     try {
-      const lastConsumed = join(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
+      const lastConsumed = runRecordPath(ctx.runDirPath, `research_round_${journal.rounds.length}_consumed.json`);
       if (!existsSync(resultAbs) && existsSync(lastConsumed)) {
         copyFileSync(lastConsumed, resultAbs);
         settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, resultRel);
@@ -693,7 +694,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       if (wroteDeclaredCandidate && declaredPath) {
         const source = join(ctx.projectDir, declaredPath);
         if (existsSync(source)) {
-          try { renameSync(source, join(ctx.runDirPath, `reality_rejected_${declaredPath.split('/').pop() ?? 'terminal_candidate'}`)); } catch { /* preserve evidence in place if move fails */ }
+          try { renameSync(source, runRecordPath(ctx.runDirPath, `reality_rejected_${declaredPath.split('/').pop() ?? 'terminal_candidate'}`)); } catch { /* preserve evidence in place if move fails */ }
         }
       }
       return state;

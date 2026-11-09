@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
@@ -120,7 +121,7 @@ function writeValidationSnapshot(
     baseline,
   };
   const bytes = `${JSON.stringify(artifact, null, 2)}\n`;
-  writeFileSync(join(runDirPath, 'validation_baseline.json'), bytes);
+  writeFileSync(runRecordPath(runDirPath, 'validation_baseline.json'), bytes);
   if (seed) seedAttemptValidation(baseline.projectDir, basename(runDirPath), baseline.results);
   return { bytes, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
@@ -226,7 +227,7 @@ describe('engine generalization runtime bindings', () => {
         return fixtureResult({ output: 'peer', exitCode: 0, duration_ms: 1, writes: ['validation.cjs'], writeAttribution: 'structured' }, opts);
       }
       reviews++; reviewStarted();
-      writeFileSync(join(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify({ pass: failure !== 'authored-rejection', reason: 'Authored review' }));
+      writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify({ pass: failure !== 'authored-rejection', reason: 'Authored review' }));
       return fixtureResult({ output: 'review', exitCode: 0, duration_ms: 1, writes: ['run:verdict_qa.json'], writeAttribution: 'structured' }, opts);
     } };
     const final = await runWorkflow(workflow, `name: ${workflow.name}`, projectDir, adapter, new Map(), undefined, agentsDir,
@@ -239,7 +240,7 @@ describe('engine generalization runtime bindings', () => {
       expect(rejected.gate?.findings?.confirmed).toHaveLength(1);
       expect(rejected.gate?.findings?.confirmed[0].record).toMatchObject({ owner: 'code', exitCode: 1 });
     }
-    const receipt = JSON.parse(readFileSync(join(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
+    const receipt = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
     expect(receipt.pass).toBe(failure !== 'regression');
     if (failure === 'peer-regression') expect(final.stages.peer_review.gate).toMatchObject({ pass: false, kind: 'audit_findings', validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]) });
     expect(final.stages.qa.status).toBe('complete');
@@ -266,7 +267,7 @@ describe('engine generalization runtime bindings', () => {
     const at = new Date().toISOString();
     writeStageStatus(projectDir, created.runId, 'qa', { status: 'complete', retries: 0,
       attempts: [{ index: 1, status: 'complete', startedAt: at, completedAt: at, exitCode: 0 }] });
-    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: !semantic, reason: 'Independent behavioral review',
+    writeFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: !semantic, reason: 'Independent behavioral review',
       ...{} }));
     let commands = 0;
     const dependencies = { runCommand: () => { commands++; throw Error('A gate cannot execute configured validation'); } };
@@ -298,19 +299,19 @@ describe('engine generalization runtime bindings', () => {
     });
     writeValidationSnapshot(created.runDirPath, baseline);
     const verdict = '{"pass":true,"reason":"Authored review remains valid"}';
-    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), verdict);
+    writeFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), verdict);
     const first = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: () => ({ exitCode: null, error: 'validation runner unavailable' }) });
     const gate = stage({ id: 'qa', is_gate: true });
     const workflow: WorkflowConfig = { name: 'gate-settlement-parity', defaults: { max_iterations: 1, max_retries: 0 }, stages: [gate] };
     const adapter: Adapter = { run: async () => { throw new Error('Mechanical settlement must preserve the authored review'); } };
     await settleGateRetries(state, [gate], 1, new Set(), projectDir, created.runId, created.runDirPath,
       workflow, adapter, new Map(), agentsDir, new Map());
-    const settled = JSON.parse(readFileSync(join(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
+    const settled = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'validation_delta_qa.json'), 'utf8'));
     const { current: _current, ...reference } = first!;
     expect(settled).toEqual(reference);
     expect(settled.pass).toBe(true); expect(settled.validationAttemptIndex).toBe(1);
-    expect(readFileSync(join(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
-    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('ledgerSequence');
+    expect(readFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
+    expect(readFileSync(runRecordPath(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('ledgerSequence');
     expect(readRunState(projectDir, created.runId).stages.qa.attempts).toEqual(status.attempts);
   });
   it('does not let green validation approve a failed gate execution', async () => {
@@ -322,7 +323,7 @@ describe('engine generalization runtime bindings', () => {
     }] });
     writeValidationSnapshot(created.runDirPath, await configuredBaseline(projectDir));
     await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: validationRunner(0) });
-    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), '{"pass":true,"reason":"Authored pass"}');
+    writeFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), '{"pass":true,"reason":"Authored pass"}');
     expect(readGateEvaluation(projectDir, 'qa', created.runId)).toBeNull();
   });
   it('refuses a synthetic terminal receipt for a normal gate with the same legal stage name', async () => {
@@ -338,7 +339,7 @@ describe('engine generalization runtime bindings', () => {
       completedAt: new Date(receiptTime + 2000).toISOString(), exitCode: 0,
     }] });
     const verdict = JSON.stringify({ pass: true, reason: 'Authored work passes' });
-    writeFileSync(join(created.runDirPath, `verdict_${gate.id}.json`), verdict);
+    writeFileSync(runRecordPath(created.runDirPath, `verdict_${gate.id}.json`), verdict);
     expect(gateValidationRefusal(projectDir, created.runId, gate.id)).toBeUndefined();
     expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: true });
     let commands = 0;
@@ -347,8 +348,8 @@ describe('engine generalization runtime bindings', () => {
     })).toMatchObject({ kind: 'unchanged' });
     expect(commands).toBe(0);
     expect(readGateEvaluation(projectDir, gate.id, created.runId)).toMatchObject({ pass: true });
-    expect(readFileSync(join(created.runDirPath, `verdict_${gate.id}.json`), 'utf8')).toBe(verdict);
-    expect(readdirSync(created.runDirPath).some(name => name.startsWith('validation_delta_terminal_author_attempt_0'))).toBe(false);
+    expect(readFileSync(runRecordPath(created.runDirPath, `verdict_${gate.id}.json`), 'utf8')).toBe(verdict);
+    expect(readdirSync(runRecordPath(created.runDirPath, '.')).some(name => name.startsWith('validation_delta_terminal_author_attempt_0'))).toBe(false);
   });
 
   it.each([
@@ -363,7 +364,7 @@ describe('engine generalization runtime bindings', () => {
     }] });
     const receipt = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: validationRunner(0) });
     expect(receipt?.pass).toBe(true);
-    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'Authored work passes' }));
+    writeFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true, reason: 'Authored work passes' }));
     expect(gateValidationRefusal(projectDir, created.runId, 'qa')).toBeUndefined();
     expect(readGateEvaluation(projectDir, 'qa', created.runId)).toMatchObject({ pass: true });
   });
@@ -382,7 +383,7 @@ describe('engine generalization runtime bindings', () => {
     expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'already_blessed', validationStageId: 'author' });
     writeFileSync(join(projectDir, 'later.ts'), 'later source change');
     expect(await ensureTerminalArtifactValidation(input)).toMatchObject({ pass: true, disposition: 'already_blessed' });
-    expect(existsSync(join(created.runDirPath, 'validation_delta_terminal_author.json'))).toBe(false);
+    expect(existsSync(runRecordPath(created.runDirPath, 'validation_delta_terminal_author.json'))).toBe(false);
   });
 
   it.each([undefined, 99, VALIDATION_FACT_VERSION])('uses supported receipt semantics before terminal completion without rerunning validation (version=%s)', async (version) => {
@@ -393,7 +394,7 @@ describe('engine generalization runtime bindings', () => {
     const created = createRun(projectDir, 'fixture', 'name: fixture', ['finalizer']);
     const state = terminalState(projectDir, created.runId, terminalPath, new Date(Date.now() - 200).toISOString());
     writeRunState(projectDir, created.runId, state);
-    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+    writeFileSync(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
       version: 1, pass: true, errors: [], terminalOwners: { [terminalPath]: 'finalizer' },
     }));
     const baseline = await configuredBaseline(projectDir);
@@ -401,7 +402,7 @@ describe('engine generalization runtime bindings', () => {
     seedAttemptValidation(projectDir, created.runId, baseline.results, { stageId: 'finalizer' });
     // Declared legacy/future receipt fixtures; keep all facts and their binding
     // identical so only supported semantics can authorize the terminal result.
-    const ledgerPath = join(created.runDirPath, 'evidence-ledger.jsonl');
+    const ledgerPath = runRecordPath(created.runDirPath, 'evidence-ledger.jsonl');
     const fact = JSON.parse(readFileSync(ledgerPath, 'utf8'));
     if (version === undefined) delete fact.validationVersion;
     else fact.validationVersion = version;
@@ -428,7 +429,7 @@ describe('engine generalization runtime bindings', () => {
     expect(state.status).toBe(accepted ? 'complete' : 'running');
     expect(validationCalls).toBe(0);
     expect(readFileSync(ledgerPath, 'utf8')).toBe(receiptBytes);
-    expect(existsSync(join(created.runDirPath, 'validation_delta_terminal_finalizer.json'))).toBe(false);
+    expect(existsSync(runRecordPath(created.runDirPath, 'validation_delta_terminal_finalizer.json'))).toBe(false);
   });
 
   it('retains an unknown attempt launch failure without retrying it or replacing independent review', async () => {
@@ -442,15 +443,15 @@ describe('engine generalization runtime bindings', () => {
       runCommand: () => ({ exitCode: null, error: 'validation runner unavailable' }) });
     seedAttemptValidation(projectDir, created.runId, measured.results);
     const verdict = JSON.stringify({ pass: true, reason: 'Authored review remains valid' });
-    writeFileSync(join(created.runDirPath, 'verdict_qa.json'), verdict);
+    writeFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), verdict);
     const first = await recordGateValidationDelta(projectDir, created.runId, 'qa', { runCommand: () => ({ exitCode: null, error: 'validation runner unavailable' }) });
     expect(first?.pass).toBe(false);
     expect(first?.delta.every((entry) => entry.state === 'unverified')).toBe(true);
     let commands = 0;
     expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: (request) => { commands++; return validationRunner(0)(request); } })).toMatchObject({ kind: 'unchanged' });
     expect(commands).toBe(0);
-    expect(readFileSync(join(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
-    expect(readFileSync(join(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('ledgerSequence');
+    expect(readFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), 'utf8')).toBe(verdict);
+    expect(readFileSync(runRecordPath(created.runDirPath, first!.immutablePath!), 'utf8')).toContain('ledgerSequence');
     expect(await settleGateValidationEvidence(projectDir, created.runId, 'qa', { runCommand: () => { throw new Error('settled validation must not repeat'); } })).toMatchObject({ kind: 'unchanged' });
     expect(readGateEvaluation(projectDir, 'qa', created.runId)?.pass).toBe(true);
   });
@@ -527,7 +528,7 @@ describe('engine generalization runtime bindings', () => {
       stages: [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'plan', role: 'planner', dynamic_dispatch: true })],
     };
     const created = createRun(projectDir, workflow.name, 'name: typed-gate-recovery', ['plan']);
-    writeFileSync(join(created.runDirPath, 'gate_contract.json'), JSON.stringify({
+    writeFileSync(runRecordPath(created.runDirPath, 'gate_contract.json'), JSON.stringify({
       metric: 'quality', threshold: 7, higherIsBetter: true,
     }));
     let gateCalls = 0;
@@ -536,7 +537,7 @@ describe('engine generalization runtime bindings', () => {
       const summary = summaryResult(opts);
       if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: qa',
           '    role: qa',
@@ -557,7 +558,7 @@ describe('engine generalization runtime bindings', () => {
       }
       if (opts.stageId === 'qa') {
         gateCalls++;
-        writeFileSync(join(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify(gateCalls === 1
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify(gateCalls === 1
           ? { pass: true, reason: 'work itself passes', metric: 'quality' }
           : { pass: true, reason: 'contract evidence supplied', metric: 'quality', value: 8 }));
         if (gateCalls === 2) expect(prompt).toContain('engine_rejection_reason');
@@ -600,7 +601,7 @@ describe('engine generalization runtime bindings', () => {
       const completedAt = new Date(Date.now() - 200).toISOString();
       const state = terminalState(projectDir, created.runId, terminalPath, completedAt);
       writeRunState(projectDir, created.runId, state);
-      writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+      writeFileSync(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
         version: 1,
         pass: true,
         checkedAt: new Date().toISOString(),
@@ -627,7 +628,7 @@ describe('engine generalization runtime bindings', () => {
           runCommand: validationRunner(laterBlessingPass ? 0 : 1),
         });
       } else {
-        writeFileSync(join(created.runDirPath, 'validation_delta_qa.json'), JSON.stringify({
+        writeFileSync(runRecordPath(created.runDirPath, 'validation_delta_qa.json'), JSON.stringify({
           version: 1,
           stageId: 'qa',
           checkedAt: laterBlessing === 'legacy'
@@ -659,13 +660,13 @@ describe('engine generalization runtime bindings', () => {
     expect(rejected.result.decision).toBe('matched');
     expect(rejected.state.status).toBe('complete');
     expect(rejected.validationCalls).toBe(0);
-    expect(existsSync(join(rejected.runDirPath, 'supervisor_guidance.md'))).toBe(false);
+    expect(existsSync(runRecordPath(rejected.runDirPath, 'supervisor_guidance.md'))).toBe(false);
 
     const revalidated = await runCase('stale-revalidated', 0, false);
     expect(revalidated.result.decision).toBe('matched');
     expect(revalidated.state.status).toBe('complete');
     expect(revalidated.validationCalls).toBe(0);
-    expect(existsSync(join(revalidated.runDirPath, 'validation_delta_terminal_finalizer.json'))).toBe(false);
+    expect(existsSync(runRecordPath(revalidated.runDirPath, 'validation_delta_terminal_finalizer.json'))).toBe(false);
 
     const identityFree = await runCase('identity-free-later-delta', 0, 'legacy');
     expect(identityFree.result.decision).toBe('matched');
@@ -719,16 +720,16 @@ describe('engine generalization runtime bindings', () => {
     for (const [index, round] of [first, independent].entries()) {
       writeFileSync(resultPath, JSON.stringify(round));
       await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: index + 1, adapter });
-      expect(JSON.parse(readFileSync(join(runDirPath, `research_round_${index + 1}_consumed.json`), 'utf-8'))).toEqual(round);
+      expect(JSON.parse(readFileSync(runRecordPath(runDirPath, `research_round_${index + 1}_consumed.json`), 'utf-8'))).toEqual(round);
     }
-    const journal = JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf-8'));
+    const journal = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_journal.json'), 'utf-8'));
     expect(journal.rounds.map((round: { label: string; result: number }) => [round.label, round.result]))
       .toEqual([['round-a', 0.018], ['round-c', 0.018]]);
     writeFileSync(resultPath, JSON.stringify({ label: 'round-a', result: 0.019, evidence: { sample: 'new', seed: 41 } }));
     await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: 3, adapter });
-    expect(readFileSync(join(runDirPath, 'supervisor_guidance.md'), 'utf-8')).toContain('immutable identity');
-    expect(JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf-8')).rounds).toEqual(journal.rounds);
-    expect(JSON.parse(readFileSync(join(runDirPath, 'research_round_1_consumed.json'), 'utf-8'))).toEqual(first);
+    expect(readFileSync(runRecordPath(runDirPath, 'supervisor_guidance.md'), 'utf-8')).toContain('immutable identity');
+    expect(JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_journal.json'), 'utf-8')).rounds).toEqual(journal.rounds);
+    expect(JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_round_1_consumed.json'), 'utf-8'))).toEqual(first);
   });
 
   it('16 — identifies configured-command inputs without scope negotiation', async () => {
@@ -781,7 +782,7 @@ describe('engine generalization runtime bindings', () => {
       const summary = summaryResult(opts);
       if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: qa',
           '    role: qa',
@@ -800,7 +801,7 @@ describe('engine generalization runtime bindings', () => {
         ].join('\n')));
       } else if (opts.stageId === 'qa') {
         initialPrompt ||= prompt;
-        writeFileSync(join(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify({
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify({
           pass: false, reason: 'substantive fixture rejection',
         }));
       } else {

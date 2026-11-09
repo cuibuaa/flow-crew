@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import {
   appendFileSync,
   mkdirSync,
@@ -72,7 +73,7 @@ function writeEntry(
 ): string {
   const directory = join(storeRoot, session);
   mkdirSync(directory, { recursive: true });
-  const path = join(directory, filename);
+  const path = runRecordPath(directory, filename);
   writeFileSync(path, `${JSON.stringify(entry, null, 2)}\n`, 'utf-8');
   return path;
 }
@@ -85,7 +86,7 @@ function writeRun(
 ): string {
   const directory = join(engineRoot, 'runs', runId);
   mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, 'run.json'), `${JSON.stringify({
+  writeFileSync(runRecordPath(directory, 'run.json'), `${JSON.stringify({
     runId,
     workflowName: 'fixture',
     projectDir,
@@ -451,7 +452,7 @@ describe('durable wrap-up obligation', () => {
         const runId = `transition-${priorIndex}-${nextIndex}`;
         const runDirectory = writeRun(engineRoot, runId, root, next);
         if (prior !== undefined) {
-          writeFileSync(join(runDirectory, 'run_event_status.json'), `${JSON.stringify({
+          writeFileSync(runRecordPath(runDirectory, 'run_event_status.json'), `${JSON.stringify({
             version: 1,
             status: prior,
             observedAt: '2030-01-01T00:00:00.000Z',
@@ -504,7 +505,7 @@ describe('durable wrap-up obligation', () => {
 describe('explicit successful wrap-up closes one exact entry', () => {
   it('ends an unattended terminal session accurately without invoking reconciliation', async () => {
     const fixture = seedLandFixture();
-    writeFileSync(join(fixture.runDirectory, 'run_event_status.json'), `${JSON.stringify({
+    writeFileSync(runRecordPath(fixture.runDirectory, 'run_event_status.json'), `${JSON.stringify({
       version: 1,
       status: RUN_STATUS.RUNNING,
       observedAt: '2030-01-01T00:00:00.000Z',

@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { readOptionalJsonlFile } from './jsonl.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, lstatSync } from 'node:fs';
@@ -251,7 +252,7 @@ export class SessionPush {
         || (original.exitCode === undefined ? undefined : `exit ${original.exitCode}`))) || undefined,
       runStatus: event.runStatus || (state && state.status) || undefined,
       lastStage: event.lastStage || stages.at(-1)?.[0],
-      reportPath: event.reportPath || (directory && existsSync(join(directory, 'summary.md')) ? join(directory, 'summary.md') : undefined),
+      reportPath: event.reportPath || (directory && existsSync(runRecordPath(directory, 'summary.md')) ? runRecordPath(directory, 'summary.md') : undefined),
     };
   }
   sessionTasks(frontend: LaunchTarget['frontend'], sessionId: string): TaskEntry[] {

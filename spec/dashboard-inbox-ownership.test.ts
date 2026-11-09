@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,10 +40,10 @@ describe('inbox campaign attention ownership', () => {
       state.campaignStorageKey = 'ledger-attention';
     });
     const path = runDir(project, created.runId);
-    mkdirSync(join(path, 'stages', 'review'), { recursive: true });
-    writeFileSync(join(path, 'metrics_review.json'), JSON.stringify({ score: 7, metric_name: 'quality' }));
-    writeFileSync(join(path, 'stages', 'review', 'metric.json'), JSON.stringify({ hasMetric: true, value: 7, metric: 'quality' }));
-    writeFileSync(join(path, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'candidate', result: 7 }] }));
+    mkdirSync(runRecordPath(path, 'stages', 'review'), { recursive: true });
+    writeFileSync(runRecordPath(path, 'metrics_review.json'), JSON.stringify({ score: 7, metric_name: 'quality' }));
+    writeFileSync(stageWorkPath(path, 'stages', 'review', 'metric.json'), JSON.stringify({ hasMetric: true, value: 7, metric: 'quality' }));
+    writeFileSync(runRecordPath(path, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'candidate', result: 7 }] }));
     const campaigns = join(fcGlobalDir(), 'campaigns');
     mkdirSync(campaigns, { recursive: true });
     writeFileSync(join(campaigns, 'ledger-attention.jsonl'), JSON.stringify({

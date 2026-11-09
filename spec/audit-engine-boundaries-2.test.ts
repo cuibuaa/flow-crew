@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { parseChecksFromMarkdown } from '../src/reality-gate/index.js';
 import { randomBytes } from 'node:crypto';
@@ -84,7 +85,7 @@ describe('engine boundary audit probes', () => {
       const runId = 'failed-gate-fixture';
       const dir = runDir(projectDir, runId);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, 'verdict_audit_cache.json'), '{"pass":false,"reason":"fixture rejection"}\n');
+      writeFileSync(runRecordPath(dir, 'verdict_audit_cache.json'), '{"pass":false,"reason":"fixture rejection"}\n');
       const state = {
         projectDir, runId,
         stages: {
@@ -113,8 +114,8 @@ describe('engine boundary audit probes', () => {
       mkdirSync(dir, { recursive: true });
       // A run-local validation baseline exists, but no delta: deltas are recorded
       // only when a declared gate completes.
-      writeFileSync(join(dir, 'validation_baseline.json'), '{"version":1}\n');
-      writeFileSync(join(dir, 'verdict_baseline.json'), '{"pass":true,"reason":"baseline captured"}\n');
+      writeFileSync(runRecordPath(dir, 'validation_baseline.json'), '{"version":1}\n');
+      writeFileSync(runRecordPath(dir, 'verdict_baseline.json'), '{"pass":true,"reason":"baseline captured"}\n');
       const stage = (id: string, extra: Record<string, unknown>) => ({ artifact_contract: artifacts([], [], []),
         id, role: 'coder', depends_on: [], dependency_reasons: {}, scope: [], criterion_refs: [],
         skills: [], prompt_template: id, is_gate: false, ...extra,

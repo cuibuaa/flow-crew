@@ -1,7 +1,7 @@
+import { stageWorkPath, runRecordPath } from '../../run-layout.js';
 // Boundary: Contradictory verdict fields and per-criterion evidence validation using admitted assignments; no execution or publication.
 import { DispatchAdmissionReport } from '../sched_admission/dispatch.js';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type { GateVerdict, StageAttempt } from '../../store.js';
 import { STAGE_STATUS } from '../../store.js';
 import type { StageArtifactContractAudit } from '../../stage-artifact-contract.js';
@@ -35,12 +35,12 @@ export function projectGateVerdict(record: Record<string, unknown>): GateVerdict
 /** Reuse the protected settlement receipt; a post-attempt edit grants no new authority. */
 export function validateSettledGateVerdict(base: string, runId: string, stageId: string, attempt: StageAttempt | undefined, capturedDigest: string | undefined): string | undefined {
   try {
-    const verdictPath = join(base, `verdict_${stageId}.json`);
-    const audit = JSON.parse(readFileSync(join(base, 'stages', stageId, 'artifact_contract.json'), 'utf8')) as StageArtifactContractAudit;
+    const verdictPath = runRecordPath(base, `verdict_${stageId}.json`);
+    const audit = JSON.parse(readFileSync(runRecordPath(base, 'stages', stageId, 'artifact_contract.json'), 'utf8')) as StageArtifactContractAudit;
     const production = audit.production;
     // Resume resolves the physical run directory; store readers may retain its
     // scratch alias. Authenticate the same location, execution and bytes.
-    const observation = audit.observations?.find((entry) => canonicalRunDirectory(entry.path) === canonicalRunDirectory(verdictPath));
+    const observation = audit.observations?.find((entry) => canonicalRunDirectory(entry.path) === canonicalRunDirectory(stageWorkPath(base, `verdict_${stageId}.json`)));
     if (attempt?.status === STAGE_STATUS.COMPLETE && attempt.completedAt && audit.stageId === stageId
         && production?.runId === runId && canonicalRunDirectory(production.runDir) === canonicalRunDirectory(base)
         && production.attemptIndex === attempt.index && production.attemptStartedAt === attempt.startedAt
@@ -65,7 +65,7 @@ export function explicitPassContradiction(
 
 export function assignedGateCriterionRefs(base: string, stageId: string): string[] {
   try {
-    const admission = JSON.parse(readFileSync(join(base, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+    const admission = JSON.parse(readFileSync(runRecordPath(base, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
     return admission.criterionGateRefs?.[stageId] ?? [];
   } catch {
     return [];
@@ -122,6 +122,6 @@ export class GateVerdictDocument {
 /** Read the gate's authored verdict carrier. */
 export function readGateVerdictDocument(base: string, stageId: string): GateVerdictDocument | null {
   const file = `verdict_${stageId}.json`;
-  try { return new GateVerdictDocument(readFileSync(join(base, file))); }
+  try { return new GateVerdictDocument(readFileSync(runRecordPath(base, file))); }
   catch { return null; }
 }

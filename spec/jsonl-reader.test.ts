@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -84,7 +85,7 @@ describe('tolerant shared JSONL reader', () => {
       runId,
       timestamp: '2026-07-01T00:00:00.000Z',
     });
-    const path = join(fcGlobalDir(), 'runs', runId, 'events.jsonl');
+    const path = runRecordPath(join(fcGlobalDir(), 'runs', runId), 'events.jsonl');
     appendFileSync(path, '{"type":\n', 'utf-8');
     appendRunEvent(projectDir, runId, {
       type: 'run_completed',
@@ -107,7 +108,7 @@ describe('tolerant shared JSONL reader', () => {
       runId,
       timestamp: '2026-09-22T00:00:00.000Z',
     });
-    const path = join(fcGlobalDir(), 'runs', runId, 'events.jsonl');
+    const path = runRecordPath(join(fcGlobalDir(), 'runs', runId), 'events.jsonl');
     appendFileSync(path, Buffer.from([0, 0, 0]));
 
     appendRunEvent(projectDir, runId, {
@@ -140,7 +141,7 @@ describe('tolerant shared JSONL reader', () => {
     const projectDir = join(tempDir, 'project');
     mkdirSync(projectDir);
     const { runId, runDirPath } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', []);
-    const path = join(runDirPath, 'events.jsonl');
+    const path = runRecordPath(runDirPath, 'events.jsonl');
     const event = { runId, type: 'admission_rejected', attemptIndex: 1, timestamp: '2026-07-01T00:00:00Z' };
     writeFileSync(path, `${JSON.stringify(event)}\n`);
     const drift = () => readRunDriftProjection(runDirPath).rows.find(row => row.id === 'first_plan_admission');

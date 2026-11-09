@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { execFileSync } from 'node:child_process';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -51,7 +52,7 @@ async function scenario(options: { negotiation?: boolean; includeRepair?: boolea
       plans++;
       const pending = pendingScopePlanningInputs(opts.runDir);
       const includeRepair = options.includeRepair !== false;
-      writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringify({
+      writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringify({
         ...(pending.length ? { scope_negotiation: { defer: pending.map(entry => entry.digest) } } : {}),
         stages: [
           { id: 'author', role: 'coder', depends_on: ['plan'], dependency_reasons: { plan: 'Produce the planned report.' }, scope: ['report.md'] },
@@ -71,7 +72,7 @@ async function scenario(options: { negotiation?: boolean; includeRepair?: boolea
     } else if (opts.stageId === 'review') {
       reviews++;
       const pass = !options.alwaysReject && repairs > 0;
-      writeFileSync(join(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ pass, reason: pass ? 'Cleanup verified.' : 'Report needs cleanup.',
+      writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ pass, reason: pass ? 'Cleanup verified.' : 'Report needs cleanup.',
         ...(!pass ? { repairability: { version: 1, disposition: 'repairable', evidence: 'Correct report.md and review it again.' } } : {}) }));
     } else if (opts.stageId === 'repair') {
       repairs++;
@@ -83,7 +84,7 @@ async function scenario(options: { negotiation?: boolean; includeRepair?: boolea
     undefined, '---\ninputs: [{path: input.txt, frozen: true}]\n---\n# Clean up the report\nKeep `input.txt` frozen.\n', true, undefined, false);
   const directory = runDir(projectDir, state.runId);
   return { state, plans, repairs, reviews, pendingDigest, firstAuthorAudit, directory,
-    events: readRunEvents(projectDir, state.runId), log: existsSync(join(directory, 'iteration_log.md')) ? readFileSync(join(directory, 'iteration_log.md'), 'utf8') : '' };
+    events: readRunEvents(projectDir, state.runId), log: existsSync(runRecordPath(directory, 'iteration_log.md')) ? readFileSync(runRecordPath(directory, 'iteration_log.md'), 'utf8') : '' };
 }
 
 describe('admitted repair routes and budgets', () => {
@@ -109,7 +110,7 @@ describe('admitted repair routes and budgets', () => {
   it('rejects frozen evidence corruption at settlement without a live handshake', async () => {
     const result = await scenario({ negotiation: true });
     expect(result.state.status).not.toBe('complete');
-    const audit = JSON.parse(readFileSync(join(result.directory, 'stages/author/constraint_audit_attempt_1.json'), 'utf8'));
+    const audit = JSON.parse(readFileSync(runRecordPath(result.directory, 'stages/author/constraint_audit_attempt_1.json'), 'utf8'));
     expect(audit).toMatchObject({ rolledBackWrites: ['input.txt'], rollbackFailures: [] });
     expect(pendingScopePlanningInputs(result.directory)).toEqual([]);
     expect(readFileSync(join(projectDir, 'input.txt'), 'utf8')).toBe('frozen evidence\n');

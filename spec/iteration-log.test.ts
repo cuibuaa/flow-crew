@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,7 +30,7 @@ describe('iteration log read by the next planner', () => {
 
     appendIterationLog(projectDir, runId, 1, state, ['work']);
 
-    const log = readFileSync(join(runDirPath, 'iteration_log.md'), 'utf8');
+    const log = readFileSync(runRecordPath(runDirPath, 'iteration_log.md'), 'utf8');
     expect(log).toContain('## work (complete)');
     expect(log).toContain('## repair_c1ae91 (failed)');
     expect(log).toContain('Error: live constraint rollback failed');

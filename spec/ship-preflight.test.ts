@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import {
   mkdirSync,
@@ -122,7 +123,7 @@ it('reports the single entry even with inert legacy workflow metadata', async ()
 function writeRun(id: string, state: Record<string, unknown>, mtime: number): string {
   const runPath = join(fixture.stateRoot, 'runs', id);
   mkdirSync(runPath, { recursive: true });
-  const statePath = join(runPath, 'run.json');
+  const statePath = runRecordPath(runPath, 'run.json');
   writeFileSync(statePath, `${JSON.stringify(state)}\n`, 'utf-8');
   const timestamp = new Date(mtime);
   utimesSync(statePath, timestamp, timestamp);
@@ -182,7 +183,7 @@ describe('ship-preflight previous-run fact', () => {
     writeFileSync(join(latest, 'terminal_failure.md'), 'Gate rejected the claimed result.\n', 'utf-8');
     writeFileSync(join(latest, '.reality-gate.json'), JSON.stringify({ pass: false, checksRun: 2 }), 'utf-8');
     mkdirSync(join(fixture.stateRoot, 'runs', 'broken'), { recursive: true });
-    writeFileSync(join(fixture.stateRoot, 'runs', 'broken', 'run.json'), '{broken', 'utf-8');
+    writeFileSync(runRecordPath(join(fixture.stateRoot, 'runs', 'broken'), 'run.json'), '{broken', 'utf-8');
 
     const stateRuns = join(fixture.stateRoot, 'runs');
     let rootReads = 0;

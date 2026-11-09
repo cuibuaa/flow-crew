@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import net, { type Server, type Socket } from 'node:net';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -202,7 +203,7 @@ describe('daemon status local diagnosis', () => {
     const registry = new TaskRegistry({ baseDir: tempDir });
     const runRoot = join(tempDir, 'runs');
     const runId = 'terminal-run';
-    const runPath = join(runRoot, runId);
+    const runPath = runRecordPath(runRoot, runId);
     mkdirSync(runPath, { recursive: true });
     const task = registry.create({
       projectDir: tempDir,
@@ -210,7 +211,7 @@ describe('daemon status local diagnosis', () => {
       run_id: runId,
       status: 'running',
     });
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId,
       status: 'complete',
       completedAt: '2026-08-06T20:00:00.000Z',
@@ -260,7 +261,7 @@ describe('daemon status local diagnosis', () => {
     mkdirSync(runPath, { recursive: true });
     const task = registry.create({ projectDir: tempDir, run_id: 'legacy-cancel', status: 'cancelled' });
     const settled = registry.update(task.id, { completed_at: '2026-08-06T20:01:00.000Z' });
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({ runId: 'legacy-cancel', status: 'stopped', completedAt: '2026-08-06T20:00:00.000Z' }));
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({ runId: 'legacy-cancel', status: 'stopped', completedAt: '2026-08-06T20:00:00.000Z' }));
     expect(mergeTaskWithRunState(settled, join(tempDir, 'runs'))).toMatchObject({
       status: 'cancelled', completed_at: '2026-08-06T20:01:00.000Z',
       run: { status: 'cancelled', completedAt: '2026-08-06T20:00:00.000Z' },
@@ -271,7 +272,7 @@ describe('daemon status local diagnosis', () => {
     const registry = new TaskRegistry({ baseDir: tempDir });
     const runRoot = join(tempDir, 'runs');
     const runId = 'settled-running-run';
-    const runPath = join(runRoot, runId);
+    const runPath = runRecordPath(runRoot, runId);
     const projectDir = join(tempDir, 'project');
     mkdirSync(join(runPath), { recursive: true });
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
@@ -282,7 +283,7 @@ describe('daemon status local diagnosis', () => {
       run_id: runId,
       status: 'running',
     });
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId,
       projectDir,
       status: 'running',
@@ -317,7 +318,7 @@ describe('daemon status local diagnosis', () => {
     const registry = new TaskRegistry({ baseDir: tempDir });
     const runRoot = join(tempDir, 'runs');
     const runId = 'resumed-live-run';
-    const runPath = join(runRoot, runId);
+    const runPath = runRecordPath(runRoot, runId);
     mkdirSync(runPath, { recursive: true });
     const task = registry.create({
       projectDir: tempDir,
@@ -325,14 +326,14 @@ describe('daemon status local diagnosis', () => {
       run_id: runId,
       status: 'running',
     });
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId,
       projectDir: tempDir,
       status: 'running',
       stages: { work: { status: 'running', retries: 0 } },
     }), 'utf-8');
     writeSchedulerProcessIdentity(runPath, runId, process.pid);
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
 
     const merged = mergeTaskWithRunState(task, runRoot);
 

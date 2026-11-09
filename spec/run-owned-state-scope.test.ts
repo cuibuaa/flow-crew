@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -39,31 +40,31 @@ afterEach(() => { setFcGlobalDir(previous); rmSync(root, { recursive: true, forc
 
 describe('run-owned state scope', () => {
   it('lets author tools update backup and diagnostic files without changing engine records', async () => {
-    for (const path of authorFiles) write(join(run, path), 'original author copy');
-    const projection = readFileSync(join(run, 'run.json'));
+    for (const path of authorFiles) write(stageWorkPath(run, path), 'original author copy');
+    const projection = readFileSync(runRecordPath(run, 'run.json'));
     await withEngineIntegrity(input(), async () => {
       const result = await execWithStdin(process.execPath, ['-e',
-        `const fs=require('node:fs');for(const file of ${JSON.stringify(authorFiles.map(path => join(run, path)))})fs.writeFileSync(file,'authored update');`],
+        `const fs=require('node:fs');for(const file of ${JSON.stringify(authorFiles.map(path => stageWorkPath(run, path)))})fs.writeFileSync(file,'authored update');`],
       '', { cwd: project, timeout_ms: 5000 });
       expect(result.exitCode).toBe(0);
     });
-    for (const path of authorFiles) expect(readFileSync(join(run, path), 'utf8')).toBe('authored update');
-    expect(readFileSync(join(run, 'run.json'))).toEqual(projection);
+    for (const path of authorFiles) expect(readFileSync(stageWorkPath(run, path), 'utf8')).toBe('authored update');
+    expect(readFileSync(runRecordPath(run, 'run.json'))).toEqual(projection);
   });
 
   it('admits authored artifacts whose names merely start with a reserved filename', () => {
     for (const path of authorFiles) {
-      expect(producesEngineOwnedArtifact({ id: 'copy', root: 'run', path, kind: 'file' }, stage, run, project), path).toBe(false);
+      expect(producesEngineOwnedArtifact({ id: 'copy', root: 'run', path: `work/${path}`, kind: 'file' }, stage, run, project), path).toBe(false);
     }
   });
 
   it('executes a declared authored handoff note without reserving the handoff prefix', async () => {
-    const path = 'handoff_notes.txt';
+    const path = 'work/handoff_notes.txt';
     await withEngineIntegrity({ ...input(), artifactContract: { ...contract,
       produces: [{ id: 'notes', root: 'run', path, kind: 'file' }] } }, async () => {
-      writeFileSync(join(run, path), 'authored notes');
+      writeFileSync(runRecordPath(run, path), 'authored notes');
     });
-    expect(readFileSync(join(run, path), 'utf8')).toBe('authored notes');
+    expect(readFileSync(runRecordPath(run, path), 'utf8')).toBe('authored notes');
   });
 
   it('leaves registered custom databases and their SQLite companions to concurrent owners', async () => {
@@ -86,7 +87,7 @@ describe('run-owned state scope', () => {
     for (const local of ['run.json', 'stages/work/status.json', 'validation_delta_review.json',
       'stages/work/plan_revision_decision_request.json',
       'stages/work/constraint_audit_attempt_1.json']) {
-      const path = join(run, local), original = readFileSync(join(run, 'run.json'), 'utf8');
+      const path = runRecordPath(run, local), original = readFileSync(runRecordPath(run, 'run.json'), 'utf8');
       write(path, original);
       await expect(withEngineIntegrity(input(), async () => { writeFileSync(path, 'counterfeit'); })).rejects.toThrow('ENGINE_STATE_TAMPERED');
       expect(readFileSync(path, 'utf8')).toBe(original);

@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 /** Pre-admission authorship. No task/run is registered until this returns a brief. */
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -189,7 +190,7 @@ export function attachBriefWritingEvidence(_projectDir: string, brief: string, r
     const stem = name.slice(0, -'.reply.json'.length);
     save(join(evidenceDir, `${stem}.registered.json`), { runDir });
   }
-  const dest = join(runDir, 'brief-writing');
+  const dest = runRecordPath(runDir, 'brief-writing');
   mkdirSync(dest, { recursive: true });
   for (const name of readdirSync(evidenceDir)) {
     // Native homes/scratch may contain credentials. Only our explicit evidence records travel.

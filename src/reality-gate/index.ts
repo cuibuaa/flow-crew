@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { result as checkResult } from './checks/_utils.js';
@@ -179,7 +179,7 @@ export async function runAllChecks(decls: CheckDecl[], context: CheckContext): P
       const { advisory: handlerAdvisory, ...result } = await handler.run(decl.params, {
         ...context, declaredReads: decl.reads,
         commandBoundary: { projectDir: context.projectDir,
-          runDir: resolve(context.taskDir) === resolve(context.projectDir) ? undefined : context.taskDir,
+          runDir: resolve(context.taskDir) === resolve(context.projectDir) || !existsSync(join(context.taskDir, 'run.json')) ? undefined : context.taskDir,
           stageId: '_reality' },
       });
       results.push({

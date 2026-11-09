@@ -32,6 +32,7 @@ beforeEach(() => {
   project = join(root, 'project'); runDir = join(root, 'run'); callsPath = join(root, 'calls.jsonl');
   const bin = join(root, 'bin');
   for (const directory of [project, runDir, bin, join(root, 'codex-source'), join(root, 'plugins'), join(root, 'skills')]) mkdirSync(directory);
+  writeFileSync(join(runDir, 'run.json'), JSON.stringify({ storageLayout: 2 }));
   // An empty synthetic source prevents this fixture from touching operator credentials.
   vi.stubEnv('CODEX_HOME', join(root, 'codex-source'));
   vi.stubEnv('CODEX_PLUGINS_CACHE', join(root, 'plugins'));

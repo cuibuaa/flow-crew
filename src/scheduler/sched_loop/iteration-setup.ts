@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 // Boundary: Consume settled terminal signals and reset the iteration DAG with immutable obligation/evidence retirement and campaign health projections.
 import { createHash } from 'node:crypto';
 import { resolveResearchPaths } from '../../research-paths.js';
@@ -57,9 +58,9 @@ export async function prepareWorkflowIteration(
     if (iteration > 1 && !isResumedIteration) {
       try {
         const runDirAbs = runDir(projectDir, runId);
-        const guidancePath = join(runDirAbs, 'supervisor_guidance.md');
+        const guidancePath = runRecordPath(runDirAbs, 'supervisor_guidance.md');
         if (existsSync(guidancePath)) {
-          const archiveDir = join(runDirAbs, 'guidance_history');
+          const archiveDir = runRecordPath(runDirAbs, 'guidance_history');
           mkdirSync(archiveDir, { recursive: true });
           renameSync(guidancePath, join(archiveDir, `iter_${iteration - 1}.md`));
         }
@@ -90,7 +91,7 @@ export async function prepareWorkflowIteration(
     // Planner retry counters are bounded within this iteration.
 
     // Delete dispatch.yaml before plan stage runs only on re-plan (iteration > 1)
-    const dispatchPathPre = join(runDirPath, 'dispatch.yaml');
+    const dispatchPathPre = runRecordPath(runDirPath, 'dispatch.yaml');
     if (iteration > 1 && !isResumedIteration && !continuingBudget && existsSync(dispatchPathPre)) unlinkSync(dispatchPathPre);
     if (iteration > 1 && !isResumedIteration && !continuingBudget && state.admittedRealityChecks) {
       restoreAdmittedRealityChecks(runDirPath, state);
@@ -177,7 +178,7 @@ export async function prepareWorkflowIteration(
       for (const s of baseStages) {
         if (preservedStageIds.has(s.id)) continue;
         state.stages[s.id] = rependStageStatus(state.stages[s.id], 0);
-        mkdirSync(join(runDirPath, 'stages', s.id), { recursive: true });
+        mkdirSync(runRecordPath(runDirPath, 'stages', s.id), { recursive: true });
       }
       state.dispatchedStages = undefined;
       state.status = 'running';
@@ -185,16 +186,16 @@ export async function prepareWorkflowIteration(
 
       // Clean stale verdict files from previous iteration so new gates start fresh
       try {
-        for (const f of readdirSync(runDirPath)) {
+        for (const f of readdirSync(runRecordPath(runDirPath, '.'))) {
           if (f.startsWith('verdict') && f.endsWith('.json')
               && ![...preservedStageIds].some((id) => f === `verdict_${id}.json`)) {
-            unlinkSync(join(runDirPath, f));
+            unlinkSync(runRecordPath(runDirPath, f));
           }
         }
       } catch { /* best effort */ }
 
       // Re-write workflow.yaml to base stages only
-      writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
+      writeFileSync(runRecordPath(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
     }
     // Campaign health check: inject researcher if regression/plateau detected
     if (campaignStorageKey && iteration > 1) {
@@ -246,7 +247,7 @@ function consumedResearchStages(state: StoreState, stages: StageConfig[], direct
   if (!state.research) return preserved;
   const journalLabels = new Set<string>();
   const consumedDigests = new Set<string>();
-  const journalPath = join(directory, 'research_journal.json');
+  const journalPath = runRecordPath(directory, 'research_journal.json');
   if (existsSync(journalPath)) {
     try {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { rounds: { label: string }[] };
@@ -255,9 +256,9 @@ function consumedResearchStages(state: StoreState, stages: StageConfig[], direct
       }
     } catch { /* reset on corruption */ }
   }
-  for (const name of readdirSync(directory)) {
+  for (const name of readdirSync(runRecordPath(directory, '.'))) {
     if (/^research_round_\d+_(?:no_candidate_)?consumed\.json$/.test(name)) {
-      consumedDigests.add(createHash('sha256').update(readFileSync(join(directory, name))).digest('hex'));
+      consumedDigests.add(createHash('sha256').update(readFileSync(runRecordPath(directory, name))).digest('hex'));
     }
   }
   const byId = new Map(stages.map(stage => [stage.id, stage]));

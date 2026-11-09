@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,7 +38,7 @@ describe('engine bookkeeping stays outside the project', () => {
     const adapter = new ScriptedAdapter({});
     let settled;
     if (kind === 'budget') {
-      writeFileSync(join(base, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'first', outcome: 'no_candidate', reason: 'No safe candidate' }] }));
+      writeFileSync(runRecordPath(base, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'first', outcome: 'no_candidate', reason: 'No safe candidate' }] }));
       const finish = createResearchBudgetFinalizer(project, state.runId, base, workflow, adapter, new Map(), project, new Map());
       settled = await finish(state, 1, 'Budget exhausted', { stages: [], injectedDispatchStages: new Set() });
       expect(readdirSync(project)).toEqual(['declared.md']);

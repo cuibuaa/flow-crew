@@ -1,6 +1,7 @@
+import { runRecordPath } from './run-layout.js';
 import { atomicWrite, mkdirSync } from './engine-fs.js';
 import { stageLiveLogPath } from './stage-live-log.js';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { processGroupWork } from './process-liveness.js';
 import { isRunningStageStatus, isTerminalRunStatus, readRunState, readStageStatus,
@@ -66,7 +67,7 @@ export interface StageExecutionFacts {
 
 function readAttemptGeneration(runDirectory: string, stageId: string): AttemptEvidenceGeneration | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(join(runDirectory, 'stages', stageId, 'attempt_generation.json'), 'utf-8')) as AttemptEvidenceGeneration;
+    const parsed = JSON.parse(readFileSync(runRecordPath(runDirectory, 'stages', stageId, 'attempt_generation.json'), 'utf-8')) as AttemptEvidenceGeneration;
     if (parsed.version !== 1 || parsed.stageId !== stageId || !Number.isSafeInteger(parsed.attemptIndex)
       || typeof parsed.attemptStartedAt !== 'string' || !Number.isSafeInteger(parsed.segmentStart) || parsed.segmentStart < 0) return undefined;
     return parsed;
@@ -111,11 +112,11 @@ export function inspectStageExecutionFacts(input: {
     return compareContentIdentities(baseline, current) === 'different';
   };
 
-  const stageRoot = join(input.runDir, 'stages', input.stageId);
+  const stageRoot = runRecordPath(input.runDir, 'stages', input.stageId);
   const liveLogPath = stageLiveLogPath(input.runDir, input.stageId);
   const outputPath = join(stageRoot, 'output.md');
-  const verdictPath = join(input.runDir, `verdict_${input.stageId}.json`);
-  const handoffPath = join(input.runDir, `handoff_${input.stageId}.md`);
+  const verdictPath = runRecordPath(input.runDir, `verdict_${input.stageId}.json`);
+  const handoffPath = runRecordPath(input.runDir, `handoff_${input.stageId}.md`);
   const verdictObserved = belongsToAttempt(verdictPath, 'verdict');
   const outputObserved = belongsToAttempt(outputPath, 'output');
   const handoffObserved = belongsToAttempt(handoffPath, 'handoff');
@@ -321,7 +322,7 @@ export class StageWatchdog {
 
   private persistProgress(): void {
     try {
-      atomicWrite(join(this.runDir(), 'stage_watchdog.json'), JSON.stringify({
+      atomicWrite(runRecordPath(this.runDir(), 'stage_watchdog.json'), JSON.stringify({
         stageProgress: this.stageObservations.snapshot(this.options.idleThresholdMs),
       }, null, 2));
     } catch { /* cancellation does not depend on dashboard publication */ }
@@ -330,7 +331,7 @@ export class StageWatchdog {
   /** Resume only observations bound to the current execution, including old runs. */
   restoreProgress(): void {
     try {
-      const path = join(this.runDir(), 'stage_watchdog.json');
+      const path = runRecordPath(this.runDir(), 'stage_watchdog.json');
       const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
         stageProgress?: Record<string, StageExecutionFacts & { lastProgressAt: number }>;
       };
@@ -371,8 +372,8 @@ export class StageWatchdog {
     const signal: StageAbortSignal = { version: ABORT_SIGNAL_VERSION, stageId, attemptIndex: facts.attemptIndex,
       reason, timestamp: new Date().toISOString(), source: 'watchdog' };
     try {
-      mkdirSync(join(this.runDir(), 'signals'), { recursive: true });
-      atomicWrite(join(this.runDir(), 'signals', `abort_${stageId}.json`), JSON.stringify(signal, null, 2));
+      mkdirSync(runRecordPath(this.runDir(), 'signals'), { recursive: true });
+      atomicWrite(runRecordPath(this.runDir(), 'signals', `abort_${stageId}.json`), JSON.stringify(signal, null, 2));
       return { written: true, reason };
     } catch { return { written: false, reason: 'the owned cancellation signal could not be persisted' }; }
   }

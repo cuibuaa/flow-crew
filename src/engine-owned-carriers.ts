@@ -94,26 +94,10 @@ export function engineOwnedGlobalCarriers(storeRoot: string): string[] {
   return [...paths];
 }
 
-/**
- * The run namespace reserved for engine publications, including future members.
- * Admission and execution integrity checks use this same predicate. Stage output
- * and request slots are capabilities; acknowledged history never is.
- */
-export function isEngineOwnedRunPath(path: string, stage: { id: string; is_gate?: boolean; dynamic_dispatch?: boolean }): boolean {
-  if (path === 'scratch' || path === 'scratch/.tmpdir') return true;
-  if (!path || /^run-history(?:[./]|$)/.test(path) || /^(?:\.run-reservation\.json|\.run-state\.lock)(?:\/|$)/.test(path)) return true;
-  if (/^(?:run\.json|evidence-ledger\.jsonl|events\.jsonl|workflow\.yaml|task_brief\.md|brief_criteria\.json|validation_baseline\.json|validation_delta_[^/]+\.json|dispatch_admission\.json|plan_history|audit_findings|signals|stage_watchdog\.json)(?:\/|$)/.test(path)) return true;
-  if (/^(?:stage_evidence|gate_reevaluation|dispatch_rejections|plan_retry|declared_outputs|terminal_snapshots|guidance_history|supervisor_rejections|discarded|approvals|\.rollback-preimages)(?:\/|$)/.test(path)
-    || /^(?:iteration_log\.md|run_event_status\.json|supervisor_guidance\.md|scheduler\.pid|scheduler\.identity\.json|scheduler-heartbeat\.json|scheduler-loop-stall\.json|\.reality-gate\.json|\.reality-gate\.failures\.md|approvals\.jsonl|user_input\.md|blockage_ledger\.json|repeated_blockage\.json|plan_retry_state\.json|gate_contract\.json|summary\.md|verdict\.json)(?:\/|$)/.test(path)) return true;
-  if (/^(?:research_round_input_error\.json|research_round_contract_repair\.json|research_integrity_rejections\.json|research_terminal_ready\.json|research_continue\.json|research_gate_exhausted\.json|goal_met\.json|repair_diff\.json|post_terminate_hook\.log)(?:\/|$)/.test(path)) return true;
-  if (/^stages(?:\/|$)/.test(path)) {
-    // Stage namespaces carry both engine records and authored outputs. Guard
-    // their directory identities and the same record slots for every stage;
-    // switching stages cannot turn a private build into engine state.
-    if (/^stages(?:\/[^/]+)?$/.test(path)) return true;
-    if (/^stages\/[^/]+\/(?:status\.json|output_schema\.json|invocations|attempt_generation\.json|plan_revision_decision_[^/]+\.json|constraint_audit_attempt_\d+\.json|command_activity\.json|session\.json|artifact_contract\.json|guidance_consumed\.md|guidance\.md|live(?:_attempt_\d+_[a-f0-9]{24})?\.log)(?:\/|$)/.test(path)) return true;
-  }
-  return (/^dispatch\.yaml(?:\/|$)/.test(path) && !(stage.dynamic_dispatch && path === 'dispatch.yaml'))
-    || (/^verdict_[^/]+\.json(?:\/|$)/.test(path) && !(stage.is_gate && path === `verdict_${stage.id}.json`))
-    || (/^handoff_[^/]+\.md(?:\/|$)/.test(path) && path !== `handoff_${stage.id}.md`);
+/** Admission reserves the envelope outside the stage work tree. This is a
+ * location restriction, independent of stage role and record spelling; the
+ * integrity guard owns engine/ and the two public projections. */
+export function isReservedRunPath(path: string): boolean {
+  const local = resolve('/', path);
+  return local !== '/work' && !local.startsWith('/work/');
 }

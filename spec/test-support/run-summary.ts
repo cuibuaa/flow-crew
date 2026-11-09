@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../src/run-layout.js';
 import { atomicWrite } from '../../src/engine-fs.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -16,12 +17,12 @@ export async function generateRunSummary(
   _adapter?: Adapter,
 ): Promise<string | null> {
   const directory = runDir(projectDir, runId);
-  if (!existsSync(join(directory, 'run.json'))) return null;
+  if (!existsSync(runRecordPath(directory, 'run.json'))) return null;
   try {
     const state = readRunState(projectDir, runId);
     if (!TERMINAL_STATUSES.includes(state.status)) return null;
     const summary = renderRunSummary(projectDir, directory, state);
-    atomicWrite(join(directory, 'summary.md'), summary);
+    atomicWrite(runRecordPath(directory, 'summary.md'), summary);
     return summary;
   } catch (err) {
     log.warn({ runId, err }, 'Failed to generate run summary');

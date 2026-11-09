@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,7 @@ const yamlBlocks = (text: string): string[] => [...text.matchAll(/```yaml\s*\n([
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'flowcrew-published-spec-'));
   const project = join(root, 'project'), run = join(root, 'run');
-  mkdirSync(project); mkdirSync(join(run, 'stages', 'audit'), { recursive: true });
+  mkdirSync(project); mkdirSync(runRecordPath(run, 'stages', 'audit'), { recursive: true });
   return { root, project, run, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -27,7 +28,7 @@ describe('published declaration inputs', () => {
   it.each(['planner', 'research'])('loads the built-in %s workflow with a complete contract', (name) => {
     const { config } = loadWorkflow(join(projectRoot, 'config', 'workflows', `${name}.yaml`));
     for (const stage of config.stages) expect(ArtifactContractSchema.parse(stage.artifact_contract)).toEqual({
-      version: 1, produces: [{ id: 'dispatch', root: 'run', path: 'dispatch.yaml', kind: 'file', nonempty: true }], reads: [], groups: [],
+      version: 1, produces: [{ id: 'dispatch', root: 'run', path: 'work/dispatch.yaml', kind: 'file', nonempty: true }], reads: [], groups: [],
     });
   });
 

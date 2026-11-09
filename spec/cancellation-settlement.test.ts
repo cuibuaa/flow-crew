@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,7 +86,7 @@ describe('cancellation settles interrupted execution', () => {
     expect(state.stages.done).toEqual(done);
     expect(readStageStatus(projectDir, run.runId, 'done')).toEqual(done);
     expect(state.stages.later.status).toBe(STAGE_STATUS.PENDING);
-    expect(existsSync(join(run.runDirPath, 'stages/later/status.json'))).toBe(false);
+    expect(existsSync(runRecordPath(run.runDirPath, 'stages/later/status.json'))).toBe(false);
     expect(() => completeStageAttempt(projectDir, run.runId, 'work', work.retries, { exitCode: 0, duration_ms: 1 })).toThrow(/cancel/i);
     expect(readStageStatus(projectDir, run.runId, 'work')).toEqual(work);
     expect(readRunState(projectDir, run.runId)).toEqual(state);
@@ -98,7 +99,7 @@ describe('cancellation preserves ledger evidence', () => {
       const run = createRun(projectDir, 'fixture', 'name: fixture\nstages:\n  - id: work\n    role: coder\n    scope: []\n    prompt_template: Complete fixture.\n', ['work']);
       beginStageAttempt(projectDir, run.runId, 'work', 0, startedAt);
       completeStageAttempt(projectDir, run.runId, 'work', 0, { exitCode: 0, duration_ms: 5, completedAt });
-      const ledgerPath = join(run.runDirPath, 'stages/work/status.json');
+      const ledgerPath = runRecordPath(run.runDirPath, 'stages/work/status.json');
       const ledger = readStageStatus(projectDir, run.runId, 'work');
       if (difference === 'missing attempt') ledger.attempts!.push({ ...ledger.attempts![0], index: 2 });
       if (difference === 'different status') ledger.attempts![0].status = 'suspended';
@@ -122,13 +123,13 @@ describe('cancellation preserves ledger evidence', () => {
     updateRunState(projectDir, run.runId, state => { state.status = RUN_STATUS.RUNNING; });
     beginStageAttempt(projectDir, run.runId, 'work', 0, startedAt);
     const projection = readRunState(projectDir, run.runId).stages.work;
-    const ledgerPath = join(run.runDirPath, 'stages/work/status.json');
+    const ledgerPath = runRecordPath(run.runDirPath, 'stages/work/status.json');
     if (kind === 'ahead') {
       // writeStageStatus publishes the ledger first. Restore only run.json to
       // reproduce a crash before the corresponding projection was published.
-      const raw = readFileSync(join(run.runDirPath, 'run.json'), 'utf8');
+      const raw = readFileSync(runRecordPath(run.runDirPath, 'run.json'), 'utf8');
       completeStageAttempt(projectDir, run.runId, 'work', 0, { exitCode: 0, duration_ms: 5, completedAt });
-      writeFileSync(join(run.runDirPath, 'run.json'), raw);
+      writeFileSync(runRecordPath(run.runDirPath, 'run.json'), raw);
     }
     if (kind === 'other disagreement') writeFileSync(ledgerPath, JSON.stringify({ ...projection, error: 'Independent ledger evidence' }));
     if (kind === 'status disagreement') {
@@ -168,7 +169,7 @@ describe('cancellation preserves ledger evidence', () => {
       state.stages.work = rependStageStatus(state.stages.work);
       if (difference === 'skipped') state.stages.work.status = STAGE_STATUS.SKIPPED;
     });
-    const ledgerPath = join(run.runDirPath, 'stages/work/status.json');
+    const ledgerPath = runRecordPath(run.runDirPath, 'stages/work/status.json');
     const ledger = readStageStatus(projectDir, run.runId, 'work');
     if (difference === 'attempts') ledger.attempts![0].duration_ms!++;
     if (difference === 'retries') ledger.retries++;
@@ -196,7 +197,7 @@ describe('cancellation preserves ledger evidence', () => {
       state.status = RUN_STATUS.RUNNING;
       state.stages.work = rependStageStatus(state.stages.work);
     });
-    const ledgerPath = join(run.runDirPath, 'stages/work/status.json');
+    const ledgerPath = runRecordPath(run.runDirPath, 'stages/work/status.json');
     if (matching) writeFileSync(ledgerPath, JSON.stringify(readRunState(projectDir, run.runId).stages.work));
     const before = readFileSync(ledgerPath, 'utf8');
     const attempts = readRunState(projectDir, run.runId).stages.work.attempts;

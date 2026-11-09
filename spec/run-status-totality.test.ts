@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -86,7 +87,7 @@ describe('unknown archived run status boundary', () => {
     previousStateDir = fcGlobalDir();
     setFcGlobalDir(join(root, 'state'));
     mkdirSync(runDir(projectDir, runId), { recursive: true });
-    writeFileSync(join(runDir(projectDir, runId), 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runDir(projectDir, runId), 'run.json'), JSON.stringify({
       runId,
       workflowName: 'future-writer-fixture',
       projectDir,
@@ -116,7 +117,7 @@ describe('unknown archived run status boundary', () => {
     } as StoreState;
     expect(() => writeRunState(projectDir, runId, proposed)).toThrow(UnknownRunStatusError);
     expect(() => writeRunState(projectDir, runId, proposed)).toThrow(/Refusing to overwrite archived run/);
-    expect(JSON.parse(readFileSync(join(runDir(projectDir, runId), 'run.json'), 'utf-8')).status)
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'run.json'), 'utf-8')).status)
       .toBe('future_archived_state');
   });
 
@@ -155,7 +156,7 @@ describe('unknown archived run status boundary', () => {
       /Refusing to resume run synthetic-future-status.*Unrecognized archived run status "future_archived_state"/,
     );
     expect(run).not.toHaveBeenCalled();
-    expect(JSON.parse(readFileSync(join(runDir(projectDir, runId), 'run.json'), 'utf-8')).status)
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'run.json'), 'utf-8')).status)
       .toBe('future_archived_state');
   });
 });

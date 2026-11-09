@@ -1,3 +1,4 @@
+import { requestPath, runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { providerFailureFromDiagnostic } from '../src/provider-result.js';
@@ -74,7 +75,7 @@ function writeRoles(...names: string[]): string {
   const directory = join(projectDir, 'config', 'agents');
   mkdirSync(directory, { recursive: true });
   for (const name of names) {
-    writeFileSync(join(directory, `${name}.yaml`), [
+    writeFileSync(runRecordPath(directory, `${name}.yaml`), [
       `name: ${name}`, 'description: fixture', 'model: default', 'reasoning_effort: default',
       'tools: []', 'prompt: fixture',
     ].join('\n'));
@@ -174,7 +175,7 @@ describe('gate verdict facts and repair eligibility', () => {
     const runId = 'gate-fact';
     const directory = join(isolatedStateDir, 'runs', runId);
     mkdirSync(directory, { recursive: true });
-    writeFileSync(join(directory, 'verdict_legacy_gate.json'), JSON.stringify({ pass: false, reason: 'rejected' }));
+    writeFileSync(runRecordPath(directory, 'verdict_legacy_gate.json'), JSON.stringify({ pass: false, reason: 'rejected' }));
     const state: StoreState = {
       runId, workflowName: 'gate-fact', projectDir, status: 'running', startedAt: new Date().toISOString(),
       stages: {
@@ -202,7 +203,7 @@ describe('gate verdict facts and repair eligibility', () => {
     const runId = 'gate-passed';
     const directory = join(isolatedStateDir, 'runs', runId);
     mkdirSync(directory, { recursive: true });
-    writeFileSync(join(directory, 'verdict_passing_gate.json'), JSON.stringify({ pass: true, reason: 'accepted' }));
+    writeFileSync(runRecordPath(directory, 'verdict_passing_gate.json'), JSON.stringify({ pass: true, reason: 'accepted' }));
     const state: StoreState = {
       runId, workflowName: 'gate-passed', projectDir, status: 'running', startedAt: new Date().toISOString(),
       stages: {
@@ -232,7 +233,7 @@ describe('gate verdict facts and repair eligibility', () => {
       if (summary) return fixtureResult(summary, opts);
       calls.push(opts.stageId);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: review_gate', '    role: qa', '    scope: []', '    depends_on: [plan]',
           '    dependency_reasons: {plan: "review the planned work"}', '    is_gate: true', '    task: review',
@@ -247,13 +248,13 @@ describe('gate verdict facts and repair eligibility', () => {
         ].join('\n')));
       } else if (opts.stageId === 'review_gate') {
         reviewCalls++;
-        writeFileSync(join(opts.runDir, 'fixture_verdict_review_gate.json'), JSON.stringify({ pass: reviewCalls > 1, reason: reviewCalls > 1 ? 'fixed' : 'rejected' }));
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_review_gate.json'), JSON.stringify({ pass: reviewCalls > 1, reason: reviewCalls > 1 ? 'fixed' : 'rejected' }));
       } else if (opts.stageId === 'implement') {
         mkdirSync(join(projectDir, 'src'), { recursive: true });
         writeFileSync(join(projectDir, 'src', 'impl.ts'), 'implemented\n');
       } else if (opts.stageId === 'release_gate') {
         releaseCalls++;
-        writeFileSync(join(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({ pass: releaseCalls > 1, reason: releaseCalls > 1 ? 'released' : 'release rejected' }));
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({ pass: releaseCalls > 1, reason: releaseCalls > 1 ? 'released' : 'release rejected' }));
       }
       const writes = opts.stageId === 'implement' ? ['src/impl.ts'] : [];
       return fixtureResult({ output: opts.stageId, exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' }, opts);
@@ -268,7 +269,7 @@ describe('gate verdict facts and repair eligibility', () => {
 describe('bounded timeout negotiation', () => {
   function directRunDir(stageId: string): { runId: string; runDirPath: string } {
     const created = createRun(projectDir, 'timeout-direct', 'name: timeout-direct', [stageId]);
-    mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
+    mkdirSync(runRecordPath(created.runDirPath, 'signals'), { recursive: true });
     return { runId: created.runId, runDirPath: created.runDirPath };
   }
 
@@ -276,7 +277,7 @@ describe('bounded timeout negotiation', () => {
     const stageId = 'guided_retry';
     const { runId, runDirPath } = directRunDir(stageId);
     const beforeAttempt = 'read this before the attempt starts';
-    writeFileSync(join(runDirPath, 'user_input.md'), beforeAttempt, 'utf-8');
+    writeFileSync(requestPath(runDirPath, 'user_input.md'), beforeAttempt, 'utf-8');
     const prompts: string[] = [];
     let calls = 0;
     const adapter: Adapter = { async run(prompt, _agent, opts) {
@@ -284,7 +285,7 @@ describe('bounded timeout negotiation', () => {
       prompts.push(prompt);
       if (calls === 1) {
         expect(prompt).toContain(beforeAttempt);
-        atomicWrite(join(opts.runDir, 'user_input.md'), 'switch to the isolated retry reproduction');
+        atomicWrite(requestPath(opts.runDir, 'user_input.md'), 'switch to the isolated retry reproduction');
         return fixtureResult({ output: '503 Service Unavailable', exitCode: 1, duration_ms: 1,
           providerFailure: providerFailureFromDiagnostic({ provider: 'codex', eventType: 'error', code: 503, message: 'service_unavailable' }) }, opts);
       }
@@ -310,11 +311,11 @@ describe('bounded timeout negotiation', () => {
     expect(result.exitCode).toBe(0);
     expect(prompts).toHaveLength(2);
     expect(prompts[1]).toContain('switch to the isolated retry reproduction');
-    const receipt = readFileSync(join(runDirPath, 'stages', stageId, 'guidance_consumed.md'), 'utf-8');
+    const receipt = readFileSync(runRecordPath(runDirPath, 'stages', stageId, 'guidance_consumed.md'), 'utf-8');
     expect(receipt).toContain(beforeAttempt);
     expect(receipt).toContain('switch to the isolated retry reproduction');
-    expect(existsSync(join(runDirPath, 'user_input.md'))).toBe(false);
-    const events = readFileSync(join(runDirPath, 'events.jsonl'), 'utf-8')
+    expect(existsSync(requestPath(runDirPath, 'user_input.md'))).toBe(false);
+    const events = readFileSync(runRecordPath(runDirPath, 'events.jsonl'), 'utf-8')
       .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -490,7 +491,7 @@ describe('bounded timeout negotiation', () => {
       const summary = summaryResult(opts);
       if (summary) return fixtureResult(summary, opts);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           '- id: work',
           '  role: coder',
           '  scope: []',
@@ -514,7 +515,7 @@ describe('bounded timeout negotiation', () => {
       config, yaml, projectDir, withConfirmedRejections(adapter), new Map(), undefined,
       writeRoles('planner', 'coder'), created.runId, 'planner retry suppression', true,
     );
-    const recorded = parseYaml(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf-8')) as {
+    const recorded = parseYaml(readFileSync(runRecordPath(created.runDirPath, 'workflow.yaml'), 'utf-8')) as {
       stages: Array<{ id: string; max_retries?: number }>;
     };
     const observed = { workCalls, budgets, finalStatus: final.status };
@@ -576,7 +577,7 @@ describe('bounded timeout negotiation', () => {
     let resolveAdapterSettled!: () => void;
     const adapterSettled = new Promise<void>((resolve) => { resolveAdapterSettled = resolve; });
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
-      const requestPath = join(opts.runDir, 'stages', opts.stageId, 'timeout_extension_request.json');
+      const requestPath = stageWorkPath(opts.runDir, 'stages', opts.stageId, 'timeout_extension_request.json');
       const emit = () => {
         requestNumber++;
         writeFileSync(requestPath, JSON.stringify({
@@ -617,7 +618,7 @@ describe('bounded timeout negotiation', () => {
     expect(requestNumber).toBe(initialBudgetMs / requestCadenceMs);
     expect(result).toMatchObject({ processExitCode: null, processSignal: 'SIGTERM' });
     const status = readStageStatus(projectDir, runId, stageId);
-    const decisions = status.timeout?.decisionPaths?.map((path) => readJson(join(runDirPath, path))) ?? [];
+    const decisions = status.timeout?.decisionPaths?.map((path) => readJson(runRecordPath(runDirPath, path))) ?? [];
     expect(result).toMatchObject({ exitCode: 0, continuation: { reason: 'stage_budget', forced: true } });
     expect(status.attempts?.at(-1)?.terminationCause, JSON.stringify({ timeout: status.timeout, decisions })).toBe('exit');
     expect(status.timeout?.deadlineReachedAt).toBeTruthy();
@@ -642,6 +643,6 @@ describe('gate constraint audit evidence', () => {
     state.stages.writer.attempts = [{ index: 1, startedAt: '2026-01-01T00:00:00Z', status: 'complete',
       constraintAudit: { path: 'stages/writer/constraint_audit_attempt_1.json', declaredScope: [], effectiveScope: [], violationCount: 2, unverifiedCount: 1 } }];
     const prompt = appendGateConstraintAuditContext('Review the work.', gate, [writer, gate], state, created.runDirPath);
-    expect(prompt).toContain(`- writer attempt 1: ${join(created.runDirPath, 'stages/writer/constraint_audit_attempt_1.json')} (violations=2, unverified=1)`);
+    expect(prompt).toContain(`- writer attempt 1: ${runRecordPath(created.runDirPath, 'stages/writer/constraint_audit_attempt_1.json')} (violations=2, unverified=1)`);
   });
 });

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -92,7 +93,7 @@ describe('terminal production preserves reviewed product bytes', () => {
     expect(final.failureReason).toContain('unreviewed product writes (value.json)');
     const audit = final.stages.finalize.attempts?.at(-1)?.constraintAudit;
     expect(audit).toBeDefined();
-    const receipt = JSON.parse(readFileSync(join(runDir(project, final.runId), audit!.path), 'utf8')) as { durableWrites: string[]; rolledBackWrites: string[] };
+    const receipt = JSON.parse(readFileSync(runRecordPath(runDir(project, final.runId), audit!.path), 'utf8')) as { durableWrites: string[]; rolledBackWrites: string[] };
     expect(receipt.durableWrites).toContain('value.json');
     expect(receipt.rolledBackWrites).toEqual([]);
   });
@@ -100,7 +101,7 @@ describe('terminal production preserves reviewed product bytes', () => {
   it('allows gitignored product changes after review, preserving the exemption', async () => {
     const { final, project } = await runReviewedTerminal(false, true, true);
     const audit = final.stages.finalize.attempts!.at(-1)!.constraintAudit!;
-    expect(JSON.parse(readFileSync(join(runDir(project, final.runId), audit.path), 'utf8')).exemptedWrites).toContain('value.json');
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(project, final.runId), audit.path), 'utf8')).exemptedWrites).toContain('value.json');
     expect(final.status, final.failureReason).toBe('complete');
   });
 

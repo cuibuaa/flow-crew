@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -23,7 +24,7 @@ const choose = { successor: 'implement', reason: 'One coherent greeting change.'
 const delivered = { status: 'delivered', summary: gap, checks: [], caveats: [gap], remaining_work: [] };
 const roles = join(import.meta.dirname, '../config/agents');
 function verdict(opts: RunOpts): string {
-  const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+  const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
   return JSON.stringify({ pass: true, reason: 'Independently checked the local greeting and resource gap.',
     criteria: Object.fromEntries(criteria.map(c => [c.id, { status: 'pass', evidence: 'Read the greeting and the explicit offline gap.' }])),
     audit_findings: { version: 1, findings: [] }, remaining_work: [] });
@@ -37,8 +38,8 @@ function adapter(overrides: Record<string, unknown> = {}) {
     if (opts.stageId === 'choose') output = overrides.choose ?? choose;
     if (opts.stageId === 'implement') {
       writeFileSync(join(project, 'greeting.txt'), 'Hello.\n');
-      const slot = join(opts.runDir, 'stages/implement/approval_request.json');
-      mkdirSync(join(opts.runDir, 'stages/implement'), { recursive: true });
+      const slot = stageWorkPath(opts.runDir, 'stages/implement/approval_request.json');
+      mkdirSync(stageWorkPath(opts.runDir, 'stages/implement'), { recursive: true });
       // A stale adapter can still write its former transport slot. It has no execution meaning.
       writeFileSync(slot, JSON.stringify({ id: 'download', action: 'download', target: 'https://example.invalid/data', risk: 'external', category: 'downloads', host: 'example.invalid', title: gap }));
     }
@@ -73,8 +74,8 @@ describe('nothing waits for a person after launch', () => {
     const directory = runDir(project, state.runId);
     expect(readRunEvents(project, state.runId).some(event => ['approval_parked', 'approval_attempt_suspended', 'approval_resolved', 'decision_questions'].includes(event.type))).toBe(false);
     expect(state.parked).toBeUndefined();
-    expect(existsSync(join(directory, 'approvals.jsonl'))).toBe(false);
-    expect(readFileSync(join(directory, 'stages/implement/output.md'), 'utf8')).toContain(gap);
+    expect(existsSync(runRecordPath(directory, 'approvals.jsonl'))).toBe(false);
+    expect(readFileSync(runRecordPath(directory, 'stages/implement/output.md'), 'utf8')).toContain(gap);
     expect(renderRunSummary(project, directory, state)).toContain(gap);
     expect(fixture.prompts.join('\n')).not.toContain('write exactly one JSON request');
     expect(fixture.prompts.join('\n')).not.toContain('Current brief authorizations');

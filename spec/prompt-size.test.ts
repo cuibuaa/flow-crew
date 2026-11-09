@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -224,7 +225,7 @@ function contextFixture(): ContextFixture {
   const fcHome = join(root, 'fc-home');
   const runId = 'bounded-run';
   const runDir = join(fcHome, 'runs', runId);
-  const depDir = join(runDir, 'stages', 'upstream');
+  const depDir = runRecordPath(runDir, 'stages', 'upstream');
   mkdirSync(join(projectDir, 'config'), { recursive: true });
   mkdirSync(depDir, { recursive: true });
   setFcGlobalDir(fcHome);
@@ -284,7 +285,7 @@ describe('one bounded evidence context replaces predecessor narratives', () => {
 
   it('omits author blocker narrative and preserves structured facts for every visibility setting', () => {
     const fixture = contextFixture();
-    const ledger = join(fixture.runDir, 'evidence-ledger.jsonl');
+    const ledger = runRecordPath(fixture.runDir, 'evidence-ledger.jsonl');
     const fact = { version: 1, sequence: 1, at: 'fixture', kind: 'declaration', owner: 'declaration',
       stageId: 'upstream', attemptIndex: 1, status: 'blocked', reason: 'HEAD-' + '界🧪'.repeat(6000) + '-TAIL', caveats: [] };
     writeFileSync(ledger, JSON.stringify(fact) + '\n');
@@ -305,7 +306,7 @@ describe('one bounded evidence context replaces predecessor narratives', () => {
 
   it('uses one ledger and diff for multiple dependencies without repeating predecessor blocks', () => {
     const fixture = contextFixture();
-    const second = join(fixture.runDir, 'stages', 'upstream_two');
+    const second = runRecordPath(fixture.runDir, 'stages', 'upstream_two');
     mkdirSync(second, { recursive: true });
     writePredecessor(fixture.depDir, ['a.js'], 'FIRST-AUTHOR-PRIVATE');
     writePredecessor(second, ['b.js'], 'SECOND-AUTHOR-PRIVATE');

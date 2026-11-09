@@ -16,7 +16,7 @@ it.skipIf(process.platform !== 'linux')('runs protected fixtures from an aliased
       import { createInvocationScratch, retireRunScratch } from ${JSON.stringify(new URL('../src/invocation-scratch.ts', import.meta.url).href)};
       import { prepareAdapterHome } from ${JSON.stringify(new URL('../src/adapter-home.ts', import.meta.url).href)};
       import { withEngineIntegrity } from ${JSON.stringify(new URL('../src/engine-integrity.ts', import.meta.url).href)};
-      import { setFcGlobalDir } from ${JSON.stringify(new URL('../src/store.ts', import.meta.url).href)};
+      import { setFcGlobalDir, reserveRun, initializeReservedRun } from ${JSON.stringify(new URL('../src/store.ts', import.meta.url).href)};
       const root = process.argv[1];
       const authorRun = join(root, 'author-run');
       const author = createInvocationScratch(authorRun);
@@ -29,10 +29,10 @@ it.skipIf(process.platform !== 'linux')('runs protected fixtures from an aliased
         const suite = tmpdir();
         const project = join(suite, 'project');
         const store = join(suite, 'control');
-        const run = join(store, 'runs', 'fixture');
         mkdirSync(project, { recursive: true });
-        mkdirSync(run, { recursive: true });
         setFcGlobalDir(store);
+        const reserved = reserveRun(project);
+        const run = initializeReservedRun(project, reserved.runId, 'fixture', 'name: fixture\\nstages: []\\n', ['work']).runDirPath;
         prepareAdapterHome({ home: join(suite, 'adapter'), config: 'fixture = true\\n' });
         const homePrepared = readFileSync(join(suite, 'adapter/config.toml'), 'utf8') === 'fixture = true\\n';
         const server = createServer();
@@ -40,7 +40,7 @@ it.skipIf(process.platform !== 'linux')('runs protected fixtures from an aliased
           server.once('error', reject);
           server.listen(join(suite, 'service.sock'), () => server.close(error => error ? reject(error) : resolve()));
         });
-        const carrier = join(run, 'verdict_previous.json');
+        const carrier = join(run, 'engine', 'verdict_previous.json');
         writeFileSync(carrier, 'authentic');
         let tamperRefused = false;
         try {

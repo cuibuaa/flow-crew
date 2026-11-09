@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -40,8 +41,8 @@ describe('campaign health after a pivot', () => {
 describe('terminal study completion contract', () => {
   it('G1: stable final study completion evidence recovers a running run before re-plan', async () => {
     const gateId = 'btc_transfer_multiphase_gate';
-    mkdirSync(join(runDir(projectDir, runId), 'stages', gateId), { recursive: true });
-    writeFileSync(join(runDir(projectDir, runId), `verdict_${gateId}.json`), JSON.stringify({
+    mkdirSync(runRecordPath(runDir(projectDir, runId), 'stages', gateId), { recursive: true });
+    writeFileSync(runRecordPath(runDir(projectDir, runId), `verdict_${gateId}.json`), JSON.stringify({
       pass: false,
       model_success: false,
       study_complete: true,
@@ -89,7 +90,7 @@ describe('terminal study completion contract', () => {
   it('G2: intermediate phase progress verdict remains non-terminal', async () => {
     const gateId = 'qa_phase3_adaptation_protocols';
     mkdirSync(runDir(projectDir, runId), { recursive: true });
-    writeFileSync(join(runDir(projectDir, runId), `verdict_${gateId}.json`), JSON.stringify({
+    writeFileSync(runRecordPath(runDir(projectDir, runId), `verdict_${gateId}.json`), JSON.stringify({
       pass: false,
       phase_complete: true,
       continue_next_phase: true,

@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -70,7 +71,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
     const stageId = 'starved_deadline';
     const created = createRun(projectRoot, 'starved-deadline', 'name: starved-deadline', [stageId]);
     const budgetMs = 40;
-    const home = join(created.runDirPath, 'stages', stageId, 'codex_home');
+    const home = stageWorkPath(created.runDirPath, 'stages', stageId, 'homes', 'codex');
     let adapterStarted = false;
     const { clock: deadlineClock, advance } = settlementClock();
     const adapter: Adapter = {
@@ -156,7 +157,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
   it('QA17 keeps a current-attempt watchdog ABORT authoritative at starved settlement', { timeout: 10_000 }, async () => {
     const stageId = 'starved_stage_abort';
     const created = createRun(projectRoot, 'starved-watchdog-abort', 'name: starved-watchdog-abort', [stageId]);
-    const signalDirectory = join(created.runDirPath, 'signals');
+    const signalDirectory = runRecordPath(created.runDirPath, 'signals');
     const signalPath = join(signalDirectory, `abort_${stageId}.json`);
     mkdirSync(signalDirectory, { recursive: true });
     const { clock: deadlineClock, advance } = settlementClock();
@@ -204,7 +205,7 @@ describe('bounded stage wrap-up and cancellation regressions', () => {
   it('QA18 normalizes exit telemetry when watchdog ABORT arrives after deadline but before settlement', { timeout: 10_000 }, async () => {
     const stageId = 'deadline_then_stage_abort';
     const created = createRun(projectRoot, 'deadline-then-watchdog', 'name: deadline-then-watchdog', [stageId]);
-    const signalDirectory = join(created.runDirPath, 'signals');
+    const signalDirectory = runRecordPath(created.runDirPath, 'signals');
     const signalPath = join(signalDirectory, `abort_${stageId}.json`);
     mkdirSync(signalDirectory, { recursive: true });
     const { clock: deadlineClock, advance } = settlementClock();

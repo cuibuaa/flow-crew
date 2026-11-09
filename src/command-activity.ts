@@ -1,7 +1,8 @@
+import { runRecordPath } from './run-layout.js';
 import { atomicWrite, mkdirSync } from './engine-fs.js';
 
 
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { normalizeNativeEvent } from './adapters/native-events.js';
 import type { CommandContext, CommandLifecycleEvent } from './adapters/base.js';
 import { processGroupWork } from './process-liveness.js';
@@ -45,7 +46,7 @@ export class CommandActivityTracker {
     now?: () => string;
     onLifecycle?: (event: CommandLifecycleEvent) => void;
   }) {
-    this.path = join(input.runDir, 'stages', input.stageId, 'command_activity.json');
+    this.path = runRecordPath(input.runDir, 'stages', input.stageId, 'command_activity.json');
     this.persist();
   }
 

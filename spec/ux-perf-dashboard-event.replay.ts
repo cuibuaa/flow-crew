@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -48,7 +49,7 @@ describe('reality-gate run-detail evidence replay', () => {
       attempts: [{ index: 2, status: 'running', startedAt: '2026-09-03T10:01:00.000Z' }],
     };
     writeRunState(projectDir, created.runId, state);
-    writeFileSync(join(fcGlobalDir(), 'runs', created.runId, 'events.jsonl'), `${JSON.stringify({
+    writeFileSync(runRecordPath(join(fcGlobalDir(), 'runs', created.runId), 'events.jsonl'), `${JSON.stringify({
       type: 'admission_rejected',
       runId: created.runId,
       timestamp: '2026-09-03T10:01:30.000Z',

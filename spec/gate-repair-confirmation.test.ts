@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { declareValidation } from './test-support/structured-validation.js';
@@ -84,7 +85,7 @@ async function workflow(mode: 'mixed' | 'unconfirmed' | 'observation', failedRep
         tracker.close();
         sequence ??= readEvidence(opts.runDir).at(-1)!.sequence;
       }
-      const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+      const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
       const observation = !first && observeAfterRepair;
       return result({ pass: !first && !observation, reason: first ? 'Review observations' : 'Independent recheck passed',
         criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: !first || mode === 'observation' ? 'pass' : 'fail', evidence: 'Read docs/value.txt' }])),
@@ -193,7 +194,7 @@ describe('repair requires a reviewer reproduction', () => {
       treeHash: expect.any(String), treeAfterHash: expect.any(String), outputDigest: expect.any(String) });
     if (closure.kind !== 'command') throw Error('missing closure');
     expect(closure.treeHash).toBe(closure.treeAfterHash); expect(closure.treeHash).not.toBe(reproduction.treeHash);
-    const archived = readFileSync(join(value.directory, 'gate_reevaluation/iteration_1/round_1/engine_verdict_review.json'), 'utf8');
+    const archived = readFileSync(runRecordPath(value.directory, 'gate_reevaluation/iteration_1/round_1/engine_verdict_review.json'), 'utf8');
     expect(archived).toContain('"unconfirmed"');
     expect(renderRunSummary(value.project, value.directory, value.final)).toContain('Unconfirmed observations: unconfirmed');
   });
@@ -251,7 +252,7 @@ describe('repair requires a reviewer reproduction', () => {
     const closure = value.ledger.find(entry => entry.kind === 'command' && entry.reproductionOf === original.sequence)!;
     const finalProbe = value.ledger.filter(entry => entry.kind === 'command' && entry.owner === 'code' && entry.stageId === last).at(-1)!;
     expect(closure).toMatchObject({ exitCode: 0 });
-    expect(finalProbe).toMatchObject({ exitCode: 0, treeHash: captureProjectTree(value.project, readFileSync(join(value.directory, 'task_brief.md'), 'utf8')).hash });
+    expect(finalProbe).toMatchObject({ exitCode: 0, treeHash: captureProjectTree(value.project, readFileSync(runRecordPath(value.directory, 'task_brief.md'), 'utf8')).hash });
     expect(finalProbe).not.toHaveProperty('reproductionOf');
     expect(finalProbe).not.toMatchObject({ treeHash: (closure as { treeHash: string }).treeHash });
     expect(readFileSync(join(value.project, 'docs/value.txt'), 'utf8')).toBe('repaired');
@@ -263,12 +264,12 @@ describe('repair requires a reviewer reproduction', () => {
   it('checks numeric contracts before accepting unconfirmed observations with passing criteria', () => {
     const project = mkdtempSync(join(tmpdir(), 'observation-contract-')); roots.push(project);
     const run = createRun(project, 'observation-contract', 'name: observation-contract\nstages: []\n', ['review']);
-    writeFileSync(join(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'Unconfirmed observation',
+    writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'Unconfirmed observation',
       criteria: { C1: { status: 'pass', evidence: 'Criterion assessed' } }, audit_findings: { version: 1, findings: [finding('uncited')] } }));
     const verdict = readGateEvaluation(project, 'review', run.runId, { metric: 'quality', threshold: 1, higherIsBetter: true }, false);
     expect(verdict?.pass).toBe(false); expect(verdict?.refusal?.kind).toBe('numeric_evidence');
     expect(verdict?.findings?.unconfirmed[0].id).toBe('uncited');
-    writeFileSync(join(run.runDirPath, 'task_brief.md'), '---\noutputs: [docs/missing.md]\n---\n# Required product\n');
+    writeFileSync(runRecordPath(run.runDirPath, 'task_brief.md'), '---\noutputs: [docs/missing.md]\n---\n# Required product\n');
     const missing = readGateEvaluation(project, 'review', run.runId, undefined, false);
     expect(missing?.pass).toBe(false); expect(missing?.refusal?.kind).toBe('declared_output');
   });
@@ -337,7 +338,7 @@ describe('repair requires a reviewer reproduction', () => {
         originals.push(appendEvidence(run.runDirPath, { kind: 'command', owner: 'adapter-event', stageId: 'review', attemptIndex: 1,
           commandId: id, command, context, exitCode: response.exitCode, outputDigest: 'original', treeHash: before, treeAfterHash: before }));
       }
-      const archive = join(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
+      const archive = runRecordPath(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
       writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ gateId: 'review', engine_effective_pass: false,
         findings: { confirmed: originals.map((record, index) => ({ ...finding(`defect_${index}`, record.sequence), record })), unconfirmed: [] } }));
       for (const id of ['one', 'two']) writeFileSync(join(project, id), mode === 'partial' && id === 'two' ? 'bad' : 'good');
@@ -362,7 +363,7 @@ describe('repair requires a reviewer reproduction', () => {
           attemptStartedAt: 'start', exitCode: 0, status: 'complete', treeHash: after, files: [],
           measurements: { inputTokens: 0, outputTokens: 0, durationMs: 1, provenance: 'adapter-reported' } });
       }
-      writeFileSync(join(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Model accepts', criteria: {}, audit_findings: { version: 1, findings: [] } }));
+      writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Model accepts', criteria: {}, audit_findings: { version: 1, findings: [] } }));
       expect(readGateEvaluation(project, 'review', run.runId, undefined, false)?.pass).toBe(mode === 'complete');
     });
 
@@ -379,7 +380,7 @@ describe('repair requires a reviewer reproduction', () => {
     const original = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
       commandId: 'original', command, context, exitCode: (await execute()).exitCode, outputDigest: 'original', treeHash: before, treeAfterHash: before });
     expect(original).toMatchObject({ exitCode: 1 });
-    const archive = join(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
+    const archive = runRecordPath(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
     writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ gateId: 'review', engine_effective_pass: false,
       findings: { confirmed: [{ ...finding('value', original.sequence), record: original }], unconfirmed: [] } }));
     writeFileSync(join(project, 'value'), 'good');
@@ -401,7 +402,7 @@ describe('repair requires a reviewer reproduction', () => {
     writeRunState(project, run.runId, state);
     writeStageStatus(project, run.runId, 'review', { status: 'complete', retries: 0, exitCode: 0,
       attempts: [{ index: 2, status: 'complete', startedAt: 'review-start', completedAt: 'review-end', exitCode: 0 }] });
-    writeFileSync(join(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Model accepts', criteria: {},
+    writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Model accepts', criteria: {},
       audit_findings: { version: 1, findings: [] } }));
     // The valid replay closes on its current tree; only historical authority is missing.
     expect(readGateEvaluation(project, 'review', run.runId, undefined, false)?.pass).toBe(true);
@@ -419,7 +420,7 @@ describe('repair requires a reviewer reproduction', () => {
       stageId: 'review', attemptIndex: 1, commandId: id, command: 'false', context: { cwd: project, shell: '/bin/sh' },
       exitCode: 1, outputDigest: id, treeHash: 'tree', treeAfterHash: 'tree' }));
     for (const [index, record] of records.entries()) {
-      const archive = join(run.runDirPath, `gate_reevaluation/iteration_1/round_${index + 1}`); mkdirSync(archive, { recursive: true });
+      const archive = runRecordPath(run.runDirPath, `gate_reevaluation/iteration_1/round_${index + 1}`); mkdirSync(archive, { recursive: true });
       writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ gateId: 'review', engine_effective_pass: false,
         findings: { confirmed: [{ ...finding(`defect_${index}`, record.sequence), record }], unconfirmed: [] } }));
     }
@@ -437,20 +438,20 @@ describe('repair requires a reviewer reproduction', () => {
     const original = appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'review', attemptIndex: 1,
       commandId: 'original', command, context, exitCode: (await execute()).exitCode, outputDigest: 'original', treeHash: before, treeAfterHash: before });
     expect(original).toMatchObject({ exitCode: 1 });
-    const archive = join(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
+    const archive = runRecordPath(run.runDirPath, 'gate_reevaluation/iteration_1/round_1'); mkdirSync(archive, { recursive: true });
     writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({ engine_effective_pass: false,
       findings: { confirmed: [{ ...finding('value', original.sequence), record: original }], unconfirmed: [] } }));
     writeFileSync(join(project, 'value'), 'good');
     const repaired = captureProjectTree(project).hash;
     appendEvidence(run.runDirPath, { kind: 'command', owner: 'code', stageId: 'repair', attemptIndex: 1,
       commandId: 'closure', command, context, exitCode: (await execute()).exitCode, outputDigest: 'closure', treeHash: repaired, treeAfterHash: repaired, reproductionOf: original.sequence });
-    writeFileSync(join(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, criteria: {} }));
+    writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, criteria: {} }));
     expect(readGateEvaluation(project, 'review', run.runId, undefined, false)?.pass).toBe(true);
     writeStageStatus(project, run.runId, 'review', { status: 'complete', retries: 0,
       gate: { pass: true, validationRequired: false, kind: 'pass', verdictSha256: null } });
     // Independent downstream work changes the tree after that repair closed.
     writeFileSync(join(project, 'other'), 'later output');
-    writeFileSync(join(run.runDirPath, 'verdict_later_review.json'), JSON.stringify({ pass: true, criteria: {} }));
+    writeFileSync(runRecordPath(run.runDirPath, 'verdict_later_review.json'), JSON.stringify({ pass: true, criteria: {} }));
     expect(readGateEvaluation(project, 'later_review', run.runId, undefined, false)?.pass).toBe(true);
   });
 
@@ -465,9 +466,9 @@ describe('repair requires a reviewer reproduction', () => {
     writeStageStatus(project, run.runId, 'review', { ...status, ...(carrier === 'gate'
       ? { gate: { ...verdict, validationRequired: false, kind: 'repairable' as const, verdictSha256: null } }
       : { acceptedFrom: { runId: 'previous', verdict } }) });
-    mkdirSync(join(run.runDirPath, 'stages/review'), { recursive: true });
-    writeFileSync(join(run.runDirPath, 'stages/review/output.md'), JSON.stringify(raw));
-    const path = join(run.runDirPath, 'verdict_review.json'); writeFileSync(path, JSON.stringify(raw));
+    mkdirSync(runRecordPath(run.runDirPath, 'stages/review'), { recursive: true });
+    writeFileSync(runRecordPath(run.runDirPath, 'stages/review/output.md'), JSON.stringify(raw));
+    const path = runRecordPath(run.runDirPath, 'verdict_review.json'); writeFileSync(path, JSON.stringify(raw));
     const before = readFileSync(path, 'utf8');
     expect(readGateEvaluation(project, 'review', run.runId, undefined, false)?.findings?.unconfirmed.map(item => item.id)).toEqual(['legacy']);
     expect(renderRunSummary(project, run.runDirPath, readRunState(project, run.runId))).toContain('unconfirmed observation legacy');

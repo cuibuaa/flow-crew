@@ -1,7 +1,8 @@
+import { runRecordPath } from './run-layout.js';
 import { createHash } from 'node:crypto';
 import { atomicWrite, mkdirSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 
 export interface BlockageOccurrence {
   fingerprint: string;
@@ -74,7 +75,7 @@ export function recordBlockageOccurrence(input: {
   now?: string;
   threshold?: number;
 }): { occurrence: BlockageOccurrence; escalatedNow: boolean } {
-  const path = join(input.runDir, 'blockage_ledger.json');
+  const path = runRecordPath(input.runDir, 'blockage_ledger.json');
   const ledger = existsSync(path) ? readLedger(path) : { version: 1 as const, occurrences: {} };
   const id = fingerprint(
     input.kind,

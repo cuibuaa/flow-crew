@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -157,14 +158,14 @@ describe('CLI argument dispatch before side effects', () => {
     const run = join(isolated.fcHome, 'runs', 'scrubbed-run');
     mkdirSync(run, { recursive: true });
     const state = JSON.stringify({ runId: 'scrubbed-run', projectDir: '/scrubbed/project', workflowName: 'fixture', status: 'complete', stages: {}, startedAt: '2026-01-01T00:00:00.000Z', engineCheckpoint: { version: 2, runId: 'scrubbed-run', projectDir: '/scrubbed/project', pid: 2147483647, bootId: '00000000-0000-0000-0000-000000000000', processStart: { kind: 'linux', value: '1' }, processes: [], at: '2026-01-01T00:00:00.000Z' } });
-    writeFileSync(join(run, 'run.json'), state);
-    writeFileSync(join(run, 'evidence.txt'), 'preserve this evidence\n');
+    writeFileSync(runRecordPath(run, 'run.json'), state);
+    writeFileSync(runRecordPath(run, 'evidence.txt'), 'preserve this evidence\n');
     for (const args of [['clean', '--keep', 'abc'], ['clean', '--keep=abc']]) {
       const result = await runCli(args, isolated);
       expect(result.code, JSON.stringify(result)).toBe(1);
       expect(result.stdout + result.stderr).toMatch(/keep|usage|integer/i);
-      expect(readFileSync(join(run, 'run.json'), 'utf8')).toBe(state);
-      expect(readFileSync(join(run, 'evidence.txt'), 'utf8')).toBe('preserve this evidence\n');
+      expect(readFileSync(runRecordPath(run, 'run.json'), 'utf8')).toBe(state);
+      expect(readFileSync(runRecordPath(run, 'evidence.txt'), 'utf8')).toBe('preserve this evidence\n');
     }
     // Confirm this settled fixture really is deletable once a valid count permits it.
     const valid = await runCli(['clean', '--keep=0'], isolated);

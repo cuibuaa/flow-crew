@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { providerFailureFromDiagnostic, providerFailureFromEvent } from '../src/provider-result.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -175,7 +176,7 @@ describe('one scheduler retry policy across batch and gate execution', () => {
       { id: 'work', role: 'coder', scope: [], depends_on: ['review'], retry_to: ['review'],
         prompt_template: 'Repair fixture.', artifact_contract: fixtureArtifactContract('work') },
       { id: 'review', role: 'coder', scope: [], is_gate: true, prompt_template: 'Review fixture.',
-        artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_review.json' }], reads: [] } },
+        artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'work/verdict_review.json' }], reads: [] } },
     ] });
     const f = createRun(project, workflow.name, stringify(workflow), ['work', 'review']);
     const state = readRunState(project, f.runId), now = '2026-10-01T00:00:00.000Z';
@@ -190,12 +191,12 @@ describe('one scheduler retry policy across batch and gate execution', () => {
     state.stages.work = rependStageStatus(timedOut, 1, timedOut.error);
     for (const id of ['work', 'review']) writeStageStatus(project, f.runId, id, state.stages[id]);
     writeRunState(project, f.runId, state);
-    writeFileSync(join(f.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'Synthetic repairable rejection.' }));
-    const archive = join(f.runDirPath, 'gate_reevaluation/iteration_1/round_2');
+    writeFileSync(runRecordPath(f.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'Synthetic repairable rejection.' }));
+    const archive = runRecordPath(f.runDirPath, 'gate_reevaluation/iteration_1/round_2');
     mkdirSync(archive, { recursive: true });
     writeFileSync(join(archive, 'repair_diff.json'), JSON.stringify({ completedAt: timedOut.attempts!.at(-1)!.startedAt, repairStageIds: ['work'] }));
     if (shape === 'legacy') {
-      const path = join(f.runDirPath, 'run.json'), raw = JSON.parse(readFileSync(path, 'utf8'));
+      const path = runRecordPath(f.runDirPath, 'run.json'), raw = JSON.parse(readFileSync(path, 'utf8'));
       delete raw.gateRetryRound;
       const bytes = JSON.stringify(raw); writeFileSync(path, bytes);
       expect(readRunState(project, f.runId).gateRetryRound).toEqual({ iteration: 1, round: 2 });
@@ -210,7 +211,7 @@ describe('one scheduler retry policy across batch and gate execution', () => {
     expect(readRunState(project, f.runId).gateRetryRound).toEqual({ iteration: 1, round: 2 });
     // Once ordinary publication stores the coordinate, receipts are no longer
     // a source of authority for this run's repair budget.
-    const later = join(f.runDirPath, 'gate_reevaluation/iteration_1/round_9');
+    const later = runRecordPath(f.runDirPath, 'gate_reevaluation/iteration_1/round_9');
     mkdirSync(later, { recursive: true }); writeFileSync(join(later, 'repair_diff.json'), '{}');
     expect(readRunState(project, f.runId).gateRetryRound).toEqual({ iteration: 1, round: 2 });
   });
@@ -231,7 +232,7 @@ describe('one scheduler retry policy across batch and gate execution', () => {
   });
 
   it.each([undefined, 'attempt_timeout', 'complete'])('projects a legacy exit 124 attempt with nested cause %s without writing its stored bytes', legacy => {
-    const f = fixture(), path = join(f.runDirPath, 'stages', 'work', 'status.json');
+    const f = fixture(), path = runRecordPath(f.runDirPath, 'stages', 'work', 'status.json');
     const raw = JSON.stringify({ status: 'failed', retries: 0, exitCode: 124,
       attempts: [{ index: 1, startedAt: '2026-10-01T00:00:00.000Z', status: 'failed', exitCode: 124, timeout: legacy ? { terminationCause: legacy } : undefined }] });
     writeFileSync(path, raw);

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
@@ -52,7 +53,7 @@ afterEach(() => {
 
 function writeVerdict(verdict: Record<string, unknown>): string {
   const bytes = JSON.stringify(verdict) + '\n';
-  writeFileSync(join(runDirPath, `verdict_${gateId}.json`), bytes);
+  writeFileSync(runRecordPath(runDirPath, `verdict_${gateId}.json`), bytes);
   return createHash('sha256').update(bytes).digest('hex');
 }
 
@@ -60,12 +61,12 @@ function writeValidation(state: 'pass' | 'regression' | 'unresolved', seed = tru
   const baselineBytes = JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline: {
     version: 1, projectDir, discovery: { state: 'configured', configPath: 'fixture', commands: [{ role: 'test', command: 'fixture', args: [], display: 'npm run test' }], missingRoles: [] }, results: [], gateCriteria: [],
   } });
-  writeFileSync(join(runDirPath, 'validation_baseline.json'), baselineBytes);
+  writeFileSync(runRecordPath(runDirPath, 'validation_baseline.json'), baselineBytes);
   const reason = state === 'unresolved'
     ? 'Green baseline no longer passes, but current failure identity/count is unavailable'
     : state === 'regression' ? 'A green baseline no longer passes' : 'Green baseline remains green';
   const fact = seed ? seedAttemptValidation(projectDir, runId, [{ role: 'test', display: 'npm run test', state: state === 'pass' ? 'passed' : 'failed', exitCode: state === 'pass' ? 0 : 1, durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'unknown' }], { delta: [{ role: 'test', display: 'npm run test', state, reason, newFailureIdentifiers: state === 'regression' ? ['spec/retained-failure.test.ts'] : [] }] }) : undefined;
-  writeFileSync(join(runDirPath, `validation_delta_${gateId}.json`), JSON.stringify({
+  writeFileSync(runRecordPath(runDirPath, `validation_delta_${gateId}.json`), JSON.stringify({
     treeHash: captureProjectTree(projectDir).hash, ...(fact ? { ledgerSequence: fact.sequence } : {}),
     version: 2, stageId: gateId, checkedAt: completedAt, pass: state === 'pass',
     baselineSha256: createHash('sha256').update(baselineBytes).digest('hex'),
@@ -106,7 +107,7 @@ describe('typed gate recovery routes', () => {
         repairability: { version: 1, disposition: 'repairable', evidence: 'Reproducible product defect' } };
       const docs = join(projectDir, 'docs');
       mkdirSync(docs);
-      writeFileSync(join(docs, 'dispatch_admission.json'), JSON.stringify({ criterionGateRefs: { [gateId]: ['C1'] } }));
+      writeFileSync(runRecordPath(docs, 'dispatch_admission.json'), JSON.stringify({ criterionGateRefs: { [gateId]: ['C1'] } }));
       const verdictPath = join(docs, `verdict_${gateId}.json`);
       writeFileSync(verdictPath, JSON.stringify({ ...authored,
         ...(kind === 'audit_findings' ? { audit_findings: { version: 1, findings: 'invalid' } } : {}) }));
@@ -229,7 +230,7 @@ describe('settled gate results', () => {
   });
 
   it('reads the archived effective rejection for a legacy completed review without a live verdict', () => {
-    const archive = join(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+    const archive = runRecordPath(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
     mkdirSync(archive, { recursive: true });
     writeFileSync(join(archive, 'rejected_verdict_review.json'), JSON.stringify({ pass: true }));
     writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({
@@ -245,7 +246,7 @@ describe('settled gate results', () => {
 
   it.each([undefined, 'validation_regression'] as const)(
     'preserves archived author PASS / engine FAIL recovery with kind=%s', kind => {
-      const archive = join(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+      const archive = runRecordPath(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
       mkdirSync(archive, { recursive: true });
       writeFileSync(join(archive, 'rejected_verdict_review.json'), JSON.stringify({ pass: true }));
       writeFileSync(join(archive, 'engine_verdict_review.json'), JSON.stringify({
@@ -289,7 +290,7 @@ describe('stage group settlement boundaries', () => {
   it.each(['initial', 'retry'] as const)('contains a validation launch exception during %s settlement', async phase => {
     writeVerdict({ pass: true });
     writeValidation('pass');
-    unlinkSync(join(runDirPath, `validation_delta_${gateId}.json`));
+    unlinkSync(runRecordPath(runDirPath, `validation_delta_${gateId}.json`));
     vi.spyOn(gateValidation, 'bindReviewedGateValidation').mockReturnValue(false);
     const record = vi.spyOn(gateValidation, 'recordGateValidationDelta');
     const retry = vi.spyOn(gateValidation, 'settleGateValidationEvidence');
@@ -320,7 +321,7 @@ describe('stage group settlement boundaries', () => {
         durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'none' }],
       gateCriteria: [],
     };
-    writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runDirPath, 'validation_baseline.json'), JSON.stringify({
       version: 1, source: 'ship-setup-ready-record', baseline,
     }));
     const commands = vi.spyOn(projectValidation, 'runValidationCommand').mockImplementation(() =>
@@ -384,7 +385,7 @@ describe('validation at the review boundary', () => {
       const artifact: gateValidation.RunValidationBaselineArtifact = {
         version: 1, source: 'ship-setup-ready-record', capturedAt: startedAt, baseCommit: projectCommit(projectDir), baseline,
       };
-      writeFileSync(join(directory, 'validation_baseline.json'), JSON.stringify(artifact));
+      writeFileSync(runRecordPath(directory, 'validation_baseline.json'), JSON.stringify(artifact));
       return artifact;
     });
     const commands = vi.spyOn(projectValidation, 'runValidationCommand')

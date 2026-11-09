@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -47,8 +48,8 @@ it('lists registry rows with indexed status without opening run evidence, while 
   const runPath = join(root, 'runs', runId);
   mkdirSync(runPath, { recursive: true });
   const state = { runId, status: 'complete', workflowName: 'fixture', startedAt: '2026-08-01T00:00:00Z', stages: {}, failureReason: 'retained show detail' } as unknown as StoreState;
-  writeFileSync(join(runPath, 'run.json'), JSON.stringify(state));
-  writeFileSync(join(runPath, 'events.jsonl'), `${JSON.stringify({ type: 'run_started', runId, timestamp: state.startedAt })}\n`);
+  writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify(state));
+  writeFileSync(runRecordPath(runPath, 'events.jsonl'), `${JSON.stringify({ type: 'run_started', runId, timestamp: state.startedAt })}\n`);
   upsertRunIndex(root, state);
   const registry = new TaskRegistry({ baseDir: root });
   const bound = registry.create({ projectDir: root, run_id: runId, status: 'failed' });
@@ -73,6 +74,6 @@ it('lists registry rows with indexed status without opening run evidence, while 
   expect(mergeTaskWithRunState(bound)).toMatchObject({
     status: 'failed', run: { status: 'complete', failureReason: 'retained show detail' }, operational: { sourceCoverage: { events: 'read' } },
   });
-  expect(accesses).toContain(join(runPath, 'events.jsonl'));
-  expect(accesses).toContain(join(runPath, 'run.json'));
+  expect(accesses).toContain(runRecordPath(runPath, 'events.jsonl'));
+  expect(accesses).toContain(runRecordPath(runPath, 'run.json'));
 });

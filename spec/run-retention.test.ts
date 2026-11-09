@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,12 +17,12 @@ const contracts = () => ['done', 'later'].map(id => ({ id, depends_on: [],
   artifact_contract: { version: 1, produces: [], reads: [] } }));
 
 function persist(): void {
-  writeFileSync(join(run, 'run.json'), JSON.stringify(state));
+  writeFileSync(runRecordPath(run, 'run.json'), JSON.stringify(state));
   for (const [id, status] of Object.entries(state.stages)) put(`stages/${id}/status.json`, JSON.stringify(status));
 }
 function put(path: string, content: string | Buffer = 'fixture'): void {
-  mkdirSync(dirname(join(run, path)), { recursive: true });
-  writeFileSync(join(run, path), content);
+  mkdirSync(dirname(runRecordPath(run, path)), { recursive: true });
+  writeFileSync(runRecordPath(run, path), content);
 }
 function tree(path = run): unknown[] {
   return readdirSync(path).sort().map(name => {
@@ -178,19 +179,34 @@ describe('operator retention command', () => {
     expect(output.stdout()).toContain('Total: 3072 bytes');
     expect(tree(root)).toEqual(before);
   });
+  it.each([undefined, 2])('keeps non-directory invocation scratch read-only in layout %s', storageLayout => {
+    rmSync(join(run, 'scratch'), { recursive: true });
+    if (storageLayout === 2) {
+      Object.assign(state, { storageLayout }); persist();
+      mkdirSync(join(run, 'work'));
+    }
+    const scratch = stageWorkPath(run, 'scratch');
+    writeFileSync(scratch, 'retained non-directory entry');
+    const before = tree(), output = capture();
+    expect(cmdPrune(['prune', '--run', 'fixture', '--dry-run', '--json'])).toBe(0);
+    expect(output.json()).toMatchObject({ refused: [], runs: [{ remove: [], removeBytes: 0,
+      kept: expect.arrayContaining([{ path: storageLayout === 2 ? 'work/scratch' : 'scratch', reason: 'non-directory invocation scratch' }]),
+    }] });
+    expect(tree()).toEqual(before);
+  });
   it('R22 CLI requires explicit apply and limits mutation to the selected run', () => {
     const other = join(root, 'runs', 'other'); mkdirSync(other);
-    writeFileSync(join(other, 'run.json'), JSON.stringify({ ...state, runId: 'other', status: 'running' }));
+    writeFileSync(runRecordPath(other, 'run.json'), JSON.stringify({ ...state, runId: 'other', status: 'running' }));
     const otherBefore = tree(other), output = capture();
     expect(cmdPrune(['prune', '--run', 'fixture', '--apply', '--json'])).toBe(0);
     expect(output.json()).toMatchObject({ dryRun: false, totalBytes: 3072, refused: [], runs: [{ runId: 'fixture', removeBytes: 3072 }] });
-    expect(existsSync(join(run, 'scratch'))).toBe(false);
-    expect(existsSync(join(run, 'stages/done/build/attempt_1/corpus.bin'))).toBe(true);
+    expect(existsSync(runRecordPath(run, 'scratch'))).toBe(false);
+    expect(existsSync(runRecordPath(run, 'stages/done/build/attempt_1/corpus.bin'))).toBe(true);
     expect(tree(other)).toEqual(otherBefore);
   });
   it('R23 CLI reports unsafe bulk runs without changing them and refuses targeted pruning', () => {
     const waiting = join(root, 'runs', 'waiting'); mkdirSync(waiting);
-    writeFileSync(join(waiting, 'run.json'), JSON.stringify({ ...state, runId: 'waiting', status: 'running' }));
+    writeFileSync(runRecordPath(waiting, 'run.json'), JSON.stringify({ ...state, runId: 'waiting', status: 'running' }));
     const before = tree(root), waitingBefore = tree(waiting), fixtureBefore = tree(run), output = capture();
     expect(cmdPrune(['prune', '--json'])).toBe(0);
     expect(output.json()).toMatchObject({ dryRun: true, totalBytes: 3072, refused: [{ runId: 'waiting' }] });
@@ -215,12 +231,12 @@ describe('invocation scratch retirement preserves durable products', () => {
     stages[0].artifact_contract.produces = [{ id: 'evidence', root: 'run', path: 'stages/done/evidence', kind: 'directory' }] as never;
     put('workflow.yaml', stringify({ stages }));
     put('stages/done/evidence/result.json', '{"passed":true}');
-    const stageBefore = tree(join(run, 'stages'));
+    const stageBefore = tree(runRecordPath(run, 'stages'));
     expect(removed()).toEqual(['scratch/pytest/.pytest_cache/result.json', 'scratch/vite/dist/bundle.js']);
     expect(pruneRunWorkAreas(run).removeBytes).toBe(3072);
-    expect(existsSync(join(run, 'scratch'))).toBe(false);
-    expect(tree(join(run, 'stages'))).toEqual(stageBefore);
-    expect(readFileSync(join(run, 'stages/done/evidence/result.json'), 'utf8')).toBe('{"passed":true}');
+    expect(existsSync(runRecordPath(run, 'scratch'))).toBe(false);
+    expect(tree(runRecordPath(run, 'stages'))).toEqual(stageBefore);
+    expect(readFileSync(runRecordPath(run, 'stages/done/evidence/result.json'), 'utf8')).toBe('{"passed":true}');
   });
   it('explicit pruning retires terminal scratch with a lost alias while preserving stage evidence', () => {
     state.status = 'running'; persist();
@@ -231,12 +247,12 @@ describe('invocation scratch retirement preserves durable products', () => {
     // A crash left the terminal record and physical scratch; reboot removed /tmp links.
     state.status = 'complete'; persist();
     rmSync(alias);
-    const stageBefore = tree(join(run, 'stages'));
+    const stageBefore = tree(runRecordPath(run, 'stages'));
     expect(pruneRunWorkAreas(run).removeBytes).toBeGreaterThan(3072);
-    expect(existsSync(join(run, 'scratch'))).toBe(false);
-    expect(tree(join(run, 'stages'))).toEqual(stageBefore);
-    expect(readFileSync(join(run, 'stages/done/evidence/result.json'), 'utf8')).toBe('{"passed":true}');
-    expect(readFileSync(join(run, 'run.json'), 'utf8')).toContain('complete');
+    expect(existsSync(runRecordPath(run, 'scratch'))).toBe(false);
+    expect(tree(runRecordPath(run, 'stages'))).toEqual(stageBefore);
+    expect(readFileSync(runRecordPath(run, 'stages/done/evidence/result.json'), 'utf8')).toBe('{"passed":true}');
+    expect(readFileSync(runRecordPath(run, 'run.json'), 'utf8')).toContain('complete');
   });
   it.each(['parked', 'deploymentHold'] as const)('retains scratch for a %s continuation record', field => {
     (state as unknown as Record<string, unknown>)[field] = { reason: 'pending continuation' };
@@ -254,13 +270,13 @@ describe('invocation scratch retirement preserves durable products', () => {
     expect(first.remove.reduce((sum, member) => sum + member.bytes, 0)).toBe(first.removeBytes);
     expect(first.kept.length).toBeGreaterThan(0);
     expect(tree()).toEqual(before);
-    expect(existsSync(join(run, '.run-state.lock'))).toBe(false);
+    expect(existsSync(runRecordPath(run, '.run-state.lock'))).toBe(false);
   });
   it('apply preserves run records and is idempotent', () => {
-    const records = ['run.json', 'workflow.yaml'].map(path => [path, readFileSync(join(run, path))] as const);
+    const records = ['run.json', 'workflow.yaml'].map(path => [path, readFileSync(runRecordPath(run, path))] as const);
     const expected = plan();
     expect(pruneRunWorkAreas(run)).toEqual(expected);
-    for (const [path, bytes] of records) expect(readFileSync(join(run, path))).toEqual(bytes);
+    for (const [path, bytes] of records) expect(readFileSync(runRecordPath(run, path))).toEqual(bytes);
     const after = tree();
     expect(pruneRunWorkAreas(run).removeBytes).toBe(0);
     expect(tree()).toEqual(after);
@@ -268,10 +284,10 @@ describe('invocation scratch retirement preserves durable products', () => {
   it('does not traverse scratch symlinks to external files', () => {
     const outside = join(root, 'outside'); mkdirSync(outside);
     writeFileSync(join(outside, 'sentinel.bin'), 'untouched');
-    symlinkSync(outside, join(run, 'scratch/external'));
+    symlinkSync(outside, runRecordPath(run, 'scratch/external'));
     const before = tree(outside);
     pruneRunWorkAreas(run);
-    expect(existsSync(join(run, 'scratch'))).toBe(false);
+    expect(existsSync(runRecordPath(run, 'scratch'))).toBe(false);
     expect(tree(outside)).toEqual(before);
   });
   it('rejects a linked run root without traversing its target', () => {
@@ -298,8 +314,8 @@ describe('clean shares prune deletion authority', () => {
     persist();
     vi.spyOn(process.stdout, 'write').mockReturnValue(true);
     expect(cmdPrune(['clean', '--keep', '0'])).toBe(0);
-    expect(existsSync(join(run, 'run.json'))).toBe(true);
-    expect(existsSync(join(run, 'stages/done/build/attempt_1/corpus.bin'))).toBe(true);
+    expect(existsSync(runRecordPath(run, 'run.json'))).toBe(true);
+    expect(existsSync(runRecordPath(run, 'stages/done/build/attempt_1/corpus.bin'))).toBe(true);
   });
 
   it.each(['complete', 'failed', 'cancelled'] as const)('deletes settled %s work and history after its deployment hold was released', status => {
@@ -308,7 +324,7 @@ describe('clean shares prune deletion authority', () => {
     state.deploymentHold = { version: 1, id: 'fixture-hold', requestedAt: at, heldAt: at, releasedAt: at };
     persist(); put('scratch/work.bin');
     expect(pruneRunWorkAreas(run).removeBytes).toBeGreaterThan(0);
-    expect(existsSync(join(run, 'scratch'))).toBe(false);
+    expect(existsSync(runRecordPath(run, 'scratch'))).toBe(false);
     vi.spyOn(process.stdout, 'write').mockReturnValue(true);
     expect(cmdPrune(['clean', '--keep', '0'])).toBe(0);
     expect(existsSync(run)).toBe(false);

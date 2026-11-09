@@ -1,10 +1,12 @@
+import { prepareAdapterHome, withAdapterCredentials } from '../adapter-home.js';
+import { runRecordPath } from '../run-layout.js';
 import { stageLiveLogPath } from '../stage-live-log.js';
 import { atomicWrite, writeFileSync, mkdirSync } from '../engine-fs.js';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { isSessionUuid, settleSession, shouldStartFreshSession } from '../adapter-session.js';
+import { isSessionUuid, settleSession, shouldStartFreshSession, stageSessionHome, finalizeSessionHome } from '../adapter-session.js';
 import type { Adapter, AgentConfig, ExecResult, RunOpts, RunResult } from './base.js';
 import { execWithStdin } from './base.js';
 import { isRetryableAdapterFailure } from './failure.js';
@@ -93,12 +95,14 @@ export class ClaudeAdapter implements Adapter {
     if (opts.resumeSessionId !== undefined && !isSessionUuid(opts.resumeSessionId)) {
       throw new Error('Claude session resume requires an explicit UUID');
     }
+    const nativeHome = stageSessionHome(opts.runDir, opts.stageId, this.sessionKind);
+    prepareAdapterHome({ home: nativeHome, sessionDirectory: 'projects', sessionHome: opts.sessionOwnerStageId && opts.sessionOwnerStageId !== opts.stageId ? stageSessionHome(opts.runDir, opts.sessionOwnerStageId, this.sessionKind) : undefined });
     let resumeSessionId = opts.resumeSessionId;
     // A native session can move between stages; its baseline has one UUID owner.
-    const costDir = join(opts.runDir, 'run-history', 'native-session-costs');
+    const costDir = runRecordPath(opts.runDir, 'run-history', 'native-session-costs');
     let invocationPrompt = prompt;
     let result: RunResult | undefined;
-    const stageDir = join(opts.runDir, 'stages', opts.stageId);
+    const stageDir = runRecordPath(opts.runDir, 'stages', opts.stageId);
     mkdirSync(stageDir, { recursive: true });
     const systemPromptPath = join(stageDir, 'system_prompt.md');
     if (role.prompt) writeFileSync(systemPromptPath, role.prompt, 'utf-8');
@@ -199,10 +203,10 @@ export class ClaudeAdapter implements Adapter {
       const invocationStartedAt = new Date().toISOString();
       let execution: ExecResult;
       try {
-        execution = await execWithStdin('claude', args, invocationPrompt, {
+        execution = await withAdapterCredentials(nativeHome, process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), () => execWithStdin('claude', args, invocationPrompt, {
           cwd: opts.workDir, timeout_ms: Math.max(1, opts.timeout_ms - (Date.now() - started)),
           liveLogPath: stageLiveLogPath(opts.runDir, opts.stageId, opts.attemptIndex, opts.attemptStartedAt), captureStreams: true, execution: opts,
-          unsetEnv,
+          unsetEnv, env: { CLAUDE_CONFIG_DIR: nativeHome },
           onChild: ({ kill }) => { childKill = kill; }, abortSignal: opts.abortSignal,
           onStdout: (chunk, activity) => {
             activity?.feed(chunk);
@@ -211,7 +215,7 @@ export class ClaudeAdapter implements Adapter {
             carry = lines.pop() ?? '';
             for (const line of lines) consume(line);
           },
-        });
+        }), ['.credentials.json']);
         if (carry.trim()) consume(carry);
       } finally {
         if (killTimer) clearTimeout(killTimer);
@@ -264,6 +268,7 @@ export class ClaudeAdapter implements Adapter {
     Object.assign(result, sumInvocationUsage(invocations), { invocations, duration_ms: Date.now() - started });
     settleSession(opts.runDir, opts.stageId, result, result.sessionId, resumeSessionId, opts.sessionOwnerStageId,
       { adapter: this.sessionKind, mismatchMessage: 'Claude resume returned a different session UUID; continuation was not verified' });
+    finalizeSessionHome(nativeHome, result.exitCode, opts.preserveSession, { runDir: opts.runDir, stageId: opts.stageId, adapter: this.sessionKind });
     return result;
   }
 }

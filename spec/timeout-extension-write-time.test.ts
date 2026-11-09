@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { drainDueTimers } from './test-support/engine-fixtures.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -64,7 +65,7 @@ describe('bounded wrap-up settlement accounting', () => {
   async function persistedTerminationCause(settleAfterDeadline: boolean) {
     const stageId = settleAfterDeadline ? 'late_settlement' : 'prompt_settlement';
     const created = createRun(projectDir, 'deadline-accounting', 'name: deadline-accounting', [stageId]);
-    mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
+    mkdirSync(runRecordPath(created.runDirPath, 'signals'), { recursive: true });
     const clock = new ManualAttemptDeadlineClock();
     const adapter: Adapter = { async run(_prompt, _agent, opts) {
       return new Promise<RunResult>((resolve) => {

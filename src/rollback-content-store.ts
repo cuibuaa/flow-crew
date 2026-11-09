@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync } from './engine-fs.js';
 import { existsSync, fstatSync, lstatSync, readSync } from 'node:fs';
 import { constants as fsConstants } from 'node:fs';
@@ -110,7 +111,7 @@ export class RollbackContentStore {
 
   constructor(runDirPath?: string) {
     this.root = runDirPath
-      ? join(runDirPath, '.rollback-preimages')
+      ? runRecordPath(runDirPath, '.rollback-preimages')
       : mkdtempSync(join(tmpdir(), 'flowcrew-rollback-preimages-'));
     mkdirSync(this.root, { recursive: true });
   }

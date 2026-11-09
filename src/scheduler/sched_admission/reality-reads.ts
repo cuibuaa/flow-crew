@@ -1,10 +1,11 @@
+import { runRecordPath } from '../../run-layout.js';
 /** Reachability of explicit reality-check reads and typed handler parameters; script text is never inferred as a read. */
 import { type TerminalStatesConfig, type ResearchConfig } from '../../store.js';
 import { resolveResearchPaths } from '../../research-paths.js';
 import { parseChecksFromMarkdown, type CheckDecl } from '../../reality-gate/index.js';
 import { artifactProducerReadError, resolveArtifactLocation } from '../../artifact-declarations.js';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { relative, join } from 'node:path';
 import { inspectRealityHandlerReads } from '../../reality-gate/declared-reads.js';
 import { type StageConfig } from './configuration.js';
 import { normalizedProjectPath } from './scope-services.js';
@@ -41,7 +42,7 @@ export function inspectRealityCheckReachability(input: {
         const error = artifactProducerReadError(read, producer, label);
         if (error) errors.push(error);
       } else if (read.source.kind === 'framework') {
-        const expected = read.source.artifact === 'task_brief' ? 'task_brief.md' : 'run.json';
+        const expected = read.source.artifact === 'task_brief' ? input.runDir ? relative(input.runDir, runRecordPath(input.runDir, 'task_brief.md')).split('\\').join('/') : 'engine/task_brief.md' : 'run.json';
         if (read.root !== 'run' || read.path !== expected || read.kind !== 'file') errors.push(`ARTIFACT_FRAMEWORK_READ_INVALID: ${label} must read file run:${expected}`);
       } else if ((read.root === 'run' && !input.runDir) || !existsSync(join(read.root === 'run' ? input.runDir! : input.projectDir, read.path))) {
         errors.push(`ARTIFACT_INPUT_ABSENT: ${label} requires existing ${read.root}:${read.path}`);

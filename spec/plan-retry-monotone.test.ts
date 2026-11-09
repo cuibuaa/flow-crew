@@ -1,5 +1,6 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
@@ -11,6 +12,7 @@ import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { createRun } from './test-support/create-run.js';
 import { admitPlannerDispatches } from '../src/scheduler/sched_loop/planner-dispatch.js';
 import { fcGlobalDir, setFcGlobalDir, readRunState, writeStageStatus } from '../src/store.js';
+import { withEngineIntegrity } from '../src/engine-integrity.js';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -18,8 +20,8 @@ function directory(): string { const root = mkdtempSync(join(tmpdir(), 'fc-plan-
 const requirement = planRetryRequirement({ code: 'stage_scope', stageId: 'work', field: 'scope', message: 'work.scope: refused' });
 function pair(root: string, scope: string, attemptIndex: number, checks?: string) {
   const dispatch = stringify({ stages: [{ id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: [scope], artifact_contract: { version: 1, produces: [], reads: [] } }] });
-  writeFileSync(join(root, 'dispatch.yaml'), dispatch);
-  if (checks !== undefined) writeFileSync(join(root, 'reality_checks.md'), checks);
+  writeFileSync(stageWorkPath(root, 'dispatch.yaml'), dispatch);
+  if (checks !== undefined) writeFileSync(stageWorkPath(root, 'reality_checks.md'), checks);
   return preparePlanRetryCandidate({ runDirPath: root, stageId: 'plan', iteration: 1, attemptIndex });
 }
 function refuse(root: string, scope: string, index: number, maxAttempts = 3, detail = requirement) {
@@ -27,6 +29,24 @@ function refuse(root: string, scope: string, index: number, maxAttempts = 3, det
 }
 
 describe('complete proposal retries', () => {
+  it('keeps retry incumbents and their snapshots in guarded engine storage', async () => {
+    const root = directory(), project = join(root, 'project'); mkdirSync(project);
+    const previous = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
+    try {
+      const { runDirPath: run } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['plan']);
+      refuse(run, 'docs/a.md', 1);
+      const incumbent = readMonotonePlanRetryState(run)!.incumbent;
+      const carrier = runRecordPath(run, incumbent.dispatchPath);
+      expect(existsSync(carrier), 'retry snapshots belong to engine storage').toBe(true);
+      expect(existsSync(join(run, incumbent.dispatchPath))).toBe(false);
+      const trusted = readFileSync(carrier, 'utf8');
+      await expect(withEngineIntegrity({ projectDir: project, runDir: run, stageId: 'plan' }, async () => {
+        writeFileSync(carrier, 'forged incumbent');
+      })).rejects.toThrow('ENGINE_STATE_TAMPERED');
+      expect(readFileSync(carrier, 'utf8')).toBe(trusted);
+    } finally { setFcGlobalDir(previous); }
+  });
+
   it('examines a full replacement independently instead of locking unrelated fields or check bytes', () => {
     const root = directory();
     refuse(root, 'docs/old.md', 1);
@@ -105,7 +125,7 @@ it('resumes planner refusal from the persisted ceiling and replans with a concre
     const plan = parseDispatchedStageConfig({ id: 'plan', role: 'planner', dynamic_dispatch: true, scope: [] });
     const { runId, runDirPath } = createRun(project, 'fixture', stringify({ name: 'fixture', stages: [plan] }), ['plan']);
     const roles = new Map([['qa', { name: 'qa', description: 'Review' }]]);
-    writeFileSync(join(runDirPath, 'dispatch.yaml'), stringify({ stages: [{ id: 'review', role: 'qa', is_gate: true, scope: [] }] }));
+    writeFileSync(stageWorkPath(runDirPath, 'dispatch.yaml'), stringify({ stages: [{ id: 'review', role: 'qa', is_gate: true, scope: [] }] }));
     const state = { ...readRunState(project, runId), currentIteration: 1 };
     state.stages.plan = { status: 'complete', retries: 0 };
     writeStageStatus(project, runId, 'plan', state.stages.plan);
@@ -132,8 +152,8 @@ it('resumes planner refusal from the persisted ceiling and replans with a concre
 it.each(['attempt_timeout', 'exit'])('uses ordinary guidance after a %s inside an admission refusal chain', cause => {
   const root = directory();
   refuse(root, 'docs/a.md', 1);
-  mkdirSync(join(root, 'stages', 'plan'), { recursive: true });
-  const statusPath = join(root, 'stages', 'plan', 'status.json');
+  mkdirSync(runRecordPath(root, 'stages', 'plan'), { recursive: true });
+  const statusPath = runRecordPath(root, 'stages', 'plan', 'status.json');
   const status = { status: 'pending', retries: 1, error: 'proposal refused',
     admissionFailure: { code: 'dispatch_refused', attemptIndex: 1 },
     attempts: [{ index: 1, status: 'complete', error: undefined as string | undefined }] };

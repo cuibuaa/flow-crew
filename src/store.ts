@@ -1,4 +1,5 @@
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
+import { runRecordPath, engineDirectory, stageWorkPath, requestPath, controlPath, hasSeparatedRunLayout } from './run-layout.js';
 import { processLiveness } from './process-liveness.js';
 import { resolveCampaignStorageKey } from './campaigns.js';
 import { observeRunStatusChange } from './run-events.js';
@@ -8,7 +9,7 @@ import { retireRunScratch } from './invocation-scratch.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import { existsSync, fstatSync, fsyncSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
@@ -498,6 +499,8 @@ export interface RunStateFormat {
 export interface StoreState {
   /** Current-tree raw command coverage, independent of run acceptance. */
   validation?: GateVerdict['validation'];
+  /** Immutable storage topology; absent only on legacy runs. */
+  storageLayout?: 2;
   deploymentHold?: import('./deployment-hold.js').RunDeploymentHold;
   continuationFailure?: { at: string; reason: string; generation?: string };
   /** Observed scheduler admissions only; legacy starts are never fabricated. */
@@ -798,18 +801,18 @@ export async function evaluateRealityGate(
   projectDir: string, runId: string, targetStatus: StoreState['status'],
 ): Promise<Pick<StoreState, 'realityGate' | 'failureReason'>> {
   const dir = runDir(projectDir, runId);
-  const briefPath = join(dir, 'task_brief.md');
+  const briefPath = runRecordPath(dir, 'task_brief.md');
   // Checks come from two sources, both in the `## Reality checks` block format:
   //   1. the human-authored brief (task_brief.md), and
   //   2. PLANNER-authored checks (reality_checks.md) — this is how the planner wires
   //      deterministic gates for the goal's hard constraints (Atom Architecture P1/P3),
   //      without having to edit the human brief.
   const checks = existsSync(briefPath) ? parseChecksFromBrief(briefPath) : [];
-  const plannerChecksPath = join(dir, 'reality_checks.md');
+  const plannerChecksPath = runRecordPath(dir, 'reality_checks.md');
   if (existsSync(plannerChecksPath)) checks.push(...parseChecksFromBrief(plannerChecksPath));
   if (checks.length === 0) return {};
   const report = await runAllChecks(checks, { taskDir: dir, projectDir, briefPath: existsSync(briefPath) ? briefPath : plannerChecksPath });
-  const artifactPath = join(dir, REALITY_GATE_ARTIFACT_PATH);
+  const artifactPath = runRecordPath(dir, REALITY_GATE_ARTIFACT_PATH);
   atomicWrite(artifactPath, JSON.stringify(report, null, 2) + '\n');
   const durableReport = readRealityGateReport(artifactPath);
   const advisoryFailures = durableReport.results.filter((item) => !item.pass && item.advisory === true);
@@ -824,7 +827,7 @@ export async function evaluateRealityGate(
   }
   const diagnostics = realityGateDiagnostics(durableReport);
   if (durableReport.pass) return { realityGate: diagnostics };
-  appendFileSync(join(dir, '.reality-gate.failures.md'), failureMarkdown(durableReport, targetStatus), 'utf-8');
+  appendFileSync(runRecordPath(dir, '.reality-gate.failures.md'), failureMarkdown(durableReport, targetStatus), 'utf-8');
   return { realityGate: diagnostics, failureReason: realityGateFailureReason(diagnostics, targetStatus) };
 }
 
@@ -843,7 +846,7 @@ function readTerminalOutcome(projectDir: string, runId: string, state: StoreStat
   if (state.terminalArtifact) {
     for (const name of [...recordedTerminalArtifactSnapshotNames(state.terminalArtifact), state.terminalArtifact]) {
       try {
-        const outcome = oneLineOutcome(readFileSync(join(dir, name), 'utf-8'));
+        const outcome = oneLineOutcome(readFileSync(runRecordPath(dir, name), 'utf-8'));
         if (outcome) return outcome;
       } catch { /* optional terminal artifact */ }
     }
@@ -865,8 +868,8 @@ function emitCampaignEnvelopeEvents(projectDir: string, runId: string, state: St
   const campaignStorageKey = resolveCampaignStorageKey(state);
   if (!campaignStorageKey) return;
   const dir = runDir(projectDir, runId);
-  const startedMarker = join(dir, '.campaign_started_emitted');
-  const endedMarker = join(dir, '.campaign_envelope_emitted');
+  const startedMarker = runRecordPath(dir, '.campaign_started_emitted');
+  const endedMarker = runRecordPath(dir, '.campaign_envelope_emitted');
   const now = new Date().toISOString();
   const baseEvent = {
     runId,
@@ -941,7 +944,7 @@ export function runDir(projectDir: string, runId: string): string {
 }
 
 export function stageDir(projectDir: string, runId: string, stageId: string): string {
-  return join(runDir(projectDir, runId), 'stages', stageId);
+  return runRecordPath(runDir(projectDir, runId), 'stages', stageId);
 }
 
 function generateRunId(at = new Date()): string {
@@ -955,6 +958,7 @@ export const RUN_RESERVATION_TTL_MS = 15 * 60_000;
 
 export interface RunReservation {
   version: 1;
+  storageLayout?: 2;
   runId: string;
   projectDir: string;
   reservedAt: string;
@@ -966,30 +970,31 @@ export function requireRunArtifactDirectory(projectDir: string, runId: string): 
   // Validate before deriving or probing a path.  Otherwise a pre-existing
   // ../escape/run.json turns the state check itself into traversal authority.
   const dir = runDir(projectDir, runId);
-  if (existsSync(join(dir, 'run.json'))) return dir;
+  if (existsSync(runRecordPath(dir, 'run.json'))) return dir;
   if (readRunReservation(projectDir, runId)) return dir;
   // Artifact APIs can precede scheduler initialization. Classify that window
   // with the same expiring reservation marker as reserveRun instead of
   // creating an unidentifiable directory or inventing run state.
   ensureGlobalRunsDir();
   mkdirSync(dir, { recursive: true });
-  if (!existsSync(join(dir, 'run.json')) && !readRunReservation(projectDir, runId)) {
+  mkdirSync(engineDirectory(dir), { recursive: true });
+  if (!existsSync(runRecordPath(dir, 'run.json')) && !readRunReservation(projectDir, runId)) {
     const reservation: RunReservation = {
-      version: 1,
+      version: 1, storageLayout: 2,
       runId,
       projectDir: resolve(projectDir),
       reservedAt: new Date().toISOString(),
     };
-    atomicWrite(join(dir, RUN_RESERVATION_FILE), JSON.stringify(reservation, null, 2) + '\n');
+    atomicWrite(join(engineDirectory(dir), RUN_RESERVATION_FILE), JSON.stringify(reservation, null, 2) + '\n');
   }
   return dir;
 }
 
 /** Variant for consumers which already received the exact run directory. */
 export function requireExistingRunArtifactDirectory(runDirectory: string): string {
-  if (existsSync(join(runDirectory, 'run.json'))) return runDirectory;
+  if (existsSync(runRecordPath(runDirectory, 'run.json'))) return runDirectory;
   try {
-    const marker = JSON.parse(readFileSync(join(runDirectory, RUN_RESERVATION_FILE), 'utf-8')) as Partial<RunReservation>;
+    const marker = JSON.parse(readFileSync(runRecordPath(runDirectory, RUN_RESERVATION_FILE), 'utf-8')) as Partial<RunReservation>;
     const reservedAt = Date.parse(String(marker.reservedAt ?? ''));
     if (marker.version === 1 && marker.runId === basename(runDirectory)
       && Number.isFinite(reservedAt) && Date.now() - reservedAt <= RUN_RESERVATION_TTL_MS) return runDirectory;
@@ -1010,18 +1015,19 @@ export function reserveRun(projectDir: string, at = new Date()): { runId: string
     const dir = runDir(normalizedProjectDir, runId);
     try {
       mkdirSync(dir);
+      mkdirSync(engineDirectory(dir));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
       throw err;
     }
     const reservation: RunReservation = {
-      version: 1,
+      version: 1, storageLayout: 2,
       runId,
       projectDir: normalizedProjectDir,
       reservedAt: at.toISOString(),
     };
     try {
-      atomicWrite(join(dir, RUN_RESERVATION_FILE), JSON.stringify(reservation, null, 2) + '\n');
+      atomicWrite(join(engineDirectory(dir), RUN_RESERVATION_FILE), JSON.stringify(reservation, null, 2) + '\n');
       return { runId, runDirPath: dir };
     } catch (err) {
       try { rmdirSync(dir); } catch { /* retain evidence if the directory is no longer empty */ }
@@ -1039,7 +1045,7 @@ export function readRunReservation(
 ): RunReservation | undefined {
   const dir = runDir(projectDir, runId);
   try {
-    const reservation = JSON.parse(readFileSync(join(dir, RUN_RESERVATION_FILE), 'utf-8')) as Partial<RunReservation>;
+    const reservation = JSON.parse(readFileSync(runRecordPath(dir, RUN_RESERVATION_FILE), 'utf-8')) as Partial<RunReservation>;
     if (
       reservation.version !== 1 ||
       reservation.runId !== runId ||
@@ -1067,10 +1073,17 @@ export function initializeReservedRun(
   const reservation = readRunReservation(normalizedProjectDir, runId, Date.now(), Number.POSITIVE_INFINITY);
   if (!reservation) throw new Error(`Run reservation is missing or invalid: ${runId}`);
   const dir = runDir(normalizedProjectDir, runId);
-  if (existsSync(join(dir, 'run.json'))) throw new Error(`Reserved run is already initialized: ${runId}`);
+  if (existsSync(runRecordPath(dir, 'run.json'))) throw new Error(`Reserved run is already initialized: ${runId}`);
+  const reservationPath = runRecordPath(dir, RUN_RESERVATION_FILE);
+  mkdirSync(engineDirectory(dir), { recursive: true });
+  atomicWrite(join(engineDirectory(dir), RUN_RESERVATION_FILE), JSON.stringify({ ...reservation, storageLayout: 2 }) + '\n');
+  mkdirSync(stageWorkPath(dir), { recursive: true });
+  mkdirSync(requestPath(dir), { recursive: true });
+  mkdirSync(controlPath(dir), { recursive: true });
   const stages: Record<string, StageStatus> = {};
   for (const sid of stageIds) stages[sid] = { status: 'pending', retries: 0 };
   const state: StoreState = {
+    storageLayout: 2,
     runId,
     workflowName,
     projectDir: normalizedProjectDir,
@@ -1084,12 +1097,14 @@ export function initializeReservedRun(
   // State is the directory's identity. Publish it before any optional child
   // directories so every observable initialization point is classifiable.
   writeRunState(normalizedProjectDir, runId, state);
-  mkdirSync(join(dir, 'stages'), { recursive: true });
+  mkdirSync(runRecordPath(dir, 'stages'), { recursive: true });
   for (const sid of stageIds) {
     mkdirSync(stageDir(normalizedProjectDir, runId, sid), { recursive: true });
+    mkdirSync(stageWorkPath(dir, 'stages', sid), { recursive: true });
   }
-  atomicWrite(join(dir, 'workflow.yaml'), workflowYaml);
-  try { unlinkSync(join(dir, RUN_RESERVATION_FILE)); } catch { /* initialized state is authoritative */ }
+  atomicWrite(runRecordPath(dir, 'workflow.yaml'), workflowYaml);
+  try { unlinkSync(reservationPath); } catch { /* initialized state is authoritative */ }
+  try { unlinkSync(join(engineDirectory(dir), RUN_RESERVATION_FILE)); } catch { /* initialized state owns topology */ }
   return { runId, runDirPath: dir };
 }
 
@@ -1163,7 +1178,7 @@ function historyRef(value: unknown): RunHistoryRef | undefined {
   if (
     ref.version !== 1
     || typeof ref.path !== 'string'
-    || !/^run-history[^/\\]*\.jsonl$/.test(ref.path)
+    || !/^(?:engine\/)?run-history[^/\\]*\.jsonl$/.test(ref.path)
     || !Number.isSafeInteger(ref.committedBytes)
     || (ref.committedBytes ?? -1) < 0
     || !counts
@@ -1201,19 +1216,19 @@ function readRunHistories(runPath: string, ref: RunHistoryRef | undefined): RunH
     retiredStageUsage: new Map(),
     stageEvidence: new Map(),
   };
-  const raw = readPrefix(join(runPath, ref.path), ref.committedBytes).toString('utf-8');
+  const raw = readPrefix(runRecordPath(runPath, ref.path), ref.committedBytes).toString('utf-8');
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let record: Partial<RunHistoryRecord>;
     try { record = JSON.parse(line) as Partial<RunHistoryRecord>; } catch {
-      throw new Error(`Malformed acknowledged run history record in ${join(runPath, ref.path)}`);
+      throw new Error(`Malformed acknowledged run history record in ${runRecordPath(runPath, ref.path)}`);
     }
     if (
       (record.kind !== 'retiredStageUsage' && record.kind !== 'stageEvidence')
       || !Number.isSafeInteger(record.index)
       || (record.index ?? -1) < 0
       || !Object.prototype.hasOwnProperty.call(record, 'value')
-    ) throw new Error(`Invalid acknowledged run history record in ${join(runPath, ref.path)}`);
+    ) throw new Error(`Invalid acknowledged run history record in ${runRecordPath(runPath, ref.path)}`);
     slots[record.kind].set(record.index as number, record.value);
   }
 
@@ -1239,7 +1254,7 @@ function hydrateRunProjection(runPath: string, parsed: ArchivedStoreState): Arch
   // Old in-flight runs predate the persisted gate coordinate. Project once at
   // read time; the next ordinary state write retains it without rescanning.
   if (!parsed.gateRetryRound && parsed.currentIteration !== undefined) {
-    const archive = join(runPath, 'gate_reevaluation', `iteration_${parsed.currentIteration}`);
+    const archive = runRecordPath(runPath, 'gate_reevaluation', `iteration_${parsed.currentIteration}`);
     let round = 0;
     if (existsSync(archive)) for (const name of readdirSync(archive)) {
       const match = /^round_(\d+)$/.exec(name);
@@ -1260,7 +1275,8 @@ function stateLockSleep(ms: number): void {
 }
 
 export function withRunStateLock<T>(directory: string, fn: () => T): T {
-  const path = join(directory, RUN_STATE_LOCK_FILE);
+  const path = runRecordPath(directory, RUN_STATE_LOCK_FILE);
+  mkdirSync(dirname(path), { recursive: true });
   const token = randomBytes(12).toString('hex');
   const started = Date.now();
   let fd: number | undefined;
@@ -1444,7 +1460,7 @@ function persistRunStateUnlocked(
   expectation?: RunStateProjectionExpectation,
   runPath = runDir(projectDir, runId),
 ): void {
-  const runJsonPath = join(runPath, 'run.json');
+  const runJsonPath = runRecordPath(runPath, 'run.json');
   const publishesToSelectedStore = canonicalRunDirectory(runPath)
     === canonicalRunDirectory(runDir(projectDir, runId));
   state.status = requireKnownRunStatus(state.status, `write run state ${runId}`);
@@ -1486,10 +1502,11 @@ function persistRunStateUnlocked(
     if (!expectation || state.status !== 'running') throw cancelledRunPublicationError(runId);
   }
 
+  if (currentProjection?.storageLayout === 2) state.storageLayout = 2;
   const currentRef = currentProjection?.stateFormat ? historyRef(currentProjection.stateFormat) : undefined;
-  const historyPath = currentRef?.path ?? RUN_HISTORY_FILE;
+  const historyPath = currentRef?.path ?? relative(runPath, runRecordPath(runPath, RUN_HISTORY_FILE));
   const committedBytes = currentRef?.committedBytes ?? 0;
-  normalizeHistoryTail(join(runPath, historyPath), committedBytes);
+  normalizeHistoryTail(runRecordPath(runPath, historyPath), committedBytes);
   const committedHistories = readRunHistories(runPath, currentRef);
   const merged = mergeStateHistories(currentState, state);
   // Compatibility snapshot writers cannot drop admissions published by the
@@ -1505,7 +1522,7 @@ function persistRunStateUnlocked(
   }
   const desiredHistories = historiesFromState(merged);
   const nextCommittedBytes = appendHistoryDelta(
-    join(runPath, historyPath),
+    runRecordPath(runPath, historyPath),
     committedHistories,
     desiredHistories,
     committedBytes,
@@ -1547,7 +1564,7 @@ function persistRunStateUnlocked(
   // Project the selected legacy ledger on its first v2 write, including the
   // metadata-only writes that precede resumed execution.
   if (currentProjection && !currentProjection.stateFormat) for (const [id, stage] of Object.entries(merged.stages)) {
-    const directory = join(runPath, 'stages', id);
+    const directory = runRecordPath(runPath, 'stages', id);
     mkdirSync(directory, { recursive: true });
     const statusPath = join(directory, 'status.json');
     if (existsSync(statusPath)) {
@@ -1574,11 +1591,11 @@ function publishRunProjection(projectDir: string, runPath: string, projection: S
   // A failed artifact write leaves the previous status observable.
   if (isTerminalRunStatus(projection.status)) {
     const summary = renderRunSummary(projectDir, runPath, summaryState);
-    atomicWrite(join(runPath, 'summary.md'), summary);
+    atomicWrite(runRecordPath(runPath, 'summary.md'), summary);
     assertProjectionUnchanged();
   }
 
-  atomicWrite(join(runPath, 'run.json'), JSON.stringify(projection) + '\n');
+  atomicWrite(runRecordPath(runPath, 'run.json'), JSON.stringify(projection) + '\n', { stagingDirectory: hasSeparatedRunLayout(runPath) ? engineDirectory(runPath) : undefined });
   observeRunStatusChange(runPath, projection.runId, projection.status);
   if (isTerminalRunStatus(projection.status)) {
     retireRunScratch(runPath);
@@ -1651,7 +1668,7 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
   const identity = resolveRunIdentity(directory);
   if (!identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: run has no project directory');
   return withRunStateLock(identity.directory, () => {
-    const path = join(identity.directory, 'run.json');
+    const path = runRecordPath(identity.directory, 'run.json');
     const raw = readFileSync(path, 'utf8');
     const previous = JSON.parse(raw) as StoreState;
     const status = resolveRunStatus(previous.status);
@@ -1671,7 +1688,7 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
     if (previous.status === RUN_STATUS.CANCELLED && !interruption) throw cancelledRunPublicationError(identity.runId);
     if (interruption) for (const [id, status] of Object.entries(state.stages)) {
       if (isJsonPersistedEqual(previous.stages[id], status)) continue;
-      const stagePath = join(identity.directory, 'stages', id);
+      const stagePath = runRecordPath(identity.directory, 'stages', id);
       let ledger: unknown;
       try { ledger = JSON.parse(readFileSync(join(stagePath, 'status.json'), 'utf8')); }
       catch { continue; } // Missing or unreadable evidence cannot authorize a ledger write.
@@ -1705,7 +1722,7 @@ function updateRunStateInDirectory(projectDir: string, runId: string, runPath: s
   // mtime check-to-rename race while retaining a byte-exact CAS for a legacy
   // writer that does not yet participate in the lock.
   return withRunStateLock(runPath, () => {
-    const runJsonPath = join(runPath, 'run.json');
+    const runJsonPath = runRecordPath(runPath, 'run.json');
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const raw = readFileSync(runJsonPath, 'utf-8');
       const state = hydrateRunProjection(runPath, JSON.parse(raw) as ArchivedStoreState) as StoreState;
@@ -1767,8 +1784,8 @@ export function writeStageStatus(
   // scheduler to finish the attempt. updateRunState re-applies this narrow
   // mutation if a parallel stage updates run.json at the same time.
   const identity = resolveRunIdentity(runDir(projectDir, runId), runsRoot(projectDir));
-  const dir = join(identity.directory, 'stages', stageId);
-  const runJsonPath = join(identity.directory, 'run.json');
+  const dir = runRecordPath(identity.directory, 'stages', stageId);
+  const runJsonPath = runRecordPath(identity.directory, 'run.json');
   if (existsSync(runJsonPath)) {
     updateRunState(projectDir, identity.runId, (state) => {
       if (state.status === RUN_STATUS.CANCELLED) throw cancelledRunPublicationError(identity.runId);
@@ -1796,7 +1813,7 @@ export function updateStageStatusUnderRunLock(
   runId = identity.runId;
   return withRunStateLock(identity.directory, () => {
     const directory = identity.directory;
-    const raw = readFileSync(join(directory, 'run.json'), 'utf8');
+    const raw = readFileSync(runRecordPath(directory, 'run.json'), 'utf8');
     const state = hydrateRunProjection(directory, JSON.parse(raw) as ArchivedStoreState) as StoreState;
     const status = mutator(state, readStageStatus(projectDir, runId, stageId));
     if (status === undefined) return state;
@@ -2108,11 +2125,12 @@ export function captureStageEvidence(
   const runDirPath = runDir(projectDir, runId);
   const liveStageDir = stageDir(projectDir, runId, stageId);
   const archive = stageEvidenceArchiveRoot(iteration, stageId);
-  const archiveDir = join(runDirPath, archive.relativePath);
+  archive.relativePath = relative(runDirPath, runRecordPath(runDirPath, archive.relativePath));
+  const archiveDir = runRecordPath(runDirPath, archive.relativePath);
   mkdirSync(archiveDir, { recursive: true });
 
   const statusPath = join(archive.relativePath, 'status.json');
-  const absoluteStatusPath = join(runDirPath, statusPath);
+  const absoluteStatusPath = runRecordPath(runDirPath, statusPath);
   if (!existsSync(absoluteStatusPath)) {
     atomicWrite(absoluteStatusPath, `${JSON.stringify(status, null, 2)}\n`);
   }
@@ -2121,22 +2139,22 @@ export function captureStageEvidence(
   const outputPath = join(archive.relativePath, 'output.md');
   const hasOutput = materializeImmutableStageEvidenceFile(
     join(liveStageDir, 'output.md'),
-    join(runDirPath, outputPath),
+    runRecordPath(runDirPath, outputPath),
   );
 
   const attemptOutputPaths: Array<{ attemptIndex: number; path: string }> = [];
   for (const attempt of persistedStatus.attempts ?? []) {
     const filename = `output_attempt_${attempt.index}.md`;
     const path = join(archive.relativePath, filename);
-    if (materializeImmutableStageEvidenceFile(join(liveStageDir, filename), join(runDirPath, path))) {
+    if (materializeImmutableStageEvidenceFile(join(liveStageDir, filename), runRecordPath(runDirPath, path))) {
       attemptOutputPaths.push({ attemptIndex: attempt.index, path });
     }
   }
 
   const verdictPath = join(archive.relativePath, 'verdict.json');
   const hasVerdict = materializeImmutableStageEvidenceFile(
-    join(runDirPath, `verdict_${stageId}.json`),
-    join(runDirPath, verdictPath),
+    runRecordPath(runDirPath, `verdict_${stageId}.json`),
+    runRecordPath(runDirPath, verdictPath),
   );
 
   return {

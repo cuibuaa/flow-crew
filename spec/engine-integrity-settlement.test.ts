@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,13 +49,13 @@ it.each(['REFUSED', 'TAMPERED'] as const)('settles real ENGINE_STATE_%s once wit
   captureResearchGateCandidate(project, created.runDirPath, 'earlier_review');
   const authored = join(project, 'state.json');
   writeFileSync(authored, '{"pass":true}');
-  if (kind === 'REFUSED') symlinkSync(authored, join(created.runDirPath, 'verdict_previous.json'));
+  if (kind === 'REFUSED') symlinkSync(authored, runRecordPath(created.runDirPath, 'verdict_previous.json'));
   let adapterCalls = 0, protectedWorkflow: string | undefined;
   const adapter: Adapter = { async run() {
     adapterCalls++;
     if (kind === 'REFUSED') throw new Error('Carrier refusal must precede adapter execution');
-    protectedWorkflow = readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf8');
-    writeFileSync(join(created.runDirPath, 'workflow.yaml'), 'counterfeit workflow');
+    protectedWorkflow = readFileSync(runRecordPath(created.runDirPath, 'workflow.yaml'), 'utf8');
+    writeFileSync(runRecordPath(created.runDirPath, 'workflow.yaml'), 'counterfeit workflow');
     return { exitCode: 0, output: 'Counterfeit acceptance.', duration_ms: 1 };
   } };
 
@@ -74,7 +75,7 @@ it.each(['REFUSED', 'TAMPERED'] as const)('settles real ENGINE_STATE_%s once wit
   expect(stage.attempts).toHaveLength(1);
   expect(stage.attempts![0]).toMatchObject({ status: 'failed', exitCode: 125, terminationCause: 'engine_void', engineVoid: true });
   expect(stage.retries).toBe(0);
-  if (kind === 'TAMPERED') expect(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf8')).toBe(protectedWorkflow);
+  if (kind === 'TAMPERED') expect(readFileSync(runRecordPath(created.runDirPath, 'workflow.yaml'), 'utf8')).toBe(protectedWorkflow);
   const events = readRunEvents(project, created.runId);
   const failed = events.filter(event => event.stageId === 'review' && event.type === 'attempt_failed');
   expect(failed).toHaveLength(1);

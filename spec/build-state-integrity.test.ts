@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,8 +14,8 @@ let previous: string;
 function record(id: string, status: StoreState['status'] = 'complete'): StoreState {
   const state = { runId: id, projectDir: root, workflowName: 'fixture', status, stages: {}, startedAt: '2000-01-01T00:00:00.000Z' };
   mkdirSync(join(root, 'runs', id), { recursive: true });
-  writeFileSync(join(root, 'runs', id, 'run.json'), JSON.stringify(state));
-  writeFileSync(join(root, 'runs', id, 'scheduler.pid'), '123');
+  writeFileSync(runRecordPath(join(root, 'runs', id), 'run.json'), JSON.stringify(state));
+  writeFileSync(runRecordPath(join(root, 'runs', id), 'scheduler.pid'), '123');
   return state;
 }
 beforeEach(() => {

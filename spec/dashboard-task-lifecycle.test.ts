@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
@@ -146,8 +147,8 @@ afterAll(() => {
 
 function writeRun(runId: string, status: string, campaignId?: string): string {
   const runPath = join(runsRoot(), runId);
-  mkdirSync(join(runPath, 'stages', 'gate'), { recursive: true });
-  writeFileSync(join(runPath, 'workflow.yaml'), [
+  mkdirSync(runRecordPath(runPath, 'stages', 'gate'), { recursive: true });
+  writeFileSync(runRecordPath(runPath, 'workflow.yaml'), [
     'name: default',
     'stages:',
     '  - id: gate',
@@ -155,7 +156,7 @@ function writeRun(runId: string, status: string, campaignId?: string): string {
     '    is_gate: true',
     '',
   ].join('\n'), 'utf-8');
-  writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+  writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
     runId,
     projectDir,
     workflowName: 'default',
@@ -183,11 +184,11 @@ function writeRun(runId: string, status: string, campaignId?: string): string {
       campaignName: campaignId,
     } : {}),
   }, null, 2), 'utf-8');
-  writeFileSync(join(runPath, 'task_brief.md'), '# Dashboard mutation fixture\n', 'utf-8');
-  writeFileSync(join(runPath, 'events.jsonl'), '{"event":"must-survive"}\n', 'utf-8');
-  writeFileSync(join(runPath, 'verdict_gate.json'), '{"pass":true}\n', 'utf-8');
-  writeFileSync(join(runPath, 'stages', 'gate', 'status.json'), '{"status":"complete"}\n', 'utf-8');
-  writeFileSync(join(runPath, 'stages', 'gate', 'live.log'), 'must survive\n', 'utf-8');
+  writeFileSync(runRecordPath(runPath, 'task_brief.md'), '# Dashboard mutation fixture\n', 'utf-8');
+  writeFileSync(runRecordPath(runPath, 'events.jsonl'), '{"event":"must-survive"}\n', 'utf-8');
+  writeFileSync(runRecordPath(runPath, 'verdict_gate.json'), '{"pass":true}\n', 'utf-8');
+  writeFileSync(runRecordPath(runPath, 'stages', 'gate', 'status.json'), '{"status":"complete"}\n', 'utf-8');
+  writeFileSync(runRecordPath(runPath, 'stages', 'gate', 'live.log'), 'must survive\n', 'utf-8');
   return runPath;
 }
 

@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 // Boundary: Canonical iteration/round coordinates, archived-record reads, evidence copies and gate framing; no live verdict policy or provider execution.
 import { copyFileSync, mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -20,7 +21,7 @@ export function appendGateEvidenceInstruction(prompt: string, runDirPath: string
 
 ## Gate evidence
 Return your verdict as the final JSON answer. The engine publishes
-${join(runDirPath, `verdict_${stageId}.json`)} and archives a rejecting attempt.
+${runRecordPath(runDirPath, `verdict_${stageId}.json`)} and archives a rejecting attempt.
 Durable rejected-verdict citation: ${archivedGateVerdictWritePath(runDirPath, coordinate, stageId)}
 Accepting metric claims include value and metric; the contract owns the threshold. For campaign phase progress,
 include phase, phaseComplete, nextPhase, outcome, artifactSummary and reason there.
@@ -38,7 +39,7 @@ export function gateArchiveCoordinate(iteration: number, round: number): GateArc
 }
 
 export function gateReevaluationArchiveRoot(runDirPath: string): string {
-  return join(runDirPath, 'gate_reevaluation');
+  return runRecordPath(runDirPath, 'gate_reevaluation');
 }
 
 export function canonicalGateRoundArtifactDir(
@@ -77,7 +78,7 @@ export function gateArchiveArtifactPath(
         // A replan already preserves attempt outputs before reusing stage indices.
         const retired = readArchivedRunStateFromDirectory(runDirPath).state.stageEvidence?.find(entry => entry.iteration === coordinate.iteration && entry.stageId === gateId);
         const output = retired?.attemptOutputPaths.find(entry => entry.attemptIndex === reference.attemptIndex);
-        if (output) return join(runDirPath, output.path);
+        if (output) return runRecordPath(runDirPath, output.path);
       }
       return reference[`${artifact}Path`] ?? '';
     } catch { return ''; }
@@ -104,12 +105,12 @@ export function archiveGateRoundEvidence(
   const artifactDir = canonicalGateRoundArtifactDir(runDirPath, coordinate);
   mkdirSync(artifactDir, { recursive: true });
   for (const gateId of gateIds) {
-    const verdict = join(runDirPath, `verdict_${gateId}.json`);
-    const stage = join(runDirPath, 'stages', gateId);
+    const verdict = runRecordPath(runDirPath, `verdict_${gateId}.json`);
+    const stage = runRecordPath(runDirPath, 'stages', gateId);
     let attempt: { index: number } | undefined;
     try { attempt = JSON.parse(readFileSync(join(stage, 'status.json'), 'utf8')).attempts?.at(-1); } catch { /* no completed attempt */ }
     const output = attempt ? join(stage, `output_attempt_${attempt.index}.md`) : '';
-    const metric = join(runDirPath, 'stages', gateId, 'metric.json');
+    const metric = stageWorkPath(runDirPath, 'stages', gateId, 'metric.json');
     const input = latestInvocationInput(runDirPath, gateId)?.path;
     try { if (existsSync(verdict)) copyFileSync(verdict, archivedGateVerdictWritePath(runDirPath, coordinate, gateId)); } catch { /* best effort */ }
     try { if (existsSync(metric)) copyFileSync(metric, gateArchiveArtifactPath(runDirPath, coordinate, gateId, 'metric')); } catch { /* best effort */ }
@@ -279,6 +280,6 @@ export function buildGateFixCorrectionContract(
       .filter(rejection => rejection.iteration === coordinate.iteration && rejection.round === coordinate.round)
       .map(rejection => rejectionRecord(rejection))),
     confirmedFindings: Object.fromEntries(gateIds.map(gateId => [gateId, confirmedRepairFindings(runDirPath, [gateId], coordinate)])),
-    ledgerPath: join(runDirPath, 'evidence-ledger.jsonl'),
+    ledgerPath: runRecordPath(runDirPath, 'evidence-ledger.jsonl'),
   })}\nResolve only the confirmed findings against the current diff; unconfirmed observations in the ledger and verdict are not repair requests. Close each confirmed finding by the same reproduction passing on the repaired tree; the engine records the replay. A fresh independent gate checks every still-required criterion. If the rejection was mistaken, supply a reproducible counterexample in declared evidence.`;
 }

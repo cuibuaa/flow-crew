@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -136,7 +137,7 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(readStageInput(project, runId, 'writer')).toBe('second attempt final input');
     writeFileSync(first.path, 'malformed earlier gzip');
     expect(readStageInput(project, runId, 'writer')).toBe('second attempt final input');
-    expect(existsSync(join(directory, 'stages', 'writer', 'input.md'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'stages', 'writer', 'input.md'))).toBe(false);
   });
 
   it('is idempotent for identical inputs and refuses mutation of an invocation identity', () => {
@@ -145,7 +146,7 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(recordInvocationInput(directory, input({ capturedAt: '2026-10-03T00:02:00.000Z' })).record.capturedAt).toBe(observedAt);
     expect(() => recordInvocationInput(directory, input({ userPrompt: 'changed bytes' }))).toThrow('INVOCATION_INPUT_CONFLICT');
     expect(readFileSync(first.path)).toEqual(bytes);
-    expect(readFileSync(join(directory, 'run.json'), 'utf8')).not.toContain('changed bytes');
+    expect(readFileSync(runRecordPath(directory, 'run.json'), 'utf8')).not.toContain('changed bytes');
   });
 
   it('recovers oversized Unicode system, user and transport bytes from one independent record', () => {
@@ -176,7 +177,7 @@ describe('versioned run state and immutable invocation inputs', () => {
   it('ignores retired scope decisions and live constraint incidents in the state projection', () => {
     writeStageStatus(project, runId, 'writer', { status: 'complete', retries: 0, attempts: [attempt()] });
     const before = view(true);
-    const stageDirectory = join(directory, 'stages', 'writer');
+    const stageDirectory = runRecordPath(directory, 'stages', 'writer');
     const decision = {
       version: 1, kind: 'scope_revision', requestId: 'retired_request', runId, stageId: 'writer', attemptIndex: 1,
       identityDigest: hash('retired identity'), requestDigest: hash('retired request'), pathDigest: hash('retired path'),
@@ -209,7 +210,7 @@ describe('versioned run state and immutable invocation inputs', () => {
     expect(() => invocationInputPath(directory, input({ stageId: '../outside' }))).toThrow();
     const outside = join(root, 'outside');
     mkdirSync(outside);
-    symlinkSync(outside, join(directory, 'stages', 'writer', 'invocations'), 'dir');
+    symlinkSync(outside, runRecordPath(directory, 'stages', 'writer', 'invocations'), 'dir');
     expect(() => recordInvocationInput(directory, input())).toThrow('STATE_PATH_ESCAPE');
     expect(existsSync(join(outside, 'attempt_1'))).toBe(false);
     expect(() => readRunStateView(project, '../foreign')).toThrow('STATE_RUN_ID_INVALID');
@@ -264,9 +265,9 @@ describe('versioned run state and immutable invocation inputs', () => {
       };
     });
     const envelope: GuidanceEnvelope = { version: 1, id: 'guide_1', target: 'writer', source: 'supervisor', createdAt: observedAt, body: 'Repair the declared line.' };
-    writeFileSync(join(directory, 'supervisor_guidance.md'), renderGuidanceEnvelope(envelope));
-    writeFileSync(join(directory, 'events.jsonl'), `${JSON.stringify({ runId, type: 'guidance_delivery_checked', stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt, guidanceIds: ['guide_1'], delivered: true })}\n`);
-    writeFileSync(join(directory, 'verdict_audit.json'), JSON.stringify({ verdict: 'reject', findings: ['report line'] }));
+    writeFileSync(runRecordPath(directory, 'supervisor_guidance.md'), renderGuidanceEnvelope(envelope));
+    writeFileSync(runRecordPath(directory, 'events.jsonl'), `${JSON.stringify({ runId, type: 'guidance_delivery_checked', stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt, guidanceIds: ['guide_1'], delivered: true })}\n`);
+    writeFileSync(runRecordPath(directory, 'verdict_audit.json'), JSON.stringify({ verdict: 'reject', findings: ['report line'] }));
 
     const consumers = ['planner', 'stage', 'supervisor', 'operator'].map(() => view());
     expect(new Set(consumers.map((entry) => entry.snapshot.evidenceSha256)).size).toBe(1);
@@ -322,11 +323,11 @@ describe('versioned run state and immutable invocation inputs', () => {
     const queued: GuidanceEnvelope = { version: 1, id: 'queued', target: 'writer', source: 'operator', createdAt: startedAt, body: 'Queued body' };
     const delivered = { ...queued, id: 'delivered' };
     const quarantined = { ...queued, id: 'quarantined', quarantined: true, quarantineReason: 'wrong recipient' };
-    writeFileSync(join(directory, 'supervisor_guidance.md'), [queued, delivered, quarantined].map(renderGuidanceEnvelope).join('\n\n'));
-    writeFileSync(join(directory, 'events.jsonl'), `torn\u0000row\n${JSON.stringify({ runId, type: 'guidance_delivery_checked', guidanceIds: ['delivered'], delivered: true })}\n{"incomplete":`);
-    const raw = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
+    writeFileSync(runRecordPath(directory, 'supervisor_guidance.md'), [queued, delivered, quarantined].map(renderGuidanceEnvelope).join('\n\n'));
+    writeFileSync(runRecordPath(directory, 'events.jsonl'), `torn\u0000row\n${JSON.stringify({ runId, type: 'guidance_delivery_checked', guidanceIds: ['delivered'], delivered: true })}\n{"incomplete":`);
+    const raw = JSON.parse(readFileSync(runRecordPath(directory, 'run.json'), 'utf8'));
     raw.status = 'archived-unrecognised-status';
-    writeFileSync(join(directory, 'run.json'), JSON.stringify(raw));
+    writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify(raw));
     const snapshot = view();
     expect(snapshot.events.malformedRecords).toBe(2);
     expect(snapshot.guidance.map((entry) => entry.deliveryState)).toEqual(['queued', 'delivered', 'quarantined']);
@@ -356,12 +357,12 @@ describe('versioned run state and immutable invocation inputs', () => {
     const state = readRunState(project, runId);
     const history = state.stateFormat?.history;
     expect(history?.committedBytes).toBeGreaterThan(0);
-    const historyPath = join(directory, history!.path);
+    const historyPath = runRecordPath(directory, history!.path);
     const original = readFileSync(historyPath);
     writeFileSync(historyPath, original.subarray(0, Math.max(0, original.length - 10)));
     expect(() => view()).toThrow('Run history is truncated');
     writeFileSync(historyPath, original);
-    const runPath = join(directory, 'run.json');
+    const runPath = runRecordPath(directory, 'run.json');
     const raw = JSON.parse(readFileSync(runPath, 'utf8'));
     raw.queryState = { version: 2 };
     writeFileSync(runPath, JSON.stringify(raw));
@@ -371,17 +372,17 @@ describe('versioned run state and immutable invocation inputs', () => {
 
   it('reports missing retained attempt inputs and observes their typed artifact contracts without parsing prose', () => {
     updateRunState(project, runId, (state) => { state.retiredStageUsage = [{ stageId: 'writer', iteration: 1, status: { status: 'complete', retries: 0, attempts: [attempt()] } }]; });
-    writeFileSync(join(directory, 'stages', 'writer', 'input.md'), 'Write missing-prose-only.md; this text creates no new duty.');
-    writeFileSync(join(directory, 'stages', 'writer', 'artifact_contract.json'), JSON.stringify({ version: 1, stageId: 'writer', obligations: [{ kind: 'prompt_artifact', path: join(directory, 'actual.md') }] }));
+    writeFileSync(runRecordPath(directory, 'stages', 'writer', 'input.md'), 'Write missing-prose-only.md; this text creates no new duty.');
+    writeFileSync(runRecordPath(directory, 'stages', 'writer', 'artifact_contract.json'), JSON.stringify({ version: 1, stageId: 'writer', obligations: [{ kind: 'prompt_artifact', path: stageWorkPath(directory, 'actual.md') }] }));
     const snapshot = view();
     expect(snapshot.prompts.missingAttemptInputs).toEqual([{ stageId: 'writer', attemptIndex: 1, attemptStartedAt: startedAt }]);
     expect(snapshot.artifacts).toHaveLength(1);
-    expect(snapshot.artifacts[0]).toMatchObject({ declaration: { root: 'run', path: 'actual.md' }, existence: { status: 'absent' } });
+    expect(snapshot.artifacts[0]).toMatchObject({ declaration: { root: 'run', path: 'work/actual.md' }, existence: { status: 'absent' } });
     expect(snapshot.artifacts.some((entry) => entry.declaration.path === 'missing-prose-only.md')).toBe(false);
   });
 
   it.each([3, 11])('refuses a changing projection after %i caller-bounded retries', (maximumReadAttempts) => {
-    writeFileSync(join(directory, 'events.jsonl'), '');
+    writeFileSync(runRecordPath(directory, 'events.jsonl'), '');
     const source = `
       import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
@@ -392,8 +393,8 @@ describe('versioned run state and immutable invocation inputs', () => {
       let mutations = 0;
       fs.readFileSync = function(path, ...args) {
         const result = original.call(fs, path, ...args);
-        if (String(path) === ${JSON.stringify(join(directory, 'events.jsonl'))}) {
-          const statePath = ${JSON.stringify(join(directory, 'run.json'))};
+        if (String(path) === ${JSON.stringify(runRecordPath(directory, 'events.jsonl'))}) {
+          const statePath = ${JSON.stringify(runRecordPath(directory, 'run.json'))};
           const state = JSON.parse(original.call(fs, statePath, 'utf8'));
           state.currentIteration = ++mutations;
           fs.writeFileSync(statePath, JSON.stringify(state));

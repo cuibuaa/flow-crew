@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { stageLiveLogPath } from '../src/stage-live-log.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -91,14 +92,14 @@ beforeEach(() => {
   project = join(root, 'provider-project');
   mkdirSync(project, { recursive: true });
   run = createRun(project, 'progress', 'name: progress\nstages: []', [stageId]);
-  writeFileSync(join(run.runDirPath, 'task_brief.md'), '# Review the result\n');
+  writeFileSync(runRecordPath(run.runDirPath, 'task_brief.md'), '# Review the result\n');
   status = beginStageAttempt(project, run.runId, stageId, 0);
   const attempt = status.attempts!.at(-1)!;
   const state = readRunState(project, run.runId);
   state.status = 'running';
   state.stages[stageId] = status;
   writeRunState(project, run.runId, state);
-  const stageRoot = join(run.runDirPath, 'stages', stageId);
+  const stageRoot = runRecordPath(run.runDirPath, 'stages', stageId);
   const logPath = stageLiveLogPath(run.runDirPath, stageId, attempt.index, attempt.startedAt);
   appendFileSync(logPath, `\n<!-- flowcrew-attempt ${JSON.stringify(attempt)} -->\n`);
   writeFileSync(join(stageRoot, 'attempt_generation.json'), JSON.stringify({
@@ -120,10 +121,10 @@ function facts(previousProcessWork?: string) {
 function monitor() { return new StageWatchdog(project, run.runId, config); }
 
 function savedProgress() {
-  return JSON.parse(readFileSync(join(run.runDirPath, 'stage_watchdog.json'), 'utf8'));
+  return JSON.parse(readFileSync(runRecordPath(run.runDirPath, 'stage_watchdog.json'), 'utf8'));
 }
 
-const signalPath = () => join(run.runDirPath, 'signals', `abort_${stageId}.json`);
+const signalPath = () => runRecordPath(run.runDirPath, 'signals', `abort_${stageId}.json`);
 
 describe.skipIf(process.platform !== 'linux')('provider inbound stream progress', () => {
   it('keeps a provider receiving bytes without emitted items or active commands alive', async () => {

@@ -1,6 +1,7 @@
+import { runRecordPath } from '../../run-layout.js';
 /** Admitted terminal owner/scope lookup and shared normalized stage-write attribution; no terminal state mutation. */
 import { type DispatchAdmissionReport } from '../sched_admission/dispatch.js';
-import { join, posix } from 'node:path';
+import { posix } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { STAGE_STATUS, type StageStatus, type StoreState } from '../../store.js';
 import { normalizedProjectContentPath, normalizedProjectPath, parseDeclaredScope, scopeMatchesProjectPath } from '../sched_admission/scope-services.js';
@@ -8,16 +9,16 @@ import { normalizedProjectContentPath, normalizedProjectPath, parseDeclaredScope
 /** Static plans and revisions carry the same admission as dispatches in the
  * authoritative plan record. The projection remains a legacy-run fallback. */
 function readTerminalAdmission(runDirPath: string): DispatchAdmissionReport {
-  const statePath = join(runDirPath, 'run.json');
+  const statePath = runRecordPath(runDirPath, 'run.json');
   if (existsSync(statePath)) {
     const state = JSON.parse(readFileSync(statePath, 'utf8')) as StoreState;
     const historyPath = state.queryState?.planRevision?.path;
     if (historyPath) {
-      const record = JSON.parse(readFileSync(join(runDirPath, historyPath), 'utf8')) as { admission?: DispatchAdmissionReport };
+      const record = JSON.parse(readFileSync(runRecordPath(runDirPath, historyPath), 'utf8')) as { admission?: DispatchAdmissionReport };
       if (record.admission?.terminalOwners) return record.admission;
     }
   }
-  return JSON.parse(readFileSync(join(runDirPath, 'dispatch_admission.json'), 'utf8')) as DispatchAdmissionReport;
+  return JSON.parse(readFileSync(runRecordPath(runDirPath, 'dispatch_admission.json'), 'utf8')) as DispatchAdmissionReport;
 }
 
 export function admittedTerminalOwner(runDirPath: string, terminalPath: string): string | undefined {
@@ -50,7 +51,7 @@ export function terminalProductWrites(
       // the existing audit preserves no-ops and review exemptions, including
       // writes whose content could not be compared.
       if (attempt.constraintAudit) try {
-        const audit = JSON.parse(readFileSync(join(runDirPath, attempt.constraintAudit.path), 'utf8')) as Record<string, string[]>;
+        const audit = JSON.parse(readFileSync(runRecordPath(runDirPath, attempt.constraintAudit.path), 'utf8')) as Record<string, string[]>;
         for (const path of audit.exemptedWrites ?? []) noReview.add(path);
         for (const path of audit.unavailableComparisons ?? []) noReview.add(path);
         const classes = ['appliedWrites', 'exemptedWrites', 'rolledBackWrites', 'rollbackFailures', 'unavailableComparisons'];

@@ -1,5 +1,5 @@
+import { runRecordPath } from '../../run-layout.js';
 /** Scheduler-owned execution and admission prompt contracts; builds strings only and changes no contract bytes. */
-import { join } from 'node:path';
 import { type StageConfig } from '../sched_admission/configuration.js';
 import { type ResearchConfig, type TerminalStatesConfig, type StoreState } from '../../store.js';
 import { resolveResearchPaths } from '../../research-paths.js';
@@ -17,7 +17,7 @@ sentence; a confirmed compatibility requirement remains binding unless the brief
 Independent reviewers must not durably modify the reviewed target or authoritative inputs; disposable probes use only the invocation's private $TMPDIR. Target repairs belong to an author.
 
 ## Run-directory safety
-The FlowCrew run directory (<run>/…) is engine-owned. Its records, including stage_evidence/, the evidence ledger and state, are read-only to stages; writing those records voids the stage result.
+The run envelope contains separate engine/ and work/ trees. engine/, root run.json and root events.jsonl are read-only to stages; writing those records voids the stage result. Stage outputs, evidence, probes and model homes belong under work/. Put run-rooted artifact declarations under work/; requests/ and control/ are engine API locations, not stage output locations.
 Never write, move, delete, or otherwise modify engine-owned records in any FlowCrew run directory. This prohibition is absolute; read authorization never grants mutation authority. Only exact output paths already assigned to this stage by its admitted artifact_contract.produces or brief retain write authority; output ownership never authorizes additional evidence files or engine-record writes.
 By default, do not read, browse, or list other \`.fc/runs/\` directories. Explicit brief authorization allows a bounded set as read-only evidence and governs default read restrictions for that evidence only; it grants no permission to modify those runs.`;
 
@@ -89,7 +89,7 @@ export function appendGateConstraintAuditContext(
     return (status?.attempts ?? []).flatMap((attempt) => {
       if (!attempt.constraintAudit) return [];
       const summary = attempt.constraintAudit;
-      return [`- ${id} attempt ${attempt.index}: ${join(runDirPath, summary.path)} `
+      return [`- ${id} attempt ${attempt.index}: ${runRecordPath(runDirPath, summary.path)} `
         + `(violations=${summary.violationCount}, unverified=${summary.unverifiedCount})`];
     });
   });

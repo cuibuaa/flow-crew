@@ -174,10 +174,12 @@ export function normalizeStageContracts(stages: StageConfig[]): StageConfig[] {
       version: 1, produces: [],
       reads: [], groups: [],
     } : stage.artifact_contract);
-    const path = stage.dynamic_dispatch ? 'dispatch.yaml' : stage.is_gate ? `verdict_${stage.id}.json` : undefined;
+    const path = stage.dynamic_dispatch ? 'work/dispatch.yaml' : stage.is_gate ? `work/verdict_${stage.id}.json` : undefined;
     if (!path) continue;
-    const output = contract.produces.find((artifact) => artifact.root === 'run' && artifact.path === path);
-    if (output) Object.assign(output, { kind: 'file', when: undefined });
+    const output = contract.produces.find((artifact) => artifact.root === 'run' && (artifact.path === path || artifact.path === path.slice('work/'.length)));
+    // Normalize the scheduler's automatic result contract into stage storage.
+    // This never grants a write in the engine tree.
+    if (output) Object.assign(output, { path, kind: 'file', when: undefined });
     else {
       const base = stage.dynamic_dispatch ? 'dispatch' : 'verdict';
       let id = base;

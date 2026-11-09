@@ -12,7 +12,7 @@ stages:
     dynamic_dispatch: true
     artifact_contract:
       version: 1
-      produces: [{id: dispatch, root: run, path: dispatch.yaml, kind: file, nonempty: true}]
+      produces: [{id: dispatch, root: run, path: work/dispatch.yaml, kind: file, nonempty: true}]
       reads: []
   - id: baseline_round
     role: coder
@@ -26,7 +26,7 @@ stages:
     artifact_contract:
       version: 1
       produces:
-        - {id: build, root: run, path: stages/baseline_round/build, kind: directory, nonempty: false}
+        - {id: build, root: run, path: work/stages/baseline_round/build, kind: directory, nonempty: false}
         - {id: round_evidence, root: project, path: artifacts/research/rounds/round_01, kind: directory, nonempty: true}
         - {id: attempt_index, root: project, path: artifacts/research/stage_01_verdict.md, kind: file, nonempty: true}
       reads: []
@@ -39,8 +39,8 @@ stages:
     artifact_contract:
       version: 1
       produces:
-        - {id: review, root: run, path: stages/baseline_review/review, kind: directory, nonempty: true}
-        - {id: verdict, root: run, path: verdict_baseline_review.json, kind: file, nonempty: false}
+        - {id: review, root: run, path: work/stages/baseline_review/review, kind: directory, nonempty: true}
+        - {id: verdict, root: run, path: work/verdict_baseline_review.json, kind: file, nonempty: false}
       reads:
         - id: round_evidence
           root: project
@@ -59,7 +59,7 @@ stages:
     prompt_template: Repair only rejected round evidence.
     artifact_contract:
       version: 1
-      produces: [{id: build, root: run, path: stages/baseline_repair/build, kind: directory, nonempty: false}]
+      produces: [{id: build, root: run, path: work/stages/baseline_repair/build, kind: directory, nonempty: false}]
       reads: []
   - id: ceiling_report
     role: doc_writer
@@ -86,8 +86,8 @@ stages:
     artifact_contract:
       version: 1
       produces:
-        - {id: review, root: run, path: stages/ceiling_review/review, kind: directory, nonempty: true}
-        - {id: verdict, root: run, path: verdict_ceiling_review.json, kind: file, nonempty: false}
+        - {id: review, root: run, path: work/stages/ceiling_review/review, kind: directory, nonempty: true}
+        - {id: verdict, root: run, path: work/verdict_ceiling_review.json, kind: file, nonempty: false}
       reads:
         - id: ceiling_report
           root: project

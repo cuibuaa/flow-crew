@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,8 +32,8 @@ describe('authored reality checks remain hard', () => {
     // Historical output-object shape. A directory producer makes the member a
     // reachable read without restating the brief's exact required file in its contract.
     const brief = '---\noutputs:\n  - path: deliverables/report.json\n---\n# Deliver the verified result\n\nUse the evidence to finish the report.\n';
-    writeFileSync(join(directory, 'task_brief.md'), brief);
-    writeFileSync(join(directory, 'dispatch.yaml'), stringify({ stages: [
+    writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
+    writeFileSync(stageWorkPath(directory, 'dispatch.yaml'), stringify({ stages: [
       { id: 'work', role: 'coder', scope: ['deliverables/'], artifact_contract: {
         version: 1, produces: [{ id: 'bundle', root: 'project', path: 'deliverables', kind: 'directory' }], reads: [],
       } },
@@ -44,14 +45,14 @@ describe('authored reality checks remain hard', () => {
       reads: [{ id: 'report', root: 'project', path: 'deliverables/report.json', source: { kind: 'stage', stage: 'work', artifact: 'bundle' } }],
       params: { paths: ['deliverables/report.json'] },
     }] });
-    writeFileSync(join(directory, 'reality_checks.md'), markdown);
+    writeFileSync(runRecordPath(directory, 'reality_checks.md'), markdown);
     const state = readRunState(project, runId);
     state.stages.plan.status = 'complete';
     const roles = new Map(['planner', 'coder', 'qa'].map(name => [name, { name, description: name }]));
     const admitted = admitPlannerDispatches([plan], state, project, runId, directory, roles, new Set(), new Map());
     expect(admitted.kind).toBe('continue');
-    expect(JSON.parse(readFileSync(join(directory, 'dispatch_admission.json'), 'utf8'))).toMatchObject({ pass: true, errors: [] });
-    const checks = readFileSync(join(directory, 'reality_checks.md'), 'utf8');
+    expect(JSON.parse(readFileSync(runRecordPath(directory, 'dispatch_admission.json'), 'utf8'))).toMatchObject({ pass: true, errors: [] });
+    const checks = readFileSync(runRecordPath(directory, 'reality_checks.md'), 'utf8');
     expect(parseChecksFromMarkdown(checks)[0]).not.toMatchObject({ advisory: true });
     expect(checks).toBe(markdown);
     if (present) {
@@ -63,7 +64,7 @@ describe('authored reality checks remain hard', () => {
     terminalState.stages.work.status = 'complete';
     writeRunState(project, runId, terminalState);
     const gate = await concludeRun(terminalState, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(project, runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(project, runId), '.reality-gate.json'));
     expect(gate.status, JSON.stringify(gateReport)).toBe(present ? 'complete' : 'reality_gate_failed');
     expect(gateReport).toMatchObject({ pass: present, checksRun: 1, results: [{ name: 'required report', pass: present }] });
     expect(gateReport.results[0].advisory).not.toBe(true);

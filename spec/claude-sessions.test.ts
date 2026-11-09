@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,7 +35,7 @@ beforeEach(() => {
   previousStore = fcGlobalDir();
   setFcGlobalDir(join(root, 'store'));
   ({ runDirPath: directory } = createRun(project, 'session-fixture', 'name: session-fixture\nstages: []\n', ['work', 'author', 'review', 'repair', 'next']));
-  writeFileSync(join(directory, 'task_brief.md'), DUTIES);
+  writeFileSync(runRecordPath(directory, 'task_brief.md'), DUTIES);
   vi.stubEnv('PATH', bin);
   vi.stubEnv('CLAUDE_CONFIG_DIR', join(root, 'ambient'));
   vi.stubEnv('CLAUDE_SECURESTORAGE_CONFIG_DIR', join(root, 'secure-source'));
@@ -119,7 +120,7 @@ describe('G01: Claude explicit native identity and bounded fresh fallback', () =
     expect(call.argv.slice(call.argv.indexOf('--resume'), call.argv.indexOf('--resume') + 2)).toEqual(['--resume', UUID]);
     expect(call.argv).not.toContain('--continue');
     expect(call.stdin).toBe('Synthetic correction only.\r\n🌿');
-    expect(call.home).toBe(join(root, 'ambient'));
+    expect(call.home).toBe(stageSessionHome(directory, 'work', 'claude'));
     expect(call.hadHistory).toBe(true);
     expect(readSession(directory, 'work', 'claude')).toMatchObject({
       version: 1, adapter: 'claude', sessionId: UUID, ownerStageId: 'work', resumedFromStageId: 'author',
@@ -149,22 +150,22 @@ describe('G01: Claude explicit native identity and bounded fresh fallback', () =
     expect(call.argv[call.argv.indexOf('--setting-sources') + 1]).toBe('');
     expect(call.argv).toContain('--strict-mcp-config');
     expect(JSON.parse(call.argv[call.argv.indexOf('--json-schema') + 1])).toEqual(schema);
-    expect(call.home).toBe(join(root, 'ambient'));
+    expect(call.home).toBe(stageSessionHome(directory, 'work', 'claude'));
     expect(call.secureSource).toBe(explicit ? join(root, 'secure-source') : undefined);
     expect(call.hadHistory).toBe(true);
     expect(call.stdin).toBe(correction);
   });
 
-  it('leaves unset config and secure-storage routing unset for the operator default', async () => {
+  it('isolates the tool home while preserving unset secure-storage routing', async () => {
     vi.stubEnv('HOME', join(root, 'operator-home'));
     vi.stubEnv('CLAUDE_CONFIG_DIR', undefined);
     vi.stubEnv('CLAUDE_SECURESTORAGE_CONFIG_DIR', undefined);
     const result = await new ClaudeAdapter().run(DUTIES, role, options());
     expect(result.exitCode).toBe(0);
-    expect(calls()[0]).not.toHaveProperty('home');
+    expect(calls()[0].home).toBe(stageSessionHome(directory, 'work', 'claude'));
     expect(calls()[0]).not.toHaveProperty('secureSource');
     expect(existsSync(stageSessionHome(directory, 'work', 'claude'))).toBe(false);
-    expect(existsSync(join(root, 'operator-home', '.claude', 'projects', 'fixture', 'conversation.jsonl'))).toBe(true);
+    expect(existsSync(join(root, 'operator-home', '.claude', 'projects', 'fixture', 'conversation.jsonl'))).toBe(false);
   });
 
   it('rejects a resumed native identity mismatch without persisting or retrying it', async () => {
@@ -237,7 +238,7 @@ describe('G01: Claude explicit native identity and bounded fresh fallback', () =
     for (const call of resumedCalls) {
       expect(call.argv.slice(call.argv.indexOf('--resume'), call.argv.indexOf('--resume') + 2)).toEqual(['--resume', UUID]);
       expect(call.stdin).toBe(correction);
-      expect(call.home).toBe(join(root, 'ambient'));
+      expect(call.home).toBe(stageSessionHome(directory, 'work', 'claude'));
       expect(call.hadHistory).toBe(true);
       expect(call.argv).toContain('--safe-mode');
       expect(call.argv[call.argv.indexOf('--setting-sources') + 1]).toBe('');
@@ -267,7 +268,7 @@ describe('G01: Claude explicit native identity and bounded fresh fallback', () =
 
   it.each([125, 137, 'timeout'])('does not fall back across control exit %s', async control => {
     scenario({ control });
-    const result = await new ClaudeAdapter().run(DUTIES, role, options({ resumeSessionId: UUID, timeout_ms: control === 'timeout' ? 300 : 10_000 }));
+    const result = await new ClaudeAdapter().run(DUTIES, role, options({ resumeSessionId: UUID, timeout_ms: control === 'timeout' ? 2000 : 10_000 }));
     expect(result.exitCode).toBe(control === 'timeout' ? 124 : control);
     expect(calls()).toHaveLength(1);
   });
@@ -276,7 +277,7 @@ describe('G01: Claude explicit native identity and bounded fresh fallback', () =
     scenario({ control, controlIdentity: OTHER_UUID });
     const result = await new ClaudeAdapter().run('Synthetic correction.', role, options({
       resumeSessionId: UUID, freshSessionPrompt: DUTIES, preserveSession: true,
-      timeout_ms: control === 'timeout' ? 300 : 10_000,
+      timeout_ms: control === 'timeout' ? 2000 : 10_000,
     }));
     expect(result.exitCode).toBe(control === 'timeout' ? 124 : control);
     expect(result.sessionId).toBeUndefined();
@@ -559,9 +560,10 @@ describe('G02: session ownership, admission and cleanup', () => {
     scenario({ nativeFailure: failed });
     const result = await new ClaudeAdapter().run(DUTIES, role, options({ preserveSession: preserve }));
     expect(result.exitCode).toBe(failed ? 1 : 0);
-    expect(existsSync(stageSessionHome(directory, 'work', 'claude'))).toBe(false);
-    expect(existsSync(join(root, 'ambient', 'projects', 'fixture', 'conversation.jsonl'))).toBe(true);
-    expect(readSession(directory, 'work', 'claude')).toMatchObject({ ownerStageId: 'work', sessionId: UUID, adapter: 'claude' });
+    expect(existsSync(stageSessionHome(directory, 'work', 'claude'))).toBe(preserve || failed);
+    expect(existsSync(join(root, 'ambient', 'projects', 'fixture', 'conversation.jsonl'))).toBe(false);
+    if (preserve || failed) expect(readSession(directory, 'work', 'claude')).toMatchObject({ ownerStageId: 'work', sessionId: UUID, adapter: 'claude' });
+    else expect(readSession(directory, 'work', 'claude')).toBeUndefined();
   });
 
   it('reads metadata by adapter, preserving legacy Codex records and rejecting cross-adapter reuse', async () => {
@@ -579,7 +581,7 @@ describe('G02: session ownership, admission and cleanup', () => {
     expect(sessionResumeForStage(work, [work], state, directory, false, 'claude')).toBeUndefined();
     expect(sessionResumeForStage(work, [work], state, directory, false, 'codex')).toBeUndefined();
     expect(sessionResumeForStage({ ...work, is_gate: true }, [work], state, directory, false, 'claude')).toBeUndefined();
-    rmSync(join(directory, 'stages', 'work', 'session.json'));
+    rmSync(runRecordPath(directory, 'stages', 'work', 'session.json'));
     expect(sessionResumeForStage(work, [work], state, directory, false, 'claude')).toBeUndefined();
   });
 
@@ -590,7 +592,7 @@ describe('G02: session ownership, admission and cleanup', () => {
     // earlier adapter still belong to this same bounded repair lifecycle.
     for (const stageId of ['author', 'review']) {
       mkdirSync(stageSessionHome(directory, stageId, 'codex'));
-      writeFileSync(join(directory, 'stages', stageId, 'output.md'), 'Retain settled synthetic evidence.');
+      writeFileSync(runRecordPath(directory, 'stages', stageId, 'output.md'), 'Retain settled synthetic evidence.');
     }
     const author = stage('author'), review = stage('review', { role: 'qa', is_gate: true, depends_on: ['author'] });
     const repair = stage('repair', { depends_on: ['review'], retry_to: ['review'] });
@@ -605,7 +607,7 @@ describe('G02: session ownership, admission and cleanup', () => {
     expect(existsSync(stageSessionHome(directory, 'review', 'claude'))).toBe(false);
     expect(existsSync(stageSessionHome(directory, 'author', 'codex'))).toBe(false);
     expect(existsSync(stageSessionHome(directory, 'review', 'codex'))).toBe(false);
-    for (const stageId of ['author', 'review']) expect(readFileSync(join(directory, 'stages', stageId, 'output.md'), 'utf8')).toBe('Retain settled synthetic evidence.');
+    for (const stageId of ['author', 'review']) expect(readFileSync(runRecordPath(directory, 'stages', stageId, 'output.md'), 'utf8')).toBe('Retain settled synthetic evidence.');
     expect(readSession(directory, 'review', 'claude')).toBeUndefined();
     expect(sessionResumeForStage(repair, all, state, directory, false, 'claude')).toBeUndefined();
   });
@@ -626,7 +628,7 @@ describe('G02: session ownership, admission and cleanup', () => {
     expect(gateContinuationSessionForStage(review, directory, false, 'claude')).toBeUndefined();
     expect(gateContinuationSessionForStage(review, directory, true, 'claude')).toBeUndefined();
     const correction = gateVerdictCorrectionPath(directory, 'review');
-    mkdirSync(join(directory, 'gate_reevaluation'), { recursive: true });
+    mkdirSync(join(correction, '..'), { recursive: true });
     writeFileSync(correction, JSON.stringify({ version: 1, gateId: 'review', previousVerdictWrong: true, reason: 'Synthetic verdict disproved.', evidence: 'Recorded synthetic check.' }));
     expect(gateContinuationSessionForStage(review, directory, true, 'claude')).toBeUndefined();
     expect(existsSync(correction)).toBe(false);

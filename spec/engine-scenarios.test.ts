@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
@@ -71,15 +72,15 @@ async function runScenario(
     /* autoApprove */ true, /* supervise */ undefined, /* inheritCampaignContext */ false,
   );
   const runDirPath = join(fcHome, 'runs', state.runId!);
-  const readRun = (name: string) => readFileSync(join(runDirPath, name), 'utf-8');
+  const readRun = (name: string) => readFileSync(runRecordPath(runDirPath, name), 'utf-8');
   const readProj = (name: string) => readFileSync(join(projectDir, name), 'utf-8');
   // Guidance is consumed by the next plan stage and archived under
   // guidance_history/ — collect the live file plus all archived generations.
   const allGuidance = () => {
     let out = '';
-    const live = join(runDirPath, 'supervisor_guidance.md');
+    const live = runRecordPath(runDirPath, 'supervisor_guidance.md');
     if (existsSync(live)) out += readFileSync(live, 'utf-8');
-    const hist = join(runDirPath, 'guidance_history');
+    const hist = runRecordPath(runDirPath, 'guidance_history');
     if (existsSync(hist)) for (const f of readdirSync(hist)) out += readFileSync(join(hist, f), 'utf-8');
     return out;
   };

@@ -1,6 +1,6 @@
+import { runRecordPath } from './run-layout.js';
 // Condition evaluation module
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { readStageStatus, runDir } from './store.js';
 import { createLogger } from './logging.js';
 
@@ -104,7 +104,7 @@ function readConditionFact(
   // campaign decision is `continue`, then run in the same iteration after the
   // settled gates produce `ship` or `stop_ceiling`.
   if (stageId === 'research') {
-    const decisionPath = join(runDir(projectDir, runId), 'research_decision.json');
+    const decisionPath = runRecordPath(runDir(projectDir, runId), 'research_decision.json');
     if (!existsSync(decisionPath)) return undefined;
     const parsed = JSON.parse(readFileSync(decisionPath, 'utf-8')) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
@@ -114,7 +114,7 @@ function readConditionFact(
   const status = readStageStatus(projectDir, runId, stageId) as unknown as Record<string, unknown>;
   if (hasOwnField(status, field)) return status[field];
 
-  const verdictPath = join(runDir(projectDir, runId), `verdict_${stageId}.json`);
+  const verdictPath = runRecordPath(runDir(projectDir, runId), `verdict_${stageId}.json`);
   const parsed = JSON.parse(readFileSync(verdictPath, 'utf-8')) as unknown;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
   const verdict = parsed as Record<string, unknown>;

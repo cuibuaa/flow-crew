@@ -1,8 +1,9 @@
+import { runRecordPath } from './run-layout.js';
 import { randomUUID } from 'node:crypto';
 import { canonicalJson, sha256Canonical } from './canonical-json.js';
 import { closeSync, linkSync, mkdirSync, openSync, unlinkSync, writeFileSync } from './engine-fs.js';
 import { existsSync, fsyncSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { z } from 'zod';
 import { ArtifactContractSchema } from './artifact-declarations.js';
 import type { StageConfig, RecordedStageConfig } from './scheduler/sched_admission/configuration.js';
@@ -59,8 +60,8 @@ export function recordAdmittedPlan(state: StoreState, stages: StageConfig[], dir
   const revision = (state.queryState?.planRevision?.revision ?? -1) + 1;
   const admittedAt = new Date().toISOString();
   const path = `plan_history/revision_${revision}_${randomUUID()}.json`;
-  mkdirSync(join(directory, 'plan_history'), { recursive: true });
-  publishImmutable(join(directory, path), `${JSON.stringify({ version: 1, runId: state.runId, revision, digest, admittedAt, reason, stages, admission }, null, 2)}\n`);
+  mkdirSync(runRecordPath(directory, 'plan_history'), { recursive: true });
+  publishImmutable(runRecordPath(directory, path), `${JSON.stringify({ version: 1, runId: state.runId, revision, digest, admittedAt, reason, stages, admission }, null, 2)}\n`);
   const record = { revision, digest, admittedAt, reason, path };
   state.queryState = { ...(state.queryState ?? { version: 1 }), version: 1, planRevision: record, planHistory: [...(state.queryState?.planHistory ?? []), record] };
   state.planControl = { version: 1, stages, capabilities: establishCapability
@@ -80,7 +81,7 @@ export function applyPlanRevision(input: {
   const request = PlanRevisionRequestSchema.parse(input.request);
   const requestDigest = sha256Canonical(request);
   const directory = runDir(input.projectDir, input.runId);
-  const decisionPath = join(directory, 'stages', request.stageId, `plan_revision_decision_${request.requestId}.json`);
+  const decisionPath = runRecordPath(directory, 'stages', request.stageId, `plan_revision_decision_${request.requestId}.json`);
   let decision: PlanRevisionDecision = { version: 1, requestId: request.requestId, accepted: false, at: new Date().toISOString(), baseRevision: request.baseRevision, requestDigest, errors: [] };
   const journalKey = `${request.stageId}:${request.requestId}`;
   let candidate: StageConfig[] | undefined;
@@ -179,7 +180,7 @@ export function applyPlanRevision(input: {
     state.planRevisionDecisions = { ...state.planRevisionDecisions, [journalKey]: decision };
   });
   if (!decision.pending) {
-    mkdirSync(join(directory, 'stages', request.stageId), { recursive: true });
+    mkdirSync(runRecordPath(directory, 'stages', request.stageId), { recursive: true });
     publishImmutable(decisionPath, `${JSON.stringify(decision, null, 2)}\n`);
   }
   return { state, decision, ...(decision.accepted ? { stages: candidate } : {}) };

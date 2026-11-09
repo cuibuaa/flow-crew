@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -51,7 +52,7 @@ describe('planner dispatch contract', () => {
     expect(admit([work]).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('not assigned to a gate');
     expect(admit([work,gate,repair]).pass).toBe(true);
     expect(gate.criterion_refs).toEqual(['required']);
-    expect(gate.artifact_contract!.produces[0].path).toBe('verdict_audit.json');
+    expect(gate.artifact_contract!.produces[0].path).toBe('work/verdict_audit.json');
     expect(admit([parseDispatchedStageConfig({id:'audit',role:'qa',is_gate:true}),{...repair,scope:[]}]).pass).toBe(true);
   });
 
@@ -72,8 +73,8 @@ describe('planner dispatch contract', () => {
       expect(admit([{ ...audit, scope: ['docs/report.md'] }, repair]).pass).toBe(false);
       const runId = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['audit', 'repair']).runId;
       const directory = runDir(project, runId);
-      writeFileSync(join(directory, 'task_brief.md'), brief);
-      writeFileSync(join(directory, 'brief_criteria.json'), JSON.stringify(criteria));
+      writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
+      writeFileSync(runRecordPath(directory, 'brief_criteria.json'), JSON.stringify(criteria));
       updateRunState(project, runId, state => { recordAdmittedPlan(state, [planner, audit, repair], directory, 'existing-work audit', true); state.dispatchedStages = [audit, repair]; });
 
     } finally { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); }

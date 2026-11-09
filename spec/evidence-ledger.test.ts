@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -101,7 +102,7 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
       if (options.input === 'introduced') writeFileSync(join(target, 'data/value.txt'), 'GOOD');
     }
     if (opts.stageId === 'review') {
-      const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+      const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
       if (options.requestBase && !prompt.startsWith('# Requested base evidence')) {
         const fact = readEvidence(opts.runDir).filter((entry): entry is typeof entry & ValidationFact => entry.kind === 'validation').at(-1)!;
         const failed = fact.executions[0].commands.filter(command => command.exitCode !== 0);
@@ -150,13 +151,13 @@ const fail=input!=='GOOD';console.log(JSON.stringify({complete:true,numTotalTest
 describe('one evidence lifecycle through the real scheduler and scripted adapter', () => {
   it('retains a bounded configured command log and raw byte counts, without another validation', async () => {
     const result = await fixture({ verbose: true });
-    expect(result.final.status).toBe('complete');
+    expect(result.final.status, result.final.failureReason).toBe('complete');
     expect(result.executions).toHaveLength(1);
     expect(result.validations).toHaveLength(1);
     const [command] = result.validations[0].executions[0].commands;
     expect(command.exitCode).toBe(0);
     expect(Buffer.byteLength(command.output)).toBeLessThanOrEqual(25 * 1024);
-    const output = readFileSync(join(result.rd, command.outputPath!), 'utf8');
+    const output = readFileSync(runRecordPath(result.rd, command.outputPath!), 'utf8');
     expect(output).toBe(command.output);
     expect(output).toContain('earlier bytes omitted');
     expect(Buffer.byteLength(output)).toBeLessThan(command.outputBytes!.stdout + command.outputBytes!.stderr);
@@ -231,11 +232,11 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
 
   it('records observed work without empty validation facts or receipts when no suite is configured', async () => {
     const result = await fixture({ noValidation: true });
-    expect(result.final.status).toBe('complete');
+    expect(result.final.status, result.final.failureReason).toBe('complete');
     expect(result.executions).toEqual([]); expect(result.validations).toEqual([]);
     expect(result.calls.map(call => call.stage)).toEqual(['implement', 'review']);
     expect(result.ledger.some(fact => fact.kind === 'attempt')).toBe(true);
-    expect(existsSync(join(result.rd, 'validation_delta_review.json'))).toBe(false);
+    expect(existsSync(runRecordPath(result.rd, 'validation_delta_review.json'))).toBe(false);
   });
 
   it('records native structured command exits and an unknown outcome when the stream closes without an exit', async () => {
@@ -249,7 +250,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
 
   it('runs a successful suite once without a base replay, including an unchanged tree', async () => {
     const result = await fixture({ unchanged: true });
-    expect(result.final.status).toBe('complete'); expect(result.executions).toHaveLength(1);
+    expect(result.final.status, result.final.failureReason).toBe('complete'); expect(result.executions).toHaveLength(1);
     expect(result.validations[0].treeHash).toBe(result.baselineTree.hash);
     expect(result.validations[0].executions).toHaveLength(1);
   });
@@ -273,7 +274,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     const firstReview = result.calls.find(call => call.stage === 'review')!;
     expect(firstReview.prompt).toContain('introduced');
     expect(firstReview.prompt).toContain('+introduced 3');
-    const evidenceRoot = join(result.rd, 'stage_evidence');
+    const evidenceRoot = runRecordPath(result.rd, 'stage_evidence');
     const patches = readdirSync(evidenceRoot, { recursive: true }).filter(path => String(path).endsWith('/change.diff'))
       .map(path => ({ path: join(evidenceRoot, String(path)), bytes: readFileSync(join(evidenceRoot, String(path)), 'utf8') }));
     const reviewedPatch = patches.find(patch => patch.bytes.includes('+introduced 3'));
@@ -283,7 +284,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     expect(firstReview.schema).toHaveProperty('anyOf');
     expect(result.calls[0].schema?.properties).not.toHaveProperty('checks');
     expect(result.calls[0].schema?.properties).not.toHaveProperty('files_modified');
-    const ledgerText = readFileSync(join(result.rd, 'evidence-ledger.jsonl'), 'utf8');
+    const ledgerText = readFileSync(runRecordPath(result.rd, 'evidence-ledger.jsonl'), 'utf8');
     expect(ledgerText).toContain('AUTHOR_TRANSCRIPT_SENTINEL');
     const ownRecord = result.ledger.find(entry => entry.kind === 'attempt' && entry.stageId === 'implement');
     expect(ownRecord?.kind === 'attempt' && ownRecord.finalRecord?.summary).toBe('AUTHOR_TRANSCRIPT_SENTINEL');
@@ -322,7 +323,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
   it.each([undefined, 99])('retains unsupported validation receipts for audit without trusting or rerunning them (version=%j)', async validationVersion => {
     const result = await fixture({ baseRed: true });
     const legacy = readEvidence(result.rd).map(fact => fact.kind === 'validation' ? { ...fact, validationVersion } : fact);
-    writeFileSync(join(result.rd, 'evidence-ledger.jsonl'), legacy.map(fact => JSON.stringify(fact)).join('\n') + '\n');
+    writeFileSync(runRecordPath(result.rd, 'evidence-ledger.jsonl'), legacy.map(fact => JSON.stringify(fact)).join('\n') + '\n');
     expect(readEvidence(result.rd).some(fact => fact.kind === 'validation')).toBe(true);
     expect(gateValidationRefusal(result.target, result.final.runId, 'review')).toBeUndefined();
     await recordAttemptValidation(result.target, result.final.runId, 'implement', { runCommand: () => { throw new Error('old receipt reran its suite'); } });
@@ -349,7 +350,7 @@ describe('one evidence lifecycle through the real scheduler and scripted adapter
     const input = result.calls.filter(call => call.stage === 'review').at(-1)!.prompt;
     const facts = JSON.parse(input.split('Ledger facts:\n')[1].split('\nValidation command selection')[0]).facts;
     expect(facts.filter((fact: { kind: string }) => fact.kind === 'validation').map((fact: { sequence: number }) => fact.sequence)).toEqual([first.sequence]);
-    expect(JSON.parse(readFileSync(join(result.rd, 'validation_delta_review.json'), 'utf8')).ledgerSequence).toBe(first.sequence);
+    expect(JSON.parse(readFileSync(runRecordPath(result.rd, 'validation_delta_review.json'), 'utf8')).ledgerSequence).toBe(first.sequence);
     expect(reviewFacts(result.target, result.rd, result.final).validation).toMatchObject({ sequence: first.sequence, pass: true });
     expect(await ensureTerminalArtifactValidation({ projectDir: result.target, runId: result.final.runId, runDirPath: result.rd,
       state: result.final, ownerStageId: 'repair', terminalPath: 'value.txt', artifactMtimeMs: Date.now(),

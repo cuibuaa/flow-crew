@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -63,7 +64,7 @@ function legacyDiff(untracked: string[]): string {
   `, JSON.stringify(untracked)], project, root);
 }
 function gateVerdict(opts: RunOpts) {
-  const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+  const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
   return JSON.stringify({ pass: true, reason: 'Independent experiment accepted.',
     criteria: Object.fromEntries(criteria.map(c => [c.id, { status: 'pass', evidence: 'Independent experiment on the produced output.' }])),
     audit_findings: { version: 1, findings: [] }, remaining_work: [] });
@@ -123,7 +124,7 @@ describe('the review decision gets the whole diff or none of it', () => {
       expect(encoded + nonDiff).toBeGreaterThan(bound);
       expect(raw).toBeLessThan(encoded);
       expect(latestInvocationInput(directory, 'review_assess')).toBeUndefined();
-      expect(existsSync(join(directory, 'stages/review_assess/invocations'))).toBe(false);
+      expect(existsSync(runRecordPath(directory, 'stages/review_assess/invocations'))).toBe(false);
       expect(record).not.toHaveProperty('model');
     }
     expect(state.stages.review.status).toBe('skipped');
@@ -212,7 +213,7 @@ describe('review stages keep their evidence inside the adapter limit', () => {
     expect(prompt.length).toBeLessThan(adapterInputLimit({}));
     expect(prompt).not.toContain('Ledger facts:\n{');
     expect(prompt).toMatch(/Ledger facts are not inlined \(ledger_exceeds_inline_bound\): \d+ facts from \d+ ledger entries, \d+ characters against the \d+ that fit/);
-    expect(prompt).toContain(join(created.runDirPath, 'evidence-ledger.jsonl'));
+    expect(prompt).toContain(runRecordPath(created.runDirPath, 'evidence-ledger.jsonl'));
     expect(prompt).not.toContain('note_00001');
   }, 60_000);
 

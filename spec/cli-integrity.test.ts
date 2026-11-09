@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -180,7 +181,7 @@ describe('command help before side effects', () => {
     mkdirSync(run, { recursive: true });
     const record = JSON.stringify({ runId: '2000-01-01T00-00-00-help', projectDir: repositoryRoot,
       status: 'running', stages: { writer: { status: 'running', retries: 0 } } });
-    writeFileSync(join(run, 'run.json'), record);
+    writeFileSync(runRecordPath(run, 'run.json'), record);
     const result = spawnSync(process.execPath, [join(repositoryRoot, 'dist', 'cli.js'), ...args], {
       cwd: repositoryRoot, encoding: 'utf-8', timeout: 5000,
       env: { ...process.env, HOME: isolated.home, FC_HOME: isolated.fcHome, TMPDIR: isolated.temp },
@@ -194,9 +195,9 @@ describe('command help before side effects', () => {
       expect(result.stdout).toContain('--timeout-ms');
       expect(existsSync(join(isolated.fcHome, 'deployment-hold.json'))).toBe(false);
     }
-    expect(readFileSync(join(run, 'run.json'), 'utf8')).toBe(record);
-    expect(existsSync(join(run, 'user_input.md'))).toBe(false);
-    expect(existsSync(join(run, 'supervisor_guidance.md'))).toBe(false);
-    expect(existsSync(join(run, 'approvals.jsonl'))).toBe(false);
+    expect(readFileSync(runRecordPath(run, 'run.json'), 'utf8')).toBe(record);
+    expect(existsSync(runRecordPath(run, 'user_input.md'))).toBe(false);
+    expect(existsSync(runRecordPath(run, 'supervisor_guidance.md'))).toBe(false);
+    expect(existsSync(runRecordPath(run, 'approvals.jsonl'))).toBe(false);
   });
 });

@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { atomicWrite } from '../src/engine-fs.js';
@@ -136,7 +137,7 @@ describe('explicit gate repairability', () => {
     expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
     expect(result.final.failureReason).toContain('Irreparable gate rejection');
-    const retained = JSON.parse(readFileSync(join(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1', `rejected_verdict_${GATE_ID}.json`), 'utf8'));
+    const retained = JSON.parse(readFileSync(runRecordPath(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1', `rejected_verdict_${GATE_ID}.json`), 'utf8'));
     expect(retained.criteria.fact.status).toBe('fail');
     expect(retained.repairability.disposition).toBe('irreparable');
   });
@@ -195,9 +196,9 @@ async function runScenario(options: ScenarioOptions): Promise<{
       }
       if (opts.stageId === 'plan') {
         planCalls += 1;
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(dispatchYaml(options.includeRepair !== false)));
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(dispatchYaml(options.includeRepair !== false)));
         if (options.contract) {
-          atomicWrite(join(opts.runDir, 'gate_contract.json'), JSON.stringify(options.contract, null, 2) + '\n');
+          atomicWrite(runRecordPath(opts.runDir, 'gate_contract.json'), JSON.stringify(options.contract, null, 2) + '\n');
         }
         return fixtureResult({ output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1 }, opts);
       }
@@ -206,12 +207,12 @@ async function runScenario(options: ScenarioOptions): Promise<{
         gatePrompts.push(prompt);
         const attempt = options.gateAttempt({ call: gateCalls, prompt, opts });
         writeFileSync(
-          join(opts.runDir, `fixture_verdict_${GATE_ID}.json`),
+          stageWorkPath(opts.runDir, `fixture_verdict_${GATE_ID}.json`),
           JSON.stringify(attempt.verdict, null, 2) + '\n',
         );
         if (attempt.metric) {
           writeFileSync(
-            join(opts.runDir, 'stages', GATE_ID, 'metric.json'),
+            stageWorkPath(opts.runDir, 'stages', GATE_ID, 'metric.json'),
             JSON.stringify(attempt.metric, null, 2) + '\n',
           );
         }
@@ -250,13 +251,13 @@ async function runScenario(options: ScenarioOptions): Promise<{
 function writeGateVerdict(value: Record<string, unknown>): void {
   const directory = runDir(projectDir, UNIT_RUN_ID);
   mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, `verdict_${GATE_ID}.json`), `${JSON.stringify(value)}\n`);
+  writeFileSync(runRecordPath(directory, `verdict_${GATE_ID}.json`), `${JSON.stringify(value)}\n`);
 }
 
 function writeGateMetric(contents: string): void {
-  const directory = join(runDir(projectDir, UNIT_RUN_ID), 'stages', GATE_ID);
+  const directory = runRecordPath(runDir(projectDir, UNIT_RUN_ID), 'stages', GATE_ID);
   mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, 'metric.json'), contents);
+  writeFileSync(stageWorkPath(directory, 'metric.json'), contents);
 }
 
 beforeEach(() => {
@@ -295,7 +296,7 @@ describe('gate verdict and score contracts', () => {
       },
     });
 
-    const expected = join(
+    const expected = runRecordPath(
       result.runDirPath,
       'gate_reevaluation',
       'iteration_1',
@@ -303,7 +304,7 @@ describe('gate verdict and score contracts', () => {
       `rejected_verdict_${GATE_ID}.json`,
     );
     expect(citedPath).toBe(expected);
-    expect(readFileSync(join(result.runDirPath, 'stages', GATE_ID, 'output.md'), 'utf-8')).toContain(expected);
+    expect(readFileSync(runRecordPath(result.runDirPath, 'stages', GATE_ID, 'output.md'), 'utf-8')).toContain(expected);
     expect(existsSync(expected)).toBe(true);
     expect(JSON.parse(readFileSync(expected, 'utf-8'))).toMatchObject({ pass: false });
   });
@@ -332,12 +333,12 @@ describe('verdict authority and binding score consistency', () => {
   it.each(['malformed', 'unreadable'])('reads a rejected authored verdict with %s run state', (kind) => {
     const verdict = { pass: false, reason: 'The authored rejection remains readable.' };
     writeGateVerdict(verdict);
-    const statePath = join(runDir(projectDir, UNIT_RUN_ID), 'run.json');
+    const statePath = runRecordPath(runDir(projectDir, UNIT_RUN_ID), 'run.json');
     if (kind === 'malformed') writeFileSync(statePath, '{');
     else mkdirSync(statePath);
 
     expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toEqual(verdict);
-    rmSync(join(runDir(projectDir, UNIT_RUN_ID), `verdict_${GATE_ID}.json`));
+    rmSync(runRecordPath(runDir(projectDir, UNIT_RUN_ID), `verdict_${GATE_ID}.json`));
     expect(readGateEvaluation(projectDir, GATE_ID, UNIT_RUN_ID)).toBeNull();
   });
 
@@ -367,7 +368,7 @@ describe('verdict authority and binding score consistency', () => {
     const directory = runDir(projectDir, UNIT_RUN_ID);
     mkdirSync(directory, { recursive: true });
     writeFileSync(
-      join(directory, `verdict_${GATE_ID}.json`),
+      runRecordPath(directory, `verdict_${GATE_ID}.json`),
       '{"pass":true,"metric":"quality","value":1e400,"threshold":7}\n',
     );
     writeGateMetric(JSON.stringify({ hasMetric: false, source: { kind: 'engine_attempt_default' } }));

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { sourceFiles } from './test-support/engine-fixtures.js';
 import {
   mkdirSync,
@@ -102,7 +103,7 @@ describe('verification-stage malformed archive boundary probe', () => {
 
   it('preserves a non-string archived status and refuses to overwrite it', () => {
     setFcGlobalDir(join(root, 'state'));
-    const path = join(runDir(projectDir, runId), 'run.json');
+    const path = runRecordPath(runDir(projectDir, runId), 'run.json');
     mkdirSync(runDir(projectDir, runId), { recursive: true });
     writeFileSync(path, JSON.stringify({
       runId,

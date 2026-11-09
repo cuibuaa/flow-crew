@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,11 +26,11 @@ describe('first v2 write of legacy stage evidence', () => {
       { index: 1, status: 'failed', startedAt: '2026-10-21T01:49:44.000Z', completedAt: '2026-10-21T01:50:44.000Z', exitCode: 1, tokens_in: 10, error: 'first attempt failed' },
       { index: 2, status: 'complete', startedAt: '2026-10-21T01:51:44.000Z', completedAt: '2026-10-21T01:52:44.000Z', exitCode: 0, tokens_in: 20, writes: ['delivery.json'] },
     ];
-    const legacy = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
+    const legacy = JSON.parse(readFileSync(runRecordPath(directory, 'run.json'), 'utf8'));
     delete legacy.stateFormat;
     legacy.stages.work = { status: 'pending', retries: 0, ...(history === 'partial' ? { attempts: [{ index: 2, status: 'complete', startedAt: attempts[1].startedAt, completedAt: attempts[1].completedAt, exitCode: 0 }] } : {}) };
-    writeFileSync(join(directory, 'run.json'), JSON.stringify(legacy));
-    writeFileSync(join(directory, 'stages', 'work', 'status.json'), JSON.stringify({ status: 'complete', retries: 0, attempts }));
+    writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify(legacy));
+    writeFileSync(runRecordPath(directory, 'stages', 'work', 'status.json'), JSON.stringify({ status: 'complete', retries: 0, attempts }));
 
     // Metadata publication precedes resumed execution and must not erase its evidence.
     updateRunState(project, runId, state => { state.currentIteration = 2; });

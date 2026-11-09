@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { writeFileSync, mkdirSync, unlinkSync } from './engine-fs.js';
 
 import { processIsAlive, processLiveness, validProcessStartToken, processStartToken, processStartTokensMatch, POSIX_PS_COMMAND, type ProcessStartToken } from './process-liveness.js';
@@ -121,7 +122,7 @@ export function claimLaunchIntent(
   nowMs = Date.now(),
 ): { claimed: boolean; blockingOwnerRunId?: string } {
   ownerRunId = canonicalRunId(runsRoot(), ownerRunId);
-  if (existsSync(join(runsRoot(), ownerRunId, 'run.json'))) {
+  if (existsSync(runRecordPath(join(runsRoot(), ownerRunId), 'run.json'))) {
     let result: { claimed: boolean; blockingOwnerRunId?: string } = { claimed: false };
     updateRunState(projectDir, ownerRunId, () => {
       result = claimLaunchIntentUnlocked(projectDir, ownerRunId, nowMs);
@@ -335,7 +336,7 @@ function commandLooksLikeFlowcrewScheduler(pid: number, expectedRunId?: string):
 }
 
 function schedulerIdentityPath(runPath: string): string {
-  return join(runPath, SCHEDULER_IDENTITY_FILE);
+  return runRecordPath(runPath, SCHEDULER_IDENTITY_FILE);
 }
 
 function indexedRunId(runPath: string): string | undefined {
@@ -459,7 +460,7 @@ export function inspectRunScheduler(runId: string, runPath: string): RunSchedule
   }
   let marker: string;
   try {
-    marker = readFileSync(join(runPath, 'scheduler.pid'), 'utf-8');
+    marker = readFileSync(runRecordPath(runPath, 'scheduler.pid'), 'utf-8');
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
       ? { kind: 'missing' }
@@ -544,7 +545,7 @@ function scanLiveRunOwners(): LiveRunOwner[] {
   for (const dir of dirs) {
     try {
       const runPath = join(runsRoot(), dir);
-      const rs = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as { projectDir?: string };
+      const rs = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as { projectDir?: string };
       if (typeof rs.projectDir !== 'string') continue;
       const observation = inspectRunScheduler(dir, runPath);
       if (['missing', 'dead', 'reused'].includes(observation.kind)) {

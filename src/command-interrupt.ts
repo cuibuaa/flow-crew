@@ -1,7 +1,8 @@
+import { runRecordPath, requestPath } from './run-layout.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { linkSync, mkdirSync, unlinkSync, writeFileSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname } from 'node:path';
 import type { CommandActivitySnapshot } from './command-activity.js';
 import { isRunningRunStatus, isRunningStageStatus } from './store.js';
 
@@ -86,7 +87,7 @@ export function requestStageCommandInterrupt(input: {
   requestedAt?: string;
 }): StageCommandInterruptSignal {
   const reason = input.reason?.trim() || DEFAULT_INTERRUPT_REASON;
-  const runState = JSON.parse(readFileSync(join(input.runDir, 'run.json'), 'utf-8')) as {
+  const runState = JSON.parse(readFileSync(runRecordPath(input.runDir, 'run.json'), 'utf-8')) as {
     runId?: unknown;
     status?: unknown;
     stages?: Record<string, {
@@ -101,7 +102,7 @@ export function requestStageCommandInterrupt(input: {
     throw new Error(`Stage ${input.stageId} is not running`);
   }
   const activity = JSON.parse(readFileSync(
-    join(input.runDir, 'stages', input.stageId, 'command_activity.json'),
+    runRecordPath(input.runDir, 'stages', input.stageId, 'command_activity.json'),
     'utf-8',
   )) as CommandActivitySnapshot;
   if (activity.version !== 1 || activity.stageId !== input.stageId || activity.streamClosed) {
@@ -138,7 +139,7 @@ export function requestStageCommandInterrupt(input: {
   // This is a request slot. The owning engine validates the active command
   // and publishes guidance/events from its own memory before stopping it.
   publishCreateOnly(
-    join(input.runDir, 'signals', `interrupt_${input.stageId}.json`),
+    requestPath(input.runDir, 'signals', `interrupt_${input.stageId}.json`),
     `${JSON.stringify(signal, null, 2)}\n`,
   );
   return signal;

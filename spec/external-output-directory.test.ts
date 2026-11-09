@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -45,7 +46,7 @@ afterEach(() => { setFcGlobalDir(previousStore); vi.unstubAllEnvs(); rmSync(root
 
 function boundaryFixture(source = brief(output)) {
   const created = createRun(project, 'external-output', 'name: fixture\nstages: []\n', ['work']);
-  writeFileSync(join(created.runDirPath, 'task_brief.md'), source);
+  writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), source);
   const input = { projectDir: project, runDir: created.runDirPath, stageId: 'work',  artifactContract: contract };
   const command = (code: string) => execWithStdin(process.execPath, ['-e', code], '', { cwd: project, timeout_ms: 5000 });
   return { ...created, input, command };
@@ -91,7 +92,7 @@ describe('absolute directories in the declared output contract', () => {
         project, 'project child': join(project, '.git', 'objects'), 'project parent': root,
         'engine root': engine, dist: join(engine, 'dist', 'external-results'),
         'build generation': join(engine, '.cache', 'build-generations', 'generation', 'results'),
-        'state root': stateRoot, 'other run': join(stateRoot, 'runs', 'other', 'results'),
+        'state root': stateRoot, 'other run': runRecordPath(join(stateRoot, 'runs', 'other'), 'results'),
         home: process.env.HOME!, 'home configuration': join(process.env.HOME!, '.ssh', 'results'), root: '/', 'root-level tree': '/tmp',
         traversal: `${output}/../escape`, 'absolute file': output, template: `${output}/$NAME`,
       };
@@ -171,7 +172,7 @@ describe('absolute directories in the declared output contract', () => {
     expect(declaredOutputSource(project, declarations[0])).toBe(output);
     const manifest = archiveDeclaredOutputs(project, f.runDirPath, declarations);
     expect(manifest.outputs).toEqual([{ path: output, expectedType: 'directory', external: true }]);
-    expect(readdirSync(join(f.runDirPath, 'declared_outputs'))).toEqual([]);
+    expect(readdirSync(runRecordPath(f.runDirPath, 'declared_outputs'))).toEqual([]);
     updateRunState(project, f.runId, state => { state.declaredOutputs = declarations; });
     expect(readRunStateView(project, f.runId).artifacts).toContainEqual(expect.objectContaining({
       declaration: expect.objectContaining({ root: 'external', path: output }),
@@ -192,7 +193,7 @@ describe('external output execution', () => {
   });
 
   it('refuses an invalid declaration before entering stage code', async () => {
-    const f = boundaryFixture(brief(join(stateRoot, 'runs', 'other', 'results')));
+    const f = boundaryFixture(brief(runRecordPath(join(stateRoot, 'runs', 'other'), 'results')));
     const action = vi.fn(async () => {});
     await expect(withEngineIntegrity(f.input, action)).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
     expect(action).not.toHaveBeenCalled();
@@ -229,6 +230,6 @@ describe('external output execution', () => {
     expect(final.status, final.failureReason).toBe('complete'); expect(calls).toBe(1);
     expect(readStageStatus(project, final.runId!, 'work').attempts).toHaveLength(1);
     expect(readFileSync(written, 'utf8')).toBe('durable result');
-    expect(existsSync(join(stateRoot, 'runs', final.runId!, 'approvals'))).toBe(false);
+    expect(existsSync(runRecordPath(join(stateRoot, 'runs', final.runId!), 'approvals'))).toBe(false);
   });
 });

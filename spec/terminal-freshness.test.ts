@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { createRun } from './test-support/create-run.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
@@ -70,9 +71,9 @@ async function run(
   );
   const runDir = join(fcHome, 'runs', state.runId!);
   let guidance = '';
-  const live = join(runDir, 'supervisor_guidance.md');
+  const live = runRecordPath(runDir, 'supervisor_guidance.md');
   if (existsSync(live)) guidance += readFileSync(live, 'utf-8');
-  const history = join(runDir, 'guidance_history');
+  const history = runRecordPath(runDir, 'guidance_history');
   if (existsSync(history)) {
     for (const name of readdirSync(history)) guidance += readFileSync(join(history, name), 'utf-8');
   }
@@ -95,7 +96,7 @@ const dispatch = (id: string, scope = ['docs/task_summary.md'], outputs = ['docs
 });
 
 describe('terminal artifact freshness', () => {
-  it.each(['file', 'directory'] as const)('finishes an old run whose owner wrote its terminal %s before deployment without rerunning the owner', async kind => {
+  it.each(['file', 'directory'] as const)('finishes a retained current-format run whose owner already wrote its terminal %s without rerunning the owner', async kind => {
     const projectDir = project();
     const path = 'docs/task_summary.md';
     const workflow = scheduler.WorkflowConfigSchema.parse({
@@ -110,15 +111,15 @@ describe('terminal artifact freshness', () => {
       attempts: [{ index: 1, status: 'complete', startedAt, completedAt: writtenAt, exitCode: 0, writes: [path] }] };
     // Literal pre-deploy carriers: initialization never observes the owner's existing result.
     const legacyState = {
-      runId: created.runId, workflowName: workflow.name, projectDir, status: 'incomplete',
+      storageLayout: 2, runId: created.runId, workflowName: workflow.name, projectDir, status: 'incomplete',
       startedAt, completedAt: writtenAt, currentIteration: 1, maxIterations: 1,
       stages: { deliver: owner }, terminalStates: { shipped: { paths: [path] } },
     };
-    mkdirSync(join(created.runDirPath, 'stages/deliver'), { recursive: true });
-    writeFileSync(join(created.runDirPath, 'run.json'), JSON.stringify(legacyState));
-    writeFileSync(join(created.runDirPath, 'workflow.yaml'), JSON.stringify(workflow));
-    writeFileSync(join(created.runDirPath, 'stages/deliver/status.json'), JSON.stringify(owner));
-    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+    mkdirSync(runRecordPath(created.runDirPath, 'stages/deliver'), { recursive: true });
+    writeFileSync(runRecordPath(created.runDirPath, 'run.json'), JSON.stringify(legacyState));
+    writeFileSync(runRecordPath(created.runDirPath, 'workflow.yaml'), JSON.stringify(workflow));
+    writeFileSync(runRecordPath(created.runDirPath, 'stages/deliver/status.json'), JSON.stringify(owner));
+    writeFileSync(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
       pass: true, terminalOwners: { [path]: 'deliver' },
     }));
     mkdirSync(join(projectDir, 'docs'));
@@ -138,8 +139,8 @@ describe('terminal artifact freshness', () => {
     expect(state.startedAt).toBe(startedAt);
     expect(state).not.toHaveProperty('terminalArtifactBaselines');
     expect(state.stages.deliver).toEqual(owner);
-    expect(JSON.parse(readFileSync(join(created.runDirPath, 'run.json'), 'utf8')).stages.deliver).toEqual(owner);
-    expect(JSON.parse(readFileSync(join(created.runDirPath, 'stages/deliver/status.json'), 'utf8'))).toEqual(owner);
+    expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'run.json'), 'utf8')).stages.deliver).toEqual(owner);
+    expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'stages/deliver/status.json'), 'utf8'))).toEqual(owner);
     expect(adapter.calls).toEqual([]);
     expect(statSync(artifact).mtimeMs).toBe(before);
   }, 60_000);
@@ -153,7 +154,7 @@ describe('terminal artifact freshness', () => {
     store.completeStageAttempt(projectDir, created.runId, 'plan', 0, {
       exitCode: 1, duration_ms: 1, error: 'The old engine stopped before producing its plan.',
     });
-    const legacyRunPath = join(created.runDirPath, 'run.json');
+    const legacyRunPath = runRecordPath(created.runDirPath, 'run.json');
     const legacyState = JSON.parse(readFileSync(legacyRunPath, 'utf8'));
     delete legacyState.terminalArtifactBaselines;
     legacyState.status = 'failed';
@@ -263,7 +264,7 @@ terminal_states:
     const created = createRun(projectDir, 'fixture', 'name: fixture', ['plan', 'finalize']);
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
     writeFileSync(join(projectDir, path), '# attributed terminal result\n');
-    writeFileSync(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+    writeFileSync(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
       pass: true, terminalOwners: { [path]: 'finalize' },
     }));
     const state: StoreState = {

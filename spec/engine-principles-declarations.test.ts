@@ -33,7 +33,7 @@ describe('declarations are explicit at new admission boundaries', () => {
     const contract = { version: 1, produces: [{ id: 'evidence', root: 'run', path, kind: 'directory' }], reads: [] };
     const writer = stage('writer', [], contract);
     expect(inspectArtifactDeclarations({ stages: [writer] }).join(';')).toContain('ARTIFACT_FRAMEWORK_PATH');
-    writer.artifact_contract!.produces[0].path = 'plan_history_notes';
+    writer.artifact_contract!.produces[0].path = 'work/plan_history_notes';
     expect(inspectArtifactDeclarations({ stages: [writer] })).toEqual([]);
     writer.artifact_contract!.produces[0].root = 'project';
     writer.artifact_contract!.produces[0].path = 'docs/plan_history';
@@ -43,7 +43,7 @@ describe('declarations are explicit at new admission boundaries', () => {
   it('keeps engine decision projections outside stage production authority',()=>{
     const product=stage('writer',[],{version:1,produces:[{id:'decision',root:'run',path:'stages/writer/plan_revision_decision_example.json'}],reads:[] });
     expect(inspectDispatchAdmission({dispatched:[product],baseStages:[],dispatchStageId:'plan'}).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('ARTIFACT_FRAMEWORK_PATH');
-    const request=stage('writer',[],{version:1,produces:[{id:'request',root:'run',path:'stages/writer/plan_revision_request.json'}],reads:[] });
+    const request=stage('writer',[],{version:1,produces:[{id:'request',root:'run',path:'work/stages/writer/plan_revision_request.json'}],reads:[] });
     expect(inspectDispatchAdmission({dispatched:[request],baseStages:[],dispatchStageId:'plan'}).pass).toBe(true);
   });
   it('refuses a missing stage contract by format with the same error for both prompt texts', () => {
@@ -67,8 +67,9 @@ describe('declarations are explicit at new admission boundaries', () => {
 
 describe('declared reads use producer bindings and settled runtime facts', () => {
   it.each(['project', 'run'] as const)('binds %s directory members for stage and terminal reads and confines physical locations', async (root) => {
-    const producer = stage('producer', [], { version: 1, produces: [{ id: 'bundle', root, path: 'docs/bundle', kind: 'directory' }], reads: [] });
-    const reader = stage('reader', ['producer'], { version: 1, produces: [], reads: [{ id: 'entry', root, path: 'docs/bundle/index.js', source: { kind: 'stage', stage: 'producer', artifact: 'bundle' } }] });
+    const prefix = root === 'run' ? 'work/' : '';
+    const producer = stage('producer', [], { version: 1, produces: [{ id: 'bundle', root, path: `${prefix}docs/bundle`, kind: 'directory' }], reads: [] });
+    const reader = stage('reader', ['producer'], { version: 1, produces: [], reads: [{ id: 'entry', root, path: `${prefix}docs/bundle/index.js`, source: { kind: 'stage', stage: 'producer', artifact: 'bundle' } }] });
     const inspect = () => inspectArtifactDeclarations({ stages: [producer, reader], projectDir: project, runDir: directory });
     const terminalReads = () => inspectRealityCheckReachability({
       markdown: `## Reality checks\n\`\`\`yaml\nchecks:\n - name: member\n   type: exec-script-exit-zero\n   reads: ${JSON.stringify(reader.artifact_contract!.reads)}\n   params: {script: 'true'}\n\`\`\`\n`,
@@ -77,15 +78,15 @@ describe('declared reads use producer bindings and settled runtime facts', () =>
     expect(inspect()).toEqual([]);
     expect(terminalReads()).toEqual([]);
     const read = reader.artifact_contract!.reads[0];
-    read.path = 'docs/bundle_other/index.js';
+    read.path = `${prefix}docs/bundle_other/index.js`;
     expect(inspect().join(';')).toContain('ARTIFACT_READ_UNBOUND');
     expect(terminalReads().join(';')).toContain('ARTIFACT_READ_UNBOUND');
-    read.path = 'docs/bundle/index.js'; read.root = root === 'project' ? 'run' : 'project';
+    read.path = `${prefix}docs/bundle/index.js`; read.root = root === 'project' ? 'run' : 'project';
     expect(inspect().join(';')).toContain('ARTIFACT_READ_UNBOUND');
     expect(terminalReads().join(';')).toContain('ARTIFACT_READ_UNBOUND');
-    read.root = root; read.path = 'docs/bundle';
+    read.root = root; read.path = `${prefix}docs/bundle`;
     expect(inspect().join(';')).toContain('ARTIFACT_READ_UNBOUND');
-    read.path = 'docs/bundle/index.js';
+    read.path = `${prefix}docs/bundle/index.js`;
     const base = root === 'project' ? project : directory;
     mkdirSync(join(base, read.path), { recursive: true });
     expect(inspectDeclaredStageReads({ artifactContract: reader.artifact_contract!, projectDir: project, runDir: directory, statuses: { producer: { status: 'complete', retries: 0 } } }).join(';')).toContain('ARTIFACT_READ_ABSENT');
@@ -97,7 +98,7 @@ describe('declared reads use producer bindings and settled runtime facts', () =>
     const check = { name: 'member', type: 'exec-script-exit-zero', reads: reader.artifact_contract!.reads, params: { script: 'true' } };
     expect((await runAllChecks([check], { projectDir: project, taskDir: directory })).pass).toBe(true);
     // This alias is confined to the authored root but belongs to another directory.
-    const sibling = join(base, 'docs/other.js'); writeFileSync(sibling, 'export {};');
+    const sibling = join(base, `${prefix}docs/other.js`); writeFileSync(sibling, 'export {};');
     rmSync(join(base, read.path)); symlinkSync(sibling, join(base, read.path));
     expect(inspect()).toEqual([]);
     expect((await runAllChecks([check], { projectDir: project, taskDir: directory })).pass).toBe(true);

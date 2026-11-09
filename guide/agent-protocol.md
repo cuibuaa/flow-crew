@@ -156,8 +156,8 @@ optional kind/when and `source`:
 IDs are unique within the stage. Produced locations are unique. Planner scope is an estimate; declared outputs remain completion obligations;
 run outputs cannot overwrite control records or captured engine evidence. Concurrent run
 outputs sharing a location require dependency ordering. The engine publishes a gate's unconditional
-`run:verdict_<id>.json` from the gate's final validated structured answer; stage templates must not
-instruct gates to write that file. A declared directory is a capability, not a recursive freshness proof.
+`run:engine/verdict_<id>.json` from the gate's final validated structured answer; stage templates must not
+instruct gates to write that file. A gate may write its own draft verdict under `work/`; only its schema-validated structured answer is published into `engine/`. All run-rooted stage outputs must be inside `work/`, beside the guarded `engine/` tree. `run.json` and `events.jsonl` retain their run-root paths. A declared directory is a capability, not a recursive freshness proof.
 Stage reads may name members of a producer directory in the same root. Dependency and
 condition admission order execution; settlement and runtime checks use actual producer
 and activation facts to verify required outputs and configured reality reads.
@@ -170,7 +170,7 @@ artifact_contract:
   produces:
     - {id: report, root: project, path: docs/report.md}
   reads:
-    - {id: brief, root: run, path: task_brief.md, source: {kind: framework, artifact: task_brief}}
+    - {id: brief, root: run, path: engine/task_brief.md, source: {kind: framework, artifact: task_brief}}
 ```
 
 `groups` can declare `mode: exactly_one` with at least two unconditional output IDs.
@@ -334,7 +334,7 @@ rejects changed frozen content and restores proven bytes. Exact task outputs tak
 Unknown preimages never authorize deletion. Use private `$TMPDIR` scratch for isolated probes.
 Historical scope-revision decisions remain readable but do not grant or suspend execution.
 
-A settled stage can submit `plan_revision_request.json` with version 1, request/run/stage/
+A settled stage can submit `work/stages/<id>/plan_revision_request.json` with version 1, request/run/stage/
 attempt identity, `attemptStartedAt`, `baseRevision`, `baseDigest`, `reason` and the complete
 proposed `stages` list. Revisions require all stages idle. Preserve admitted result obligations
 and executed history; unstarted declared tactics may be replaced. Path estimates may change with the tactics. Whole-plan admission

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -106,7 +107,7 @@ it.each([true, false])(
     // iteration driver can also retain the previous settled ledger.
     if (matching) writeStageStatus(fixture.project, run.runId, 'work', rependStageStatus(priorWork, 0));
     else updateRunState(fixture.project, run.runId, state => { state.stages.work = rependStageStatus(state.stages.work, 0); });
-    const ledgerPath = join(run.runDirPath, 'stages/work/status.json');
+    const ledgerPath = runRecordPath(run.runDirPath, 'stages/work/status.json');
     const ledgerBeforeCancel = readFileSync(ledgerPath, 'utf8');
     const registry = new TaskRegistry({ baseDir: fixture.root });
     const task = registry.create({ projectDir: fixture.project, brief_text: brief, brief_admission: admission,

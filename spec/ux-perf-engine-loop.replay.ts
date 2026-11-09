@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { readAdapterCapabilityMemory, rememberUnsupportedEffort } from '../src/adapters/diagnose.js';
 import { fixtureResult, fixtureArtifactContract } from './test-support/declared-dispatch.js';
@@ -363,7 +364,7 @@ describe('UX/performance engine-loop evidence replays', () => {
     // the later empty-scope stage must still be caught and restored independently.
     const admittedWriter = stage({ id: 'prior_writer', role: 'coder', scope: ['src/**'],
       depends_on: [], dependency_reasons: {} });
-    writeFileSync(join(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: src, frozen: true}]\n---\nKeep `src` frozen.');
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: src, frozen: true}]\n---\nKeep `src` frozen.');
     const admitted = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
     expect(admitted.files.get('src/dirty.txt')?.backingPath).toBeTruthy();
     expect(admitted.files.get('src/untracked.txt')?.backingPath).toBeTruthy();
@@ -415,14 +416,14 @@ describe('UX/performance engine-loop evidence replays', () => {
     writeRunState(projectDir, created.runId, initial);
     const admittedWriter = stage({ id: 'prior_writer', role: 'coder', scope: ['src/protected.txt'],
       depends_on: [], dependency_reasons: {} });
-    writeFileSync(join(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: src, frozen: true}]\n---\nKeep `src` frozen.');
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: src, frozen: true}]\n---\nKeep `src` frozen.');
     const admitted = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
     expect(admitted.measurement.baselineStrategy).toBe('filesystem-images');
     expect(admitted.files.get('src/protected.txt')?.backingPath).toBeTruthy();
     const warm = captureRepairRoundSnapshot(projectDir, [admittedWriter], { runDirPath: created.runDirPath });
     expect(warm.measurement).toMatchObject({ baselineInitialized: false, scopedFilesRead: 0, scopedFilesHashed: 0,
       scopedBytesRead: 0, scopedBytesHashed: 0 });
-    expect(readdirSync(join(created.runDirPath, '.rollback-preimages')).length).toBeGreaterThanOrEqual(1);
+    expect(readdirSync(runRecordPath(created.runDirPath, '.rollback-preimages')).length).toBeGreaterThanOrEqual(1);
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, opts);
       writeFileSync(join(projectDir, 'src', 'protected.txt'), 'unauthorized\n');

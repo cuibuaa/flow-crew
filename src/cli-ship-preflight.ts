@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { EXIT_CODE } from './exit-code.js';
 import { commandUsage, parseCommandArgs } from './cli-args.js';
 import { errorMessage } from './source_services/cli-inputs.js';
@@ -322,11 +323,11 @@ function priorRunEvidence(
   const artifact = typeof state.terminalArtifact === 'string' ? state.terminalArtifact : '';
   for (const name of artifact ? [...recordedTerminalArtifactSnapshotNames(artifact), artifact] : []) {
     try {
-      const text = deps.readText(join(runPath, name));
+      const text = deps.readText(runRecordPath(runPath, name));
       if (!text) continue;
       return {
         source: 'terminal_artifact',
-        path: join(runPath, name),
+        path: runRecordPath(runPath, name),
         text,
       };
     } catch {
@@ -343,7 +344,7 @@ function priorRealityGate(
   state: Partial<StoreState>,
   deps: ResolvedDependencies,
 ): PreviousRunReport['realityGate'] {
-  const artifactPath = join(runPath, '.reality-gate.json');
+  const artifactPath = runRecordPath(runPath, '.reality-gate.json');
   try {
     return {
       source: 'artifact',
@@ -393,7 +394,7 @@ function scanPreviousRun(project: string, deps: ResolvedDependencies): PreviousR
 
   for (const id of ids) {
     const runPath = join(root, id);
-    const statePath = join(runPath, 'run.json');
+    const statePath = runRecordPath(runPath, 'run.json');
     try {
       const state = JSON.parse(deps.readText(statePath)) as Partial<StoreState>;
       if (typeof state.projectDir !== 'string' || typeof state.status !== 'string') {

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -56,10 +57,10 @@ it.each([false, true])('direct terminal owner keeps shell writes with ignored=%s
   expect(state.status, state.failureReason).toBe('complete');
   const attempt = state.stages.implement.attempts!.at(-1)!;
   expect(attempt.writes).toContain(terminalPath);
-  const audit = JSON.parse(readFileSync(join(directory, attempt.constraintAudit!.path), 'utf8'));
+  const audit = JSON.parse(readFileSync(runRecordPath(directory, attempt.constraintAudit!.path), 'utf8'));
   expect(attempt.writes).toEqual(audit.rawWrites);
   if (ignored) expect(audit.exemptedWrites).toContain(terminalPath);
-  expect(readdirSync(directory).some(path => path.startsWith('non_owner_terminal_'))).toBe(false);
+  expect(readdirSync(runRecordPath(directory, '.')).some(path => path.startsWith('non_owner_terminal_'))).toBe(false);
   expect(readFileSync(join(project, terminalPath), 'utf8')).toContain('this execution');
 });
 
@@ -113,7 +114,7 @@ it('quarantines a reviewer-only terminal write when the admitted owner never wro
   '---\nterminal_states:\n  complete: [docs/result.md]\n---\nProduce the result.\n', true);
   expect(state.status).not.toBe('complete');
   expect(existsSync(join(project, terminalPath))).toBe(false);
-  expect(readdirSync(join(fcGlobalDir(), 'runs', state.runId)).some(path => path.startsWith('non_owner_terminal_'))).toBe(true);
+  expect(readdirSync(runRecordPath(join(fcGlobalDir(), 'runs', state.runId), '.')).some(path => path.startsWith('non_owner_terminal_'))).toBe(true);
 });
 
 it('does not attribute an engine quarantine or restore to the following attempt', async () => {
@@ -131,7 +132,7 @@ it('does not attribute an engine quarantine or restore to the following attempt'
   };
   try {
     await execute(() => shellWrite());
-    const quarantined = join(created.runDirPath, 'quarantined.md');
+    const quarantined = runRecordPath(created.runDirPath, 'quarantined.md');
     renameSync(join(project, terminalPath), quarantined);
     await execute(() => {});
     expect(readStageStatus(project, created.runId, stage.id).attempts?.at(-1)?.writes).not.toContain(terminalPath);

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -32,7 +33,7 @@ function fixture(frontend: LaunchTarget['frontend'] = 'codex') {
 }
 function runFile(root: string, status = 'running', stages: Record<string, unknown> = { build: { status: 'running', startedAt: '2020-01-01T00:00:00Z' } }) {
   mkdirSync(join(root, 'runs', 'own-run'), { recursive: true });
-  writeFileSync(join(root, 'runs', 'own-run', 'run.json'), JSON.stringify({ runId: 'own-run', projectDir: root, status, workflowName: 'tiny', startedAt: '2020-01-01T00:00:00Z', stages }));
+  writeFileSync(runRecordPath(join(root, 'runs', 'own-run'), 'run.json'), JSON.stringify({ runId: 'own-run', projectDir: root, status, workflowName: 'tiny', startedAt: '2020-01-01T00:00:00Z', stages }));
 }
 const source = { type: 'attempt_failed' as const, runId: 'own-run', timestamp: '2020-01-01T00:00:00Z', attemptIndex: 1, detail: 'attempt failed' };
 
@@ -348,7 +349,7 @@ describe('durable delivery and business ACK', () => {
     const dependencies = { claude: vi.fn().mockRejectedValue(new Error('closed')), notify: vi.fn().mockResolvedValue(undefined) };
     let push = new SessionPush(registry, dependencies);
     runFile(root, 'parked');
-    writeFileSync(join(root, 'runs', 'own-run', 'events.jsonl'), [source, { ...source, type: 'approval_parked', attemptIndex: 2 }].map(e => JSON.stringify(e)).join('\n') + '\n');
+    writeFileSync(runRecordPath(join(root, 'runs', 'own-run'), 'events.jsonl'), [source, { ...source, type: 'approval_parked', attemptIndex: 2 }].map(e => JSON.stringify(e)).join('\n') + '\n');
     await push.sweep();
     const ids = push.events().map(e => e.eventId).sort();
     expect(push.events().map(e => e.kind)).toEqual(expect.arrayContaining(['attempt_failed', 'operator_wrap_up_required']));
@@ -425,7 +426,7 @@ describe('durable delivery and business ACK', () => {
     const { root, registry, launcher } = fixture('claude');
     runFile(root, 'parked');
     const events = [{ ...source, type: 'run_status_changed', runStatus: 'parked' }];
-    const path = join(root, 'runs', 'own-run', 'events.jsonl');
+    const path = runRecordPath(join(root, 'runs', 'own-run'), 'events.jsonl');
     const write = () => writeFileSync(path, events.map(event => JSON.stringify(event)).join('\n') + '\n');
     write();
     const push = new SessionPush(registry, { claude: vi.fn().mockResolvedValue(undefined) });
@@ -470,7 +471,7 @@ describe('durable delivery and business ACK', () => {
     setFcGlobalDir(root);
     try {
       runFile(root, 'failed');
-      writeFileSync(join(root, 'runs', 'own-run', 'events.jsonl'), JSON.stringify({ ...source, stageId: 'work', attemptStartedAt: source.timestamp }) + '\n');
+      writeFileSync(runRecordPath(join(root, 'runs', 'own-run'), 'events.jsonl'), JSON.stringify({ ...source, stageId: 'work', attemptStartedAt: source.timestamp }) + '\n');
       registry.update(task.id, { status: 'failed' });
       const orchestrator = new Orchestrator({ registry });
       await orchestrator.retry(task.id);
@@ -496,7 +497,7 @@ describe('durable delivery and business ACK', () => {
 
     registry.update(task.id, { run_id: 'next-run' });
     mkdirSync(join(root, 'runs', 'next-run'), { recursive: true });
-    writeFileSync(join(root, 'runs', 'next-run', 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(join(root, 'runs', 'next-run'), 'run.json'), JSON.stringify({
       runId: 'next-run', projectDir: root, status: 'complete', stages: {},
     }));
     // The Wake hook starts on this same Stop and polls every session task, so publication needs no block.

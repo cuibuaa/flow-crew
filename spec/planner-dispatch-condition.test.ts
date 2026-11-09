@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -43,10 +44,10 @@ it('admits planner roots as conditional DAG duties without inventing a chosen su
   const calls: string[] = [];
   const adapter: Adapter = { async run(_prompt, _role, opts) {
     calls.push(opts.stageId);
-    if (opts.stageId === 'plan') writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: proposal }));
+    if (opts.stageId === 'plan') writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify({ stages: proposal }));
     return { output: JSON.stringify({ status: 'delivered', summary: 'Completed fixture duty.', checks: [], caveats: [], remaining_work: [] }),
       exitCode: 0, duration_ms: 1,
-      ...(opts.stageId === 'plan' ? { writes: ['run:dispatch.yaml'], writeAttribution: 'structured' as const } : {}) };
+      ...(opts.stageId === 'plan' ? { writes: ['run:work/dispatch.yaml'], writeAttribution: 'structured' as const } : {}) };
   } };
   const state = await track(runWorkflow(workflow, JSON.stringify(workflow), project, adapter, new Map(), undefined,
     join(import.meta.dirname, '../config/agents')));

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -76,7 +77,7 @@ async function scenario(producer: string, gate: 'passed' | 'rejected' | 'missing
   const executeScript = adapter.run.bind(adapter);
   adapter.run = async (prompt, role, opts) => {
     if (opts.stageId === 'plan') {
-      const journal = join(opts.runDir, 'research_journal.json');
+      const journal = runRecordPath(opts.runDir, 'research_journal.json');
       journalsBeforePlanning.push(existsSync(journal) ? JSON.parse(readFileSync(journal, 'utf8')) : undefined);
     }
     return executeScript(prompt, role, opts);
@@ -86,7 +87,7 @@ async function scenario(producer: string, gate: 'passed' | 'rejected' | 'missing
   const state = await runWorkflow(config, raw, project, adapter, new Map(), undefined,
     join(repository, 'config', 'agents'), undefined, brief, true, undefined, false);
   const run = runDir(project, state.runId);
-  const read = (name: string) => JSON.parse(readFileSync(join(run, name), 'utf8'));
+  const read = (name: string) => JSON.parse(readFileSync(runRecordPath(run, name), 'utf8'));
   return { state, adapter, run, read, journalsBeforePlanning };
 }
 
@@ -113,7 +114,7 @@ describe('planner-authored research round settlement', () => {
 
   it.each(['rejected', 'missing'] as const)('does not bank a round with a %s gate', async gate => {
     const { state, adapter, run } = await scenario('baseline_round', gate);
-    expect(existsSync(join(run, 'research_journal.json'))).toBe(false);
+    expect(existsSync(runRecordPath(run, 'research_journal.json'))).toBe(false);
     expect(adapter.calls.filter(call => call.stageId === 'plan')).toHaveLength(1);
     expect(adapter.calls.some(call => call.stageId === 'ceiling_report')).toBe(false);
     expect(state.status).toBe('incomplete');

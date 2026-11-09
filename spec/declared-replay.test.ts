@@ -69,7 +69,7 @@ describe('artifact locations and historical observations', () => {
     ];
     normalizeStageContracts(stages);
     expect(stages[0].is_gate).toBe(true);
-    expect(stages[0].artifact_contract?.produces).toContainEqual(expect.objectContaining({ root: 'run', path: 'verdict_review.json' }));
+    expect(stages[0].artifact_contract?.produces).toContainEqual(expect.objectContaining({ root: 'run', path: 'work/verdict_review.json' }));
     expect(stages[1].artifact_contract?.produces).toEqual([]);
   });
   it.each([null, { version: 2, produces: [], reads: [] }])('refuses malformed explicit launch contracts before invoking the adapter (%j)', async artifact_contract => {

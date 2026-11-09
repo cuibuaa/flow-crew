@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -62,7 +63,7 @@ function task(id: string, overrides: Partial<FcTaskEntry> = {}): FcTaskEntry {
 function seed(session: string, filename: string, value: unknown): string {
   const directory = join(root, session);
   mkdirSync(directory, { recursive: true });
-  const path = join(directory, filename);
+  const path = runRecordPath(directory, filename);
   writeFileSync(path, `${JSON.stringify(value)}\n`, 'utf-8');
   return path;
 }
@@ -373,7 +374,7 @@ describe('session ledger publication regressions', () => {
     const installLock = (session: string, pid: number) => {
       const directory = lockPath(session);
       mkdirSync(directory);
-      writeFileSync(join(directory, 'owner'), `${JSON.stringify({
+      writeFileSync(runRecordPath(directory, 'owner'), `${JSON.stringify({
         version: 1,
         pid,
         token: 'a'.repeat(32),
@@ -695,7 +696,7 @@ describe('session ledger input and CLI regressions', () => {
       projectDir,
       run_id: 'run-1',
     })}\n`);
-    writeFileSync(join(engineRoot, 'runs', 'run-1', 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(join(engineRoot, 'runs', 'run-1'), 'run.json'), JSON.stringify({
       runId: 'run-1',
       status: 'x'.repeat(12 * 1024 * 1024),
       projectDir,
@@ -722,7 +723,7 @@ describe('session ledger input and CLI regressions', () => {
     writeFileSync(join(engineRoot, 'tasks.jsonl'), JSON.stringify({
       id: 1, status: 'running', projectDir: root, run_id: 'run-1',
     }) + '\n');
-    const record = join(directory, 'run.json');
+    const record = runRecordPath(directory, 'run.json');
     writeFileSync(record, '{"history":"');
     const chunk = 'x'.repeat(1024 * 1024);
     for (let index = 0; index < 80; index++) appendFileSync(record, chunk);
@@ -750,11 +751,11 @@ describe('session ledger input and CLI regressions', () => {
     const entry = { ...task('1'), flowcrewTaskId: 1 };
     const prefix = `{"runId":"run-1","status":"failed","sta\\u0074us":"complete","projectDir":${JSON.stringify(root)},"skipped":`;
     for (const skipped of ['null', 'true', 'false', '-0.2e+3', '[1,{"a":[null,false,"\\uD800"]}]']) {
-      writeFileSync(join(directory, 'run.json'), prefix + skipped + '}');
+      writeFileSync(runRecordPath(directory, 'run.json'), prefix + skipped + '}');
       expect(resolver.resolve(entry)).toMatchObject({ state: 'resolved', runStatus: 'complete' });
     }
     for (const suffix of ['[1,]}', '{"a":true,}}', '01}', '1e}', '"\\q"}', '"bad\nstring"}', 'true} trailing']) {
-      writeFileSync(join(directory, 'run.json'), prefix + suffix);
+      writeFileSync(runRecordPath(directory, 'run.json'), prefix + suffix);
       expect(resolver.resolve(entry)).toMatchObject({ state: 'stale' });
     }
   });
@@ -765,8 +766,8 @@ describe('session ledger input and CLI regressions', () => {
       const directory = join(engineRoot, 'runs', 'run-1');
       mkdirSync(directory, { recursive: true });
       const state = JSON.stringify({ runId: 'run-1', status: 'complete', projectDir: root });
-      writeFileSync(join(directory, 'run.json'), state);
-      writeFileSync(join(directory, '.run-reservation.json'), JSON.stringify({
+      writeFileSync(runRecordPath(directory, 'run.json'), state);
+      writeFileSync(runRecordPath(directory, '.run-reservation.json'), JSON.stringify({
         version: 1, runId: 'run-1', projectDir: root, reservedAt: '2020-01-01T00:00:00Z',
       }));
       writeFileSync(join(engineRoot, 'tasks.jsonl'), JSON.stringify({
@@ -1041,7 +1042,7 @@ describe('session ledger input and CLI regressions', () => {
     seed('small', 'small.json', { ...task('small', { status: 'in_progress' }), flowcrewTaskId: 7 });
     mkdirSync(join(engineRoot, 'runs', 'run-small'), { recursive: true });
     appendFileSync(join(engineRoot, 'tasks.jsonl'), `${JSON.stringify({ id: 7, status: 'running', projectDir, run_id: 'run-small' })}\n`);
-    writeFileSync(join(engineRoot, 'runs', 'run-small', 'run.json'), JSON.stringify({ runId: 'run-small', status: 'running', projectDir }));
+    writeFileSync(runRecordPath(join(engineRoot, 'runs', 'run-small'), 'run.json'), JSON.stringify({ runId: 'run-small', status: 'running', projectDir }));
 
     const result = renderFcTasks({
       storeRoot: root,

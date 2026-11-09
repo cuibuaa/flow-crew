@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { parseJsonl } from './jsonl.js';
 import { closeSync, openSync } from './engine-fs.js';
 import { existsSync, lstatSync, readFileSync, readSync } from 'node:fs';
@@ -369,7 +370,7 @@ function researchDoseRow(state: unknown, runDirectory?: string): RunDriftRow {
     );
   }
 
-  const journal = readJsonObject(join(runDirectory, 'research_journal.json'));
+  const journal = readJsonObject(runRecordPath(runDirectory, 'research_journal.json'));
   const rounds = Array.isArray(journal.value?.rounds) ? journal.value.rounds : undefined;
   if (journal.availability !== 'read' || !rounds) {
     return unavailableRow(
@@ -393,11 +394,11 @@ function researchDoseRow(state: unknown, runDirectory?: string): RunDriftRow {
     const round = object(selected[localIndex]);
     const expectedLabel = text(round?.label);
     const noCandidate = round?.outcome === 'no_candidate';
-    const preferred = join(
+    const preferred = runRecordPath(
       runDirectory,
       `research_round_${roundIndex}_${noCandidate ? 'no_candidate_' : ''}consumed.json`,
     );
-    const alternate = join(
+    const alternate = runRecordPath(
       runDirectory,
       `research_round_${roundIndex}_${noCandidate ? '' : 'no_candidate_'}consumed.json`,
     );
@@ -470,7 +471,7 @@ function firstPlanAdmissionRow(events: readonly JsonObject[], runDirectory?: str
     source: 'fail-closed plan admission invariant',
   };
   if (runDirectory) {
-    const state = readJsonObject(join(runDirectory, 'plan_retry_state.json'));
+    const state = readJsonObject(runRecordPath(runDirectory, 'plan_retry_state.json'));
     const attempts = Array.isArray(state.value?.attempts) ? state.value.attempts : undefined;
     if (state.availability === 'read' && attempts) {
       const records: JsonObject[] = [];
@@ -801,7 +802,7 @@ function logGrowthRow(runDirectory: string | undefined, registry: RegistryObserv
 }
 
 function readEventTail(runDirectory: string): { events: JsonObject[]; coverage: 'read' | 'missing' | 'unreadable' } {
-  const path = join(runDirectory, 'events.jsonl');
+  const path = runRecordPath(runDirectory, 'events.jsonl');
   const observation = regularFile(path);
   if (!observation) return { events: [], coverage: existsSync(path) ? 'unreadable' : 'missing' };
   const start = Math.max(0, observation.size - MAX_EVENT_TAIL_BYTES);
@@ -831,7 +832,7 @@ function readEventTail(runDirectory: string): { events: JsonObject[]; coverage: 
 
 function resolveState(runDirectory: string | undefined, supplied: unknown): unknown {
   if (supplied !== undefined || !runDirectory) return supplied;
-  return readJsonObject(join(runDirectory, 'run.json')).value;
+  return readJsonObject(runRecordPath(runDirectory, 'run.json')).value;
 }
 
 /**
@@ -860,7 +861,7 @@ export function readRunDriftProjection(
   runDirectory: string,
   options: RunDriftReadOptions = {},
 ): RunDriftProjection {
-  const stateObservation = regularFile(join(runDirectory, 'run.json'));
+  const stateObservation = regularFile(runRecordPath(runDirectory, 'run.json'));
   const state = resolveState(runDirectory, options.state);
   const eventRead = options.events === undefined
     ? readEventTail(runDirectory)

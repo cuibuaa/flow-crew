@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 // Boundary: Metric agreement and threshold policy plus declared contract readers; no scheduler state mutation or launching.
 import { RUN_STATUS, runDir } from '../../store.js';
 import { readFileSync } from 'node:fs';
@@ -37,7 +38,7 @@ function metricFileIndicatesFailure(metric: Record<string, unknown>): boolean {
 export function loadGateContract(projectDir: string, runId?: string, campaignStorageKey?: string): GateContract | null {
   // 1. Per-run override (written by the planner or copied at run start)
   if (runId) {
-    const p = join(runDir(projectDir, runId), 'gate_contract.json');
+    const p = runRecordPath(runDir(projectDir, runId), 'gate_contract.json');
     try {
       const raw = JSON.parse(readFileSync(p, 'utf-8'));
       if (raw && typeof raw.metric === 'string' && typeof raw.threshold === 'number') return raw as GateContract;

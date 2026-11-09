@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 /**
  * Independent audit controls. Run: npm test -- spec/engine-principles-independent.test.ts
@@ -54,8 +55,8 @@ describe('independent declaration and decision controls', () => {
   });
 
   it('refuses a typed run output shared by two unordered directory and file writers', () => {
-    const a = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'dir', root: 'run', path: 'deliverables', kind: 'directory' }], reads: [] }) });
-    const b = stage('pending', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'file', root: 'run', path: 'deliverables/result.md' }], reads: [] }) });
+    const a = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'dir', root: 'run', path: 'work/deliverables', kind: 'directory' }], reads: [] }) });
+    const b = stage('pending', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'file', root: 'run', path: 'work/deliverables/result.md' }], reads: [] }) });
     const admission = inspectDispatchAdmission({ dispatched: [a, b], baseStages: [], dispatchStageId: 'plan' });
     expect(admission.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('ARTIFACT_OUTPUT_CONCURRENT_OWNERS');
   });
@@ -63,44 +64,44 @@ describe('independent declaration and decision controls', () => {
   it.each(['run-history.jsonl', 'run-history.v1.jsonl'])('refuses the actual engine history carrier %s as a stage-produced run artifact', historyPath => {
     const evidence = captureStageEvidence(project, runId, 1, 'writer', { status: 'complete', retries: 0 });
     updateRunState(project, runId, state => { state.stageEvidence = [evidence]; });
-    const projection = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
-    renameSync(join(directory, projection.stateFormat.history.path), join(directory, historyPath));
-    projection.stateFormat.history.path = historyPath;
-    writeFileSync(join(directory, 'run.json'), JSON.stringify(projection));
+    const projection = JSON.parse(readFileSync(runRecordPath(directory, 'run.json'), 'utf8'));
+    renameSync(runRecordPath(directory, projection.stateFormat.history.path), runRecordPath(directory, historyPath));
+    projection.stateFormat.history.path = 'engine/' + historyPath;
+    writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify(projection));
     const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: historyPath }], reads: [] }) });
     const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.pass).toBe(false);
     expect(admission.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
     expect(readRunState(project, runId).stageEvidence).toHaveLength(1);
-    const ordinary = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: 'ordinary-history.jsonl' }], reads: [] }) });
+    const ordinary = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: 'work/ordinary-history.jsonl' }], reads: [] }) });
     expect(inspectDispatchAdmission({ dispatched: [ordinary], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).pass).toBe(true);
   });
 
   it.each(['symlink', 'hardlink', 'container'])('refuses an existing %s alias to acknowledged history', kind => {
     const evidence = captureStageEvidence(project, runId, 1, 'writer', { status: 'complete', retries: 0 });
     updateRunState(project, runId, state => { state.stageEvidence = [evidence]; });
-    const before = readFileSync(join(directory, RUN_HISTORY_FILE));
-    const alias = join(directory, 'alias');
-    if (kind === 'hardlink') linkSync(join(directory, RUN_HISTORY_FILE), alias);
-    else symlinkSync(kind === 'container' ? directory : join(directory, RUN_HISTORY_FILE), alias);
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: 'alias', kind: kind === 'container' ? 'directory' : 'file' }], reads: [] }) });
+    const before = readFileSync(runRecordPath(directory, RUN_HISTORY_FILE));
+    const alias = stageWorkPath(directory, 'alias');
+    if (kind === 'hardlink') linkSync(runRecordPath(directory, RUN_HISTORY_FILE), alias);
+    else symlinkSync(kind === 'container' ? directory : runRecordPath(directory, RUN_HISTORY_FILE), alias);
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'history', root: 'run', path: 'work/alias', kind: kind === 'container' ? 'directory' : 'file' }], reads: [] }) });
     const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
-    expect(readFileSync(join(directory, RUN_HISTORY_FILE))).toEqual(before);
+    expect(readFileSync(runRecordPath(directory, RUN_HISTORY_FILE))).toEqual(before);
     expect(readRunState(project, runId).stageEvidence).toHaveLength(1);
   });
 
   it.each(['relative', 'absolute', 'multihop', 'parent', 'component_dotdot'])('refuses a pre-existing %s alias before history is created', kind => {
-    expect(existsSync(join(directory, RUN_HISTORY_FILE))).toBe(false);
-    if (kind === 'multihop') symlinkSync(RUN_HISTORY_FILE, join(directory, 'hop'));
-    if (kind === 'parent') symlinkSync(directory, join(directory, 'parent'));
+    expect(existsSync(runRecordPath(directory, RUN_HISTORY_FILE))).toBe(false);
+    if (kind === 'multihop') symlinkSync('../engine/' + RUN_HISTORY_FILE, stageWorkPath(directory, 'hop'));
+    if (kind === 'parent') symlinkSync(directory, stageWorkPath(directory, 'parent'));
     if (kind === 'component_dotdot') {
-      mkdirSync(join(directory, 'nested')); symlinkSync('nested', join(directory, 'part'));
+      mkdirSync(stageWorkPath(directory, 'nested')); symlinkSync('nested', stageWorkPath(directory, 'part'));
     }
-    symlinkSync(kind === 'absolute' ? join(directory, RUN_HISTORY_FILE)
-      : kind === 'multihop' ? 'hop' : kind === 'parent' ? `parent/${RUN_HISTORY_FILE}`
-        : kind === 'component_dotdot' ? `part/../${RUN_HISTORY_FILE}` : RUN_HISTORY_FILE, join(directory, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+    symlinkSync(kind === 'absolute' ? runRecordPath(directory, RUN_HISTORY_FILE)
+      : kind === 'multihop' ? 'hop' : kind === 'parent' ? `parent/engine/${RUN_HISTORY_FILE}`
+        : kind === 'component_dotdot' ? `part/../../engine/${RUN_HISTORY_FILE}` : '../engine/' + RUN_HISTORY_FILE, stageWorkPath(directory, 'alias'));
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'work/alias' }], reads: [] }) });
     const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.pass).toBe(false);
     expect(admission.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
@@ -135,49 +136,49 @@ describe('independent declaration and decision controls', () => {
       'verdict_other.json',
     ];
     for (const carrier of carriers) {
-      const alias = join(directory, 'alias');
-      symlinkSync(join(directory, carrier), alias);
+      const alias = stageWorkPath(directory, 'alias');
+      symlinkSync(runRecordPath(directory, carrier), alias);
       try {
-        const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+        const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'work/alias' }], reads: [] }) });
         expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).errors.map(error => typeof error === 'string' ? error : error.message).join(';'), carrier).toContain('ARTIFACT_FRAMEWORK_PATH:');
       } finally { rmSync(alias); }
     }
   });
 
   it.each(['run.json', 'events.jsonl', 'stages/writer/invocations/one.json'])('refuses an existing hardlink alias to engine carrier %s', carrier => {
-    const path = join(directory, carrier); mkdirSync(join(path, '..'), { recursive: true });
+    const path = runRecordPath(directory, carrier); mkdirSync(join(path, '..'), { recursive: true });
     if (!existsSync(path)) writeFileSync(path, 'Engine-owned bytes');
-    const before = readFileSync(path); linkSync(path, join(directory, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+    const before = readFileSync(path); linkSync(path, stageWorkPath(directory, 'alias'));
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'work/alias' }], reads: [] }) });
     expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).pass).toBe(false);
     expect(readFileSync(path)).toEqual(before);
   });
 
   it.each(['cycle', 'escape'])('refuses a dangling alias with %s even without its final target', kind => {
-    symlinkSync(kind === 'cycle' ? 'alias' : join(root, 'outside-future.md'), join(directory, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+    symlinkSync(kind === 'cycle' ? 'alias' : join(root, 'outside-future.md'), stageWorkPath(directory, 'alias'));
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'work/alias' }], reads: [] }) });
     const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.pass).toBe(false);
     expect(admission.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain(kind === 'cycle' ? 'ARTIFACT_PATH_SYMLINK_LOOP:' : 'ARTIFACT_PATH_ESCAPE:');
   });
 
   it('keeps a normal future alias and own stage request/output and gate verdict capabilities', () => {
-    symlinkSync('future.md', join(directory, 'alias'));
-    for (const path of ['alias', 'stages/writer/notes/report.md', 'stages/writer/scope_revision_request.json', 'stages/writer/plan_revision_request.json', 'stages/writer/approval_request.json']) {
+    symlinkSync('future.md', stageWorkPath(directory, 'alias'));
+    for (const path of ['work/alias', 'work/stages/writer/notes/report.md', 'work/stages/writer/scope_revision_request.json', 'work/stages/writer/plan_revision_request.json', 'work/stages/writer/approval_request.json']) {
       const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path }], reads: [] }) });
       expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).pass).toBe(true);
     }
-    const gate = stage('writer', { role: 'qa', is_gate: true, artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_writer.json' }], reads: [] }) });
+    const gate = stage('writer', { role: 'qa', is_gate: true, artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'verdict', root: 'run', path: 'work/verdict_writer.json' }], reads: [] }) });
     expect(inspectArtifactDeclarations({ stages: [gate], projectDir: project, runDir: directory })).toEqual([]);
   });
 
   it('keeps an ordered earlier stage authored output outside engine ownership while reserving its namespace', () => {
-    const path = 'stages/work/output.md';
-    mkdirSync(join(directory, 'stages/work'), { recursive: true });
-    writeFileSync(join(directory, path), 'Authored result');
-    symlinkSync(path, join(directory, 'alias'));
+    const path = 'work/stages/work/output.md';
+    mkdirSync(stageWorkPath(directory, 'stages/work'), { recursive: true });
+    writeFileSync(runRecordPath(directory, path), 'Authored result');
+    symlinkSync('stages/work/output.md', stageWorkPath(directory, 'alias'));
     const producer = stage('work', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path }], reads: [] }) });
-    const writer = stage('writer', { depends_on: ['work'], artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
+    const writer = stage('writer', { depends_on: ['work'], artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'work/alias' }], reads: [] }) });
     const inspect = () => inspectArtifactDeclarations({ stages: [producer, writer], projectDir: project, runDir: directory });
     expect(inspect()).toEqual([]);
     writer.artifact_contract!.produces[0] = { id: 'out', root: 'run', path: 'stages/work', kind: 'directory', nonempty: true };
@@ -185,12 +186,12 @@ describe('independent declaration and decision controls', () => {
   });
 
   it('rechecks replacement and renamed aliases at live revision admission', () => {
-    symlinkSync('ordinary-future.md', join(directory, 'alias'));
+    symlinkSync('ordinary-future.md', stageWorkPath(directory, 'alias'));
     const base = stage('work');
     writeStageStatus(project, runId, 'work', { status: 'complete', retries: 0, attempts: [{ index: 1, startedAt, status: 'complete', exitCode: 0 }] });
     updateRunState(project, runId, state => { recordAdmittedPlan(state, [base], directory, 'Alias fixture', true, { pass: true, errors: [] }); });
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'alias' }], reads: [] }) });
-    symlinkSync(RUN_HISTORY_FILE, join(directory, 'replacement')); renameSync(join(directory, 'replacement'), join(directory, 'alias'));
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'work/alias' }], reads: [] }) });
+    symlinkSync('../engine/' + RUN_HISTORY_FILE, stageWorkPath(directory, 'replacement')); renameSync(stageWorkPath(directory, 'replacement'), stageWorkPath(directory, 'alias'));
     const previousHistory = readRunState(project, runId).queryState!.planHistory;
     const { decision } = applyPlanRevision({ projectDir: project, runId, request: { version: 1, requestId: 'replace_alias', runId, stageId: 'work', attemptIndex: 1, attemptStartedAt: startedAt, baseRevision: 0, baseDigest: planDigest([base]), reason: 'Exercise replacement under full admission', stages: [base, writer] }, parseStage: parseDispatchedStageConfig,  admit: (stages) => inspectDispatchAdmission({ dispatched: stages, baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }) });
     expect(decision.accepted).toBe(false);
@@ -201,10 +202,10 @@ describe('independent declaration and decision controls', () => {
   it.each(['dangling_symlink', 'existing_symlink', 'existing_hardlink'])('refuses a directory containing an engine history %s member', kind => {
     const evidence = () => { const record = captureStageEvidence(project, runId, 1, 'writer', { status: 'complete', retries: 0 }); updateRunState(project, runId, state => { state.stageEvidence = [record]; }); };
     if (kind !== 'dangling_symlink') evidence();
-    const notes = join(directory, 'notes'); mkdirSync(notes);
-    if (kind === 'existing_hardlink') linkSync(join(directory, RUN_HISTORY_FILE), join(notes, 'alias'));
-    else symlinkSync(join(directory, RUN_HISTORY_FILE), join(notes, 'alias'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'notes', kind: 'directory' }], reads: [] }) });
+    const notes = stageWorkPath(directory, 'notes'); mkdirSync(notes);
+    if (kind === 'existing_hardlink') linkSync(runRecordPath(directory, RUN_HISTORY_FILE), join(notes, 'alias'));
+    else symlinkSync(runRecordPath(directory, RUN_HISTORY_FILE), join(notes, 'alias'));
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'work/notes', kind: 'directory' }], reads: [] }) });
     const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.pass).toBe(false);
     expect(admission.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
@@ -213,23 +214,23 @@ describe('independent declaration and decision controls', () => {
   });
 
   it('allows an ordinary directory with a confined future member and a finite directory link', () => {
-    mkdirSync(join(directory, 'notes')); symlinkSync('future.md', join(directory, 'notes/alias'));
-    symlinkSync('.', join(directory, 'notes/self'));
-    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'notes', kind: 'directory' }], reads: [] }) });
+    mkdirSync(stageWorkPath(directory, 'notes')); symlinkSync('future.md', stageWorkPath(directory, 'notes/alias'));
+    symlinkSync('.', stageWorkPath(directory, 'notes/self'));
+    const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'run', path: 'work/notes', kind: 'directory' }], reads: [] }) });
     expect(inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory }).pass).toBe(true);
   });
 
   it.each(['file', 'directory'])('refuses a project %s output hardlinked to acknowledged engine history', kind => {
     const evidence = captureStageEvidence(project, runId, 1, 'writer', { status: 'complete', retries: 0 });
     updateRunState(project, runId, state => { state.stageEvidence = [evidence]; });
-    const before = readFileSync(join(directory, RUN_HISTORY_FILE));
+    const before = readFileSync(runRecordPath(directory, RUN_HISTORY_FILE));
     mkdirSync(join(project, 'docs'));
-    linkSync(join(directory, RUN_HISTORY_FILE), join(project, 'docs/alias'));
+    linkSync(runRecordPath(directory, RUN_HISTORY_FILE), join(project, 'docs/alias'));
     const writer = stage('writer', { artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'out', root: 'project', path: kind === 'file' ? 'docs/alias' : 'docs', kind }], reads: [] }) });
     const admission = inspectDispatchAdmission({ dispatched: [writer], baseStages: [], dispatchStageId: 'plan', projectDir: project, runDir: directory });
     expect(admission.pass).toBe(false);
     expect(admission.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('ARTIFACT_FRAMEWORK_PATH:');
-    expect(readFileSync(join(directory, RUN_HISTORY_FILE))).toEqual(before);
+    expect(readFileSync(runRecordPath(directory, RUN_HISTORY_FILE))).toEqual(before);
     expect(readRunState(project, runId).stageEvidence).toHaveLength(1);
   });
 
@@ -342,17 +343,17 @@ describe('independent restart crash-window falsifier', () => {
     expect(second.recovery?.interruptedStages).toEqual(['work']);
     expect(readStageStatus(project, runId, 'work').attempts?.[0].exitCode).toBe(143);
     expect(readStageStatus(project, runId, 'work').attempts).toHaveLength(1);
-    const beforeRepeat = [readFileSync(join(directory, 'run.json')), readFileSync(join(directory, 'stages/work/status.json'))];
+    const beforeRepeat = [readFileSync(runRecordPath(directory, 'run.json')), readFileSync(runRecordPath(directory, 'stages/work/status.json'))];
     expect(recover().recovery).toEqual(second.recovery);
-    expect([readFileSync(join(directory, 'run.json')), readFileSync(join(directory, 'stages/work/status.json'))]).toEqual(beforeRepeat);
-    expect(existsSync(join(directory, 'stages/work/status.json'))).toBe(true);
+    expect([readFileSync(runRecordPath(directory, 'run.json')), readFileSync(runRecordPath(directory, 'stages/work/status.json'))]).toEqual(beforeRepeat);
+    expect(existsSync(runRecordPath(directory, 'stages/work/status.json'))).toBe(true);
   });
 
   function legacyCrash(point: string) {
     prepare(); crash(point);
     // The version-1 producer predates exactly these two optional fields.
     // Preserve all authenticated binding, timing, attempt and prefix bytes.
-    for (const path of [join(directory, 'run.json'), join(directory, 'stages/work/status.json')]) {
+    for (const path of [runRecordPath(directory, 'run.json'), runRecordPath(directory, 'stages/work/status.json')]) {
       const raw = JSON.parse(readFileSync(path, 'utf8'));
       if (raw.recoveryIntent) delete raw.recoveryIntent.cause;
       delete (raw.stages?.work ?? raw).attempts.at(-1).endingCause;
@@ -375,15 +376,15 @@ describe('independent restart crash-window falsifier', () => {
       if (kind === 'attempt') state.recoveryIntent!.stages[0].attempt.index++;
       if (kind === 'prefix') state.recoveryIntent!.stages[0].prefixDigest = '0'.repeat(64);
     });
-    const before = readFileSync(join(directory, 'stages/work/status.json'));
+    const before = readFileSync(runRecordPath(directory, 'stages/work/status.json'));
     expect(recover().recovery?.kind).toBe('blocked');
-    expect(readFileSync(join(directory, 'stages/work/status.json'))).toEqual(before);
+    expect(readFileSync(runRecordPath(directory, 'stages/work/status.json'))).toEqual(before);
   });
 
   it('validates all interrupted executions before partially closing any of them', () => {
     prepare(); beginStageAttempt(project, runId, 'writer', 0, startedAt);
     const ledger = readStageStatus(project, runId, 'writer'); ledger.attempts![0].index++;
-    writeFileSync(join(directory, 'stages/writer/status.json'), JSON.stringify(ledger));
+    writeFileSync(runRecordPath(directory, 'stages/writer/status.json'), JSON.stringify(ledger));
     expect(recover().recovery?.reason).toContain('RECOVERY_ATTEMPT_UNBOUND:');
     expect(readStageStatus(project, runId, 'work').attempts![0].status).toBe('running');
     expect(readRunState(project, runId).recoveryIntent).toBeUndefined();
@@ -391,7 +392,7 @@ describe('independent restart crash-window falsifier', () => {
 
   it.each(['run', 'checkpoint', 'plan', 'iteration', 'attempt', 'prefix', 'malformed', 'completion_time', 'duration'])('blocks %s intent mismatch without changing the execution ledger', kind => {
     prepare(); crash('intent');
-    const before = readFileSync(join(directory, 'stages/work/status.json'));
+    const before = readFileSync(runRecordPath(directory, 'stages/work/status.json'));
     updateRunState(project, runId, state => {
       const intent = state.recoveryIntent!;
       if (kind === 'run') intent.binding.runId = 'unrelated';
@@ -407,17 +408,17 @@ describe('independent restart crash-window falsifier', () => {
     const state = recover();
     expect(state.recovery?.kind).toBe('blocked');
     expect(state.recovery?.reason).toMatch(/RECOVERY_(INTENT_INVALID|INTENT_UNBOUND|ATTEMPT_UNBOUND):/);
-    expect(readFileSync(join(directory, 'stages/work/status.json'))).toEqual(before);
+    expect(readFileSync(runRecordPath(directory, 'stages/work/status.json'))).toEqual(before);
   });
 
   it('preserves an authored rejection published after prepared interruption intent', () => {
     prepare(); crash('intent');
     completeStageAttempt(project, runId, 'work', 0, { exitCode: 1, duration_ms: 1, error: 'Authored validation rejected the product' });
-    const before = readFileSync(join(directory, 'stages/work/status.json'));
+    const before = readFileSync(runRecordPath(directory, 'stages/work/status.json'));
     const state = recover();
     expect(state.recovery?.reason).toContain('RECOVERY_ATTEMPT_UNBOUND:');
     expect(state.stages.work.status).toBe('failed');
-    expect(readFileSync(join(directory, 'stages/work/status.json'))).toEqual(before);
+    expect(readFileSync(runRecordPath(directory, 'stages/work/status.json'))).toEqual(before);
   });
 
   it('blocks the entire interruption set if another execution appears after intent', () => {
@@ -432,48 +433,48 @@ describe('independent restart crash-window falsifier', () => {
     prepare();
     completeStageAttempt(project, runId, 'work', 0, { exitCode: 143, duration_ms: 1, error: 'HOST_RESTART_INTERRUPTED: authored imitation' });
     expect(readStageStatus(project, runId, 'work').attempts!.at(-1)!.terminationCause).toBe('exit');
-    const before = readFileSync(join(directory, 'stages/work/status.json'));
+    const before = readFileSync(runRecordPath(directory, 'stages/work/status.json'));
     const state = recover();
     expect(state.recovery?.reason).toContain('RECOVERY_INTENT_REQUIRED:');
     expect(state.stages.work.status).toBe('failed');
-    expect(readFileSync(join(directory, 'stages/work/status.json'))).toEqual(before);
+    expect(readFileSync(runRecordPath(directory, 'stages/work/status.json'))).toEqual(before);
   });
 
   it.each([undefined, 'failed', 'complete', 'stage_abort', 'attempt_timeout'])('requires intent for an unauthenticated legacy exit143 with nested cause %s', nestedCause => {
     prepare();
     completeStageAttempt(project, runId, 'work', 0, { exitCode: 143, duration_ms: 1, error: 'HOST_RESTART_INTERRUPTED: authored imitation' });
-    for (const path of [join(directory, 'run.json'), join(directory, 'stages/work/status.json')]) {
+    for (const path of [runRecordPath(directory, 'run.json'), runRecordPath(directory, 'stages/work/status.json')]) {
       const raw = JSON.parse(readFileSync(path, 'utf8'));
       const attempt = (raw.stages?.work ?? raw).attempts.at(-1);
       delete attempt.terminationCause;
       if (nestedCause) attempt.timeout = { terminationCause: nestedCause };
       writeFileSync(path, JSON.stringify(raw));
     }
-    const before = readFileSync(join(directory, 'stages/work/status.json'));
+    const before = readFileSync(runRecordPath(directory, 'stages/work/status.json'));
     expect(readStageStatus(project, runId, 'work').attempts!.at(-1)!.terminationCause).toBe(nestedCause === 'stage_abort' || nestedCause === 'attempt_timeout' ? nestedCause : nestedCause ? 'exit' : undefined);
     const state = recover();
     expect(state.recovery?.reason).toContain('RECOVERY_INTENT_REQUIRED:');
     expect(state.stages.work.status).toBe('failed');
-    expect(readFileSync(join(directory, 'stages/work/status.json'))).toEqual(before);
+    expect(readFileSync(runRecordPath(directory, 'stages/work/status.json'))).toEqual(before);
   });
 
   it('requires intent for a typed exit143 without a restart marker', () => {
     prepare();
     completeStageAttempt(project, runId, 'work', 0, { exitCode: 143, duration_ms: 1, error: 'Unknown execution fate' });
-    const before = readFileSync(join(directory, 'stages/work/status.json'));
+    const before = readFileSync(runRecordPath(directory, 'stages/work/status.json'));
     expect(recover().recovery?.reason).toContain('RECOVERY_INTENT_REQUIRED:');
-    expect(readFileSync(join(directory, 'stages/work/status.json'))).toEqual(before);
+    expect(readFileSync(runRecordPath(directory, 'stages/work/status.json'))).toEqual(before);
   });
 
   it('does not reclassify typed cancellation from a restart marker', () => {
     prepare();
     completeStageAttempt(project, runId, 'work', 0, { exitCode: 143, duration_ms: 1,
       terminationCause: 'cancelled', error: 'HOST_RESTART_INTERRUPTED: authored imitation' });
-    const before = readFileSync(join(directory, 'stages/work/status.json'));
+    const before = readFileSync(runRecordPath(directory, 'stages/work/status.json'));
     const state = recover();
     expect(state.recovery?.kind).toBe('resumable');
     expect(state.stages.work.attempts!.at(-1)!.terminationCause).toBe('cancelled');
-    expect(readFileSync(join(directory, 'stages/work/status.json'))).toEqual(before);
+    expect(readFileSync(runRecordPath(directory, 'stages/work/status.json'))).toEqual(before);
   });
 
   it('preserves cancellation even with prepared interruption intent', () => {
@@ -502,8 +503,8 @@ describe('independent restart crash-window falsifier', () => {
   it.each(['none', 'blocked', 'resumable'])('preserves stopped automatic recovery with %s recovery metadata before any execution', kind => {
     prepare();
     if (kind !== 'none') recover();
-    mkdirSync(join(directory, 'signals'));
-    writeFileSync(join(directory, 'signals/abort.json'), 'Retain acknowledged cancellation');
+    mkdirSync(runRecordPath(directory, 'signals'));
+    writeFileSync(runRecordPath(directory, 'signals/abort.json'), 'Retain acknowledged cancellation');
     updateRunState(project, runId, state => {
       state.status = RUN_STATUS.CANCELLED;
       state.failureReason = 'Cancelled by user';
@@ -512,12 +513,12 @@ describe('independent restart crash-window falsifier', () => {
     });
     const stopped = readRunState(project, runId);
     const paths = ['run.json', 'workflow.yaml', 'signals/abort.json', 'stages/work/status.json'];
-    const before = paths.map(path => readFileSync(join(directory, path)));
+    const before = paths.map(path => readFileSync(runRecordPath(directory, path)));
     for (let attempt = 0; attempt < 2; attempt++) {
       expect(recover()).toEqual(stopped);
-      expect(paths.map(path => readFileSync(join(directory, path)))).toEqual(before);
+      expect(paths.map(path => readFileSync(runRecordPath(directory, path)))).toEqual(before);
     }
-    expect(existsSync(join(directory, 'scheduler.pid'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'scheduler.pid'))).toBe(false);
   });
 
   const cancellationPoints = [
@@ -536,13 +537,14 @@ describe('independent restart crash-window falsifier', () => {
       import { syncBuiltinESMExports } from 'node:module'; import { join } from 'node:path';
       import { pathToFileURL } from 'node:url';
       const [dist, project, fc, runId, point, output] = process.argv.slice(1);
-      const directory = join(fc, 'runs', runId), lock = join(directory, '.run-state.lock');
+      const directory = join(fc, 'runs', runId), lock = runRecordPath(directory, 'engine', '.run-state.lock');
+      const runRecordPath = (root, ...parts) => parts[0] === 'run.json' || parts[0] === 'events.jsonl' ? join(root, ...parts) : join(root, 'engine', ...parts);
       const ack = output + '.ack', waiting = output + '.waiting';
       const canceller = ${JSON.stringify(`
         import fs from 'node:fs'; import { join } from 'node:path'; import { pathToFileURL } from 'node:url';
         import { syncBuiltinESMExports } from 'node:module';
         const [dist, project, fc, runId, ack, waiting] = process.argv.slice(1);
-        const lock = join(fc, 'runs', runId, '.run-state.lock'), open = fs.openSync;
+        const lock = join(fc, 'runs', runId, 'engine', '.run-state.lock'), open = fs.openSync;
         fs.openSync = function(file, ...args) {
           try { return open(file, ...args); }
           catch (error) { if (String(file) === lock && error.code === 'EEXIST') fs.writeFileSync(waiting, 'queued on live recovery lock'); throw error; }
@@ -552,7 +554,7 @@ describe('independent restart crash-window falsifier', () => {
         const coordinator = new RunCancellationCoordinator({ registry: { list: () => [] }, units: { getStatus: async () => ({ kind: 'absent' }), stopUnit: async () => {}, listUnits: async () => [] }, runsDir: join(fc, 'runs') });
         const result = await coordinator.cancelRun(runId);
         const state = store.readRunState(project, runId);
-        const ledgers = Object.fromEntries(Object.keys(state.stages).map(id => { const path = join(fc, 'runs', runId, 'stages', id, 'status.json'); return [id, fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : null]; }));
+        const ledgers = Object.fromEntries(Object.keys(state.stages).map(id => { const path = join(fc, 'runs', runId, 'engine', 'stages', id, 'status.json'); return [id, fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : null]; }));
         fs.writeFileSync(ack + '.tmp', JSON.stringify({ result, state, ledgers, at: new Date().toISOString(), waitedOnRecoveryLock: fs.existsSync(waiting) }));
         fs.renameSync(ack + '.tmp', ack);
       `)};
@@ -567,12 +569,12 @@ describe('independent restart crash-window falsifier', () => {
       const rename = fs.renameSync, unlink = fs.unlinkSync, open = fs.openSync, nativeWrite = fs.writeSync;
       const descriptorPaths = new Map();
       function matches(file, candidate = file) {
-        if (![join(directory, 'run.json'), join(directory, 'stages/work/status.json')].includes(String(file))) return false;
+        if (![runRecordPath(directory, 'run.json'), runRecordPath(directory, 'stages/work/status.json')].includes(String(file))) return false;
         const record = JSON.parse(fs.readFileSync(candidate, 'utf8'));
-        if (String(file) === join(directory, 'stages/work/status.json')) {
+        if (String(file) === runRecordPath(directory, 'stages/work/status.json')) {
           return (point.startsWith('closed_ledger_') && record.status === 'failed') || (point.startsWith('pending_ledger_') && record.status === 'pending');
         }
-        if (String(file) !== join(directory, 'run.json')) return false;
+        if (String(file) !== runRecordPath(directory, 'run.json')) return false;
         const stage = record.stages.work;
         return (point.startsWith('intent_') && record.recoveryIntent?.phase === 'prepared' && stage.status === 'running')
           || (point.startsWith('closed_projection_') && stage.status === 'failed')
@@ -588,7 +590,7 @@ describe('independent restart crash-window falsifier', () => {
       };
       fs.openSync = function(file, ...args) {
         if (!hit && String(file) === lock && ['final_lock_before', 'blocked_lock_before'].includes(point)) {
-          const state = JSON.parse(fs.readFileSync(join(directory, 'run.json')));
+          const state = JSON.parse(fs.readFileSync(runRecordPath(directory, 'run.json')));
           if (point === 'blocked_lock_before' || state.stages.work.status === 'pending') cancel(false);
         }
         const descriptor = open(file, ...args);
@@ -600,7 +602,7 @@ describe('independent restart crash-window falsifier', () => {
         if (String(file) === lock) {
           if (hit && child) wait(ack);
           if (!hit) {
-            const state = JSON.parse(fs.readFileSync(join(directory, 'run.json'))), stage = state.stages.work;
+            const state = JSON.parse(fs.readFileSync(runRecordPath(directory, 'run.json'))), stage = state.stages.work;
             const match = point === 'intent_release' ? state.recoveryIntent?.phase === 'prepared' && stage.status === 'running'
               : point === 'closed_release' ? stage.status === 'failed'
               : ['pending_release', 'between_stages'].includes(point) ? stage.status === 'pending'
@@ -612,7 +614,7 @@ describe('independent restart crash-window falsifier', () => {
         return result;
       };
       fs.writeSync = function(descriptor, bytes, ...args) {
-        const event = descriptorPaths.get(descriptor) === join(directory, 'events.jsonl') && String(bytes).includes('"type":"recovery_reconciled"');
+        const event = descriptorPaths.get(descriptor) === runRecordPath(directory, 'events.jsonl') && String(bytes).includes('"type":"recovery_reconciled"');
         if (!hit && event && point === 'event_before') { eventHadRecoveryLock = fs.existsSync(lock); cancel(eventHadRecoveryLock); }
         const result = nativeWrite(descriptor, bytes, ...args);
         if (!hit && event && point === 'event_after') { eventHadRecoveryLock = fs.existsSync(lock); cancel(eventHadRecoveryLock); }
@@ -628,10 +630,10 @@ describe('independent restart crash-window falsifier', () => {
       }
       const acknowledged = fs.existsSync(ack) ? JSON.parse(fs.readFileSync(ack)) : undefined;
       const final = store.readRunState(project, runId);
-      const ledgers = Object.fromEntries(Object.keys(final.stages).map(id => { const path = join(directory, 'stages', id, 'status.json'); return [id, fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : null]; }));
-      const beforeRepeat = fs.readFileSync(join(directory, 'run.json'), 'utf8');
+      const ledgers = Object.fromEntries(Object.keys(final.stages).map(id => { const path = runRecordPath(directory, 'stages', id, 'status.json'); return [id, fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : null]; }));
+      const beforeRepeat = fs.readFileSync(runRecordPath(directory, 'run.json'), 'utf8');
       recovery.reconcileHostInterruptedRun(project, runId, { currentBootId: 'boot_after', currentGeneration: 'fixture_generation' });
-      fs.writeFileSync(output, JSON.stringify({ hit, cancellationExit, eventHadRecoveryLock, acknowledged, final, ledgers, error, repeatUnchanged: beforeRepeat === fs.readFileSync(join(directory, 'run.json'), 'utf8') }));
+      fs.writeFileSync(output, JSON.stringify({ hit, cancellationExit, eventHadRecoveryLock, acknowledged, final, ledgers, error, repeatUnchanged: beforeRepeat === fs.readFileSync(runRecordPath(directory, 'run.json'), 'utf8') }));
     `;
     const output = join(root, 'cancellation.json');
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', source, resolve('dist'), project, fcGlobalDir(), runId, point, output], { cwd: project, encoding: 'utf8', timeout: 15000, env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir(), FLOWCREW_DAEMON_SOCKET: join(root, 'absent.sock') } });

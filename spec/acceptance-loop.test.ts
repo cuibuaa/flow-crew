@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { readInvocationInput } from '../src/run-state-view.js';
@@ -96,7 +97,7 @@ function dispatchYaml(): string {
 }
 
 function writeSession(runDirPath: string, stageId: string, sessionId: string, ownerStageId = stageId): void {
-  const dir = join(runDirPath, 'stages', stageId);
+  const dir = runRecordPath(runDirPath, 'stages', stageId);
   mkdirSync(dir, { recursive: true });
   atomicWrite(join(dir, 'session.json'), JSON.stringify({
     version: 1,
@@ -134,7 +135,7 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
     async run(prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- E7 fixture complete', exitCode: 0, duration_ms: 1 }, opts);
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(dispatchYaml()));
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(dispatchYaml()));
         writeSession(opts.runDir, 'plan', BUILDER_UUID, 'plan');
         return fixtureResult({ output: 'planned', exitCode: 0, duration_ms: 2, sessionId: BUILDER_UUID }, opts);
       }
@@ -144,7 +145,7 @@ async function runScenario(options: ScenarioOptions = {}): Promise<{
         gatePrompts.push(prompt);
         const fixtureIteration = options.twoIterations ? Math.ceil(gateCalls / 2) : 1;
         const pass = options.firstGatePass === true || (options.twoIterations ? gateCalls % 2 === 0 : gateCalls > 1);
-        writeFileSync(join(opts.runDir, `fixture_verdict_${GATE_ID}.json`), JSON.stringify({
+        writeFileSync(stageWorkPath(opts.runDir, `fixture_verdict_${GATE_ID}.json`), JSON.stringify({
           pass,
           reason: pass ? 'fixture fixed' : 'fixture still contains BROKEN',
           findings: pass ? [] : [{ id: 'broken-marker', path: 'src/checked.ts' }],
@@ -254,7 +255,7 @@ describe('compressed acceptance loop', () => {
     expect(args.slice(0, 2)).toEqual(['exec', '--json']);
     expect(args).not.toContain(GATE_UUID);
     expect(args).not.toContain(['--', 'last'].join(''));
-    expect(existsSync(join(result.runDirPath, 'stages', GATE_ID, 'session.json'))).toBe(false);
+    expect(existsSync(runRecordPath(result.runDirPath, 'stages', GATE_ID, 'session.json'))).toBe(false);
   });
 
   it('keeps the construction-session inheritance ban on an initial gate', async () => {
@@ -324,7 +325,7 @@ describe('compressed acceptance loop', () => {
     expect(result.gatePrompts).toHaveLength(4);
     expect(result.fixPrompts).toHaveLength(2);
 
-    const archiveRoot = join(result.runDirPath, 'gate_reevaluation');
+    const archiveRoot = runRecordPath(result.runDirPath, 'gate_reevaluation');
     const roundDirs = [1, 2].map((iteration) => join(archiveRoot, `iteration_${iteration}`, 'round_1'));
     const artifactMatrix = roundDirs.flatMap((roundDir) => [
       join(roundDir, `rejected_verdict_${GATE_ID}.json`),
@@ -359,7 +360,7 @@ describe('compressed acceptance loop', () => {
       const fixPrompt = result.fixPrompts[iteration - 1];
       for (const prompt of [reevaluationPrompt, fixPrompt]) {
         expect(prompt).toContain(join(roundDir, `rejected_verdict_${GATE_ID}.json`));
-        expect(prompt).not.toContain(join(result.runDirPath, 'stages', GATE_ID, 'output_attempt_1.md'));
+        expect(prompt).not.toContain(runRecordPath(result.runDirPath, 'stages', GATE_ID, 'output_attempt_1.md'));
         expect(prompt).toContain('evidence-ledger.jsonl');
         expect(prompt).not.toContain(evaluatedInputPath);
         expect(prompt).not.toContain(join(archiveRoot, 'round_1'));
@@ -380,9 +381,9 @@ describe('compressed acceptance loop', () => {
 
   it('treats a gate attempt without a verdict as interrupted while retaining its available input', () => {
       const runDirPath = join(root, 'interrupted-gate');
-      const roundDir = join(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+      const roundDir = runRecordPath(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
       mkdirSync(roundDir, { recursive: true });
-      const inputPath = join(runDirPath, 'retained-invocation.json.gz');
+      const inputPath = runRecordPath(runDirPath, 'retained-invocation.json.gz');
       writeFileSync(join(roundDir, 'engine_verdict_review.json'), JSON.stringify({ inputPath }));
       writeFileSync(inputPath, 'first exact gate prompt\n', 'utf8');
       const present = buildGateReevaluationPreamble({
@@ -414,7 +415,7 @@ describe('compressed acceptance loop', () => {
     const directory = join(root, 'interrupted-archive');
     mkdirSync(directory, { recursive: true });
     archiveGateRoundEvidence(directory, { iteration: 1, round: 1 }, ['review']);
-    const archive = join(directory, 'gate_reevaluation/iteration_1/round_1');
+    const archive = runRecordPath(directory, 'gate_reevaluation/iteration_1/round_1');
     const metadata = join(archive, 'engine_verdict_review.json');
     expect(JSON.parse(readFileSync(metadata, 'utf8'))).toMatchObject({ written_verdict_pass: null, engine_effective_pass: null });
     expect(archivedGateRejections(directory, 'review')).toEqual([]);
@@ -434,15 +435,15 @@ describe('compressed acceptance loop', () => {
 
   it('prefers canonical evidence over stale legacy artifacts when both layouts exist', () => {
     const runDirPath = join(root, 'canonical-precedence-run');
-    const legacyRoundDir = join(runDirPath, 'gate_reevaluation', 'round_1');
-    const canonicalRoundDir = join(runDirPath, 'gate_reevaluation', 'iteration_3', 'round_1');
+    const legacyRoundDir = runRecordPath(runDirPath, 'gate_reevaluation', 'round_1');
+    const canonicalRoundDir = runRecordPath(runDirPath, 'gate_reevaluation', 'iteration_3', 'round_1');
     mkdirSync(legacyRoundDir, { recursive: true });
     mkdirSync(canonicalRoundDir, { recursive: true });
     const legacyVerdict = join(legacyRoundDir, `rejected_verdict_${GATE_ID}.json`);
     const legacyOutput = join(legacyRoundDir, `previous_output_${GATE_ID}.md`);
     const canonicalVerdict = join(canonicalRoundDir, `rejected_verdict_${GATE_ID}.json`);
-    const canonicalOutput = join(runDirPath, 'output_attempt_1.md');
-    writeFileSync(join(runDirPath, 'run.json'), JSON.stringify({ runId: 'canonical-precedence-run', status: 'running', stages: {} }));
+    const canonicalOutput = runRecordPath(runDirPath, 'output_attempt_1.md');
+    writeFileSync(runRecordPath(runDirPath, 'run.json'), JSON.stringify({ runId: 'canonical-precedence-run', status: 'running', stages: {} }));
     writeFileSync(join(canonicalRoundDir, `engine_verdict_${GATE_ID}.json`), JSON.stringify({ outputPath: canonicalOutput }));
     writeFileSync(legacyVerdict, '{"marker":"stale-legacy-verdict"}\n');
     writeFileSync(legacyOutput, 'stale-legacy-output\n');
@@ -488,7 +489,7 @@ describe('compressed acceptance loop', () => {
     const qa = readFileSync(join(process.cwd(), 'config', 'agents', 'qa.yaml'), 'utf-8');
     const base = applyBasePrompt(parseAgent(parse(qa)), baseText).prompt;
     const runDirPath = join(root, 'prompt-contract-run');
-    const roundDir = join(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+    const roundDir = runRecordPath(runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
     mkdirSync(roundDir, { recursive: true });
     writeFileSync(join(roundDir, `rejected_verdict_${GATE_ID}.json`), '{"pass":false}\n');
     const preamble = buildGateReevaluationPreamble({

@@ -1,4 +1,5 @@
 import { validationReport } from './test-support/structured-validation.js';
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -227,7 +228,7 @@ describe('configuration-driven project validation baseline', () => {
         configure(`${JSON.stringify(process.execPath)} -e "process.exit(0)"`);
         const configuredBaseline = await runProjectValidationBaseline(projectDir);
         const { runId, runDirPath } = createRun(projectDir, 'peer-validation', 'name: peer-validation\nstages: []\n', ['review', 'peer']);
-        writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline: configuredBaseline }));
+        writeFileSync(runRecordPath(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline: configuredBaseline }));
         const attempt = { index: 1, startedAt: 'fixture', writes: [], writeAttribution: 'structured' as const };
         writeStageStatus(projectDir, runId, 'review', { status: 'running', retries: 0, attempts: [{ ...attempt, status: 'running' }] });
         await recordGateValidationDelta(projectDir, runId, 'review', { runCommand: () => ({ exitCode: 0 }) });

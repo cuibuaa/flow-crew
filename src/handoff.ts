@@ -1,4 +1,5 @@
 import { VALIDATION_REVIEW_JSON_SCHEMA, ValidationReviewSchema, ValidationSelectionSchema } from './project-validation.js';
+import { runRecordPath, stageWorkPath } from './run-layout.js';
 // Module: handoff
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -124,18 +125,18 @@ function substituteTemplate(template: string, vars: Record<string, string>): str
 export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(opts.projectDir, opts.runDir, opts.stageId)): string {
   const vars: Record<string, string> = {
     project: opts.projectDir,
-    run_dir: opts.runDir,
+    run_dir: stageWorkPath(opts.runDir),
     skills: opts.skills ?? '',
     available_roles: opts.availableRoles ?? '',
     available_skills: opts.availableSkills ?? '',
-    task_description: existsSync(join(opts.runDir, 'task_brief.md'))
-      ? join(opts.runDir, 'task_brief.md') : opts.taskDescription ?? '',
+    task_description: existsSync(runRecordPath(opts.runDir, 'task_brief.md'))
+      ? runRecordPath(opts.runDir, 'task_brief.md') : opts.taskDescription ?? '',
   };
   const body = substituteTemplate(opts.promptTemplate, vars);
   const criterionBlock = (() => {
     if (!opts.criterionRefs?.length) return '';
     return `## Canonical brief criteria assigned to this stage\n${JSON.stringify({ criterion_refs: opts.criterionRefs,
-      path: join(opts.runDir, 'brief_criteria.json') })}\nRead the assigned criteria at this path; the system brief owns their full context.`;
+      path: runRecordPath(opts.runDir, 'brief_criteria.json') })}\nRead the assigned criteria at this path; the system brief owns their full context.`;
   })();
   const skillsContent = loadSkills(opts.skillNames || [], opts.projectDir);
   const anchor = skillsContent
@@ -152,7 +153,7 @@ export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(op
     if (candidate.kind === 'absent' && candidate.reason === 'run is not in research mode') return '';
     return `## Framework-captured research round outcome\n${JSON.stringify({
       version: candidate.version, kind: candidate.kind,
-      path: join(opts.runDir, researchGateCandidateFile(opts.stageId)),
+      path: runRecordPath(opts.runDir, researchGateCandidateFile(opts.stageId)),
       ...(candidate.sha256 ? { sha256: candidate.sha256 } : {}),
     })}\nRead the captured structured outcome at this path. A no_candidate round is not a measured candidate and must not be rejected merely for lacking a numeric candidate measurement.`;
   })();

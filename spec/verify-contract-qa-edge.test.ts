@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { artifacts } from './spec_contracts/declared-fixtures.js';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -40,7 +41,7 @@ function gateVerdictWithFields(metric: Record<string, unknown>): { pass: boolean
       'name: qa-repair-outcome\nstages: []\n',
       ['audit_round06'],
     );
-    writeFileSync(join(created.runDirPath, 'verdict_audit_round06.json'),
+    writeFileSync(runRecordPath(created.runDirPath, 'verdict_audit_round06.json'),
       JSON.stringify({ pass: true, reason: 'The verdict carries the phase decision.', ...metric }));
     return readGateEvaluation(projectDir, 'audit_round06', created.runId);
   } finally {
@@ -122,7 +123,7 @@ describe('verification-owned orchestration edge probes', () => {
       body,
       knownStageIds: ['plan', 'implement'],
     });
-    const ledger = readFileSync(join(runDir, 'supervisor_guidance.md'), 'utf-8');
+    const ledger = readFileSync(runRecordPath(runDir, 'supervisor_guidance.md'), 'utf-8');
 
     expect(guidanceForStageFromText(ledger, 'plan').map((entry) => entry.body)).toEqual([body]);
     expect(guidanceForStageFromText(ledger, 'implement')).toEqual([]);

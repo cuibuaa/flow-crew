@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { firstImmutableEvidenceConflict } from '../src/scheduler/sched_scope/path-capabilities.js';
 import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
@@ -121,24 +122,24 @@ describe('engine generalization binding contracts', () => {
     const repair = stage({ id: 'repair', depends_on: ['audit'], retry_to: ['audit'] });
     normalizeStageContracts([promoted, repair]);
     for (const gate of [dynamic, omitted, configured, promoted]) {
-      expect(gate.artifact_contract?.produces).toEqual([{ id: 'verdict', root: 'run', path: 'verdict_audit.json', kind: 'file', nonempty: false }]);
+      expect(gate.artifact_contract?.produces).toEqual([{ id: 'verdict', root: 'run', path: 'work/verdict_audit.json', kind: 'file', nonempty: false }]);
       expect(admission([gate, repair]).pass).toBe(true);
     }
     const collisions = parseDispatchedStageConfig({ id: 'audit', role: 'qa', is_gate: true, artifact_contract: {
-      ...empty, produces: [{ id: 'verdict', root: 'project', path: 'docs/report.md' }, { id: 'verdict_1', root: 'run', path: 'notes.md' }],
+      ...empty, produces: [{ id: 'verdict', root: 'project', path: 'docs/report.md' }, { id: 'verdict_1', root: 'run', path: 'work/notes.md' }],
     } });
     expect(collisions.artifact_contract?.produces.at(-1)?.id).toBe('verdict_2');
     expect(admission([collisions, repair]).pass).toBe(true);
-    const reader = stage({ id: 'reader', depends_on: ['audit'], artifact_contract: artifacts([], [{ id: 'review', root: 'run', path: 'verdict_audit.json', source: { kind: 'stage', stage: 'audit', artifact: 'verdict' } }]) });
+    const reader = stage({ id: 'reader', depends_on: ['audit'], artifact_contract: artifacts([], [{ id: 'review', root: 'run', path: 'work/verdict_audit.json', source: { kind: 'stage', stage: 'audit', artifact: 'verdict' } }]) });
     expect(admission([dynamic, repair, reader]).pass).toBe(true);
     const root = temporaryRoot(), projectDir = join(root, 'project'), runDir = join(root, 'run');
-    mkdirSync(projectDir); mkdirSync(runDir);
+    mkdirSync(projectDir); mkdirSync(join(runDir, 'work'), { recursive: true });
     const input = { stageId: dynamic.id, template: '', isGate: true, artifactContract: dynamic.artifact_contract, projectDir, runDir };
     expect(inspectStageArtifactContract(input).violations[0]?.reason).toContain('ARTIFACT_OUTPUT_ABSENT');
-    writeFileSync(join(runDir, 'verdict_audit.json'), '{"pass":true}');
-    const observed = inspectStageArtifactContract({ ...input, writes: ['run:verdict_audit.json'] });
+    writeFileSync(join(runDir, 'work/verdict_audit.json'), '{"pass":true}');
+    const observed = inspectStageArtifactContract({ ...input, writes: ['run:work/verdict_audit.json'] });
     expect(observed.violations).toEqual([]);
-    expect(observed.observations).toEqual([expect.objectContaining({ path: join(runDir, 'verdict_audit.json'), fresh: true, bytes: 13 })]);
+    expect(observed.observations).toEqual([expect.objectContaining({ path: join(runDir, 'work/verdict_audit.json'), fresh: true, bytes: 13 })]);
   });
 
   it('keeps framework research provenance separate from planner path estimates', () => {
@@ -208,7 +209,7 @@ describe('engine generalization binding contracts', () => {
       },
       startedAt: new Date(0).toISOString(),
     };
-    writeFileSync(join(taskRunDir, 'dispatch_admission.json'), `${JSON.stringify({
+    writeFileSync(runRecordPath(taskRunDir, 'dispatch_admission.json'), `${JSON.stringify({
       version: 1,
       pass: true,
       checkedAt: new Date(0).toISOString(),

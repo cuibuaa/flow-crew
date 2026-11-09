@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -26,7 +27,7 @@ describe('independent scheduler-loop heartbeat', () => {
   it('warns durably while run truth stays running, then clears only the current warning on recovery', () => {
     const projectDir = process.env.FLOWCREW_VITEST_ROOT!;
     const created = createRun(projectDir, 'heartbeat', 'name: heartbeat', []);
-    writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(created.runDirPath, 'scheduler.pid'), String(process.pid));
     writeSchedulerProcessIdentity(created.runDirPath, created.runId);
     const handle = startSchedulerHeartbeat({
       runPath: created.runDirPath,
@@ -37,20 +38,20 @@ describe('independent scheduler-loop heartbeat', () => {
       spawnObserver: false,
     });
     try {
-      const heartbeat = JSON.parse(readFileSync(join(created.runDirPath, 'scheduler-heartbeat.json'), 'utf-8')) as { updatedAt: string };
+      const heartbeat = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'scheduler-heartbeat.json'), 'utf-8')) as { updatedAt: string };
       const stalledAt = Date.parse(heartbeat.updatedAt) + 101;
       expect(observeSchedulerHeartbeatOnce({
         runPath: created.runDirPath, runId: created.runId, thresholdMs: 100, nowMs: stalledAt,
       })).toBe('stalled');
       expect(schedulerLoopIsStalled(projectDir, created.runId)).toBe(true);
-      expect(JSON.parse(readFileSync(join(created.runDirPath, 'run.json'), 'utf-8')).status).toBe('running');
+      expect(JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'run.json'), 'utf-8')).status).toBe('running');
 
       handle.pulse();
       expect(observeSchedulerHeartbeatOnce({
         runPath: created.runDirPath, runId: created.runId, thresholdMs: 100, nowMs: Date.now(),
       })).toBe('healthy');
       expect(schedulerLoopIsStalled(projectDir, created.runId)).toBe(false);
-      const events = readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf-8');
+      const events = readFileSync(runRecordPath(created.runDirPath, 'events.jsonl'), 'utf-8');
       expect(events).toContain('scheduler_loop_stalled');
       expect(events).toContain('scheduler_loop_recovered');
     } finally {
@@ -67,7 +68,7 @@ describe('independent scheduler-loop heartbeat', () => {
     mkdirSync(projectDir, { recursive: true });
     mkdirSync(runPath, { recursive: true });
     const runId = 'generic-block-run';
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId, workflowName: 'block', projectDir, status: 'running', stages: {}, startedAt: new Date().toISOString(),
     }));
     const heartbeatUrl = pathToFileURL(join(process.cwd(), 'src', 'scheduler-heartbeat.ts')).href;
@@ -100,13 +101,13 @@ describe('independent scheduler-loop heartbeat', () => {
       // Allow the TypeScript child and observer to initialize under suite load;
       // the actual stall threshold below remains 100 ms.
       await Promise.race([waitFor(readyPath, 10_000), completion.then(() => { throw new Error('fixture exited before readiness'); })]);
-      await waitFor(join(runPath, SCHEDULER_LOOP_STALL_FILE), 2_000);
+      await waitFor(runRecordPath(runPath, SCHEDULER_LOOP_STALL_FILE), 2_000);
       // The warning is published before its event. Wait for that separate fact,
       // including its content when earlier events already created the file.
-      await waitFor(join(runPath, 'events.jsonl'), 2_000, (text) => text.includes('scheduler_loop_stalled'));
-      const warning = JSON.parse(readFileSync(join(runPath, SCHEDULER_LOOP_STALL_FILE), 'utf-8')) as { active: boolean; thresholdMs: number };
+      await waitFor(runRecordPath(runPath, 'events.jsonl'), 2_000, (text) => text.includes('scheduler_loop_stalled'));
+      const warning = JSON.parse(readFileSync(runRecordPath(runPath, SCHEDULER_LOOP_STALL_FILE), 'utf-8')) as { active: boolean; thresholdMs: number };
       expect(warning).toMatchObject({ active: true, thresholdMs: 100 });
-      expect(readFileSync(join(runPath, 'events.jsonl'), 'utf-8')).toContain('scheduler_loop_stalled');
+      expect(readFileSync(runRecordPath(runPath, 'events.jsonl'), 'utf-8')).toContain('scheduler_loop_stalled');
       await completion;
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
@@ -121,14 +122,14 @@ describe('independent scheduler-loop heartbeat', () => {
 
     const projectDir = process.env.FLOWCREW_VITEST_ROOT!;
     const created = createRun(projectDir, 'heartbeat-controls', 'name: controls', []);
-    writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(created.runDirPath, 'scheduler.pid'), String(process.pid));
     writeSchedulerProcessIdentity(created.runDirPath, created.runId);
     const handle = startSchedulerHeartbeat({
       runPath: created.runDirPath, runId: created.runId,
       intervalMs: 60_000, stallThresholdMs: 1, observerPollMs: 1, spawnObserver: false,
     });
     try {
-      const statePath = join(created.runDirPath, 'run.json');
+      const statePath = runRecordPath(created.runDirPath, 'run.json');
       const state = JSON.parse(readFileSync(statePath, 'utf-8')) as { status: string };
       state.status = 'parked';
       writeFileSync(statePath, JSON.stringify(state));
@@ -141,7 +142,7 @@ describe('independent scheduler-loop heartbeat', () => {
         runPath: created.runDirPath, runId: created.runId, thresholdMs: 1, nowMs: Date.now() + 10,
       })).toBe('inactive');
       expect(() => writeSchedulerProcessIdentity(created.runDirPath, 'different-run')).toThrow('RUN_IDENTITY_BINDING');
-      const identityPath = join(created.runDirPath, 'scheduler.identity.json');
+      const identityPath = runRecordPath(created.runDirPath, 'scheduler.identity.json');
       const identity = JSON.parse(readFileSync(identityPath, 'utf-8'));
       writeFileSync(identityPath, JSON.stringify({ ...identity, runId: 'different-run' }));
       expect(observeSchedulerHeartbeatOnce({

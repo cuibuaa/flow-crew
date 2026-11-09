@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,7 +28,7 @@ outputSchema: HANDOFF_SCHEMA, artifactContract: { version: 1 as const, produces:
 const delivered = () => ({ output: JSON.stringify({ status: 'delivered', summary: 'Reviewed', files_modified: [], checks: [], caveats: [] }), exitCode: 0, duration_ms: 1 });
 function declare(path = 'report.md', expectedType: 'file' | 'directory' = 'file') {
   updateRunState(project, runId, state => { state.declaredOutputs = [{ path, expectedType }]; });
-  writeFileSync(join(directory, 'verdict_review.json'), '{"pass":true}');
+  writeFileSync(runRecordPath(directory, 'verdict_review.json'), '{"pass":true}');
 }
 const verdict = () => readGateEvaluation(project, 'review', runId, undefined, false);
 
@@ -47,7 +48,7 @@ describe('stage writes follow the run product contract', () => {
     expect((await runStage(adapter, stageOptions())).exitCode).toBe(0); expect(observed).toBe(true);
     expect(verdict()?.pass).toBe(true);
     expect(archiveDeclaredOutputs(project, directory, [{ path: 'report.md', expectedType: 'file' }]).complete).toBe(true);
-    expect(readFileSync(join(directory, 'declared_outputs/report.md'), 'utf8')).toBe('Required report');
+    expect(readFileSync(runRecordPath(directory, 'declared_outputs/report.md'), 'utf8')).toBe('Required report');
   });
 
   it('refreshes required-output facts on a resumed worker after guidance arrives', async () => {

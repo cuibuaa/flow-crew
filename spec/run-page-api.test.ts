@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, cancelTask, fetchRunSummary, fetchRunStageOutput } from "../ui/src/api";
@@ -66,7 +67,7 @@ describe('dashboard iteration history', () => {
       const { runId } = createRun(project, 'fixture', 'name: fixture\nstages: []', ['active']);
       // Raw persisted optional data can be malformed even when core hydration
       // succeeds. Use the gate's damaged iteration, with a valid-row control.
-      const path = join(runDir(project, runId), 'run.json');
+      const path = runRecordPath(runDir(project, runId), 'run.json');
       const state = JSON.parse(readFileSync(path, 'utf8'));
       state.status = 'complete';
       const status = { status: 'failed', retries: 0 };

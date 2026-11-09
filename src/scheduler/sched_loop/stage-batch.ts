@@ -1,3 +1,4 @@
+import { stageWorkPath } from '../../run-layout.js';
 import { atomicWrite } from '../../engine-fs.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 import { decideStageRetry, parkProviderQuota, stageRetryCharge } from '../sched_settlement/stage-execution.js';
@@ -14,7 +15,6 @@ import { recordThrownStageAttempt, createStageSettlementBoundary, settleStageGro
 import { RUN_STATUS, STAGE_STATUS, StageStatus, StoreState, isPausedRunStatus, isTerminalRunStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection } from '../../worker.js';
 import { executeOrdinaryStage } from './ordinary-stage.js';
-import { join } from 'node:path';
 import { consumePlanRevisions, findAllReady, reconcileCompletedStageAttempts, tryTerminateOnTerminalState } from './services.js';
 
 export async function executeReadyBatch(
@@ -197,7 +197,7 @@ export async function executeReadyBatch(
 /** A workflow's fixed plan is its plan stage's answer: published where a planner's record goes, with
  * no model call, for the next admission pass to accept or refuse like any proposal. */
 function answerWithFixedPlan(stage: StageConfig, dispatch: readonly unknown[], state: StoreState, projectDir: string, runId: string, runDirPath: string): void {
-  atomicWrite(join(runDirPath, 'dispatch.yaml'), `${JSON.stringify({ stages: dispatch })}\n`);
+  atomicWrite(stageWorkPath(runDirPath, 'dispatch.yaml'), `${JSON.stringify({ stages: dispatch })}\n`);
   const answered: StageStatus = { status: STAGE_STATUS.COMPLETE, retries: state.stages[stage.id]?.retries ?? 0, completedAt: new Date().toISOString() };
   writeStageStatus(projectDir, runId, stage.id, answered);
   state.stages[stage.id] = answered;

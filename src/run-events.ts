@@ -1,6 +1,6 @@
+import { runRecordPath } from './run-layout.js';
 import { atomicWrite } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { appendTextRecord } from './append-boundary.js';
 import { readJsonlFile, readOptionalJsonlFile, type JsonlReadCursor } from './jsonl.js';
 import type { AttemptDisposition, StageAttempt, StageStatus, StoreState } from './store.js';
@@ -118,7 +118,7 @@ export function attemptEventFields(attempt: StageAttempt | undefined): Pick<RunE
 }
 
 function eventsPath(projectDir: string, runId: string): string {
-  return join(runDir(projectDir, runId), 'events.jsonl');
+  return runRecordPath(runDir(projectDir, runId), 'events.jsonl');
 }
 
 export function appendRunEvent(projectDir: string, runId: string, event: RunEvent): void {
@@ -131,7 +131,7 @@ export function appendRunEvent(projectDir: string, runId: string, event: RunEven
  * project root from an arbitrary run path. */
 export function appendRunEventAtRunDir(runDirectory: string, event: RunEvent): void {
   requireExistingRunArtifactDirectory(runDirectory);
-  appendTextRecord(join(runDirectory, 'events.jsonl'), JSON.stringify(event));
+  appendTextRecord(runRecordPath(runDirectory, 'events.jsonl'), JSON.stringify(event));
 }
 
 export function readRunEvents(projectDir: string, runId: string, cursor?: JsonlReadCursor): RunEvent[] {
@@ -143,7 +143,7 @@ export function readRunEvents(projectDir: string, runId: string, cursor?: JsonlR
 }
 
 export function observeRunStatusChange(directory: string, runId: string, status: StoreState['status']): RunEvent[] {
-  const cursorPath = join(directory, 'run_event_status.json');
+  const cursorPath = runRecordPath(directory, 'run_event_status.json');
   let committing = false;
   try {
     const cursor = existsSync(cursorPath)
@@ -155,7 +155,7 @@ export function observeRunStatusChange(directory: string, runId: string, status:
     const prior = cursor?.status;
     if (prior === status) return [];
     const observationId = `${cursor?.observedAt ?? 'initial'}:${String(prior ?? 'unobserved')}->${String(status)}`;
-    const recorded = readOptionalJsonlFile<RunEvent>(join(directory, 'events.jsonl'));
+    const recorded = readOptionalJsonlFile<RunEvent>(runRecordPath(directory, 'events.jsonl'));
     const timestamp = recorded.find((event) => event.observationId === observationId)?.timestamp
       ?? new Date().toISOString();
     const events: RunEvent[] = [{

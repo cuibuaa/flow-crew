@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 /**
  * Ledger primitive — the loop's accumulated memory across a campaign's runs.
  *
@@ -27,7 +28,7 @@ export function summarizeLedger(projectDir: string, campaignId: string | undefin
   const tried = new Map<string, number>(); // label → best result seen
   for (const runId of runIds) {
     try {
-      const jp = join(runsRoot(), runId, 'research_journal.json');
+      const jp = runRecordPath(join(runsRoot(), runId), 'research_journal.json');
       if (existsSync(jp)) {
         const journal = JSON.parse(readFileSync(jp, 'utf-8')) as { rounds?: JournalRound[] };
         for (const round of journal.rounds ?? []) {

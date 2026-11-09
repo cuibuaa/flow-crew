@@ -1,3 +1,4 @@
+import { requestPath, runRecordPath } from '../src/run-layout.js';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -41,7 +42,7 @@ function writeRun(
   mtimeOffsetSeconds: number,
   stageIds: string[] = [],
 ): void {
-  const directory = join(runsDir, runId);
+  const directory = runRecordPath(runsDir, runId);
   mkdirSync(directory, { recursive: true });
   const runJson = join(directory, 'run.json');
   writeFileSync(runJson, JSON.stringify({
@@ -73,7 +74,7 @@ function runGuide(...guideArgs: string[]) {
 }
 
 function guidancePath(runId: string): string {
-  return join(runsDir, runId, 'user_input.md');
+  return requestPath(join(runsDir, runId), 'user_input.md');
 }
 
 describe('safe guide targeting', () => {
@@ -138,10 +139,10 @@ describe('safe guide targeting', () => {
     );
 
     expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
-    expect(existsSync(join(runsDir, 'run-alpha', 'supervisor_guidance.md'))).toBe(false);
-    routePendingOperatorGuidanceToStage(join(runsDir, 'run-alpha'), 'implement');
+    expect(existsSync(runRecordPath(runsDir, 'run-alpha', 'supervisor_guidance.md'))).toBe(false);
+    routePendingOperatorGuidanceToStage(runRecordPath(runsDir, 'run-alpha'), 'implement');
     expect(existsSync(guidancePath('run-alpha'))).toBe(false);
-    const ledger = parseGuidanceLedger(readFileSync(join(runsDir, 'run-alpha', 'supervisor_guidance.md'), 'utf-8'));
+    const ledger = parseGuidanceLedger(readFileSync(runRecordPath(runsDir, 'run-alpha', 'supervisor_guidance.md'), 'utf-8'));
     expect(ledger).toEqual([
       expect.objectContaining({
         target: 'implement',
@@ -149,7 +150,7 @@ describe('safe guide targeting', () => {
         body: 'use the already-isolated reproduction',
       }),
     ]);
-    const events = readFileSync(join(runsDir, 'run-alpha', 'events.jsonl'), 'utf-8')
+    const events = readFileSync(runRecordPath(runsDir, 'run-alpha', 'events.jsonl'), 'utf-8')
       .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(events).toContainEqual(expect.objectContaining({
       type: 'guidance_written',

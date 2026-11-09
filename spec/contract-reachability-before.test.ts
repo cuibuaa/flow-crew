@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { artifacts, inputFile } from './spec_contracts/declared-fixtures.js';
@@ -122,22 +123,22 @@ describe('research ingestion and planner refusal evidence', () => {
     expect(state.stages.measure).toEqual({ status: 'complete', retries: 0, completedAt });
     if (!outcome) {
       expect(result).toBeNull();
-      expect(readJson(join(runDirectory, 'research_round_input_error.json'))).toMatchObject({ kind: 'missing_label' });
+      expect(readJson(runRecordPath(runDirectory, 'research_round_input_error.json'))).toMatchObject({ kind: 'missing_label' });
       expect(existsSync(path)).toBe(true);
-      expect(existsSync(join(runDirectory, 'research_round_contract_repair.json'))).toBe(false);
+      expect(existsSync(runRecordPath(runDirectory, 'research_round_contract_repair.json'))).toBe(false);
       return;
     }
-    expect(readJson(join(runDirectory, 'research_journal.json')).rounds).toEqual([
+    expect(readJson(runRecordPath(runDirectory, 'research_journal.json')).rounds).toEqual([
       expect.objectContaining({ label: record.label, outcome, ...(!sidecar ? { result: record.result } : {}) }),
     ]);
-    expect(existsSync(join(runDirectory, 'research_round_input_error.json'))).toBe(false);
+    expect(existsSync(runRecordPath(runDirectory, 'research_round_input_error.json'))).toBe(false);
     if (sidecar) {
       expect(result).toBeNull();
       expect(existsSync(path)).toBe(false);
-      expect(readdirSync(runDirectory).some(file => /no_candidate_consumed\.json$/.test(file))).toBe(true);
-    } else expect(existsSync(join(runDirectory, 'research_round_1_consumed.json'))).toBe(true);
+      expect(readdirSync(runRecordPath(runDirectory, '.')).some(file => /no_candidate_consumed\.json$/.test(file))).toBe(true);
+    } else expect(existsSync(runRecordPath(runDirectory, 'research_round_1_consumed.json'))).toBe(true);
     if (name === 'legacy discriminator') {
-      expect(readJson(join(runDirectory, 'research_round_contract_repair.json'))).toMatchObject({
+      expect(readJson(runRecordPath(runDirectory, 'research_round_contract_repair.json'))).toMatchObject({
         kind: 'no_candidate_status_alias', fromField: 'status', toField: 'outcome',
       });
     }
@@ -278,8 +279,8 @@ describe('research ingestion and planner refusal evidence', () => {
           criterion_refs: [],
           prompt_template: `produce ${id}`,
         }));
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringifyYaml({ stages })), 'utf8');
-        writeFileSync(join(opts.runDir, 'reality_checks.md'), [
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringifyYaml({ stages })), 'utf8');
+        writeFileSync(stageWorkPath(opts.runDir, 'reality_checks.md'), [
           '## Reality checks',
           '',
           '```yaml',
@@ -311,8 +312,8 @@ describe('research ingestion and planner refusal evidence', () => {
       true,
     );
     const runDirectory = runDir(projectDir, final.runId);
-    const retryState = readJson(join(runDirectory, 'plan_retry_state.json'));
-    const events = readFileSync(join(runDirectory, 'events.jsonl'), 'utf8')
+    const retryState = readJson(runRecordPath(runDirectory, 'plan_retry_state.json'));
+    const events = readFileSync(runRecordPath(runDirectory, 'events.jsonl'), 'utf8')
       .trim().split('\n').map((line) => JSON.parse(line) as Record<string, any>);
     const retryEvents = events.filter((event) => event.type === 'plan_dispatch_retry');
 
@@ -436,12 +437,12 @@ describe('declared rehearsal outcomes and bounded ship probes', () => {
       rehearsalObservations.push({
         target,
         result,
-        run: readJson(join(runDirectory, 'run.json')),
-        journal: readJson(join(runDirectory, 'research_journal.json')),
-        runFiles: readdirSync(runDirectory),
-        noCandidateRun: readJson(join(noCandidate.runDir, 'run.json')),
-        noCandidateJournal: readJson(join(noCandidate.runDir, 'research_journal.json')),
-        noCandidateRunFiles: readdirSync(noCandidate.runDir),
+        run: readJson(runRecordPath(runDirectory, 'run.json')),
+        journal: readJson(runRecordPath(runDirectory, 'research_journal.json')),
+        runFiles: readdirSync(runRecordPath(runDirectory, '.')),
+        noCandidateRun: readJson(runRecordPath(noCandidate.runDir, 'run.json')),
+        noCandidateJournal: readJson(runRecordPath(noCandidate.runDir, 'research_journal.json')),
+        noCandidateRunFiles: readdirSync(runRecordPath(noCandidate.runDir, '.')),
       });
       temporaryRoots.push(result.retainedArtifacts.projectDir);
       temporaryRoots.push(noCandidate.projectDir);
@@ -492,7 +493,7 @@ describe('declared rehearsal outcomes and bounded ship probes', () => {
       expect(observation.runFiles).toContain('research_confirm.json');
       expect(texts).not.toContain('The decoy round is missing from the journal — the ship path was not exercised');
       expect(texts).not.toContain('Confirm was never executed — a ship decision may never have been proposed');
-      expect(readJson(join(observation.result.retainedArtifacts!.runDir, 'research_confirm.json')))
+      expect(readJson(runRecordPath(observation.result.retainedArtifacts!.runDir, 'research_confirm.json')))
         .toMatchObject({ pass: false });
     }
     expect(rehearsalObservations.map(({ target, journal }) => ({
@@ -581,7 +582,7 @@ describe('declared rehearsal outcomes and bounded ship probes', () => {
     if (result.retainedOutcomeArtifacts?.no_candidate) {
       temporaryRoots.push(result.retainedOutcomeArtifacts.no_candidate.projectDir);
     }
-    const journal = readJson(join(result.retainedArtifacts.runDir, 'research_journal.json'));
+    const journal = readJson(runRecordPath(result.retainedArtifacts.runDir, 'research_journal.json'));
     const texts = result.findings.map((finding) => finding.text);
 
     expect(result.exitCode).toBe(0);
@@ -589,7 +590,7 @@ describe('declared rehearsal outcomes and bounded ship probes', () => {
       expect.objectContaining({ label: 'rehearse_r1_mild', result: 0.045, resultStd: 0.001 }),
       expect.objectContaining({ label: 'rehearse_r2_decoy', result: 0.05, resultStd: 0.001, confirmFailed: true }),
     ]));
-    expect(existsSync(join(result.retainedArtifacts.runDir, 'research_confirm.json'))).toBe(true);
+    expect(existsSync(runRecordPath(result.retainedArtifacts.runDir, 'research_confirm.json'))).toBe(true);
     expect(texts).not.toContain('The decoy round is missing from the journal — the ship path was not exercised');
     expect(texts).not.toContain('Confirm was never executed — a ship decision may never have been proposed');
   }, 60_000);
@@ -718,9 +719,9 @@ describe('violation paths at durable and human event layers', () => {
     const root = temporaryRoot('event-path');
     const runsRoot = join(root, 'runs');
     const runId = 'violation-event';
-    const runDirectory = join(runsRoot, runId);
+    const runDirectory = runRecordPath(runsRoot, runId);
     mkdirSync(runDirectory, { recursive: true });
-    writeFileSync(join(runDirectory, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runDirectory, 'run.json'), JSON.stringify({
       runId,
       projectDir: join(root, 'project'),
       workflowName: 'event-replay',
@@ -728,7 +729,7 @@ describe('violation paths at durable and human event layers', () => {
       stages: {},
       startedAt: '2030-01-01T00:00:00.000Z',
     }));
-    writeFileSync(join(runDirectory, 'events.jsonl'), `${JSON.stringify({
+    writeFileSync(runRecordPath(runDirectory, 'events.jsonl'), `${JSON.stringify({
       type: 'live_constraint_violation',
       runId,
       timestamp: '2030-01-01T00:00:01.000Z',
@@ -771,12 +772,12 @@ describe('violation paths at durable and human event layers', () => {
     const root = temporaryRoot('event-path-control');
     const runsRoot = join(root, 'runs');
     const runId = 'pathless-violation-event';
-    const runDirectory = join(runsRoot, runId);
+    const runDirectory = runRecordPath(runsRoot, runId);
     mkdirSync(runDirectory, { recursive: true });
-    write(join(runDirectory, 'run.json'), JSON.stringify({
+    write(runRecordPath(runDirectory, 'run.json'), JSON.stringify({
       runId, projectDir: join(root, 'project'), status: 'failed', stages: {}, startedAt: '2030-01-01T00:00:00.000Z',
     }));
-    write(join(runDirectory, 'events.jsonl'), `${JSON.stringify({
+    write(runRecordPath(runDirectory, 'events.jsonl'), `${JSON.stringify({
       type: 'live_constraint_violation',
       runId,
       timestamp: '2030-01-01T00:00:01.000Z',
@@ -847,7 +848,7 @@ describe('violation paths at durable and human event layers', () => {
       true,
     );
     const runDirectory = runDir(projectDir, final.runId);
-    const durableEvents = readFileSync(join(runDirectory, 'events.jsonl'), 'utf8')
+    const durableEvents = readFileSync(runRecordPath(runDirectory, 'events.jsonl'), 'utf8')
       .trim().split('\n').map((line) => JSON.parse(line) as Record<string, any>)
       .filter((event) => event.type === 'live_constraint_violation');
     const human = new CaptureWriter();

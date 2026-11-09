@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../src/run-layout.js';
 import { createHash } from 'node:crypto';
 import {
   closeSync,
@@ -131,7 +132,7 @@ export function materializeClosedLoopDriftFixture(): MaterializedClosedLoopDrift
   const root = mkdtempSync(join(tmpdir(), 'flowcrew-closed-loop-drift-'));
   const fcHome = join(root, 'state');
   const runsRoot = join(fcHome, 'runs');
-  const runDir = join(runsRoot, evidence.evidenceRunId);
+  const runDir = runRecordPath(runsRoot, evidence.evidenceRunId);
   const projectDir = join(root, 'project');
   const registryPath = join(fcHome, 'tasks.jsonl');
   const taskId = 9001;
@@ -149,18 +150,18 @@ export function materializeClosedLoopDriftFixture(): MaterializedClosedLoopDrift
     completedAt: sample.completedAt,
     duration_ms: sample.adapterMs,
   }));
-  writeJson(join(runDir, 'run.json'), state);
-  writeJson(join(runDir, 'plan_retry_state.json'), evidence.planRetryState);
-  writeJson(join(runDir, 'research_journal.json'), evidence.researchJournal);
+  writeJson(runRecordPath(runDir, 'run.json'), state);
+  writeJson(runRecordPath(runDir, 'plan_retry_state.json'), evidence.planRetryState);
+  writeJson(runRecordPath(runDir, 'research_journal.json'), evidence.researchJournal);
   for (const [index, round] of evidence.researchJournal.rounds.entries()) {
-    writeJson(join(runDir, `research_round_${index + 1}_no_candidate_consumed.json`), {
+    writeJson(runRecordPath(runDir, `research_round_${index + 1}_no_candidate_consumed.json`), {
       label: round.label,
       outcome: round.outcome,
       dose_minutes: evidence.historical.doseMinutes[index],
     });
   }
-  writeFileSync(join(runDir, 'events.jsonl'), `${evidence.events.map((event) => JSON.stringify(event)).join('\n')}\n`, 'utf-8');
-  writeFileSync(join(runDir, 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
+  writeFileSync(runRecordPath(runDir, 'events.jsonl'), `${evidence.events.map((event) => JSON.stringify(event)).join('\n')}\n`, 'utf-8');
+  writeFileSync(runRecordPath(runDir, 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
 
   mkdirSync(fcHome, { recursive: true });
   buildRegistry({

@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../../src/run-layout.js';
 import type { ArtifactContractInput } from './fixture-types.js';
 import { existsSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,7 +11,7 @@ import { ArtifactContractSchema } from '../../src/artifact-declarations.js';
 export function fixtureArtifactContract(stageId: string, isGate = false) {
   return ArtifactContractSchema.parse({
     version: 1,
-    produces: isGate ? [{ id: 'verdict', root: 'run', path: `verdict_${stageId}.json` }] : [],
+    produces: isGate ? [{ id: 'verdict', root: 'run', path: `work/verdict_${stageId}.json` }] : [],
     reads: [],
   });
 }
@@ -38,13 +39,13 @@ export function declaredDispatch(text: string, contracts: Record<string, Artifac
  * explicit JSON retain the same result validation as production invocations. */
 export function fixtureResult(result: RunResult | Promise<RunResult>, opts: RunOpts): RunResult | Promise<RunResult> {
   if (result instanceof Promise) return result.then(value => fixtureResult(value, opts) as RunResult);
-  const planner = existsSync(join(opts.runDir, 'fixture_dispatch.yaml'));
-  const finalPath = join(opts.runDir, planner ? 'fixture_dispatch.yaml' : `fixture_verdict_${opts.stageId}.json`);
+  const planner = existsSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'));
+  const finalPath = stageWorkPath(opts.runDir, planner ? 'fixture_dispatch.yaml' : `fixture_verdict_${opts.stageId}.json`);
   const finalRecord = existsSync(finalPath) ? readFileSync(finalPath, 'utf8') : undefined;
   if (finalRecord !== undefined) {
     if (planner) {
-      renameSync(finalPath, join(opts.runDir, 'dispatch.yaml'));
-      result = { ...result, writes: [...new Set([...(result.writes ?? []), 'run:dispatch.yaml'])] };
+      renameSync(finalPath, stageWorkPath(opts.runDir, 'dispatch.yaml'));
+      result = { ...result, writes: [...new Set([...(result.writes ?? []), 'run:work/dispatch.yaml'])] };
     } else unlinkSync(finalPath);
   }
   return result.exitCode === 0 ? { ...result, output: scriptedRecord(result.output, opts, planner ? undefined : finalRecord) } : result;

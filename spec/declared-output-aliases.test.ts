@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { hashRollbackFileSync } from '../src/rollback-content-store.js';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,7 +29,7 @@ it('indexes a manifest once while rehashing source and archive bytes on every ch
   expect(proof('source.md')).toBe(false);
   writeFileSync(join(project, 'source.md'), 'source bytes');
   expect(proof('source.md')).toBe(true);
-  writeFileSync(join(run, 'declared_outputs/source.md'), 'corrupt archive');
+  writeFileSync(runRecordPath(run, 'declared_outputs/source.md'), 'corrupt archive');
   expect(proof('source.md')).toBe(false);
   expect(proof('../source.md')).toBe(false);
 });
@@ -75,9 +76,9 @@ it('archives file and directory link objects without copying their target member
     { path: 'report.md', type: 'symlink' }, { path: 'self', type: 'symlink' },
   ] });
   for (const [name] of links) {
-    const archived = join(run, 'declared_outputs', 'reports', name);
-    expect(lstatSync(archived).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(archived, { encoding: 'buffer' })).toEqual(readlinkSync(join(project, 'reports', name), { encoding: 'buffer' }));
+    const archived = runRecordPath(run, 'declared_outputs', 'reports', name);
+    expect(lstatSync(archived).isFile()).toBe(true);
+    expect(readFileSync(archived)).toEqual(readlinkSync(join(project, 'reports', name), { encoding: 'buffer' }));
     expect(createArchivedPathVerifier(project, run, archiveFs)(`reports/${name}`)).toBe(true);
   }
   writeFileSync(join(project, 'source.md'), 'changed target bytes');
@@ -93,9 +94,9 @@ it('archives an output through a confined directory ancestor and preserves a dec
   mkdirSync(join(project, 'reports')); writeFileSync(join(project, 'reports/report.md'), 'report bytes');
   symlinkSync('reports', join(project, 'alias'));
   expect(archiveDeclaredOutputs(project, run, [declaration('alias/report.md')]).complete).toBe(true);
-  expect(readFileSync(join(run, 'declared_outputs/alias/report.md'), 'utf8')).toBe('report bytes');
+  expect(readFileSync(runRecordPath(run, 'declared_outputs/alias/report.md'), 'utf8')).toBe('report bytes');
   expect(archiveDeclaredOutputs(project, run, [declaration('alias', 'directory')]).complete).toBe(true);
-  expect(lstatSync(join(run, 'declared_outputs/alias')).isSymbolicLink()).toBe(true);
-  expect(readlinkSync(join(run, 'declared_outputs/alias'))).toBe('reports');
+  expect(lstatSync(runRecordPath(run, 'declared_outputs/alias')).isFile()).toBe(true);
+  expect(readFileSync(runRecordPath(run, 'declared_outputs/alias'), 'utf8')).toBe('reports');
   expect(createArchivedPathVerifier(project, run, archiveFs)('alias')).toBe(true);
 });

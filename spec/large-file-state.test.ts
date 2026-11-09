@@ -18,7 +18,7 @@ afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
-it('excludes sparse multi-GiB rollback payloads from engine scans and verifies their digest at restore', { timeout: 120_000 }, async () => {
+it('guards sparse multi-GiB rollback payloads and verifies their digest at restore', { timeout: 240_000 }, async () => {
   root = mkdtempSync(join(tmpdir(), 'large-file-state-'));
   const project = join(root, 'project');
   mkdirSync(join(project, 'hf_cache'), { recursive: true });
@@ -38,13 +38,20 @@ it('excludes sparse multi-GiB rollback payloads from engine scans and verifies t
   await withEngineIntegrity(input, async () => { invocations++; });
   expect(invocations).toBe(1);
 
-  // Backup corruption is adjudicated by restoration, not an unrelated stage.
-  await withEngineIntegrity(input, async () => {
-    invocations++;
+  const corrupt = () => {
     const fd = openSync(captured.backingPath, 'r+');
     try { writeSync(fd, Buffer.from([1]), 0, 1, size - 1); } finally { closeSync(fd); }
-  });
+  };
+  // Rollback material is in the engine tree, so corruption during execution
+  // voids the stage and restores the engine's last trusted bytes.
+  await expect(withEngineIntegrity(input, async () => {
+    invocations++;
+    corrupt();
+  })).rejects.toThrow('ENGINE_STATE_TAMPERED');
   expect(invocations).toBe(2);
+  expect(hashRollbackFileSync(captured.backingPath).sha256).toBe(captured.sha256);
+  // Restoration must also refuse a preimage corrupted outside a live guard.
+  corrupt();
   const restored = restoreProjectPath(project, path, {
     exists: true, type: 'file', sha256: captured.sha256,
     byteLength: captured.byteLength, backingPath: captured.backingPath,

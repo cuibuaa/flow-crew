@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { artifacts, stageArtifacts  } from './spec_contracts/declared-fixtures.js';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -56,7 +57,7 @@ describe('addressed guidance envelopes', () => {
     appendGuidanceEnvelope({ runDir, target: RUN_WIDE_GUIDANCE_TARGET, source: 'operator', body: 'all stages', createdAt: '2026-01-01T00:00:02.000Z' });
     const unknown = appendGuidanceEnvelope({ runDir, target: 'missing', source: 'supervisor', body: 'must not leak', knownStageIds: ['plan', 'implement'], createdAt: '2026-01-01T00:00:03.000Z' });
 
-    const ledger = readFileSync(join(runDir, 'supervisor_guidance.md'), 'utf-8');
+    const ledger = readFileSync(runRecordPath(runDir, 'supervisor_guidance.md'), 'utf-8');
     expect(guidanceForStageFromText(ledger, 'implement').map((entry) => entry.body)).toEqual(['implementation only', 'all stages']);
     expect(guidanceForStageFromText(ledger, 'plan').map((entry) => entry.body)).toEqual(['plan only', 'all stages']);
     expect(unknown).toMatchObject({ quarantined: true });
@@ -78,8 +79,8 @@ describe('addressed guidance envelopes', () => {
 
   it('preserves a legacy prefix during envelope migration and fails closed on foreign local ledgers', () => {
     const taskRunDir = temporaryRoot();
-    mkdirSync(join(taskRunDir, 'stages', 'implement'), { recursive: true });
-    writeFileSync(join(taskRunDir, 'supervisor_guidance.md'), '[plan]: legacy plan only\n\n[implement]: legacy implementation\n');
+    mkdirSync(runRecordPath(taskRunDir, 'stages', 'implement'), { recursive: true });
+    writeFileSync(runRecordPath(taskRunDir, 'supervisor_guidance.md'), '[plan]: legacy plan only\n\n[implement]: legacy implementation\n');
     appendGuidanceEnvelope({
       runDir: taskRunDir,
       target: 'implement',
@@ -100,7 +101,7 @@ describe('addressed guidance envelopes', () => {
       knownStageIds: ['plan', 'implement'],
     });
     writeFileSync(
-      join(taskRunDir, 'stages', 'implement', 'guidance.md'),
+      runRecordPath(taskRunDir, 'stages', 'implement', 'guidance.md'),
       `<!-- flowcrew-guidance ${JSON.stringify({
         version: foreign.version,
         id: foreign.id,
@@ -232,7 +233,7 @@ describe('canonical criteria and atomic dispatch admission', () => {
         { condition: 'research.decision == ship', decision: 'ship', terminalStatus: 'shipped' },
         { condition: 'research.decision == stop_ceiling', decision: 'stop_ceiling', terminalStatus: 'ceiling_hit' },
       ]) {
-        writeFileSync(join(taskRunDir, 'research_decision.json'), JSON.stringify(expected));
+        writeFileSync(runRecordPath(taskRunDir, 'research_decision.json'), JSON.stringify(expected));
         expect(evaluateCondition(expected.condition, 'unused-project', 'run')).toBe(true);
       }
     } finally {
@@ -285,11 +286,11 @@ describe('gate settlement and research evidence', () => {
     const project = temporaryRoot();
     const docs = join(project, 'docs');
     mkdirSync(docs, { recursive: true });
-    writeFileSync(join(docs, 'verdict_qa.json'), JSON.stringify({ pass: true, requires_repair: true }));
+    writeFileSync(runRecordPath(docs, 'verdict_qa.json'), JSON.stringify({ pass: true, requires_repair: true }));
     expect(readGateEvaluation(project, 'qa')).toMatchObject({ pass: false, reason: expect.stringContaining('contradiction') });
 
-    writeFileSync(join(docs, 'dispatch_admission.json'), JSON.stringify({ version: 1, pass: true, terminalOwners: {}, errors: [], checkedAt: 'now', criterionGateRefs: { qa: ['c1'] } }));
-    writeFileSync(join(docs, 'verdict_qa.json'), JSON.stringify({ pass: true }));
+    writeFileSync(runRecordPath(docs, 'dispatch_admission.json'), JSON.stringify({ version: 1, pass: true, terminalOwners: {}, errors: [], checkedAt: 'now', criterionGateRefs: { qa: ['c1'] } }));
+    writeFileSync(runRecordPath(docs, 'verdict_qa.json'), JSON.stringify({ pass: true }));
     expect(readGateEvaluation(project, 'qa')).toMatchObject({ pass: false, reason: expect.stringContaining('missing criteria evidence') });
   });
 
@@ -318,7 +319,7 @@ describe('gate settlement and research evidence', () => {
       outcome: 'no_candidate', label: 'round_without_action', reason: 'every candidate violated a hard constraint', evidence: { rejected: 4 },
     }));
     await tryAdvanceResearch(state, { projectDir, runId: 'run', runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter });
-    const journal = JSON.parse(readFileSync(join(taskRunDir, 'research_journal.json'), 'utf-8')) as { rounds: Array<Record<string, unknown>> };
+    const journal = JSON.parse(readFileSync(runRecordPath(taskRunDir, 'research_journal.json'), 'utf-8')) as { rounds: Array<Record<string, unknown>> };
     expect(journal.rounds[0]).toMatchObject({ outcome: 'no_candidate', label: 'round_without_action', evidence: { rejected: 4 } });
     expect(journal.rounds[0]).not.toHaveProperty('result');
   });
@@ -330,10 +331,10 @@ describe('gate settlement and research evidence', () => {
     mkdirSync(taskRunDir, { recursive: true });
     const startedAt = new Date(Date.now() - 1000).toISOString();
     writeFileSync(join(projectDir, 'docs', 'ship.md'), '# premature ship\n');
-    writeFileSync(join(taskRunDir, 'research_decision.json'), JSON.stringify({
+    writeFileSync(runRecordPath(taskRunDir, 'research_decision.json'), JSON.stringify({
       decision: 'stop_ceiling', terminalStatus: 'ceiling_hit', terminalPath: 'docs/ceiling.md', terminalOwner: 'finalize',
     }));
-    writeFileSync(join(taskRunDir, 'dispatch_admission.json'), JSON.stringify({
+    writeFileSync(runRecordPath(taskRunDir, 'dispatch_admission.json'), JSON.stringify({
       version: 1, pass: true, checkedAt: new Date().toISOString(), errors: [],
       terminalOwners: { 'docs/ship.md': 'finalize', 'docs/ceiling.md': 'finalize' },
     }));
@@ -356,7 +357,7 @@ describe('gate settlement and research evidence', () => {
     });
     expect(result.decision).toBe('deferred');
     expect(existsSync(join(projectDir, 'docs', 'ship.md'))).toBe(false);
-    expect(readdirSync(taskRunDir).some((name) => name.startsWith('wrong_terminal_shipped_ship.md'))).toBe(true);
+    expect(readdirSync(runRecordPath(taskRunDir, '.')).some((name) => name.startsWith('wrong_terminal_shipped_ship.md'))).toBe(true);
   });
 
   it('quarantines multiple non-research terminal outcomes and re-pends their sole owner', async () => {
@@ -367,7 +368,7 @@ describe('gate settlement and research evidence', () => {
     mkdirSync(taskRunDir, { recursive: true });
     writeFileSync(join(projectDir, 'docs', 'final.md'), '# complete\n');
     writeFileSync(join(projectDir, 'docs', 'escalation.md'), '# escalated\n');
-    writeFileSync(join(taskRunDir, 'dispatch_admission.json'), JSON.stringify({
+    writeFileSync(runRecordPath(taskRunDir, 'dispatch_admission.json'), JSON.stringify({
       version: 1, pass: true, checkedAt: new Date().toISOString(), errors: [],
       terminalOwners: { 'docs/final.md': 'finalize', 'docs/escalation.md': 'finalize' },
     }));
@@ -397,7 +398,7 @@ describe('gate settlement and research evidence', () => {
     expect(state.stages.finalize.status).toBe('pending');
     expect(existsSync(join(projectDir, 'docs', 'final.md'))).toBe(false);
     expect(existsSync(join(projectDir, 'docs', 'escalation.md'))).toBe(false);
-    expect(readdirSync(taskRunDir).filter((name) => name.startsWith('ambiguous_terminal_'))).toHaveLength(2);
+    expect(readdirSync(runRecordPath(taskRunDir, '.')).filter((name) => name.startsWith('ambiguous_terminal_'))).toHaveLength(2);
   });
 
   it('re-pends every implicated owner when path-specific terminal writers emit conflicting outcomes', async () => {
@@ -405,11 +406,11 @@ describe('gate settlement and research evidence', () => {
     const { runId, runDirPath: taskRunDir } = createRun(projectDir, 'test', 'name: test\nstages: []\n', ['finish', 'escalate']);
     const startedAt = new Date(Date.now() - 1000).toISOString();
     mkdirSync(join(projectDir, 'docs'), { recursive: true });
-    mkdirSync(join(taskRunDir, 'stages', 'finish', 'placeholder'), { recursive: true });
-    mkdirSync(join(taskRunDir, 'stages', 'escalate', 'placeholder'), { recursive: true });
+    mkdirSync(runRecordPath(taskRunDir, 'stages', 'finish', 'placeholder'), { recursive: true });
+    mkdirSync(runRecordPath(taskRunDir, 'stages', 'escalate', 'placeholder'), { recursive: true });
     writeFileSync(join(projectDir, 'docs', 'final.md'), '# complete\n');
     writeFileSync(join(projectDir, 'docs', 'escalation.md'), '# escalated\n');
-    writeFileSync(join(taskRunDir, 'dispatch_admission.json'), JSON.stringify({
+    writeFileSync(runRecordPath(taskRunDir, 'dispatch_admission.json'), JSON.stringify({
       version: 1, pass: true, checkedAt: new Date().toISOString(), errors: [],
       terminalOwners: { 'docs/final.md': 'finish', 'docs/escalation.md': 'escalate' },
     }));
@@ -438,7 +439,7 @@ describe('gate settlement and research evidence', () => {
     expect(result.decision).toBe('deferred');
     expect(state.stages.finish.status).toBe('pending');
     expect(state.stages.escalate.status).toBe('pending');
-    const guidance = readFileSync(join(taskRunDir, 'supervisor_guidance.md'), 'utf-8');
+    const guidance = readFileSync(runRecordPath(taskRunDir, 'supervisor_guidance.md'), 'utf-8');
     expect(guidance).toContain('"target":"finish"');
     expect(guidance).toContain('"target":"escalate"');
   });
@@ -487,8 +488,8 @@ describe('persistent blockers and quiet active commands', () => {
     };
     expect(inspectStageExecutionFacts({ runDir, stageId: 'work', status }))
       .toMatchObject({ commandActivityValid: false, activeCommandCount: 0, protectedFromIdleAbort: false });
-    mkdirSync(join(runDir, 'stages', 'work'), { recursive: true });
-    writeFileSync(join(runDir, 'stages', 'work', 'command_activity.json'), '{not-json');
+    mkdirSync(runRecordPath(runDir, 'stages', 'work'), { recursive: true });
+    writeFileSync(runRecordPath(runDir, 'stages', 'work', 'command_activity.json'), '{not-json');
     expect(inspectStageExecutionFacts({ runDir, stageId: 'work', status }))
       .toMatchObject({ commandActivityValid: false, activeCommandCount: 0, protectedFromIdleAbort: false });
   });

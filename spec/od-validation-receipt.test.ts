@@ -1,4 +1,5 @@
 import { validationReport } from './test-support/structured-validation.js';
+import { runRecordPath } from '../src/run-layout.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -38,7 +39,7 @@ async function fixture() {
       args: ['-e', 'const fs = require("node:fs"); fs.appendFileSync(process.argv[1], "test\\n"); if (fs.existsSync("product.ts")) { console.log("FAILED tests/test_product.py::test_missing_result\\n1 failed"); process.exit(1); }', counter], display: 'fixture test' }],
     runCommand: () => ({ exitCode: 0 }),
   });
-  writeFileSync(join(created.runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline }));
+  writeFileSync(runRecordPath(created.runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline }));
   seedAttemptValidation(project, created.runId, baseline.results);
   const state = readRunState(project, created.runId); state.status = 'running'; writeRunState(project, created.runId, state);
   return { ...created, stage, workflow, state, counter };
@@ -67,8 +68,8 @@ describe('configured validation has one attempt owner and read-only gate binding
     }
     console.log('VALIDATION_EXECUTIONS_PER_REVIEW', JSON.stringify(counts));
     expect(counts).toEqual([0, 0, 0]);
-    const receipts = readdirSync(f.runDirPath).filter(name => /^validation_delta_review_attempt_/.test(name))
-      .map(name => JSON.parse(readFileSync(join(f.runDirPath, name), 'utf8')));
+    const receipts = readdirSync(runRecordPath(f.runDirPath, '.')).filter(name => /^validation_delta_review_attempt_/.test(name))
+      .map(name => JSON.parse(readFileSync(runRecordPath(f.runDirPath, name), 'utf8')));
     // Immutable bind copies are evidence, not additional command executions.
     expect(new Set(receipts.map(receipt => receipt.checkedAt)).size).toBe(3);
   });
@@ -92,7 +93,7 @@ describe('configured validation has one attempt owner and read-only gate binding
         await reviewClosed;
         writeFileSync(join(project, 'product.ts'), 'regressed');
         completeStageAttempt(project, f.runId, peer.id, 0, { exitCode: 0, duration_ms: 1, writes: ['product.ts'], writeAttribution: 'snapshot' });
-        const measured = await runProjectValidationBaseline(project, { commands: JSON.parse(readFileSync(join(f.runDirPath, 'validation_baseline.json'), 'utf8')).baseline.discovery.commands.map(command => ({ ...command, report: { format: 'vitest-json' } })),
+        const measured = await runProjectValidationBaseline(project, { commands: JSON.parse(readFileSync(runRecordPath(f.runDirPath, 'validation_baseline.json'), 'utf8')).baseline.discovery.commands.map(command => ({ ...command, report: { format: 'vitest-json' } })),
           runCommand: async request => { const response = await runValidationCommand({ ...request, report: undefined }); return { ...response, stdout: validationReport(['test_missing_result'], { file: 'product.ts' }) }; } });
         seedAttemptValidation(project, f.runId, measured.results, { stageId: peer.id });
         return;
@@ -125,7 +126,7 @@ describe('configured validation has one attempt owner and read-only gate binding
         { ...current, status: 'complete', startedAt: end, completedAt: end },
       ] });
       if (kind !== 'prior-write' && kind !== 'baseline-change') writeFileSync(join(project, kind === 'generated-write' ? 'generated.js' : 'product.ts'), 'actual bytes changed');
-      if (kind === 'baseline-change') appendFileSync(join(f.runDirPath, 'validation_baseline.json'), '\n');
+      if (kind === 'baseline-change') appendFileSync(runRecordPath(f.runDirPath, 'validation_baseline.json'), '\n');
       const bound = bindReviewedGateValidation(project, f.runId, 'review', kind.startsWith('peer-') ? ['review', 'peer'] : ['review']);
       expect(bound).toBe(kind === 'prior-write');
       if (!bound) await recordGateValidationDelta(project, f.runId, 'review');
@@ -139,7 +140,7 @@ describe('configured validation has one attempt owner and read-only gate binding
     const f = await fixture();
     const attempt = { index: 1, startedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z', status: 'complete', writes: [], writeAttribution: 'snapshot' as const };
     writeStageStatus(project, f.runId, 'review', { status: 'complete', retries: 0, attempts: [attempt] });
-    const plan = JSON.parse(readFileSync(join(f.runDirPath, 'validation_baseline.json'), 'utf8')).baseline;
+    const plan = JSON.parse(readFileSync(runRecordPath(f.runDirPath, 'validation_baseline.json'), 'utf8')).baseline;
     seedAttemptValidation(project, f.runId, plan.results.map((result: import('../src/project-validation.js').ValidationCommandResult) => result.role !== 'test' ? result : {
       ...result, state: 'failed', exitCode: 1, failureIdentifiers: ['test_missing_result'], failureIdentity: 'known',
     }));

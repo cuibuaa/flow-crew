@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { spawnSync } from 'node:child_process';
 import {
@@ -67,8 +68,8 @@ function makeRun(stageIds: string[]) {
     `name: guidance-controls\nstages:\n${stageIds.map((id) => `  - id: ${id}\n    role: coder`).join('\n')}\n`,
     stageIds,
   );
-  mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
-  writeFileSync(join(created.runDirPath, 'task_brief.md'), '# Command control fixture\n', 'utf-8');
+  mkdirSync(runRecordPath(created.runDirPath, 'signals'), { recursive: true });
+  writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '# Command control fixture\n', 'utf-8');
   return created;
 }
 
@@ -89,7 +90,7 @@ function stageOptions(created: { runId: string; runDirPath: string }, stageId = 
 }
 
 function events(runDir: string): Array<Record<string, unknown>> {
-  return readFileSync(join(runDir, 'events.jsonl'), 'utf-8')
+  return readFileSync(runRecordPath(runDir, 'events.jsonl'), 'utf-8')
     .trim()
     .split(/\r?\n/)
     .filter(Boolean)
@@ -133,7 +134,7 @@ describe('live guidance and command controls', () => {
     const result = await runStage(adapter, stageOptions(created));
     const ledger = events(created.runDirPath);
     const receipt = readFileSync(
-      join(created.runDirPath, 'stages', 'work', 'guidance_consumed.md'),
+      runRecordPath(created.runDirPath, 'stages', 'work', 'guidance_consumed.md'),
       'utf-8',
     );
     expect({ exitCode: result.exitCode, invocations: prompts.length, commandStarts }).toEqual({
@@ -285,8 +286,8 @@ describe('live guidance and command controls', () => {
       status: 'running', retries: 0,
       attempts: [{ index: 2, status: 'running', startedAt: '2026-01-01T00:00:02Z' }],
     });
-    mkdirSync(join(created.runDirPath, 'stages', 'work'), { recursive: true });
-    writeFileSync(join(created.runDirPath, 'stages', 'work', 'command_activity.json'), JSON.stringify({
+    mkdirSync(runRecordPath(created.runDirPath, 'stages', 'work'), { recursive: true });
+    writeFileSync(runRecordPath(created.runDirPath, 'stages', 'work', 'command_activity.json'), JSON.stringify({
       version: 1, stageId: 'work', attemptIndex: 1, attemptStartedAt: '2026-01-01T00:00:01Z',
       active: [{ id: 'command', command: 'node check.mjs' }], streamClosed: false,
     }));
@@ -303,12 +304,12 @@ describe('live guidance and command controls', () => {
 
   it.each(['first', 'passing', 'rejected'] as const)('frames a standalone review from %s history', async history => {
     const created = makeRun(['qa']);
-    const archive = join(created.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+    const archive = runRecordPath(created.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
     if (history === 'rejected') {
       mkdirSync(archive, { recursive: true });
       writeFileSync(join(archive, 'rejected_verdict_qa.json'), '{"pass":false}');
     } else if (history === 'passing') {
-      writeFileSync(join(created.runDirPath, 'verdict_qa.json'), '{"pass":true}');
+      writeFileSync(runRecordPath(created.runDirPath, 'verdict_qa.json'), '{"pass":true}');
     }
     const prompts: string[] = [];
     const adapter: Adapter = { async run(prompt) {

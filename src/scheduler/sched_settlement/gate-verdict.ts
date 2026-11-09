@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 // Boundary: Select and evaluate authored verdict carriers, project terminal-study evidence, derive digest-bound criterion discharges; no stage launching.
 import { captureProjectTree, readEvidence } from '../../evidence-ledger.js';
 import { projectValidationResult, validationDispositions } from '../../project-validation.js';
@@ -22,7 +23,7 @@ import { currentValidationResults, currentValidationRegressions } from './gate-v
 export function readTerminalStudyCompletionEvidence(projectDir: string, runId: string, stageId: string): Record<string, unknown> | null {
   const base = runDir(projectDir, runId);
   try {
-    const parsed = JSON.parse(readFileSync(join(base, `verdict_${stageId}.json`), 'utf-8')) as Record<string, unknown>;
+    const parsed = JSON.parse(readFileSync(runRecordPath(base, `verdict_${stageId}.json`), 'utf-8')) as Record<string, unknown>;
     if (isTerminalStudyCompletionArtifact(parsed) && !('repairability' in parsed)) return parsed;
   } catch { /* optional */ }
   return null;
@@ -31,7 +32,7 @@ export function readTerminalStudyCompletionEvidence(projectDir: string, runId: s
 export function writeTerminalStudyCompletionArtifacts(projectDir: string, runId: string, stageId: string, evidence: Record<string, unknown>): void {
   const base = runDir(projectDir, runId);
   mkdirSync(stageDir(projectDir, runId, stageId), { recursive: true });
-  writeFileSync(join(base, `verdict_${stageId}.json`), JSON.stringify(evidence, null, 2) + '\n', 'utf-8');
+  writeFileSync(runRecordPath(base, `verdict_${stageId}.json`), JSON.stringify(evidence, null, 2) + '\n', 'utf-8');
 
 }
 
@@ -106,7 +107,7 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const parsed = AuditFindingsSchema.safeParse(document.value.audit_findings);
   let attemptIndex = 0;
   try { attemptIndex = readStageStatus(projectDir, runId, stageId).attempts?.at(-1)?.index ?? 0; } catch { /* legacy verdict without stage status: no confirmed finding */ }
-  let brief = ''; try { brief = readFileSync(join(base, 'task_brief.md'), 'utf8'); } catch { /* legacy */ }
+  let brief = ''; try { brief = readFileSync(runRecordPath(base, 'task_brief.md'), 'utf8'); } catch { /* legacy */ }
   const treeHash = captureProjectTree(projectDir, brief).hash;
   const findings = assessFindings(parsed.success ? parsed.data.findings : [], ledger, { stageId, attemptIndex, treeHash });
   const regressions = currentValidationRegressions(projectDir, runId);
@@ -124,7 +125,7 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   const { findings: _findings, validation: _validation, ...authored } = verdict;
   // Rejections survive review-depth changes. Effective acceptance binds a
   // closure to its reviewed tree, so later independent work cannot reopen it.
-  const state = verdict.pass && existsSync(join(base, 'run.json')) ? readRunState(projectDir, runId) : undefined;
+  const state = verdict.pass && existsSync(runRecordPath(base, 'run.json')) ? readRunState(projectDir, runId) : undefined;
   const gateIds = [stageId, ...(state?.planControl?.stages ?? []).flatMap(stage => stage.retry_to?.includes(stageId) ? stage.retry_to : [])];
   const required = verdict.pass ? confirmedRepairFindings(base, [...new Set(gateIds)]) : [];
   const accepted = ledger.filter(entry => entry.kind === 'attempt' && gateIds.includes(entry.stageId)
@@ -162,12 +163,12 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
     const { repairability: _repairability, ...accepted } = raw;
     v = { ...accepted, pass: true };
   }
-  const accepted = raw.repairability !== undefined && runId && existsSync(join(base, 'run.json')) ? readRunState(projectDir, runId).stages[stageId] : undefined;
+  const accepted = raw.repairability !== undefined && runId && existsSync(runRecordPath(base, 'run.json')) ? readRunState(projectDir, runId).stages[stageId] : undefined;
   if (document?.value.repairability && accepted && (!runId || validateSettledGateVerdict(base, runId, stageId, accepted.attempts?.at(-1), document.digest))) {
     return { pass: false, refusal: { kind: 'repairability' }, reason: 'Gate contract violation: repairability requires the unchanged canonical verdict and protected receipt of the current settled completed gate execution; rerun the gate' };
   }
 
-  if (runId && v.pass === true && existsSync(join(base, 'run.json'))) {
+  if (runId && v.pass === true && existsSync(runRecordPath(base, 'run.json'))) {
     const state = readRunState(projectDir, runId);
     const outputs = declaredOutputFacts(projectDir, runId, state);
     const stages = state.planControl?.stages ?? [];
@@ -252,7 +253,7 @@ export function deriveCriterionDischarges(input: {
 }): CriterionDischargeRecord[] {
   let admission: DispatchAdmissionReport;
   try {
-    admission = JSON.parse(readFileSync(join(input.runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+    admission = JSON.parse(readFileSync(runRecordPath(input.runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
   } catch {
     return [];
   }
@@ -273,7 +274,7 @@ export function deriveCriterionDischarges(input: {
     let verdictBytes: Buffer;
     let verdict: Record<string, unknown>;
     try {
-      verdictBytes = readFileSync(join(input.runDirPath, immutable.verdictPath));
+      verdictBytes = readFileSync(runRecordPath(input.runDirPath, immutable.verdictPath));
       verdict = JSON.parse(verdictBytes.toString('utf-8')) as Record<string, unknown>;
     } catch {
       continue;

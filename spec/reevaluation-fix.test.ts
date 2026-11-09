@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { emptyArtifactContract, gateArtifactContract, planArtifactContract } from './spec_presentation/declared-fixtures.js';
@@ -74,7 +75,7 @@ describe('repair-stage retry ledger reevaluation', () => {
   it('retains a budget-limited fix before its next bounded iteration', async () => {
     const { config, yaml } = dynamicWorkflow();
     const created = createRun(projectDir, config.name, yaml, ['plan']);
-    writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
@@ -87,7 +88,7 @@ describe('repair-stage retry ledger reevaluation', () => {
           return fixtureResult({ output: '## What was done\n- verified repair retry ledger', exitCode: 0, duration_ms: 1 }, opts);
         }
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: release_gate',
             '    role: qa',
@@ -109,7 +110,7 @@ describe('repair-stage retry ledger reevaluation', () => {
         }
         if (opts.stageId === 'release_gate') {
           gateCalls++;
-          writeFileSync(join(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({
             pass: gateCalls > 1,
             reason: gateCalls > 1 ? 'fixed' : 'repair required',
           }));

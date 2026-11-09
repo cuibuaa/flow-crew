@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { inputFile } from './spec_contracts/declared-fixtures.js';
@@ -292,12 +293,12 @@ describe('store integration', () => {
     expect(existsSync(stageEnvironment.scratch)).toBe(true);
 
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'),
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'),
       `## Reality checks\n\`\`\`yaml\n${JSON.stringify({ checks: [{ name: 'scratch', type: 'exec-script-exit-zero', reads: [], params: { script } }] })}\n\`\`\`\n`);
     const state = readRunState(projectDir, created.runId);
     state.status = 'complete';
     const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
     const evidence = gateReport.results[0].evidence as { stdout: string; exit: { code: number } };
     expect(evidence.exit.code, gateReport.results[0].details).toBe(exitCode);
     expect(gate.status).toBe(exitCode === 0 ? 'complete' : 'reality_gate_failed');
@@ -327,7 +328,7 @@ describe('store integration', () => {
   it('records a real command-not-found exit 127 as advisory and allows the terminal verdict', async () => {
     const missingCommand = 'flowcrew_e3_tool_that_does_not_exist';
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: unavailable-tool',
@@ -340,7 +341,7 @@ describe('store integration', () => {
     state.status = 'complete';
 
     const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
 
     expect(gate.status).toBe('complete');
     expect(gateReport.pass).toBe(true);
@@ -355,7 +356,7 @@ describe('store integration', () => {
       }),
     }));
     const persisted = JSON.parse(readFileSync(
-      join(runDir(projectDir, created.runId), '.reality-gate.json'),
+      runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'),
       'utf-8',
     )) as { pass: boolean; results: Array<{ name: string; advisory?: boolean; details: string }> };
     expect(persisted.pass).toBe(true);
@@ -372,7 +373,7 @@ describe('store integration', () => {
 
   it('keeps an ordinary exit 1 as a hard failure that blocks the terminal verdict', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: genuine-failure',
@@ -385,7 +386,7 @@ describe('store integration', () => {
     state.status = 'complete';
 
     const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
 
     expect(gate.status).toBe('reality_gate_failed');
     expect(gateReport.results).toContainEqual(expect.objectContaining({
@@ -398,7 +399,7 @@ describe('store integration', () => {
 
   it('persists executor-owned diagnostics when a failing script deletes its only logs', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: deleted-log-failure',
@@ -430,7 +431,7 @@ describe('store integration', () => {
 
   it('persists a named hard-failure reason and structured diagnostics in run.json', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: required-build-proof',
@@ -465,7 +466,7 @@ describe('store integration', () => {
 
   it('stores bounded ANSI-free stdout and stderr tails for a failed check', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: noisy-check',
@@ -503,7 +504,7 @@ describe('store integration', () => {
 
   it('keeps a bare exit 127 without command-not-found evidence as a hard failure', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: unexplained-127',
@@ -516,7 +517,7 @@ describe('store integration', () => {
     state.status = 'complete';
 
     const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
 
     expect(gate.status).toBe('reality_gate_failed');
     expect(gateReport.results[0]).toMatchObject({
@@ -529,7 +530,7 @@ describe('store integration', () => {
 
   it('attaches advisory failure evidence without blocking the terminal state', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: optional-environment-check',
@@ -543,7 +544,7 @@ describe('store integration', () => {
     state.status = 'complete';
 
     const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
     const persisted = readRunState(projectDir, created.runId);
 
     expect(gate.status).toBe('complete');
@@ -553,7 +554,7 @@ describe('store integration', () => {
     expect(gateReport.results).toContainEqual(expect.objectContaining({
       name: 'optional-environment-check', pass: false, advisory: true,
     }));
-    const report = JSON.parse(readFileSync(join(runDir(projectDir, created.runId), '.reality-gate.json'), 'utf8'));
+    const report = JSON.parse(readFileSync(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'), 'utf8'));
     expect(report.pass).toBe(true);
     expect(report.results).toContainEqual(expect.objectContaining({ name: 'optional-environment-check', advisory: true }));
     expect(readRunEvents(projectDir, created.runId)).toContainEqual(expect.objectContaining({
@@ -578,7 +579,7 @@ describe('store integration', () => {
 
   it('still blocks when a hard failure appears alongside an advisory failure', async () => {
     const created = createRun(projectDir, 'test', 'name: test', []);
-    writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), [
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), [
       '## Reality checks',
       'checks:',
       '  - name: optional-wording',
@@ -595,7 +596,7 @@ describe('store integration', () => {
     state.status = 'complete';
 
     const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
 
     expect(gate.status).toBe('reality_gate_failed');
     expect(gateReport.pass).toBe(false);
@@ -605,17 +606,17 @@ describe('store integration', () => {
   it.each([false, true])('settles a terminal transition from brief-authored checks passing=%s', async present => {
     const created = createRun(projectDir, 'test', 'name: test', []);
     if (present) write('artifact.txt', 'x');
-    writeFileSync(join(runDir(projectDir, created.runId), 'task_brief.md'), [
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'task_brief.md'), [
       '## Reality checks', 'checks:', '  - name: artifact', '    type: file-exists-nonempty',
       '    reads: [{id: file_0, root: project, path: artifact.txt, source: {kind: input}}]',
       '    params: { paths: [artifact.txt] }',
     ].join('\n'), 'utf8');
     const state = readRunState(projectDir, created.runId); state.status = 'complete';
     const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
     expect(gate.status).toBe(present ? 'complete' : 'reality_gate_failed');
     expect(gateReport.pass).toBe(present);
-    expect(existsSync(join(runDir(projectDir, created.runId), '.reality-gate.json'))).toBe(true);
+    expect(existsSync(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'))).toBe(true);
     if (!present) expect(readRunState(projectDir, created.runId).status).toBe('reality_gate_failed');
   });
 });

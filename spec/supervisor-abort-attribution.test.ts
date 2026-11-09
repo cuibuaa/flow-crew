@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,9 +19,9 @@ beforeEach(() => {
   projectDir = mkdtempSync(join(tmpdir(), 'fc-abort-test-proj-'));
   stageId = 'unit_test_stage';
   ({ runId, runDirPath: runDir } = createRun(projectDir, 'abort', 'name: abort\nstages: []', [stageId]));
-  mkdirSync(join(runDir, 'stages', stageId), { recursive: true });
-  mkdirSync(join(runDir, 'signals'), { recursive: true });
-  writeFileSync(join(runDir, 'task_brief.md'), '# Test task\n');
+  mkdirSync(runRecordPath(runDir, 'stages', stageId), { recursive: true });
+  mkdirSync(runRecordPath(runDir, 'signals'), { recursive: true });
+  writeFileSync(runRecordPath(runDir, 'task_brief.md'), '# Test task\n');
 });
 
 afterEach(() => {
@@ -69,7 +70,7 @@ describe('worker.ts abort attribution (Layer 2 fix)', () => {
   it('attributes an watchdog signal distinctly from wall-clock timeout', async () => {
     const adapter = makeAdapter('abort-on-signal');
     // Replay an archived signal so the owned cancellation poller fires.
-    const sigPath = join(runDir, 'signals', `abort_${stageId}.json`);
+    const sigPath = runRecordPath(runDir, 'signals', `abort_${stageId}.json`);
     atomicWrite(sigPath, JSON.stringify({
       version: 1,
       stageId,
@@ -91,7 +92,7 @@ describe('worker.ts abort attribution (Layer 2 fix)', () => {
       retries: 0,
     });
     expect(result.exitCode).toBe(137);
-    const status = JSON.parse(readFileSync(join(runDir, 'stages', stageId, 'status.json'), 'utf-8'));
+    const status = JSON.parse(readFileSync(runRecordPath(runDir, 'stages', stageId, 'status.json'), 'utf-8'));
     expect(status.status).toBe('failed');
     expect(status.error).toMatch(/^aborted by engine/);
     expect(status.error).toContain('idle past threshold');
@@ -113,7 +114,7 @@ describe('worker.ts abort attribution (Layer 2 fix)', () => {
       runDir,
       retries: 0,
     });
-    const status = JSON.parse(readFileSync(join(runDir, 'stages', stageId, 'status.json'), 'utf-8'));
+    const status = JSON.parse(readFileSync(runRecordPath(runDir, 'stages', stageId, 'status.json'), 'utf-8'));
     expect(status.error).toBeUndefined();
     expect(status.status).toBe('complete');
     expect(status.attempts.at(-1).terminationCause).toBe('exit');
@@ -124,7 +125,7 @@ describe('worker.ts abort attribution (Layer 2 fix)', () => {
 describe('worker.ts stale abort-signal cleanup (Layer 3 fix)', () => {
   it('deletes a leftover abort signal at start so retry does not self-abort', async () => {
     // Simulate the state at retry: a leftover signal from attempt #1.
-    const sigPath = join(runDir, 'signals', `abort_${stageId}.json`);
+    const sigPath = runRecordPath(runDir, 'signals', `abort_${stageId}.json`);
     atomicWrite(sigPath, JSON.stringify({ reason: 'stale from previous attempt' }));
     expect(existsSync(sigPath)).toBe(true);
 
@@ -145,7 +146,7 @@ describe('worker.ts stale abort-signal cleanup (Layer 3 fix)', () => {
     // The stale signal should have been cleared at start; attempt completes normally.
     expect(result.exitCode).toBe(0);
     expect(existsSync(sigPath)).toBe(false);
-    const status = JSON.parse(readFileSync(join(runDir, 'stages', stageId, 'status.json'), 'utf-8'));
+    const status = JSON.parse(readFileSync(runRecordPath(runDir, 'stages', stageId, 'status.json'), 'utf-8'));
     expect(status.status).toBe('complete');
     expect(status.error).toBeUndefined();
   });

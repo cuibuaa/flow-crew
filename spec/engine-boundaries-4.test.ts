@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,12 +39,14 @@ describe('engine boundaries from recorded runs', () => {
           'if (round.result !== result.result || evidence.result !== result.result || !evidence.primary || !evidence.confirmation) process.exit(1);',
         ].join('\n'));
         const state = {
-          runId, status: 'running', startedAt: new Date(Date.now() - 2_000).toISOString(), stages: {},
+          storageLayout: 2, runId, status: 'running', startedAt: new Date(Date.now() - 2_000).toISOString(), stages: {},
           research: { baseline: 0, policy: 'greedy_stack', higherIsBetter: true,
             resultFile: resultRel, reportDir: 'research',
             stop: { beat: 0.1, maxRounds: 1, haltAfterNoImprovement: 1 },
             confirm: { command: `node confirm.cjs ${resultRel}`, requires: 'result and evidence match', timeoutSeconds: 10 } },
         } as StoreState;
+        writeFileSync(join(runDirPath, 'run.json'), JSON.stringify(state));
+        mkdirSync(join(runDirPath, 'engine'), { recursive: true });
         const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
         beginResearchInputGeneration(projectDir, state);
         writeFileSync(join(projectDir, resultRel), JSON.stringify(caseName === 'confirmed'
@@ -53,9 +56,9 @@ describe('engine boundaries from recorded runs', () => {
         const terminal = await tryAdvanceResearch(state, {
           projectDir, runId, runDirPath, iteration: 1, adapter: new ScriptedAdapter({}),
         });
-        const confirmation = JSON.parse(readFileSync(join(runDirPath, 'research_confirm.json'), 'utf8'));
+        const confirmation = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_confirm.json'), 'utf8'));
         const manifest = JSON.parse(readFileSync(join(projectDir, 'research/run_manifest.json'), 'utf8'));
-        const consumed = JSON.parse(readFileSync(join(runDirPath, 'research_round_1_consumed.json'), 'utf8'));
+        const consumed = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_round_1_consumed.json'), 'utf8'));
         expect(terminal?.status, JSON.stringify(confirmation)).toBe(expected);
         expect(confirmation.pass).toBe(caseName === 'confirmed');
         expect(manifest.rounds[0].evidence).toBe(evidencePath);
@@ -87,7 +90,7 @@ describe('engine boundaries from recorded runs', () => {
       const baseline = await runProjectValidationBaseline(projectDir, {
         commands: [command], runCommand: () => ({ exitCode: 0, stdout: '1 passed', durationMs: 1 }),
       });
-      writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline }));
+      writeFileSync(runRecordPath(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline }));
       const readable = await runProjectValidationBaseline(projectDir, { commands: [command] });
       expect(readable?.results.every(result => result.state === 'passed' || result.state === 'not_configured'), JSON.stringify(readable)).toBe(true);
       expect(readable?.results.find((entry) => entry.role === 'test')).toMatchObject({ state: 'passed', exitCode: 0 });

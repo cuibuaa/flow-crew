@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -367,10 +368,10 @@ describe('ship-setup fail-closed worktree transaction', () => {
     expect(git).toHaveBeenCalledTimes(inPlace ? 0 : 1);
     expect(existsSync(path)).toBe(false);
     const run = createRun(target, 'external-output', 'name: fixture\nstages: []\n', ['work']);
-    writeFileSync(join(run.runDirPath, 'task_brief.md'), readFileSync(fixture.brief));
+    writeFileSync(runRecordPath(run.runDirPath, 'task_brief.md'), readFileSync(fixture.brief));
     const input = { projectDir: target, runDir: run.runDirPath, stageId: 'work',
       artifactContract: { version: 1 as const, produces: [], reads: [], groups: [] } };
-    const action = vi.fn(async () => execWithStdin(process.execPath, ['-e', `const fs=require('node:fs');fs.mkdirSync(${JSON.stringify(path)},{recursive:true});fs.writeFileSync(${JSON.stringify(join(path, 'result.txt'))},'result');`], '', { cwd: target, timeout_ms: 5000 }));
+    const action = vi.fn(async () => execWithStdin(process.execPath, ['-e', `const fs=require('node:fs');fs.mkdirSync(${JSON.stringify(path)},{recursive:true});fs.writeFileSync(${JSON.stringify(runRecordPath(path, 'result.txt'))},'result');`], '', { cwd: target, timeout_ms: 5000 }));
     if (inPlace) {
       await expect(withEngineIntegrity(input, action)).rejects.toThrow('overlaps project');
       expect(action).not.toHaveBeenCalled();
@@ -379,7 +380,7 @@ describe('ship-setup fail-closed worktree transaction', () => {
       expect(report.targetOutputInventory?.blocking).toHaveLength(0);
       const result = await withEngineIntegrity(input, action);
       expect(result.exitCode, result.output).toBe(0);
-      expect(readFileSync(join(path, 'result.txt'), 'utf8')).toBe('result');
+      expect(readFileSync(runRecordPath(path, 'result.txt'), 'utf8')).toBe('result');
     }
   });
 

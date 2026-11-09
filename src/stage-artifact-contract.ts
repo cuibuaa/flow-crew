@@ -1,7 +1,8 @@
+import { runRecordPath } from './run-layout.js';
 import { writeFileSync } from './engine-fs.js';
 
 import { createHash } from 'node:crypto';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { ArtifactContractSchema, artifactActivation, artifactDeclarationErrors, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
 import type { StageStatus } from './store.js';
 import { readContentIdentity } from './content-identity.js';
@@ -85,7 +86,7 @@ export function inspectStageArtifactContract(input: StageArtifactContractInput, 
     version: 1, stageId: input.stageId, checkedAt: new Date().toISOString(),
     obligations: [], producedPromptArtifacts: [], violations: errors.map(reason => ({
       kind: 'declared_artifact', source: 'declaration', mention: `${input.stageId}.artifact_contract`,
-      path: join(input.runDir, 'stages', input.stageId, 'artifact_contract.json'), reason,
+      path: runRecordPath(input.runDir, 'stages', input.stageId, 'artifact_contract.json'), reason,
     })),
   };
   const contract = ArtifactContractSchema.parse(input.artifactContract);
@@ -117,14 +118,14 @@ export function inspectStageArtifactContract(input: StageArtifactContractInput, 
       if (reason && (!grouped.has(artifact.id) || existsSync(path))) violations.push({ ...obligation, reason });
     }
     if (artifact.kind !== 'file' || input.isGate !== true || artifact.root !== 'run'
-        || artifact.path !== `verdict_${input.stageId}.json`) continue;
+        || artifact.path !== `work/verdict_${input.stageId}.json`) continue;
     const identity = readContentIdentity(path);
     if (identity.state === 'present' && identity.type === 'file') observations.push({
       id: artifact.id, path, kind: artifact.kind, bytes: identity.byteLength, sha256: identity.sha256,
       // Retained record field: only a published current gate verdict is an
       // adjudication, rather than a reusable intermediate output.
       fresh: input.isGate === true && artifact.root === 'run'
-        && artifact.path === `verdict_${input.stageId}.json`
+        && artifact.path === `work/verdict_${input.stageId}.json`
         && ((input.writes ?? []).includes(path) || (input.writes ?? []).includes(`run:${artifact.path}`)),
     });
   }
@@ -132,7 +133,7 @@ export function inspectStageArtifactContract(input: StageArtifactContractInput, 
     const count = group.members.filter(id => present.has(id)).length;
     if (count !== 1) violations.push({
       kind: 'declared_artifact', source: 'declaration', mention: group.id,
-      path: join(input.runDir, 'stages', input.stageId, 'artifact_contract.json'),
+      path: runRecordPath(input.runDir, 'stages', input.stageId, 'artifact_contract.json'),
       reason: `ARTIFACT_OUTPUT_GROUP: ${group.id} requires exactly one of ${group.members.join(', ')}; observed ${count}`,
     });
   }
@@ -145,7 +146,7 @@ export function inspectStageArtifactContract(input: StageArtifactContractInput, 
 }
 
 export function writeStageArtifactContractAudit(runDir: string, audit: StageArtifactContractAudit): string {
-  const path = join(runDir, 'stages', audit.stageId, 'artifact_contract.json');
+  const path = runRecordPath(runDir, 'stages', audit.stageId, 'artifact_contract.json');
   writeFileSync(path, `${JSON.stringify(audit)}\n`, 'utf-8');
   return path;
 }

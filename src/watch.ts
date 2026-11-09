@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { projectValidationResult } from './project-validation.js';
 import { inspectRunScheduler } from './run-lock.js';
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
@@ -409,7 +410,7 @@ function collectGateVerdicts(
   deps: ResolvedWatchPollDependencies,
   diagnostics: MutableDiagnostics,
 ): GateVerdictRecord[] {
-  const archiveRoot = join(runDir, 'gate_reevaluation');
+  const archiveRoot = runRecordPath(runDir, 'gate_reevaluation');
   let topLevel: readonly string[];
   try {
     topLevel = deps.readDirectory(archiveRoot);
@@ -564,14 +565,14 @@ function terminalActivityClock(
     return { reason: 'unreadable' };
   }
   if (!runMetadata || runMetadata.kind !== 'directory') return { reason: 'malformed' };
-  const runStateProblem = includeFile(join(runDir, 'run.json'), true);
+  const runStateProblem = includeFile(runRecordPath(runDir, 'run.json'), true);
   if (runStateProblem) return { reason: runStateProblem };
   for (const name of TOP_LEVEL_ACTIVITY_FILES) {
-    const problem = includeFile(join(runDir, name), false);
+    const problem = includeFile(runRecordPath(runDir, name), false);
     if (problem) return { reason: problem };
   }
 
-  const stagesRoot = join(runDir, 'stages');
+  const stagesRoot = runRecordPath(runDir, 'stages');
   let stagesMetadata: WatchPathMetadata | undefined;
   try {
     stagesMetadata = deps.readPathMetadata(stagesRoot);
@@ -744,7 +745,7 @@ export function pollWatch(
     const runDir = join(deps.runsRoot, runId);
     let state: JsonObject | undefined;
     try {
-      state = parseObject(deps.readText(join(runDir, 'run.json')));
+      state = parseObject(deps.readText(runRecordPath(runDir, 'run.json')));
     } catch {
       state = undefined;
     }
@@ -797,7 +798,7 @@ export function pollWatch(
 
     let pid: number | undefined;
     try {
-      pid = parsePositiveInteger(deps.readText(join(runDir, 'scheduler.pid')));
+      pid = parsePositiveInteger(deps.readText(runRecordPath(runDir, 'scheduler.pid')));
     } catch {
       pid = undefined;
     }

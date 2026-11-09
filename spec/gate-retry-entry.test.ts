@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { readStageInput } from '../src/store.js';
 import { readInvocationInput } from '../src/run-state-view.js';
@@ -172,7 +173,7 @@ async function runScenario(options: ScenarioOptions): Promise<{
       }
       if (opts.stageId === 'plan') {
         writeFileSync(
-          join(opts.runDir, 'fixture_dispatch.yaml'),
+          stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'),
           declaredDispatch(dispatchYaml(
             options.includeUnrelatedRejectedGate,
             options.terminalArtifactOnPass,
@@ -188,10 +189,10 @@ async function runScenario(options: ScenarioOptions): Promise<{
         const verdict = scoredVerdict(pass, pass ? 'accepted' : 'explicit rejection');
         if (options.gateCriteria) verdict.criteria = options.gateCriteria;
         writeFileSync(
-          join(opts.runDir, `fixture_verdict_${GATE_ID}.json`),
+          stageWorkPath(opts.runDir, `fixture_verdict_${GATE_ID}.json`),
           JSON.stringify(verdict, null, 2) + '\n',
         );
-        const metricPath = join(opts.runDir, 'stages', GATE_ID, 'metric.json');
+        const metricPath = stageWorkPath(opts.runDir, 'stages', GATE_ID, 'metric.json');
         writeFileSync(metricPath, JSON.stringify(metricArtifact(options.legacyMetricPass ?? pass), null, 2) + '\n');
         return fixtureResult({ output: `gate ${gateCalls}: ${pass}`, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
@@ -227,14 +228,14 @@ async function runScenario(options: ScenarioOptions): Promise<{
       }
       if (opts.stageId === UNRELATED_GATE_ID) {
         writeFileSync(
-          join(opts.runDir, `fixture_verdict_${UNRELATED_GATE_ID}.json`),
+          stageWorkPath(opts.runDir, `fixture_verdict_${UNRELATED_GATE_ID}.json`),
           JSON.stringify(scoredVerdict(false, 'unrelated rejection'), null, 2) + '\n',
         );
         return fixtureResult({ output: 'unrelated gate: false', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
       }
       if (opts.stageId === REPAIR_ID) {
         repairCalls++;
-        const archived = join(
+        const archived = runRecordPath(
           opts.runDir,
           'gate_reevaluation',
           'iteration_1',
@@ -307,7 +308,7 @@ describe('gate retry loop entry', () => {
     });
     const events = readRunEvents(projectDir, result.final.runId);
     const exhausted = JSON.parse(readFileSync(
-      join(result.runDirPath, 'research_gate_exhausted.json'),
+      runRecordPath(result.runDirPath, 'research_gate_exhausted.json'),
       'utf-8',
     )) as { criteria: string[] };
 
@@ -344,11 +345,11 @@ describe('gate retry loop entry', () => {
     });
     const events = readRunEvents(projectDir, result.final.runId);
     const decision = JSON.parse(readFileSync(
-      join(result.runDirPath, 'research_decision.json'),
+      runRecordPath(result.runDirPath, 'research_decision.json'),
       'utf-8',
     )) as { failingCriteria: string[] };
     const ready = JSON.parse(readFileSync(
-      join(result.runDirPath, 'signals', 'research_terminal_ready.json'),
+      runRecordPath(result.runDirPath, 'signals', 'research_terminal_ready.json'),
       'utf-8',
     )) as { failingCriteria: string[] };
 
@@ -375,7 +376,7 @@ describe('gate retry loop entry', () => {
     const attempt = finalizer.attempts?.at(-1);
     expect(attempt?.status).toBe('complete');
     expect(attempt?.constraintAudit).toBeDefined();
-    expect(readFileSync(join(result.runDirPath, attempt!.constraintAudit!.path), 'utf8')).toContain('outside.txt');
+    expect(readFileSync(runRecordPath(result.runDirPath, attempt!.constraintAudit!.path), 'utf8')).toContain('outside.txt');
   });
 
   it('treats pass=true at score=0/threshold=0 as accepted and never dispatches repair', async () => {
@@ -385,13 +386,13 @@ describe('gate retry loop entry', () => {
     expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
     expect(result.final.stages[REPAIR_ID]?.status).toBe('skipped');
-    expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({
+    expect(JSON.parse(readFileSync(runRecordPath(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({
       pass: true, metric: 'e18_quality', score: 0, threshold: 0,
     });
-    expect(JSON.parse(readFileSync(join(result.runDirPath, 'stages', GATE_ID, 'metric.json'), 'utf-8'))).toMatchObject({
+    expect(JSON.parse(readFileSync(stageWorkPath(result.runDirPath, 'stages', GATE_ID, 'metric.json'), 'utf-8'))).toMatchObject({
       pass: true, metric: 'e18_quality', value: 0, threshold: 0,
     });
-    expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
+    expect(existsSync(runRecordPath(result.runDirPath, 'gate_reevaluation'))).toBe(false);
   });
 
   it('dispatches repair for an explicit negative verdict, then stops after the re-evaluation passes', async () => {
@@ -402,10 +403,10 @@ describe('gate retry loop entry', () => {
     expect(result.repairCalls).toBe(1);
     expect(result.repairSawArchivedNegative).toBe(true);
     expect(result.final.stages[REPAIR_ID]?.status).toBe('complete');
-    expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({
+    expect(JSON.parse(readFileSync(runRecordPath(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({
       pass: true, score: 0, threshold: 0,
     });
-    expect(JSON.parse(readFileSync(join(
+    expect(JSON.parse(readFileSync(runRecordPath(
       result.runDirPath,
       'gate_reevaluation',
       'iteration_1',
@@ -419,7 +420,7 @@ describe('gate retry loop entry', () => {
     expect(archivedInput).toBe(result.gateInputs[0]);
     expect(archivedInput).not.toBe(result.gateInputs[1]);
     expect(readStageInput(projectDir, result.final.runId, GATE_ID)).toBe(result.gateInputs[1]);
-    expect(existsSync(join(
+    expect(existsSync(runRecordPath(
       result.runDirPath,
       'gate_reevaluation',
       'iteration_1',
@@ -455,7 +456,7 @@ describe('gate retry loop entry', () => {
     expect(result.final.status).toBe('complete');
     expect(result.gateCalls).toBe(1);
     expect(result.repairCalls).toBe(0);
-    expect(existsSync(join(result.runDirPath, 'gate_reevaluation'))).toBe(false);
+    expect(existsSync(runRecordPath(result.runDirPath, 'gate_reevaluation'))).toBe(false);
   });
 
   it('guards a related pass even while an unrelated gate remains rejected', async () => {
@@ -467,8 +468,8 @@ describe('gate retry loop entry', () => {
 
     expect(result.repairCalls).toBe(0);
     expect(result.gateCalls).toBe(1);
-    expect(JSON.parse(readFileSync(join(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
-    const archiveDir = join(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
+    expect(JSON.parse(readFileSync(runRecordPath(result.runDirPath, `verdict_${GATE_ID}.json`), 'utf-8'))).toMatchObject({ pass: true });
+    const archiveDir = runRecordPath(result.runDirPath, 'gate_reevaluation', 'iteration_1', 'round_1');
     expect(JSON.parse(readFileSync(
       join(archiveDir, `rejected_verdict_${UNRELATED_GATE_ID}.json`),
       'utf-8',

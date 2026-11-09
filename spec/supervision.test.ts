@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { stageLiveLogPath } from '../src/stage-live-log.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
@@ -54,8 +55,8 @@ beforeEach(() => {
   );
   currentRunId = created.runId;
   currentRunDir = created.runDirPath;
-  mkdirSync(join(currentRunDir, 'signals'), { recursive: true });
-  writeFileSync(join(currentRunDir, 'task_brief.md'), '# Deterministic E8 fixture\n');
+  mkdirSync(runRecordPath(currentRunDir, 'signals'), { recursive: true });
+  writeFileSync(runRecordPath(currentRunDir, 'task_brief.md'), '# Deterministic E8 fixture\n');
 });
 
 afterEach(() => {
@@ -116,8 +117,8 @@ function stageOptions() {
 describe('current-attempt watchdog facts', () => {
   it('observes current-attempt verdict and handoff without treating them as progress', () => {
     markRunningAttempt();
-    writeFileSync(join(currentRunDir, `verdict_${stageId}.json`), '{"pass":false}\n');
-    writeFileSync(join(currentRunDir, `handoff_${stageId}.md`), '## Delivered\nchecked\n');
+    writeFileSync(runRecordPath(currentRunDir, `verdict_${stageId}.json`), '{"pass":false}\n');
+    writeFileSync(runRecordPath(currentRunDir, `handoff_${stageId}.md`), '## Delivered\nchecked\n');
     const status = readRunState(projectDir, currentRunId).stages[stageId];
 
     const facts = inspectStageExecutionFacts({
@@ -136,7 +137,7 @@ describe('current-attempt watchdog facts', () => {
   });
 
   it('does not treat an earlier attempt output as a new finalization window', () => {
-    const outputPath = join(currentRunDir, 'stages', stageId, 'output.md');
+    const outputPath = runRecordPath(currentRunDir, 'stages', stageId, 'output.md');
     writeFileSync(outputPath, 'old attempt output\n');
     const oldTime = new Date(Date.now() - 120_000);
     utimesSync(outputPath, oldTime, oldTime);
@@ -166,7 +167,7 @@ describe('current-attempt watchdog facts', () => {
 describe('attempt-scoped one-shot abort signals', () => {
   it('consumes a matching signal once so the next same-name attempt runs normally', async () => {
     vi.useFakeTimers();
-    const signalPath = join(currentRunDir, 'signals', `abort_${stageId}.json`);
+    const signalPath = runRecordPath(currentRunDir, 'signals', `abort_${stageId}.json`);
     atomicWrite(signalPath, JSON.stringify({
       version: 1,
       stageId,
@@ -200,7 +201,7 @@ describe('attempt-scoped one-shot abort signals', () => {
       duration_ms: 1,
       completedAt: '2026-08-01T00:00:01.000Z',
     });
-    const signalPath = join(currentRunDir, 'signals', `abort_${stageId}.json`);
+    const signalPath = runRecordPath(currentRunDir, 'signals', `abort_${stageId}.json`);
     atomicWrite(signalPath, JSON.stringify({
       version: 1,
       stageId,
@@ -223,7 +224,7 @@ describe('attempt-scoped one-shot abort signals', () => {
   });
 
   it('keeps an owned watchdog signal authoritative when the adapter throws before the next poll', async () => {
-    const signalPath = join(currentRunDir, 'signals', `abort_${stageId}.json`);
+    const signalPath = runRecordPath(currentRunDir, 'signals', `abort_${stageId}.json`);
     const adapter: Adapter = {
       run: async () => {
         atomicWrite(signalPath, JSON.stringify({

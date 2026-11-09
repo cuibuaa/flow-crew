@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -127,7 +128,7 @@ it.each(['claude', 'codex'] as const)('foreground %s quick completes locally wit
   expect(tasks).toHaveLength(1);
   const task = tasks[0];
   expect(task).toMatchObject({ status: 'done', foregroundOwner: { pid: child.pid }, launcher: { frontend, sessionId: 'own-session' } });
-  const run = JSON.parse(readFileSync(join(engine, 'runs', task.run_id!, 'run.json'), 'utf8'));
+  const run = JSON.parse(readFileSync(runRecordPath(join(engine, 'runs', task.run_id!), 'run.json'), 'utf8'));
   expect(run).toMatchObject({ status: 'complete', engineCheckpoint: { pid: child.pid } });
   const entries = publicTaskEntries(readTaskLedger(ledger, 'own-session'));
   expect(entries).toHaveLength(1);

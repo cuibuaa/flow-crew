@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -34,7 +35,7 @@ it('exports and queries immutable stage inputs without an input.md copy', () => 
     cwd: project, encoding: 'utf8', timeout: 10_000,
     env: { ...process.env, HOME: project, FC_HOME: fcGlobalDir() },
   });
-  expect(existsSync(join(runDirPath, 'stages', 'writer', 'input.md'))).toBe(false);
+  expect(existsSync(runRecordPath(runDirPath, 'stages', 'writer', 'input.md'))).toBe(false);
 
   const exported = invoke(['export', runId]);
   expect(exported.error).toBeUndefined();
@@ -50,5 +51,5 @@ it('exports and queries immutable stage inputs without an input.md copy', () => 
   expect(state.prompts.invocations.map(({ record }) => record?.userPrompt)).toEqual(prompts);
   expect(state.prompts.invocations.every(({ integrity, attemptBinding }) => integrity === 'verified' && attemptBinding === 'matched')).toBe(true);
   expect(state.prompts.legacyInputs).toEqual([]);
-  expect(existsSync(join(runDirPath, 'stages', 'writer', 'input.md'))).toBe(false);
+  expect(existsSync(runRecordPath(runDirPath, 'stages', 'writer', 'input.md'))).toBe(false);
 });

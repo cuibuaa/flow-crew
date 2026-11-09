@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
@@ -48,7 +49,7 @@ function commit() {
 }
 function create(brief = 'Complete the required project work.', stages = [stage()]) {
   ({ runId, runDirPath: directory } = createRun(project, 'write-contract', 'name: fixture\nstages: []\n', stages.map(s => s.id)));
-  writeFileSync(join(directory, 'task_brief.md'), brief);
+  writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
   return stages;
 }
 async function execute(work: (opts: RunOpts) => Promise<string[]> | string[], stages = [stage()]) {
@@ -65,7 +66,7 @@ async function execute(work: (opts: RunOpts) => Promise<string[]> | string[], st
      artifactContract: fixtureArtifactContract(s.id), settlementBoundary,
   }));
   return { calls, aborts, status: readStageStatus(project, runId, stages[0].id),
-    audits: stages.map(s => JSON.parse(readFileSync(join(directory, `stages/${s.id}/constraint_audit_attempt_1.json`), 'utf8'))) };
+    audits: stages.map(s => JSON.parse(readFileSync(runRecordPath(directory, `stages/${s.id}/constraint_audit_attempt_1.json`), 'utf8'))) };
 }
 function accepted(result: Awaited<ReturnType<typeof execute>>, expectedCalls = 1) {
   expect(result.status.status, result.status.error).toBe('complete');
@@ -273,7 +274,7 @@ describe('the surviving project guarantees', () => {
     expect(result.status.status).toBe('failed'); expect(result.audits[0].rollbackFailures).toEqual([]);
     expect(readFileSync(join(project, 'evidence.bin'))).toEqual(bytes);
     const retained = result.audits[0].retainedReplacements['evidence.bin'];
-    expect(retained).toContain(join(directory, 'rollback-retained'));
+    expect(retained).toContain(runRecordPath(directory, 'rollback-retained'));
     expect(existsSync(join(retained, 'nested/child'))).toBe(true);
     expect(readFileSync(join(retained, 'nested/child'), 'utf8')).toBe('replacement child');
     expect(readlinkSync(join(retained, 'link'))).toBe(join(root, 'outside.txt'));
@@ -475,7 +476,7 @@ it('keeps ordinary wave snapshots and settled writes as identities without rollb
   write('notes.md', 'operator notes\n');
   const stages = create('---\noutputs: [out.md]\n---\nDo work.', [stage('author', ['src'])]);
   const snapshot = captureRepairRoundSnapshot(project, stages, { runDirPath: directory });
-  expect(readdirSync(join(directory, '.rollback-preimages'))).toEqual([]);
+  expect(readdirSync(runRecordPath(directory, '.rollback-preimages'))).toEqual([]);
   for (const image of snapshot.files.values()) {
     expect(image.text).toBeUndefined(); expect(image.bytes).toBeUndefined(); expect(image.backingPath).toBeUndefined();
   }
@@ -484,7 +485,7 @@ it('keeps ordinary wave snapshots and settled writes as identities without rollb
     rawWrites: ['src/new_output.py'], definiteWrites: new Set(['src/new_output.py']) });
   expect(settled).toMatchObject({ appliedWrites: ['src/new_output.py'], durableWrites: ['src/new_output.py'],
     rolledBackWrites: [], rollbackFailures: [], violations: [] });
-  expect(readdirSync(join(directory, '.rollback-preimages'))).toEqual([]);
+  expect(readdirSync(runRecordPath(directory, '.rollback-preimages'))).toEqual([]);
 });
 
 it('restores the original task-frozen bytes at two successive settlements', () => {

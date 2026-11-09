@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { atomicWrite } from '../src/engine-fs.js';
@@ -89,7 +90,7 @@ function dynamicWorkflow(name: string): { config: WorkflowConfig; yaml: string }
 
 function prepareRun(config: WorkflowConfig, yaml: string) {
   const created = createRun(projectDir, config.name, yaml, ['plan']);
-  writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
+  writeFileSync(runRecordPath(created.runDirPath, 'scheduler.pid'), String(process.pid));
   const state = readRunState(projectDir, created.runId);
   state.autoApprove = true;
   writeRunState(projectDir, created.runId, state);
@@ -99,7 +100,7 @@ function prepareRun(config: WorkflowConfig, yaml: string) {
 describe('current-attempt truth', () => {
   it('keeps the running second attempt identical in stage status, run.json, and the run API', async () => {
     const created = createRun(projectDir, 'p6-attempt-truth', 'name: p6-attempt-truth', ['work']);
-    writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(created.runDirPath, 'scheduler.pid'), String(process.pid));
     const firstStartedAt = '2026-08-02T18:00:00.000Z';
     const secondStartedAt = '2026-08-02T19:30:00.000Z';
     beginStageAttempt(projectDir, created.runId, 'work', 0, firstStartedAt);
@@ -284,7 +285,7 @@ describe('inbox stale truth', () => {
       const response = await app.inject({ method: 'GET', url: '/api/inbox/overview' });
       const body = response.json() as { stale: { items: Array<{ id: string; staleRunId?: string }> } };
       const observation = {
-        missingRunJson: !existsSync(join(runDir(projectDir, missingRunId), 'run.json')),
+        missingRunJson: !existsSync(runRecordPath(runDir(projectDir, missingRunId), 'run.json')),
         staleItems: body.stale.items,
       };
       console.info(`[P6_BASELINE_STALE] ${JSON.stringify(observation)}`);
@@ -333,7 +334,7 @@ describe('campaign cost honesty', () => {
       }],
     };
     const created = createRun(projectDir, config.name, yaml, ['plan']);
-    writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(created.runDirPath, 'scheduler.pid'), String(process.pid));
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
@@ -346,7 +347,7 @@ describe('campaign cost honesty', () => {
           planCalls++;
           planPrompts.push(prompt);
           const suffix = planCalls === 1 ? 'one' : 'two';
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             `  - id: work_${suffix}`,
             '    role: coder',
@@ -372,12 +373,12 @@ describe('campaign cost honesty', () => {
           return fixtureResult({ output: `plan ${planCalls}`, exitCode: 0, duration_ms: 1, tokens_in: 10, tokens_out: 1 }, opts);
         }
         if (opts.stageId === 'work_one') {
-          const signalDir = join(opts.runDir, 'signals');
+          const signalDir = runRecordPath(opts.runDir, 'signals');
           mkdirSync(signalDir, { recursive: true });
           const reason = 'recorded corpus text was mistaken for the stage direction';
           const signalTimestamp = new Date().toISOString();
           atomicWrite(join(signalDir, 'replan.json'), JSON.stringify({ reason, timestamp: signalTimestamp }));
-          atomicWrite(join(opts.runDir, 'supervisor_state.json'), JSON.stringify({ actions: [{
+          atomicWrite(runRecordPath(opts.runDir, 'supervisor_state.json'), JSON.stringify({ actions: [{
             tick: 1,
             timestamp: new Date(Date.parse(signalTimestamp) + 1).toISOString(),
             verdict: 'REPLAN',
@@ -392,12 +393,12 @@ describe('campaign cost honesty', () => {
           return fixtureResult({ output: 'first work', exitCode: 0, duration_ms: 1, tokens_in: 100, tokens_out: 10 }, opts);
         }
         if (opts.stageId === 'gate_one') {
-          writeFileSync(join(opts.runDir, 'fixture_verdict_gate_one.json'), JSON.stringify({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' }));
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_gate_one.json'), JSON.stringify({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' }));
           return fixtureResult({ output: 'first gate rejected', exitCode: 0, duration_ms: 1, tokens_in: 20, tokens_out: 2 }, opts);
         }
         if (opts.stageId === 'work_two') return fixtureResult({ output: 'second work', exitCode: 0, duration_ms: 1, tokens_in: 200, tokens_out: 20 }, opts);
         if (opts.stageId === 'gate_two') {
-          writeFileSync(join(opts.runDir, 'fixture_verdict_gate_two.json'), JSON.stringify({ pass: true, reason: 'accepted' }));
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_gate_two.json'), JSON.stringify({ pass: true, reason: 'accepted' }));
           return fixtureResult({ output: 'second gate passed', exitCode: 0, duration_ms: 1, tokens_in: 30, tokens_out: 3 }, opts);
         }
         return fixtureResult({ output: 'unexpected', exitCode: 1, duration_ms: 1 }, opts);
@@ -442,7 +443,7 @@ describe('gate-aware DAG ordering', () => {
         if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- verified ordering', exitCode: 0, duration_ms: 1 }, opts);
         if (opts.stageId === 'plan') {
           calls.push('plan');
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: design_gate',
             '    role: qa',
@@ -471,7 +472,7 @@ describe('gate-aware DAG ordering', () => {
           gateCalls++;
           const pass = gateCalls > 1;
           calls.push(`gate:${pass ? 'pass' : 'fail'}`);
-          writeFileSync(join(opts.runDir, 'fixture_verdict_design_gate.json'), JSON.stringify({ pass, reason: pass ? 'accepted' : 'design rejected' }));
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_design_gate.json'), JSON.stringify({ pass, reason: pass ? 'accepted' : 'design rejected' }));
           return fixtureResult({ output: pass ? 'accepted' : 'rejected', exitCode: 0, duration_ms: 1 }, opts);
         }
         if (opts.stageId === 'repair_design') {

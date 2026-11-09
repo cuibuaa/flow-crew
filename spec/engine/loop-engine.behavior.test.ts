@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../../src/run-layout.js';
 import '../test-support/policy-runtime.js';
 import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
 /**
@@ -41,7 +42,7 @@ function writeRoles(): string {
 function setupRun(stop: Record<string, unknown>, confirmCommand?: string): string {
   const created = createRun(projectDir, 'research', researchWorkflow.yaml, ['plan']);
   const rd = runDir(projectDir, created.runId);
-  writeFileSync(join(rd, 'scheduler.pid'), String(process.pid));
+  writeFileSync(runRecordPath(rd, 'scheduler.pid'), String(process.pid));
   const brief = [
     '---', 'research:', '  baseline: 0', '  policy: greedy_stack', '  higher_is_better: true',
     '  result_file: docs/research_round_result.json',
@@ -50,7 +51,7 @@ function setupRun(stop: Record<string, unknown>, confirmCommand?: string): strin
     ...Object.entries(stop).map(([k, v]) => `    ${k}: ${v}`),
     '---', '# Test research task',
   ].join('\n');
-  writeFileSync(join(rd, 'task_brief.md'), brief);
+  writeFileSync(runRecordPath(rd, 'task_brief.md'), brief);
   const state = readRunState(projectDir, created.runId);
   state.autoApprove = true;
   state.campaignId = 'loop-test';
@@ -67,7 +68,7 @@ function loopAdapter(results: number[]): { adapter: Adapter; rounds: () => numbe
   const adapter = {
     async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
       if (opts.stageId === 'plan') {
-        writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:', '  - id: measure', '    role: researcher', '    depends_on: [plan]',
           '    scope: [docs/research_round_result.json, docs/research_round_result.json.no_candidate.json]',
           '    dependency_reasons: {plan: "measure only after this iteration is planned"}',
@@ -142,7 +143,7 @@ describe('loop engine — research behavior (mock-driven)', () => {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           plans++;
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:', '  - id: closeout', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "audit only after this iteration is planned"}',
             '    is_gate: true', '    task: close out',
@@ -155,7 +156,7 @@ describe('loop engine — research behavior (mock-driven)', () => {
           return fixtureResult(ok('planned (no round)'), opts);
         }
         if (opts.stageId === 'closeout') {
-          writeFileSync(join(opts.runDir, 'fixture_verdict_closeout.json'), JSON.stringify({ pass: true, reason: 'looks done' }));
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_closeout.json'), JSON.stringify({ pass: true, reason: 'looks done' }));
           return fixtureResult(ok('gate passed'), opts);
         }
         return fixtureResult(ok(`noop ${opts.stageId}`), opts);

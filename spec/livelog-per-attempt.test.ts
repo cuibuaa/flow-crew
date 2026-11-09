@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -96,7 +97,7 @@ describe('native logs belong to scheduler attempts', () => {
     fakeExecutable(kind);
     const { config, yaml, agentsDir } = gateWorkflow();
     const created = createRun(project, config.name, yaml, ['plan']);
-    writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(created.runDirPath, 'scheduler.pid'), String(process.pid));
     const initial = readRunState(project, created.runId);
     initial.autoApprove = true;
     writeRunState(project, created.runId, initial);
@@ -117,7 +118,7 @@ describe('native logs belong to scheduler attempts', () => {
           if (opts.attemptIndex === 1) firstStream = readFileSync(stageLiveLogPath(opts.runDir, 'review', 1), 'utf8');
           return result;
         }
-        if (opts.stageId === 'plan') writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+        if (opts.stageId === 'plan') writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
           'stages:',
           '  - id: review', '    role: qa', '    scope: []', '    depends_on: [plan]',
           '    dependency_reasons: {plan: "review the plan"}', '    is_gate: true', '    task: verify fixture',
@@ -160,13 +161,13 @@ describe('native logs belong to scheduler attempts', () => {
     const transcript = parseStreamJsonToText(readFileSync(stageLiveLogPath(created.runDirPath, 'review'), 'utf8'));
     expect(transcript).toContain('native attempt 2');
     expect(transcript).not.toContain('native attempt 1');
-    expect(readFileSync(join(created.runDirPath, 'stages', 'review', 'output.md'), 'utf8')).toContain('native attempt 2');
-    expect(readFileSync(join(created.runDirPath, 'summary.md'), 'utf8')).toContain('native attempt 2');
+    expect(readFileSync(runRecordPath(created.runDirPath, 'stages', 'review', 'output.md'), 'utf8')).toContain('native attempt 2');
+    expect(readFileSync(runRecordPath(created.runDirPath, 'summary.md'), 'utf8')).toContain('native attempt 2');
   });
 
   it('reads legacy logs and observes only the current attempt in the watchdog', () => {
     const created = createRun(project, 'fixture', 'name: fixture', ['work']);
-    const legacy = join(created.runDirPath, 'stages', 'work', 'live.log');
+    const legacy = runRecordPath(created.runDirPath, 'stages', 'work', 'live.log');
     writeFileSync(legacy, 'legacy native result\n');
     // Materialize an old build's ledger without calling the new attempt writer.
     writeStageStatus(project, created.runId, 'work', { status: 'complete', retries: 0,
@@ -233,7 +234,7 @@ describe('native logs belong to scheduler attempts', () => {
     const current = stageLiveLogPath(created.runDirPath, 'work', 2);
     appendFileSync(current, 'current native result\n');
     completeStageAttempt(project, created.runId, 'work', 0, { exitCode: 0, duration_ms: 1 });
-    writeFileSync(join(created.runDirPath, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(created.runDirPath, 'scheduler.pid'), String(process.pid));
     const state = readRunState(project, created.runId);
     state.status = 'running';
     state.terminalStates = { complete: { paths: ['final.txt'] } };

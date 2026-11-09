@@ -34,6 +34,7 @@ beforeEach(() => {
 
 describe('codex capability executable selection', () => {
   async function identity(): Promise<string> {
+    writeFileSync(join(stageHome, 'run.json'), JSON.stringify({ storageLayout: 2 }));
     return withEngineIntegrity({ projectDir: globalHome, runDir: stageHome, stageId: 'work',
       artifactContract: { version: 1, produces: [], reads: [], groups: [] } },
     async () => resolveCodexCapabilityIdentity(role('fixture', 'low'), { cwd: globalHome }).version);

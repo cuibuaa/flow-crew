@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -12,6 +13,7 @@ import { runWorkflow, WorkflowConfigSchema } from '../src/scheduler.js';
 import { fcGlobalDir, readStageStatus, setFcGlobalDir, updateRunState } from '../src/store.js';
 import { prepareFixtureRun } from './spec_runtime/run-fixture.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { createRun } from './test-support/create-run.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 
 const stageId = 'verify_v3';
@@ -73,17 +75,17 @@ async function launch(options: { pass?: boolean; noAnswer?: boolean; correctAnsw
     calls.push(opts.stageId);
     if (opts.stageId === 'plan') {
       plannerPrompts.push(invocationRole.prompt);
-      writeFileSync(join(opts.runDir, 'dispatch.yaml'), stringify(plan));
-      return { output: delivered, exitCode: 0, duration_ms: 1, writes: ['run:dispatch.yaml'], writeAttribution: 'structured' };
+      writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), stringify(plan));
+      return { output: delivered, exitCode: 0, duration_ms: 1, writes: ['run:work/dispatch.yaml'], writeAttribution: 'structured' };
     }
     if (opts.stageId === stageId) {
       prompts.push(prompt);
-      if (options.writeOwn !== false) writeFileSync(join(opts.runDir, carrier), '{"pass":true,"reason":"stage-authored counterfeit"}');
-      if (options.otherCarrier) writeFileSync(join(opts.runDir, 'verdict_dependent.json'), '{"pass":true}');
+      if (options.writeOwn !== false) writeFileSync(stageWorkPath(opts.runDir, carrier), '{"pass":true,"reason":"stage-authored counterfeit"}');
+      if (options.otherCarrier) writeFileSync(runRecordPath(opts.runDir, 'verdict_dependent.json'), '{"pass":true}');
       return { output: options.noAnswer || options.correctAnswer && prompts.length === 1
         ? 'Review completed, but no structured final answer.' : JSON.stringify(answer, null, 2),
         exitCode: 0, duration_ms: 1, writes: [
-          ...(options.writeOwn !== false ? [`run:${carrier}`] : []),
+          ...(options.writeOwn !== false ? [`run:work/${carrier}`] : []),
           ...(options.otherCarrier ? ['run:verdict_dependent.json'] : []),
         ], writeAttribution: 'structured' };
     }
@@ -95,7 +97,7 @@ async function launch(options: { pass?: boolean; noAnswer?: boolean; correctAnsw
     stage: readStageStatus(project, created.runId, stageId), events: readRunEvents(project, created.runId) };
 }
 
-it('publishes the validated answer after a planner-instructed write to the gate own carrier, recording a warning', async () => {
+it('publishes the validated answer after a planner-instructed write to the gate own carrier, without an ownership warning', async () => {
   const result = await launch();
   expect(result.prompts[0]).toContain(legacyInstruction);
   expect(result.prompts[0]).toContain('The engine validates and publishes that answer');
@@ -105,9 +107,8 @@ it('publishes the validated answer after a planner-instructed write to the gate 
   expect(result.plannerPrompts[0]).toContain('Stage templates must not instruct stages to write verdict files or other engine-owned files');
   expect(result.stage).toMatchObject({ status: 'complete', exitCode: 0 });
   expect(result.calls).toContain('dependent');
-  expect(readFileSync(join(result.directory, carrier), 'utf8')).toBe(`${JSON.stringify(result.answer)}\n`);
-  expect(result.events).toContainEqual(expect.objectContaining({ type: 'execution_notice', level: 'warning', stageId,
-    files: [join(result.directory, carrier)], detail: expect.stringContaining('engine-published carrier') }));
+  expect(readFileSync(runRecordPath(result.directory, carrier), 'utf8')).toBe(`${JSON.stringify(result.answer)}\n`);
+  expect(result.events.some(event => event.type === 'execution_notice' && event.detail?.includes('engine-published carrier'))).toBe(false);
   expect(result.events.some(event => event.detail?.includes('ENGINE_STATE_TAMPERED'))).toBe(false);
 });
 
@@ -122,16 +123,15 @@ it('recognizes its own publication carrier when the configured store has a symli
 
   expect(result.directory).toBe(join(alias, 'runs', result.state.runId));
   expect(result.state.status, result.state.failureReason).toBe('complete');
-  expect(readFileSync(join(result.directory, carrier), 'utf8')).toBe(`${JSON.stringify(result.answer)}\n`);
-  expect(result.events).toContainEqual(expect.objectContaining({ type: 'execution_notice', level: 'warning', stageId,
-    files: [join(physicalStore, 'runs', result.state.runId, carrier)], detail: expect.stringContaining('engine-published carrier') }));
+  expect(readFileSync(runRecordPath(result.directory, carrier), 'utf8')).toBe(`${JSON.stringify(result.answer)}\n`);
+  expect(result.events.some(event => event.type === 'execution_notice' && event.detail?.includes('engine-published carrier'))).toBe(false);
 });
 
 it('uses a rejecting final answer instead of a forged passing file, keeping downstream conditions false', async () => {
   const result = await launch({ pass: false });
   expect(result.stage).toMatchObject({ status: 'complete', exitCode: 0 });
   expect(result.state.failureReason ?? '').not.toContain('ENGINE_STATE_TAMPERED');
-  expect(readFileSync(join(result.directory, carrier), 'utf8')).toBe(`${JSON.stringify(result.answer)}\n`);
+  expect(readFileSync(runRecordPath(result.directory, carrier), 'utf8')).toBe(`${JSON.stringify(result.answer)}\n`);
   expect(evaluateCondition(`${stageId}.pass == true`, project, result.state.runId)).toBe(false);
   expect(result.calls).not.toContain('dependent');
 });
@@ -146,15 +146,14 @@ it('discards a stage-written verdict when the gate provides no valid final answe
   expect(result.calls).toEqual(control.calls);
   expect(result.prompts).toHaveLength(2);
   expect(result.prompts[1]).toContain('# Stage result correction');
-  expect(result.events).toContainEqual(expect.objectContaining({ type: 'execution_notice', level: 'warning', stageId,
-    files: [join(result.directory, carrier)] }));
+  expect(result.events.some(event => event.type === 'execution_notice' && event.detail?.includes('engine-published carrier'))).toBe(false);
   expect(result.events.some(event => event.detail?.includes('ENGINE_STATE_TAMPERED'))).toBe(false);
-  expect(existsSync(join(result.directory, carrier))).toBe(false);
+  expect(existsSync(runRecordPath(result.directory, carrier))).toBe(false);
   expect(evaluateCondition(`${stageId}.pass == true`, project, result.state.runId)).toBe(false);
   expect(result.calls).not.toContain('dependent');
 });
 
-it('corrects an invalid first answer in the same attempt after restoring its own verdict write', async () => {
+it('corrects an invalid first answer in the same attempt with its own draft verdict in stage storage', async () => {
   const result = await launch({ correctAnswer: true });
   expect(result.state.status, result.state.failureReason).toBe('complete');
   expect(result.stage).toMatchObject({ status: 'complete', exitCode: 0 });
@@ -162,9 +161,8 @@ it('corrects an invalid first answer in the same attempt after restoring its own
   expect(result.prompts).toHaveLength(2);
   expect(result.prompts[1]).toContain('# Stage result correction');
   expect(result.calls).toContain('dependent');
-  expect(readFileSync(join(result.directory, carrier), 'utf8')).toBe(`${JSON.stringify(result.answer)}\n`);
-  expect(result.events).toContainEqual(expect.objectContaining({ type: 'execution_notice', level: 'warning', stageId,
-    files: [join(result.directory, carrier)] }));
+  expect(readFileSync(runRecordPath(result.directory, carrier), 'utf8')).toBe(`${JSON.stringify(result.answer)}\n`);
+  expect(result.events.some(event => event.type === 'execution_notice' && event.detail?.includes('engine-published carrier'))).toBe(false);
   expect(result.events.some(event => event.detail?.includes('ENGINE_STATE_TAMPERED'))).toBe(false);
 });
 
@@ -174,36 +172,31 @@ it('still voids an attempt that also writes another stage verdict', async () => 
   expect(result.stage).toMatchObject({ status: 'failed', exitCode: 125 });
   expect(result.stage.error).toContain('ENGINE_STATE_TAMPERED');
   expect(result.stage.attempts).toMatchObject([{ terminationCause: 'engine_void', engineVoid: true }]);
-  expect(existsSync(join(result.directory, 'verdict_dependent.json'))).toBe(false);
+  expect(existsSync(runRecordPath(result.directory, 'verdict_dependent.json'))).toBe(false);
   expect(result.calls).not.toContain('dependent');
 });
 
 it('does not exempt a carrier absent from the worker publication list', async () => {
-  const directory = join(root, 'run');
-  mkdirSync(directory);
+  const directory = createRun(project, 'fixture', 'name: fixture\nstages: []\n', [stageId]).runDirPath;
   await expect(withEngineIntegrity({ projectDir: project, runDir: directory, stageId,
     artifactContract: fixtureArtifactContract(stageId) }, async () => {
-    writeFileSync(join(directory, carrier), '{"pass":true}');
+    writeFileSync(runRecordPath(directory, carrier), '{"pass":true}');
     return { output: JSON.stringify(verdict()), exitCode: 0, duration_ms: 1 };
   })).rejects.toThrow('ENGINE_STATE_TAMPERED');
-  expect(existsSync(join(directory, carrier))).toBe(false);
+  expect(existsSync(runRecordPath(directory, carrier))).toBe(false);
 });
 
-it('records a rewrite even when an existing engine publication has identical bytes', async () => {
-  const directory = join(root, 'run');
-  mkdirSync(directory);
-  const path = join(directory, carrier), bytes = `${JSON.stringify(verdict())}\n`;
+it('uses content integrity for an identical rewrite without a publication exemption', async () => {
+  const directory = createRun(project, 'fixture', 'name: fixture\nstages: []\n', [stageId]).runDirPath;
+  const path = runRecordPath(directory, carrier), bytes = `${JSON.stringify(verdict())}\n`;
   writeFileSync(path, bytes);
   const alias = join(root, 'run-link');
   symlinkSync(directory, alias, 'dir');
-  let warned: string[] = [];
-  await withEngineIntegrity({ projectDir: project, runDir: alias, stageId,
-    publicationCarriers: [carrier], onPublicationWrite: paths => { warned = paths; } }, async () => {
+  await withEngineIntegrity({ projectDir: project, runDir: alias, stageId }, async () => {
     // Replacement guarantees a different identity even on coarse timestamp filesystems.
     const replacement = join(root, 'replacement');
     writeFileSync(replacement, bytes);
-    renameSync(replacement, join(alias, carrier));
+    renameSync(replacement, runRecordPath(alias, carrier));
   });
-  expect(warned).toEqual([carrier]);
   expect(readFileSync(path, 'utf8')).toBe(bytes);
 });

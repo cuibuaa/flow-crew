@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -61,12 +62,12 @@ afterEach(async () => {
 function workflow() {
   const stage = (id: string, deps: string[]) => ({ id, role: 'coder', depends_on: deps, scope: [],
     criterion_refs: [criterion],
-    artifact_contract: { version: 1, produces: [{ id: 'artifact', root: 'run', path: `stages/${id}/artifact.txt`, kind: 'file' }], reads: [] } });
+    artifact_contract: { version: 1, produces: [{ id: 'artifact', root: 'run', path: `work/stages/${id}/artifact.txt`, kind: 'file' }], reads: [] } });
   const config = WorkflowConfigSchema.parse({ name: 'deployment-fixture', defaults: { max_iterations: 2, max_retries: 0 }, stages: [
     stage('producer', []), stage('active_a', ['producer']), stage('active_b', ['producer']),
     stage('later', ['active_a', 'active_b']),
     { id: 'review', role: 'coder', is_gate: true, depends_on: ['later'], scope: [], criterion_refs: [criterion],
-      artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_review.json', kind: 'file' }], reads: [] } },
+      artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'work/verdict_review.json', kind: 'file' }], reads: [] } },
     { ...stage('repair', ['review']), retry_to: ['review'], criterion_refs: [] },
   ] });
   normalizeStageContracts(config.stages);
@@ -84,12 +85,12 @@ it.each([false, true])('holds at the current shared-tree owner, preserves comple
   const calls: string[] = [];
   let runId = '';
   const adapter = { async run(_prompt: string, _role: unknown, opts: Parameters<typeof fixtureResult>[1]) {
-    calls.push(opts.stageId); runId = JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8')).runId;
+    calls.push(opts.stageId); runId = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'run.json'), 'utf8')).runId;
     if (opts.stageId === 'producer') updateRunState(project, runId, state => { state.maxRetries = 1; });
     if (opts.stageId === 'active_a') { enteredA.resolve(); await releaseA.promise; }
     if (opts.stageId === 'active_b') { enteredB.resolve(); await releaseB.promise; }
-    if (opts.stageId === 'review') writeFileSync(join(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ pass: !gate, reason: gate ? 'Independent rejection remains binding.' : 'Independently accepted.', criteria: { [criterion]: { status: gate ? 'fail' : 'pass', evidence: 'Completed producer and later work inspected.' } } }));
-    else writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), `${opts.stageId} product\n`);
+    if (opts.stageId === 'review') writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ pass: !gate, reason: gate ? 'Independent rejection remains binding.' : 'Independently accepted.', criteria: { [criterion]: { status: gate ? 'fail' : 'pass', evidence: 'Completed producer and later work inspected.' } } }));
+    else writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), `${opts.stageId} product\n`);
     return fixtureResult({ output: 'Fixture result.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } };
   const running = execute(config, adapter);
@@ -115,7 +116,7 @@ it.each([false, true])('holds at the current shared-tree owner, preserves comple
     expect(calls).toEqual(['producer', 'active_a']);
     releaseB.resolve();
     const held = await running;
-    const workflowBefore = readFileSync(join(root, 'store/runs', runId, 'workflow.yaml'), 'utf8');
+    const workflowBefore = readFileSync(runRecordPath(join(root, 'store/runs', runId), 'workflow.yaml'), 'utf8');
     expect(held.status, held.failureReason).toBe('parked');
     expect(held.deploymentHold?.heldAt).toBeTruthy();
     expect((await orchestrator.deploymentStatus()).ready).toBe(true);
@@ -144,14 +145,14 @@ it.each([false, true])('holds at the current shared-tree owner, preserves comple
     expect(continued.status).toBe(gate ? 'incomplete' : 'complete');
     expect(calls).toEqual(['producer', 'active_a', 'active_b', 'later', 'review', ...(gate ? ['repair', 'review'] : [])]);
     expect(readStageStatus(project, runId, 'producer')).toEqual(producer);
-    expect(readFileSync(join(root, 'store/runs', runId, 'stages/producer/artifact.txt'), 'utf8')).toBe('producer product\n');
+    expect(readFileSync(stageWorkPath(join(root, 'store/runs', runId), 'stages/producer/artifact.txt'), 'utf8')).toBe('producer product\n');
     expect(continued).toMatchObject({ currentIteration: before.currentIteration, maxIterations: before.maxIterations, startedAt: before.startedAt });
     expect(continued.maxRetries).toBe(before.maxRetries);
     expect(continued.engineHistory?.map(entry => entry.kind)).toEqual(['start', 'resume']);
     expect(continued.deploymentHold).toBeUndefined();
     expect(continued.engineHistory?.[0]).toEqual(held.engineHistory?.[0]);
     expect(continued.planControl).toEqual(held.planControl);
-    expect(readFileSync(join(root, 'store/runs', runId, 'workflow.yaml'), 'utf8')).toBe(workflowBefore);
+    expect(readFileSync(runRecordPath(join(root, 'store/runs', runId), 'workflow.yaml'), 'utf8')).toBe(workflowBefore);
     expect(readDeploymentHold()?.releasedAt).toBeTruthy();
   } finally { releaseA.resolve(); releaseB.resolve(); await running; }
 });
@@ -200,7 +201,7 @@ it.each([false, true])('explicitly resumes safely settled cancelled work with re
   const adapter: Adapter = { async run(_prompt, _agent, opts) {
     calls.push(opts.stageId);
     if (opts.stageId === 'review') return { output: JSON.stringify({ pass: true, reason: 'Retained work inspected.', criteria: { [criterion]: { status: 'pass', evidence: 'Completed producer and remaining products checked.' } }, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1 };
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed work.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed work.\n');
     if (opts.stageId === 'producer') requestDeploymentHold();
     return fixtureResult({ output: 'Completed.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } };
@@ -238,7 +239,7 @@ it.each(['checkpoint', 'plan', 'plan_version', 'ledger', 'missing_projection', '
   const config = workflow();
   const held = await execute(config, { async run(_prompt, _agent, opts) {
     requestDeploymentHold();
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
     return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } });
   const task = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
@@ -251,12 +252,12 @@ it.each(['checkpoint', 'plan', 'plan_version', 'ledger', 'missing_projection', '
     if (invalid === 'ledger') delete state.stages.producer.attempts;
     if (invalid === 'missing_projection' || invalid === 'missing_plan_projection' || invalid === 'missing_projection_and_ledger') delete state.stages.producer;
   });
-  if (invalid === 'missing_projection_and_ledger') rmSync(join(root, 'store/runs', held.runId, 'stages/producer/status.json'));
+  if (invalid === 'missing_projection_and_ledger') rmSync(runRecordPath(join(root, 'store/runs', held.runId), 'stages/producer/status.json'));
   if (invalid === 'missing_plan_projection') {
     // A dynamically admitted stage need not appear in the base workflow.
     const base = WorkflowConfigSchema.parse({ ...config, stages: config.stages.filter(stage => stage.id !== 'producer')
       .map(stage => ({ ...stage, depends_on: stage.depends_on.filter(id => id !== 'producer') })) });
-    writeFileSync(join(root, 'store/runs', held.runId, 'workflow.yaml'), stringify(base));
+    writeFileSync(runRecordPath(join(root, 'store/runs', held.runId), 'workflow.yaml'), stringify(base));
   }
   const result = await orchestrator.continueDeployment();
   expect(result.released).toBe(false);
@@ -275,7 +276,7 @@ it.each(['checkpoint', 'plan', 'plan_version', 'ledger', 'missing_projection', '
 it('retains the hold across a controller interruption and continues once on retry', async () => {
   const held = await execute(workflow(), { async run(_prompt, _agent, opts) {
     requestDeploymentHold();
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
     return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } });
   const task = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
@@ -294,7 +295,7 @@ it('keeps compatible peers held until every current-hold run is compatible', asy
   const config = workflow();
   const held = await execute(config, { async run(_prompt, _agent, opts) {
     requestDeploymentHold();
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
     return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } });
   const compatible = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
@@ -306,7 +307,7 @@ it('keeps compatible peers held until every current-hold run is compatible', asy
     state.deploymentHold = held.deploymentHold;
     state.engineCheckpoint = { ...held.engineCheckpoint!, version: 99 } as unknown as typeof state.engineCheckpoint;
   });
-  writeFileSync(join(invalid.runDirPath, 'task_brief.md'), brief);
+  writeFileSync(runRecordPath(invalid.runDirPath, 'task_brief.md'), brief);
   registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: invalid.runId });
   const result = await orchestrator.continueDeployment();
   expect(result.errors.join('\n'), JSON.stringify(result)).toContain('CONTINUATION_INCOMPATIBLE');
@@ -323,7 +324,7 @@ it('keeps compatible peers held until every current-hold run is compatible', asy
 it.each(['repair', 'cancel'] as const)('can continue after resolving a refused held run by %s', async resolution => {
   const held = await execute(workflow(), { async run(_prompt, _agent, opts) {
     requestDeploymentHold();
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
     return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } });
   const task = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
@@ -351,7 +352,7 @@ it.each(['repair', 'cancel'] as const)('can continue after resolving a refused h
 async function registeredHeldRun() {
   const held = await execute(workflow(), { async run(_prompt, _agent, opts) {
     requestDeploymentHold();
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
     return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } });
   const task = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
@@ -427,7 +428,7 @@ it('accepts a different supported generation and makes repeated continue idempot
   const config = workflow();
   const held = await execute(config, { async run(_prompt, _agent, opts) {
     requestDeploymentHold();
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
     return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } });
   const task = registry.create({ ...admitted(), projectDir: project, status: 'running', run_id: held.runId });
@@ -443,7 +444,7 @@ it('accepts a different supported generation and makes repeated continue idempot
 it('accepts normal iteration repending with the retained completed attempt ledger', async () => {
   const held = await execute(workflow(), { async run(_prompt, _agent, opts) {
     requestDeploymentHold();
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed producer.\n');
     return fixtureResult({ output: 'Producer complete.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } });
   const ledger = readStageStatus(project, held.runId, 'producer');
@@ -463,7 +464,7 @@ it('continues an attemptless legacy preparation without inventing completed hist
   const result = await execute(config, { async run(_prompt, _agent, opts) {
     calls.push(opts.stageId);
     if (opts.stageId === 'review') return { output: JSON.stringify({ pass: true, reason: 'Prepared work completed.', criteria: { [criterion]: { status: 'pass', evidence: 'Every required artifact was produced once.' } }, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1 };
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'First execution.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'First execution.\n');
     return fixtureResult({ output: 'Completed.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } }, prepared.runId);
   expect(result.status, result.failureReason).toBe('complete');
@@ -489,7 +490,7 @@ it('retains completed uncommitted project work across a deployment hold and sche
     else {
       expect(readFileSync(join(project, 'product.txt'), 'utf8')).toBe('Completed product.\n');
     }
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Stage evidence.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Stage evidence.\n');
     if (opts.stageId === 'producer') requestDeploymentHold();
     return fixtureResult({ output: 'Fixture result.', exitCode: 0, duration_ms: 1, writes: ['product.txt'], writeAttribution: 'structured' }, opts);
   } };
@@ -544,7 +545,7 @@ it('can explicitly continue an unregistered foreground run after releasing the s
   const adapter: Adapter = { async run(_prompt, _agent, opts) {
     calls.push(opts.stageId);
     if (opts.stageId === 'review') return { output: JSON.stringify({ pass: true, reason: 'Retained producer inspected.', criteria: { [criterion]: { status: 'pass', evidence: 'All completed fixture artifacts retained.' } }, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1 };
-    writeFileSync(join(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed work.\n');
+    writeFileSync(stageWorkPath(opts.runDir, 'stages', opts.stageId, 'artifact.txt'), 'Completed work.\n');
     if (opts.stageId === 'producer') requestDeploymentHold();
     return fixtureResult({ output: 'Completed.', exitCode: 0, duration_ms: 1, writes: [] }, opts);
   } };

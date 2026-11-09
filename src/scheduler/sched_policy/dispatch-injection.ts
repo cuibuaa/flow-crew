@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 import { declareReviewChoices } from '../../decision-graph.js';
 /** Native dispatch transport parsing, admission and persistence; receives admission, declared-input and scope-disposition services. */
 import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
@@ -8,7 +9,6 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { inspectRealityCheckReachability } from '../sched_admission/reality-reads.js';
-import { join } from 'node:path';
 import { log } from '../sched_admission/shared.js';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { promoteAdmittedRealityChecks } from '../sched_admission/dispatch-retry.js';
@@ -142,7 +142,8 @@ export function inspectDispatchProposal(
     runDir: runDirPath,
   });
   admission.proposalDigest = proposalDigest;
-  const checksPath = join(runDirPath, 'reality_checks.md');
+  const draftChecks = stageWorkPath(runDirPath, 'reality_checks.md');
+  const checksPath = existsSync(draftChecks) ? draftChecks : runRecordPath(runDirPath, 'reality_checks.md');
   const typedChecks = items && typeof items === 'object' && 'reality_checks' in items
     ? parseRealityChecks(items.reality_checks) : undefined;
   if (typedChecks || existsSync(checksPath)) {
@@ -181,11 +182,11 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
     };
     const publishAdmission = (report: DispatchAdmissionReport): boolean => {
       report.pass = report.pass && report.errors.length === 0;
-      writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+      writeFileSync(runRecordPath(runDirPath, 'dispatch_admission.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
       if (!report.pass) emitAdmissionRejection(report);
       return report.pass;
     };
-    const dispatchPath = join(runDirPath, 'dispatch.yaml');
+    const dispatchPath = stageWorkPath(runDirPath, 'dispatch.yaml');
     if (!existsSync(dispatchPath)) return [];
 
     let rawDispatchText: string;
@@ -219,7 +220,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
       let requestBootstrap = bootstrap;
       if (previous) {
         if (!base.path) throw new Error('PLAN_REVISION_DECISION_UNBOUND: replan base carrier is absent');
-        const original = JSON.parse(readFileSync(join(runDirPath, base.path), 'utf8'));
+        const original = JSON.parse(readFileSync(runRecordPath(runDirPath, base.path), 'utf8'));
         if (!Array.isArray(original.stages) || planDigest(original.stages) !== base.digest) throw new Error('PLAN_HISTORY_CONFLICT: replan base bytes differ');
         requestBootstrap = (original.stages as StageConfig[]).filter(stage => stage.dynamic_dispatch || stage.decision?.kind === 'shape');
       }
@@ -247,7 +248,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
       sorted.splice(0, sorted.length, ...result.stages);
       for (const stage of sorted) mkdirSync(stageDir(projectDir, runId, stage.id), { recursive: true });
       refreshRunQueryState(state, sorted);
-      writeFileSync(join(runDirPath, 'workflow.yaml'), stringifyYaml({ ...parseYaml(readFileSync(join(runDirPath, 'workflow.yaml'), 'utf8')), stages: sorted }));
+      writeFileSync(runRecordPath(runDirPath, 'workflow.yaml'), stringifyYaml({ ...parseYaml(readFileSync(runRecordPath(runDirPath, 'workflow.yaml'), 'utf8')), stages: sorted }));
       writeRunState(projectDir, runId, state);
       recordRunEvent(projectDir, runId, { type: 'plan_revision_decided', runId, timestamp: result.decision.at, stageId: dispatchStageId, detail: JSON.stringify(result.decision), source: 'scheduler' });
       return dispatched;
@@ -279,7 +280,7 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
 
     // Readers of the admitted dispatch (including verdict controls) need the
     // same derived criterion and artifact facts as workflow/state readers.
-    writeFileSync(dispatchPath, stringifyYaml(Array.isArray(items) ? dispatched : { ...items as object, stages: dispatched }), 'utf-8');
+    writeFileSync(runRecordPath(runDirPath, 'dispatch.yaml'), stringifyYaml(Array.isArray(items) ? dispatched : { ...items as object, stages: dispatched }), 'utf-8');
     state.dispatchedStages = dispatched;
     refreshRunQueryState(state, sorted);
     recordAdmittedPlan(state, sorted, runDirPath, 'Initial dispatch admitted', true, admission);
@@ -289,14 +290,18 @@ export function createDispatchInjector(services: DispatchInjectionServices) {
     // Keep the existing admitted snapshot and terminal reader as the sole durable
     // check channel; new planners no longer author or parse Markdown fences.
     if (items && typeof items === 'object' && 'reality_checks' in items) {
-      writeFileSync(join(runDirPath, 'reality_checks.md'), `## Reality checks\n${stringifyYaml({ checks: parseRealityChecks(items.reality_checks) })}`, 'utf-8');
+      writeFileSync(runRecordPath(runDirPath, 'reality_checks.md'), `## Reality checks\n${stringifyYaml({ checks: parseRealityChecks(items.reality_checks) })}`, 'utf-8');
+    }
+    else {
+      const draft = stageWorkPath(runDirPath, 'reality_checks.md');
+      if (existsSync(draft)) writeFileSync(runRecordPath(runDirPath, 'reality_checks.md'), readFileSync(draft, 'utf8'), 'utf8');
     }
     promoteAdmittedRealityChecks(runDirPath, state);
 
     writeRunState(projectDir, runId, state);
 
     // Update stored workflow.yaml
-    const wfPath = join(runDir(projectDir, runId), 'workflow.yaml');
+    const wfPath = runRecordPath(runDir(projectDir, runId), 'workflow.yaml');
     try {
       const wfRaw = readFileSync(wfPath, 'utf-8');
       const wfParsed = parseYaml(wfRaw) ?? {};

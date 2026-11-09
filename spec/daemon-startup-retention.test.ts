@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -35,7 +36,7 @@ it('listens FRESH on repeated starts without traversing retained terminal runs',
   const socket = join(root, 'daemon.sock');
   const entered = join(root, 'scan-entered');
   const release = join(root, 'release-scan');
-  const archive = join(run, 'archive');
+  const archive = runRecordPath(run, 'archive');
   const runner = join(root, 'serve.mjs');
   const missingRecord = join(home, 'runs', 'missing-record');
   const deletedOwner = join(home, 'runs', 'deleted-owner');
@@ -47,17 +48,17 @@ it('listens FRESH on repeated starts without traversing retained terminal runs',
   // tree is small: its controllable filesystem latency stands in for millions
   // of retained files, proving the dependency without a timing assertion.
   const stage = { status: 'complete', retries: 0 };
-  put(join(run, 'run.json'), JSON.stringify({
+  put(runRecordPath(run, 'run.json'), JSON.stringify({
     runId: 'terminal', projectDir: root, workflowName: 'startup', status: 'complete',
     startedAt: '2026-01-01T00:00:00.000Z', stages: { done: stage },
     engineCheckpoint: { version: 2, runId: 'terminal', projectDir: root,
       pid: 2147483647, processes: [], at: '2026-01-01T00:00:00.000Z' },
   }));
-  put(join(run, 'workflow.yaml'), 'name: startup\nstages:\n  - id: done\n    artifact_contract: { version: 1, produces: [], reads: [] }\n');
-  put(join(run, 'stages/done/status.json'), JSON.stringify(stage));
-  put(join(run, 'stages/done/build/attempt_1/payload.bin'), 'disposable work');
+  put(runRecordPath(run, 'workflow.yaml'), 'name: startup\nstages:\n  - id: done\n    artifact_contract: { version: 1, produces: [], reads: [] }\n');
+  put(runRecordPath(run, 'stages/done/status.json'), JSON.stringify(stage));
+  put(runRecordPath(run, 'stages/done/build/attempt_1/payload.bin'), 'disposable work');
   put(join(archive, 'nested/retained.bin'), 'durable history');
-  put(join(run, 'scratch/nested/invocation.bin'), 'old invocation scratch');
+  put(runRecordPath(run, 'scratch/nested/invocation.bin'), 'old invocation scratch');
   const deleted = createInvocationScratch(deletedOwner);
   const danglingAlias = dirname(deleted.path);
   rmSync(deletedOwner, { recursive: true, force: true });
@@ -70,7 +71,7 @@ import { syncBuiltinESMExports } from 'node:module';
 const original = fs.readdirSync;
 const originalRm = fs.rmSync;
 function blockTraversal(path) {
-  if ([${JSON.stringify(archive)}, ${JSON.stringify(join(missingRecord, 'scratch'))}].includes(String(path))) {
+  if ([${JSON.stringify(archive)}, ${JSON.stringify(runRecordPath(missingRecord, 'scratch'))}].includes(String(path))) {
     fs.writeFileSync(${JSON.stringify(entered)}, String(path));
     const deadline = Date.now() + 5000;
     while (!fs.existsSync(${JSON.stringify(release)})) {
@@ -113,7 +114,7 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
       while (!existsSync(socket) && !existsSync(entered) && child.exitCode === null && Date.now() < deadline) await delay(10);
       if (existsSync(entered)) {
         expect(existsSync(socket), 'blocked retention has not yet opened the RPC socket').toBe(false);
-        expect(readFileSync(entered, 'utf8')).toBe(start === 0 ? archive : join(missingRecord, 'scratch'));
+        expect(readFileSync(entered, 'utf8')).toBe(start === 0 ? archive : runRecordPath(missingRecord, 'scratch'));
         throw new Error('terminal-run retention traversed retained history before the daemon could listen');
       }
       expect(existsSync(socket), errors).toBe(true);
@@ -129,8 +130,8 @@ process.exitCode = await cmdDaemon(['daemon', 'serve', '--socket', ${JSON.string
       expect(() => lstatSync(danglingAlias)).toThrow(/ENOENT/);
       if (orphan) expect(readFileSync(join(orphan.path, 'payload.bin'), 'utf8')).toBe('orphan scratch for explicit clean');
       expect(readFileSync(join(archive, 'nested/retained.bin'), 'utf8')).toBe('durable history');
-      expect(readFileSync(join(run, 'stages/done/build/attempt_1/payload.bin'), 'utf8')).toBe('disposable work');
-      expect(readFileSync(join(run, 'scratch/nested/invocation.bin'), 'utf8')).toBe('old invocation scratch');
+      expect(readFileSync(runRecordPath(run, 'stages/done/build/attempt_1/payload.bin'), 'utf8')).toBe('disposable work');
+      expect(readFileSync(runRecordPath(run, 'scratch/nested/invocation.bin'), 'utf8')).toBe('old invocation scratch');
       await sendRpc(socket, { cmd: 'stop' }, 1000);
       await exitWithin(child).catch(error => { throw new Error(`${error.message}; daemon stderr: ${errors}`); });
       child = undefined;
@@ -168,8 +169,8 @@ it('starts one verified serve with a 15 MB registry and retained run library, bi
   writeFileSync(join(home, 'tasks.jsonl'), row.repeat(Math.ceil(15 * 1024 * 1024 / Buffer.byteLength(row))));
   for (let i = 0; i < 1500; i++) {
     const run = join(home, 'runs', `retained-${i}`);
-    mkdirSync(join(run, 'stages', 'done', 'archive'), { recursive: true });
-    writeFileSync(join(run, 'run.json'), JSON.stringify({
+    mkdirSync(runRecordPath(run, 'stages', 'done', 'archive'), { recursive: true });
+    writeFileSync(runRecordPath(run, 'run.json'), JSON.stringify({
       runId: `retained-${i}`, projectDir: root, workflowName: 'startup', status: 'complete',
       startedAt: '2026-01-01T00:00:00.000Z', stages: { done: { status: 'complete', retries: 0 } },
     }));

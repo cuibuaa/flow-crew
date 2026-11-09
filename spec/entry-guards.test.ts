@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { coveredStages, settleCoverageFixture } from './spec_contracts/declared-fixtures.js';
@@ -226,7 +227,7 @@ describe('Dashboard admission handshake', () => {
     );
 
     expect(final.taskDescription).toBe(brief);
-    const report = readFileSync(join(runsRoot(), runId, 'summary.md'), 'utf8');
+    const report = readFileSync(runRecordPath(join(runsRoot(), runId), 'summary.md'), 'utf8');
     expect(report).toContain('captured scheduler input marker');
     expect(report).not.toContain('SIDE-CAR-DRIFT-MUST-NOT-RUN');
     expect(prompts).not.toContain('_summary');
@@ -494,8 +495,8 @@ describe('quick and operator entry behavior', () => {
     const runPath = join(isolated.fcHome, 'runs', runId);
     mkdirSync(runPath, { recursive: true });
     const brief = '# Goal\nContinue exactly.\n\n## What the report must show\n1. Continue the admitted run snapshot.\n';
-    writeFileSync(join(runPath, 'task_brief.md'), brief, 'utf-8');
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'task_brief.md'), brief, 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId,
       projectDir: isolated.project,
       status: 'failed',
@@ -510,9 +511,9 @@ describe('quick and operator entry behavior', () => {
     expect(missing.status).toBe(1);
     expect(`${missing.stdout}${missing.stderr}`).toContain('Launch paused before run creation');
 
-    const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8'));
+    const state = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8'));
     state.briefAdmission = explicitAdmission(brief);
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify(state), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify(state), 'utf-8');
     const valid = runQuickSync(isolated, [
       'quick', '--existing-run-id', runId, '--project', isolated.project,
       '--adapter', 'mock',
@@ -534,8 +535,8 @@ describe('quick and operator entry behavior', () => {
       at: '2026-08-04T00:00:00.000Z',
     });
     mkdirSync(runPath, { recursive: true });
-    writeFileSync(join(runPath, 'task_brief.md'), brief, 'utf-8');
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'task_brief.md'), brief, 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId,
       projectDir: isolated.project,
       status: 'failed',
@@ -573,8 +574,8 @@ describe('quick and operator entry behavior', () => {
     const runPath = join(isolated.fcHome, 'runs', runId);
     const brief = '# Goal\nContinue the named run.\n\n## What the report must show\n1. Preserve the existing run identity.\n';
     mkdirSync(runPath, { recursive: true });
-    writeFileSync(join(runPath, 'task_brief.md'), brief, 'utf-8');
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'task_brief.md'), brief, 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId,
       projectDir: isolated.project,
       status: 'failed',
@@ -618,8 +619,8 @@ describe('quick and operator entry behavior', () => {
     mkdirSync(runPath, { recursive: true });
     const brief = '# Goal\nConsume the captured continuation.\n\n## What the report must show\n1. Use the transported admitted snapshot.\n';
     const admission = explicitAdmission(brief);
-    writeFileSync(join(runPath, 'task_brief.md'), `${brief}\n`, 'utf-8');
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'task_brief.md'), `${brief}\n`, 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId,
       projectDir: isolated.project,
       status: 'failed',

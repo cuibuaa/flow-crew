@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { appendFileSync, readFileSync, statSync, truncateSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -39,7 +40,7 @@ describe('scheduler history polling boundary', () => {
     expect(operational.retiredStageUsage).toBeUndefined();
     expect(readRunState(projectDir, created.runId).retiredStageUsage).toHaveLength(1);
 
-    const historyPath = join(created.runDirPath, 'run-history.jsonl');
+    const historyPath = runRecordPath(created.runDirPath, 'run-history.jsonl');
     const acknowledged = operational.stateFormat!.history!.committedBytes;
     truncateSync(historyPath, acknowledged - 1);
     expect(readOperationalRunState(projectDir, created.runId).retiredStageUsage).toBeUndefined();
@@ -52,7 +53,7 @@ describe('scheduler history polling boundary', () => {
     const state = readRunState(projectDir, created.runId);
     state.retiredStageUsage = [retired(1)];
     writeRunState(projectDir, created.runId, state);
-    const historyPath = join(created.runDirPath, 'run-history.jsonl');
+    const historyPath = runRecordPath(created.runDirPath, 'run-history.jsonl');
     const oneAttemptBytes = statSync(historyPath).size;
 
     for (let index = 0; index < 10; index += 1) writeRunState(projectDir, created.runId, state);

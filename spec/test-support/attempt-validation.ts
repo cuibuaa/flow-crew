@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../src/run-layout.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { appendEvidence, captureProjectTree, VALIDATION_FACT_VERSION } from '../../src/evidence-ledger.js';
@@ -17,7 +18,7 @@ export function seedAttemptValidation(projectDir: string, runId: string, current
   try { prior = options.stageId ? readStageStatus(projectDir, runId, stageId) : undefined; } catch { /* no prior fixture attempt */ }
   const status = prior?.attempts?.at(-1)?.status === 'complete' ? prior : completeStageAttempt(projectDir, runId, stageId, 0, { exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' });
   const attempt = status.attempts!.at(-1)!;
-  let brief = ''; try { brief = readFileSync(join(base, 'task_brief.md'), 'utf8'); } catch { /* consumer-only fixture */ }
+  let brief = ''; try { brief = readFileSync(runRecordPath(base, 'task_brief.md'), 'utf8'); } catch { /* consumer-only fixture */ }
   const tree = captureProjectTree(projectDir, brief);
   const delta = options.delta ?? evaluateValidationDelta(options.baseline ?? plan.baseline, current);
   return appendEvidence(base, { kind: 'validation', validationVersion: VALIDATION_FACT_VERSION, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,

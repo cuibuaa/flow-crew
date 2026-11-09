@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -192,13 +193,13 @@ describe('campaign context production path', () => {
     ]);
     const runPath = join(fcHome, 'runs', runId);
     mkdirSync(runPath, { recursive: true });
-    writeFileSync(join(runPath, 'research_journal.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'research_journal.json'), JSON.stringify({
       rounds: [
         { label: 'first direction', result: 1 },
         { label: 'second direction', result: 2 },
       ],
     }), 'utf-8');
-    writeFileSync(join(runPath, 'knowledge_graph.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'knowledge_graph.json'), JSON.stringify({
       nodes: [{ type: 'dead_end', text: 'dead end alpha' }],
     }), 'utf-8');
 
@@ -213,7 +214,7 @@ describe('campaign context production path', () => {
     const oldRunId = 'old-terminal-run';
     const oldRunPath = join(fcHome, 'runs', oldRunId);
     mkdirSync(oldRunPath, { recursive: true });
-    writeFileSync(join(oldRunPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(oldRunPath, 'run.json'), JSON.stringify({
       runId: oldRunId,
       projectDir,
       workflowName: 'old-workflow',
@@ -224,8 +225,8 @@ describe('campaign context production path', () => {
       campaignId: CAMPAIGN_ID,
       campaignStorageKey: CAMPAIGN_ID,
     }), 'utf-8');
-    writeFileSync(join(oldRunPath, 'iteration_log.md'), 'OLD ITERATION PATH CONTENT', 'utf-8');
-    writeFileSync(join(oldRunPath, 'research_journal.json'), JSON.stringify({
+    writeFileSync(runRecordPath(oldRunPath, 'iteration_log.md'), 'OLD ITERATION PATH CONTENT', 'utf-8');
+    writeFileSync(runRecordPath(oldRunPath, 'research_journal.json'), JSON.stringify({
       rounds: [
         { label: 'never retry the terminal mechanism', result: 1 },
         { label: 'preserve this second direction too', result: 2 },
@@ -304,7 +305,7 @@ describe('campaign context production path', () => {
     expect(fullPrompt).not.toContain('Best ever: 99');
     expect(fullPrompt).not.toContain('OLD REASON MUST DISAPPEAR');
     expect(fullPrompt).not.toContain('OLD ARTIFACT MUST DISAPPEAR');
-    expect(fullPrompt).not.toContain(join(oldRunPath, 'iteration_log.md'));
+    expect(fullPrompt).not.toContain(runRecordPath(oldRunPath, 'iteration_log.md'));
     expect(fullPrompt).not.toContain('old-misleading-next-phase');
     expect(planCall!.systemPrompt).toContain('never retry the terminal mechanism');
     expect(planCall!.systemPrompt).toContain('preserve this second direction too');
@@ -317,7 +318,7 @@ class PromptCaptureAdapter implements Adapter {
   async run(prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
     this.calls.push({ stageId: opts.stageId, prompt, systemPrompt: role.prompt });
     if (opts.stageId === 'plan') {
-      writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+      writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
         '- id: implement',
         '  role: coder',
         '  depends_on: [plan]',

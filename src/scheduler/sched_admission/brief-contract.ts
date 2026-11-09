@@ -1,9 +1,10 @@
+import { runRecordPath } from '../../run-layout.js';
 import { type BriefFrontmatterDocument, parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
 /** Brief frontmatter, duration/floor contracts; no dispatch admission or execution. */
 import { type ResearchConfirmConfig, type TerminalStatesConfig, type ResearchConfig, type ResearchIntegrityConfig, isTerminalRunStatus, TERMINAL_STATUSES, type TerminalStateEntry, type PostTerminateHook, type StoreState } from '../../store.js';
 import { join } from 'node:path';
 import { writeFileSync } from '../../engine-fs.js';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { type ResearchFeasibilityConfig, parseResearchFeasibility } from '../../research-feasibility.js';
 import { type BriefOutputDeclaration, extractBriefOutputDeclarations } from '../../ship-inputs.js';
 import { nextTechnicalRetryBudget } from '../../attempt-deadline.js';
@@ -14,7 +15,7 @@ import { parsePlannerPolicySelection, type PlannerPolicyName } from '../../plann
 
 export function recordConfirmNotRun(runDirPath: string, confirm: ResearchConfirmConfig | undefined, terminalStatus: string): void {
   if (!confirm?.command) return;
-  const path = join(runDirPath, 'research_confirm.json');
+  const path = runRecordPath(runDirPath, 'research_confirm.json');
   if (existsSync(path)) return; // a real confirm result was already written (ship path) — leave it.
   try {
     writeFileSync(path, JSON.stringify({

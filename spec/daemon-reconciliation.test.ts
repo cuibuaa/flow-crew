@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -57,7 +58,7 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     expect(readRunState(project, id).stages.work.attempts!.at(-1)).toMatchObject({ status: 'failed', exitCode: 143, tokenUsage: 'unknown' });
     expect(readFileSync(join(runsRoot(), id, 'events.jsonl'), 'utf8')).toContain('recovery_reconciled');
     expect(readFileSync(join(scratch.path, 'evidence.txt'), 'utf8')).toBe('available to resumed stages');
-    expect(existsSync(join(runsRoot(), id, 'scratch'))).toBe(true);
+    expect(existsSync(stageWorkPath(join(runsRoot(), id), 'scratch'))).toBe(true);
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -69,14 +70,14 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     scratchAliases.push(alias);
     writeFileSync(join(scratch.path, 'evidence.txt'), 'interrupted invocation payload');
     updateRunState(project, id, state => { delete state.engineCheckpoint; });
-    const ledger = readFileSync(join(runDir, 'stages/work/status.json'), 'utf8');
+    const ledger = readFileSync(runRecordPath(runDir, 'stages/work/status.json'), 'utf8');
 
     createDaemonReconciler(registry, vi.fn())();
 
     expect(readRunState(project, id)).toMatchObject({ status: 'failed', recovery: { kind: 'blocked' } });
     expect(() => lstatSync(alias)).toThrow(/ENOENT/);
-    expect(existsSync(join(runDir, 'scratch'))).toBe(false);
-    expect(readFileSync(join(runDir, 'stages/work/status.json'), 'utf8')).toBe(ledger);
+    expect(existsSync(stageWorkPath(runDir, 'scratch'))).toBe(false);
+    expect(readFileSync(runRecordPath(runDir, 'stages/work/status.json'), 'utf8')).toBe(ledger);
   });
 
   it.each(['live', 'corrupt', 'unverifiable', 'same-boot', 'unknown-boot', 'legacy', 'bound', 'unknown-task-status', 'unreadable-binding', 'damaged-registry'])('retains %s records without inferring interruption', kind => {
@@ -92,23 +93,23 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     if (kind === 'unreadable-binding') registry.create({ projectDir: project, brief_text: 'task', status: 'running', run_id: 'unreadable' });
     if (kind === 'damaged-registry') appendFileSync(registry.registryPath, '{bad}\n');
     const bytes = readFileSync(join(runsRoot(), id, 'run.json'), 'utf8');
-    const ledger = readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8');
+    const ledger = readFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), 'utf8');
     createDaemonReconciler(registry, vi.fn())();
     if (['same-boot', 'unknown-boot', 'legacy'].includes(kind)) {
       expect(readRunState(project, id)).toMatchObject({ status: 'failed', recovery: { kind: 'blocked' } });
       expect(readRunState(project, id).failureReason).toMatch(/RECOVERY_FATE_UNKNOWN|RECOVERY_CHECKPOINT_MISSING/);
-      expect(readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8')).toBe(ledger);
+      expect(readFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), 'utf8')).toBe(ledger);
     } else expect(readFileSync(join(runsRoot(), id, 'run.json'), 'utf8')).toBe(bytes);
   });
 
   it.each(['plan', 'attempt'])('keeps %s refusal in the authoritative recovery mechanism', kind => {
     const id = orphan();
     if (kind === 'plan') updateRunState(project, id, state => { state.planControl = { version: 1, stages: [], capabilities: [] }; });
-    if (kind === 'attempt') writeFileSync(join(runsRoot(), id, 'stages/work/status.json'), JSON.stringify({ status: 'pending', retries: 0 }));
-    const ledger = readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8');
+    if (kind === 'attempt') writeFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), JSON.stringify({ status: 'pending', retries: 0 }));
+    const ledger = readFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), 'utf8');
     createDaemonReconciler(registry, vi.fn())();
     expect(readRunState(project, id).recovery?.kind).toBe('blocked');
-    expect(readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8')).toBe(ledger);
+    expect(readFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), 'utf8')).toBe(ledger);
   });
 
   it('discovers an externally restored carrier inside the index seed TTL', () => {
@@ -143,12 +144,12 @@ describe('daemon-owned previous-boot orphan recovery', () => {
     const id = orphan();
     expect(listRunningRunIdsFromIndex(project)).toContain(id);
     const bytes = readFileSync(join(runsRoot(), id, 'run.json'), 'utf8');
-    const ledger = readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8');
+    const ledger = readFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), 'utf8');
     vi.mocked(runLock.inspectRunScheduler).mockReturnValueOnce({ kind: 'missing' }).mockReturnValue({ kind: 'live', pid: 10 });
     const warn = vi.fn(); createDaemonReconciler(registry, warn)();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('RECOVERY_FATE_CHANGED'));
     expect(readFileSync(join(runsRoot(), id, 'run.json'), 'utf8')).toBe(bytes);
-    expect(readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8')).toBe(ledger);
+    expect(readFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), 'utf8')).toBe(ledger);
   });
 
   it('fences a checkpoint that changed between observation and recovery', () => {
@@ -191,7 +192,7 @@ describe('daemon-owned previous-boot orphan recovery', () => {
             recover(() => {
               if (++checks === publication) {
                 runBefore = readFileSync(join(runsRoot(), id, 'run.json'), 'utf8');
-                ledgerBefore = readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8');
+                ledgerBefore = readFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), 'utf8');
                 // An uncooperative append is observable even inside the lock;
                 // ordinary TaskRegistry writers are serialized by tasks.lock.
                 if (kind === 'lock-replaced') writeFileSync(registry.lockPath, JSON.stringify({ pid: process.pid, token: 'replacement' }));
@@ -207,7 +208,7 @@ describe('daemon-owned previous-boot orphan recovery', () => {
         expect(checks).toBe(publication);
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('RECOVERY_REGISTRY_'));
         expect(readFileSync(join(runsRoot(), id, 'run.json'), 'utf8')).toBe(runBefore);
-        expect(readFileSync(join(runsRoot(), id, 'stages/work/status.json'), 'utf8')).toBe(ledgerBefore);
+        expect(readFileSync(runRecordPath(join(runsRoot(), id), 'stages/work/status.json'), 'utf8')).toBe(ledgerBefore);
         expect(readRunState(project, id).status).toBe('running');
         expect(readFileSync(join(runsRoot(), id, 'events.jsonl'), 'utf8')).toBe(events);
       },

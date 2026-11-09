@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,7 +46,7 @@ async function author(brief: string, restore = false) {
   const stage = StageConfigSchema.parse({ id: 'author', role: 'coder', scope: ['report.md'] });
   const { runId, runDirPath } = createRun(project, 'frozen-field', 'name: fixture\nstages: []\n', ['author']);
   directory = runDirPath;
-  writeFileSync(join(directory, 'task_brief.md'), brief);
+  writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
   let calls = 0;
   const adapter: Adapter = { async run() {
     calls++;
@@ -60,7 +61,7 @@ async function author(brief: string, restore = false) {
     retries: 0, timeout_ms: 8_000, artifactContract: fixtureArtifactContract(s.id), settlementBoundary,
   }));
   return { calls, status: readStageStatus(project, runId, 'author'),
-    audit: JSON.parse(readFileSync(join(directory, 'stages/author/constraint_audit_attempt_1.json'), 'utf8')) };
+    audit: JSON.parse(readFileSync(runRecordPath(directory, 'stages/author/constraint_audit_attempt_1.json'), 'utf8')) };
 }
 
 it('keeps prose-only preservation unfrozen through preflight, rehearsal and authoring', async () => {

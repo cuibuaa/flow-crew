@@ -1,3 +1,4 @@
+import { stageWorkPath } from '../run-layout.js';
 /**
  * ScriptedAdapter — a deterministic "agent" that plays back a per-stage script.
  *
@@ -11,7 +12,7 @@
  * Script shape: stageId → one turn, or an ARRAY of turns consumed one per call
  * (a stage that runs once per iteration, like the research planner, scripts a
  * sequence). Files can be written relative to the PROJECT dir (deliverables,
- * round results) and/or the RUN dir (dispatch.yaml, reality_checks.md), with
+ * round results) and/or the run work tree (dispatch.yaml, reality_checks.md), with
  * the same containment check the mock adapter uses.
  */
 import { mkdirSync, writeFileSync } from '../engine-fs.js';
@@ -26,7 +27,7 @@ export interface ScriptedTurn {
   exitCode?: number;
   /** Files written relative to the project dir (opts.workDir). */
   projectFiles?: Record<string, string>;
-  /** Files written relative to the run dir (opts.runDir) — dispatch.yaml etc. */
+  /** Files written relative to the run work tree — dispatch.yaml etc. */
   runFiles?: Record<string, string>;
   tokens_out?: number;
 }
@@ -88,7 +89,7 @@ export class ScriptedAdapter implements Adapter {
     const finalPath = `verdict_${opts.stageId}.json`;
     const finalRecord = turn.runFiles?.[finalPath];
     const files = Object.fromEntries(Object.entries(turn.runFiles ?? {}).filter(([path]) => !opts.outputSchema || path !== finalPath));
-    const writes = [...writeContained(opts.workDir, turn.projectFiles), ...writeContained(opts.runDir, files).map((path) => `run:${path}`)];
+    const writes = [...writeContained(opts.workDir, turn.projectFiles), ...writeContained(stageWorkPath(opts.runDir), files).map((path) => `run:work/${path}`)];
     return {
       output: turn.exitCode ? turn.output ?? '' : scriptedRecord(turn.output ?? '', opts, finalRecord),
       exitCode: turn.exitCode ?? 0,

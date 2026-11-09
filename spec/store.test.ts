@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 /**
  * Store-level contracts that do not need a scheduler. Kept machine-independent: no child
  * processes, no network, isolated FC_HOME per test (see spec/purity.ts).
@@ -42,7 +43,7 @@ describe('R02 stage output keeps the attempt it belongs to', () => {
       // A later attempt overwrites `output.md` — that is its documented meaning — but it must
       // not destroy the earlier attempt, which is what a retry is told to read.
       writeStageOutput(projectDir, created.runId, 'work', 'second attempt transcript', 2);
-      const dir = join(created.runDirPath, 'stages', 'work');
+      const dir = runRecordPath(created.runDirPath, 'stages', 'work');
       expect(readFileSync(join(dir, 'output_attempt_1.md'), 'utf-8')).toBe('first attempt transcript');
       expect(readFileSync(join(dir, 'output_attempt_2.md'), 'utf-8')).toBe('second attempt transcript');
       expect(readFileSync(join(dir, 'output.md'), 'utf-8')).toBe('second attempt transcript');
@@ -61,7 +62,7 @@ describe('R02 stage output keeps the attempt it belongs to', () => {
     try {
       const created = createRun(projectDir, 'r02b', 'name: r02b\nstages: []\n', ['work']);
       writeStageOutput(projectDir, created.runId, 'work', 'no index');
-      const dir = join(created.runDirPath, 'stages', 'work');
+      const dir = runRecordPath(created.runDirPath, 'stages', 'work');
       expect(readFileSync(join(dir, 'output.md'), 'utf-8')).toBe('no index');
       expect(existsSync(join(dir, 'output_attempt_1.md'))).toBe(false);
     } finally {

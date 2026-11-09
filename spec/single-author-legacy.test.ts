@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -89,7 +90,7 @@ describe('single-author admission and historical competition records', () => {
       state.currentIteration = 1; state.maxIterations = 2;
       state.taskDescription = '# Goal\nComplete the deterministic recovery demonstration.\n\n# Acceptance criteria\n1. Both configured stages return their completed result.';
     });
-    const cancel = new RunCancellationCoordinator({ registry: new TaskRegistry({ baseDir: join(root, 'registry') }), units, timeoutMs: 0, signalGraceMs: 0, runsDir: join(created.runDirPath, '..') });
+    const cancel = new RunCancellationCoordinator({ registry: new TaskRegistry({ baseDir: join(root, 'registry') }), units, timeoutMs: 0, signalGraceMs: 0, runsDir: runRecordPath(created.runDirPath, '..') });
     expect(await cancel.cancelRun(created.runId)).toMatchObject({ ok: true, status: 'cancelled' });
     const fixtures = join(root, 'fixtures'); mkdirSync(fixtures);
     writeFileSync(join(fixtures, 'work.json'), JSON.stringify({ output_text: JSON.stringify({ status: 'delivered', summary: 'Retained work completed.', checks: [], caveats: [] }) }));
@@ -142,7 +143,7 @@ describe('single-author admission and historical competition records', () => {
     const accepted = { runId: 'historical-child', verdict: { pass: true, reason: 'Independently accepted' } };
     writeStageStatus(project, created.runId, 'accepted', { status: 'complete', retries: 0, acceptedFrom: accepted });
     beginStageAttempt(project, created.runId, 'work', 0);
-    const patches = join(created.runDirPath, 'stages/work');
+    const patches = runRecordPath(created.runDirPath, 'stages/work');
     const patch = 'Retained candidate patch bytes\n';
     const receipt = JSON.stringify({ version: 3, candidates: [{ label: 'A', runId: 'historical-child', status: 'running' }] }) + '\n';
     writeFileSync(join(patches, 'candidate_1_a.patch'), patch);
@@ -153,7 +154,7 @@ describe('single-author admission and historical competition records', () => {
     const original = readRunState(project, created.runId);
     const originalDone = readStageStatus(project, created.runId, 'done');
     expect(persistedPlanErrors(original)).toEqual([]);
-    const cancel = new RunCancellationCoordinator({ registry: new TaskRegistry({ baseDir: join(root, 'registry') }), units, timeoutMs: 0, signalGraceMs: 0, runsDir: join(created.runDirPath, '..') });
+    const cancel = new RunCancellationCoordinator({ registry: new TaskRegistry({ baseDir: join(root, 'registry') }), units, timeoutMs: 0, signalGraceMs: 0, runsDir: runRecordPath(created.runDirPath, '..') });
     expect(await cancel.cancelRun(created.runId)).toMatchObject({ ok: true, status: 'cancelled' });
     expect(() => assertContinuationCompatible(project, created.runId)).not.toThrow();
     expect(workflowContinuation(readRunState(project, created.runId), project, created.runId).iteration).toBe(1);
@@ -174,7 +175,7 @@ describe('single-author admission and historical competition records', () => {
     expect(resumed.stages.accepted.acceptedFrom).toEqual(accepted);
     expect(readGateEvaluation(project, 'accepted', created.runId)).toEqual(accepted.verdict);
     expect(resumed.stages.work.attempts?.map(attempt => attempt.status)).toEqual(['failed', 'complete']);
-    expect(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf8')).toBe(bytes);
+    expect(readFileSync(runRecordPath(created.runDirPath, 'workflow.yaml'), 'utf8')).toBe(bytes);
     expect(readFileSync(join(patches, 'candidate_1_a.patch'), 'utf8')).toBe(patch);
     expect(readFileSync(join(patches, 'race_1.json'), 'utf8')).toBe(receipt);
     expect(resumed.queryState?.planRevision?.digest).toBe(original.queryState?.planRevision?.digest);

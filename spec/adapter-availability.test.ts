@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
@@ -417,7 +418,7 @@ describe('CLI adapter behavior', () => {
     expect(projectSnapshot(fixture.project)).toEqual(before);
     const runs = readdirSync(join(fixture.fcHome, 'runs'));
     expect(runs).toHaveLength(1);
-    expect(readFileSync(join(fixture.fcHome, 'runs', runs[0], 'task_brief.md'), 'utf8')).toBe(brief);
+    expect(readFileSync(runRecordPath(join(fixture.fcHome, 'runs', runs[0]), 'task_brief.md'), 'utf8')).toBe(brief);
   });
 
   it('makes malformed Reality-check YAML fail rehearsal while no heading remains admissible', () => {

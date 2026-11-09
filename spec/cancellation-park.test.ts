@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:net';
@@ -185,8 +186,8 @@ describe('cancellation entry convergence', () => {
       completedAt: expect.any(String),
     });
     expect(() => lstatSync(scratchAlias)).toThrow(/ENOENT/);
-    expect(existsSync(join(created.runDirPath, 'scratch'))).toBe(false);
-    expect(readFileSync(join(created.runDirPath, 'workflow.yaml'), 'utf8')).toContain('name: default');
+    expect(existsSync(runRecordPath(created.runDirPath, 'scratch'))).toBe(false);
+    expect(readFileSync(runRecordPath(created.runDirPath, 'workflow.yaml'), 'utf8')).toContain('name: default');
   });
 
   it('accepts only complete confirmed RPC results and never retries an outcome-unknown mutation', async () => {
@@ -363,9 +364,9 @@ describe('parked resume durability', () => {
       'name: sibling-workflow\nstages: []\n',
       [],
     );
-    writeFileSync(join(sibling.runDirPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(sibling.runDirPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(sibling.runDirPath, sibling.runId, process.pid);
-    const before = readFileSync(join(parked.runDirPath, 'run.json'), 'utf-8');
+    const before = readFileSync(runRecordPath(parked.runDirPath, 'run.json'), 'utf-8');
     const replacement = loadWorkflow(join(import.meta.dirname, '..', 'config', 'workflows', 'research.yaml'));
     const adapter = {
       async run(): Promise<never> {
@@ -390,10 +391,10 @@ describe('parked resume durability', () => {
 
     expect(result.status).toBe(RUN_STATUS.PARKED);
     expect(result.parked?.requestId).toBe('e13b-byte-invariance');
-    expect(readFileSync(join(parked.runDirPath, 'run.json'), 'utf-8')).toBe(before);
-    expect(existsSync(join(parked.runDirPath, 'scheduler.pid'))).toBe(false);
-    expect(existsSync(join(parked.runDirPath, 'scheduler.identity.json'))).toBe(false);
-    expect(existsSync(join(sibling.runDirPath, 'scheduler.pid'))).toBe(true);
-    expect(existsSync(join(sibling.runDirPath, 'scheduler.identity.json'))).toBe(true);
+    expect(readFileSync(runRecordPath(parked.runDirPath, 'run.json'), 'utf-8')).toBe(before);
+    expect(existsSync(runRecordPath(parked.runDirPath, 'scheduler.pid'))).toBe(false);
+    expect(existsSync(runRecordPath(parked.runDirPath, 'scheduler.identity.json'))).toBe(false);
+    expect(existsSync(runRecordPath(sibling.runDirPath, 'scheduler.pid'))).toBe(true);
+    expect(existsSync(runRecordPath(sibling.runDirPath, 'scheduler.identity.json'))).toBe(true);
   });
 });

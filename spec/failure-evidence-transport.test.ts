@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -47,7 +48,7 @@ afterEach(() => {
 
 function writeExecCheck(runId: string, name: string, command: string): void {
   const indentedCommand = command.split('\n').map((line) => `        ${line}`);
-  writeFileSync(join(runDir(projectDir, runId), 'reality_checks.md'), [
+  writeFileSync(runRecordPath(runDir(projectDir, runId), 'reality_checks.md'), [
     '## Reality checks',
     'checks:',
     `  - name: ${name}`,
@@ -120,7 +121,7 @@ describe('failure evidence transport', () => {
     writeRunState(projectDir, failureRun.runId, deceptiveState);
 
     const failureGate = await concludeRun(deceptiveState, { status: 'complete', reasonCode: 'workflow_complete' });
-    const failureArtifact = join(runDir(projectDir, failureRun.runId), '.reality-gate.json');
+    const failureArtifact = runRecordPath(runDir(projectDir, failureRun.runId), '.reality-gate.json');
     expect(statSync(failureArtifact).size).toBeGreaterThan(0);
     const failureArtifactRaw = readFileSync(failureArtifact, 'utf-8');
     if (!failureArtifactRaw.includes('TOKEN_COUNT=5')) {
@@ -192,7 +193,7 @@ describe('failure evidence transport', () => {
     longState.status = 'complete';
 
     const longGate = await concludeRun(longState, { status: 'complete', reasonCode: 'workflow_complete' });
-    const longArtifact = join(runDir(projectDir, longRun.runId), '.reality-gate.json');
+    const longArtifact = runRecordPath(runDir(projectDir, longRun.runId), '.reality-gate.json');
     const replayedLong = replayExpectedExecution(longArtifact, {
       command: longCommand,
       stdout: longStdout,
@@ -280,7 +281,7 @@ describe('failure evidence transport', () => {
     state.status = 'complete';
 
     const gate = await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const artifactPath = join(runDir(projectDir, created.runId), '.reality-gate.json');
+    const artifactPath = runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json');
     const replayed = replayExpectedExecution(artifactPath, {
       command,
       stdout: 'm4-short-stdout\n',

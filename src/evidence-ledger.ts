@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
@@ -118,12 +119,12 @@ export type EvidenceEntry = EvidenceFact & { version: 1; sequence: number; at: s
 export function appendEvidence(runDir: string, fact: EvidenceFact): EvidenceEntry {
   const entries = readEvidence(runDir);
   const entry = { version: 1 as const, sequence: entries.length + 1, at: new Date().toISOString(), owner: 'code', ...fact };
-  appendFileSync(join(runDir, EVIDENCE_LEDGER), `${JSON.stringify(entry)}\n`);
+  appendFileSync(runRecordPath(runDir, EVIDENCE_LEDGER), `${JSON.stringify(entry)}\n`);
   return entry;
 }
 
 export function readEvidence(runDir: string): EvidenceEntry[] {
-  const path = join(runDir, EVIDENCE_LEDGER);
+  const path = runRecordPath(runDir, EVIDENCE_LEDGER);
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map((line, index) => {
     const value = JSON.parse(line) as EvidenceEntry;
@@ -202,11 +203,11 @@ export function projectCommit(projectDir: string): string | undefined {
 /** Diff is a separate inspectable artifact, never a summary by the author. Git
  * supplies the patch; structured file identities also include untracked writes. */
 export function evidenceContext(projectDir: string, runDir: string, stageId?: string, previous?: { index: number; startedAt: string } | null, budget = Infinity): string {
-  if (!existsSync(join(runDir, EVIDENCE_LEDGER))) writeFileSync(join(runDir, EVIDENCE_LEDGER), '', { flag: 'wx' });
+  if (!existsSync(runRecordPath(runDir, EVIDENCE_LEDGER))) writeFileSync(runRecordPath(runDir, EVIDENCE_LEDGER), '', { flag: 'wx' });
   const entries = readEvidence(runDir);
-  let brief = ''; try { brief = readFileSync(join(runDir, 'task_brief.md'), 'utf8'); } catch { /* legacy context */ }
+  let brief = ''; try { brief = readFileSync(runRecordPath(runDir, 'task_brief.md'), 'utf8'); } catch { /* legacy context */ }
   const validation = validationForTree(entries, captureProjectTree(projectDir, brief).hash);
-  const baselinePath = join(runDir, 'validation_baseline.json');
+  const baselinePath = runRecordPath(runDir, 'validation_baseline.json');
   let commit: string | undefined;
   let selection: unknown;
   try { const plan = JSON.parse(readFileSync(baselinePath, 'utf8')); commit = plan.baseCommit; selection = plan.baseline?.discovery; } catch { /* no Git baseline */ }
@@ -226,9 +227,9 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
       patch += added.status === 0 || added.status === 1 ? added.stdout : `\nPatch unavailable for ${JSON.stringify(path)}; inspect the current file.\n`;
     }
   }
-  const directory = join(runDir, 'stage_evidence', 'diffs', createHash('sha256').update(patch).digest('hex'));
+  const directory = runRecordPath(runDir, 'stage_evidence', 'diffs', createHash('sha256').update(patch).digest('hex'));
   mkdirSync(directory, { recursive: true });
-  const diffPath = join(directory, 'change.diff');
+  const diffPath = runRecordPath(directory, 'change.diff');
   try { writeFileSync(diffPath, patch, { flag: 'wx' }); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || readFileSync(diffPath, 'utf8') !== patch) throw error;
@@ -236,7 +237,7 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
   // A field projection, not a model summary or a prose importance filter.
   // Only the same stage sees its predecessor's final answer. Other stages see
   // engine facts, decisions and unverified blocker declarations, never narratives.
-  if (stageId && previous === undefined) try { previous = JSON.parse(readFileSync(join(runDir, 'stages', stageId, 'status.json'), 'utf8')).attempts?.at(-1); } catch { /* unknown predecessor */ }
+  if (stageId && previous === undefined) try { previous = JSON.parse(readFileSync(runRecordPath(runDir, 'stages', stageId, 'status.json'), 'utf8')).attempts?.at(-1); } catch { /* unknown predecessor */ }
   const predecessor = stageId ? stagePredecessor(entries, stageId, previous ?? undefined) : undefined;
   const latest = new Map(entries.map(entry => [`${entry.kind}:${entry.stageId}`, entry]));
   const facts = entries.flatMap<object>(entry => {
@@ -271,7 +272,7 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
   while ((patchBytes[tail] & 0xc0) === 0x80) tail++;
   const patchExcerpt = patchBytes.length <= 3000 ? patchText
     : `${patchBytes.subarray(0, head).toString('utf8')}\n[excerpt; read the complete artifact above]\n${patchBytes.subarray(tail).toString('utf8')}`;
-  return `## Evidence ledger and diff\nRead ${join(runDir, EVIDENCE_LEDGER)} (version 1 append-only structured facts; latest validation sequence ${validation?.sequence ?? 'none'}).\n`
+  return `## Evidence ledger and diff\nRead ${runRecordPath(runDir, EVIDENCE_LEDGER)} (version 1 append-only structured facts; latest validation sequence ${validation?.sequence ?? 'none'}).\n`
     + `Inspect the diff (including untracked additions; any unavailable patch is explicitly marked): ${diffPath}\nChanged-file hashes, including untracked files, are recorded in the ledger's attempt facts.\n`
     + 'Use these facts and current artifacts for every decision. Do not read author transcripts, stage output narratives or provider session history. '
     + 'Configured validation belongs to the completed author/repair attempt; decisions consume its tree-bound results without rerunning the suite. '
@@ -279,6 +280,6 @@ export function evidenceContext(projectDir: string, runDir: string, stageId?: st
     + 'Independent experiments and every assigned acceptance criterion remain required. Read the complete diff artifact when its excerpt is truncated.\n'
     + (ledgerText.length + selectionText.length + predecessorText.length <= budget ? `Ledger facts:\n${ledgerText}${selectionText}${predecessorText}`
       // All or nothing: a ledger that does not fit the adapter's input limit is named, not clipped.
-      : `Ledger facts are not inlined (ledger_exceeds_inline_bound): ${facts.length} facts from ${entries.length} ledger entries, ${ledgerText.length + selectionText.length + predecessorText.length} characters against the ${Math.max(0, budget)} that fit the adapter's input limit. Read ${join(runDir, EVIDENCE_LEDGER)} with your tools; the attempt facts carry the changed-file hashes and your own stage's latest attempt is its continuation evidence.`)
+      : `Ledger facts are not inlined (ledger_exceeds_inline_bound): ${facts.length} facts from ${entries.length} ledger entries, ${ledgerText.length + selectionText.length + predecessorText.length} characters against the ${Math.max(0, budget)} that fit the adapter's input limit. Read ${runRecordPath(runDir, EVIDENCE_LEDGER)} with your tools; the attempt facts carry the changed-file hashes and your own stage's latest attempt is its continuation evidence.`)
     + `\nDiff:\n${patchExcerpt}`;
 }

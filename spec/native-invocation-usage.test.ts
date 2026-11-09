@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -138,7 +139,7 @@ describe('native invocation usage', () => {
       console.log(JSON.stringify({type:'result',subtype:'success',session_id:'${sessionId}',result:'done',
         usage:{input_tokens:100,output_tokens:10},total_cost_usd:0.5}));
     `);
-    const costDir = join(opts.runDir, 'run-history', 'native-session-costs');
+    const costDir = runRecordPath(opts.runDir, 'run-history', 'native-session-costs');
     mkdirSync(costDir, { recursive: true });
     const costPath = join(costDir, `${sessionId}.json`);
     writeFileSync(costPath, failure === 'torn' ? '{"cumulativeCostUsd":0.' : JSON.stringify({ cumulativeCostUsd: 0.2 }));

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -31,7 +32,7 @@ beforeEach(async () => {
 
   const runPath = join(runsRoot(), runId);
   mkdirSync(runPath, { recursive: true });
-  writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+  writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
     runId,
     projectDir,
     workflowName: 'default',

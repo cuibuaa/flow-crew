@@ -13,7 +13,7 @@ describe('declared fixture migration boundary', () => {
     const working = (parse(declaredDispatch(stringify(raw))) as unknown[]).map((stage) => parseDispatchedStageConfig(stage));
     expect(working[0].artifact_contract).toMatchObject({ version: 1, produces: [], reads: [] });
     expect(working[1].artifact_contract?.produces).toEqual([
-      { id: 'verdict', root: 'run', path: 'verdict_judge.json', kind: 'file', nonempty: false },
+      { id: 'verdict', root: 'run', path: 'work/verdict_judge.json', kind: 'file', nonempty: false },
     ]);
   });
 

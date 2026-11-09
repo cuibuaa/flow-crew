@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,7 +29,7 @@ describe('condition facts resolve from the producing stage only', () => {
   };
   const writeVerdict = (stageId: string, verdict: Record<string, unknown>) => {
     mkdirSync(runDir(sandbox, runId), { recursive: true });
-    writeFileSync(join(runDir(sandbox, runId), `verdict_${stageId}.json`), JSON.stringify(verdict));
+    writeFileSync(runRecordPath(runDir(sandbox, runId), `verdict_${stageId}.json`), JSON.stringify(verdict));
   };
 
   beforeEach(() => {

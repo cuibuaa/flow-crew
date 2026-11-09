@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -46,7 +47,7 @@ describe('terminal publication', () => {
   it.each(TERMINAL_STATUSES.flatMap(status => readers.map(writer => ({ status, writer }))))(
     'publishes the candidate artifacts before $status via $writer becomes observable',
     ({ status, writer }) => {
-      fs.writeFileSync(join(directory, 'summary.md'), 'stale summary');
+      fs.writeFileSync(runRecordPath(directory, 'summary.md'), 'stale summary');
       const state = readRunState(project, id);
       state.status = status;
       state.completedAt = new Date().toISOString();
@@ -58,21 +59,21 @@ describe('terminal publication', () => {
       const actual = vi.mocked(originalRename).getMockImplementation()!;
       let observed = 0;
       vi.mocked(fs.renameSync).mockImplementation((from, to) => {
-        if (String(to) === join(directory, 'run.json')) {
+        if (String(to) === runRecordPath(directory, 'run.json')) {
           expect(JSON.parse(fs.readFileSync(String(to), 'utf8')).status).toBe('running');
-          const content = fs.readFileSync(join(directory, 'summary.md'), 'utf8');
+          const content = fs.readFileSync(runRecordPath(directory, 'summary.md'), 'utf8');
           expect(content).toContain(`Status: **${status}**`);
           expect(content).toContain('Final outcome evidence');
           expect(content).toContain('work: complete');
           expect(content).toContain('earlier [iteration 1, archived]: complete');
         }
         actual(from, to);
-        if (String(to) === join(directory, 'run.json')) observed++;
+        if (String(to) === runRecordPath(directory, 'run.json')) observed++;
       });
       if (writer === 'write') writeRunState(project, id, state);
       else updateRunState(project, id, current => Object.assign(current, state));
       expect(observed).toBe(1);
-      expect(JSON.parse(fs.readFileSync(join(directory, 'run.json'), 'utf8')).status).toBe(status);
+      expect(JSON.parse(fs.readFileSync(runRecordPath(directory, 'run.json'), 'utf8')).status).toBe(status);
     },
   );
 
@@ -81,31 +82,31 @@ describe('terminal publication', () => {
     state.status = 'complete';
     state.completedAt = new Date().toISOString();
     // A directory at the artifact destination deterministically rejects rename.
-    fs.mkdirSync(join(directory, 'summary.md'));
+    fs.mkdirSync(runRecordPath(directory, 'summary.md'));
     await expect(concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' })).rejects.toThrow();
     expect(readRunState(project, id).status).toBe('running');
     expect(readRunEvents(project, id).some(event => event.type === 'run_completed')).toBe(false);
-    fs.rmSync(join(directory, 'summary.md'), { recursive: true });
+    fs.rmSync(runRecordPath(directory, 'summary.md'), { recursive: true });
     await concludeRun(state, { status: 'complete', reasonCode: 'workflow_complete' });
     expect(readRunState(project, id).status).toBe('complete');
     expect(readRunEvents(project, id).some(event => event.type === 'run_completed')).toBe(true);
   });
 
   it('publishes a budget-exhaustion summary without unrecorded research quantities', () => {
-    fs.writeFileSync(join(directory, 'research_journal.json'), JSON.stringify({ rounds: [] }));
-    fs.writeFileSync(join(directory, 'research_decision.json'), JSON.stringify({
+    fs.writeFileSync(runRecordPath(directory, 'research_journal.json'), JSON.stringify({ rounds: [] }));
+    fs.writeFileSync(runRecordPath(directory, 'research_decision.json'), JSON.stringify({
       decision: 'stop_ceiling', reason: 'Iteration budget exhausted', bankedRounds: 0,
     }));
     updateRunState(project, id, state => {
       state.status = 'ceiling_hit';
       state.completedAt = new Date().toISOString();
     });
-    const summary = fs.readFileSync(join(directory, 'summary.md'), 'utf8');
+    const summary = fs.readFileSync(runRecordPath(directory, 'summary.md'), 'utf8');
     expect(summary).toContain('**Decision:** stop_ceiling — Iteration budget exhausted');
     expect(summary).toContain('**Rounds:** 0');
     expect(summary).not.toContain('kept:');
     expect(summary).not.toContain('no-improvement streak:');
-    expect(fs.existsSync(join(directory, 'progress.md'))).toBe(false);
+    expect(fs.existsSync(runRecordPath(directory, 'progress.md'))).toBe(false);
   });
 
   it('keeps the terminal summary when a watchdog ticks after settlement', async () => {
@@ -115,10 +116,10 @@ describe('terminal publication', () => {
       state.status = 'complete';
       state.completedAt = new Date().toISOString();
     });
-    const summary = fs.readFileSync(join(directory, 'summary.md'), 'utf8');
+    const summary = fs.readFileSync(runRecordPath(directory, 'summary.md'), 'utf8');
     expect(summary).toContain('Status: **complete**');
     await watchdog.tick();
-    expect(fs.readFileSync(join(directory, 'summary.md'), 'utf8')).toBe(summary);
-    expect(fs.existsSync(join(directory, 'progress.md'))).toBe(false);
+    expect(fs.readFileSync(runRecordPath(directory, 'summary.md'), 'utf8')).toBe(summary);
+    expect(fs.existsSync(runRecordPath(directory, 'progress.md'))).toBe(false);
   });
 });

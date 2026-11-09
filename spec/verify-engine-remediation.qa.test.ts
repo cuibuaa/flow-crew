@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
@@ -157,7 +158,7 @@ describe('independent engine-remediation verification', () => {
         if (options.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 1 }, options);
         if (settleCoverageFixture(options)) return fixtureResult({ output: 'fixture prerequisite settled', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
         gatePrompt = prompt;
-        write(join(options.runDir, 'fixture_verdict_qa.json'), JSON.stringify({ pass: true, reason: 'model accepted', criteria: Object.fromEntries(extractBriefCriteria(brief).criteria.map(({id}) => [id, { status: 'judgement', evidence: 'engine validation delta' }])) }));
+        write(stageWorkPath(options.runDir, 'fixture_verdict_qa.json'), JSON.stringify({ pass: true, reason: 'model accepted', criteria: Object.fromEntries(extractBriefCriteria(brief).criteria.map(({id}) => [id, { status: 'judgement', evidence: 'engine validation delta' }])) }));
         return fixtureResult({ output: 'gate complete', exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, options);
       } },
       new Map(), undefined, agentsDir, undefined, brief, true,
@@ -165,11 +166,11 @@ describe('independent engine-remediation verification', () => {
     const runDirectory = runDir(projectDir, final.runId);
     expect(gatePrompt).toContain('evidence-ledger.jsonl');
     expect(gatePrompt).toContain('change.diff');
-    expect(existsSync(join(runDirectory, 'validation_baseline.json'))).toBe(true);
-    const producedByScheduler = existsSync(join(runDirectory, 'validation_delta_qa.json'));
+    expect(existsSync(runRecordPath(runDirectory, 'validation_baseline.json'))).toBe(true);
+    const producedByScheduler = existsSync(runRecordPath(runDirectory, 'validation_delta_qa.json'));
     if (!producedByScheduler) await recordGateValidationDelta(projectDir, final.runId, 'qa');
-    expect(existsSync(join(runDirectory, 'validation_delta_qa.json'))).toBe(true);
-    const delta = JSON.parse(readFileSync(join(runDirectory, 'validation_delta_qa.json'), 'utf-8')) as {
+    expect(existsSync(runRecordPath(runDirectory, 'validation_delta_qa.json'))).toBe(true);
+    const delta = JSON.parse(readFileSync(runRecordPath(runDirectory, 'validation_delta_qa.json'), 'utf-8')) as {
       pass: boolean;
       delta: Array<{ state: string }>;
       version: number;
@@ -185,7 +186,7 @@ describe('independent engine-remediation verification', () => {
       immutablePath: expect.any(String),
       delta: expect.arrayContaining([{ role: 'build', display: 'node -e process.exit(0)', state: 'unverified', reason: 'Command unverified; independent gate owns disposition', newFailureIdentifiers: [] }]),
     });
-    expect(existsSync(join(runDirectory, delta.immutablePath))).toBe(true);
+    expect(existsSync(runRecordPath(runDirectory, delta.immutablePath))).toBe(true);
     expect(readGateEvaluation(projectDir, 'qa', final.runId)).toMatchObject({
       pass: true,
       validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified' })]),
@@ -213,7 +214,7 @@ describe('independent engine-remediation verification', () => {
     expect(archiveDeclaredOutputs(projectDir, runDirectory, [{
       path: 'docs/report.md', line: 2, source: 'outputs', disposition: 'create', expectedType: 'file',
     }]).complete).toBe(true);
-    expect(readFileSync(join(runDirectory, 'declared_outputs/docs/report.md'), 'utf8')).toBe('outside project\n');
+    expect(readFileSync(runRecordPath(runDirectory, 'declared_outputs/docs/report.md'), 'utf8')).toBe('outside project\n');
   });
 
   it('archives declared outputs when a workflow completes without terminal_states', { timeout: 20_000 }, async () => {
@@ -254,8 +255,8 @@ describe('independent engine-remediation verification', () => {
     const runDirectory = runDir(projectDir, final.runId);
     expect({
       status: final.status,
-      manifestExists: existsSync(join(runDirectory, 'declared_outputs_manifest.json')),
-      archivedOutputExists: existsSync(join(runDirectory, 'declared_outputs', outputPath)),
+      manifestExists: existsSync(runRecordPath(runDirectory, 'declared_outputs_manifest.json')),
+      archivedOutputExists: existsSync(runRecordPath(runDirectory, 'declared_outputs', outputPath)),
     }).toEqual({ status: 'complete', manifestExists: true, archivedOutputExists: true });
   });
 
@@ -429,7 +430,7 @@ describe('independent engine-remediation verification', () => {
       attempts: [{ index: 1, status: 'complete', startedAt, writes: [terminalPath] }],
     };
     writeRunState(projectDir, created.runId, state);
-    write(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+    write(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
       version: 1,
       pass: true,
       checkedAt: new Date().toISOString(),
@@ -459,7 +460,7 @@ describe('independent engine-remediation verification', () => {
     state.status = 'running';
     state.terminalStates = { complete: { paths: [terminalPath] } };
     writeRunState(projectDir, created.runId, state);
-    write(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+    write(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
       version: 1,
       pass: true,
       checkedAt: new Date().toISOString(),
@@ -509,7 +510,7 @@ describe('independent engine-remediation verification', () => {
     state.research = { baseline: 30, policy: 'greedy_stack', higherIsBetter: false };
     state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []), id: 'qa', role: 'qa', is_gate: true })];
     state.stages.qa = { status: 'complete', retries: 0 };
-    write(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({
+    write(runRecordPath(created.runDirPath, 'verdict_qa.json'), JSON.stringify({
       pass: false, phase: 'research', phaseComplete: false, score: 10, metric: 'error_count',
     }));
     writeCampaignEntry(projectDir, state);

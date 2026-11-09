@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import { ignoredProjectPaths } from '../../project-identity.js';
 // Boundary: Own one run-scoped lazy Git/disk preimage cache, watcher journal, current-image nomination, committed writes and lifecycle cleanup.
 import { type GitIndexEntry, parseGitIndexEntries } from "./file-images.js";
@@ -193,7 +194,7 @@ function createRollbackBaseline(projectDir: string, runDirPath?: string): RunRol
     journal: new Map(), journalSequence: 0, reliable: true,
     initialization: { filesEnumerated, filesRead, filesHashed, bytesRead, bytesHashed, strategy },
   };
-  const briefPath = runDirPath && join(runDirPath, 'task_brief.md');
+  const briefPath = runDirPath && runRecordPath(runDirPath, 'task_brief.md');
   baseline.frozenInputs = briefPath && existsSync(briefPath)
     ? resolveImmutableEvidenceBindings(projectDir, readFileSync(briefPath, 'utf8')) : [];
   // Derive supporting topology only for identities still frozen after exact

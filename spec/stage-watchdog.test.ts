@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, appendFileSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -49,8 +50,8 @@ function begin() {
   updateRunState(project, runId, state => { state.status = 'running'; state.stages[stageId] = status; });
   return status;
 }
-const signalPath = () => join(directory, 'signals', `abort_${stageId}.json`);
-const saved = () => JSON.parse(readFileSync(join(directory, 'stage_watchdog.json'), 'utf8'));
+const signalPath = () => runRecordPath(directory, 'signals', `abort_${stageId}.json`);
+const saved = () => JSON.parse(readFileSync(runRecordPath(directory, 'stage_watchdog.json'), 'utf8'));
 function monitor() { return new StageWatchdog(project, runId, { idleThresholdMs: threshold }); }
 
 describe('deterministic idle watchdog', () => {
@@ -61,16 +62,16 @@ describe('deterministic idle watchdog', () => {
     vi.spyOn(Date, 'now').mockReturnValue(started + threshold);
     await watchdog.tick();
     expect(observations.processes).toEqual([]);
-    expect(observations.directories.filter(path => path.startsWith(join(directory, 'stages')))).toEqual([]);
+    expect(observations.directories.filter(path => path.startsWith(runRecordPath(directory, 'stages')))).toEqual([]);
     expect(existsSync(signalPath())).toBe(true);
   });
 
   it('recognizes changed attempt evidence even when its mtime predates the attempt', () => {
     const status = readStageStatus(project, runId, stageId);
     const artifacts = [
-      join(directory, 'stages', stageId, 'output.md'),
-      join(directory, `verdict_${stageId}.json`),
-      join(directory, `handoff_${stageId}.md`),
+      runRecordPath(directory, 'stages', stageId, 'output.md'),
+      runRecordPath(directory, `verdict_${stageId}.json`),
+      runRecordPath(directory, `handoff_${stageId}.md`),
     ];
     for (const artifact of artifacts) {
       writeFileSync(artifact, 'current attempt bytes');
@@ -83,9 +84,9 @@ describe('deterministic idle watchdog', () => {
 
   it('rejects unchanged prior-attempt evidence even after its mtime advances', () => {
     const artifacts = [
-      join(directory, 'stages', stageId, 'output.md'),
-      join(directory, `verdict_${stageId}.json`),
-      join(directory, `handoff_${stageId}.md`),
+      runRecordPath(directory, 'stages', stageId, 'output.md'),
+      runRecordPath(directory, `verdict_${stageId}.json`),
+      runRecordPath(directory, `handoff_${stageId}.md`),
     ];
     for (const artifact of artifacts) writeFileSync(artifact, 'previous attempt bytes');
     const status = begin();
@@ -104,15 +105,15 @@ describe('deterministic idle watchdog', () => {
     const fingerprint = createHash('sha256').update('prior attempt bytes').digest('hex');
     // Exact old version-1 shape: output was output_attempt_N, hashes/null,
     // and no handoff baseline. Do not use the new writer to build this record.
-    writeFileSync(join(directory, 'stages', stageId, 'attempt_generation.json'), JSON.stringify({
+    writeFileSync(runRecordPath(directory, 'stages', stageId, 'attempt_generation.json'), JSON.stringify({
       version: 1, stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
       segmentStart, ...(shape === 'missing' ? {} : { artifactBaselines: {
         output: shape === 'absent' ? null : fingerprint,
         verdict: shape === 'absent' ? null : fingerprint,
       } }), recordedAt: attempt.startedAt,
     }));
-    for (const artifact of [join(directory, 'stages', stageId, 'output.md'),
-      join(directory, `verdict_${stageId}.json`), join(directory, `handoff_${stageId}.md`)]) {
+    for (const artifact of [runRecordPath(directory, 'stages', stageId, 'output.md'),
+      runRecordPath(directory, `verdict_${stageId}.json`), runRecordPath(directory, `handoff_${stageId}.md`)]) {
       writeFileSync(artifact, shape === 'unchanged' ? 'prior attempt bytes' : 'current attempt bytes');
       const modified = new Date(Date.parse(attempt.startedAt) + 1_000);
       utimesSync(artifact, modified, modified);
@@ -125,8 +126,8 @@ describe('deterministic idle watchdog', () => {
       protectedFromIdleAbort: false,
     });
     const old = new Date(Date.parse(attempt.startedAt) - 1_500);
-    for (const artifact of [join(directory, 'stages', stageId, 'output.md'),
-      join(directory, `verdict_${stageId}.json`), join(directory, `handoff_${stageId}.md`)]) utimesSync(artifact, old, old);
+    for (const artifact of [runRecordPath(directory, 'stages', stageId, 'output.md'),
+      runRecordPath(directory, `verdict_${stageId}.json`), runRecordPath(directory, `handoff_${stageId}.md`)]) utimesSync(artifact, old, old);
     expect(inspectStageExecutionFacts({ runDir: directory, stageId, status })).toMatchObject({
       outputObserved: false, verdictObserved: false, handoffObserved: false,
     });
@@ -146,8 +147,8 @@ describe('deterministic idle watchdog', () => {
     vi.spyOn(Date, 'now').mockReturnValue(started + threshold * 2);
     await watchdog.tick();
     expect(readFileSync(signalPath(), 'utf8')).toBe(firstSignal);
-    expect(existsSync(join(directory, 'stages', '_supervisor'))).toBe(false);
-    expect(existsSync(join(directory, 'supervisor_log.md'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'stages', '_supervisor'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'supervisor_log.md'))).toBe(false);
   });
 
   it('starts a fresh idle clock when a same-name stage begins its next execution', async () => {
@@ -165,7 +166,7 @@ describe('deterministic idle watchdog', () => {
     const status = readStageStatus(project, runId, stageId);
     const attempt = status.attempts!.at(-1)!;
     const lastProgressAt = Date.now() - threshold;
-    writeFileSync(join(directory, 'stage_watchdog.json'), JSON.stringify({
+    writeFileSync(runRecordPath(directory, 'stage_watchdog.json'), JSON.stringify({
       stageProgress: { work: { stageId, attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, lastProgressAt } },
       stageProgressObservedAt: Date.now() - 1,
     }));
@@ -176,7 +177,7 @@ describe('deterministic idle watchdog', () => {
   });
 
   it('rejects a historical progress clock owned by another execution', async () => {
-    writeFileSync(join(directory, 'stage_watchdog.json'), JSON.stringify({
+    writeFileSync(runRecordPath(directory, 'stage_watchdog.json'), JSON.stringify({
       stageProgress: { work: { stageId, attemptIndex: 99, attemptStartedAt: '2000-01-01T00:00:00.000Z', lastProgressAt: 1 } },
     }));
     const watchdog = monitor();

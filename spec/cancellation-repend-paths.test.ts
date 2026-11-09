@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -44,7 +45,7 @@ function fixture() {
     { id: 'repair', role: 'coder', scope: [], depends_on: ['review'], retry_to: ['review'], prompt_template: 'Repair fixture.',
       artifact_contract: { version: 1, produces: [], reads: [] } },
     { id: 'review', role: 'coder', scope: [], depends_on: [], is_gate: true, prompt_template: 'Review fixture.',
-      artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'verdict_review.json' }], reads: [] } },
+      artifact_contract: { version: 1, produces: [{ id: 'verdict', root: 'run', path: 'work/verdict_review.json' }], reads: [] } },
   ] });
   const yaml = stringify(workflow);
   const run = createRun(project, workflow.name, yaml, workflow.stages.map(stage => stage.id));
@@ -64,7 +65,7 @@ function fixture() {
   const treeHash = captureProjectTree(project).hash;
   const reproduction = appendEvidence(run.runDirPath, { kind: 'command', owner: 'adapter-event', stageId: 'review', attemptIndex: 2,
     commandId: 'prior-fixture-reproduction', command: 'true', context: { cwd: project, shell: '/bin/sh' }, exitCode: 1, outputDigest: 'a'.repeat(64), treeHash, treeAfterHash: treeHash });
-  writeFileSync(join(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'Fixture requires a repair.',
+  writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'Fixture requires a repair.',
     audit_findings: { version: 1, findings: [{ id: 'fixture', paths: ['fixture'], reason: 'Retained fixture rejection',
       criterion_ids: [], invalidates_plan: false, repair_role: 'coder', reproduction: reproduction.sequence }] } }));
   const roles = join(root, 'roles'); mkdirSync(roles);
@@ -74,7 +75,7 @@ function fixture() {
 
 async function cancelAndContinue(run: ReturnType<typeof fixture>, stageId: string, matchingLedger = false) {
   const projection = readRunState(project, run.runId).stages[stageId];
-  const ledgerPath = join(run.runDirPath, 'stages', stageId, 'status.json');
+  const ledgerPath = runRecordPath(run.runDirPath, 'stages', stageId, 'status.json');
   const ledger = readStageStatus(project, run.runId, stageId);
   const before = readFileSync(ledgerPath, 'utf8');
   expect(projection).toMatchObject({ status: 'pending', retries: 0, attempts: ledger.attempts });
@@ -126,7 +127,7 @@ it('continues after terminal ambiguity repends its admitted owner and ledger', a
     state.startedAt = '2000-01-01T00:00:00.000Z';
     state.terminalStates = { complete: { paths: ['complete.md'] }, escalated: { paths: ['escalated.md'] } };
   });
-  writeFileSync(join(run.runDirPath, 'dispatch_admission.json'), JSON.stringify({ pass: true,
+  writeFileSync(runRecordPath(run.runDirPath, 'dispatch_admission.json'), JSON.stringify({ pass: true,
     terminalOwners: { 'complete.md': 'repair', 'escalated.md': 'repair' } }));
   writeFileSync(join(project, 'complete.md'), 'Fixture successful outcome.');
   writeFileSync(join(project, 'escalated.md'), 'Fixture competing outcome.');
@@ -142,8 +143,8 @@ it('continues after research progress repends its terminal finalizer and ledger'
   updateRunState(project, run.runId, state => {
     state.research = { baseline: 0, policy: 'greedy_stack', resultFile: 'round_result.json', stop: { maxRounds: 3 } };
   });
-  mkdirSync(join(run.runDirPath, 'signals'));
-  writeFileSync(join(run.runDirPath, 'signals/research_terminal_ready.json'), JSON.stringify({ terminalOwner: 'repair' }));
+  mkdirSync(runRecordPath(run.runDirPath, 'signals'));
+  writeFileSync(runRecordPath(run.runDirPath, 'signals/research_terminal_ready.json'), JSON.stringify({ terminalOwner: 'repair' }));
   const interrupted = new Error('Fixture scheduler stopped before terminal finalizer dispatch');
   const dispatch = vi.spyOn(iteration, 'executeIteration').mockImplementation(async () => {
     await cancelAndContinue(run, 'repair', true);

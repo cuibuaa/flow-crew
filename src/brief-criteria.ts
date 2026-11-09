@@ -1,8 +1,8 @@
+import { runRecordPath } from './run-layout.js';
 import { splitBriefFrontmatter } from './brief-frontmatter.js';
 import { createHash } from 'node:crypto';
 import { writeFileSync } from './engine-fs.js';
 
-import { join } from 'node:path';
 
 export interface BriefCriterion {
   id: string;
@@ -112,6 +112,6 @@ export function extractBriefCriteria(brief: string): BriefCriteriaArtifact {
 
 export function writeBriefCriteriaArtifact(runDir: string, brief: string): BriefCriteriaArtifact {
   const artifact = extractBriefCriteria(brief);
-  writeFileSync(join(runDir, 'brief_criteria.json'), `${JSON.stringify(artifact, null, 2)}\n`, 'utf-8');
+  writeFileSync(runRecordPath(runDir, 'brief_criteria.json'), `${JSON.stringify(artifact, null, 2)}\n`, 'utf-8');
   return artifact;
 }

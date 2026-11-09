@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
@@ -338,7 +339,7 @@ async function waitForTerminalRun(harness: Harness, id: number): Promise<RunSnap
     const runId = basename(task.run_id);
     const runPath = join(harness.fcHome, 'runs', runId);
     try {
-      const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as RunSnapshot['state'];
+      const state = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as RunSnapshot['state'];
       if (!(TERMINAL_STATUSES as readonly string[]).includes(state.status)) return false;
       snapshot = { task, runId, runPath, state };
       return true;

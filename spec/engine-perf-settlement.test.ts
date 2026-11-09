@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -41,7 +42,7 @@ describe('interrupted runs have a durable outcome without takeover', () => {
   it('resumes the archived workflow contract after project configuration changes', () => {
     const id = interrupted(), base = runDir(project, id);
     const stage = StageConfigSchema.parse({ id: 'work', role: 'coder', scope: [], artifact_contract: { version: 1, produces: [], reads: [] } });
-    writeFileSync(join(base, 'workflow.yaml'), JSON.stringify({ name: 'admitted', defaults: { max_iterations: 1 }, stages: [stage] }));
+    writeFileSync(runRecordPath(base, 'workflow.yaml'), JSON.stringify({ name: 'admitted', defaults: { max_iterations: 1 }, stages: [stage] }));
     vi.spyOn(recovery, 'readHostBootId').mockReturnValue('same-boot');
     vi.spyOn(runLock, 'inspectRunScheduler').mockReturnValue({ kind: 'dead', pid: 2147483647 });
     try {
@@ -52,7 +53,7 @@ describe('interrupted runs have a durable outcome without takeover', () => {
       expect(replacement).not.toHaveProperty('dispatch');
       expect(readRunState(project, id).stages.replacement).toBeUndefined();
     } finally {
-      removeSchedulerPidIfOwned(join(base, 'scheduler.pid')); runLock.releaseLaunchIntent(project, id);
+      removeSchedulerPidIfOwned(runRecordPath(base, 'scheduler.pid')); runLock.releaseLaunchIntent(project, id);
     }
   });
 
@@ -75,7 +76,7 @@ describe('interrupted runs have a durable outcome without takeover', () => {
       expect(readRunState(project, id)).toMatchObject({ recovery: { kind: 'resumable' }, currentIteration: 2, maxIterations: 3, maxRetries: 4 });
       expect(readRunState(project, id).stages.work).toMatchObject({ status: 'pending', retries: 0, attempts: [{ status: 'failed', exitCode: 143 }] });
     } finally {
-      removeSchedulerPidIfOwned(join(base, 'scheduler.pid'));
+      removeSchedulerPidIfOwned(runRecordPath(base, 'scheduler.pid'));
       runLock.releaseLaunchIntent(project, id);
     }
   });
@@ -95,14 +96,14 @@ describe('interrupted runs have a durable outcome without takeover', () => {
       state.recovery!.kind = 'resuming';
     });
     beginStageAttempt(project, id, 'work', 1);
-    const base = runDir(project, id), ledger = join(base, 'stages/work/status.json');
-    const before = readFileSync(ledger, 'utf8'), stateBefore = readFileSync(join(base, 'run.json'), 'utf8');
+    const base = runDir(project, id), ledger = runRecordPath(base, 'stages/work/status.json');
+    const before = readFileSync(ledger, 'utf8'), stateBefore = readFileSync(runRecordPath(base, 'run.json'), 'utf8');
     if (kind === 'live-owner') vi.spyOn(runLock, 'inspectRunScheduler').mockReturnValue({ kind: 'live', pid: process.pid });
     let launch: ReturnType<typeof prepareWorkflowLaunch> | undefined, failure: unknown;
     try {
       launch = prepareWorkflowLaunch({ name: 'fixture', description: '', defaults: { max_iterations: 2, max_retries: 1 }, stages: [] }, 'name: fixture\nstages: []\n', project, id);
     } catch (error) { failure = error; }
-    finally { removeSchedulerPidIfOwned(join(base, 'scheduler.pid')); runLock.releaseLaunchIntent(project, id); }
+    finally { removeSchedulerPidIfOwned(runRecordPath(base, 'scheduler.pid')); runLock.releaseLaunchIntent(project, id); }
     const after = readRunState(project, id);
     if (kind !== 'live-owner') {
       expect(failure).toBeUndefined(); expect(launch?.kind).toBe('ready');
@@ -115,19 +116,19 @@ describe('interrupted runs have a durable outcome without takeover', () => {
       expect(launch).toBeUndefined();
       expect(String(failure)).toContain('RECOVERY_FATE_UNKNOWN');
       expect(readFileSync(ledger, 'utf8')).toBe(before);
-      expect(readFileSync(join(base, 'run.json'), 'utf8')).toBe(stateBefore);
+      expect(readFileSync(runRecordPath(base, 'run.json'), 'utf8')).toBe(stateBefore);
     }
   });
   it('refuses direct continuation of closed legacy work without a bound checkpoint', () => {
     const id = interrupted(false);
     writeStageStatus(project, id, 'work', { status: 'failed', retries: 0, attempts: [{ index: 1, status: 'failed', startedAt: '2026-01-01T00:00:00.000Z', completedAt: '2026-01-01T00:00:01.000Z', exitCode: 124 }] });
-    const ledger = join(runDir(project, id), 'stages/work/status.json'), before = readFileSync(ledger, 'utf8');
+    const ledger = runRecordPath(runDir(project, id), 'stages/work/status.json'), before = readFileSync(ledger, 'utf8');
     expect(() => prepareWorkflowLaunch({ name: 'fixture', description: '', defaults: { max_iterations: 1, max_retries: 0 }, stages: [] }, 'name: fixture\nstages: []\n', project, id)).toThrow(/RECOVERY_CHECKPOINT_MISSING/);
     expect(readRunState(project, id)).toMatchObject({ status: 'failed', recovery: { kind: 'blocked' } });
     expect(readFileSync(ledger, 'utf8')).toBe(before);
   });
   it.each([true, false])('ends unknown consumer fate (checkpoint=%s) with a reason, retaining attempt evidence', checkpoint => {
-    const id = interrupted(checkpoint), ledger = join(runDir(project, id), 'stages/work/status.json');
+    const id = interrupted(checkpoint), ledger = runRecordPath(runDir(project, id), 'stages/work/status.json');
     if (checkpoint) updateRunState(project, id, state => { delete state.engineCheckpoint!.processes; });
     const before = readFileSync(ledger, 'utf8');
     const state = reconcileHostInterruptedRun(project, id, { currentBootId: 'same-boot', currentGeneration: 'fixture-generation' });
@@ -135,7 +136,7 @@ describe('interrupted runs have a durable outcome without takeover', () => {
     expect(state.completedAt).toBeTruthy();
     expect(state.failureReason).toMatch(checkpoint ? /RECOVERY_FATE_UNKNOWN/ : /RECOVERY_CHECKPOINT_MISSING/);
     expect(readFileSync(ledger, 'utf8')).toBe(before);
-    expect(readFileSync(join(runDir(project, id), 'events.jsonl'), 'utf8')).toContain('recovery_reconciled');
+    expect(readFileSync(runRecordPath(runDir(project, id), 'events.jsonl'), 'utf8')).toContain('recovery_reconciled');
   });
 
   it.each([true, false])('daemon discovers same-boot/legacy stopped runs (checkpoint=%s)', checkpoint => {
@@ -157,7 +158,7 @@ describe('declared products are part of gate admission', () => {
       state.declaredOutputs = [{ path: 'report.md', expectedType: 'file' }];
       state.planControl = { version: 1, capabilities: ['report.md'], stages: [stage('review', { is_gate: true }), stage('report', { scope: ['report.md'], depends_on: ['review'], ...(repair ? { retry_to: ['review'] } : {}) })] };
     });
-    writeFileSync(join(base, 'verdict_review.json'), '{"pass":true}');
+    writeFileSync(runRecordPath(base, 'verdict_review.json'), '{"pass":true}');
     expect(readGateEvaluation(project, 'review', id, undefined, false)?.pass).toBe(!repair);
     if (!repair) {
       writeStageStatus(project, id, 'report', { status: 'complete', retries: 0 });
@@ -167,9 +168,9 @@ describe('declared products are part of gate admission', () => {
 
   it('accepts a delivered link object without treating its target as the product', () => {
     const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []).runId;
-    writeFileSync(join(runDir(project, id), 'task_brief.md'), '---\noutputs: [report.md]\n---\n# Goal\nDeliver the report.');
+    writeFileSync(runRecordPath(runDir(project, id), 'task_brief.md'), '---\noutputs: [report.md]\n---\n# Goal\nDeliver the report.');
     writeFileSync(join(root, 'outside.md'), 'fixture'); symlinkSync(join(root, 'outside.md'), join(project, 'report.md'));
-    writeFileSync(join(runDir(project, id), 'verdict_review.json'), '{"pass":true}');
+    writeFileSync(runRecordPath(runDir(project, id), 'verdict_review.json'), '{"pass":true}');
     expect(readGateEvaluation(project, 'review', id, undefined, false)?.pass).toBe(true);
   });
 
@@ -185,8 +186,8 @@ describe('declared products are part of gate admission', () => {
   it.each(['missing', 'wrong-type', 'present'])('checks a required %s output before accepting PASS', kind => {
     const id = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []).runId;
     const base = runDir(project, id);
-    writeFileSync(join(base, 'task_brief.md'), '---\noutputs: [report.md]\n---\n# Goal\nDeliver the product and report.\n');
-    writeFileSync(join(base, 'verdict_review.json'), '{"pass":true}');
+    writeFileSync(runRecordPath(base, 'task_brief.md'), '---\noutputs: [report.md]\n---\n# Goal\nDeliver the product and report.\n');
+    writeFileSync(runRecordPath(base, 'verdict_review.json'), '{"pass":true}');
     if (kind === 'present') writeFileSync(join(project, 'report.md'), 'Required product');
     if (kind === 'wrong-type') mkdirSync(join(project, 'report.md'));
     const verdict = readGateEvaluation(project, 'review', id, undefined, false);
@@ -227,7 +228,7 @@ describe('mixed language validation retains all measured commands', () => {
     const commands = mixed('pyproject');
     const baseline = await runProjectValidationBaseline(project, { commands, runCommand: () => ({ exitCode: 0 }) });
     const { runId, runDirPath } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['review']);
-    writeFileSync(join(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline }));
+    writeFileSync(runRecordPath(runDirPath, 'validation_baseline.json'), JSON.stringify({ version: 1, source: 'ship-setup-ready-record', baseline }));
     const attempt = { index: 1, startedAt: 'fixture-start', writes: [], writeAttribution: 'structured' as const };
     writeStageStatus(project, runId, 'review', { status: 'running', retries: 0, attempts: [{ ...attempt, status: 'running' }] });
     seedAttemptValidation(project, runId, baseline.results);
@@ -236,7 +237,7 @@ describe('mixed language validation retains all measured commands', () => {
     writeStageStatus(project, runId, 'review', { status: 'complete', retries: 0, attempts: [{ ...attempt, status: 'complete', completedAt: 'fixture-end' }] });
     expect(bindReviewedGateValidation(project, runId, 'review')).toBe(true);
     expect(await settleGateValidationEvidence(project, runId, 'review', { runCommand: () => { throw new Error('settled read-only review must not rerun'); } })).toEqual({ kind: 'unchanged' });
-    const durable = JSON.parse(readFileSync(join(runDirPath, 'validation_delta_review.json'), 'utf8'));
+    const durable = JSON.parse(readFileSync(runRecordPath(runDirPath, 'validation_delta_review.json'), 'utf8'));
     expect(durable.delta).toHaveLength(baseline.results.length);
     expect(durable).not.toHaveProperty('current');
     expect(receipt?.current.filter(result => result.role === 'test')).toHaveLength(2);

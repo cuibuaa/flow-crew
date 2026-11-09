@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -57,9 +58,9 @@ describe('author result reuses the engine write record', () => {
       { index: 2, startedAt: state.startedAt, status: 'complete', exitCode: 0, writes: ['second.md'], writeAttribution: 'snapshot' },
     ] };
     writeRunState(project, runId, state);
-    writeFileSync(join(directory, 'stages/work/output_attempt_1.md'), JSON.stringify({ ...record(), files_modified: ['historical-reported.md'] }));
-    writeFileSync(join(directory, 'stages/work/output_attempt_2.md'), JSON.stringify(record()));
-    writeFileSync(join(directory, 'stages/work/output.md'), JSON.stringify(record()));
+    writeFileSync(runRecordPath(directory, 'stages/work/output_attempt_1.md'), JSON.stringify({ ...record(), files_modified: ['historical-reported.md'] }));
+    writeFileSync(runRecordPath(directory, 'stages/work/output_attempt_2.md'), JSON.stringify(record()));
+    writeFileSync(runRecordPath(directory, 'stages/work/output.md'), JSON.stringify(record()));
     const report = await generateRunSummary(project, runId);
     const first = report.split('### work, execution 1')[1].split('### work, execution 2')[0];
     const second = report.split('### work, execution 2')[1];

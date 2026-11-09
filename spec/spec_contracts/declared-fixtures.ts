@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../../src/run-layout.js';
 import type { ArtifactContractInput } from '../test-support/fixture-types.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,7 +43,7 @@ export function coveredStages(subject: StageConfig, brief: string): StageConfig[
     dependency_reasons: subject.is_gate ? {} : { [subject.id]: 'Verify the completed fixture subject.' },
     criterion_refs: refs, is_gate: !subject.is_gate,
     artifact_contract: { ...stageArtifacts(subject.is_gate ? 'fixture_work' : 'fixture_audit', !subject.is_gate),
-      reads: subject.is_gate ? [] : [inputFile('criteria', 'brief_criteria.json', 'run')] },
+      reads: subject.is_gate ? [] : [inputFile('criteria', 'engine/brief_criteria.json', 'run')] },
   });
   return subject.is_gate
     ? [fixture, { ...subject, criterion_refs: refs, depends_on: [...subject.depends_on, fixture.id] }]
@@ -53,10 +54,10 @@ export function coveredStages(subject: StageConfig, brief: string): StageConfig[
 export function settleCoverageFixture(options: RunOpts): boolean {
   if (options.stageId === 'fixture_work') return true;
   if (options.stageId !== 'fixture_audit') return false;
-  const artifact = JSON.parse(readFileSync(join(options.runDir, 'brief_criteria.json'), 'utf8')) as {
+  const artifact = JSON.parse(readFileSync(runRecordPath(options.runDir, 'brief_criteria.json'), 'utf8')) as {
     criteria: Array<{ id: string }>;
   };
-  writeFileSync(join(options.runDir, 'fixture_verdict_fixture_audit.json'), JSON.stringify({
+  writeFileSync(stageWorkPath(options.runDir, 'fixture_verdict_fixture_audit.json'), JSON.stringify({
     pass: true, reason: 'Mechanical fixture subject completed; property assertions follow in the spec.',
     criteria: Object.fromEntries(artifact.criteria.map(({ id }) => [id, { status: 'pass', evidence: 'Fixture subject settled.' }])),
   }));

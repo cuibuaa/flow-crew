@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -52,10 +53,10 @@ it.each(['alive', 'unknown'] as const)('refuses %s checkpoint controller without
     state.engineCheckpoint = { version: 2, runId, projectDir: project, bootId: 'fixture-boot', pid: process.pid,
       processStart: processStartToken(process.pid), at: new Date().toISOString(), processes: [] };
   });
-  const before = readFileSync(join(runDir(project, runId), 'run.json'), 'utf8');
+  const before = readFileSync(runRecordPath(runDir(project, runId), 'run.json'), 'utf8');
   vi.spyOn(liveness, 'processLiveness').mockReturnValue(fate);
   expect(() => reconcileHostInterruptedRun(project, runId, { currentBootId: 'fixture-boot' })).toThrow('RECOVERY_FATE_CHANGED');
-  expect(readFileSync(join(runDir(project, runId), 'run.json'), 'utf8')).toBe(before);
+  expect(readFileSync(runRecordPath(runDir(project, runId), 'run.json'), 'utf8')).toBe(before);
 });
 
 it('ignores a reused command group during recovery without signalling it', () => {
@@ -125,7 +126,7 @@ it.skipIf(process.platform !== 'linux')('retires an owned orphan before retainin
   for (let i = 0; i < 500 && !existsSync(join(project, 'consumer')); i++) await delay(10);
   expect(existsSync(join(project, 'consumer'))).toBe(true);
   expect(readRunState(project, id).engineCheckpoint?.processes).toHaveLength(1);
-  const done = readFileSync(join(runDir(project, id), 'stages/done/status.json'), 'utf8');
+  const done = readFileSync(runRecordPath(runDir(project, id), 'stages/done/status.json'), 'utf8');
   controller!.kill('SIGKILL'); await exited;
   expect(() => reconcileHostInterruptedRun(project, id)).toThrow('RECOVERY_CONSUMERS_ACTIVE');
   expect(readRunState(project, id).stages.work.status).toBe('running');
@@ -135,10 +136,10 @@ it.skipIf(process.platform !== 'linux')('retires an owned orphan before retainin
     catch (error) { if (!String(error).includes('RECOVERY_CONSUMERS_ACTIVE')) throw error; await delay(10); }
   }
   expect(state).toMatchObject({ status: 'parked', recovery: { kind: 'resumable' }, stages: { done: { status: 'complete' }, work: { status: 'pending', attempts: [{ status: 'failed', exitCode: 143, tokenUsage: 'unknown' }] } } });
-  expect(readFileSync(join(runDir(project, id), 'stages/done/status.json'), 'utf8')).toBe(done);
+  expect(readFileSync(runRecordPath(runDir(project, id), 'stages/done/status.json'), 'utf8')).toBe(done);
   reconcileHostInterruptedRun(project, id);
   expect(readRunState(project, id).stages.work.attempts).toHaveLength(1);
-  expect(readFileSync(join(runDir(project, id), 'events.jsonl'), 'utf8').match(/recovery_reconciled/g)).toHaveLength(1);
+  expect(readFileSync(runRecordPath(runDir(project, id), 'events.jsonl'), 'utf8').match(/recovery_reconciled/g)).toHaveLength(1);
 });
 
 it.skipIf(process.platform !== 'linux')('a crash before command ownership publication never releases the command to write', async () => {

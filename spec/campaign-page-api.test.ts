@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -53,8 +54,8 @@ function sources(): Partial<CampaignPageSources> {
   };
   runEvidenceDir = join(runsRoot(), state.runId);
   mkdirSync(runEvidenceDir, { recursive: true });
-  writeFileSync(join(runEvidenceDir, 'workflow.yaml'), 'name: default\nstages:\n  - id: implement\n    role: coder\n', 'utf-8');
-  writeFileSync(join(runEvidenceDir, 'summary.md'), '## What was done\n- served the dedicated operator contract\n', 'utf-8');
+  writeFileSync(runRecordPath(runEvidenceDir, 'workflow.yaml'), 'name: default\nstages:\n  - id: implement\n    role: coder\n', 'utf-8');
+  writeFileSync(runRecordPath(runEvidenceDir, 'summary.md'), '## What was done\n- served the dedicated operator contract\n', 'utf-8');
   const records = [{
     runId: state.runId,
     status: state.status,

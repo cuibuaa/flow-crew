@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from './run-layout.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -693,7 +694,7 @@ export function deriveCampaignRunTitle(taskDescription?: string, workflowName?: 
 }
 
 function workflowEvidence(projectDir: string, state: StoreState): WorkflowEvidence {
-  const path = join(runsRoot(projectDir), state.runId, 'workflow.yaml');
+  const path = runRecordPath(join(runsRoot(projectDir), state.runId), 'workflow.yaml');
   const text = readOptionalText(path);
   if (text.error) return {
     roles: null,
@@ -731,7 +732,7 @@ function workflowEvidence(projectDir: string, state: StoreState): WorkflowEviden
 }
 
 function journalEvidence(projectDir: string, state: StoreState): JournalEvidence {
-  const path = join(runsRoot(projectDir), state.runId, 'research_journal.json');
+  const path = runRecordPath(join(runsRoot(projectDir), state.runId), 'research_journal.json');
   const json = readOptionalJson(path);
   if (json.error) return {
     rounds: [],
@@ -750,7 +751,7 @@ function metricArtifacts(projectDir: string, state: StoreState): { values: Metri
   const values: MetricArtifact[] = [];
   const issues: CampaignIssueSeed[] = [];
   for (const stageId of Object.keys(state.stages)) {
-    const path = join(runsRoot(projectDir), state.runId, 'stages', stageId, 'metric.json');
+    const path = stageWorkPath(join(runsRoot(projectDir), state.runId), 'stages', stageId, 'metric.json');
     if (!existsSync(path)) continue;
     const json = readOptionalJson(path);
     if (json.error || !json.value) {
@@ -810,8 +811,8 @@ function createRunEvidence(
   const workflow = workflowEvidence(projectDir, state);
   const journal = journalEvidence(projectDir, state);
   const artifacts = metricArtifacts(projectDir, state);
-  const summary = readOptionalText(join(runsRoot(projectDir), state.runId, 'summary.md'));
-  const confirm = readOptionalJson(join(runsRoot(projectDir), state.runId, 'research_confirm.json'));
+  const summary = readOptionalText(runRecordPath(join(runsRoot(projectDir), state.runId), 'summary.md'));
+  const confirm = readOptionalJson(runRecordPath(join(runsRoot(projectDir), state.runId), 'research_confirm.json'));
   return {
     state,
     workflow,
@@ -1957,7 +1958,7 @@ export async function readCampaignOperatorIndex(
     let conclusion = recentState ? 'Outcome summary unavailable' : 'No run records yet';
     if (recentState) {
       const task = tasks.find((item) => item.run_id === recentState.runId);
-      const summaryText = readOptionalText(join(runsRoot(projectDir), recentState.runId, 'summary.md')).value;
+      const summaryText = readOptionalText(runRecordPath(join(runsRoot(projectDir), recentState.runId), 'summary.md')).value;
       const minimalRun: RunEvidence = {
         state: recentState,
         workflow: { roles: null },

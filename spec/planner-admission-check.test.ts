@@ -1,5 +1,6 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -37,10 +38,10 @@ function setup(candidate = rejected) {
   const workflow = 'name: fixture\nstages:\n  - id: plan\n    role: planner\n    dynamic_dispatch: true\n    artifact_contract: {version: 1, produces: [], reads: [], groups: []}\n';
   const { runId } = createRun(project, 'fixture', workflow, ['plan']);
   const directory = runDir(project, runId);
-  writeFileSync(join(directory, 'task_brief.md'), brief);
-  writeFileSync(join(directory, 'brief_criteria.json'), JSON.stringify(extractBriefCriteria(brief)));
+  writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
+  writeFileSync(runRecordPath(directory, 'brief_criteria.json'), JSON.stringify(extractBriefCriteria(brief)));
   updateRunState(project, runId, state => { state.terminalStates = parseBriefFrontmatter(brief).terminalStates; });
-  const draft = join(directory, 'draft.json'); writeFileSync(draft, JSON.stringify(candidate));
+  const draft = stageWorkPath(directory, 'draft.json'); writeFileSync(draft, JSON.stringify(candidate));
   return { project, runId, directory, draft, workflow };
 }
 
@@ -53,12 +54,12 @@ async function check(ctx: ReturnType<typeof setup>) {
 }
 
 function inject(ctx: ReturnType<typeof setup>) {
-  writeFileSync(join(ctx.directory, 'dispatch.yaml'), readFileSync(ctx.draft));
+  writeFileSync(stageWorkPath(ctx.directory, 'dispatch.yaml'), readFileSync(ctx.draft));
   const roles = admission.buildRoleRegistry(join(ctx.project, 'config/agents'));
-  const sorted = admission.loadWorkflow(join(ctx.directory, 'workflow.yaml')).config.stages;
+  const sorted = admission.loadWorkflow(runRecordPath(ctx.directory, 'workflow.yaml')).config.stages;
   const { injectDispatchedStages } = createDispatchInjector({ inspectDispatchAdmission: admission.createDispatchAdmission(), resolveImmutableEvidenceBindings });
   injectDispatchedStages('plan', roles, sorted, readRunState(ctx.project, ctx.runId), ctx.project, ctx.runId, true);
-  return JSON.parse(readFileSync(join(ctx.directory, 'dispatch_admission.json'), 'utf8'));
+  return JSON.parse(readFileSync(runRecordPath(ctx.directory, 'dispatch_admission.json'), 'utf8'));
 }
 
 describe('planner checks real admission before its first result', () => {
@@ -89,7 +90,7 @@ describe('planner checks real admission before its first result', () => {
     vi.spyOn(admission, 'createDispatchAdmission').mockReturnValue(validator);
     const reachability = vi.spyOn(realityReads, 'inspectRealityCheckReachability').mockReturnValue(['reachability probe']);
     const parser = vi.spyOn(configuration, 'parseDispatchedStageConfig');
-    const ctx = setup(); writeFileSync(join(ctx.directory, 'reality_checks.md'), 'No additional hard checks.');
+    const ctx = setup(); writeFileSync(runRecordPath(ctx.directory, 'reality_checks.md'), 'No additional hard checks.');
     const checked = await check(ctx);
     const live = inject(ctx);
     expect(checked.report.errors).toEqual(live.errors);
@@ -102,7 +103,7 @@ describe('planner checks real admission before its first result', () => {
     const render = (planInterface as unknown as { renderPlannerAdmissionCheck: (project: string, directory: string) => string }).renderPlannerAdmissionCheck;
     expect(render(ctx.project, ctx.directory)).toContain(`--run '${ctx.directory}'`);
     expect(render(ctx.project, ctx.directory)).toContain('within this planner attempt');
-    expect(render(ctx.project, ctx.directory)).toContain(`'${join(ctx.directory, 'dispatch.yaml')}'`);
+    expect(render(ctx.project, ctx.directory)).toContain(`'${stageWorkPath(ctx.directory, 'dispatch.yaml')}'`);
     expect(render(ctx.project, ctx.directory)).not.toContain('$TMPDIR/dispatch.json');
     const worker = readFileSync(join(root, 'src/worker.ts'), 'utf8');
     expect(worker).toContain('renderPlannerAdmissionCheck(opts.projectDir, opts.runDir)');
@@ -112,16 +113,18 @@ describe('planner checks real admission before its first result', () => {
 
   it('reports the missing repair route while admitting report then review topology', async () => {
     const ctx = setup();
-    const before = Object.fromEntries(readdirSync(ctx.directory, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => [entry.name, readFileSync(join(ctx.directory, entry.name), 'utf8')]));
+    const snapshot = () => Object.fromEntries(readdirSync(ctx.directory, { recursive: true }).map(String)
+      .filter(name => statSync(join(ctx.directory, name)).isFile()).map(name => [name, readFileSync(join(ctx.directory, name), 'utf8')]));
+    const before = snapshot();
     const { exitCode, report } = await check(ctx);
     expect(exitCode).toBe(1);
     expect(report.errors).toHaveLength(1);
     expect(report.errors).toContainEqual(expect.objectContaining({ code: 'stage_retry_to', stageId: 'review', field: 'retry_to' }));
     expect(report.errors.map(error => error.message)).toContain('review: missing repair route; declare an ordinary repair stage with retry_to: [review], depends_on: [review], and scope for the permitted repairs. The engine bounds repair rounds by gate_retry_loops without re-planning.');
-    expect(Object.fromEntries(readdirSync(ctx.directory, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => [entry.name, readFileSync(join(ctx.directory, entry.name), 'utf8')]))).toEqual(before);
+    expect(snapshot()).toEqual(before);
     expect(report.errors).toEqual(inject(ctx).errors);
-    mkdirSync(join(ctx.directory, 'stages/plan'), { recursive: true });
-    writeFileSync(join(ctx.directory, 'stages/plan/status.json'), JSON.stringify({ admissionFailure: { code: 'dispatch_refused', attemptIndex: 0 }, error: `invalid dispatch.yaml: dispatch admission rejected the complete proposal before stage injection.\nExact admission errors:\n${report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')}` }));
+    mkdirSync(runRecordPath(ctx.directory, 'stages/plan'), { recursive: true });
+    writeFileSync(runRecordPath(ctx.directory, 'stages/plan/status.json'), JSON.stringify({ admissionFailure: { code: 'dispatch_refused', attemptIndex: 0 }, error: `invalid dispatch.yaml: dispatch admission rejected the complete proposal before stage injection.\nExact admission errors:\n${report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')}` }));
     recordPlanRetryRefusal({ runDirPath: ctx.directory, prepared: preparePlanRetryCandidate({ runDirPath: ctx.directory, stageId: 'plan', iteration: 1, attemptIndex: 1 }), maxAttempts: 3, unsatisfied: planRetryRequirementsFromAdmission(report) });
     const retry = buildRetryPreamble(1, 1000, ctx.directory, 'plan');
     expect(retry).toContain('RE-PLAN');
@@ -132,8 +135,8 @@ describe('planner checks real admission before its first result', () => {
   it('lets the planner correct a missing repair route within its own read-only plan-check', async () => {
     const ctx = setup();
     updateRunState(ctx.project, ctx.runId, state => { delete state.terminalStates; });
-    rmSync(join(ctx.directory, 'brief_criteria.json'));
-    writeFileSync(join(ctx.directory, 'task_brief.md'), '# Review the report\n');
+    rmSync(runRecordPath(ctx.directory, 'brief_criteria.json'));
+    writeFileSync(runRecordPath(ctx.directory, 'task_brief.md'), '# Review the report\n');
     const refused = await check(ctx);
     expect(refused.exitCode).toBe(1);
     expect(refused.report.errors).toEqual([expect.objectContaining({ field: 'retry_to', stageId: 'review', message: expect.stringContaining('review: missing repair route') })]);

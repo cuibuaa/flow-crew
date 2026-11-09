@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { stageArtifacts } from './spec_contracts/declared-fixtures.js';
 import { inputFile } from './spec_contracts/declared-fixtures.js';
 import {
@@ -261,7 +262,7 @@ describe('single resolved framework output contract', () => {
       wallHoursCumulative: expect.any(Number),
     });
     expect(manifest.rounds[0]).not.toHaveProperty('result');
-    const journal = JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf8')) as {
+    const journal = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_journal.json'), 'utf8')) as {
       rounds: Array<Record<string, unknown>>;
     };
     expect(journal.rounds).toEqual(manifest.rounds);

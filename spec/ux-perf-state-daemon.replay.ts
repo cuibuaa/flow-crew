@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { execFileSync } from 'node:child_process';
 import {
@@ -146,7 +147,7 @@ function recoveryFixture(options: { maxRetries?: number; attempt?: number } = {}
   run.taskDescription = brief;
   run.briefAdmission = admitted(brief).brief_admission;
   writeRunState(projectDir, created.runId, run);
-  writeFileSync(join(created.runDirPath, 'task_brief.md'), brief, 'utf-8');
+  writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), brief, 'utf-8');
   writeFileSync(
     join(projectDir, 'terminal_ceiling_report.md'),
     recordedEvidence('item5_terminal_candidate'),
@@ -200,7 +201,7 @@ describe('identity-bound dead scheduler recovery', () => {
 
   it('waits without spending budget while the recorded PID/start identity still owns the run', async () => {
     const fixture = recoveryFixture();
-    writeFileSync(join(fixture.created.runDirPath, 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
+    writeFileSync(runRecordPath(fixture.created.runDirPath, 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
     writeSchedulerProcessIdentity(fixture.created.runDirPath, fixture.created.runId);
 
     await fixture.orchestrator.tickOnce();
@@ -212,7 +213,7 @@ describe('identity-bound dead scheduler recovery', () => {
 
   it('recognizes a live but unrelated recycled PID as non-owning and preserves the same run binding', async () => {
     const fixture = recoveryFixture();
-    writeFileSync(join(fixture.created.runDirPath, 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
+    writeFileSync(runRecordPath(fixture.created.runDirPath, 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
 
     await fixture.orchestrator.tickOnce();
 
@@ -226,7 +227,7 @@ describe('identity-bound dead scheduler recovery', () => {
 
   it('fails visibly on corrupt identity and unproved recovery even at the retry limit', async () => {
     const corrupt = recoveryFixture();
-    writeFileSync(join(corrupt.created.runDirPath, 'scheduler.pid'), 'not-a-pid\n', 'utf-8');
+    writeFileSync(runRecordPath(corrupt.created.runDirPath, 'scheduler.pid'), 'not-a-pid\n', 'utf-8');
     await corrupt.orchestrator.tickOnce();
     expect(corrupt.registry.get(corrupt.task.id)).toMatchObject({ status: 'stuck', attempt: 1 });
     expect(corrupt.registry.get(corrupt.task.id)?.notes).toContain(`flowcrew task retry ${corrupt.task.id}`);
@@ -243,7 +244,7 @@ describe('identity-bound dead scheduler recovery', () => {
     const state = readRunState(projectDir, fixture.created.runId);
     state.status = 'reality_gate_failed';
     writeRunState(projectDir, fixture.created.runId, state);
-    writeFileSync(join(fixture.created.runDirPath, 'scheduler.pid'), 'corrupt\n', 'utf-8');
+    writeFileSync(runRecordPath(fixture.created.runDirPath, 'scheduler.pid'), 'corrupt\n', 'utf-8');
 
     await fixture.orchestrator.tickOnce();
 
@@ -384,8 +385,8 @@ describe('compact atomic run projection', () => {
     state.stageEvidence = Array.from({ length: 80 }, (_, index) => evidence(index));
     writeRunState(projectDir, created.runId, state);
 
-    const statePath = join(created.runDirPath, 'run.json');
-    const historyPath = join(created.runDirPath, 'run-history.jsonl');
+    const statePath = runRecordPath(created.runDirPath, 'run.json');
+    const historyPath = runRecordPath(created.runDirPath, 'run-history.jsonl');
     const projectionBytes = readFileSync(statePath);
     const projection = JSON.parse(projectionBytes.toString('utf-8')) as StoreState;
     expect(projectionBytes.toString('utf-8').split('\n').filter(Boolean)).toHaveLength(1);
@@ -393,7 +394,7 @@ describe('compact atomic run projection', () => {
     expect(projection.stageEvidence).toBeUndefined();
     expect(projection.stateFormat).toMatchObject({
       version: 2,
-      history: { version: 1, path: 'run-history.jsonl', counts: { retiredStageUsage: 80, stageEvidence: 80 } },
+      history: { version: 1, path: 'engine/run-history.jsonl', counts: { retiredStageUsage: 80, stageEvidence: 80 } },
     });
     const records = readFileSync(historyPath, 'utf-8').trim().split('\n').map((line) => JSON.parse(line));
     expect(records).toHaveLength(160);
@@ -423,7 +424,7 @@ describe('compact atomic run projection', () => {
     const state = readRunState(projectDir, created.runId);
     state.retiredStageUsage = [{ stageId: 'retired', iteration: 1, status: { status: 'complete', retries: 0 } }];
     writeRunState(projectDir, created.runId, state);
-    const historyPath = join(created.runDirPath, 'run-history.jsonl');
+    const historyPath = runRecordPath(created.runDirPath, 'run-history.jsonl');
     const acknowledged = readRunState(projectDir, created.runId).stateFormat!.history!.committedBytes;
     appendFileSync(historyPath, '{unacknowledged crash tail', 'utf-8');
 
@@ -443,7 +444,7 @@ describe('compact atomic run projection', () => {
     const state = readRunState(projectDir, created.runId);
     state.retiredStageUsage = [{ stageId: 'retired', iteration: 1, status: { status: 'complete', retries: 0 } }];
     writeRunState(projectDir, created.runId, state);
-    const raw = JSON.parse(readFileSync(join(created.runDirPath, 'run.json'), 'utf-8')) as StoreState;
+    const raw = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'run.json'), 'utf-8')) as StoreState;
     expect(raw.retiredStageUsage).toBeUndefined();
 
     const exportDir = join(root, 'export-output');
@@ -468,7 +469,7 @@ describe('compact atomic run projection', () => {
   it('loads, resumes and displays an old ref-named history with versioned records', () => {
     const created = createRun(projectDir, 'history', 'name: history\nstages: []\n', []);
     const projection = readRunState(projectDir, created.runId);
-    const historyPath = join(created.runDirPath, 'run-history.v1.jsonl');
+    const historyPath = runRecordPath(created.runDirPath, 'run-history.v1.jsonl');
     const retired = { stageId: 'retired', iteration: 1, status: { status: 'complete' as const, retries: 0 } };
     const histories = {
       retiredStageUsage: [retired],
@@ -480,7 +481,7 @@ describe('compact atomic run projection', () => {
       version: 1, path: 'run-history.v1.jsonl', committedBytes: Buffer.byteLength(prefix),
       counts: { retiredStageUsage: 1, stageEvidence: 1 },
     } };
-    const statePath = join(created.runDirPath, 'run.json');
+    const statePath = runRecordPath(created.runDirPath, 'run.json');
     writeFileSync(statePath, JSON.stringify(projection) + '\n');
     writeFileSync(historyPath, prefix);
 
@@ -503,7 +504,7 @@ describe('compact atomic run projection', () => {
     const appended = after.slice(prefix.length).trim().split('\n').map((line) => JSON.parse(line));
     expect(appended).toHaveLength(2);
     expect(appended.every((record) => !Object.hasOwn(record, 'version'))).toBe(true);
-    expect(existsSync(join(created.runDirPath, 'run-history.jsonl'))).toBe(false);
+    expect(existsSync(runRecordPath(created.runDirPath, 'run-history.jsonl'))).toBe(false);
     const snapshot = readRunStateView(projectDir, created.runId);
     expect(snapshot.histories).toMatchObject({ retiredStageUsage: [retired, { ...retired, iteration: 2 }], stageEvidence: [evidence(1), evidence(2)] });
     expect(snapshot.snapshot.sources.some((source) => source.path === historyPath && source.prefix === Buffer.byteLength(after))).toBe(true);
@@ -518,7 +519,7 @@ describe('compact atomic run projection', () => {
       version: 1, path: '../run-history-outside.jsonl', committedBytes: 0,
       counts: { retiredStageUsage: 0, stageEvidence: 0 },
     } };
-    writeFileSync(join(created.runDirPath, 'run.json'), JSON.stringify(projection) + '\n');
+    writeFileSync(runRecordPath(created.runDirPath, 'run.json'), JSON.stringify(projection) + '\n');
     try {
       updateRunState(projectDir, created.runId, (state) => { state.retiredStageUsage = [{ stageId: 'retired', iteration: 1, status: { status: 'complete', retries: 0 } }]; });
     } catch { /* refusal is acceptable */ }
@@ -541,11 +542,11 @@ describe('compact atomic run projection', () => {
       }],
       stageEvidence: [evidence(1)],
     };
-    writeFileSync(join(path, 'run.json'), JSON.stringify(legacy, null, 2), 'utf-8');
+    writeFileSync(runRecordPath(path, 'run.json'), JSON.stringify(legacy, null, 2), 'utf-8');
 
     const before = readRunState(projectDir, runId);
     writeRunState(projectDir, runId, before);
-    const raw = JSON.parse(readFileSync(join(path, 'run.json'), 'utf-8')) as StoreState;
+    const raw = JSON.parse(readFileSync(runRecordPath(path, 'run.json'), 'utf-8')) as StoreState;
 
     expect(raw.stateFormat?.version).toBe(2);
     expect(raw.retiredStageUsage).toBeUndefined();
@@ -558,7 +559,7 @@ describe('compact atomic run projection', () => {
 
   it('serializes mutation commits and recovers a stale lock left by a dead writer', () => {
     const created = createRun(projectDir, 'cas', 'name: cas\nstages: []\n', []);
-    writeFileSync(join(created.runDirPath, '.run-state.lock'), JSON.stringify({
+    writeFileSync(runRecordPath(created.runDirPath, '.run-state.lock'), JSON.stringify({
       pid: 2_000_000_000,
       token: 'dead-writer',
       acquiredAt: '2026-09-03T00:00:00.000Z',
@@ -571,7 +572,7 @@ describe('compact atomic run projection', () => {
       taskDescription: 'first mutation',
       failureReason: 'second mutation',
     });
-    expect(existsSync(join(created.runDirPath, '.run-state.lock'))).toBe(false);
+    expect(existsSync(runRecordPath(created.runDirPath, '.run-state.lock'))).toBe(false);
   });
 });
 
@@ -581,14 +582,14 @@ describe('indexed readers and cached status RPC', () => {
       const id = `finished-${String(index).padStart(3, '0')}`;
       const path = runDir(projectDir, id);
       mkdirSync(path, { recursive: true });
-      writeFileSync(join(path, 'run.json'), JSON.stringify({
+      writeFileSync(runRecordPath(path, 'run.json'), JSON.stringify({
         runId: id, workflowName: 'done', projectDir, status: 'complete', stages: {}, startedAt: '',
       }), 'utf-8');
     }
     const activeId = 'live-only';
     const activePath = runDir(projectDir, activeId);
     mkdirSync(activePath, { recursive: true });
-    writeFileSync(join(activePath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(activePath, 'run.json'), JSON.stringify({
       runId: activeId, workflowName: 'live', projectDir, status: 'running', stages: {}, startedAt: '',
     }), 'utf-8');
     rebuildRunIndex(projectDir);

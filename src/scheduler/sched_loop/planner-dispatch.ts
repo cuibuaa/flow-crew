@@ -1,7 +1,7 @@
+import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 import { preparePlanRetryCandidate, recordPlanRetryAdmission, recordPlanRetryRefusal, planRetryRequirement } from '../../plan-retry-monotone.js';
 import { currentDispatchAdmissionReport, planRetryRequirementsFromAdmission, archiveDispatchAdmissionRefusal } from '../sched_admission/dispatch-retry.js';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 /** Admit planner topology; ordinary dependencies and conditions own its DAG duties. */
 import { StageConfig, loadDefaults } from '../sched_admission/configuration.js';
 import { attemptEventFields, recordRunEvent } from '../../run-events.js';
@@ -40,16 +40,16 @@ export function admitPlannerDispatches(sorted: StageConfig[], state: StoreState,
     }
     const admission = currentDispatchAdmissionReport(directory);
     let archived: ReturnType<typeof archiveDispatchAdmissionRefusal> | undefined;
-    try { archived = archiveDispatchAdmissionRefusal({ runDirPath: directory, stageId: planner.id, attemptIndex: prepared.attemptIndex, rawDispatchText: readFileSync(join(directory, 'dispatch.yaml'), 'utf8') }); } catch { /* missing/invalid YAML is retained by the ordinary output record */ }
+    try { archived = archiveDispatchAdmissionRefusal({ runDirPath: directory, stageId: planner.id, attemptIndex: prepared.attemptIndex, rawDispatchText: readFileSync(stageWorkPath(directory, 'dispatch.yaml'), 'utf8') }); } catch { /* missing/invalid YAML is retained by the ordinary output record */ }
     const ratchet = recordPlanRetryRefusal({ runDirPath: directory, prepared, maxAttempts: limit + 1,
       unsatisfied: admission?.errors.length ? planRetryRequirementsFromAdmission(admission) : [planRetryRequirement({ code: 'dispatch_structure', field: 'stages', message: 'No admissible complete plan.' }, 'structure')] });
     if (ratchet.stop) {
       let diagnostic = '';
-      try { diagnostic = (JSON.parse(readFileSync(join(directory, 'dispatch_admission.json'), 'utf8')).errors as Array<{message: string}>).map(error => error.message).join('; '); } catch { /* missing admission remains an explicit refusal */ }
-      return { kind: 'settled', state: concludeRun(state, { status: admission?.errors.some(error => error.code === 'stage_role_unknown') ? 'escalated' : 'failed', reasonCode: 'dispatch_refused', detail: `Planner dispatch refused after ${count + 1} attempts: ${ratchet.reason ?? record.reason}; ${diagnostic}; see ${directory}/dispatch_admission.json.` }) };
+      try { diagnostic = (JSON.parse(readFileSync(runRecordPath(directory, 'dispatch_admission.json'), 'utf8')).errors as Array<{message: string}>).map(error => error.message).join('; '); } catch { /* missing admission remains an explicit refusal */ }
+      return { kind: 'settled', state: concludeRun(state, { status: admission?.errors.some(error => error.code === 'stage_role_unknown') ? 'escalated' : 'failed', reasonCode: 'dispatch_refused', detail: `Planner dispatch refused after ${count + 1} attempts: ${ratchet.reason ?? record.reason}; ${diagnostic}; see ${runRecordPath(directory, 'dispatch_admission.json')}.` }) };
     }
     graph.visits[`${state.currentIteration ?? 1}/dispatch_refusal`] = count + 1;
-    const retryDetail = archived ? `${record.reason}\nDurable rejected proposal: ${join(directory, archived.proposalPath)}\nDurable admission report: ${join(directory, archived.admissionPath)}` : record.reason;
+    const retryDetail = archived ? `${record.reason}\nDurable rejected proposal: ${runRecordPath(directory, archived.proposalPath)}\nDurable admission report: ${runRecordPath(directory, archived.admissionPath)}` : record.reason;
     state.stages[planner.id] = { ...rependStageStatus(state.stages[planner.id], count + 1, retryDetail), admissionFailure: { code: 'dispatch_refused', attemptIndex: state.stages[planner.id].attempts?.at(-1)?.index ?? 0 } };
     writeStageStatus(project, run, planner.id, state.stages[planner.id]);
     writeRunState(project, run, state);

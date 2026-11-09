@@ -1,13 +1,14 @@
+import { hasSeparatedRunLayout, runRecordPath, runStorageLayout, stageWorkPath } from './run-layout.js';
 import type { DispatchAdmissionError } from './scheduler/sched_admission/dispatch.js';
-import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { ArtifactPathSchema, resolveArtifactLocation, artifactRootContains as contained } from './artifact-location.js';
 export { ArtifactPathSchema, resolveArtifactLocation } from './artifact-location.js';
 export type { ArtifactLocation } from './artifact-location.js';
 import type { StageStatus } from './store.js';
-import { fcGlobalDir, STAGE_STATUS } from './store.js';
-import { containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isEngineOwnedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
+import { fcGlobalDir, runsRoot, STAGE_STATUS } from './store.js';
+import { containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isReservedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 const location = z.object({ root: z.enum(['project', 'run']), path: ArtifactPathSchema });
@@ -109,22 +110,58 @@ export function artifactProducerReadError(read: ArtifactRead, producer: Artifact
   return undefined;
 }
 
-export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces'][number], stage: ArtifactPlanStage, runDirectory?: string, projectDirectory?: string): boolean {
-  if (artifact.root === 'run' && isEngineOwnedRunPath(artifact.path, stage)) return true;
+export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces'][number], _stage: ArtifactPlanStage, runDirectory?: string, projectDirectory?: string): boolean {
+  if (artifact.root === 'run' && isReservedRunPath(artifact.path)) return true;
   if (!runDirectory || (artifact.root === 'project' && !projectDirectory)) return false;
   const runRoot = realpathSync(runDirectory);
+  const runRoots = new Set([runRoot]);
+  // Peer locations help prove writable aliases; they are not a complete
+  // inventory of engine records. Unresolved hardlinks never grant writes.
+  try {
+    for (const entry of readdirSync(runsRoot(), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      try { runRoots.add(realpathSync(join(runsRoot(), entry.name))); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || existsSync(runsRoot())) throw error; }
+  const runTrees = [...runRoots].map(root => ({ root, separated: hasSeparatedRunLayout(root) }));
   const projectRoot = projectDirectory && realpathSync(projectDirectory);
+  const writableRoots = [...(projectRoot ? [projectRoot] : []), ...runRoots];
+  const ownedInRun = (root: string, separated: boolean, target: string): boolean =>
+    contained(root, target) && (!separated || isReservedRunPath(relative(root, target).split(sep).join('/')));
+  const layouts = new Map<string, 1 | 2 | undefined>();
+  const layoutAt = (directory: string) => {
+    if (!layouts.has(directory)) layouts.set(directory, runStorageLayout(directory));
+    return layouts.get(directory);
+  };
+  // A project may contain another configured store. Bind each physical target
+  // to its enclosing run format before granting writes, even for an unlinked
+  // file or a future name. The same boundary governs writable-link accounting.
+  const ownedByRun = (target: string): boolean => {
+    if (runTrees.some(({ root, separated }) => ownedInRun(root, separated, target))) return true;
+    const boundary = writableRoots.filter(root => contained(root, target)).sort((a, b) => b.length - a.length)[0];
+    if (!boundary) return true;
+    for (let directory = target; ; directory = dirname(directory)) {
+      const layout = layoutAt(directory);
+      if (layout !== undefined && ownedInRun(directory, layout === 2, target)) return true;
+      if (directory === boundary) return false;
+    }
+  };
   const root = artifact.root === 'run' ? runRoot : projectRoot!;
   const output = resolve(root, artifact.path);
   if (artifact.kind === 'directory' && containsEngineOwnedGlobalPath(prospectivePhysicalPath(output), fcGlobalDir())) return true;
   const paths = [output], visitedDirectories = new Set<string>(), outputInodes = new Set<string>();
+  const linkedOutputs = new Set<string>();
   while (paths.length) {
     const path = paths.pop()!, target = prospectivePhysicalPath(path);
-    if (contained(runRoot, target) && isEngineOwnedRunPath(relative(runRoot, target).split(sep).join('/'), stage)) return true;
+    if (ownedByRun(target)) return true;
     if (isEngineOwnedGlobalPath(target, fcGlobalDir())) return true;
     let entry;
     try { entry = statSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (entry?.isFile()) outputInodes.add(`${entry.dev}:${entry.ino}`);
+    if (entry?.isFile()) {
+      outputInodes.add(`${entry.dev}:${entry.ino}`);
+      if (entry.nlink > 1) linkedOutputs.add(target);
+    }
     if (artifact.kind === 'directory' && entry?.isDirectory() && !visitedDirectories.has(target)) {
       visitedDirectories.add(target);
       paths.push(...readdirSync(path).map((name) => join(path, name)));
@@ -138,21 +175,47 @@ export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces
       if (outputInodes.has(`${carrier.dev}:${carrier.ino}`)) return true;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
-  // Native hardlinks have no path target. Compare all existing declared members
-  // against owned inodes, without following directory links in the store walk.
-  if (!outputInodes.size) return false;
-  const folders = [runRoot];
+  // A hardlink has no target pathname. Prove that *all* its directory entries
+  // are in writable locations, using nlink as the upper bound. A link outside
+  // this inventory may be in any store's engine tree, so fail closed without
+  // trying to discover every FC_HOME. Never follow archive/input symlinks.
+  if (!linkedOutputs.size) return false;
+  const writableLinks = new Map<string, number>();
+  const folders = [...(projectRoot ? [projectRoot] : []),
+    ...runTrees.filter(tree => tree.separated).map(tree => stageWorkPath(tree.root))];
+  visitedDirectories.clear();
   while (folders.length) {
     const folder = folders.pop()!;
-    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+    if (visitedDirectories.has(folder)) continue;
+    visitedDirectories.add(folder);
+    try { if (!lstatSync(folder).isDirectory()) continue; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+    const layout = layoutAt(folder);
+    if (layout !== undefined) {
+      if (layout === 2) folders.push(stageWorkPath(folder));
+      continue;
+    }
+    if (ownedByRun(folder) || isEngineOwnedGlobalPath(folder, fcGlobalDir())) continue;
+    let entries;
+    try { entries = readdirSync(folder, { withFileTypes: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+    for (const entry of entries) {
       const path = join(folder, entry.name);
-      if (entry.isDirectory()) folders.push(path);
-      if (!isEngineOwnedRunPath(relative(runRoot, path).split(sep).join('/'), stage)) continue;
       try {
-        const carrier = statSync(path);
-        if (outputInodes.has(`${carrier.dev}:${carrier.ino}`)) return true;
+        const file = lstatSync(path);
+        if (file.isDirectory()) folders.push(path);
+        else if (file.isFile() && !ownedByRun(path) && !isEngineOwnedGlobalPath(path, fcGlobalDir())) {
+          const inode = `${file.dev}:${file.ino}`;
+          if (outputInodes.has(inode)) writableLinks.set(inode, (writableLinks.get(inode) ?? 0) + 1);
+        }
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     }
+  }
+  for (const path of linkedOutputs) {
+    try {
+      const file = statSync(path);
+      if (file.nlink > (writableLinks.get(`${file.dev}:${file.ino}`) ?? 0)) return true;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   return false;
 }
@@ -215,7 +278,7 @@ export function artifactDeclarationFindings(input: {
         if (error) add(error, artifactField(read, 'reads'));
         else if (!ancestor(stage, producer!.id)) add(`ARTIFACT_READ_UNREACHABLE: ${stage.id}.${read.id} producer ${producer!.id} must be a dependency ancestor`, artifactField(read, 'reads'));
       } else if (source.kind === 'framework') {
-        const path = source.artifact === 'task_brief' ? 'task_brief.md' : 'run.json';
+        const path = source.artifact === 'task_brief' ? input.runDir ? relative(input.runDir, runRecordPath(input.runDir, 'task_brief.md')).split(sep).join('/') : 'engine/task_brief.md' : 'run.json';
         if (read.root !== 'run' || read.path !== path || read.kind !== 'file') add(`ARTIFACT_FRAMEWORK_READ_INVALID: ${stage.id}.${read.id} must read run:${path}`, artifactField(read, 'reads'));
       } else if (input.projectDir && (read.root === 'project' || input.runDir)) {
         try {

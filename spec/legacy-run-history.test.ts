@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
@@ -50,7 +51,7 @@ it('reads a legacy zero-count history through state, dashboard and campaign view
   const runJson = JSON.stringify(state);
   writeFileSync(join(directory, 'run.json'), runJson);
   writeFileSync(join(directory, 'run-history.jsonl'), history);
-  writeFileSync(join(directory, 'workflow.yaml'), 'name: default\nstages:\n  - id: audit\n    role: qa\n');
+  writeFileSync(runRecordPath(directory, 'workflow.yaml'), 'name: default\nstages:\n  - id: audit\n    role: qa\n');
 
   const hydrated = readRunState(projectDir, runId);
   expect(hydrated.retiredStageUsage).toEqual([retired]);

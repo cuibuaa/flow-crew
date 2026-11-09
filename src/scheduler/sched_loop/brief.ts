@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Materialize admitted task metadata and brief configuration, and refuse malformed research/budget inputs before agents execute.
 import { BriefAdmissionRecord } from '../../brief-preflight.js';
@@ -41,7 +42,7 @@ export function configureWorkflowBrief(
       initState.taskDescription = taskDescription;
       // The run owns the brief consumed by workers and reruns.
       try {
-        const briefDest = join(runDirPath, 'task_brief.md');
+        const briefDest = runRecordPath(runDirPath, 'task_brief.md');
         if (!existsSync(briefDest)) {
           writeFileSync(briefDest, taskDescription, 'utf-8');
         }
@@ -62,7 +63,7 @@ export function configureWorkflowBrief(
   // briefs declare ceiling_report.md / escalation_note.md as valid completions).
   // The frontmatter is stripped from the brief before it reaches stage prompts so the
   // planner doesn't waste tokens reading scheduler-internal config.
-  const briefPath = join(runDirPath, 'task_brief.md');
+  const briefPath = runRecordPath(runDirPath, 'task_brief.md');
   if (taskDescription !== undefined || existsSync(briefPath)) {
     const briefContent = (taskDescription !== undefined
       ? taskDescription

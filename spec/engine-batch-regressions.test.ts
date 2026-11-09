@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -77,7 +78,7 @@ it.each(['measured', 'no_candidate'] as const)('ingests a new %s round after a s
   expect(statSync(join(project, path)).mtimeMs).toBeLessThan(Date.parse(readRunState(project, runId).startedAt));
   expect(captureResearchGateCandidate(project, run, 'review').kind).toBe(kind);
   await advance(); await advance();
-  const journal = JSON.parse(readFileSync(join(run, 'research_journal.json'), 'utf8'));
+  const journal = JSON.parse(readFileSync(runRecordPath(run, 'research_journal.json'), 'utf8'));
   expect(journal.rounds).toHaveLength(1);
   expect(journal.rounds[0].outcome).toBe(kind);
   expect(captureResearchGateCandidate(project, run, 'review').kind).toBe(kind);
@@ -89,14 +90,14 @@ it('rejects old and unchanged results regardless of mtime and preserves the admi
   expect(captureResearchGateCandidate(project, run).kind).toBe('absent');
   publish('docs/round.json', value, future + 10_000);
   expect(captureResearchGateCandidate(project, run).kind).toBe('absent');
-  await advance(); expect(existsSync(join(run, 'research_journal.json'))).toBe(false);
+  await advance(); expect(existsSync(runRecordPath(run, 'research_journal.json'))).toBe(false);
   publish('docs/round.json', { label: 'new-round', result: 2 }, Date.now() - 1500);
   const generation = readRunState(project, runId).researchInputGeneration;
   admitResearch(true);
   expect(readRunState(project, runId).researchInputGeneration).toEqual(generation);
   expect(captureResearchGateCandidate(project, run).kind).toBe('measured');
   await advance();
-  expect(JSON.parse(readFileSync(join(run, 'research_journal.json'), 'utf8')).rounds).toHaveLength(1);
+  expect(JSON.parse(readFileSync(runRecordPath(run, 'research_journal.json'), 'utf8')).rounds).toHaveLength(1);
 });
 
 it('rejects simultaneously published measured and no-candidate outcomes after rollback', async () => {
@@ -104,8 +105,8 @@ it('rejects simultaneously published measured and no-candidate outcomes after ro
   publish('docs/round.json', { label: 'measured', result: 1 }, rolledBack);
   publish('docs/round.json.no_candidate.json', { label: 'none', outcome: 'no_candidate', reason: 'none' }, rolledBack);
   expect(captureResearchGateCandidate(project, run).kind).toBe('invalid');
-  await advance(); expect(existsSync(join(run, 'research_journal.json'))).toBe(false);
-  expect(readFileSync(join(run, 'research_round_input_error.json'), 'utf8')).toContain('ambiguous_measured_and_no_candidate');
+  await advance(); expect(existsSync(runRecordPath(run, 'research_journal.json'))).toBe(false);
+  expect(readFileSync(runRecordPath(run, 'research_round_input_error.json'), 'utf8')).toContain('ambiguous_measured_and_no_candidate');
 });
 
 it.each([false, true])('links inferred evidence only when its content was published in this run (changed=%s)', async changed => {
@@ -115,14 +116,14 @@ it.each([false, true])('links inferred evidence only when its content was publis
   publish('docs/round.json', { label: 'round-one', result: 1 }, rolledBack);
   if (changed) publish('docs/evidence.json', { label: 'round-one', result: 1, measurement: 'independent paired observation' }, rolledBack);
   await advance(['docs/evidence.json']);
-  const round = JSON.parse(readFileSync(join(run, 'research_journal.json'), 'utf8')).rounds[0];
+  const round = JSON.parse(readFileSync(runRecordPath(run, 'research_journal.json'), 'utf8')).rounds[0];
   expect(round.evidence).toBe(changed ? 'docs/evidence.json' : undefined);
 });
 
 it('observes stream growth and current command identity during rollback without counting unchanged bytes again', async () => {
   const start = Date.now(); vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(start);
   const watchdog = new StageWatchdog(project, runId, { idleThresholdMs: 1000 });
-  const saved = () => JSON.parse(readFileSync(join(run, 'stage_watchdog.json'), 'utf8')).stageProgress.work;
+  const saved = () => JSON.parse(readFileSync(runRecordPath(run, 'stage_watchdog.json'), 'utf8')).stageProgress.work;
   const result = await runStage({ async run(_prompt, _role, opts) {
     await watchdog.tick();
     const before = saved();
@@ -136,7 +137,7 @@ it('observes stream growth and current command identity during rollback without 
     expect(saved().liveLogBytes).toBeGreaterThan(before.liveLogBytes);
     vi.setSystemTime(start - 1000); await watchdog.tick();
     expect(saved()).toMatchObject({ liveProgressThisTick: false, lastProgressAt: start - 1500 });
-    expect(existsSync(join(run, 'signals/abort_work.json'))).toBe(false);
+    expect(existsSync(runRecordPath(run, 'signals/abort_work.json'))).toBe(false);
     tracker.feed(JSON.stringify({ type: 'item.completed', item: { id: 'cmd', type: 'command_execution' } }) + '\n');
     return { exitCode: 0, output: 'Complete', duration_ms: 1 };
   } }, { stageId: 'work', projectDir: project, runDir: run, runId, role: { name: 'fixture', description: '', model: 'default', reasoning_effort: 'low', tools: [], prompt: '' }, dependsOn: [], promptTemplate: 'Complete work', timeout_ms: 5000, retries: 0, artifactContract: { version: 1, produces: [], reads: [], groups: [] } });

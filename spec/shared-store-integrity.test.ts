@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -43,7 +44,7 @@ it('leaves an asynchronous heartbeat refusal for stage settlement without escapi
   const heartbeat = startSchedulerHeartbeat({ runPath: run, runId: run.split('/').at(-1)!,
     intervalMs: 20, stallThresholdMs: 100, observerPollMs: 10, spawnObserver: false });
   let reachedSettlement = false;
-  const path = join(run, 'scheduler-heartbeat.json');
+  const path = runRecordPath(run, 'scheduler-heartbeat.json');
   try {
     await expect(withEngineIntegrity(execution(), async () => {
       writeFileSync(path, 'counterfeit');
@@ -56,7 +57,7 @@ it('leaves an asynchronous heartbeat refusal for stage settlement without escapi
 });
 
 it('still refuses and restores changed run-owned state after a concurrent index update', async () => {
-  const path = join(run, 'run.json');
+  const path = runRecordPath(run, 'run.json');
   const before = readFileSync(path);
   await expect(withEngineIntegrity(execution(), async () => {
     execFileSync(process.execPath, ['-e', `

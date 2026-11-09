@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { changedProjectPathsSinceSnapshot } from '../src/scheduler/sched_scope/snapshots.js';
 import { closeRepairRoundSnapshot } from './test-support/close-repair-snapshot.js';
 import {
@@ -58,7 +59,7 @@ describe('snapshot comparison and frozen-content reconciliation', () => {
     const original = Buffer.alloc(4 * 1024 * 1024, 0x41);
     writeFileSync(target, original);
     const created = createRun(projectDir, 'ignored-content', 'name: ignored-content', ['writer']);
-    writeFileSync(join(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: model.bin, frozen: true}]\n---\n');
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: model.bin, frozen: true}]\n---\n');
     const snapshot = captureRepairRoundSnapshot(projectDir, [stage('model.bin')], { runDirPath: created.runDirPath });
     try {
       const before = snapshot.rollbackBaseline.frozenImages.get('model.bin')!;
@@ -89,7 +90,7 @@ describe('snapshot comparison and frozen-content reconciliation', () => {
     const target = join(projectDir, 'weights.bin');
     writeFileSync(target, Buffer.alloc(2 * 1024 * 1024, 0x23));
     const created = createRun(projectDir, 'metadata-control', 'name: metadata-control', ['writer']);
-    writeFileSync(join(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: weights.bin, frozen: true}]\n---\n');
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '---\ninputs: [{path: weights.bin, frozen: true}]\n---\n');
     const snapshot = captureRepairRoundSnapshot(projectDir, [stage('weights.bin')], { runDirPath: created.runDirPath });
     try {
       const before = snapshot.rollbackBaseline.frozenImages.get('weights.bin')!;

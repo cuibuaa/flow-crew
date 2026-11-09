@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { writeFileSync } from './engine-fs.js';
 
 import { createHash } from 'node:crypto';
@@ -129,7 +130,7 @@ function classify(source: string, bytes: Buffer): ResearchGateCandidate {
 
 function immutableConsumed(runDir: string): string | undefined {
   try {
-    return readdirSync(runDir)
+    return readdirSync(runRecordPath(runDir, '.'))
       .filter((name) => /^research_round_\d+_(?:no_candidate_)?consumed\.json$/.test(name))
       .sort((left, right) => Number(/\d+/.exec(left)?.[0]) - Number(/\d+/.exec(right)?.[0]))
       .at(-1);
@@ -141,14 +142,14 @@ export function captureResearchGateCandidate(
   runDir: string,
   gateStageId?: string,
 ): ResearchGateCandidate {
-  const destination = join(runDir, researchGateCandidateFile(gateStageId));
+  const destination = runRecordPath(runDir, researchGateCandidateFile(gateStageId));
   const previous = readResearchGateCandidate(runDir, gateStageId);
   if (previous && !previous.settlement) {
     settleResearchGateCandidate(projectDir, runDir, previous, 'rejected', 'Gate was re-evaluated before this captured outcome was ingested');
   }
   const consumed = immutableConsumed(runDir);
   let state: StoreState | undefined;
-  try { state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8')) as StoreState; } catch { /* fallback below */ }
+  try { state = JSON.parse(readFileSync(runRecordPath(runDir, 'run.json'), 'utf-8')) as StoreState; } catch { /* fallback below */ }
   let candidate: ResearchGateCandidate;
   if (state?.research) {
     const result = resolveResearchPaths(state.research).resultFile;
@@ -162,12 +163,12 @@ export function captureResearchGateCandidate(
       const source = noCandidate ? `${result}.no_candidate.json` : result;
       candidate = classify(source, readFileSync(noCandidate ? sidecarPath : resultPath));
     } else if (consumed) {
-      candidate = classify(consumed, readFileSync(join(runDir, consumed)));
+      candidate = classify(consumed, readFileSync(runRecordPath(runDir, consumed)));
     } else {
       candidate = { version: 1, kind: 'absent', capturedAt: new Date().toISOString(), source: result, reason: 'no fresh round outcome exists' };
     }
   } else if (consumed) {
-    candidate = classify(consumed, readFileSync(join(runDir, consumed)));
+    candidate = classify(consumed, readFileSync(runRecordPath(runDir, consumed)));
   } else {
     candidate = { version: 1, kind: 'absent', capturedAt: new Date().toISOString(), source: 'run.json', reason: 'run is not in research mode' };
   }
@@ -178,7 +179,7 @@ export function captureResearchGateCandidate(
 
 export function readResearchGateCandidate(runDir: string, gateStageId?: string): ResearchGateCandidate | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(join(runDir, researchGateCandidateFile(gateStageId)), 'utf-8')) as ResearchGateCandidate;
+    const parsed = JSON.parse(readFileSync(runRecordPath(runDir, researchGateCandidateFile(gateStageId)), 'utf-8')) as ResearchGateCandidate;
     if (parsed.version !== 1) return undefined;
     if (gateStageId && parsed.gateStageId !== gateStageId) return undefined;
     return parsed;
@@ -192,8 +193,8 @@ export function settleResearchGateCandidate(
 ): void {
   if (candidate.settlement) return;
   candidate.settlement = { disposition, reason };
-  writeFileSync(join(runDir, researchGateCandidateFile(candidate.gateStageId)), `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
-  const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf8')) as StoreState;
+  writeFileSync(runRecordPath(runDir, researchGateCandidateFile(candidate.gateStageId)), `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
+  const state = JSON.parse(readFileSync(runRecordPath(runDir, 'run.json'), 'utf8')) as StoreState;
   recordRunEvent(projectDir, state.runId, {
     type: 'research_gate_candidate_settled', runId: state.runId,
     timestamp: new Date().toISOString(), iteration: state.currentIteration,
@@ -203,10 +204,10 @@ export function settleResearchGateCandidate(
 }
 
 export function pendingResearchGateCandidates(runDir: string): ResearchGateCandidate[] {
-  return readdirSync(runDir)
+  return readdirSync(runRecordPath(runDir, '.'))
     .filter(name => /^research_gate_candidate(?:_[a-f0-9]{16})?\.json$/.test(name))
     .flatMap(name => {
-      const candidate = JSON.parse(readFileSync(join(runDir, name), 'utf8')) as ResearchGateCandidate;
+      const candidate = JSON.parse(readFileSync(runRecordPath(runDir, name), 'utf8')) as ResearchGateCandidate;
       return candidate.version === 1 && !candidate.settlement ? [candidate] : [];
     })
     .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));

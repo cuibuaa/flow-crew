@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -36,8 +37,8 @@ async function run(verdicts: Array<Record<string, unknown>>, answers: Record<str
       const seen = (prompts[opts.stageId] ??= []).push(prompt);
       if (opts.stageId === 'review') {
         const verdict = verdicts[seen - 1];
-        const { criteria } = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')) as { criteria: Array<{ id: string }> };
-        writeFileSync(join(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ ...verdict,
+        const { criteria } = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')) as { criteria: Array<{ id: string }> };
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({ ...verdict,
           criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: verdict.pass ? 'pass' : 'fail', evidence: 'docs/report.md' }])) }));
         return fixtureResult({ output: 'reviewed', exitCode: 0, duration_ms: 1 }, opts);
       }
@@ -50,7 +51,7 @@ async function run(verdicts: Array<Record<string, unknown>>, answers: Record<str
   };
   const { config, raw } = loadWorkflow(workflow);
   const final = await runWorkflow(config, raw, projectDir, withConfirmedRejections(adapter), new Map(), undefined, join(root, 'config', 'agents'), undefined, brief, true);
-  const ledger = readFileSync(join(runDir(projectDir, final.runId), 'evidence-ledger.jsonl'), 'utf8');
+  const ledger = readFileSync(runRecordPath(runDir(projectDir, final.runId), 'evidence-ledger.jsonl'), 'utf8');
   return { final, calls, reviews: prompts.review ?? [], repairs: prompts.repair ?? [], ledger };
 }
 

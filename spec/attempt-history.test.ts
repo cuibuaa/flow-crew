@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -87,7 +88,7 @@ describe('append-only stage attempts', () => {
   it('records gate fail → fix → pass as two gate attempts with cumulative time/tokens', async () => {
     const { config, yaml } = workflow();
     const created = createRun(projectDir, config.name, yaml, ['plan']);
-    writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
@@ -97,7 +98,7 @@ describe('append-only stage attempts', () => {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- fixed and verified', exitCode: 0, duration_ms: 1 }, opts);
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: release_gate',
             '    role: qa',
@@ -120,7 +121,7 @@ describe('append-only stage attempts', () => {
         }
         if (opts.stageId === 'release_gate') {
           gateCalls++;
-          writeFileSync(join(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({
             pass: gateCalls > 1,
             reason: gateCalls > 1 ? 'fixed' : 'needs fix',
           }));
@@ -140,14 +141,14 @@ describe('append-only stage attempts', () => {
     expect(finalState.stages.fix_release.attempts).toHaveLength(1);
     expect(finalState.stages.fix_release.reruns).toBe(0);
 
-    const summary = readFileSync(join(runDir(projectDir, created.runId), 'summary.md'), 'utf-8');
+    const summary = readFileSync(runRecordPath(runDir(projectDir, created.runId), 'summary.md'), 'utf-8');
     expect(summary).toContain('release_gate: complete — ran 2 times, 24s cumulative');
   });
 
   it('retains a budget handoff between gate rejection and the next bounded iteration pass', async () => {
     const { config, yaml } = workflow(2);
     const created = createRun(projectDir, config.name, yaml, ['plan']);
-    writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
     const initial = readRunState(projectDir, created.runId);
     initial.autoApprove = true;
     writeRunState(projectDir, created.runId, initial);
@@ -157,7 +158,7 @@ describe('append-only stage attempts', () => {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === '_summary') return fixtureResult({ output: '## What was done\n- retained retry evidence', exitCode: 0, duration_ms: 1 }, opts);
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: release_gate',
             '    role: qa',
@@ -183,13 +184,13 @@ describe('append-only stage attempts', () => {
         if (opts.stageId === 'release_gate') {
           gateCalls++;
           if (gateCalls === 1) {
-            writeFileSync(join(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({ pass: false, reason: 'needs fix' }));
+            writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({ pass: false, reason: 'needs fix' }));
             return fixtureResult({ output: 'initial rejection', exitCode: 0, duration_ms: 100, tokens_out: 1 }, opts);
           }
           if (gateCalls === 2) {
             return fixtureResult({ output: 'timed out while re-evaluating', exitCode: 124, duration_ms: 200, tokens_out: 2 }, opts);
           }
-          writeFileSync(join(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({ pass: true, reason: 'fixed' }));
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_release_gate.json'), JSON.stringify({ pass: true, reason: 'fixed' }));
           return fixtureResult({ output: 'final pass', exitCode: 0, duration_ms: 300, tokens_out: 3 }, opts);
         }
         return fixtureResult({ output: 'unexpected', exitCode: 1, duration_ms: 1 }, opts);

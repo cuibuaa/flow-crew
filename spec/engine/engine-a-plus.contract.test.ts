@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../../src/run-layout.js';
 import { withConfirmedRejections } from '../test-support/confirmed-rejection.js';
 import { setEngineDefaults } from '../test-support/engine-defaults-fixture.js';
 import { fixtureResult, declaredDispatch } from '../test-support/declared-dispatch.js';
@@ -200,8 +201,8 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
   function setupPlainRun(): string {
     const created = createRun(projectDir, 'plan-only', planWorkflow.yaml, ['plan']);
     const rd = runDir(projectDir, created.runId);
-    writeFileSync(join(rd, 'scheduler.pid'), String(process.pid));
-    writeFileSync(join(rd, 'task_brief.md'), '# Test task\nDo the thing.');
+    writeFileSync(runRecordPath(rd, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(rd, 'task_brief.md'), '# Test task\nDo the thing.');
     const agentsDir = join(projectDir, 'config', 'agents');
     mkdirSync(agentsDir, { recursive: true });
     for (const role of ['planner', 'qa']) {
@@ -224,7 +225,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           plans++;
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:', '  - id: check', '    role: qa', '    depends_on: [plan]', '    scope: []',
             '    dependency_reasons: {plan: "evaluate only after this iteration is planned"}',
             '    is_gate: true', '    task: gate',
@@ -236,7 +237,7 @@ describe('GAP-1 + A+(c) integration — max-iters yields `incomplete`, not a `fa
         }
         if (opts.stageId === 'check') {
           gates++;
-          writeFileSync(join(opts.runDir, 'fixture_verdict_check.json'), JSON.stringify({ pass: false, reason: `review ${gates} still needs work`,
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_check.json'), JSON.stringify({ pass: false, reason: `review ${gates} still needs work`,
             repairability: { version: 1, disposition: 'repairable', evidence: 'The admitted repair can inspect the rejected evidence.' } }));
           return fixtureResult(ok('gate failed'), opts);
         }

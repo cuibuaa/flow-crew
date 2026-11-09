@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -52,7 +53,7 @@ afterEach(() => {
 
 describe('schedulerIsAliveForRun', () => {
   it('reports alive for a live process bound to this run — the silent-but-working case', () => {
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(runPath, RUN_ID, process.pid);
 
     expect(schedulerIsAliveForRun(PROJECT_DIR, RUN_ID)).toBe(true);
@@ -63,16 +64,16 @@ describe('schedulerIsAliveForRun', () => {
   });
 
   it('reports not-alive when scheduler.pid is malformed rather than treating it as liveness', () => {
-    writeFileSync(join(runPath, 'scheduler.pid'), '12345abc\n', 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), '12345abc\n', 'utf-8');
 
     expect(schedulerIsAliveForRun(PROJECT_DIR, RUN_ID)).toBe(false);
   });
 
   it('rejects a live process whose identity binds it to a different run — pid reuse', () => {
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     expect(() => writeSchedulerProcessIdentity(runPath, 'some-other-run', process.pid)).toThrow('RUN_IDENTITY_BINDING');
     writeSchedulerProcessIdentity(runPath, RUN_ID, process.pid);
-    const identityPath = join(runPath, 'scheduler.identity.json');
+    const identityPath = runRecordPath(runPath, 'scheduler.identity.json');
     const identity = JSON.parse(readFileSync(identityPath, 'utf-8'));
     writeFileSync(identityPath, JSON.stringify({ ...identity, runId: 'some-other-run' }));
 
@@ -81,7 +82,7 @@ describe('schedulerIsAliveForRun', () => {
   });
 
   it('does not treat an empty run id or project dir as a live scheduler', () => {
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(runPath, RUN_ID, process.pid);
 
     expect(schedulerIsAliveForRun(PROJECT_DIR, '')).toBe(false);
@@ -119,7 +120,7 @@ describe('campaign stale status consults process liveness', () => {
 
   it('stays running when a live scheduler is bound to the quiet run', async () => {
     writeQuietCampaign();
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(runPath, RUN_ID, process.pid);
 
     expect(await staleItems()).toEqual([]);
@@ -127,10 +128,10 @@ describe('campaign stale status consults process liveness', () => {
 
   it('still goes stale when a live pid is bound to some other run', async () => {
     writeQuietCampaign();
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     expect(() => writeSchedulerProcessIdentity(runPath, 'some-other-run', process.pid)).toThrow('RUN_IDENTITY_BINDING');
     writeSchedulerProcessIdentity(runPath, RUN_ID, process.pid);
-    const identityPath = join(runPath, 'scheduler.identity.json');
+    const identityPath = runRecordPath(runPath, 'scheduler.identity.json');
     const identity = JSON.parse(readFileSync(identityPath, 'utf-8'));
     writeFileSync(identityPath, JSON.stringify({ ...identity, runId: 'some-other-run' }));
 

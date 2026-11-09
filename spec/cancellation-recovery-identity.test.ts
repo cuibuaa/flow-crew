@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { spawnSync } from 'node:child_process';
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -36,12 +37,12 @@ function checkpoint() {
 
 const cancelChild = `
 import fs from 'node:fs'; import path from 'node:path'; import {pathToFileURL} from 'node:url'; import {syncBuiltinESMExports} from 'node:module';
-const [runtime,fc,id,canonical,ack,queued]=process.argv.slice(1);const lock=path.join(fc,'runs',canonical,'.run-state.lock');const open=fs.openSync;
+const [runtime,fc,id,canonical,ack,queued]=process.argv.slice(1);const lock=path.join(fc,'runs',canonical,'engine','.run-state.lock');const open=fs.openSync;
 fs.openSync=function(file,...args){try{return open(file,...args)}catch(e){if(String(file)===lock&&e.code==='EEXIST')fs.writeFileSync(queued,'queued');throw e}};syncBuiltinESMExports();
 const load=n=>import(pathToFileURL(path.join(runtime,'dist',n+'.js')).href);const store=await load('store');store.setFcGlobalDir(fc);
 const {RunCancellationCoordinator}=await load('run-control');const c=new RunCancellationCoordinator({registry:{list:()=>[]},units:{isActive:async()=>({kind:'absent'}),stopUnit:async()=>{}},runsDir:path.join(fc,'runs')});
 const result=await c.cancelRun(id);const dir=path.join(fc,'runs',canonical);
-fs.writeFileSync(ack,JSON.stringify({result,raw:fs.readFileSync(path.join(dir,'run.json'),'utf8'),ledger:fs.readFileSync(path.join(dir,'stages/work/status.json'),'utf8')}));
+fs.writeFileSync(ack,JSON.stringify({result,raw:fs.readFileSync(path.join(dir,'run.json'),'utf8'),ledger:fs.readFileSync(path.join(dir,'engine','stages/work/status.json'),'utf8')}));
 `;
 
 // Hold each real publication rename while a separate native coordinator tries
@@ -52,13 +53,13 @@ import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:
 const [runtime,fc,project,id,point]=process.argv.slice(1);const dir=path.join(fc,'runs',id),ack=path.join(fc,'ack.json'),queued=path.join(fc,'queued');
 const load=n=>import(pathToFileURL(path.join(runtime,'dist',n+'.js')).href);const store=await load('store');store.setFcGlobalDir(fc);const recovery=await load('restart-recovery');
 const rename=fs.renameSync;let hit=false,early=false,child;const sleep=()=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);
-fs.renameSync=function(from,to){let boundary;try{const v=JSON.parse(fs.readFileSync(from,'utf8'));if(String(to)===path.join(dir,'stages/work/status.json')&&v.status==='failed')boundary='closed_ledger_before';else if(String(to)===path.join(dir,'run.json'))boundary=v.recoveryIntent?.phase==='committed'?'commit_before':v.stages?.work?.status==='failed'?'closed_projection_before':undefined}catch{}
+fs.renameSync=function(from,to){let boundary;try{const v=JSON.parse(fs.readFileSync(from,'utf8'));if(String(to)===path.join(dir,'engine','stages/work/status.json')&&v.status==='failed')boundary='closed_ledger_before';else if(String(to)===path.join(dir,'run.json'))boundary=v.recoveryIntent?.phase==='committed'?'commit_before':v.stages?.work?.status==='failed'?'closed_projection_before':undefined}catch{}
 if(!hit&&boundary===point){hit=true;child=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(cancelChild)},runtime,fc,'accepted_alias',id,ack,queued],{stdio:'ignore'});const deadline=Date.now()+8000;while(!fs.existsSync(ack)&&!fs.existsSync(queued)){if(Date.now()>deadline)throw new Error('lock/ack boundary not reached');sleep()}early=fs.existsSync(ack)}return rename(from,to)};syncBuiltinESMExports();
 try {
  recovery.reconcileHostInterruptedRun(project,id,{currentBootId:'new-boot',currentGeneration:'fixture-generation'});
  fs.renameSync=rename;syncBuiltinESMExports();
  if(child)await new Promise((done,fail)=>{const timer=setTimeout(()=>{child.kill('SIGKILL');fail(new Error('canceller did not settle'))},8000);child.once('close',()=>{clearTimeout(timer);done()})});
- const receipt=JSON.parse(fs.readFileSync(ack,'utf8'));console.log(JSON.stringify({hit,early,queued:fs.existsSync(queued),result:receipt.result.status,rawPreserved:receipt.raw===fs.readFileSync(path.join(dir,'run.json'),'utf8'),ledgerPreserved:receipt.ledger===fs.readFileSync(path.join(dir,'stages/work/status.json'),'utf8'),status:store.readRunState(project,id).status}));
+ const receipt=JSON.parse(fs.readFileSync(ack,'utf8'));console.log(JSON.stringify({hit,early,queued:fs.existsSync(queued),result:receipt.result.status,rawPreserved:receipt.raw===fs.readFileSync(path.join(dir,'run.json'),'utf8'),ledgerPreserved:receipt.ledger===fs.readFileSync(path.join(dir,'engine','stages/work/status.json'),'utf8'),status:store.readRunState(project,id).status}));
 } finally {fs.renameSync=rename;syncBuiltinESMExports();if(child&&child.exitCode===null)child.kill('SIGKILL')}
 `;
 
@@ -70,7 +71,7 @@ fs.readFileSync=function(file,...args){const bytes=read(file,...args);const stac
 try {
  const workflow=scheduler.WorkflowConfigSchema.parse({name:'fixture',defaults:{max_iterations:1},stages:[{id:'work',role:'coder',scope:[],depends_on:[],dependency_reasons:{},prompt_template:'Owned deterministic control.',artifact_contract:{version:1,produces:[],reads:[]}}]});
  const result=await scheduler.runWorkflow(workflow,'name: fixture',project,{run:async()=>{executions++;return {exitCode:0,output:'Owned control.',duration_ms:1,writes:[]}}},new Map(),undefined,undefined,id);
- const receipt=JSON.parse(read(ack,'utf8'));console.log(JSON.stringify({hit,executions,status:result.status,rawPreserved:receipt.raw===read(path.join(dir,'run.json'),'utf8'),ledgerPreserved:receipt.ledger===read(path.join(dir,'stages/work/status.json'),'utf8')}));
+ const receipt=JSON.parse(read(ack,'utf8'));console.log(JSON.stringify({hit,executions,status:result.status,rawPreserved:receipt.raw===read(path.join(dir,'run.json'),'utf8'),ledgerPreserved:receipt.ledger===read(path.join(dir,'engine','stages/work/status.json'),'utf8')}));
 } finally {fs.readFileSync=read;syncBuiltinESMExports()}
 `;
 
@@ -78,7 +79,7 @@ const claimRaceChild = `
 import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';import {pathToFileURL} from 'node:url';import {syncBuiltinESMExports} from 'node:module';
 const [runtime,fc,id]=process.argv.slice(1),run=path.join(fc,'runs',id);const load=n=>import(pathToFileURL(path.join(runtime,'dist',n+'.js')).href);const store=await load('store');store.setFcGlobalDir(fc);const lock=await load('run-lock');const {RunCancellationCoordinator}=await load('run-control');
 const open=fs.openSync;let hit=false,owned;
-fs.openSync=function(file,...args){if(!hit&&String(file)===path.join(run,'.run-state.lock')){hit=true;owned=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync(path.join(run,'scheduler.pid'),String(owned.pid));lock.writeSchedulerProcessIdentity(run,id,owned.pid)}return open(file,...args)};syncBuiltinESMExports();
+fs.openSync=function(file,...args){if(!hit&&String(file)===path.join(run,'engine','.run-state.lock')){hit=true;owned=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync(path.join(run,'engine','scheduler.pid'),String(owned.pid));lock.writeSchedulerProcessIdentity(run,id,owned.pid)}return open(file,...args)};syncBuiltinESMExports();
 try {
  const c=new RunCancellationCoordinator({registry:{list:()=>[]},units:{isActive:async()=>({kind:'absent'}),stopUnit:async()=>{}},signalGraceMs:0,timeoutMs:0});const result=await c.cancelRun(id);let publicationBlocked=false;try{store.writeRunState('',id,{...store.readRunState('',id),status:'running'})}catch(error){publicationBlocked=error.message.startsWith('RUN_CANCELLED')}console.log(JSON.stringify({hit,status:result.status,ok:result.ok,stateStatus:store.readRunState('',id).status,publicationBlocked}));
 } finally {fs.openSync=open;syncBuiltinESMExports();if(owned&&owned.exitCode===null){owned.kill('SIGTERM');await new Promise(done=>{const timer=setTimeout(()=>{owned.kill('SIGKILL');done()},2000);owned.once('close',()=>{clearTimeout(timer);done()})})}}
@@ -87,7 +88,7 @@ try {
 describe('canonical cancellation and committed publication fences', () => {
   it('uses the same identity and live scheduler for an accepted directory alias', () => {
     symlinkSync(runId, join(runsRoot(), 'accepted_alias'));
-    writeFileSync(join(directory, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(directory, 'scheduler.pid'), String(process.pid));
     writeSchedulerProcessIdentity(join(runsRoot(), 'accepted_alias'), 'accepted_alias');
     expect(canonicalRunId(runsRoot(), 'accepted_alias')).toBe(runId);
     expect(inspectRunScheduler('accepted_alias', join(runsRoot(), 'accepted_alias')).kind).toBe('live');
@@ -127,37 +128,39 @@ describe('canonical cancellation and committed publication fences', () => {
     const stale = readRunState(project, runId);
     const c = new RunCancellationCoordinator({ registry: { list: () => [] } as never, units: { isActive: async () => ({ kind: 'absent' }), stopUnit: async () => {} } as never });
     expect((await c.cancelRun(runId)).status).toBe('cancelled');
-    const acknowledged = readFileSync(join(directory, 'run.json'), 'utf8');
-    const beforeLedger = readFileSync(join(directory, 'stages/work/status.json'), 'utf8');
+    const acknowledged = readFileSync(runRecordPath(directory, 'run.json'), 'utf8');
+    const beforeLedger = readFileSync(runRecordPath(directory, 'stages/work/status.json'), 'utf8');
     expect(() => writeRunState(project, runId, stale)).toThrow('RUN_CANCELLED');
     expect(() => writeStageStatus(project, runId, 'work', { status: 'running', retries: 0 })).toThrow('RUN_CANCELLED');
     expect(claimLaunchIntent(project, runId).claimed).toBe(true);
-    expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(acknowledged);
-    expect(readFileSync(join(directory, 'stages/work/status.json'), 'utf8')).toBe(beforeLedger);
+    expect(readFileSync(runRecordPath(directory, 'run.json'), 'utf8')).toBe(acknowledged);
+    expect(readFileSync(runRecordPath(directory, 'stages/work/status.json'), 'utf8')).toBe(beforeLedger);
   });
 
   it('preserves an old stopped projection byte for byte on a no-op update', () => {
     const legacy = { ...readRunState(project, runId), status: 'stopped' as const };
     delete legacy.stateFormat;
     const acknowledged = JSON.stringify(legacy, null, 2) + '\n';
-    writeFileSync(join(directory, 'run.json'), acknowledged);
+    writeFileSync(runRecordPath(directory, 'run.json'), acknowledged);
     expect(updateRunState(project, runId, () => {}).status).toBe('cancelled');
-    expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(acknowledged);
+    expect(readFileSync(runRecordPath(directory, 'run.json'), 'utf8')).toBe(acknowledged);
   });
 
   it('keeps an explicit private run binding out of the global index for the same run ID', async () => {
     const privateProject = join(root, 'private-project'); mkdirSync(privateProject);
     const privateDirectory = join(root, 'legacy-runs', runId); mkdirSync(privateDirectory, { recursive: true });
-    writeFileSync(join(privateDirectory, 'run.json'), JSON.stringify({ ...readRunState(project, runId), projectDir: privateProject }));
+    const privateState = { ...readRunState(project, runId), projectDir: privateProject };
+    delete privateState.storageLayout; delete privateState.stateFormat;
+    writeFileSync(join(privateDirectory, 'run.json'), JSON.stringify(privateState));
     const registry = new TaskRegistry({ baseDir: join(root, 'task-registry') });
     const task = registry.create({ kind: 'quick', name: 'Private binding', projectDir: privateProject, brief_text: 'Owned control.' });
     registry.update(task.id, { run_id: privateDirectory, status: 'running' });
     const indexBefore = readRunIndexRecords(project);
-    const globalBefore = readFileSync(join(directory, 'run.json'), 'utf8');
+    const globalBefore = readFileSync(runRecordPath(directory, 'run.json'), 'utf8');
     const coordinator = new RunCancellationCoordinator({ registry, units: { isActive: async () => ({ kind: 'absent' }), stopUnit: async () => {} } as never });
     expect((await coordinator.cancelTask(task.id)).status).toBe('cancelled');
     expect(JSON.parse(readFileSync(join(privateDirectory, 'run.json'), 'utf8')).status).toBe('cancelled');
-    expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(globalBefore);
+    expect(readFileSync(runRecordPath(directory, 'run.json'), 'utf8')).toBe(globalBefore);
     expect(readRunIndexRecords(project)).toEqual(indexBefore);
   });
 
@@ -166,10 +169,10 @@ describe('canonical cancellation and committed publication fences', () => {
       const outside = join(root, 'other_run'); mkdirSync(outside); symlinkSync(outside, join(runsRoot(), 'alias'));
       expect(() => canonicalRunId(runsRoot(), 'alias')).toThrow('RUN_IDENTITY_OUTSIDE_ROOT');
     } else if (kind === 'record-mismatch') {
-      const state = readRunState(project, runId); state.runId = 'other_run'; writeFileSync(join(directory, 'run.json'), JSON.stringify(state));
+      const state = readRunState(project, runId); state.runId = 'other_run'; writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify(state));
       expect(() => resolveRunIdentity(directory)).toThrow('RUN_IDENTITY_BINDING');
     } else {
-      linkSync(join(directory, 'run.json'), join(root, 'projection-copy'));
+      linkSync(runRecordPath(directory, 'run.json'), join(root, 'projection-copy'));
       expect(() => resolveRunIdentity(directory)).toThrow('RUN_IDENTITY_PROJECTION_ALIAS');
     }
   });
@@ -185,7 +188,7 @@ describe('recovery authority remains required', () => {
       exitCode: 143, terminationCause: 'cancelled', error: expect.stringContaining('CANCELLED_INTERRUPTED'),
     });
     if (shape === 'legacy') {
-      for (const path of [join(directory, 'run.json'), join(directory, 'stages/work/status.json')]) {
+      for (const path of [runRecordPath(directory, 'run.json'), runRecordPath(directory, 'stages/work/status.json')]) {
         const raw = JSON.parse(readFileSync(path, 'utf8'));
         delete (raw.stages?.work ?? raw).attempts.at(-1).terminationCause;
         writeFileSync(path, JSON.stringify(raw));
@@ -219,17 +222,17 @@ describe('recovery authority remains required', () => {
     checkpoint();
     if (kind === 'unknown-boot') updateRunState(project, runId, state => { delete state.engineCheckpoint!.bootId; });
     if (kind === 'unbound-plan') updateRunState(project, runId, state => { state.planControl = { version: 1, stages: [], capabilities: [] }; });
-    if (kind === 'unbound-attempt') writeFileSync(join(directory, 'stages/work/status.json'), JSON.stringify({ status: 'pending', retries: 0 }));
+    if (kind === 'unbound-attempt') writeFileSync(runRecordPath(directory, 'stages/work/status.json'), JSON.stringify({ status: 'pending', retries: 0 }));
     if (kind === 'missing-intent' || kind === 'typed-missing-intent') {
       const ledger = readStageStatus(project, runId, 'work'); ledger.status = 'failed';
       Object.assign(ledger.attempts!.at(-1)!, { status: 'failed', exitCode: 143, error: 'HOST_RESTART_INTERRUPTED: no durable intent' });
       if (kind === 'typed-missing-intent') Object.assign(ledger.attempts!.at(-1)!, { terminationCause: 'host_restart', error: 'Display text is not interruption authority' });
       writeStageStatus(project, runId, 'work', ledger);
     }
-    const ledger = readFileSync(join(directory, 'stages/work/status.json'), 'utf8');
+    const ledger = readFileSync(runRecordPath(directory, 'stages/work/status.json'), 'utf8');
     const state = reconcileHostInterruptedRun(project, runId, { currentBootId: kind === 'same-boot' ? 'old-boot' : 'new-boot', currentGeneration: kind === 'generation' ? 'different' : 'fixture-generation' });
     expect(state.recovery?.kind).toBe('blocked'); expect(state.failureReason).toContain(reason);
-    expect(readFileSync(join(directory, 'stages/work/status.json'), 'utf8')).toBe(ledger);
+    expect(readFileSync(runRecordPath(directory, 'stages/work/status.json'), 'utf8')).toBe(ledger);
   });
 
   it('requires an exactly bound checkpoint', () => {

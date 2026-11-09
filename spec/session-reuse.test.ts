@@ -1,3 +1,5 @@
+import { runRecordPath } from '../src/run-layout.js';
+import { stageSessionHome } from '../src/adapter-session.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -210,7 +212,7 @@ describe('own-stage continuation', () => {
     try {
       const subject = stage('work');
       const state = { stages: { work: successfulStatus({ status: 'pending', retries: 1 }) } } as StoreState;
-      const writeSession = (record: object) => { mkdirSync(join(root, 'stages', 'work'), { recursive: true }); writeFileSync(join(root, 'stages', 'work', 'session.json'), JSON.stringify(record)); };
+      const writeSession = (record: object) => { mkdirSync(runRecordPath(root, 'stages', 'work'), { recursive: true }); writeFileSync(runRecordPath(root, 'stages', 'work', 'session.json'), JSON.stringify(record)); };
       writeSession({ version: 1, sessionId: UUID, ownerStageId: 'work', capturedAt: new Date().toISOString() });
       // Native session storage is CLI-owned; admitted UUID metadata is sufficient.
       expect(sessionResumeForStage(subject, [subject], state, root, false)).toBeUndefined();
@@ -230,8 +232,8 @@ describe('repair continues its author', () => {
       const repair = stage('repair', { depends_on: ['review'], retry_to: ['review'] });
       const all = [implement, review, repair];
       const state = { stages: { implement: successfulStatus() } } as StoreState;
-      mkdirSync(join(root, 'stages', 'implement', 'codex_home'), { recursive: true });
-      writeFileSync(join(root, 'stages', 'implement', 'session.json'), JSON.stringify({ version: 1, sessionId: UUID, ownerStageId: 'implement', capturedAt: new Date().toISOString() }));
+      mkdirSync(stageSessionHome(root, 'implement'), { recursive: true });
+      writeFileSync(runRecordPath(root, 'stages', 'implement', 'session.json'), JSON.stringify({ version: 1, sessionId: UUID, ownerStageId: 'implement', capturedAt: new Date().toISOString() }));
 
       // Independent of the predecessor-reuse opt-in, and never for the gate.
       expect(sessionResumeForStage(repair, all, state, root, false)).toBeUndefined();
@@ -248,7 +250,7 @@ describe('repair continues its author', () => {
       expect(sessionResumeForStage(repair, all, { stages: { implement: successfulStatus({ status: 'failed' }) } } as StoreState, root, false)).toBeUndefined();
 
       clearGateContinuationsForStages(root, all);
-      expect(existsSync(join(root, 'stages', 'implement', 'codex_home'))).toBe(false);
+      expect(existsSync(stageSessionHome(root, 'implement'))).toBe(false);
       expect(sessionResumeForStage(repair, all, state, root, false)).toBeUndefined();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });

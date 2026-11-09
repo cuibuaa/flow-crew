@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import {
   appendFileSync,
   mkdirSync,
@@ -74,7 +75,7 @@ function writeEntry(
 ): string {
   const directory = join(storeRoot, session);
   mkdirSync(directory, { recursive: true });
-  const path = join(directory, `${value.id}.json`);
+  const path = runRecordPath(directory, `${value.id}.json`);
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf-8');
   return path;
 }
@@ -87,7 +88,7 @@ function writeRun(
 ): string {
   const directory = join(engineRoot, 'runs', runId);
   mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, 'run.json'), `${JSON.stringify({
+  writeFileSync(runRecordPath(directory, 'run.json'), `${JSON.stringify({
     runId,
     workflowName: 'qa-fixture',
     projectDir,
@@ -296,7 +297,7 @@ describe('independent ledger convergence replay', () => {
     const fixture = seedLandFixture();
     setFcGlobalDir(fixture.engineRoot);
     writeRun(fixture.engineRoot, fixture.runId, fixture.projectDir, 'running');
-    writeFileSync(join(fixture.engineRoot, 'runs', fixture.runId, 'run_event_status.json'), `${JSON.stringify({
+    writeFileSync(runRecordPath(join(fixture.engineRoot, 'runs', fixture.runId), 'run_event_status.json'), `${JSON.stringify({
       version: 1,
       status: 'running',
       observedAt: '2031-01-01T00:00:00.000Z',
@@ -331,7 +332,7 @@ describe('independent ledger convergence replay', () => {
     const runId = 'active-run';
     setFcGlobalDir(engineRoot);
     const runDirectory = writeRun(engineRoot, runId, projectDir, 'pending');
-    writeFileSync(join(runDirectory, 'run_event_status.json'), `${JSON.stringify({
+    writeFileSync(runRecordPath(runDirectory, 'run_event_status.json'), `${JSON.stringify({
       version: 1,
       status: 'pending',
       observedAt: '2031-01-01T00:00:00.000Z',

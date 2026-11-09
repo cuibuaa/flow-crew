@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { providerFailureFromDiagnostic } from '../src/provider-result.js';
 import { readStageLiveLogPath, stageLiveLogPath } from '../src/stage-live-log.js';
@@ -29,7 +30,7 @@ const uuid = '11111111-1111-4111-8111-111111111111';
 const role: AgentConfig = { name: 'coder', description: 'deterministic', model: 'test', reasoning_effort: 'low', tools: [], prompt: 'current duties' };
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'fc-settlement-')); project = join(root, 'project'); mkdirSync(join(project, 'config', 'agents'), { recursive: true }); writeFileSync(join(project, 'config', 'agents', 'coder.yaml'), 'name: coder\ndescription: fixture\nmodel: test\nreasoning_effort: low\ntools: []\nprompt: fixture\n'); prior = fcGlobalDir(); setFcGlobalDir(join(root, 'store')); });
 afterEach(() => { setFcGlobalDir(prior); rmSync(root, { recursive: true, force: true }); });
-function ownSession(run: string, stage: string) { const home = join(run, 'stages', stage, 'codex_home'); mkdirSync(home, { recursive: true }); writeFileSync(join(home, 'progress'), 'verified progress'); atomicWrite(join(run, 'stages', stage, 'session.json'), JSON.stringify({ version: 1, adapter: 'codex', sessionId: uuid, ownerStageId: stage, updatedAt: new Date().toISOString() })); return home; }
+function ownSession(run: string, stage: string) { const home = stageWorkPath(run, 'stages', stage, 'homes', 'codex'); mkdirSync(home, { recursive: true }); writeFileSync(join(home, 'progress'), 'verified progress'); atomicWrite(runRecordPath(run, 'stages', stage, 'session.json'), JSON.stringify({ version: 1, adapter: 'codex', sessionId: uuid, ownerStageId: stage, updatedAt: new Date().toISOString() })); return home; }
 function workflow(): WorkflowConfig { return { name: 'settlement', description: '', defaults: { max_iterations: 1, max_retries: 0 }, stages: [{ id: 'work', role: 'coder', depends_on: [], scope: [], skills: [], dynamic_dispatch: false, is_gate: false, criterion_refs: [], prompt_template: 'write the declared product after scope admission', artifact_contract: fixtureArtifactContract('work') }] }; }
 describe('scheduler attempt closure and own-stage retry progress', () => {
     it('recomputes own-stage continuation after a refused technical attempt in the grouped executor', async () => {

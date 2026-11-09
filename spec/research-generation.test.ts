@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
@@ -95,7 +96,7 @@ it.each((['unproven', 'earlier-iteration', 'unsettled', 'existing-snapshot'] as 
     });
     configure();
     expect(captureResearchGateCandidate(project, run, 'review').kind).toBe('absent');
-    expect(existsSync(join(run, 'research_journal.json'))).toBe(false);
+    expect(existsSync(runRecordPath(run, 'research_journal.json'))).toBe(false);
   });
 
 it('does not promote an independent old result with the same bytes as a completed publication', () => {
@@ -110,7 +111,7 @@ it('does not promote an independent old result with the same bytes as a complete
   });
   configure();
   expect(captureResearchGateCandidate(project, run, 'review').kind).toBe('absent');
-  expect(existsSync(join(run, 'research_journal.json'))).toBe(false);
+  expect(existsSync(runRecordPath(run, 'research_journal.json'))).toBe(false);
 });
 
 it.each([
@@ -172,7 +173,7 @@ it.each([
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(start - 1500);
     utimesSync(join(project, 'docs/round.json'), (start - 1500) / 1000, (start - 1500) / 1000);
   }
-  writeFileSync(join(run, 'task_brief.md'), brief());
+  writeFileSync(runRecordPath(run, 'task_brief.md'), brief());
   updateRunState(project, runId, state => {
     state.status = 'cancelled'; state.failureReason = 'Synthetic interruption after production.';
     state.completedAt = new Date().toISOString();
@@ -187,7 +188,7 @@ it.each([
     join(resolve(import.meta.dirname, '..'), 'config/agents'), runId);
   expect(adapter.calls.some(call => call.stageId === 'measure')).toBe(false);
   expect(adapter.calls.filter(call => call.stageId === 'review')).toHaveLength(1);
-  const journal = join(run, 'research_journal.json');
+  const journal = runRecordPath(run, 'research_journal.json');
   expect(result.status, result.failureReason).toBe(reviewPass ? 'shipped' : 'escalated');
   expect(existsSync(journal)).toBe(reviewPass);
   if (reviewPass) {

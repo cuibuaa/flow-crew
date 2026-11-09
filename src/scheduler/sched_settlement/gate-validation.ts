@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import type { ReproductionRecord } from '../../scoped-audit-repair.js';
 import { loadEngineDefaults } from '../../config.js';
 import { performance } from 'node:perf_hooks';
@@ -52,7 +53,7 @@ function captureBaseInputs(projectDir: string, brief: string, base: string, comm
       paths.add(input.path);
       for (const path of listProjectFilesAt(projectDir, input.path, false, { complete: true, skipDirectory: path => !safeEvidencePath(path) })) paths.add(path);
     }
-    const store = new RollbackContentStore(join(base, 'stage_evidence', 'base-inputs'));
+    const store = new RollbackContentStore(runRecordPath(base, 'stage_evidence', 'base-inputs'));
     for (const path of [...paths].sort()) {
       if (!safeEvidencePath(path) || tracked.has(path)) continue;
       const image = readRepairFileImage(projectDir, path, undefined, { contentStore: store });
@@ -83,7 +84,7 @@ export interface GateValidationDeltaArtifact extends Partial<GateValidationExecu
 }
 
 function briefAt(base: string): string {
-  try { return readFileSync(join(base, 'task_brief.md'), 'utf8'); } catch { return ''; }
+  try { return readFileSync(runRecordPath(base, 'task_brief.md'), 'utf8'); } catch { return ''; }
 }
 export function validationExecutionId(runId: string, stageId: string, index: number, start: string, end: string): string {
   return createHash('sha256').update([runId, stageId, String(index), start, end].join('\0')).digest('hex');
@@ -113,7 +114,7 @@ export function validationDeltaMatchesExecution(delta: GateValidationDeltaArtifa
 }
 export function readRunValidationBaseline(base: string): RunValidationBaselineArtifact | undefined {
   try {
-    const value = JSON.parse(readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE), 'utf8')) as RunValidationBaselineArtifact;
+    const value = JSON.parse(readFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE), 'utf8')) as RunValidationBaselineArtifact;
     return value.version === 1 && value.baseline?.version === 1 && Array.isArray(value.baseline.discovery?.commands)
       && Array.isArray(value.baseline.results) ? value : undefined;
   } catch { return undefined; }
@@ -124,7 +125,7 @@ export function snapshotShipSetupValidationBaseline(projectDir: string, exactBri
   // declaration here without turning unrelated malformed YAML into admission.
   const metadata = parseBriefFrontmatterDocument(exactBrief)?.value;
   const declaration = parseValidationCommands(metadata && typeof metadata === 'object'
-    ? (metadata as Record<string, unknown>).validation : undefined, join(base, 'task_brief.md'));
+    ? (metadata as Record<string, unknown>).validation : undefined, runRecordPath(base, 'task_brief.md'));
   if (declaration.error) throw new Error(declaration.error);
   const baseline: ProjectValidationBaseline = admitted ?? { version: 1, execution: 'skipped', projectDir,
     discovery: reconcileProjectValidation(projectDir, declaration.commands), results: [], gateCriteria: [] };
@@ -135,7 +136,7 @@ export function snapshotShipSetupValidationBaseline(projectDir: string, exactBri
     baseInputs: captureBaseInputs(projectDir, exactBrief, base, baseCommit),
     // Historical setup measurements are retained for audit, but never decide a new attempt.
     baseline };
-  writeFileSync(join(base, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(artifact, null, 2)}\n`);
+  writeFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(artifact, null, 2)}\n`);
   return artifact;
 }
 /** Called before an author can write, including low-level runStage callers. */
@@ -160,7 +161,7 @@ export function recordValidationSelection(projectDir: string, runId: string, val
     missingRoles: (['build', 'test', 'lint'] as const).filter(role => !commands.some(command => command.role === role)),
     reason: `Model selection: ${selected.success ? selected.data.reason : 'invalid or unavailable; validation unmeasured'}` };
   // Never reconstruct a missing pre-author input image from authored bytes.
-  writeFileSync(join(base, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(plan, null, 2)}\n`);
+  writeFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE), `${JSON.stringify(plan, null, 2)}\n`);
 }
 
 function completedFailure(result: ProjectValidationBaseline['results'][number]): boolean {
@@ -214,10 +215,10 @@ export async function recordAttemptValidation(projectDir: string, runId: string,
     const recordedCommands = measured.results.flatMap(result => {
       const command = measured.discovery.commands.find(item => item.role === result.role && item.display === result.display);
       if (!command) return [];
-      const outputPath = `stage_evidence/${stageId}/validation-${attempt.index}-${target}-${executions.length}-${commandIndex}.log`;
-      mkdirSync(dirname(join(base, outputPath)), { recursive: true });
+      const outputPath = relative(base, runRecordPath(base, `stage_evidence/${stageId}/validation-${attempt.index}-${target}-${executions.length}-${commandIndex}.log`));
+      mkdirSync(dirname(runRecordPath(base, outputPath)), { recursive: true });
       commandIndex++;
-      writeFileSync(join(base, outputPath), result.output);
+      writeFileSync(runRecordPath(base, outputPath), result.output);
       return [{ ...result, outputPath, command: command.command, args: command.args, ...(command.env ? { env: command.env } : {}) }];
     });
     executions.push({ target, ...(rerun ? { rerun } : {}), cwd, commit, treeHash: tree.hash, treeAfterHash: captureProjectTree(cwd, brief).hash, commands: recordedCommands });
@@ -346,26 +347,26 @@ export async function recordGateValidationDelta(projectDir: string, runId: strin
     && readStageStatus(projectDir, runId, fact.stageId).attempts?.some(attempt => attempt.index === fact.attemptIndex && attempt.startedAt === fact.attemptStartedAt && attempt.status === STAGE_STATUS.COMPLETE);
   const delta: ValidationDeltaResult[] = valid ? fact.delta : [{ role: 'test', state: 'unverified', reason: 'No settled author validation covers the current source tree', newFailureIdentifiers: [] }];
   const artifact: GateValidationDeltaArtifact = { version: 2, stageId, checkedAt: new Date().toISOString(),
-    pass: valid ? fact.pass : false, baselineSha256: createHash('sha256').update(readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex'),
+    pass: valid ? fact.pass : false, baselineSha256: createHash('sha256').update(readFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex'),
     current: valid ? fact.executions[0].commands : [], delta, ...execution, treeHash: tree.hash,
     ...(valid ? { ledgerSequence: fact.sequence } : {}), validationAttemptIndex: 1 };
   artifact.immutablePath = `validation_delta_${stageId}_attempt_${execution.attemptIndex}_${createHash('sha256').update(JSON.stringify(artifact)).digest('hex').slice(0, 16)}.json`;
   const { current: _current, ...reference } = artifact;
   const stored = valid ? reference : artifact;
-  publishJsonCreateOnly(join(base, artifact.immutablePath), stored);
-  writeFileSync(join(base, `validation_delta_${stageId}.json`), `${JSON.stringify(stored)}\n`);
+  publishJsonCreateOnly(runRecordPath(base, artifact.immutablePath), stored);
+  writeFileSync(runRecordPath(base, `validation_delta_${stageId}.json`), `${JSON.stringify(stored)}\n`);
   return artifact;
 }
 export function bindReviewedGateValidation(projectDir: string, runId: string, stageId: string, _waveStageIds?: string[]): boolean {
-  const base = runDir(projectDir, runId), prior = readValidationDelta(join(base, `validation_delta_${stageId}.json`));
+  const base = runDir(projectDir, runId), prior = readValidationDelta(runRecordPath(base, `validation_delta_${stageId}.json`));
   const execution = closedGateValidationExecution(projectDir, runId, stageId);
-  if (!prior || !execution || prior.baselineSha256 !== createHash('sha256').update(readFileSync(join(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex') || !prior.treeHash || prior.treeHash !== captureProjectTree(projectDir, briefAt(base)).hash
+  if (!prior || !execution || prior.baselineSha256 !== createHash('sha256').update(readFileSync(runRecordPath(base, RUN_VALIDATION_BASELINE_FILE))).digest('hex') || !prior.treeHash || prior.treeHash !== captureProjectTree(projectDir, briefAt(base)).hash
     || prior.attemptIndex !== execution.attemptIndex || prior.attemptStartedAt !== execution.attemptStartedAt) return false;
   const { current: _current, ...bound } = { ...prior, ...execution };
   bound.immutablePath = `validation_delta_${stageId}_attempt_${execution.attemptIndex}_${createHash('sha256').update(JSON.stringify(bound)).digest('hex').slice(0, 16)}.json`;
   const stored = bound.ledgerSequence === undefined ? { ...bound, current: prior.current } : bound;
-  publishJsonCreateOnly(join(base, bound.immutablePath), stored);
-  writeFileSync(join(base, `validation_delta_${stageId}.json`), `${JSON.stringify(stored)}\n`);
+  publishJsonCreateOnly(runRecordPath(base, bound.immutablePath), stored);
+  writeFileSync(runRecordPath(base, `validation_delta_${stageId}.json`), `${JSON.stringify(stored)}\n`);
   return true;
 }
 /** Missing or stale facts expose each selected command as unrun. They never

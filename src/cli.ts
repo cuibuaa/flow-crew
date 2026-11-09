@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runRecordPath } from './run-layout.js';
 import { CliUsageError, commandName, commandUsage, parseCommandArgs } from './cli-args.js';
 import { EXIT_CODE } from './exit-code.js';
 import type { RetiredStageUsage, RunStatus } from './store.js';
@@ -880,13 +881,13 @@ async function cmdQuick(preview = false) {
     const { runsRoot: getRunsRoot } = await import('./store.js');
     let storedTaskDescription: string | undefined;
     try {
-      const runJson = JSON.parse(readFileSync(join(getRunsRoot(), existingRunId, 'run.json'), 'utf-8'));
+      const runJson = JSON.parse(readFileSync(runRecordPath(join(getRunsRoot(), existingRunId), 'run.json'), 'utf-8'));
       if (typeof runJson.taskDescription === 'string') storedTaskDescription = runJson.taskDescription;
       storedAdmission = runJson.briefAdmission as BriefAdmissionRecord | undefined;
     } catch { /* an uninitialized reservation has no run state yet */ }
 
     const hasTransportedExactTask = taskSupplied && transportedAdmission !== undefined;
-    const briefPath = join(getRunsRoot(), existingRunId, 'task_brief.md');
+    const briefPath = runRecordPath(join(getRunsRoot(), existingRunId), 'task_brief.md');
     if (!hasTransportedExactTask && existsSync(briefPath)) {
       try { task = readFileSync(briefPath, 'utf-8'); } catch { /* ignore */ }
     }
@@ -1225,7 +1226,7 @@ async function cmdQuick(preview = false) {
 
   const workflowsDir = join(engineConfigDir, 'workflows');
   const workflowPath = initializedContinuation
-    ? join((await import('./store.js')).runsRoot(), existingRunId!, 'workflow.yaml')
+    ? runRecordPath(join((await import('./store.js')).runsRoot(), existingRunId!), 'workflow.yaml')
     : join(workflowsDir, `${workflow}.yaml`);
   if (!existsSync(workflowPath)) {
     console.error(`Workflow not found: ${workflow}.yaml`);
@@ -1325,7 +1326,7 @@ async function cmdQuick(preview = false) {
     try {
       const runs = readdirSync(runsRoot()).sort().reverse();
       if (runs.length === 0) return;
-      const stateFile = join(runsRoot(), runs[0], 'run.json');
+      const stateFile = runRecordPath(join(runsRoot(), runs[0]), 'run.json');
       if (!existsSync(stateFile)) return;
       const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
       for (const [id, ss] of Object.entries(state.stages) as [string, { status: string; duration_ms?: number; error?: string }][]) {
@@ -1419,7 +1420,7 @@ function runIdsByRecency(root: string): string[] {
 }
 
 function printResearchProgress(runDir: string): void {
-  const journalPath = join(runDir, 'research_journal.json');
+  const journalPath = runRecordPath(runDir, 'research_journal.json');
   if (!existsSync(journalPath)) return;
   let journal: { rounds?: { label?: string; result?: number; wallHoursCumulative?: number }[] };
   try { journal = JSON.parse(readFileSync(journalPath, 'utf-8')); } catch { return; }
@@ -1434,7 +1435,7 @@ function printResearchProgress(runDir: string): void {
       console.log(`  ${i + 1}. ${r.label ?? '?'} = ${r.result ?? '?'}${wall}`);
     }
   }
-  const decisionPath = join(runDir, 'research_decision.json');
+  const decisionPath = runRecordPath(runDir, 'research_decision.json');
   if (existsSync(decisionPath)) {
     try {
       const d = JSON.parse(readFileSync(decisionPath, 'utf-8'));
@@ -1565,7 +1566,7 @@ function cmdStatus() {
   }
   if (selected.historyError) console.log(`History unavailable: ${selected.historyError}`);
   if (selection.details) {
-    const summaryPath = join(runDir, 'summary.md');
+    const summaryPath = runRecordPath(runDir, 'summary.md');
     if (existsSync(summaryPath)) console.log(`\n${readFileSync(summaryPath, 'utf-8').trimEnd()}`);
     printResearchProgress(runDir);
   }
@@ -1774,7 +1775,7 @@ function cmdExport() {
   // v2 run.json is intentionally a compact projection. Export the hydrated
   // state so acknowledged append-only history does not disappear from bundles.
   try { bundle.state = readRunState('', runId); } catch { /* non-critical */ }
-  const stagesDir = join(runDir, 'stages');
+  const stagesDir = runRecordPath(runDir, 'stages');
   if (existsSync(stagesDir)) {
     const stages: Record<string, unknown> = {};
     for (const stageId of readdirSync(stagesDir)) {
@@ -1787,8 +1788,8 @@ function cmdExport() {
     }
     bundle.stages = stages;
   }
-  try { bundle.progress = readFileSync(join(runDir, 'summary.md'), 'utf-8'); } catch { /* non-critical */ }
-  try { bundle.dispatch = readFileSync(join(runDir, 'dispatch.yaml'), 'utf-8'); } catch { /* non-critical */ }
+  try { bundle.progress = readFileSync(runRecordPath(runDir, 'summary.md'), 'utf-8'); } catch { /* non-critical */ }
+  try { bundle.dispatch = readFileSync(runRecordPath(runDir, 'dispatch.yaml'), 'utf-8'); } catch { /* non-critical */ }
 
   const outputPath = `flowcrew-export-${runId}.json`;
   writeFileSync(outputPath, JSON.stringify(bundle, null, 2), 'utf-8');

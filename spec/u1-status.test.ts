@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,7 +32,7 @@ it('publishes cancellation with one spelling across storage, events, registry, R
     timeoutMs: 0, signalGraceMs: 0,
   });
   expect(await coordinator.cancelTask(task.id)).toMatchObject({ ok: true, status: 'cancelled' });
-  expect(JSON.parse(readFileSync(join(run.runDirPath, 'run.json'), 'utf8')).status).toBe('cancelled');
+  expect(JSON.parse(readFileSync(runRecordPath(run.runDirPath, 'run.json'), 'utf8')).status).toBe('cancelled');
   expect(readRunEvents(project, run.runId).filter(event => event.type === 'run_status_changed').at(-1)?.runStatus).toBe('cancelled');
   const stored = registry.get(task.id)!;
   expect(stored.status).toBe('cancelled');
@@ -60,7 +61,7 @@ it('projects the resumed complete outcome over a stale failed task (historical f
 
 it('reads stopped as cancelled without changing archived bytes or inferring success', () => {
   const run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', []);
-  const path = join(run.runDirPath, 'run.json');
+  const path = runRecordPath(run.runDirPath, 'run.json');
   const archived = JSON.parse(readFileSync(path, 'utf8'));
   archived.status = 'stopped';
   archived.failureReason = 'Historical operator cancellation';

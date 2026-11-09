@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -46,8 +47,8 @@ function adapter(calls: string[], rejectFirstReview: boolean, observe?: (prompt:
       observe?.(prompt, role, opts);
       if (opts.stageId === 'review') {
         const pass = !(rejectFirstReview && ++reviews === 1);
-        const { criteria } = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')) as { criteria: Array<{ id: string }> };
-        writeFileSync(join(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({
+        const { criteria } = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')) as { criteria: Array<{ id: string }> };
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_review.json'), JSON.stringify({
           pass, reason: pass ? 'accepted' : 'the greeting is missing',
           criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: pass ? 'pass' : 'fail', evidence: 'docs/report.md' }])),
         }));
@@ -176,7 +177,7 @@ describe('direct workflow', () => {
     expect(final.status).not.toBe('complete');
     expect(final.stages.implement.status).toBe('failed');
     expect(final.stages.implement.error).toContain('DECLARED_OUTPUT_REQUIRED');
-    expect(existsSync(join(runDir(projectDir, final.runId), 'verdict_review.json'))).toBe(false);
+    expect(existsSync(runRecordPath(runDir(projectDir, final.runId), 'verdict_review.json'))).toBe(false);
     expect(existsSync(join(projectDir, 'docs', 'report.md'))).toBe(false);
   });
 
@@ -184,8 +185,8 @@ describe('direct workflow', () => {
     const calls: string[] = [];
     const final = await runDirect(brief('outputs:\n  - docs/report.md'), calls, true);
     const directory = runDir(projectDir, final.runId);
-    const criteria = (JSON.parse(readFileSync(join(directory, 'brief_criteria.json'), 'utf8')) as { criteria: Array<{ id: string }> }).criteria.map(({ id }) => id);
-    const admission = JSON.parse(readFileSync(join(directory, 'dispatch_admission.json'), 'utf8')) as { pass: boolean; criterionGateRefs: Record<string, string[]> };
+    const criteria = (JSON.parse(readFileSync(runRecordPath(directory, 'brief_criteria.json'), 'utf8')) as { criteria: Array<{ id: string }> }).criteria.map(({ id }) => id);
+    const admission = JSON.parse(readFileSync(runRecordPath(directory, 'dispatch_admission.json'), 'utf8')) as { pass: boolean; criterionGateRefs: Record<string, string[]> };
 
     expect(final.status).toBe('complete');
     expect(calls).toEqual(['implement', 'review', 'repair', 'review']);
@@ -193,7 +194,7 @@ describe('direct workflow', () => {
     expect(final.stages.plan.attempts ?? []).toEqual([]);
     expect(criteria).toHaveLength(2);
     expect(admission).toMatchObject({ pass: true, criterionGateRefs: { review: criteria } });
-    expect(existsSync(join(directory, 'declared_outputs', 'docs', 'report.md'))).toBe(true);
+    expect(existsSync(runRecordPath(directory, 'declared_outputs', 'docs', 'report.md'))).toBe(true);
   });
 
   it('refuses at admission a brief its fixed plan cannot satisfy, before any stage runs', async () => {
@@ -204,7 +205,7 @@ describe('direct workflow', () => {
       const calls: string[] = [];
       const final = await runDirect(brief(frontmatter), calls);
       expect(['failed', 'escalated']).toContain(final.status);
-      const admissionPath = join(runDir(projectDir, final.runId), 'dispatch_admission.json');
+      const admissionPath = runRecordPath(runDir(projectDir, final.runId), 'dispatch_admission.json');
       const errors = existsSync(admissionPath) ? JSON.parse(readFileSync(admissionPath, 'utf8')).errors : [];
       expect([final.failureReason, ...errors].join('\n')).toContain(reason);
       expect(calls).toEqual([]);
@@ -234,7 +235,7 @@ describe('direct workflow', () => {
     expect(readFileSync(join(projectDir, 'notes.md'), 'utf8')).toBe('frozen notes\n');
     const audits = Object.values(final.stages).flatMap(stage => stage.attempts ?? [])
       .flatMap(attempt => attempt.constraintAudit
-        ? [JSON.parse(readFileSync(join(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
+        ? [JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
     expect(audits.flatMap(audit => audit.rollbackFailures)).toEqual([]);
     expect(audits.flatMap(audit => audit.rolledBackWrites)).toContain('notes.md');
   });
@@ -261,7 +262,7 @@ describe('direct workflow', () => {
     expect(existsSync(join(projectDir, 'evidence', 'new.md'))).toBe(false);
     expect(final.stages.implement.attempts?.length).toBeGreaterThan(0);
     const audits = final.stages.implement.attempts!.flatMap(attempt => attempt.constraintAudit
-      ? [JSON.parse(readFileSync(join(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
+      ? [JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), attempt.constraintAudit.path), 'utf8'))] : []);
     const canonicalPath = path.replace(/^alias\//, 'evidence/');
     expect(audits.flatMap(audit => audit.rolledBackWrites)).toContain(canonicalPath);
     expect(audits.flatMap(audit => audit.rollbackFailures)).toEqual([]);

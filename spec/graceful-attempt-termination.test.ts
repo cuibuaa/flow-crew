@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { stageWrapUpTiming } from '../src/attempt-deadline.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
@@ -528,7 +529,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
     setFcGlobalDir(stateRoot);
     const stageId = 'stage_abort';
     const created = createRun(projectRoot, 'graceful-abort', 'name: graceful-abort', [stageId]);
-    mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
+    mkdirSync(runRecordPath(created.runDirPath, 'signals'), { recursive: true });
     const cleanupPath = join(projectRoot, 'abort-cleanup');
     const readyPath = join(projectRoot, 'abort-ready');
     const pidPath = join(projectRoot, 'abort-pid');
@@ -558,7 +559,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
           },
         });
         await waitForFile(readyPath, 1_000);
-        atomicWrite(join(created.runDirPath, 'signals', `abort_${stageId}.json`), JSON.stringify({
+        atomicWrite(runRecordPath(created.runDirPath, 'signals', `abort_${stageId}.json`), JSON.stringify({
           version: 1,
           stageId,
           attemptIndex: 1,
@@ -658,7 +659,7 @@ describe.skipIf(process.platform === 'win32')('graceful attempt termination', ()
   it('keeps command evidence open through child retirement and closes it on launch failure', async () => {
     const root = mkdtempSync(join(tmpdir(), 'fc-command-owner-'));
     const controller = new AbortController();
-    const activityPath = join(root, 'stages', 'fixture', 'command_activity.json');
+    const activityPath = runRecordPath(root, 'stages', 'fixture', 'command_activity.json');
     const readyPath = join(root, 'ready'), cleanupPath = join(root, 'cleanup'), scratchPath = join(root, 'scratch.json');
     const execution = { runDir: root, stageId: 'fixture', attemptIndex: 1, attemptStartedAt: new Date().toISOString() };
     const fixture = [

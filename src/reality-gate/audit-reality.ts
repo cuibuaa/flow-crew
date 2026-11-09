@@ -1,3 +1,4 @@
+import { runRecordPath } from '../run-layout.js';
 import { parseCommandArgs, commandUsage } from '../cli-args.js';
 import { writeFileSync } from '../engine-fs.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -52,7 +53,7 @@ async function auditRunMatches(id: number): Promise<AuditRow[]> {
   const rows: AuditRow[] = [];
   for (const name of names) {
     const runPath = join(root, name);
-    const statePath = join(runPath, 'run.json');
+    const statePath = runRecordPath(runPath, 'run.json');
     if (!existsSync(statePath)) continue;
     let state: Record<string, unknown>;
     try { state = JSON.parse(readFileSync(statePath, 'utf-8')) as Record<string, unknown>; } catch { continue; }
@@ -65,7 +66,7 @@ async function auditRunMatches(id: number): Promise<AuditRow[]> {
 
 async function auditRunState(name: string, runPath: string, state: Record<string, unknown>): Promise<AuditRow> {
   const projectDir = typeof state.projectDir === 'string' ? state.projectDir : process.cwd();
-  const briefPath = existsSync(join(runPath, 'task_brief.md')) ? join(runPath, 'task_brief.md') : undefined;
+  const briefPath = existsSync(runRecordPath(runPath, 'task_brief.md')) ? runRecordPath(runPath, 'task_brief.md') : undefined;
   const label = `#${String(state.taskId ?? state.task_id ?? state.campaignSeq ?? state.campaignIteration ?? name)} ${name}`;
   const base = {
     task: escapeCell(label),
@@ -86,7 +87,7 @@ async function auditRunState(name: string, runPath: string, state: Record<string
 
 async function auditTask(task: TaskEntry): Promise<AuditRow> {
   const runPath = task.run_id ? join(runsRoot(), task.run_id) : undefined;
-  const runJson = runPath && existsSync(join(runPath, 'run.json')) ? JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as Record<string, unknown> : {};
+  const runJson = runPath && existsSync(runRecordPath(runPath, 'run.json')) ? JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as Record<string, unknown> : {};
   const projectDir = typeof runJson.projectDir === 'string' ? runJson.projectDir : task.projectDir;
   const briefPath = resolveBriefPath(task, runPath);
   if (!briefPath) {
@@ -114,7 +115,7 @@ function baseRow(task: TaskEntry, projectDir: string, checksRun: string, realSta
 
 function resolveBriefPath(task: TaskEntry, runPath?: string): string | undefined {
   const candidates = [
-    runPath ? join(runPath, 'task_brief.md') : undefined,
+    runPath ? runRecordPath(runPath, 'task_brief.md') : undefined,
     task.brief_path,
   ].filter((item): item is string => Boolean(item));
   return candidates.find((candidate) => existsSync(candidate));

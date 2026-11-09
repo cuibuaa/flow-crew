@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import { freshTerminalArtifact, terminalArtifactIdentity } from '../../terminal-artifact-status.js';
 import { concludeRun } from './run-completion.js';
 /** Terminal selection, floor/owner/freshness/reality enforcement and quiescent conclusion; receives validation, campaign and escalation services. */
@@ -67,7 +68,7 @@ interface ResearchTerminalSelection {
 
 function readResearchTerminalSelection(runDirPath: string): ResearchTerminalSelection | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(join(runDirPath, 'research_decision.json'), 'utf-8')) as Record<string, unknown>;
+    const parsed = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_decision.json'), 'utf-8')) as Record<string, unknown>;
     if (parsed.decision === 'continue') return undefined;
     if (typeof parsed.terminalStatus !== 'string' || typeof parsed.terminalPath !== 'string') return undefined;
     return { terminalStatus: parsed.terminalStatus, terminalPath: parsed.terminalPath };
@@ -80,7 +81,7 @@ function quarantineTerminalCandidate(runDirPath: string, sourcePath: string, lab
   if (!existsSync(sourcePath)) return undefined;
   const safeLabel = label.replace(/[^A-Za-z0-9_.-]+/g, '_');
   for (let suffix = 0; suffix < 1000; suffix += 1) {
-    const target = join(runDirPath, `${safeLabel}${suffix === 0 ? '' : `_${suffix}`}`);
+    const target = runRecordPath(runDirPath, `${safeLabel}${suffix === 0 ? '' : `_${suffix}`}`);
     if (existsSync(target)) continue;
     try {
       renameSync(sourcePath, target);
@@ -130,7 +131,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     artifactMtimeMs: number;
     dependencies?: ProjectValidationDependencies;
   }): Promise<TerminalValidationFreshnessResult> {
-    const baselinePath = join(input.runDirPath, RUN_VALIDATION_BASELINE_FILE);
+    const baselinePath = runRecordPath(input.runDirPath, RUN_VALIDATION_BASELINE_FILE);
     const attributedWriteMs = lastAttributedStageWriteMs(
       input.projectDir,
       input.state,
@@ -186,7 +187,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
       const freshLogicalCandidates = Object.entries(state.terminalStates).flatMap(([terminalStatus, entry]) => (
         entry.paths.flatMap((path) => {
           const projectPath = join(ctx.projectDir, path);
-          const snapshotPath = join(ctx.runDirPath, terminalArtifactSnapshotName(path));
+          const snapshotPath = runRecordPath(ctx.runDirPath, terminalArtifactSnapshotName(path));
           const sources = [projectPath, snapshotPath].filter(candidate => freshCandidate(path, candidate));
           return sources.length > 0 ? [{ terminalStatus, path, sources }] : [];
         })
@@ -242,7 +243,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
       for (const path of entry.paths) {
         
         const projPath = join(ctx.projectDir, path);
-        const snapPath = join(ctx.runDirPath, terminalArtifactSnapshotName(path));
+        const snapPath = runRecordPath(ctx.runDirPath, terminalArtifactSnapshotName(path));
         const candidates = [projPath, snapPath].flatMap((candidate) => {
           if (!existsSync(candidate)) return [];
           try { return [{ path: candidate, mtimeMs: statSync(candidate).mtimeMs }]; } catch { return []; }
@@ -321,7 +322,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           ? (() => {
               let measuredRounds = 0;
               try {
-                const journal = JSON.parse(readFileSync(join(ctx.runDirPath, 'research_journal.json'), 'utf-8')) as { rounds?: unknown[] };
+                const journal = JSON.parse(readFileSync(runRecordPath(ctx.runDirPath, 'research_journal.json'), 'utf-8')) as { rounds?: unknown[] };
                 measuredRounds = Array.isArray(journal.rounds) ? journal.rounds.length : 0;
               } catch { /* missing/corrupt journal fails the floor as zero rounds */ }
               const startedAtMs = Date.parse(state.startedAt);
@@ -408,7 +409,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           } catch (err) {
             confirmReport = { pass: false, results: [{ details: `confirm command threw: ${err instanceof Error ? err.message : String(err)}` }] };
           }
-          try { writeFileSync(join(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: state.research.confirm.command, requires: state.research.confirm.requires, trigger: `terminal file ${path}` }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+          try { writeFileSync(runRecordPath(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: state.research.confirm.command, requires: state.research.confirm.requires, trigger: `terminal file ${path}` }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
           if (!confirmReport.pass) {
             const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
             const hintMarker = `[scheduler-hint:shipped-confirm:${path}]`;

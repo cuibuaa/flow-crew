@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { declareValidation } from './test-support/structured-validation.js';
 import { artifacts, inputFile, stageArtifacts } from './spec_contracts/declared-fixtures.js';
@@ -177,7 +178,7 @@ function seedCampaignPhase(
   state.research = { baseline: 0, policy: 'greedy_stack' };
   state.dispatchedStages = [stage({ criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []), id: 'qa', role: 'qa', is_gate: true })];
   state.stages.qa = { status: 'complete', retries: 0 };
-  write(join(created.runDirPath, 'verdict_qa.json'), `${JSON.stringify({
+  write(runRecordPath(created.runDirPath, 'verdict_qa.json'), `${JSON.stringify({
     pass: true, phase: 'research', phaseComplete: false,
   })}\n`);
   return { state, runDirectory: created.runDirPath };
@@ -298,13 +299,13 @@ describe('engine self-collision after-state replays and controls', () => {
     mkdirSync(projectDir, { recursive: true });
     setFcGlobalDir(stateRoot);
     const created = createRun(projectDir, 'validation-fixture', 'name: validation-fixture', ['qa']);
-    write(join(created.runDirPath, 'validation_baseline.json'), `${JSON.stringify({
+    write(runRecordPath(created.runDirPath, 'validation_baseline.json'), `${JSON.stringify({
       version: 1,
       capturedAt: new Date().toISOString(),
       source: 'ship-setup-ready-record',
       baseline: validationBaseline(projectDir),
     }, null, 2)}\n`);
-    write(join(created.runDirPath, 'verdict_qa.json'), `${JSON.stringify({
+    write(runRecordPath(created.runDirPath, 'verdict_qa.json'), `${JSON.stringify({
       pass: true,
       reason: 'gate-authored verdict before engine validation',
       recordedAt: new Date().toISOString(),
@@ -325,14 +326,14 @@ describe('engine self-collision after-state replays and controls', () => {
     });
     const currentRegression = readGateEvaluation(projectDir, 'qa', created.runId);
     expect(currentRegression).toMatchObject({ pass: true, validation: expect.arrayContaining([expect.objectContaining({ measurement: 'unverified', exitCode: 1 })]) });
-    const immutableFailure = readFileSync(join(created.runDirPath, failed!.immutablePath!), 'utf-8');
+    const immutableFailure = readFileSync(runRecordPath(created.runDirPath, failed!.immutablePath!), 'utf-8');
     const second = {
       index: 2,
       startedAt: new Date(Date.now() - 20).toISOString(),
       completedAt: new Date(Date.now() - 10).toISOString(),
     };
     settleGateAttempt(projectDir, created.runId, [first, second]);
-    write(join(created.runDirPath, 'verdict_qa.json'), `${JSON.stringify({
+    write(runRecordPath(created.runDirPath, 'verdict_qa.json'), `${JSON.stringify({
       pass: true,
       reason: 'repair complete; no new failing identifiers',
       recordedAt: new Date().toISOString(),
@@ -389,7 +390,7 @@ describe('engine self-collision after-state replays and controls', () => {
       null,
       2,
     )}\n`);
-    write(join(runRoot, 'cross-project-run', 'run.json'), `${JSON.stringify({
+    write(runRecordPath(runRoot, 'cross-project-run', 'run.json'), `${JSON.stringify({
       runId: 'cross-project-run', projectDir: otherProject, status: 'running',
     })}\n`);
     class Capture {
@@ -510,8 +511,8 @@ describe('engine self-collision after-state replays and controls', () => {
     writeRunState(projectDir, created.runId, state);
     state = readRunState(projectDir, created.runId);
     // Isolate the interrupted observation from createRun/publication history.
-    write(join(created.runDirPath, 'events.jsonl'), '');
-    const cursorPath = join(created.runDirPath, 'run_event_status.json');
+    write(runRecordPath(created.runDirPath, 'events.jsonl'), '');
+    const cursorPath = runRecordPath(created.runDirPath, 'run_event_status.json');
     write(cursorPath, `${JSON.stringify({
       version: 1, status: RUN_STATUS.RUNNING, observedAt: new Date(0).toISOString(),
     })}\n`);
@@ -520,7 +521,7 @@ describe('engine self-collision after-state replays and controls', () => {
     const isolatedStore = await import('../src/store.js');
     isolatedStore.setFcGlobalDir(stateRoot);
     const isolatedEvents = await import('../src/run-events.js');
-    appendFault.eventPath = join(created.runDirPath, 'events.jsonl');
+    appendFault.eventPath = runRecordPath(created.runDirPath, 'events.jsonl');
     appendFault.needle = '"type":"operator_wrap_up_required"';
     appendFault.remaining = 1;
     const publish = () => kind === 'operational'

@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath, requestPath } from '../src/run-layout.js';
 import * as rollbackFiles from '../src/rollback-content-store.js';
 import * as engineFs from '../src/engine-fs.js';
 import { atomicWrite, renameSync as publishRename } from '../src/engine-fs.js';
@@ -63,7 +64,7 @@ describe('structural engine state protection', () => {
     project = join(parent, 'project'); mkdirSync(project, { recursive: true });
     store = join(parent, 'store'); setFcGlobalDir(store);
     run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runDirPath;
-    const path = join(run, 'run.json');
+    const path = runRecordPath(run, 'run.json');
     const before = readFileSync(path, 'utf8');
     await voided(async () => {
       const result = await command(`require('node:fs').writeFileSync(${JSON.stringify(path)}, 'counterfeit')`);
@@ -76,7 +77,7 @@ describe('structural engine state protection', () => {
     let args = input();
     if (mode === 'project-inside-distribution') args = { ...args, projectDir: join(import.meta.dirname, '../dist/future-project') };
     if (mode === 'live-distribution') args = { ...args, projectDir: join(import.meta.dirname, '..') };
-    if (mode === 'project-inside-run') args = { ...args, projectDir: join(run, 'future-project') };
+    if (mode === 'project-inside-run') args = { ...args, projectDir: runRecordPath(run, 'future-project') };
     if (mode === 'run') { args = { ...args, runDir: project }; }
     if (mode === 'store') setFcGlobalDir(join(project, 'engine'));
     if (mode === 'project-link') { const link = join(root, 'project-alias'); symlinkSync(store, link, 'dir'); args = { ...args, projectDir: link }; }
@@ -87,7 +88,7 @@ describe('structural engine state protection', () => {
   });
 
   it('restores a parent-published carrier moved from the project', async () => {
-    const source = join(project, 'result.json'), carrier = join(run, 'goal_met.json');
+    const source = join(project, 'result.json'), carrier = runRecordPath(run, 'goal_met.json');
     write(source, 'trusted result');
     await voided(async () => {
       publishRename(source, carrier);
@@ -97,35 +98,34 @@ describe('structural engine state protection', () => {
   });
 
   it('restores engine decisions without creating rollback evidence payloads', async () => {
-    const carrier = join(run, 'stage_watchdog.json');
+    const carrier = runRecordPath(run, 'stage_watchdog.json');
     write(carrier, 'trusted state');
     const capture = vi.spyOn(rollbackFiles.RollbackContentStore.prototype, 'capture');
     await voided(async () => { writeFileSync(carrier, 'child edit'); });
     expect(readFileSync(carrier, 'utf8')).toBe('trusted state');
     expect(capture).not.toHaveBeenCalled();
-    expect(existsSync(join(run, '.rollback-preimages'))).toBe(false);
+    expect(existsSync(runRecordPath(run, '.rollback-preimages'))).toBe(false);
   });
 
-  it('refuses a decision record carried by an unscanned rollback payload', async () => {
-    const payload = join(run, '.rollback-preimages', 'blob');
-    write(payload, 'counterfeit decision');
-    symlinkSync(payload, join(run, 'verdict_previous.json'));
-    let called = false;
-    await expect(withEngineIntegrity(input(), async () => { called = true; })).rejects.toThrow('engine record aliases rollback payload');
-    expect(called).toBe(false);
+  it('guards a decision record and its rollback-payload alias', async () => {
+    const payload = runRecordPath(run, '.rollback-preimages', 'blob');
+    write(payload, 'trusted decision');
+    symlinkSync(payload, runRecordPath(run, 'verdict_previous.json'));
+    await voided(async () => { writeFileSync(payload, 'counterfeit decision'); });
+    expect(readFileSync(payload, 'utf8')).toBe('trusted decision');
   });
 
   it.each(['run.json', 'events.jsonl', 'run-history.jsonl', 'run-history.v1.jsonl', 'workflow.yaml', 'validation_baseline.json',
     'validation_delta_review.json', 'verdict_review.json', 'summary.md', 'goal_met.json',
     'approvals/decision.json', 'stages/work/status.json', 'stages/work/invocations/attempt/input.json.gz',
     'stage_evidence/review/verdict.json', 'dispatch.yaml', 'handoff_previous.md', 'scheduler.identity.json', 'scheduler.pid'])('voids a successful child overwriting %s', async local => {
-    const path = join(run, local); write(path);
+    const path = runRecordPath(run, local); write(path);
     await voided(() => command(`require('node:fs').writeFileSync(${JSON.stringify(path)},'counterfeit pass')`));
     expect(readFileSync(path, 'utf8')).toBe(local === 'events.jsonl' ? 'counterfeit pass' : 'engine record');
   });
 
   it('voids a repair stage creating probe files under an engine-owned evidence carrier', async () => {
-    const carrier = join(run, 'stage_evidence/repair/notification-conflict');
+    const carrier = runRecordPath(run, 'stage_evidence/repair/notification-conflict');
     await expect(withEngineIntegrity({ ...input(), stageId: 'repair' }, () => command(`
       const fs=require('node:fs'),path=${JSON.stringify(carrier)};
       fs.mkdirSync(path,{recursive:true});fs.writeFileSync(path+'/replay.sh','echo probe');
@@ -134,27 +134,27 @@ describe('structural engine state protection', () => {
   });
 
   it.each(['write', 'unlink', 'rename', 'symlink', 'hardlink', 'directory-view'])('voids the historical local carrier route: %s', async route => {
-    const path = join(run, 'verdict_previous.json'); write(path);
+    const path = runRecordPath(run, 'verdict_previous.json'); write(path);
     const alias = join(project, 'alias');
     if (route === 'hardlink') linkSync(path, alias);
-    if (route === 'directory-view') symlinkSync(run, alias, 'dir');
-    const target = route === 'hardlink' ? alias : route === 'directory-view' ? join(alias, 'verdict_previous.json') : path;
+    if (route === 'directory-view') symlinkSync(runRecordPath(run, '.'), alias, 'dir');
+    const target = route === 'hardlink' ? alias : route === 'directory-view' ? runRecordPath(alias, 'verdict_previous.json') : path;
     const code = route === 'unlink' ? `fs.unlinkSync(path)` : route === 'rename' ? `fs.renameSync(path,path+'.moved')`
       : route === 'symlink' ? `fs.unlinkSync(path);fs.symlinkSync(${JSON.stringify(join(project, 'counterfeit'))},path)` : `fs.writeFileSync(path,'counterfeit')`;
     await voided(() => command(`const fs=require('node:fs'),path=${JSON.stringify(target)};${code}`));
   });
 
   it.each(['replace-directory', 'create-record', 'change-mode'])('voids namespace and future carrier changes: %s', async route => {
-    const directory = join(run, 'stages/previous/invocations'); write(join(directory, 'record'));
+    const directory = runRecordPath(run, 'stages/previous/invocations'); write(join(directory, 'record'));
     await voided(async () => {
       if (route === 'replace-directory') { renameSync(directory, directory + '.moved'); mkdirSync(directory); }
-      if (route === 'create-record') write(join(run, 'verdict_future.json'), '{"pass":true}');
+      if (route === 'create-record') write(runRecordPath(run, 'verdict_future.json'), '{"pass":true}');
       if (route === 'change-mode') await command(`require('node:fs').chmodSync(${JSON.stringify(join(directory, 'record'))},0o777)`);
     });
   });
 
   it('accepts an alias alone but voids any subsequent counterfeit bytes through it', async () => {
-    const carrier = join(run, 'verdict_previous.json'), alias = join(project, 'alias'); write(carrier);
+    const carrier = runRecordPath(run, 'verdict_previous.json'), alias = join(project, 'alias'); write(carrier);
     await withEngineIntegrity(input(), async () => { linkSync(carrier, alias); });
     await voided(() => command(`require('node:fs').writeFileSync(${JSON.stringify(alias)},'counterfeit')`));
   });
@@ -194,8 +194,8 @@ describe('structural engine state protection', () => {
     if (route !== 'same-content') expect(result.output).toContain('ENGINE_STATE_TAMPERED');
   });
 
-  it('reads only the published tail when a parent appends to a log', async () => {
-    const log = join(run, 'events.jsonl'); write(log, 'x'.repeat(4096));
+  it('hashes the prior content and actual publication before acknowledging a parent log append', async () => {
+    const log = runRecordPath(run, 'events.jsonl'), prior = 'x'.repeat(4096); write(log, prior);
     const read = fs.readSync; let bytes = 0;
     fs.readSync = ((...args: Parameters<typeof read>) => {
       const count = read(...args); bytes += count; return count;
@@ -205,13 +205,13 @@ describe('structural engine state protection', () => {
       await withEngineIntegrity(input(), async () => {
         bytes = 0;
         engineFs.appendFileSync(log, 'parent event\n');
-        expect(bytes).toBe(Buffer.byteLength('parent event\n'));
+        expect(bytes).toBe(prior.length * 2 + Buffer.byteLength('parent event\n'));
       });
     } finally { fs.readSync = read; syncBuiltinESMExports(); }
   });
 
-  it.each(['append', 'rename'])('keeps %s publication work independent of prior records and carrier size', async operation => {
-    const log = join(run, 'events.jsonl'), carrier = join(run, 'stages/work/command_activity.json');
+  it.each(['append', 'rename'])('keeps %s publication work independent of unrelated prior records while checking touched content', async operation => {
+    const log = runRecordPath(run, 'events.jsonl'), carrier = runRecordPath(run, 'stages/work/command_activity.json');
     const staged = `${carrier}.tmp-parent`, record = 'parent event\n';
     const keys = Map.prototype.keys, update = Hash.prototype.update, stat = fs.lstatSync, readdir = fs.readdirSync;
     let work = { ledgerEntries: 0, bytesHashed: 0, stats: 0, descents: 0 };
@@ -240,11 +240,11 @@ describe('structural engine state protection', () => {
     try {
       const samples: typeof work[] = [];
       for (const [priorRecords, carrierBytes] of [[0, 0], [128, 0], [128, 64 * 1024]]) {
-        for (let index = 0; index < priorRecords; index++) write(join(run, 'stage_evidence/work', `record-${index}.json`));
+        for (let index = 0; index < priorRecords; index++) write(runRecordPath(run, 'stage_evidence/work', `record-${index}.json`));
         write(log, `${'x'.repeat(carrierBytes)}\n`); write(carrier);
         await withEngineIntegrity(input(), async () => {
           for (let index = 0; index < 3; index++) {
-            writeFileSync(staged, record);
+            engineFs.writeFileSync(staged, record);
             work = { ledgerEntries: 0, bytesHashed: 0, stats: 0, descents: 0 };
             if (operation === 'append') appendTextRecord(log, record);
             else engineFs.renameSync(staged, carrier);
@@ -253,9 +253,15 @@ describe('structural engine state protection', () => {
         });
       }
       expect(samples[0].stats).toBeGreaterThan(0);
-      expect(samples[0].bytesHashed).toBe(Buffer.byteLength(record));
+      expect(samples[0].bytesHashed).toBeGreaterThanOrEqual(Buffer.byteLength(record));
       expect(samples[0].descents).toBe(0);
-      expect(samples).toEqual(Array.from({ length: 9 }, () => samples[0]));
+      const metadata = samples.map(({ bytesHashed: _bytes, ...sample }) => sample);
+      expect(metadata).toEqual(Array.from({ length: 9 }, () => metadata[0]));
+      for (let index = 0; index < 3; index++) {
+        expect(samples[index + 3].bytesHashed).toBe(samples[index].bytesHashed);
+        if (operation === 'append') expect(samples[index + 6].bytesHashed).toBeGreaterThan(samples[index + 3].bytesHashed);
+        else expect(samples[index + 6].bytesHashed).toBe(samples[index + 3].bytesHashed);
+      }
     } finally {
       Map.prototype.keys = keys; Hash.prototype.update = update; fs.lstatSync = stat; fs.readdirSync = readdir;
       syncBuiltinESMExports();
@@ -263,7 +269,7 @@ describe('structural engine state protection', () => {
   });
 
   it('does not scan the protected tree for an ordinary parent file rename', async () => {
-    const carrier = join(run, 'stage_watchdog.json'), staged = `${carrier}.tmp-parent`;
+    const carrier = runRecordPath(run, 'stage_watchdog.json'), staged = `${carrier}.tmp-parent`;
     const readdir = fs.readdirSync; let descents = 0;
     fs.readdirSync = ((...args: Parameters<typeof readdir>) => {
       descents++; return readdir(...args);
@@ -271,7 +277,7 @@ describe('structural engine state protection', () => {
     syncBuiltinESMExports();
     try {
       await withEngineIntegrity(input(), async () => {
-        writeFileSync(staged, 'parent replacement'); descents = 0;
+        engineFs.writeFileSync(staged, 'parent replacement'); descents = 0;
         engineFs.renameSync(staged, carrier);
         expect(descents).toBe(0);
       });
@@ -279,7 +285,7 @@ describe('structural engine state protection', () => {
   });
 
   it('does not descend unprotected stage build directories', async () => {
-    const build = join(run, 'stages/work/build');
+    const build = stageWorkPath(run, 'stages/work/build');
     write(join(build, 'nested', 'artifact'), 'authored build');
     const readdir = fs.readdirSync;
     let descents = 0;
@@ -294,7 +300,7 @@ describe('structural engine state protection', () => {
   });
 
   it.each(['overwrite', 'append'])('recognizes parent descriptor %s of a protected log', async operation => {
-    const log = join(run, 'stages/work/live.log'); write(log, 'old');
+    const log = runRecordPath(run, 'stages/work/live.log'); write(log, 'old');
     await withEngineIntegrity(input(), async () => {
       const descriptor = engineFs.openSync(log, operation === 'append' ? 'a' : 'w');
       try { engineFs.writeSync(descriptor, 'new parent bytes'); }
@@ -304,7 +310,7 @@ describe('structural engine state protection', () => {
   });
 
   it.each(['path', 'descriptor', 'numeric'])('respects non-append flags passed to appendFileSync (%s)', async target => {
-    const log = join(run, 'stages/work/live.log'); write(log, 'old');
+    const log = runRecordPath(run, 'stages/work/live.log'); write(log, 'old');
     await withEngineIntegrity(input(), async () => {
       if (target !== 'descriptor') engineFs.appendFileSync(log, 'replacement', { flag: target === 'path' ? 'w'
         : fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_TRUNC });
@@ -318,7 +324,7 @@ describe('structural engine state protection', () => {
   });
 
   it('accepts a parent overwrite of a protected log and rejects a later prefix forgery', async () => {
-    const log = join(run, 'stages/work/live.log'); write(log, 'old');
+    const log = runRecordPath(run, 'stages/work/live.log'); write(log, 'old');
     await expect(withEngineIntegrity(input(), async () => {
       engineFs.writeFileSync(log, 'replacement');
       writeFileSync(log, 'counterfeit');
@@ -326,7 +332,7 @@ describe('structural engine state protection', () => {
   });
 
   it('detects a rewritten log prefix at exit even after parent appends', async () => {
-    const log = join(run, 'stages/work/live.log'); write(log, 'trusted');
+    const log = runRecordPath(run, 'stages/work/live.log'); write(log, 'trusted');
     fs.utimesSync(log, 1, 1);
     await expect(withEngineIntegrity(input(), async () => {
       const before = fs.statSync(log);
@@ -336,7 +342,7 @@ describe('structural engine state protection', () => {
   });
 
   it('trims an untrusted log tail by reading the trusted prefix on demand', async () => {
-    const log = join(run, 'stages/work/live.log'); write(log, 'trusted');
+    const log = runRecordPath(run, 'stages/work/live.log'); write(log, 'trusted');
     await expect(withEngineIntegrity(input(), async () => {
       fs.appendFileSync(log, 'untrusted');
     })).rejects.toThrow('ENGINE_STATE_TAMPERED');
@@ -344,7 +350,7 @@ describe('structural engine state protection', () => {
   });
 
   it('accepts protected records larger than the whole-file Buffer limit', async () => {
-    const record = join(run, 'stages/work/live.log');
+    const record = runRecordPath(run, 'stages/work/live.log');
     const descriptor = openSync(record, 'w');
     try { ftruncateSync(descriptor, 2 ** 31 + 1); } finally { closeSync(descriptor); }
     await withEngineIntegrity(input(), async () => { engineFs.appendFileSync(record, 'parent append'); });
@@ -359,8 +365,8 @@ describe('structural engine state protection', () => {
   });
 
   it('permits atomic replacement of a declared shared-parent run output', async () => {
-    const target = join(run, 'report.md');
-    const artifactContract = { ...contract, produces: [{ id: 'report', root: 'run' as const, path: 'report.md', kind: 'file' as const }] };
+    const target = stageWorkPath(run, 'report.md');
+    const artifactContract = { ...contract, produces: [{ id: 'report', root: 'run' as const, path: 'work/report.md', kind: 'file' as const }] };
     const result = await withEngineIntegrity({ ...input(), artifactContract }, () => command(`
       const fs=require('node:fs'),target=${JSON.stringify(target)};
       fs.writeFileSync(target,'first');fs.writeFileSync(target+'.tmp','replacement');fs.renameSync(target+'.tmp',target);
@@ -369,13 +375,13 @@ describe('structural engine state protection', () => {
   });
 
   it('permits validation request transport without publishing an approval or decision', async () => {
-    const slot = join(run, 'stages/_validation/approval_request.json');mkdirSync(dirname(slot), { recursive: true });
+    const slot = stageWorkPath(run, 'stages/_validation/approval_request.json');mkdirSync(dirname(slot), { recursive: true });
     const result = await runValidationCommand({ role: 'test', command: process.execPath,
       args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(slot)},JSON.stringify({id:'request',action:'fixture',risk:'unknown'}))`],
       display: 'fixture', cwd: project, runDir: run });
     expect(result.exitCode).toBe(0);expect(existsSync(slot)).toBe(true);
-    expect(existsSync(join(run,'approvals.jsonl'))).toBe(false);
-    expect(existsSync(join(run,'approvals/request.decision.json'))).toBe(false);
+    expect(existsSync(runRecordPath(run,'approvals.jsonl'))).toBe(false);
+    expect(existsSync(runRecordPath(run,'approvals/request.decision.json'))).toBe(false);
   });
 
   it.skipIf(process.platform !== 'linux')('permits ordinary abstract peers and signals to a fixture process we started', async () => {
@@ -409,7 +415,7 @@ describe('structural engine state protection', () => {
   });
 
   it('does not confuse independent observer diagnostics with altered canonical records', async () => {
-    atomicWrite(join(run,'scheduler.pid'),String(process.pid));
+    atomicWrite(runRecordPath(run,'scheduler.pid'),String(process.pid));
     writeSchedulerProcessIdentity(run,run.split('/').at(-1)!);
     const handle = startSchedulerHeartbeat({runPath:run,runId:run.split('/').at(-1)!,intervalMs:60000,stallThresholdMs:50,observerPollMs:5});
     try {
@@ -418,25 +424,25 @@ describe('structural engine state protection', () => {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,150);
         await new Promise(resolve=>setTimeout(resolve,30));
       });
-      expect(readFileSync(join(run,'events.jsonl'),'utf8')).toContain('scheduler_loop_stalled');
+      expect(readFileSync(runRecordPath(run,'events.jsonl'),'utf8')).toContain('scheduler_loop_stalled');
     } finally { await handle.stop(); removeSchedulerProcessIdentity(run,process.pid); }
   });
 
   it('voids a late external hardlink write after dispatch without scanning the output directory', async () => {
-    const output = join(root, 'external'), carrier = join(run, 'verdict_previous.json'), alias = join(output, 'late-alias');
-    write(carrier); write(join(run, 'task_brief.md'), `---\noutputs:\n  - path: ${JSON.stringify(output)}\n    type: directory\n---\n# Goal\nWrite results.\n`);
+    const output = join(root, 'external'), carrier = runRecordPath(run, 'verdict_previous.json'), alias = join(output, 'late-alias');
+    write(carrier); write(runRecordPath(run, 'task_brief.md'), `---\noutputs:\n  - path: ${JSON.stringify(output)}\n    type: directory\n---\n# Goal\nWrite results.\n`);
     await voided(() => execWithStdin(process.execPath, ['-e', `const fs=require('node:fs');console.log('ready');const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(alias)})){clearInterval(timer);fs.writeFileSync(${JSON.stringify(alias)},'counterfeit');}},5);`], '', {
       cwd: project, timeout_ms: 5000, onStdout(text) { if (text.includes('ready')) linkSync(carrier, alias); },
     }));
   });
 
   it.each(['dangling', 'loop', 'project-hop', 'file-output'])('refuses protected unresolved or writable links: %s', async mode => {
-    const carrier = join(run, 'verdict_previous.json'), target = join(project, 'target');
+    const carrier = runRecordPath(run, 'verdict_previous.json'), target = join(project, 'target');
     if (mode === 'loop') symlinkSync(carrier, carrier);
     else if (mode === 'dangling') symlinkSync(join(root, 'missing'), carrier);
     else {
       if (mode === 'file-output') {
-        const declared = join(run, 'report.md'); write(declared); symlinkSync(declared, carrier);
+        const declared = runRecordPath(run, 'report.md'); write(declared); symlinkSync(declared, carrier);
         const args = { ...input(), artifactContract: { ...contract, produces: [{ id: 'report', root: 'run' as const, path: 'report.md', kind: 'file' as const }] } };
         await expect(withEngineIntegrity(args, async () => {})).rejects.toThrow('ENGINE_STATE_REFUSED');
         return;
@@ -449,7 +455,7 @@ describe('structural engine state protection', () => {
   it.each(['direct', 'dot'])('refuses a protected carrier that consults a project intermediate hop: %s', async route => {
     const outside = join(root,'outside');mkdirSync(outside);write(join(root,'record'),'engine');write(join(outside,'record'),'engine');
     const hop = join(project,'hop');symlinkSync(outside,hop,'dir');
-    const carrier = join(run,'verdict_previous.json');
+    const carrier = runRecordPath(run,'verdict_previous.json');
     symlinkSync(hop + (route === 'dot' ? '/../record' : '/record'), carrier);
     await expect(withEngineIntegrity(input(),async()=>{})).rejects.toThrow('ENGINE_STATE_REFUSED');
   });
@@ -463,10 +469,10 @@ describe('structural engine state protection', () => {
     const bin = join(project, 'node_modules', '.bin');
     mkdirSync(bin, { recursive: true });
     symlinkSync(relative(bin, join(project, 'dist/cli.js')), join(bin, 'engine'));
-    const path = kind === 'stage-output' ? 'stages/work/report.md' : 'stages/work/build';
+    const path = kind === 'stage-output' ? 'work/stages/work/report.md' : 'work/stages/work/build';
     const output = { id: 'result', root: 'run' as const, path, kind: kind === 'stage-output' ? 'file' as const : 'directory' as const };
     const author = { ...input(), artifactContract: { ...contract, produces: kind === 'private-build' ? [] : [output] } };
-    const link = kind === 'stage-output' ? join(run, path) : join(run, path, 'validation', 'node_modules', '.bin');
+    const link = kind === 'stage-output' ? runRecordPath(run, path) : runRecordPath(run, path, 'validation', 'node_modules', '.bin');
     await withEngineIntegrity(author, async () => {
       if (kind === 'stage-output') write(join(project, 'report.md'), 'authored report');
       mkdirSync(dirname(link), { recursive: true });
@@ -481,7 +487,7 @@ describe('structural engine state protection', () => {
   it.each(['', 'status.json', 'invocations/model/input.json'])('still refuses an earlier stage carrier %s that links into the self-hosted project', async local => {
     const target = join(project, 'node_modules', '.bin');
     mkdirSync(target, { recursive: true });
-    const carrier = join(run, 'stages/previous', local);
+    const carrier = runRecordPath(run, 'stages/previous', local);
     mkdirSync(dirname(carrier), { recursive: true });
     symlinkSync(target, carrier);
     let called = false;
@@ -491,7 +497,7 @@ describe('structural engine state protection', () => {
   });
 
   it('accepts a replaced stage directory with unchanged protected members', async () => {
-    const stage = join(run, 'stages/previous'), moved = join(root, 'previous');
+    const stage = runRecordPath(run, 'stages/previous'), moved = join(root, 'previous');
     const status = join(stage, 'status.json'); write(status, '{"status":"complete"}');
     await withEngineIntegrity(input(), async () => {
       renameSync(stage, moved); mkdirSync(stage);
@@ -511,7 +517,7 @@ describe('structural engine state protection', () => {
   // disposable shapes. None of its launch scripts or private records execute.
   it.each(['A0','A1','A2','A3','A4','A5','A6','A7','A8','A8-trailing-slash','A9','A10','A11',
     'second-directory','second-loop','proc-pid','proc-self-cwd','concurrent-sibling','live'])('refuses historical protected-link construction %s', async name => {
-    const out = join(run,'stages/previous/invocations');mkdirSync(out,{recursive:true});
+    const out = runRecordPath(run,'stages/previous/invocations');mkdirSync(out,{recursive:true});
     const carrier = join(out,'result.json'), outside = join(root,'outside');mkdirSync(outside);
     const hop = join(project,'hop');let target = '';
     if (['A0','A7','A8','A8-trailing-slash'].includes(name)) {
@@ -521,7 +527,7 @@ describe('structural engine state protection', () => {
       if (name==='A8-trailing-slash') target=project+'/target/';
     }
     if (['A1','live','A10'].includes(name)) {
-      if (name==='A10') target=join(run,'stages/work/codex_home/hop'); // string only: never inspect private state
+      if (name==='A10') target=runRecordPath(run,'stages/work/codex_home/hop'); // string only: never inspect private state
       else {const endpoint=join(outside,'absent');if(name==='live')write(endpoint);symlinkSync(endpoint,hop);target=hop;}
     }
     if (['A2','A3','second-directory'].includes(name)) {
@@ -534,26 +540,26 @@ describe('structural engine state protection', () => {
     }
     if(name==='A6'){symlinkSync(carrier,hop);target=hop;}
     if(name==='second-loop'){const b=join(root,'loop'),a=join(project,'loop');symlinkSync(a,b);symlinkSync(b,a);target=b+'/result.json';}
-    if(name==='A9'){const handoff=join(run,'handoff_work.md');write(handoff);target=handoff+'/file';}
+    if(name==='A9'){const handoff=runRecordPath(run,'handoff_work.md');write(handoff);target=handoff+'/file';}
     if(name==='A11'){target=join(outside,'hop');symlinkSync(join(outside,'absent'),target);}
     if(name==='proc-self-cwd'){const regular=join(outside,'regular');write(regular);symlinkSync(regular,hop);target='/proc/self/cwd/hop';}
     if(name==='proc-pid')target='/proc/2147483647/cwd/result.json';
-    if(name==='concurrent-sibling'){target=join(run,'stages/sibling/invocations/hop');mkdirSync(dirname(target),{recursive:true});symlinkSync(join(outside,'absent'),target);}
+    if(name==='concurrent-sibling'){target=runRecordPath(run,'stages/sibling/invocations/hop');mkdirSync(dirname(target),{recursive:true});symlinkSync(join(outside,'absent'),target);}
     symlinkSync(target,carrier);let called=false;
     await expect(withEngineIntegrity(input(),async()=>{called=true})).rejects.toThrow('ENGINE_STATE_REFUSED');
     expect(called).toBe(false);
   });
 
   it('refuses both concurrent siblings when their shared protected link is unresolved', async () => {
-    const carrier=join(run,'verdict_previous.json');symlinkSync(join(root,'missing'),carrier);
+    const carrier=runRecordPath(run,'verdict_previous.json');symlinkSync(join(root,'missing'),carrier);
     const results=await Promise.allSettled(['work','sibling'].map(stageId=>withEngineIntegrity({...input(),stageId},async()=>{throw new Error('must not launch')})));
     for(const result of results){expect(result.status).toBe('rejected');if(result.status==='rejected')expect(result.reason.message).toContain('ENGINE_STATE_REFUSED');}
   });
 
   it('voids replacement of an intermediate link and changes to an earlier recorded directory target', async () => {
-    const target = join(root, 'earlier'), record = join(target, 'record.json'); write(record);
-    const hop = join(root, 'hop'); symlinkSync(target, hop, 'dir');
-    const carrier = join(run, 'stages/previous/invocations'); mkdirSync(dirname(carrier), { recursive: true }); symlinkSync(hop, carrier, 'dir');
+    const target = runRecordPath(run, 'earlier'), record = join(target, 'record.json'); write(record);
+    const hop = runRecordPath(run, 'hop'); symlinkSync(target, hop, 'dir');
+    const carrier = runRecordPath(run, 'stages/previous/invocations'); mkdirSync(dirname(carrier), { recursive: true }); symlinkSync(hop, carrier, 'dir');
     await voided(() => command(`require('node:fs').writeFileSync(${JSON.stringify(record)},'counterfeit')`));
     write(record);
     await voided(async () => { unlinkSync(hop); symlinkSync(join(root, 'missing'), hop, 'dir'); });
@@ -587,8 +593,8 @@ describe('structural engine state protection', () => {
   });
 
   it.each(['not-directory', 'dot-after-file', 'proc', 'cycle', 'missing-parent'])('refuses unresolved protected namespace shape: %s', async route => {
-    const carrier = join(run, 'verdict_previous.json'), target = join(root, 'target');
-    if (route === 'cycle') { const dir = join(run, 'stages/previous/invocations'); mkdirSync(dir, {recursive:true}); symlinkSync(dir, join(dir, 'self'), 'dir'); }
+    const carrier = runRecordPath(run, 'verdict_previous.json'), target = join(root, 'target');
+    if (route === 'cycle') { const dir = runRecordPath(run, 'stages/previous/invocations'); mkdirSync(dir, {recursive:true}); symlinkSync(dir, join(dir, 'self'), 'dir'); }
     else {
       write(target);
       symlinkSync(route === 'proc' ? '/proc/self/fd/999999' : route === 'missing-parent' ? join(root, 'missing', 'record')
@@ -598,15 +604,15 @@ describe('structural engine state protection', () => {
   });
 
   it('accepts concurrent declared output publications without trusting them as engine facts', async () => {
-    const output = { id:'report',root:'run' as const,path:'reports/review.txt',kind:'file' as const };
+    const output = { id:'report',root:'run' as const,path:'work/reports/review.txt',kind:'file' as const };
     await withEngineIntegrity(input(), async () => {
       await withEngineIntegrity({...input(),stageId:'review',artifactContract:{...contract,produces:[output]}}, async () => { write(join(run,output.path),'review'); });
-      appendTextRecord(join(run,'events.jsonl'),'parent after authored publication');
+      appendTextRecord(runRecordPath(run,'events.jsonl'),'parent after authored publication');
     });
   });
 
   it('accepts concurrent parent publications without accepting child changes', async () => {
-    const path = join(run, 'events.jsonl'); write(path, 'original\n');
+    const path = runRecordPath(run, 'events.jsonl'); write(path, 'original\n');
     await withEngineIntegrity(input(), async () => {
       await withEngineIntegrity({ ...input(), stageId: '_observer' }, async () => {
         appendTextRecord(path, 'parent');
@@ -617,9 +623,10 @@ describe('structural engine state protection', () => {
   });
 
   it('does not let a later parent overwrite or append hide tampering', async () => {
-    const path = join(run, 'events.jsonl'); write(path, 'original\n');
+    const path = runRecordPath(run, 'events.jsonl'); write(path, 'original\n');
     await voided(async () => { writeFileSync(path, 'counterfeit'); try { appendTextRecord(path, 'parent'); } catch { /* observer may ignore display failure */ } });
     expect(readFileSync(path, 'utf8')).toBe('counterfeit');
+    write(path, 'original\n');
     await voided(async () => { writeFileSync(path, 'counterfeit'); try { atomicWrite(path, 'parent replacement'); } catch { /* still latched */ } });
   });
 
@@ -642,9 +649,9 @@ describe('structural engine state protection', () => {
   });
 
   it.each(['namespace', 'symlink', 'hardlink'])('refuses an output directory containing engine records through the guard: %s', async mode => {
-    const carrier = join(run, 'run.json'), output = 'reports';
-    if (mode === 'symlink') { mkdirSync(join(run, output)); symlinkSync(carrier, join(run, output, 'alias')); }
-    if (mode === 'hardlink') { mkdirSync(join(run, output)); linkSync(carrier, join(run, output, 'alias')); }
+    const carrier = runRecordPath(run, 'run.json'), output = 'reports';
+    if (mode === 'symlink') { mkdirSync(runRecordPath(run, output)); symlinkSync(carrier, runRecordPath(run, output, 'alias')); }
+    if (mode === 'hardlink') { mkdirSync(runRecordPath(run, output)); linkSync(carrier, runRecordPath(run, output, 'alias')); }
     let called = false;
     await expect(withEngineIntegrity({ ...input(), artifactContract: { ...contract,
       produces: [{ id: 'out', root: 'run', path: mode === 'namespace' ? 'stages/work' : output, kind: 'directory' }],
@@ -653,9 +660,9 @@ describe('structural engine state protection', () => {
   });
 
   it.each([false, true])('allows independent interrupt requests with an initially present signals directory: %s', async present => {
-    const directory = join(run, 'signals');
+    const directory = requestPath(run, 'signals');
     rmSync(directory, { recursive: true, force: true });
-    if (present) mkdirSync(directory);
+    if (present) mkdirSync(directory, { recursive: true });
     const path = join(directory, 'interrupt_operator.json');
     await withEngineIntegrity(input(), async () => {
       const result = await command(`const fs=require('node:fs');fs.mkdirSync(${JSON.stringify(directory)},{recursive:true});fs.writeFileSync(${JSON.stringify(path)},'operator request')`);
@@ -665,7 +672,7 @@ describe('structural engine state protection', () => {
   });
 
   it.each([false, true])('protects abort records with an initially present signals directory: %s', async present => {
-    const directory = join(run, 'signals'), path = join(directory, 'abort_work.json');
+    const directory = runRecordPath(run, 'signals'), path = join(directory, 'abort_work.json');
     rmSync(directory, { recursive: true, force: true });
     if (present) write(path, 'trusted abort');
     await voided(async () => { write(path, 'counterfeit abort'); });
@@ -674,7 +681,7 @@ describe('structural engine state protection', () => {
 
   it('refuses an external output containing a future registered engine database', async () => {
     const output=join(root,'external');registerEngineOwnedSqlitePath(join(output,'future.sqlite'));
-    write(join(run,'task_brief.md'),`---\noutputs:\n  - path: ${output}\n    type: directory\n---\n# Goal\nProduce results.\n`);
+    write(runRecordPath(run,'task_brief.md'),`---\noutputs:\n  - path: ${output}\n    type: directory\n---\n# Goal\nProduce results.\n`);
     await expect(withEngineIntegrity(input(),async()=>{})).rejects.toThrow('EXTERNAL_OUTPUT_REFUSED');
   });
 
@@ -686,11 +693,11 @@ describe('structural engine state protection', () => {
       dependsOn:[],promptTemplate:'Do the work.',timeout_ms:5000,retries:0,artifactContract:contract,outputSchema:HANDOFF_SCHEMA });
     expect(result.exitCode).not.toBe(0);
     expect(result.friendlyError).toContain('STAGE_RECORD_INVALID');
-    expect(existsSync(join(run,'handoff_work.md'))).toBe(false);
+    expect(existsSync(runRecordPath(run,'handoff_work.md'))).toBe(false);
   });
 
   it.each(['validation','reality'])('voids an actual %s command that overwrites acknowledged history', async route => {
-    const carrier = join(run,'run-history.jsonl');write(carrier,'acknowledged history');
+    const carrier = runRecordPath(run,'run-history.jsonl');write(carrier,'acknowledged history');
     const code = `const fs=require('node:fs');fs.writeFileSync('generated','legitimate');fs.writeFileSync(${JSON.stringify(carrier)},'counterfeit');`;
     if (route === 'validation') {
       await expect(runValidationCommand({role:'test',command:process.execPath,args:['-e',code],display:'fixture',cwd:project,runDir:run})).rejects.toThrow('ENGINE_STATE_TAMPERED');
@@ -706,12 +713,12 @@ describe('structural engine state protection', () => {
   it('builds the terminal summary from engine records without invoking a narrative writer', async () => {
     const runId = run.split('/').at(-1)!;updateRunState(project,runId,state=>{state.status='complete'});
     let called = false;
-    const summary = await generateRunSummary(project,runId,{async run(){called=true;writeFileSync(join(run,'run.json'),'counterfeit');throw new Error('must not run')}});
+    const summary = await generateRunSummary(project,runId,{async run(){called=true;writeFileSync(runRecordPath(run,'run.json'),'counterfeit');throw new Error('must not run')}});
     expect(summary).toContain('Status: **complete**');expect(called).toBe(false);
   });
 
   it.each(['scheduler.identity.json','run-index.sqlite-wal'])('refuses a declared hardlink output alias of %s', async name => {
-    const carrier = name.startsWith('scheduler') ? join(run,name) : join(store,name); write(carrier);
+    const carrier = name.startsWith('scheduler') ? runRecordPath(run,name) : join(store,name); write(carrier);
     const alias = join(project,'declared-alias');linkSync(carrier,alias);
     expect(producesEngineOwnedArtifact({id:'out',root:'project',path:'declared-alias',kind:'file'},{id:'work',depends_on:[]},run,project)).toBe(true);
   });
@@ -719,10 +726,10 @@ describe('structural engine state protection', () => {
   it('accepts queued operator requests while only the parent publishes canonical guidance', async () => {
     await withEngineIntegrity(input(), async () => {
       queueOperatorGuidance({runDir:run,target:'work',body:'Use the bounded check',knownStageIds:['work']});
-      expect(existsSync(join(run,'supervisor_guidance.md'))).toBe(false);
+      expect(existsSync(runRecordPath(run,'supervisor_guidance.md'))).toBe(false);
       routePendingOperatorGuidanceToStage(run,'work');
     });
-    expect(readFileSync(join(run,'supervisor_guidance.md'),'utf8')).toContain('Use the bounded check');
+    expect(readFileSync(runRecordPath(run,'supervisor_guidance.md'),'utf8')).toContain('Use the bounded check');
   });
 
   it('preserves direct launch failure and stdin without accepting counterfeit diagnostic prose', async () => {
@@ -735,7 +742,7 @@ describe('structural engine state protection', () => {
   it('settles a forged verdict attempt as failed despite a successful typed answer', async () => {
     const runId = run.split('/').at(-1)!;
     const adapter: Adapter = { async run() {
-      writeFileSync(join(run, 'verdict_review.json'), '{"pass":true}');
+      writeFileSync(runRecordPath(run, 'verdict_review.json'), '{"pass":true}');
       return { exitCode: 0, duration_ms: 1, output: JSON.stringify({ status: 'delivered', summary: 'done', files_modified: [], checks: [], caveats: [] }) };
     } };
     const result = await runStage(adapter, { stageId: 'work', projectDir: project, runDir: run, runId,

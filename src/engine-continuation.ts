@@ -1,8 +1,9 @@
+import { runRecordPath } from './run-layout.js';
 /** Validate persisted execution contracts before any continuation is queued or
  * claimed. Build identity is provenance; supported state, not hash equality,
  * decides compatibility. Interrupted executions require settled ledgers. */
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { parse } from 'yaml';
 import { RecordedWorkflowConfigSchema } from './scheduler/sched_admission/configuration.js';
 import { persistedPlanErrors, checkpointConsumers, engineGeneration } from './restart-recovery.js';
@@ -22,7 +23,7 @@ export function assertContinuationCompatible(projectDir: string, runId: string):
     requireKnownRunStatus(state.status, `continue run ${runId}`);
     if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new Error('run/project binding mismatch');
     if (state.recovery?.kind === 'blocked') throw new Error(state.recovery.reason);
-    const workflow = RecordedWorkflowConfigSchema.parse(parse(readFileSync(join(runDir(projectDir, runId), 'workflow.yaml'), 'utf8')));
+    const workflow = RecordedWorkflowConfigSchema.parse(parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'workflow.yaml'), 'utf8')));
     const errors = persistedPlanErrors(state);
     const checkpoint = state.engineCheckpoint;
     if (checkpoint && (checkpoint.version !== 2 || checkpoint.runId !== runId
@@ -40,11 +41,11 @@ export function assertContinuationCompatible(projectDir: string, runId: string):
     for (const id of stageIds) {
       const stage = state.stages[id];
       if (!stage) {
-        if (checkpoint || existsSync(join(runDir(projectDir, runId), 'stages', id, 'status.json'))) errors.push(`missing stage projection for ${id}; admitted execution state must not be reset`);
+        if (checkpoint || existsSync(runRecordPath(runDir(projectDir, runId), 'stages', id, 'status.json'))) errors.push(`missing stage projection for ${id}; admitted execution state must not be reset`);
         continue;
       }
       if (!Number.isSafeInteger(stage.retries) || stage.retries < 0) errors.push(`invalid stage projection ${id}`);
-      const ledgerExists = existsSync(join(runDir(projectDir, runId), 'stages', id, 'status.json'));
+      const ledgerExists = existsSync(runRecordPath(runDir(projectDir, runId), 'stages', id, 'status.json'));
       const ledger = ledgerExists ? readStageStatus(projectDir, runId, id) : undefined;
       const attempts = stage.attempts ?? [];
       const settled = (status: string) => [STAGE_STATUS.COMPLETE, STAGE_STATUS.FAILED, 'suspended'].includes(status);

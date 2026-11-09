@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -43,9 +44,9 @@ async function reproduce(options: { workflow?: 'planner' | 'direct'; status?: 'b
     if (opts.stageId === '_summary') return { output: 'Fixture summary', exitCode: 0, duration_ms: 1 };
     calls.push(opts.stageId);
     if (opts.stageId === 'plan') {
-      writeFileSync(join(opts.runDir, 'dispatch.yaml'), JSON.stringify(plan));
+      writeFileSync(stageWorkPath(opts.runDir, 'dispatch.yaml'), JSON.stringify(plan));
       return { output: JSON.stringify({ status: 'delivered', summary: 'Authored the execution plan.', checks: [], caveats: [] }),
-        exitCode: 0, duration_ms: 1, writes: ['run:dispatch.yaml'], writeAttribution: 'structured' };
+        exitCode: 0, duration_ms: 1, writes: ['run:work/dispatch.yaml'], writeAttribution: 'structured' };
     }
     if (opts.stageId !== 'review') {
       mkdirSync(join(project, 'docs'), { recursive: true });
@@ -89,7 +90,7 @@ async function reproduce(options: { workflow?: 'planner' | 'direct'; status?: 'b
       ...(pass ? {} : { repairability: { version: 1, disposition: 'repairable', evidence: reason } }) }),
     exitCode: 0, duration_ms: 1 };
   } };
-  const workflow = join(project, 'workflow.yaml');
+  const workflow = runRecordPath(project, 'workflow.yaml');
   writeFileSync(workflow, 'name: bounded-result\ndefaults: {max_iterations: 1, max_retries: 0}\nstages:\n  - id: plan\n    role: planner\n    dynamic_dispatch: true\n    artifact_contract: {version: 1, produces: [], reads: [], groups: []}\n');
   const { config, raw } = loadWorkflow(options.workflow === 'direct' ? join(repository, 'config/workflows/direct.yaml') : workflow);
   const final = await runWorkflow(config, raw, project, withConfirmedRejections(adapter), new Map(), undefined, join(repository, 'config/agents'), undefined, task, true);
@@ -103,7 +104,7 @@ describe('gate acceptance follows the full brief outcome contract', () => {
     expect(gateInputs[0]).toContain(conflicting);
     expect(final.status, final.failureReason).toBe('complete');
     expect(calls).toEqual(['plan', 'implement', 'review']);
-    expect(JSON.parse(readFileSync(join(directory, 'verdict_review.json'), 'utf8'))).toMatchObject({ pass: true });
+    expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8'))).toMatchObject({ pass: true });
   });
 
   it('uses the same outcome contract in the direct workflow', async () => {
@@ -115,13 +116,13 @@ describe('gate acceptance follows the full brief outcome contract', () => {
   it.each(['measurement', 'bounds', 'criterion'] as const)('rejects missing required %s even when a negative outcome is allowed', async missing => {
     const { final, directory } = await reproduce({ missing });
     expect(final.status).not.toBe('complete');
-    if (missing !== 'criterion') expect(JSON.parse(readFileSync(join(directory, 'verdict_review.json'), 'utf8')).pass).toBe(false);
+    if (missing !== 'criterion') expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8')).pass).toBe(false);
   });
 
   it('still rejects a below-target result when the brief requires success', async () => {
     const { final, directory } = await reproduce({ fallback: false });
     expect(final.status).not.toBe('complete');
-    expect(JSON.parse(readFileSync(join(directory, 'verdict_review.json'), 'utf8')).pass).toBe(false);
+    expect(JSON.parse(readFileSync(runRecordPath(directory, 'verdict_review.json'), 'utf8')).pass).toBe(false);
   });
 
   it('accepts the allowed bounds outcome on reevaluation after repairing missing measurements', async () => {

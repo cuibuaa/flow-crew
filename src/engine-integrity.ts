@@ -1,14 +1,15 @@
 import { tmpdir } from 'node:os';
 import { createHash, type Hash } from 'node:crypto';
 import { hashRollbackFileSync } from './rollback-content-store.js';
-import { isSessionHomeName } from './adapter-session.js';
-import { observeEnginePublications, publishEngineFiles } from './engine-fs.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { engineDirectory, stageWorkPath, requestPath, controlPath, assertSeparatedRunLayout, runRecordPath } from './run-layout.js';
+import { observeEnginePublications, publishEngineFiles, type EngineWrite } from './engine-fs.js';
 export { publishEngineFiles } from './engine-fs.js';
 import { chmodSync, constants, copyFileSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fcGlobalDir } from './store.js';
-import { engineOwnedDatabasePaths, isEngineOwnedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
+import { engineOwnedDatabasePaths, prospectivePhysicalPath } from './engine-owned-carriers.js';
 import { producesEngineOwnedArtifact, resolveArtifactLocation, type ArtifactContract } from './artifact-declarations.js';
 import { externalOutputDirectory, extractBriefOutputDeclarations, extractDeclaredBriefInputPaths } from './ship-inputs.js';
 
@@ -16,19 +17,17 @@ export class EngineStateError extends Error {}
 
 type Entry = { identity: string; stat: string; length?: number; hash?: Hash; backing?: string; link?: string; mode?: number };
 type Snapshot = Map<string, Entry>;
-interface Guard { scan: (read?: typeof entry) => Snapshot; retain: (path: string, previous?: Entry, destination?: string) => Entry | undefined; owns: (path: string) => boolean; expected: Snapshot; publications: Set<string>; publicationWrites: Set<string>; error?: EngineStateError }
+interface Guard { checkRoute: () => void; scan: (read?: typeof entry) => Snapshot; retain: (path: string, destination?: string) => Entry | undefined; prepareWrite: (path: string, previous: Entry | undefined, write: EngineWrite, append: boolean) => () => Entry; owns: (path: string) => boolean; expected: Snapshot; error?: EngineStateError }
 const guards = new Set<Guard>();
-const activeOutputs = new Set<string>();
+const execution = new AsyncLocalStorage<Guard>();
 const inside = (root: string, path: string): boolean => {
   const rel = relative(root, path);
   return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../'));
 };
-const privateNames = new Set(['auth.json', 'credentials.json', 'installation_id']);
-const privateName = (name: string): boolean => privateNames.has(name) || isSessionHomeName(name);
 const same = (a?: Entry, b?: Entry): boolean => a?.identity === b?.identity;
 
-// Content decides whether a stage is valid; stat facts only guard synchronous
-// parent publications against adopting a child's intervening write.
+// Content decides integrity, including before a trusted parent publication.
+// Stat facts retain object/transfer identity; timestamps cannot attest bytes.
 function entry(path: string, digest = true): Entry | undefined {
   try {
     const stat = lstatSync(path, { bigint: true });
@@ -62,22 +61,13 @@ function digestRange(path: string, length: number, hash = createHash('sha256'), 
   return hash;
 }
 
-function writeAll(descriptor: number, bytes: Buffer): void {
-  for (let offset = 0; offset < bytes.length;) {
-    const count = writeSync(descriptor, bytes, offset);
-    if (count <= 0) throw new Error('Engine recovery write made no progress');
-    offset += count;
-  }
-}
-
 function changed(guard: Guard, actual: Snapshot): string[] {
   return [...new Set([...guard.expected.keys(), ...actual.keys()])]
     .filter(path => !same(guard.expected.get(path), actual.get(path)));
 }
 function notice(guard: Guard, paths: string[]): void {
   for (const path of paths) {
-    if (guard.publications.has(path)) guard.publicationWrites.add(path);
-    else guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; changed engine carrier ${path}`);
+    guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; changed engine carrier ${path}`);
   }
 }
 
@@ -85,13 +75,22 @@ function notice(guard: Guard, paths: string[]): void {
  * has no access to this memory. Check before overwriting so an append or a later
  * engine publication cannot hide changed bytes. All concurrent guards advance. */
 observeEnginePublications((paths, tree, publication) => {
-  const { transfer, append } = publication ?? {};
+  const { transfer, append, write, copy, followSource, followDestination, merge, verbatimLinks, remove, directory, directories, mode, link } = publication ?? {};
   // A rename transfers the staged object, including its identity. Reading the
   // destination after rename can instead adopt a concurrent child's deletion
   // or replacement as a trusted parent publication.
-  const moved = transfer?.map(path => join(prospectivePhysicalPath(dirname(resolve(path))), basename(path)));
+  const moved = transfer?.map((path, index) => index === 0 && followSource || index === 1 && followDestination ? prospectivePhysicalPath(resolve(path))
+    : join(prospectivePhysicalPath(dirname(resolve(path))), basename(path)));
   const postimages = new Map<Guard, Snapshot>();
-  const physical = [...new Set([...paths.flatMap(path => [resolve(path), prospectivePhysicalPath(resolve(path))]), ...(moved ?? [])])];
+  const writes = new Map<Guard, Map<string, () => Entry>>();
+  const entries = paths.map(path => join(prospectivePhysicalPath(dirname(resolve(path))), basename(path)));
+  const directoryParent = directories && prospectivePhysicalPath(resolve(paths[0]));
+  const targets = paths.map(path => prospectivePhysicalPath(resolve(path)));
+  const physical = [...new Set([...entries, ...targets, ...(moved ?? [])])];
+  const entryAncestors = new Set(entries);
+  for (const path of entries) for (let parent = dirname(path); ; parent = dirname(parent)) {
+    entryAncestors.add(parent); if (dirname(parent) === parent) break;
+  }
   const ancestors = new Set(physical);
   for (const path of physical) for (let parent = dirname(path); ; parent = dirname(parent)) {
     ancestors.add(parent);
@@ -114,43 +113,101 @@ observeEnginePublications((paths, tree, publication) => {
       return value ? [[path, value] as const] : [];
     }));
   for (const guard of guards) {
+    if (execution.getStore() === guard) guard.checkRoute();
     if (!relevant(guard)) continue;
-    const actual = current(guard);
-    notice(guard, [...candidates(guard, actual)]
-      .filter(path => affected(path) && !sameStat(guard.expected.get(path), actual.get(path))));
-    if (guard.error) throw guard.error;
-    if (!moved) continue;
-    const snapshot: Snapshot = new Map();
-    const capture = (source: string, destination: string): void => {
-      if (!guard.owns(destination) && !guard.expected.has(destination)) return;
-      const value = guard.retain(source, undefined, destination);
-      if (!value) return;
-      snapshot.set(destination, value);
-      if (value.stat.startsWith('directory:')) for (const name of readdirSync(source)) capture(join(source, name), join(destination, name));
-    };
-    capture(moved[0], moved[1]);
-    // Renaming two hardlinks of one object leaves both names in place.
-    if (sameStat(statEntry(moved[0]), statEntry(moved[1]))) capture(moved[0], moved[0]);
-    postimages.set(guard, snapshot);
+    let actual: Snapshot;
+    try {
+      actual = current(guard);
+      notice(guard, [...candidates(guard, actual)]
+        .filter(path => affected(path) && (guard.expected.has(path) || actual.has(path))
+          && !same(guard.expected.get(path), entry(path))));
+    } catch (error) {
+      guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; ${String(error)}`);
+      if (execution.getStore() === guard) throw guard.error;
+      continue;
+    }
+    if (guard.error && execution.getStore() === guard) throw guard.error;
+    try {
+      if (write) writes.set(guard, new Map(physical.filter(path => guard.owns(path) && targets.includes(path) && guard.expected.get(path)?.link === undefined)
+        .map(path => [path, guard.prepareWrite(path, guard.expected.get(path), write, Boolean(append))])));
+      if (!moved) continue;
+      const snapshot: Snapshot = new Map();
+      const capture = (source: string, destination: string): void => {
+        if (!guard.owns(destination) && !guard.expected.has(destination)) return;
+        if (merge && followSource) source = prospectivePhysicalPath(source);
+        const value = guard.retain(source, destination);
+        if (!value) return;
+        if (guard.expected.has(source) && !same(guard.expected.get(source), value)) {
+          notice(guard, [source]);
+          if (execution.getStore() === guard) throw guard.error;
+        }
+        if (merge && !verbatimLinks && source !== destination && value.link !== undefined) {
+          value.link = resolve(dirname(source), value.link); value.identity = `link:${value.link}`;
+        }
+        if (!(merge && source !== destination && value.stat.startsWith('directory:') && snapshot.get(destination)?.stat.startsWith('directory:'))) snapshot.set(destination, value);
+        if (value.stat.startsWith('directory:')) for (const name of readdirSync(source)) capture(join(source, name), join(destination, name));
+      };
+      if (merge && existsSync(moved[1])) capture(moved[1], moved[1]);
+      capture(moved[0], moved[1]);
+      // Renaming two hardlinks of one object leaves both names in place.
+      if (copy || sameStat(statEntry(moved[0]), statEntry(moved[1]))) capture(moved[0], moved[0]);
+      postimages.set(guard, snapshot);
+    } catch (error) {
+      guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; ${String(error)}`);
+      if (execution.getStore() === guard) throw guard.error;
+    }
   }
   return () => {
     descendants ||= hasDirectory();
     for (const guard of guards) {
       if (!relevant(guard)) continue;
-      const actual = current(guard), snapshot = postimages.get(guard);
+      const snapshot = postimages.get(guard);
+      const intended = writes.get(guard);
+      let actual: Snapshot;
+      try { actual = current(guard); }
+      catch (error) {
+        guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; ${String(error)}`);
+        // A child may replace the destination with an unscannable namespace.
+        // The engine's last write is still the captured rename source, never
+        // the child's replacement or the pre-publication destination.
+        if (moved && snapshot) for (const path of new Set([...guard.expected.keys(), ...snapshot.keys()])) {
+          if (!inside(moved[0], path) && !inside(moved[1], path)) continue;
+          const value = snapshot.get(path), previous = guard.expected.get(path)?.backing;
+          if (previous && previous !== value?.backing) rmSync(previous, { force: true });
+          if (value) guard.expected.set(path, value); else guard.expected.delete(path);
+        }
+        continue;
+      }
       for (const path of candidates(guard, actual, snapshot)) {
         if (!affected(path)) continue;
-        const transferred = moved && (inside(moved[0], path) || inside(moved[1], path));
+        const written = intended?.get(path);
+        const deleted = remove && entries.some(root => inside(root, path));
+        const createdDirectory = directory !== undefined && (directories ? directories.some(root => join(directoryParent!, basename(root)) === path)
+          : entryAncestors.has(path) && guard.owns(path) && (entries.includes(path) || !guard.expected.has(path)));
+        const changedMetadata = physical.includes(path) && (mode !== undefined || link !== undefined);
+        const transferred = Boolean(written || deleted || createdDirectory || changedMetadata || moved && (inside(moved[0], path) || inside(moved[1], path)));
         if (!transferred && sameStat(guard.expected.get(path), actual.get(path))) continue;
-        const value = transferred ? snapshot?.get(path) : actual.has(path) ? guard.retain(path, append ? guard.expected.get(path) : undefined) : undefined;
-        const acknowledged = sameStat(value, actual.get(path));
-        notice(guard, acknowledged ? [] : [path]);
-        if (!transferred && !acknowledged) {
+        let value: Entry | undefined;
+        let acknowledged = false;
+        try {
           const previous = guard.expected.get(path);
-          if (value?.backing && value.backing === previous?.backing) {
-            const descriptor = openSync(value.backing, 'r+');
-            try { ftruncateSync(descriptor, previous.length!); } finally { closeSync(descriptor); }
-          }
+          value = written ? written() : deleted ? undefined : createdDirectory
+            ? previous ?? { identity: `directory:${0o40000 | directory!}`, stat: '', mode: 0o40000 | directory! }
+            : changedMetadata && link !== undefined ? { identity: `link:${link}`, stat: '', link }
+            : changedMetadata && mode !== undefined && previous?.mode !== undefined ? {
+              ...previous, mode: (previous.mode & ~0o7777) | (mode & 0o7777),
+              identity: previous.identity.replace(`:${previous.mode}`, `:${(previous.mode & ~0o7777) | (mode & 0o7777)}`),
+            } : moved && (inside(moved[0], path) || inside(moved[1], path)) ? snapshot?.get(path) : previous;
+          try { acknowledged = guard.owns(path) || guard.expected.has(path) ? same(value, entry(path)) : sameStat(value, actual.get(path)); }
+          catch { /* an unscannable replacement cannot acknowledge the intended bytes */ }
+        } catch (error) {
+          guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; ${String(error)}`);
+          continue;
+        }
+        notice(guard, acknowledged ? [] : [path]);
+        if (acknowledged && value && actual.has(path)) value.stat = actual.get(path)!.stat;
+        if (!transferred && !acknowledged) {
+          if (value?.backing && value.backing !== guard.expected.get(path)?.backing) rmSync(value.backing, { force: true });
           continue;
         }
         const previous = guard.expected.get(path)?.backing;
@@ -169,12 +226,7 @@ export interface EngineExecution {
   projectDir: string;
   runDir?: string;
   stageId: string;
-  dynamicDispatch?: boolean;
   artifactContract?: ArtifactContract;
-  /** Exact run-relative carriers the worker can publish from this attempt's structured answer. */
-  publicationCarriers?: readonly string[];
-  /** Receives run-relative names only after trusted carriers have been restored and verified. */
-  onPublicationWrite?: (paths: string[]) => void;
 }
 
 /** Storage topology plus an in-memory digest ledger; no child path grants,
@@ -194,105 +246,135 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
   if (engineOwnedDatabasePaths(store).some(file => inside(project, prospectivePhysicalPath(file)))) {
     throw new EngineStateError('ENGINE_STATE_REFUSED: engine database must be outside authored work');
   }
-  const publications = new Set((input.publicationCarriers ?? []).map(path => resolve(run!, path)));
-  const outputs = (input.artifactContract?.produces ?? []).filter(a => a.root === 'run'
-    && !publications.has(resolve(run!, a.path)));
+  const engine = run && engineDirectory(run);
+  if (run) assertSeparatedRunLayout(run);
+  const roots = [engine, run && join(run, 'run.json'), run && join(run, 'events.jsonl'), distribution]
+    .filter((root): root is string => Boolean(root));
   if (run) {
-    for (const artifact of outputs) {
-      if (/^handoff_[^/]+\.md(?:\/|$)/.test(artifact.path) || producesEngineOwnedArtifact(artifact, { id: input.stageId, dynamic_dispatch: input.dynamicDispatch, depends_on: [] }, run, project)) {
+    for (const artifact of input.artifactContract?.produces ?? []) {
+      if (producesEngineOwnedArtifact(artifact, { id: input.stageId, depends_on: [] }, run, project)) {
         throw new EngineStateError(`ENGINE_STATE_REFUSED: output contains an engine carrier: ${artifact.path}`);
       }
+      if (artifact.root !== 'run') continue;
       const output = resolveArtifactLocation(artifact, project, run);
-      const directory = artifact.kind === 'directory' ? output : dirname(output);
-      publishEngineFile(directory, () => mkdirSync(directory, { recursive: true }));
+      publishEngineFile(artifact.kind === 'directory' ? output : dirname(output), () => mkdirSync(artifact.kind === 'directory' ? output : dirname(output), { recursive: true }));
     }
-    const briefPath = join(run, 'task_brief.md');
+    const briefPath = runRecordPath(run, 'task_brief.md');
     const brief = existsSync(briefPath) ? readFileSync(briefPath, 'utf8') : '';
     for (const output of extractBriefOutputDeclarations(brief).filter(o => isAbsolute(o.path))) {
       const directory = externalOutputDirectory(output, project, undefined, { runDir: run, inputPaths: extractDeclaredBriefInputPaths(brief) });
       publishEngineFile(directory, () => mkdirSync(directory, { recursive: true }));
     }
   }
-  const exclusions = outputs.map(a => join(run!, a.path));
-  for (const path of exclusions) activeOutputs.add(path);
-  // Concurrent declared publications are authored work, never engine facts.
-  for (const guard of guards) for (const path of guard.expected.keys()) {
-    if (exclusions.some(root => inside(root, path))) guard.expected.delete(path);
-  }
-  // Rollback payloads have a retained digest checked by restoreProjectPath.
-  // Admission still reserves their namespace; they are not engine decisions.
-  const rollbackBlobs = run && join(run, '.rollback-preimages');
-  const isRollbackBlob = (path: string): boolean => Boolean(rollbackBlobs && inside(rollbackBlobs, path));
-  const excluded = (path: string): boolean => {
-    const root = run && inside(run, path) ? run : inside(distribution, path) ? distribution : undefined;
-    // A temporary ancestor does not make an entire nested engine disposable.
-    // Only temporary entries inside the protected carrier tree are exempt.
-    const local = root === undefined ? '' : relative(root, path).split('\\').join('/');
-    return path.split('/').some(privateName) || /\.tmp(?:[.-]|$)|\.integrity-restore$|(?:^|\/)\.run-state\.lock$/.test(local)
-      || [...activeOutputs].some(root => inside(root, path));
-  };
-  const owns = (path: string): boolean => {
-    if (isRollbackBlob(path)) return false;
-    if (excluded(path)) return false;
-    if (run && inside(run, path)) {
-      const local = relative(run, path).split('\\').join('/');
-      if (/^gate_reevaluation\/verdict_correction_[^/]+\.json$/.test(local)) return false;
-      // The independent heartbeat warning is checked against live identity and never grades a result.
-      if (local === 'scheduler-loop-stall.json') return false;
-      if (local === 'user_input.md' || local === 'signals' || /^signals\/interrupt_[^/]+\.json$/.test(local)) return false;
-      if (/^stages\/[^/]+\/plan_revision_request\.json$/.test(local)) return false;
-      return isEngineOwnedRunPath(local, { id: input.stageId, dynamic_dispatch: input.dynamicDispatch }) || /^handoff_[^/]+\.md(?:\/|$)/.test(local);
-    }
-    return inside(distribution, path);
-  };
+  const owns = (path: string): boolean => roots.some(root => inside(root, path));
   // Append-only text records retain a prefix digest, never a disk preimage.
   // run-history is a rewritable journal (tail repair/truncation), not a log.
   const appendOnly = (path: string): boolean => /\.(?:log|jsonl)$/.test(path)
-    && !/^run-history(?:[./]|$)/.test(relative(run ?? distribution, path));
+    && !/^run-history(?:[./]|$)/.test(relative(engine ?? distribution, path));
   const backing = mkdtempSync(join(tmpdir(), '.tmp-integrity-'));
   let sequence = 0;
-  const retain = (path: string, previous?: Entry, destination = path): Entry | undefined => {
+  const retain = (path: string, destination = path): Entry | undefined => {
     const value = statEntry(path);
     if (!value || !value.identity.startsWith('file:')) return value;
-    if (previous?.hash && value.length! < previous.length!) throw new EngineStateError(`ENGINE_STATE_TAMPERED: append truncated carrier ${path}`);
-    const start = previous?.hash ? previous.length! : 0;
-    const hash = previous?.hash?.copy() ?? createHash('sha256');
-    let saved: string | undefined, descriptor: number | undefined;
-    if (!appendOnly(destination)) {
-      saved = previous?.backing ?? join(backing, String(sequence++));
-      if (previous?.backing) descriptor = openSync(saved, 'a');
-      else copyFileSync(path, saved, constants.COPYFILE_FICLONE);
-    }
-    try {
-      digestRange(descriptor === undefined && saved ? saved : path, value.length!, hash, start,
-        descriptor === undefined ? undefined : bytes => writeAll(descriptor!, bytes));
-    } finally { if (descriptor !== undefined) closeSync(descriptor); }
+    const hash = createHash('sha256');
+    const saved = appendOnly(destination) ? undefined : join(backing, String(sequence++));
+    if (saved) copyFileSync(path, saved, constants.COPYFILE_FICLONE);
+    digestRange(saved ?? path, value.length!, hash);
     return { ...value, hash, backing: saved, identity: value.identity + hash.copy().digest('hex') };
   };
 
+  // The write's bytes come from the engine call, never its mutable destination.
+  // Keep an independent preimage for positioned writes and restoration. Partial
+  // writeSync results shorten write.bytes before this deferred image is built.
+  const prepareWrite: Guard['prepareWrite'] = (path, previous, write, append) => {
+    if (previous && previous.length === undefined) throw new EngineStateError(`ENGINE_STATE_REFUSED: write target is not a regular engine file ${path}`);
+    const priorLength = previous?.length ?? 0;
+    const offset = append ? priorLength : write.position ?? 0;
+    const replace = write.truncate || !previous;
+    const prefix = previous?.hash?.copy() ?? (previous ? digestRange(path, priorLength) : createHash('sha256'));
+    const saved = join(backing, String(sequence++));
+    const needsPrior = !replace && (write.resize !== undefined || offset !== priorLength || !appendOnly(path));
+    if (needsPrior && previous) {
+      copyFileSync(previous.backing ?? path, saved, constants.COPYFILE_FICLONE);
+      if (hashRollbackFileSync(saved).sha256 !== prefix.copy().digest('hex')) throw new EngineStateError(`ENGINE_STATE_TAMPERED: changed engine preimage ${path}`);
+    }
+    let resized: Hash | undefined;
+    if (write.resize !== undefined) {
+      resized = createHash('sha256');
+      let cursor = 0;
+      const original = priorLength ? digestRange(saved, priorLength, createHash('sha256'), 0, chunk => {
+        resized!.update(chunk.subarray(0, Math.max(0, Math.min(chunk.length, write.resize! - cursor))));
+        cursor += chunk.length;
+      }) : createHash('sha256');
+      if (original.digest('hex') !== prefix.copy().digest('hex')) throw new EngineStateError(`ENGINE_STATE_TAMPERED: changed engine preimage ${path}`);
+      const zeros = Buffer.alloc(256 * 1024);
+      for (let remaining = write.resize - priorLength; remaining > 0; remaining -= zeros.length) resized.update(zeros.subarray(0, Math.min(remaining, zeros.length)));
+    }
+    const mode = previous?.mode ?? (0o100000 | ((write.mode ?? 0o666) & ~process.umask()));
+    return () => {
+      const bytes = write.bytes, length = write.resize ?? (replace ? bytes.length : Math.max(priorLength, offset + bytes.length));
+      const hash = resized ?? (replace ? createHash('sha256').update(bytes) : offset === priorLength ? prefix.copy().update(bytes) : createHash('sha256'));
+      if (write.resize === undefined && !replace && offset !== priorLength) {
+        let cursor = 0, inserted = false;
+        const original = digestRange(saved, priorLength, createHash('sha256'), 0, chunk => {
+          const end = cursor + chunk.length;
+          if (cursor < offset) hash.update(chunk.subarray(0, Math.min(chunk.length, offset - cursor)));
+          if (!inserted && end >= offset) { hash.update(bytes); inserted = true; }
+          if (end > offset + bytes.length) hash.update(chunk.subarray(Math.max(0, offset + bytes.length - cursor)));
+          cursor = end;
+        });
+        if (original.digest('hex') !== prefix.copy().digest('hex')) throw new EngineStateError(`ENGINE_STATE_TAMPERED: changed engine preimage ${path}`);
+        if (!inserted) {
+          const zeros = Buffer.alloc(256 * 1024);
+          for (let remaining = offset - priorLength; remaining > 0; remaining -= zeros.length) hash.update(zeros.subarray(0, Math.min(remaining, zeros.length)));
+          hash.update(bytes);
+        }
+      }
+      let retained: string | undefined;
+      if (!appendOnly(path)) {
+        const descriptor = openSync(saved, needsPrior && previous ? 'r+' : 'w');
+        try {
+          for (let written = 0; written < bytes.length;) {
+            const count = writeSync(descriptor, bytes, written, bytes.length - written, replace ? written : offset + written);
+            if (count <= 0) throw new Error('Engine write image made no progress');
+            written += count;
+          }
+          ftruncateSync(descriptor, length);
+        } finally { closeSync(descriptor); }
+        chmodSync(saved, mode);
+        retained = saved;
+      }
+      return { identity: `file:${mode}:${length}:${hash.copy().digest('hex')}`, stat: statEntry(path)?.stat ?? '', length, hash, backing: retained, mode };
+    };
+  };
+
+  const checkRoute = (): void => {
+    if (prospectivePhysicalPath(resolve(input.projectDir)) !== project
+        || (run && prospectivePhysicalPath(resolve(input.runDir!)) !== run)) {
+      throw new EngineStateError('ENGINE_STATE_TAMPERED: execution storage route changed');
+    }
+  };
   const scan = (read: typeof entry = entry): Snapshot => {
+    checkRoute();
     const result: Snapshot = new Map(), visited = new Set<string>(), ancestors = new Set<string>();
     const separate = (path: string): void => {
-      if ([project, ...activeOutputs].some(root => inside(root, path))) throw new EngineStateError(`ENGINE_STATE_REFUSED: engine carrier consults authored work ${path}`);
+      if ([project, ...(run ? [stageWorkPath(run), requestPath(run), controlPath(run)] : [])].some(root => inside(root, path))) throw new EngineStateError(`ENGINE_STATE_REFUSED: engine carrier consults authored work ${path}`);
     };
     const walk = (path: string): void => {
-      if (isRollbackBlob(path)) throw new EngineStateError(`ENGINE_STATE_REFUSED: engine record aliases rollback payload ${path}`);
       separate(path);
-      if (excluded(path)) return;
       const value = read(path);
       if (!value) return;
-      // Operators may create the request inbox during a stage. Its children
-      // still carry protected abort records alongside untrusted requests.
-      if (!run || path !== join(run, 'signals')) result.set(path, value);
+      result.set(path, value);
       if (value.link !== undefined) {
         const target = prospectivePhysicalPath(path, {
           lstat(component) {
-            if (component.split('/').some(privateName)) throw new EngineStateError('ENGINE_STATE_REFUSED: private adapter state cannot carry engine records');
+            separate(component);
             const stat = lstatSync(component);
             if (stat.isSymbolicLink()) { separate(component); result.set(component, read(component)!); }
             return stat;
           }, readlink: readlinkSync,
         });
+        if (!roots.some(root => inside(root, target))) throw new EngineStateError(`ENGINE_STATE_REFUSED: engine record resolves outside engine trees ${path}`);
         if (ancestors.has(target)) throw new EngineStateError(`ENGINE_STATE_REFUSED: cyclic protected directory link ${path}`);
         if (target === path || !existsSync(target)) throw new EngineStateError(`ENGINE_STATE_REFUSED: unresolved protected link ${path}`);
         if (!visited.has(path)) {
@@ -303,16 +385,15 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
         visited.add(path); ancestors.add(path);
         for (const name of readdirSync(path)) {
           const child = join(path, name);
-          if (!run || !inside(run, child) || owns(child) || child === join(run, 'signals')) walk(child);
+          walk(child);
         }
         ancestors.delete(path);
       }
     };
-    if (run) walk(run);
     // Shared store databases serve concurrent runs and CLI readers. Their
     // bytes are not this attempt's facts; admission still reserves their paths.
-    walk(distribution);
-    for (const root of [run, distribution].filter((root): root is string => Boolean(root))) {
+    for (const root of roots) walk(root);
+    for (const root of roots) {
       for (let parent = dirname(root); ; parent = dirname(parent)) {
         const value = statEntry(parent);
         if (value) result.set(parent, value);
@@ -324,32 +405,19 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
   try {
     let expected: Snapshot;
     try { expected = scan(path => run && inside(run, path) ? retain(path) : entry(path)); } catch (error) {
-      for (const path of exclusions) activeOutputs.delete(path);
       throw new EngineStateError(`ENGINE_STATE_REFUSED: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
-    const guard: Guard = { scan, retain, owns, expected, publications, publicationWrites: new Set() };
+    const guard: Guard = { checkRoute, scan, retain, prepareWrite, owns, expected };
     guards.add(guard);
     let result: T | undefined, failure: unknown;
-    try { result = await action(); } catch (error) { failure = error; } finally {
+    try { result = await execution.run(guard, action); } catch (error) { failure = error; } finally {
       try {
         const actual = scan();
         notice(guard, changed(guard, actual));
-        // Record even a same-content rewrite of an existing publication.
-        notice(guard, [...publications].filter(path => !sameStat(expected.get(path), actual.get(path))));
       } catch (error) { guard.error ??= new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; ${String(error)}`); }
       guards.delete(guard);
-      for (const path of exclusions) activeOutputs.delete(path);
-      for (const other of guards) {
-        const current = other.scan(statEntry);
-        for (const [path, value] of current) {
-          if (!exclusions.some(root => inside(root, path))) continue;
-          const retained = other.retain(path);
-          notice(other, sameStat(value, retained) ? [] : [path]);
-          if (sameStat(value, retained)) other.expected.set(path, retained!);
-        }
-      }
     }
-    if (guard.error || guard.publicationWrites.size) {
+    if (guard.error) {
       // Rebuild parent directories first; restore the projection last so all
       // acknowledged histories exist before it becomes readable again.
       const records = [...guard.expected].filter(([path]) => run && inside(run, path));
@@ -375,14 +443,13 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
         if (!run || !inside(run, path) || prospectivePhysicalPath(dirname(path)) !== dirname(path) || same(value, entry(path))) continue;
         try {
           if (value.backing) {
-            const temporary = `${path}.integrity-restore`;
+            const temporary = engine && !inside(engine, path) ? join(engine, `${basename(path)}.integrity-restore`) : `${path}.integrity-restore`;
             rmSync(temporary, { recursive: true, force: true });
             mkdirSync(dirname(path), { recursive: true });
-            const descriptor = openSync(temporary, 'wx', value.mode);
-            let digest: Hash;
-            try { digest = digestRange(value.backing, value.length!, undefined, 0, bytes => writeAll(descriptor, bytes)); }
-            finally { closeSync(descriptor); }
-            if (digest.digest('hex') !== value.hash!.copy().digest('hex')) { rmSync(temporary); continue; }
+            // Clone first, then hash the actual staged bytes. This preserves
+            // sparse preimages while retaining the same exact-content check.
+            copyFileSync(value.backing, temporary, constants.COPYFILE_FICLONE | constants.COPYFILE_EXCL);
+            if (hashRollbackFileSync(temporary).sha256 !== value.hash!.copy().digest('hex')) { rmSync(temporary); continue; }
             if (entry(path)?.stat.startsWith('directory:')) rmSync(path, { recursive: true, force: true });
             renameSync(temporary, path);
             if (value.mode !== undefined) chmodSync(path, value.mode);
@@ -407,12 +474,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
           }
         } catch { /* the surviving guard will fail closed */ }
       }
-      if (guard.error) throw guard.error;
-      // Recovery used to run only for already-voided attempts. A warning may
-      // succeed only when every protected carrier is back to its trusted bytes.
-      const remaining = changed(guard, scan());
-      if (remaining.length) throw new EngineStateError(`ENGINE_STATE_TAMPERED: stage result voided; unrestored engine carrier ${remaining[0]}`);
-      input.onPublicationWrite?.([...guard.publicationWrites].map(path => relative(run!, path)));
+      throw guard.error;
     }
     if (failure !== undefined) throw failure;
     return result as T;

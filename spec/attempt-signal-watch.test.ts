@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -33,7 +34,7 @@ it.each([
   const projectDir = join(process.env.FLOWCREW_VITEST_ROOT!, `signals-${delivery}-${signal}`);
   mkdirSync(projectDir, { recursive: true });
   const created = createRun(projectDir, 'signals', 'name: signals\nstages: []', ['work']);
-  writeFileSync(join(created.runDirPath, 'task_brief.md'), '# Finish the fixture\n');
+  writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '# Finish the fixture\n');
   // Signal delivery has no elapsed-time requirement. Keep the attempt budget
   // clock fixed while exercising real watch events and explicit reconciliation.
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] });
@@ -55,7 +56,7 @@ it.each([
     tracker.started('active', 'sleep 60');
     const stopped = new Promise<void>(resolve => opts.abortSignal!.addEventListener('abort', () => resolve(), { once: true }));
     if (signal === 'abort') {
-      atomicWrite(join(opts.runDir, 'signals', 'abort_work.json'), JSON.stringify({
+      atomicWrite(runRecordPath(opts.runDir, 'signals', 'abort_work.json'), JSON.stringify({
         version: 1, stageId: 'work', attemptIndex: opts.attemptIndex, source: 'watchdog',
         reason: 'verified idle fixture', timestamp: new Date().toISOString(),
       }));
@@ -67,7 +68,7 @@ it.each([
       expect(opts.abortSignal!.aborted).toBe(true);
     }
     await stopped;
-    consumed = !existsSync(join(opts.runDir, 'signals', `${signal}_work.json`));
+    consumed = !existsSync(runRecordPath(opts.runDir, 'signals', `${signal}_work.json`));
     tracker.close();
     return { output: 'stopped', exitCode: 137, duration_ms: 1 };
   } };

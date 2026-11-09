@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -47,7 +48,7 @@ function cancelled(retry = false) {
     state.stages.work.status = 'failed';
   });
   // Bypass today's writer to preserve the literal status in legacy run.json.
-  const path = join(created.runDirPath, 'run.json');
+  const path = runRecordPath(created.runDirPath, 'run.json');
   const legacy = JSON.parse(readFileSync(path, 'utf8'));
   if (legacy.status === 'cancelled') legacy.status = 'stopped';
   writeFileSync(path, JSON.stringify(legacy));
@@ -56,8 +57,8 @@ function cancelled(retry = false) {
 
 it.each(['index', 'start time'] as const)('refuses matching malformed %s history in both carriers', field => {
   const created = cancelled();
-  const rawPath = join(created.runDirPath, 'run.json');
-  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const rawPath = runRecordPath(created.runDirPath, 'run.json');
+  const ledgerPath = runRecordPath(created.runDirPath, 'stages/work/status.json');
   const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
   const stage = interruptedStageStatus(raw.stages.work, raw.completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
   if (field === 'index') stage.attempts![0].index = 2;
@@ -72,8 +73,8 @@ it.each(['index', 'start time'] as const)('refuses matching malformed %s history
 
 it.each(['stage', 'attempt'] as const)('refuses an unknown ledger %s status despite proven owner death', carrier => {
   const created = cancelled();
-  const rawPath = join(created.runDirPath, 'run.json');
-  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const rawPath = runRecordPath(created.runDirPath, 'run.json');
+  const ledgerPath = runRecordPath(created.runDirPath, 'stages/work/status.json');
   const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
   raw.stages.work = interruptedStageStatus(raw.stages.work, raw.completedAt, 'CANCELLED_INTERRUPTED: Cancelled by user');
   const ledger = structuredClone(raw.stages.work);
@@ -90,8 +91,8 @@ it.each(['stage', 'attempt'] as const)('refuses an unknown ledger %s status desp
 
 it('refuses an unsupported projection status before normalizing its interrupted attempt', () => {
   const created = cancelled();
-  const rawPath = join(created.runDirPath, 'run.json');
-  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const rawPath = runRecordPath(created.runDirPath, 'run.json');
+  const ledgerPath = runRecordPath(created.runDirPath, 'stages/work/status.json');
   const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
   raw.stages.work.status = 'unknown';
   writeFileSync(rawPath, JSON.stringify(raw));
@@ -103,8 +104,8 @@ it('refuses an unsupported projection status before normalizing its interrupted 
 
 it.each([null, false, 0, ''])('refuses an existing falsy JSON ledger %j for an unstarted stage', ledger => {
   const created = cancelled();
-  const rawPath = join(created.runDirPath, 'run.json');
-  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const rawPath = runRecordPath(created.runDirPath, 'run.json');
+  const ledgerPath = runRecordPath(created.runDirPath, 'stages/work/status.json');
   const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
   raw.stages.work.status = 'pending';
   raw.stages.work.attempts = [];
@@ -119,7 +120,7 @@ it.each([null, false, 0, ''])('refuses an existing falsy JSON ledger %j for an u
 
 it.each(['attempt disagreement', 'invalid budget'] as const)('refuses %s in settled execution records', kind => {
   const created = cancelled();
-  const path = join(created.runDirPath, 'run.json');
+  const path = runRecordPath(created.runDirPath, 'run.json');
   const raw = JSON.parse(readFileSync(path, 'utf8'));
   const stage = interruptedStageStatus(raw.stages.work, raw.completedAt, 'Fixture interruption');
   const settledLedger = structuredClone(stage);
@@ -127,7 +128,7 @@ it.each(['attempt disagreement', 'invalid budget'] as const)('refuses %s in sett
   else raw.maxIterations = 0;
   raw.stages.work = stage;
   writeFileSync(path, JSON.stringify(raw));
-  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const ledgerPath = runRecordPath(created.runDirPath, 'stages/work/status.json');
   writeFileSync(ledgerPath, JSON.stringify(settledLedger));
   const before = readFileSync(path, 'utf8');
   const ledger = readFileSync(ledgerPath, 'utf8');
@@ -141,8 +142,8 @@ it.each(['attempt disagreement', 'invalid budget'] as const)('refuses %s in sett
 it.each(['running', 'closed', 'ledger-only', 'projection-only', 'summary-only', 'historical'] as const)(
   'refuses legacy stopped cancellation with %s unsettled work without rewriting it', kind => {
     const created = cancelled(kind === 'historical');
-    const path = join(created.runDirPath, 'run.json');
-    const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+    const path = runRecordPath(created.runDirPath, 'run.json');
+    const ledgerPath = runRecordPath(created.runDirPath, 'stages/work/status.json');
     const raw = JSON.parse(readFileSync(path, 'utf8'));
     const ledger = readStageStatus(project, created.runId, 'work');
     if (kind === 'closed') {
@@ -174,14 +175,14 @@ it.each(['running', 'closed', 'ledger-only', 'projection-only', 'summary-only', 
 
 it('returns CLI exit 1 with a stable refusal when resuming legacy stopped cancellation through RPC', async () => {
   const created = cancelled();
-  const path = join(created.runDirPath, 'run.json');
+  const path = runRecordPath(created.runDirPath, 'run.json');
   const raw = JSON.parse(readFileSync(path, 'utf8'));
   const brief = '# Goal\nComplete the fixture.\n\n# Acceptance criteria\n1. The fixture is complete.';
   const admission = createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
   raw.taskDescription = brief; raw.briefAdmission = admission;
   writeFileSync(path, JSON.stringify(raw));
   const before = readFileSync(path, 'utf8');
-  const ledgerPath = join(created.runDirPath, 'stages/work/status.json');
+  const ledgerPath = runRecordPath(created.runDirPath, 'stages/work/status.json');
   const ledger = readFileSync(ledgerPath, 'utf8');
   const registry = new TaskRegistry({ baseDir: join(root, 'registry') });
   const task = registry.create({ kind: 'quick', name: 'Legacy cancellation', projectDir: project,

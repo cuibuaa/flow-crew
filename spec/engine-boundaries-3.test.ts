@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { changedProjectPathsSinceSnapshot } from '../src/scheduler/sched_scope/snapshots.js';
 import { closeRepairRoundSnapshot } from './test-support/close-repair-snapshot.js';
 import { execFileSync } from 'node:child_process';
@@ -83,7 +84,7 @@ describe('A — tracked Git identities and frozen preimages', () => {
     git(project, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     write(join(project, 'data/dirty.bin'), 'dirty-now');
     write(join(project, 'data/filtered.bin'), 'filtered-now');
-    write(join(run, 'task_brief.md'), '---\ninputs: [{path: data/dirty.bin, frozen: true}, {path: data/filtered.bin, frozen: true}]\n---\n');
+    write(runRecordPath(run, 'task_brief.md'), '---\ninputs: [{path: data/dirty.bin, frozen: true}, {path: data/filtered.bin, frozen: true}]\n---\n');
     const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
     try {
       const dirty = snapshot.rollbackBaseline.frozenImages.get('data/dirty.bin')!;
@@ -112,7 +113,7 @@ describe('A — tracked Git identities and frozen preimages', () => {
     git(project, ['-c', 'user.name=FlowCrew Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
     git(project, ['update-index', '--assume-unchanged', 'data/local.txt']);
     write(join(project, 'data/local.txt'), 'operator-local\n');
-    write(join(run, 'task_brief.md'), '---\ninputs: [{path: data/local.txt, frozen: true}]\n---\n');
+    write(runRecordPath(run, 'task_brief.md'), '---\ninputs: [{path: data/local.txt, frozen: true}]\n---\n');
     const snapshot = captureRepairRoundSnapshot(project, [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'repair', role: 'coder', scope: ['data/**'] })], { runDirPath: run });
     try {
       const before = snapshot.rollbackBaseline.frozenImages.get('data/local.txt')!;
@@ -129,7 +130,7 @@ describe('A — tracked Git identities and frozen preimages', () => {
 describe('C — retry context', () => {
   it('still describes a real budget timeout as a timeout and retains its larger retry budget', () => {
     const run = root();
-    write(join(run, 'stages', 'work', 'status.json'), JSON.stringify({ error: 'attempt timeout exceeded' }));
+    write(runRecordPath(run, 'stages', 'work', 'status.json'), JSON.stringify({ error: 'attempt timeout exceeded' }));
     const preamble = buildRetryPreamble(1, 1000, run, 'work', { previousBudgetMs: 1000, nextBudgetMs: 2000 });
     expect(preamble).toContain('\"previousError\":\"attempt timeout exceeded\"');
     expect(preamble).toContain('\"previousBudgetMs\":1000');

@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,7 +45,7 @@ const passed = () => ({ pass: true, reason: 'The report meets the brief.', crite
 const schema = () => stageRecordSchema({ isGate: true, criterionRefs: ['criterion'] });
 const options = () => ({ stageId: 'review', role, dependsOn: [], promptTemplate: 'Review the report.', projectDir, runId, runDir,
   retries: 0, timeout_ms: 10000, deadlineClock: time.clock, isGate: true, criterionRefs: ['criterion'], outputSchema: schema(),
-  artifactContract: { version: 1 as const, produces: [{ id: 'verdict', root: 'run' as const, path: 'verdict_review.json', kind: 'file' as const }], reads: [], groups: [] } });
+  artifactContract: { version: 1 as const, produces: [{ id: 'verdict', root: 'run' as const, path: 'work/verdict_review.json', kind: 'file' as const }], reads: [], groups: [] } });
 
 beforeEach(() => {
   time = manualClock();
@@ -52,7 +53,7 @@ beforeEach(() => {
   projectDir = join(root, 'project'); mkdirSync(projectDir);
   previousStore = fcGlobalDir(); setFcGlobalDir(join(root, 'store'));
   ({ runId, runDirPath: runDir } = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', ['review']));
-  writeFileSync(join(runDir, 'dispatch_admission.json'), JSON.stringify({ criterionGateRefs: { review: ['criterion'] } }));
+  writeFileSync(runRecordPath(runDir, 'dispatch_admission.json'), JSON.stringify({ criterionGateRefs: { review: ['criterion'] } }));
 });
 afterEach(() => { setFcGlobalDir(previousStore); rmSync(root, { recursive: true, force: true }); });
 
@@ -97,7 +98,7 @@ describe('informational citations preserve independent refusals', () => {
   it.each(['validation receipt', 'external determinism evidence', 'external performance evidence'])('accepts a negative review citing %s without a second invocation', async evidence => {
     // Scrubbed audit incidents: a run receipt, admitted external smoke results,
     // and external benchmark results showing 0.923x against a required 4x.
-    const path = evidence === 'validation receipt' ? join(runDir, 'validation_delta_review.json')
+    const path = evidence === 'validation receipt' ? runRecordPath(runDir, 'validation_delta_review.json')
       : join(root, 'external-evidence', evidence === 'external determinism evidence' ? 'smoke_determinism.json' : 'hybrid_stats.json');
     const record = rejected();
     record.reason = evidence === 'external performance evidence' ? 'Measured speed ratio is 0.923x; the brief requires 4x.'
@@ -113,7 +114,7 @@ describe('informational citations preserve independent refusals', () => {
     expect(result.exitCode, result.friendlyError).toBe(0);
     expect(calls).toBe(1);
     expect(AuditFindingsSchema.parse(record.audit_findings)).toEqual(record.audit_findings);
-    expect(JSON.parse(readFileSync(join(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
+    expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(record);
     // Accepting the citation must preserve the real unmet-outcome rejection.
     expect(readGateEvaluation(projectDir, 'review', runId)).toMatchObject({ pass: false, reason: expect.stringContaining(record.reason),
       findings: { confirmed: [], unconfirmed: [expect.objectContaining({ reason: record.reason })] } });
@@ -141,7 +142,7 @@ describe('record correction uses the existing attempt', () => {
     const original = output(), invocations: RunOpts[] = [];
     const adapter: Adapter = { async run(prompt, _role, opts) {
       invocations.push(opts);
-      expect(existsSync(join(runDir, 'verdict_review.json'))).toBe(false);
+      expect(existsSync(runRecordPath(runDir, 'verdict_review.json'))).toBe(false);
       // Even slow host-side setup cannot consume the injected attempt budget.
       if (invocations.length === 1) time.advanceTo(stageWrapUpTiming(options().timeout_ms).warningAfterMs - 1);
       if (invocations.length === 2) {
@@ -156,7 +157,7 @@ describe('record correction uses the existing attempt', () => {
     expect(result.exitCode, result.friendlyError).toBe(0);
     expect(invocations).toHaveLength(2);
     expect(result).toMatchObject({ tokens_in: 20, tokens_out: 40, writes: ['docs/report.md'] });
-    expect(JSON.parse(readFileSync(join(runDir, 'verdict_review.json'), 'utf8'))).toEqual(rejected());
+    expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(rejected());
     const status = readStageStatus(projectDir, runId, 'review');
     expect(status.attempts).toHaveLength(1);
     expect(status.attempts?.[0]).toMatchObject({ exitCode: 0, disposition: 'repaired' });
@@ -168,7 +169,7 @@ describe('record correction uses the existing attempt', () => {
     const warningAt = stageWrapUpTiming(options().timeout_ms).warningAfterMs;
     const adapter: Adapter = { async run(prompt, _role, opts) {
       invocations.push(opts);
-      expect(existsSync(join(runDir, 'verdict_review.json'))).toBe(false);
+      expect(existsSync(runRecordPath(runDir, 'verdict_review.json'))).toBe(false);
       if (invocations.length === 1) {
         time.advanceTo(warningAt - 1);
         expect(opts.abortSignal?.aborted).toBe(false);
@@ -186,7 +187,7 @@ describe('record correction uses the existing attempt', () => {
     expect(result.exitCode, result.friendlyError).toBe(0);
     expect(invocations).toHaveLength(2);
     expect(result.continuation).toBeUndefined(); // A completed rejection remains authoritative.
-    expect(JSON.parse(readFileSync(join(runDir, 'verdict_review.json'), 'utf8'))).toEqual(rejected());
+    expect(JSON.parse(readFileSync(runRecordPath(runDir, 'verdict_review.json'), 'utf8'))).toEqual(rejected());
     const status = readStageStatus(projectDir, runId, 'review');
     expect(status.attempts).toHaveLength(1);
     expect(status.attempts?.[0].disposition).not.toBe('repaired');
@@ -201,14 +202,14 @@ describe('record correction uses the existing attempt', () => {
     const record = { status: 'delivered', summary: 'Delivered.', files_modified: [], checks: [], caveats: [] };
     const dispatch = JSON.stringify({ stages: [{ id: 'work', role: 'coder' }] });
     const adapter: Adapter = { async run() {
-      if (dynamicDispatch && calls === 0) writeFileSync(join(runDir, 'dispatch.yaml'), dispatch);
+      if (dynamicDispatch && calls === 0) writeFileSync(stageWorkPath(runDir, 'dispatch.yaml'), dispatch);
       return { output: JSON.stringify(++calls === 1 ? {} : record), exitCode: 0, duration_ms: 1 };
     } };
     const result = await runStage(adapter, { ...options(), isGate: false, dynamicDispatch, outputSchema: HANDOFF_SCHEMA,
-      artifactContract: { version: 1, produces: dynamicDispatch ? [{ id: 'dispatch', root: 'run', path: 'dispatch.yaml', kind: 'file', nonempty: true }] : [], reads: [], groups: [] } });
+      artifactContract: { version: 1, produces: dynamicDispatch ? [{ id: 'dispatch', root: 'run', path: 'work/dispatch.yaml', kind: 'file', nonempty: true }] : [], reads: [], groups: [] } });
     expect(result.exitCode, result.friendlyError).toBe(0);
     expect(calls).toBe(2);
-    if (dynamicDispatch) expect(readFileSync(join(runDir, 'dispatch.yaml'), 'utf8')).toBe(dispatch);
+    if (dynamicDispatch) expect(readFileSync(stageWorkPath(runDir, 'dispatch.yaml'), 'utf8')).toBe(dispatch);
   });
 
   it('bounds correction and never publishes a persistently invalid answer', async () => {
@@ -217,7 +218,7 @@ describe('record correction uses the existing attempt', () => {
     const result = await runStage(adapter, options());
     expect(result.exitCode).toBe(1); expect(calls).toBe(2);
     expect(result.friendlyError).toContain('Stage record refused');
-    expect(existsSync(join(runDir, 'verdict_review.json'))).toBe(false);
+    expect(existsSync(runRecordPath(runDir, 'verdict_review.json'))).toBe(false);
     expect(readStageStatus(projectDir, runId, 'review').attempts).toHaveLength(1);
   });
 
@@ -248,7 +249,7 @@ describe('record correction uses the existing attempt', () => {
     } };
     const result = await runStage(adapter, { ...options(), deadlineClock: clock });
     expect(result).toMatchObject({ exitCode: 0, timedOut: false, continuation: { reason: 'stage_budget', forced: true } }); expect(calls).toBe(expirationInvocation);
-    expect(existsSync(join(runDir, 'verdict_review.json'))).toBe(false);
+    expect(existsSync(runRecordPath(runDir, 'verdict_review.json'))).toBe(false);
     expect(readStageStatus(projectDir, runId, 'review').attempts).toHaveLength(1);
     expect(readStageStatus(projectDir, runId, 'review').timeout?.deadlineAt).toBe(new Date(started + 10000).toISOString());
   });

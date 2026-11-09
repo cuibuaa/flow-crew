@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { closeSync, openSync, unlinkSync, publishEngineFiles } from './engine-fs.js';
 import { constants, fstatSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
 
 /** Node has no dirfd-relative filesystem API. The trusted parent uses a small
  * stdlib bridge so a child cannot redirect config, auth or cache publication
@@ -45,7 +45,7 @@ def publish(parent, name, data):
 def copy_cache(source, target, root=None):
     if root is None: root = os.readlink('/proc/self/fd/' + str(source))
     for name in os.listdir(source):
-        if name in ['auth.json', 'credentials.json', 'installation_id']: continue
+        if name in ['auth.json', 'credentials.json', 'installation_id', '.credentials.json']: continue
         info = os.stat(name, dir_fd=source, follow_symlinks=False)
         if stat.S_ISDIR(info.st_mode):
             src = directory(source, name, False, True)
@@ -102,7 +102,7 @@ try:
     fd = os.dup(3) if config.get('credentials') else home(config['home'])
     try:
         if config.get('credentials'):
-            for name in ['auth.json', 'credentials.json', 'installation_id']:
+            for name in config['credentialNames']:
                 try:
                     with open(os.path.join(config['sourceHome'], name), 'rb') as stream: data = stream.read()
                 except (OSError, IsADirectoryError): continue
@@ -162,7 +162,8 @@ export function prepareAdapterHome(input: {
  * Keep the home pinned until the owned process group has settled; unlink only
  * credential entries, even if the child substitutes a link or renames the home.
  * The finally also retires a partial copy or a failed launch. */
-export async function withAdapterCredentials<T>(home: string, sourceHome: string, execute: () => Promise<T>): Promise<T> {
+export async function withAdapterCredentials<T>(home: string, sourceHome: string, execute: () => Promise<T>, credentialNames: readonly string[] = ['auth.json', 'credentials.json', 'installation_id']): Promise<T> {
+  if (credentialNames.some(name => basename(name) !== name || name === '.' || name === '..')) throw new Error('ADAPTER_HOME_REFUSED: credentials require confined file names');
   const fd = openSync(home, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     let source;
@@ -179,7 +180,7 @@ export async function withAdapterCredentials<T>(home: string, sourceHome: string
   let value: T;
   try {
     const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', PREPARE_HOME], {
-      input: JSON.stringify({ credentials: true, sourceHome: resolve(sourceHome) }),
+      input: JSON.stringify({ credentials: true, sourceHome: resolve(sourceHome), credentialNames }),
       stdio: ['pipe', 'pipe', 'pipe', fd], encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024,
     });
     if (result.error || result.status !== 0) {
@@ -187,19 +188,19 @@ export async function withAdapterCredentials<T>(home: string, sourceHome: string
     }
     value = await execute();
   } catch (error) {
-    const cleanup = retireCredentials(fd);
+    const cleanup = retireCredentials(fd, credentialNames);
     throw cleanup ? new AggregateError([error, cleanup], 'credential cleanup also failed') : error;
   }
-  const cleanup = retireCredentials(fd);
+  const cleanup = retireCredentials(fd, credentialNames);
   if (cleanup) throw cleanup;
   return value;
 }
 
 /** Unlinks credential entries and closes the pinned home; returns, never throws, the first failure. */
-function retireCredentials(fd: number): unknown {
+function retireCredentials(fd: number, credentialNames: readonly string[]): unknown {
   let failure: unknown;
   try {
-    for (const name of ['auth.json', 'credentials.json', 'installation_id']) {
+    for (const name of credentialNames) {
       try { unlinkSync(`/proc/self/fd/${fd}/${name}`); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failure ??= error; }
     }

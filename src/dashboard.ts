@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { normalizeNativeEvent } from './adapters/native-events.js';
 import { stageLiveLogPath } from './stage-live-log.js';
 import Fastify from "fastify";
@@ -210,7 +211,7 @@ function sendStageOutput(
 
 function loadStageRoles(projectDir: string, runId: string): Record<string, { role: string; dependsOn: string[]; isGate?: boolean }> {
   try {
-    const wfPath = join(runsRoot(), runId, 'workflow.yaml');
+    const wfPath = runRecordPath(join(runsRoot(), runId), 'workflow.yaml');
     const mtime = statSync(wfPath).mtimeMs;
     const cached = _stageRolesCache.get(runId);
     if (cached && cached.mtime === mtime) return cached.roles;
@@ -333,7 +334,7 @@ function summarizeRunOutcome(status?: string): string {
 
 /** True when the run has a generated summary.md the dashboard can display. */
 function runHasSummary(runId: string): boolean {
-  return existsSync(join(runsRoot(), runId, 'summary.md'));
+  return existsSync(runRecordPath(join(runsRoot(), runId), 'summary.md'));
 }
 
 function runSummaryFromState(state: StoreState): CampaignRunSummary {
@@ -423,7 +424,7 @@ function readStandaloneRuns(projectDir: string): { runs: StandaloneRunSummary[];
 }
 
 function stageArtifactCount(projectDir: string, runId: string, stageId: string): number {
-  const dir = join(runsRoot(), runId, 'stages', stageId);
+  const dir = runRecordPath(join(runsRoot(), runId), 'stages', stageId);
   try {
     return readdirSync(dir).filter((name) => name !== 'output.md' && name !== 'status.json').length;
   } catch {
@@ -437,7 +438,7 @@ function readRunEvents(runId: string): EventLike[] {
 
 function readStageOutputPreviews(runId: string): Record<string, string> {
   const out: Record<string, string> = {};
-  const stagesDir = join(runsRoot(), runId, 'stages');
+  const stagesDir = runRecordPath(join(runsRoot(), runId), 'stages');
   try {
     for (const stageId of readdirSync(stagesDir)) {
       const outputPath = join(stagesDir, stageId, 'output.md');
@@ -804,7 +805,7 @@ function defaultStaleItems(projectDir: string, campaigns: WorkspaceCampaign[]): 
       campaign.status === CAMPAIGN_PRESENTATION_STATUS.STALE
       && typeof campaign.staleRunId === 'string'
       && campaign.staleRunId.length > 0
-      && existsSync(join(runDir(projectDir, campaign.staleRunId), 'run.json'))
+      && existsSync(runRecordPath(runDir(projectDir, campaign.staleRunId), 'run.json'))
     ))
     .map((campaign) => ({
       id: campaign.id,
@@ -1129,7 +1130,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
   app.get<{ Params: { runId: string; stageId: string }; Querystring: { tailBytes?: string } }>(
     "/api/runs/:runId/stages/:stageId/output",
     async (req, reply) => {
-      const p = join(runsRoot(), req.params.runId, 'stages', req.params.stageId, 'output.md');
+      const p = runRecordPath(join(runsRoot(), req.params.runId), 'stages', req.params.stageId, 'output.md');
       if (!existsSync(p)) return reply.code(404).send("not found");
       return sendStageOutput(reply, p, parseTailBytes(req.query.tailBytes));
     },
@@ -1394,7 +1395,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
         }
         // Stop polling once the stage is no longer running (use per-stage status.json — much smaller than run.json)
         try {
-          const statusPath = join(runsRoot(), req.params.id, 'stages', req.params.stageId, 'status.json');
+          const statusPath = runRecordPath(join(runsRoot(), req.params.id), 'stages', req.params.stageId, 'status.json');
           const raw = readFileSync(statusPath, 'utf-8');
           const ss = JSON.parse(raw) as { status?: string };
           if (ss.status && !isRunningStageStatus(ss.status) && !isPendingStageStatus(ss.status)) {
@@ -1444,7 +1445,7 @@ export async function startDashboard(projectDir: string, port = 3000, options: D
 
   // 12b. GET /api/tasks/:id/summary
   app.get<{ Params: { id: string } }>("/api/tasks/:id/summary", async (req, reply) => {
-    const summaryPath = join(runsRoot(), req.params.id, 'summary.md');
+    const summaryPath = runRecordPath(join(runsRoot(), req.params.id), 'summary.md');
     if (!existsSync(summaryPath)) {
       return reply.code(404).send({ error: 'No summary available yet. Summary is generated after run completes.' });
     }

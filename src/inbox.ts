@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 /** Read-only decoding of historical approval logs for dashboard and campaign readers. */
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -85,7 +86,7 @@ export function isPendingInboxItemState(state: string): boolean {
  */
 export function foldItems(runId: string): Map<string, InboxItem> {
   const out = new Map<string, InboxItem>();
-  for (const rec of readJsonl<ApprovalRequest | ApprovalResolution>(join(runsRoot(), runId, 'approvals.jsonl'))) {
+  for (const rec of readJsonl<ApprovalRequest | ApprovalResolution>(runRecordPath(join(runsRoot(), runId), 'approvals.jsonl'))) {
     if (rec.kind === 'request') {
       if (!out.has(rec.requestId)) out.set(rec.requestId, { ...rec, state: INBOX_ITEM_STATE.PENDING });
     } else if (rec.kind === 'resolution') {
@@ -108,7 +109,7 @@ export function listAll(filter: { state?: InboxFilterState; runId?: string } = {
   const runIds = filter.runId ? [filter.runId] : safeReaddir(runsRoot()).sort().reverse();
   const out: InboxItem[] = [];
   for (const runId of runIds) {
-    if (!existsSync(join(runsRoot(), runId, 'approvals.jsonl'))) continue;
+    if (!existsSync(runRecordPath(join(runsRoot(), runId), 'approvals.jsonl'))) continue;
     for (const item of foldItems(runId).values()) {
       if (want === INBOX_FILTER_STATE.PENDING && !isPendingInboxItemState(item.state)) continue;
       if (want === INBOX_FILTER_STATE.RESOLVED && isPendingInboxItemState(item.state)) continue;

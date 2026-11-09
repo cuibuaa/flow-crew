@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Publish iteration accounting, advance only fully settled research evidence, and dispatch admitted policy finalizers before deciding to continue.
 import { pendingResearchGateCandidates, readResearchGateCandidate, rejectPendingResearchGateCandidates, settleResearchGateCandidate } from '../../research-candidate.js';
@@ -18,7 +19,6 @@ import { readEvidence } from '../../evidence-ledger.js';
 import { createHash } from 'node:crypto';
 import { unlinkSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 export async function advanceSettledResearch(
   state: StoreState, sorted: StageConfig[], baseStages: StageConfig[], iteration: number,
@@ -72,7 +72,7 @@ export async function advanceSettledResearch(
         rejectPendingResearchGateCandidates(projectDir, runDirPath, 'Verified terminal settlement superseded unconsumed round evidence');
       } else if (candidates.length) {
         for (const candidate of candidates) {
-          if (existsSync(join(runDirPath, 'signals', 'research_terminal_ready.json'))) {
+          if (existsSync(runRecordPath(runDirPath, 'signals', 'research_terminal_ready.json'))) {
             settleResearchGateCandidate(projectDir, runDirPath, candidate, 'rejected', 'Research policy already reached a terminal outcome');
             continue;
           }
@@ -97,7 +97,7 @@ export async function advanceSettledResearch(
       if (repeatedAfterResearch) {
         return { kind: 'settled', state: repeatedAfterResearch };
       }
-      const terminalReadyPath = join(runDirPath, 'signals', 'research_terminal_ready.json');
+      const terminalReadyPath = runRecordPath(runDirPath, 'signals', 'research_terminal_ready.json');
       if (existsSync(terminalReadyPath)) {
         let terminalOwner: string | undefined;
         try {
@@ -141,7 +141,7 @@ export async function advanceSettledResearch(
           }
         }
       }
-      const contSignal = join(runDirPath, 'signals', 'research_continue.json');
+      const contSignal = runRecordPath(runDirPath, 'signals', 'research_continue.json');
       if (existsSync(contSignal) && iteration < maxIterations) {
         try { unlinkSync(contSignal); } catch { /* non-critical */ }
         clearGateContinuationsForStages(runDirPath, sorted);

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { declaredDispatch } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -175,19 +176,19 @@ describe('next-phase evidence retention', () => {
     expect(work).toBeDefined();
     expect(work?.status).toMatchObject({ status: 'complete', exitCode: 0, attempts: [{ index: 1, status: 'complete' }] });
     expect(work?.outputPath).toBeTruthy();
-    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), work!.outputPath!), 'utf-8')).summary)
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), work!.outputPath!), 'utf-8')).summary)
       .toBe('iteration 1 implementation evidence');
     expect(work?.attemptOutputPaths).toHaveLength(1);
-    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), work!.attemptOutputPaths[0].path), 'utf-8')).summary)
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), work!.attemptOutputPaths[0].path), 'utf-8')).summary)
       .toBe('iteration 1 implementation evidence');
 
     const gate = stageEvidence(final).find((entry) => entry.iteration === 1 && entry.stageId === 'first_gate');
     expect(gate).toBeDefined();
     expect(gate?.status.attempts).toHaveLength(1);
     expect(gate?.verdictPath).toBeTruthy();
-    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), gate!.verdictPath!), 'utf-8')))
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), gate!.verdictPath!), 'utf-8')))
       .toMatchObject({ pass: true, reason: 'phase accepted', phaseComplete: true, nextPhase: 'phase two' });
-    expect(existsSync(join(runDir(projectDir, final.runId), gate!.statusPath))).toBe(true);
+    expect(existsSync(runRecordPath(runDir(projectDir, final.runId), gate!.statusPath))).toBe(true);
 
     const app = await startDashboard(projectDir, 0, { distDir: join(projectDir, 'missing-dist') });
     try {
@@ -250,11 +251,11 @@ describe('next-phase evidence retention', () => {
     });
     const archived = stageEvidence(final).find((entry) => entry.iteration === 1 && entry.stageId === 'shared_work');
     expect(archived?.status.attempts).toEqual([expect.objectContaining({ index: 1, status: 'complete' })]);
-    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), archived!.outputPath!), 'utf-8')).summary)
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), archived!.outputPath!), 'utf-8')).summary)
       .toBe('shared work from iteration 1');
-    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), 'stages', 'shared_work', 'output.md'), 'utf-8')).summary)
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), 'stages', 'shared_work', 'output.md'), 'utf-8')).summary)
       .toBe('shared work from iteration 2');
-    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), 'stages', 'shared_work', 'output_attempt_1.md'), 'utf-8')).summary)
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), 'stages', 'shared_work', 'output_attempt_1.md'), 'utf-8')).summary)
       .toBe('shared work from iteration 2');
   }, 15_000);
 
@@ -320,9 +321,9 @@ describe('next-phase evidence retention', () => {
     expect(adapter.calls.filter((call) => call.stageId === 'plan')[2].prompt).toContain('Reality check item #1 must be an object');
     const archived = stageEvidence(final).filter((entry) => entry.iteration === 1 && entry.stageId === 'first_work');
     expect(archived).toHaveLength(1);
-    expect(JSON.parse(readFileSync(join(runDir(projectDir, final.runId), archived[0].outputPath!), 'utf-8')).summary)
+    expect(JSON.parse(readFileSync(runRecordPath(runDir(projectDir, final.runId), archived[0].outputPath!), 'utf-8')).summary)
       .toBe('evidence captured before the blocking preflight retry');
-    expect(readFileSync(join(runDir(projectDir, final.runId), archived[0].statusPath), 'utf-8'))
+    expect(readFileSync(runRecordPath(runDir(projectDir, final.runId), archived[0].statusPath), 'utf-8'))
       .toContain('"status": "complete"');
   }, 15_000);
 });

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Settle policy-owned budget exhaustion and rejected research rounds through their admitted terminal owners or truthful incomplete outcomes.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
@@ -39,13 +40,13 @@ export function createResearchBudgetFinalizer(
     // Banked (journaled) measured rounds — the rounds that survived the integrity gates.
     let bankedRounds = 0;
     try {
-      const j = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_journal.json'), 'utf-8'));
+      const j = JSON.parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'research_journal.json'), 'utf-8'));
       if (j && Array.isArray(j.rounds)) bankedRounds = j.rounds.length;
     } catch { /* no journal → 0 banked */ }
     // Integrity-gate rejections, by reason (e.g. {"schema_mismatch":3}). Surfaced for observability.
     let rejections: Record<string, number> = {};
     try {
-      const r = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_integrity_rejections.json'), 'utf-8'));
+      const r = JSON.parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'research_integrity_rejections.json'), 'utf-8'));
       if (r && typeof r === 'object') rejections = r as Record<string, number>;
     } catch { /* no rejections file → none */ }
     const totalRejected = Object.values(rejections).reduce((s, n) => s + (typeof n === 'number' ? n : 0), 0);
@@ -82,7 +83,7 @@ export function createResearchBudgetFinalizer(
       // exhaustion is still a policy decision, but it must flow through that
       // owner just like an ordinary ship/ceiling decision; otherwise the
       // framework can bypass every mandatory ancestor at the last exit door.
-      writeFileSync(join(runDirPath, 'research_decision.json'), `${JSON.stringify({
+      writeFileSync(runRecordPath(runDirPath, 'research_decision.json'), `${JSON.stringify({
         version: 1,
         decision: 'stop_ceiling',
         terminalStatus,
@@ -93,8 +94,8 @@ export function createResearchBudgetFinalizer(
         bankedRounds,
         requiredRounds,
       }, null, 2)}\n`, 'utf-8');
-      mkdirSync(join(runDirPath, 'signals'), { recursive: true });
-      const readyPath = join(runDirPath, 'signals', 'research_terminal_ready.json');
+      mkdirSync(runRecordPath(runDirPath, 'signals'), { recursive: true });
+      const readyPath = runRecordPath(runDirPath, 'signals', 'research_terminal_ready.json');
       writeFileSync(readyPath, `${JSON.stringify({
         version: 1,
         decision: 'stop_ceiling',
@@ -139,7 +140,7 @@ export function createResearchBudgetFinalizer(
     try {
       let roundsMd = '';
       try {
-        const j2 = JSON.parse(readFileSync(join(runDir(projectDir, runId), 'research_journal.json'), 'utf-8')) as { rounds?: ResearchRound[] };
+        const j2 = JSON.parse(readFileSync(runRecordPath(runDir(projectDir, runId), 'research_journal.json'), 'utf-8')) as { rounds?: ResearchRound[] };
         roundsMd = (j2.rounds ?? []).map((r) => r.outcome === 'no_candidate'
           ? `- ${r.label}: no candidate (${r.reason ?? 'no reason recorded'})`
           : `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n');
@@ -167,7 +168,7 @@ export function createResearchBudgetFinalizer(
     if (state.status !== terminalStatus) {
       const quarantine = (source: string | undefined, label: string): void => {
         if (!source || !existsSync(source)) return;
-        try { renameSync(source, join(runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
+        try { renameSync(source, runRecordPath(runDirPath, `reality_rejected_${label}`)); } catch { /* preserve evidence in place if move fails */ }
       };
       if (wroteDeclaredCandidate) quarantine(declaredAbs, declaredPathBE?.split('/').pop() ?? 'terminal_candidate');
       return state;
@@ -190,7 +191,7 @@ export async function settleExhaustedResearchGates(
     if (state.research && exhaustedResearchFacts.rejectedGateIds.length > 0) {
       let bankedRounds = 0;
       try {
-        const journal = JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf-8')) as { rounds?: unknown[] };
+        const journal = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_journal.json'), 'utf-8')) as { rounds?: unknown[] };
         bankedRounds = Array.isArray(journal.rounds) ? journal.rounds.length : 0;
       } catch { /* an absent journal means this is round one */ }
       const round = bankedRounds + 1;
@@ -205,7 +206,7 @@ export async function settleExhaustedResearchGates(
         .map((evaluation) => `${evaluation.id}: ${evaluation.effectiveVerdict?.reason ?? 'gate rejected the round'}`);
       const detail = `Research round ${round} exhausted its gate retries; failing criteria: ${criteria.join(', ')}`
         + (reasons.length > 0 ? ` (${reasons.join('; ')})` : '');
-      writeFileSync(join(runDirPath, 'research_gate_exhausted.json'), `${JSON.stringify({
+      writeFileSync(runRecordPath(runDirPath, 'research_gate_exhausted.json'), `${JSON.stringify({
         version: 1,
         round,
         gateIds: exhaustedResearchFacts.rejectedGateIds,
@@ -230,7 +231,7 @@ export async function settleExhaustedResearchGates(
         .map((terminalPath) => ({ terminalPath, terminalOwner: admittedTerminalOwner(runDirPath, terminalPath) }))
         .find((selection): selection is { terminalPath: string; terminalOwner: string } => Boolean(selection.terminalOwner));
       if (escalationSelection) {
-        writeFileSync(join(runDirPath, 'research_decision.json'), `${JSON.stringify({
+        writeFileSync(runRecordPath(runDirPath, 'research_decision.json'), `${JSON.stringify({
           decision: 'escalate',
           runningBest: state.research.baseline,
           keptLabels: [],
@@ -243,8 +244,8 @@ export async function settleExhaustedResearchGates(
           round,
           failingCriteria: criteria,
         }, null, 2)}\n`, 'utf-8');
-        mkdirSync(join(runDirPath, 'signals'), { recursive: true });
-        writeFileSync(join(runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
+        mkdirSync(runRecordPath(runDirPath, 'signals'), { recursive: true });
+        writeFileSync(runRecordPath(runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
           version: 1,
           decision: 'escalate',
           terminalStatus: RUN_STATUS.ESCALATED,

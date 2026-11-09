@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { readSession } from '../src/adapter-session.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,7 +46,7 @@ process.stdin.on('end', () => {
   const count = fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, 'utf8')) + 1 : 1;
   fs.writeFileSync(countPath, String(count));
   if (process.env.FC_INPUT_MODE === 'repair' && count === 1) {
-    const owner = path.join(home, '..', '..', 'owner', 'codex_home');
+    const owner = path.join(home, '..', '..', '..', 'owner', 'homes', 'codex');
     if (fs.existsSync(path.join(home, 'state_5.sqlite'))) throw Error('source index with absolute paths was copied');
     if (fs.existsSync(path.join(home, 'sessions', 'closed.jsonl'))) throw Error('predecessor conversation copied');
     fs.writeFileSync(path.join(owner, 'witness'), 'ordinary filesystem access');
@@ -84,7 +85,7 @@ describe('one recoverable record per native invocation', () => {
     const result = await runStage(new CodexAdapter(), options());
     expect(result.exitCode, result.output).toBe(0);
     recordStageOutcome(project, runId, 'writer', undefined, readStageStatus(project, runId, 'writer'));
-    const eventsPath = join(directory, 'events.jsonl');
+    const eventsPath = runRecordPath(directory, 'events.jsonl');
     const settledEvents = readFileSync(eventsPath, 'utf8');
     expect(settledEvents.split('\n').filter(Boolean).map(line => JSON.parse(line).type)).toContain('stage_complete');
     expect(view().stages.writer?.status).toBe('complete');
@@ -93,7 +94,7 @@ describe('one recoverable record per native invocation', () => {
   });
 
   it('records all parameter repairs and fresh-session fallback while retaining a separate predecessor home', async () => {
-    const owner = join(directory, 'stages', 'owner', 'codex_home');
+    const owner = stageWorkPath(directory, 'stages', 'owner', 'homes', 'codex');
     mkdirSync(join(owner, 'sessions'), { recursive: true });
     writeFileSync(join(owner, 'config.toml'), 'model = "author-model"\n');
     writeFileSync(join(owner, 'state_5.sqlite'), 'closed state');
@@ -134,14 +135,14 @@ describe('one recoverable record per native invocation', () => {
     expect(inputs.every(entry => entry.integrity === 'verified' && entry.attemptBinding === 'matched')).toBe(true);
     expect(inputs.map(entry => entry.record!.attemptIndex)).toEqual([1, 2]);
     expect(inputs[1].record?.resumeSessionId).toBeUndefined();
-    expect(readFileSync(join(directory, 'stages', 'writer', 'codex_home', 'call-count'), 'utf8')).toBe('2');
+    expect(readFileSync(stageWorkPath(directory, 'stages', 'writer', 'homes', 'codex', 'call-count'), 'utf8')).toBe('2');
   });
 
   it('recovers an inherited model and exact generated config after the transient home is deleted', async () => {
     writeFileSync(join(root, 'source', 'config.toml'), 'model = "destination-model"\nmodel_reasoning_effort = "low"\n');
     const result = await runStage(new CodexAdapter(), { ...options(), role: { ...role, model: 'default', reasoning_effort: 'default' } });
     expect(result.exitCode, result.output).toBe(0);
-    expect(existsSync(join(directory, 'stages', 'writer', 'codex_home'))).toBe(false);
+    expect(existsSync(stageWorkPath(directory, 'stages', 'writer', 'homes', 'codex'))).toBe(false);
     const record = view().prompts.invocations[0].record!, transport = JSON.parse(record.transport!.payload!);
     expect(record.model).toBe('destination-model');
     expect(transport.configToml).toContain('model = "destination-model"');

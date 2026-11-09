@@ -1,3 +1,4 @@
+import { runRecordPath, assertSeparatedRunLayout } from '../../run-layout.js';
 import { attachBriefWritingEvidence } from '../../brief-writer.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Validate declared launch inputs and claim one run/project owner; preserves cancellation and park/resume transactions before execution.
@@ -16,7 +17,6 @@ import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, continuationExhausted, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
 import { atomicWrite, mkdirSync, rmSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { deploymentHeld } from '../../deployment-hold.js';
 import { assertContinuationCompatible } from '../../engine-continuation.js';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -24,7 +24,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 /** Interrupted work keeps its iteration; a settled rejection spends the next one. */
 export function workflowContinuation(state: StoreState, projectDir: string, runId: string, workflow?: WorkflowConfig): { iteration: number; gateIds: string[] } {
   const currentIteration = state.currentIteration ?? 1;
-  const workflowPath = join(runDir(projectDir, runId), 'workflow.yaml');
+  const workflowPath = runRecordPath(runDir(projectDir, runId), 'workflow.yaml');
   const admitted = workflow ?? (existsSync(workflowPath) ? RecordedWorkflowConfigSchema.parse(parseYaml(readFileSync(workflowPath, 'utf8'))) : undefined);
   const gateIds = state.status === RUN_STATUS.INCOMPLETE
     ? collectGateRuntimeFacts(state.planControl?.stages ?? admitted?.stages ?? [], state, projectDir, runId)
@@ -49,14 +49,16 @@ export function prepareWorkflowLaunch(
   let launchState: StoreState | undefined;
   const launchUnchanged = (state: StoreState): boolean => !launchState
     || (state.status === launchState.status && state.completedAt === launchState.completedAt);
-  if (existingRunId && existsSync(join(runDir(projectDir, existingRunId), 'run.json'))) {
+  if (existingRunId && existsSync(runRecordPath(runDir(projectDir, existingRunId), 'run.json'))) {
     const archived = readRunState(projectDir, existingRunId);
+    requireKnownRunStatus(archived.status, `resume run ${existingRunId}`);
+    assertSeparatedRunLayout(runDir(projectDir, existingRunId));
     launchState = archived;
     if ((!isPausedRunStatus(archived.status) && isResumableRunStatus(archived.status))
       || archived.deploymentHold || archived.recovery?.kind === 'resumable' || (archived.status === RUN_STATUS.RUNNING && archived.engineCheckpoint)) {
       // Resume the admitted contract, validated by this engine's ordinary
       // parser, even if engine configuration changed during the redeploy.
-      const admitted = RecordedWorkflowConfigSchema.parse(parseYaml(readFileSync(join(runDir(projectDir, existingRunId), 'workflow.yaml'), 'utf8')));
+      const admitted = RecordedWorkflowConfigSchema.parse(parseYaml(readFileSync(runRecordPath(runDir(projectDir, existingRunId), 'workflow.yaml'), 'utf8')));
       for (const key of Object.keys(workflow)) Reflect.deleteProperty(workflow, key);
       Object.assign(workflow, admitted);
     }
@@ -94,7 +96,7 @@ export function prepareWorkflowLaunch(
     const identity = resolveRunIdentity(runDir(projectDir, existingRunId), runsRoot(projectDir));
     runId = identity.runId;
     runDirPath = identity.directory;
-    const hasRunState = existsSync(join(runDirPath, 'run.json'));
+    const hasRunState = existsSync(runRecordPath(runDirPath, 'run.json'));
     const reservation = hasRunState ? undefined : readRunReservation(projectDir, runId);
     if (!hasRunState && !reservation) {
       throw new Error(`Existing run is unreadable and has no valid reservation: ${runId}`);
@@ -130,8 +132,8 @@ export function prepareWorkflowLaunch(
       const blocked = readRunState(projectDir, runId);
       if (taskDescription) blocked.taskDescription = taskDescription;
       if (briefAdmission) blocked.briefAdmission = briefAdmission;
-      if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
-        writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
+      if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
+        writeFileSync(runRecordPath(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
       }
       concludeRun(blocked, { status: 'failed', reasonCode: 'launch_conflict',
         detail: `Single-in-flight launch intent: another launch (${launchClaim.blockingOwnerRunId ?? 'unknown'}) already owns this project.` });
@@ -145,8 +147,8 @@ export function prepareWorkflowLaunch(
       state.currentIteration = 1;
       if (taskDescription) state.taskDescription = taskDescription;
       if (briefAdmission) state.briefAdmission = briefAdmission;
-      if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
-        writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
+      if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
+        writeFileSync(runRecordPath(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
       }
       writeRunState(projectDir, runId, state);
       launchState = state;
@@ -155,9 +157,9 @@ export function prepareWorkflowLaunch(
     const prepared = updateRunState(projectDir, runId, (state) => {
     if (!launchUnchanged(state)) return;
     preparedForLaunch = true;
-    mkdirSync(join(runDirPath, 'stages'), { recursive: true });
+    mkdirSync(runRecordPath(runDirPath, 'stages'), { recursive: true });
     for (const s of baseStages) {
-      mkdirSync(join(runDirPath, 'stages', s.id), { recursive: true });
+      mkdirSync(runRecordPath(runDirPath, 'stages', s.id), { recursive: true });
     }
     maxIterations = state.maxIterations ?? maxIterations;
     // Preserve the continuation's iteration, lifecycle clock and signals.
@@ -168,8 +170,8 @@ export function prepareWorkflowLaunch(
     if (briefAdmission && !resumingExistingRun) {
       state.briefAdmission = briefAdmission;
     }
-    if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
-      writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
+    if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
+      writeFileSync(runRecordPath(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
     }
     if (!resumingExistingRun && !reservation) {
       state.status = 'running';
@@ -187,11 +189,11 @@ export function prepareWorkflowLaunch(
       delete state.failureReason;
       delete state.reasonCode;
       delete state.terminalArtifact;
-      try { rmSync(join(runDirPath, 'signals'), { recursive: true, force: true }); } catch { /* best effort */ }
+      try { rmSync(runRecordPath(runDirPath, 'signals'), { recursive: true, force: true }); } catch { /* best effort */ }
       // Reset the integrity-rejection tally so a prior run's rejections don't shrink
       // this rerun's budget.
-      try { unlinkSync(join(runDirPath, 'research_integrity_rejections.json')); } catch { /* best effort */ }
-      writeFileSync(join(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
+      try { unlinkSync(runRecordPath(runDirPath, 'research_integrity_rejections.json')); } catch { /* best effort */ }
+      writeFileSync(runRecordPath(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
     }
     });
     if (!preparedForLaunch) {
@@ -210,8 +212,8 @@ export function prepareWorkflowLaunch(
     const state = readRunState(projectDir, runId);
     if (taskDescription) state.taskDescription = taskDescription;
     if (briefAdmission) state.briefAdmission = briefAdmission;
-    if (taskDescription && !existsSync(join(runDirPath, 'task_brief.md'))) {
-      writeFileSync(join(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
+    if (taskDescription && !existsSync(runRecordPath(runDirPath, 'task_brief.md'))) {
+      writeFileSync(runRecordPath(runDirPath, 'task_brief.md'), taskDescription, 'utf-8');
     }
     if (!launchClaim.claimed) {
       concludeRun(state, { status: 'failed', reasonCode: 'launch_conflict',
@@ -227,18 +229,18 @@ export function prepareWorkflowLaunch(
   // Criterion transport is tied to the exact admitted brief bytes and exists
   // before a planner can emit dynamic stages.
   try {
-    const briefPath = join(runDirPath, 'task_brief.md');
+    const briefPath = runRecordPath(runDirPath, 'task_brief.md');
     const exactBrief = existsSync(briefPath)
       ? readFileSync(briefPath, 'utf-8')
       : (taskDescription ?? '');
     if (exactBrief) {
       attachBriefWritingEvidence(projectDir, exactBrief, runDirPath);
       writeBriefCriteriaArtifact(runDirPath, exactBrief);
-      if (!existsSync(join(runDirPath, RUN_VALIDATION_BASELINE_FILE))) {
+      if (!existsSync(runRecordPath(runDirPath, RUN_VALIDATION_BASELINE_FILE))) {
         snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
       }
     }
-    if (!existsSync(join(runDirPath, RUN_VALIDATION_BASELINE_FILE))) snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
+    if (!existsSync(runRecordPath(runDirPath, RUN_VALIDATION_BASELINE_FILE))) snapshotShipSetupValidationBaseline(projectDir, exactBrief, runDirPath);
   } catch (error) {
     throw new Error(`Cannot materialize brief_criteria.json before dispatch: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
@@ -246,7 +248,7 @@ export function prepareWorkflowLaunch(
   // Claim liveness before probing siblings. In particular, a parked run remains
   // durably parked during admission, but this pid makes its resume-start window
   // visible to another concurrent launcher.
-  const schedulerPidPath = join(runDirPath, 'scheduler.pid');
+  const schedulerPidPath = runRecordPath(runDirPath, 'scheduler.pid');
   let schedulerClaimed = false;
   updateRunState(projectDir, runId, (state) => {
     if (launchUnchanged(state)) schedulerClaimed = claimSchedulerPid(schedulerPidPath, runId);
@@ -300,7 +302,7 @@ export function prepareWorkflowLaunch(
       for (const [stageId, status] of Object.entries(current.stages)) {
         if (status.status !== STAGE_STATUS.FAILED && status.status !== STAGE_STATUS.SKIPPED && !gateIds.includes(stageId)) continue;
         const pending = rependStageStatus(status);
-        atomicWrite(join(runDirPath, 'stages', stageId, 'status.json'), JSON.stringify(pending, null, 2));
+        atomicWrite(runRecordPath(runDirPath, 'stages', stageId, 'status.json'), JSON.stringify(pending, null, 2));
         current.stages[stageId] = pending;
       }
       current.status = 'running';

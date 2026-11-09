@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -79,10 +80,10 @@ function invoke(adapter: Adapter, stageId: string, request: object, options: Par
 function retire(citation: string): void {
   updateRunState(project, basename(runDir), state => { state.status = RUN_STATUS.COMPLETE; });
   expect(existsSync(citation)).toBe(false);
-  expect(existsSync(join(runDir, 'scratch'))).toBe(false);
+  expect(existsSync(stageWorkPath(runDir, 'scratch'))).toBe(false);
   expect(readRunState(project, basename(runDir)).status).toBe(RUN_STATUS.COMPLETE);
-  for (const name of ['run.json', 'summary.md']) expect(existsSync(join(runDir, name))).toBe(true);
-  expect(existsSync(join(runDir, 'progress.md'))).toBe(false);
+  for (const name of ['run.json', 'summary.md']) expect(existsSync(runRecordPath(runDir, name))).toBe(true);
+  expect(existsSync(runRecordPath(runDir, 'progress.md'))).toBe(false);
 }
 
 function clean(keep = 0): string {
@@ -105,7 +106,7 @@ describe('invocation scratch lifetime without provider calls', () => {
     retireRunScratch(aliasRun);
     expect(existsSync(first.path)).toBe(false);
     expect(existsSync(second.path)).toBe(false);
-    expect(existsSync(join(runDir, 'scratch'))).toBe(false);
+    expect(existsSync(stageWorkPath(runDir, 'scratch'))).toBe(false);
   });
 
   it.each([
@@ -123,7 +124,7 @@ describe('invocation scratch lifetime without provider calls', () => {
         expect(reader.exitCode, reader.output).toBe(0);
         expect(reader.output).toBe(`readable: ${citation}`);
       }
-      expect(realpathSync(citation)).toContain(join(runDir, 'scratch'));
+      expect(realpathSync(citation)).toContain(stageWorkPath(runDir, 'scratch'));
       expect(readFileSync(citation, 'utf8')).toBe('tests passed\n');
     }
     const payloads = citations.map(citation => realpathSync(citation));
@@ -187,7 +188,7 @@ describe('invocation scratch lifetime without provider calls', () => {
     recovered.cleanup();
     expect(existsSync(citation)).toBe(true);
     const recoveredPayload = realpathSync(recovered.path);
-    writeFileSync(join(runDir, 'run.json'), JSON.stringify({ ...readRunState(project, basename(runDir)), status: 'failed',
+    writeFileSync(runRecordPath(runDir, 'run.json'), JSON.stringify({ ...readRunState(project, basename(runDir)), status: 'failed',
       engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, processes: [], at: new Date().toISOString() } }));
     expect(clean()).toContain('Cleaned 1');
     for (const path of [payload, recovered.path, recoveredPayload]) expect(existsSync(path)).toBe(false);
@@ -227,7 +228,7 @@ describe('invocation scratch lifetime without provider calls', () => {
     await once(child, 'spawn');
     const exited = once(child, 'exit');
     try {
-      writeFileSync(join(runDir, 'run.json'), JSON.stringify({
+      writeFileSync(runRecordPath(runDir, 'run.json'), JSON.stringify({
         ...readRunState(project, basename(runDir)), status: 'failed',
         engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, at: new Date().toISOString(),
           processes: [{ pid: child.pid, processStart: processStartToken(child.pid!) }] },
@@ -247,10 +248,10 @@ describe('invocation scratch lifetime without provider calls', () => {
     const alias = dirname(scratch.path);
     writeFileSync(join(payload, 'large.log'), 'fixture');
     updateRunState(project, basename(runDir), state => { state.status = status; });
-    for (const path of [scratch.path, payload, alias, join(runDir, 'scratch')]) expect(existsSync(path)).toBe(false);
+    for (const path of [scratch.path, payload, alias, stageWorkPath(runDir, 'scratch')]) expect(existsSync(path)).toBe(false);
     expect(() => lstatSync(alias)).toThrow(/ENOENT/);
     expect(readRunState(project, basename(runDir)).status).toBe(status);
-    expect(existsSync(join(runDir, 'summary.md'))).toBe(true);
+    expect(existsSync(runRecordPath(runDir, 'summary.md'))).toBe(true);
   });
 
   it.each([RUN_STATUS.PARKED])('keeps scratch across %s and resume', status => {
@@ -296,19 +297,19 @@ describe('invocation scratch lifetime without provider calls', () => {
     const alias = dirname(scratch.path);
     writeFileSync(join(payload, 'build-cache.bin'), 'disposable');
     // Simulate interrupted terminal retirement followed by a wiped TMPDIR.
-    writeFileSync(join(runDir, 'run.json'), JSON.stringify({ ...readRunState(project, basename(runDir)), status: RUN_STATUS.COMPLETE,
+    writeFileSync(runRecordPath(runDir, 'run.json'), JSON.stringify({ ...readRunState(project, basename(runDir)), status: RUN_STATUS.COMPLETE,
       engineCheckpoint: { version: 2, runId: basename(runDir), projectDir: project, pid: 2147483647, processes: [], at: new Date().toISOString() } }));
     rmSync(alias);
     expect(existsSync(join(payload, 'build-cache.bin'))).toBe(true);
     expect(clean()).toContain('Cleaned 1');
-    for (const path of [payload, join(runDir, 'scratch'), runDir]) expect(existsSync(path)).toBe(false);
+    for (const path of [payload, stageWorkPath(runDir, 'scratch'), runDir]) expect(existsSync(path)).toBe(false);
     expect(() => lstatSync(alias)).toThrow(/ENOENT/);
   });
 
   it('can retry interrupted physical scratch retirement without losing its alias', () => {
     const scratch = createInvocationScratch(runDir);
     const alias = dirname(scratch.path);
-    const physicalRoot = join(runDir, 'scratch');
+    const physicalRoot = stageWorkPath(runDir, 'scratch');
     writeFileSync(join(scratch.path, 'build-cache.bin'), 'disposable');
     const originalRemove = engineFs.rmSync;
     const failure = vi.spyOn(engineFs, 'rmSync').mockImplementation((path, options) => {
@@ -332,7 +333,7 @@ describe('invocation scratch lifetime without provider calls', () => {
     });
     expect(result.exitCode).toBe(0);
     expect(existsSync(result.output.trim())).toBe(false);
-    expect(existsSync(join(runDir, 'scratch'))).toBe(false);
+    expect(existsSync(stageWorkPath(runDir, 'scratch'))).toBe(false);
   });
 
   it('still retires scratch immediately for commands without a run owner', async () => {

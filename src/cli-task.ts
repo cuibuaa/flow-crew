@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { EXIT_CODE } from './exit-code.js';
 import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { closeSync, openSync } from './engine-fs.js';
@@ -247,7 +248,7 @@ function printTask(
   if (completedAt) stdout.write(`Completed: ${completedAt}\n`);
   if (task.run?.failureReason) stdout.write(`Failure reason: ${task.run.failureReason}\n`);
   if (task.notes) stdout.write(`Notes: ${task.notes}\n`);
-  const failurePath = task.run_id ? join(runsRoot(), task.run_id, '.reality-gate.failures.md') : undefined;
+  const failurePath = task.run_id ? runRecordPath(join(runsRoot(), task.run_id), '.reality-gate.failures.md') : undefined;
   if (failurePath && existsSync(failurePath)) {
     stdout.write('\nReality gate failures:\n');
     stdout.write(readFileSync(failurePath, 'utf-8').trimEnd() + '\n');

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,7 +28,7 @@ function close() {
     tokenUsage: 'known', writes: ['product.txt'], writeAttribution: 'structured',
   });
 }
-function ledger() { return readFileSync(join(runDir(project, runId), 'stages/work/status.json'), 'utf8'); }
+function ledger() { return readFileSync(runRecordPath(runDir(project, runId), 'stages/work/status.json'), 'utf8'); }
 
 describe('one attempt closure owner', () => {
   it('keeps closure non-runnable and non-successful until classification, then retains measured facts', () => {

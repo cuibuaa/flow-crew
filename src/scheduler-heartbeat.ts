@@ -1,3 +1,4 @@
+import { runRecordPath, controlPath, hasSeparatedRunLayout } from './run-layout.js';
 import { randomBytes } from 'node:crypto';
 import { atomicWrite, unlinkSync } from './engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -53,15 +54,15 @@ function atomicJson(path: string, value: unknown): void {
 }
 
 function heartbeatPath(runPath: string): string {
-  return join(runPath, SCHEDULER_HEARTBEAT_FILE);
+  return runRecordPath(runPath, SCHEDULER_HEARTBEAT_FILE);
 }
 
 function warningPath(runPath: string): string {
-  return join(runPath, SCHEDULER_LOOP_STALL_FILE);
+  return hasSeparatedRunLayout(runPath) ? controlPath(runPath, SCHEDULER_LOOP_STALL_FILE) : join(runPath, SCHEDULER_LOOP_STALL_FILE);
 }
 
 function readRunStatus(runPath: string): string | undefined {
-  const state = parseJson<{ status?: unknown }>(join(runPath, 'run.json'));
+  const state = parseJson<{ status?: unknown }>(runRecordPath(runPath, 'run.json'));
   return typeof state?.status === 'string' ? state.status : undefined;
 }
 

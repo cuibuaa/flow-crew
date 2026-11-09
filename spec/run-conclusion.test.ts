@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -67,10 +68,10 @@ function settledReview(status: 'complete' | 'failed', extra: object = {}) {
 describe('terminal conclusions from settled evidence', () => {
   it('does not give unknown validation a separate terminal failure route', async () => {
     settledReview('failed');
-    writeFileSync(join(directory, 'verdict_review.json'), JSON.stringify({ pass: true }));
+    writeFileSync(runRecordPath(directory, 'verdict_review.json'), JSON.stringify({ pass: true }));
     const baseline = '{}\n';
-    writeFileSync(join(directory, 'validation_baseline.json'), baseline);
-    writeFileSync(join(directory, 'validation_delta_review.json'), JSON.stringify({
+    writeFileSync(runRecordPath(directory, 'validation_baseline.json'), baseline);
+    writeFileSync(runRecordPath(directory, 'validation_delta_review.json'), JSON.stringify({
       version: 2, stageId: 'review', checkedAt: completedAt, pass: false,
       baselineSha256: createHash('sha256').update(baseline).digest('hex'),
       attemptIndex: 1, attemptStartedAt: startedAt, attemptCompletedAt: completedAt,
@@ -93,7 +94,7 @@ describe('terminal conclusions from settled evidence', () => {
 
   it('keeps the b7295c rejected gate incomplete after bounded repair attempts', async () => {
     settledReview('complete');
-    writeFileSync(join(directory, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'New pytest failure remains' }));
+    writeFileSync(runRecordPath(directory, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'New pytest failure remains' }));
     const state = await finishIteration(3);
     expect(state).toMatchObject({ status: 'incomplete', reasonCode: 'bounded_attempts' });
     expectOwnerConclusion('incomplete');
@@ -105,7 +106,7 @@ describe('terminal conclusions from settled evidence', () => {
     expectOwnerConclusion('complete');
     expect(readRunEvents(project, runId).filter(event => event.type === 'run_completed')).toHaveLength(1);
     expect(readRunState(project, runId).stages.optional.status).toBe('pending');
-    expect(existsSync(join(directory, 'stages', 'optional', 'status.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'stages', 'optional', 'status.json'))).toBe(false);
   });
 
   it('settles superseded work through the blockage owner without rewriting its stage ledger', () => {
@@ -113,10 +114,10 @@ describe('terminal conclusions from settled evidence', () => {
       { index: 1, status: 'failed' as const, startedAt, completedAt, exitCode: 1, error: 'prior failure' },
     ] };
     writeStageStatus(project, runId, 'optional', pending);
-    const statusPath = join(directory, 'stages', 'optional', 'status.json');
+    const statusPath = runRecordPath(directory, 'stages', 'optional', 'status.json');
     const before = readFileSync(statusPath, 'utf8');
-    mkdirSync(join(directory, 'signals'), { recursive: true });
-    writeFileSync(join(directory, 'signals', 'repeated_blockage.json'), JSON.stringify({ action: 'escalate', detail: 'unchanged evidence' }));
+    mkdirSync(runRecordPath(directory, 'signals'), { recursive: true });
+    writeFileSync(runRecordPath(directory, 'signals', 'repeated_blockage.json'), JSON.stringify({ action: 'escalate', detail: 'unchanged evidence' }));
     const { concludeRepeatedBlockage } = createBlockageConcluder(() => {});
     const result = concludeRepeatedBlockage(readRunState(project, runId), { projectDir: project, runId, runDirPath: directory, iteration: 1 });
     expect(result?.stages.optional).toMatchObject({ status: 'skipped', attempts: pending.attempts });
@@ -129,17 +130,17 @@ describe('terminal conclusions from settled evidence', () => {
   ] as const)('retains runnable obligations after %s / %s', async (status, reasonCode) => {
     const state = await concludeRun(readRunState(project, runId), { status, reasonCode });
     expect(state.stages.optional.status).toBe('pending');
-    expect(existsSync(join(directory, 'stages', 'optional', 'status.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'stages', 'optional', 'status.json'))).toBe(false);
     expectOwnerConclusion(status);
   });
 
   it('projects the legacy run ledger before terminal publication', async () => {
-    const legacy = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
+    const legacy = JSON.parse(readFileSync(runRecordPath(directory, 'run.json'), 'utf8'));
     delete legacy.stateFormat;
     legacy.stages.review = { status: 'complete', retries: 0, exitCode: 0 };
-    writeFileSync(join(directory, 'run.json'), JSON.stringify(legacy));
-    mkdirSync(join(directory, 'stages', 'review'), { recursive: true });
-    writeFileSync(join(directory, 'stages', 'review', 'status.json'), JSON.stringify({ status: 'pending', retries: 0 }));
+    writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify(legacy));
+    mkdirSync(runRecordPath(directory, 'stages', 'review'), { recursive: true });
+    writeFileSync(runRecordPath(directory, 'stages', 'review', 'status.json'), JSON.stringify({ status: 'pending', retries: 0 }));
     updateRunState(project, runId, current => { current.currentIteration = 2; });
     expect(readStageStatus(project, runId, 'review').status).toBe('complete');
     await completePlainWorkflow(readRunState(project, runId), [], project, runId, directory, 1, adapter, 'base_all_done');
@@ -151,7 +152,7 @@ describe('terminal conclusions from settled evidence', () => {
 
   it('keeps the fc9ce3 missing JSON field behind the reality gate and publishes the failed status', async () => {
     writeFileSync(join(project, 'delivery.json'), JSON.stringify({ title: 'scrubbed delivery' }));
-    writeFileSync(join(directory, 'reality_checks.md'), [
+    writeFileSync(runRecordPath(directory, 'reality_checks.md'), [
       '## Reality checks', 'checks:', '  - name: delivery-required-fields', '    type: json-schema-match',
       '    reads:', '      - id: delivery', '        root: project', '        kind: file', '        path: delivery.json', '        source: {kind: input}',
       '    params:', '      file: delivery.json', '      schema:', '        type: object', '        required: [title, findings]',
@@ -159,18 +160,18 @@ describe('terminal conclusions from settled evidence', () => {
     const state = await completePlainWorkflow(readRunState(project, runId), [], project, runId, directory, 1, adapter, 'base_all_done');
     expect(state.status).toBe('reality_gate_failed');
     expect(state.stages.optional.status).toBe('pending');
-    expect(existsSync(join(directory, 'stages', 'optional', 'status.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'stages', 'optional', 'status.json'))).toBe(false);
     expectOwnerConclusion('reality_gate_failed');
-    const report = JSON.parse(readFileSync(join(directory, '.reality-gate.json'), 'utf8'));
+    const report = JSON.parse(readFileSync(runRecordPath(directory, '.reality-gate.json'), 'utf8'));
     expect(report.pass).toBe(false);
     expect(report.results[0].details).toContain('findings');
   });
 
   it('keeps a recovered study behind the reality gate in its campaign entry', async () => {
     settledReview('complete');
-    writeFileSync(join(directory, 'verdict_review.json'), JSON.stringify({ pass: false, study_complete: true, model_success: false, reason: 'study_complete_without_model_success' }));
+    writeFileSync(runRecordPath(directory, 'verdict_review.json'), JSON.stringify({ pass: false, study_complete: true, model_success: false, reason: 'study_complete_without_model_success' }));
     writeFileSync(join(project, 'delivery.json'), '{}');
-    writeFileSync(join(directory, 'reality_checks.md'), [
+    writeFileSync(runRecordPath(directory, 'reality_checks.md'), [
       '## Reality checks', 'checks:', '  - name: recovered-delivery', '    type: json-schema-match',
       '    reads: []', '    params:', '      file: delivery.json', '      schema:',
       '        type: object', '        required: [findings]',
@@ -196,7 +197,7 @@ describe('terminal conclusions from settled evidence', () => {
 
   it.each(['complete', 'failed', 'shipped', 'ceiling_hit', 'escalated', 'reality_gate_failed', 'cancelled', 'incomplete'] satisfies RunStatus[])(
     'publishes owner completion and status events for terminal %s', async status => {
-      writeFileSync(join(directory, 'reality_checks.md'), [
+      writeFileSync(runRecordPath(directory, 'reality_checks.md'), [
         '## Reality checks', 'checks:', '  - name: count-terminal-checks',
         '    type: exec-script-exit-zero', '    reads: []',
         '    params:', '      script: printf invocation >> reality-executions.txt',

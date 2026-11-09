@@ -20,7 +20,7 @@ beforeAll(() => {
   const root = mkdtempSync(join(tmpdir(), 'fc-distribution-')); cleanup.push(root);
   const project = join(root, 'producer');
   for (const path of ['src', 'scripts', 'ui/src']) mkdirSync(join(project, path), { recursive: true });
-  for (const file of ['build-manifest.ts', 'engine-fs.ts', 'engine-owned-carriers.ts', 'rollback-content-store.ts', 'daemon-identity.ts', 'process-liveness.ts']) {
+  for (const file of ['build-manifest.ts', 'engine-fs.ts', 'engine-owned-carriers.ts', 'rollback-content-store.ts', 'run-layout.ts', 'run-record-fields.ts', 'daemon-identity.ts', 'process-liveness.ts']) {
     copyFileSync(join(repository, 'src', file), join(project, 'src', file));
   }
   copyFileSync(join(repository, 'scripts/build.ts'), join(project, 'scripts/build.ts'));

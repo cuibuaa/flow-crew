@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,7 +33,7 @@ describe('portable process identity', () => {
 
     writeSchedulerProcessIdentity(runPath, 'v2-run', process.pid);
 
-    const identity = JSON.parse(readFileSync(join(runPath, 'scheduler.identity.json'), 'utf-8')) as {
+    const identity = JSON.parse(readFileSync(runRecordPath(runPath, 'scheduler.identity.json'), 'utf-8')) as {
       version?: number;
       pid?: number;
       runId?: string;
@@ -49,7 +50,7 @@ describe('portable process identity', () => {
     const runPath = join(root, 'v1-run');
     mkdirSync(runPath);
     const token = processStartToken(process.pid);
-    writeFileSync(join(runPath, 'scheduler.identity.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'scheduler.identity.json'), JSON.stringify({
       version: 1,
       pid: process.pid,
       runId: 'v1-run',
@@ -65,7 +66,7 @@ describe('portable process identity', () => {
     mkdirSync(runPath);
     const token = processStartToken(process.pid);
     expect(token).toBeDefined();
-    writeFileSync(join(runPath, 'scheduler.identity.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'scheduler.identity.json'), JSON.stringify({
       version: 2,
       pid: process.pid,
       runId: 'kind-mismatch',

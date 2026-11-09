@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -72,6 +73,7 @@ function writeRun(
   const path = join(runsRoot(), runId);
   mkdirSync(path, { recursive: true });
   writeFileSync(join(path, 'run.json'), JSON.stringify({
+    storageLayout: 2,
     runId,
     projectDir,
     workflowName: 'e13-fixture',
@@ -79,8 +81,9 @@ function writeRun(
     stages,
     startedAt: '2026-08-03T16:00:00.000Z',
   }, null, 2), 'utf-8');
+  mkdirSync(join(path, 'engine'), { recursive: true });
   if (schedulerPid !== undefined) {
-    writeFileSync(join(path, 'scheduler.pid'), String(schedulerPid), 'utf-8');
+    writeFileSync(runRecordPath(path, 'scheduler.pid'), String(schedulerPid), 'utf-8');
     if (schedulerPid === process.pid) {
       writeSchedulerProcessIdentity(path, runId, schedulerPid);
     }
@@ -343,7 +346,7 @@ describe('process-authoritative project occupancy', () => {
 
   it('rejects a scheduler.pid marker with a numeric prefix and trailing data', () => {
     const path = writeRun('malformed-pid-owner', RUN_STATUS.FAILED);
-    writeFileSync(join(path, 'scheduler.pid'), `${process.pid}trailing-data`, 'utf-8');
+    writeFileSync(runRecordPath(path, 'scheduler.pid'), `${process.pid}trailing-data`, 'utf-8');
 
     expect(findLiveRunOwnerForProject(projectDir)).toBeNull();
     expect(isProjectBusy(projectDir)).toBeNull();
@@ -352,10 +355,10 @@ describe('process-authoritative project occupancy', () => {
   it('binds a live PID to the run whose scheduler identity claimed it', () => {
     const ownerPath = writeRun('identity-owner', RUN_STATUS.FAILED, process.pid);
     const recycledPath = writeRun('identity-recycled-marker', RUN_STATUS.FAILED);
-    writeFileSync(join(recycledPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(recycledPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeFileSync(
-      join(recycledPath, 'scheduler.identity.json'),
-      readFileSync(join(ownerPath, 'scheduler.identity.json'), 'utf-8'),
+      runRecordPath(recycledPath, 'scheduler.identity.json'),
+      readFileSync(runRecordPath(ownerPath, 'scheduler.identity.json'), 'utf-8'),
       'utf-8',
     );
 
@@ -371,7 +374,7 @@ describe('process-authoritative project occupancy', () => {
     const path = writeRun('parked-owner', RUN_STATUS.PARKED, DEAD_FIXTURE_PID);
     expect(isProjectBusy(projectDir)).toBeNull();
 
-    writeFileSync(join(path, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(path, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(path, 'parked-owner');
     invalidateRunLockCache();
     expect(isProjectBusy(projectDir)).toBe(`parked-owner, scheduler pid ${process.pid}`);

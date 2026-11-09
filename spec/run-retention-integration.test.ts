@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -42,7 +43,7 @@ function workflowFixture() {
   normalizeStageContracts(workflow.stages);
   for (const stage of workflow.stages) stage.artifact_contract = {
     ...fixtureArtifactContract(stage.id),
-    produces: [{ id: 'evidence', root: 'run', path: `stages/${stage.id}/evidence`, kind: 'directory', nonempty: false }],
+    produces: [{ id: 'evidence', root: 'run', path: `work/stages/${stage.id}/evidence`, kind: 'directory', nonempty: false }],
   };
   return workflow;
 }
@@ -52,8 +53,8 @@ function completed(opts: RunOpts, summary: string): RunResult {
 }
 
 function workspace(runDirectory: string, stage: string) {
-  mkdirSync(join(runDirectory, 'stages', stage, 'evidence'), { recursive: true });
-  const directory = join(runDirectory, 'stages', stage, 'build');
+  mkdirSync(stageWorkPath(runDirectory, 'stages', stage, 'evidence'), { recursive: true });
+  const directory = stageWorkPath(runDirectory, 'stages', stage, 'build');
   mkdirSync(directory, { recursive: true });
   const bulky = join(directory, 'corpus.bin');
   writeFileSync(bulky, Buffer.alloc(1024 * 1024 + 1, 7));
@@ -89,7 +90,7 @@ describe('run retention at scheduler and continuation boundaries', () => {
         runDirectory = opts.runDir;
         const scratch = createInvocationScratch(opts.runDir);
         const buildRoot = prompt.includes('stages/<stage-id>/build')
-          ? join(opts.runDir, 'stages', opts.stageId, 'build')
+          ? stageWorkPath(opts.runDir, 'stages', opts.stageId, 'build')
           : prompt.includes('Put compiler output and caches in $TMPDIR') ? scratch.path : undefined;
         if (!buildRoot) throw new Error('Fixture author received no compiler/cache destination.');
         const products = opts.stageId === 'done'
@@ -103,23 +104,23 @@ describe('run retention at scheduler and continuation boundaries', () => {
         }
         if (opts.stageId === 'work') {
           expect(scratchFiles.every(file => existsSync(file)), 'scratch remains available until all stages finish').toBe(true);
-          expect(readFileSync(join(opts.runDir, 'stages/done/evidence/result.json'), 'utf8')).toContain('true');
+          expect(readFileSync(stageWorkPath(opts.runDir, 'stages/done/evidence/result.json'), 'utf8')).toContain('true');
         }
-        const evidence = join(opts.runDir, 'stages', opts.stageId, 'evidence');
+        const evidence = stageWorkPath(opts.runDir, 'stages', opts.stageId, 'evidence');
         mkdirSync(evidence, { recursive: true });
         writeFileSync(join(evidence, 'result.json'), '{"passed":true}\n');
-        expect(readdirSync(join(opts.runDir, 'stages', opts.stageId)).filter(name => ['build', 'scratch'].includes(name))).toEqual([]);
+        expect(readdirSync(runRecordPath(opts.runDir, 'stages', opts.stageId)).filter(name => ['build', 'scratch'].includes(name))).toEqual([]);
         return completed(opts, `${opts.stageId} completed.`);
       },
     }, new Map(), undefined, roles);
     expect(result.status, result.failureReason).toBe('complete');
     expect(scratchFiles.every(file => !existsSync(file))).toBe(true);
-    expect(existsSync(join(runDirectory, 'scratch'))).toBe(false);
+    expect(existsSync(runRecordPath(runDirectory, 'scratch'))).toBe(false);
     for (const stage of ['done', 'work']) {
-      expect(readFileSync(join(runDirectory, 'stages', stage, 'evidence/result.json'), 'utf8')).toContain('true');
-      expect(existsSync(join(runDirectory, 'stages', stage, 'build'))).toBe(false);
+      expect(readFileSync(stageWorkPath(runDirectory, 'stages', stage, 'evidence/result.json'), 'utf8')).toContain('true');
+      expect(existsSync(stageWorkPath(runDirectory, 'stages', stage, 'build'))).toBe(false);
     }
-    expect(readFileSync(join(runDirectory, 'summary.md'), 'utf8')).toContain('done completed.');
+    expect(readFileSync(runRecordPath(runDirectory, 'summary.md'), 'utf8')).toContain('done completed.');
     const view = readRunStateView(project, result.runId);
     expect(view.run.status).toBe('complete');
     expect(view.stages.done.attempts).toHaveLength(1);
@@ -158,8 +159,8 @@ describe('run retention at scheduler and continuation boundaries', () => {
     const done = completeStageAttempt(project, created.runId, 'done', 0, { exitCode: 0, duration_ms: 1 });
     beginStageAttempt(project, created.runId, 'work', 0);
     const failed = completeStageAttempt(project, created.runId, 'work', 0, { exitCode: 1, duration_ms: 1, error: 'Fixture interruption.' });
-    writeFileSync(join(created.runDirPath, 'stages/done/output_attempt_1.md'), '{"status":"delivered","summary":"Recorded predecessor.","checks":[],"caveats":[]}');
-    writeFileSync(join(created.runDirPath, 'stages/work/output_attempt_1.md'), 'Recorded interrupted experiment.');
+    writeFileSync(runRecordPath(created.runDirPath, 'stages/done/output_attempt_1.md'), '{"status":"delivered","summary":"Recorded predecessor.","checks":[],"caveats":[]}');
+    writeFileSync(runRecordPath(created.runDirPath, 'stages/work/output_attempt_1.md'), 'Recorded interrupted experiment.');
     const deadPid = Number(execFileSync(process.execPath, ['-e', 'console.log(process.pid)'], {
       cwd: project, encoding: 'utf8', timeout: 3000,
       env: { ...process.env, HOME: root, FC_HOME: fcGlobalDir() },
@@ -185,7 +186,7 @@ describe('run retention at scheduler and continuation boundaries', () => {
     expect(existsSync(predecessor.bulky)).toBe(true);
     expect(existsSync(unfinished.bulky)).toBe(true);
     expect(existsSync(temporaryFile), 'terminal publication retires invocation scratch').toBe(false);
-    expect(existsSync(join(created.runDirPath, 'scratch'))).toBe(false);
+    expect(existsSync(runRecordPath(created.runDirPath, 'scratch'))).toBe(false);
     const archived = readRunStateView(project, created.runId);
     expect(archived.run.status).toBe(status);
     expect(archived.stages.done).toEqual(before);
@@ -209,7 +210,7 @@ describe('run retention at scheduler and continuation boundaries', () => {
     expect(calls).toEqual(['work']);
     expect(readStageStatus(project, created.runId, 'done')).toEqual(before);
     expect(resumed.stages.work.attempts?.map(attempt => attempt.status)).toEqual(['failed', 'complete']);
-    expect(readFileSync(join(created.runDirPath, 'stages/work/output_attempt_1.md'), 'utf8')).toContain('interrupted experiment');
+    expect(readFileSync(runRecordPath(created.runDirPath, 'stages/work/output_attempt_1.md'), 'utf8')).toContain('interrupted experiment');
     expect(readRunStateView(project, created.runId).run.status).toBe('complete');
   });
 });

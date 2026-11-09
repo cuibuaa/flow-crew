@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { parseJsonl } from './jsonl.js';
 import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { closeSync, openSync } from './engine-fs.js';
@@ -350,7 +351,7 @@ function readTail(path: string, maxBytes = DEFAULT_EVENT_TAIL_BYTES): string {
 }
 
 export function readOperatorEvents(runDirectory: string, maxEvents = 500): EventLike[] {
-  const path = join(runDirectory, 'events.jsonl');
+  const path = runRecordPath(runDirectory, 'events.jsonl');
   if (!existsSync(path)) return [];
   return parseJsonl<unknown>(readTail(path))
     .filter((parsed): parsed is EventLike => !!parsed && typeof parsed === 'object' && !Array.isArray(parsed))
@@ -363,12 +364,12 @@ export function readOperationalProjection(
 ): OperationalProjection {
   let state = options.state;
   if (!state) {
-    try { state = JSON.parse(readFileSync(join(runDirectory, 'run.json'), 'utf-8')) as OperationalRunState; } catch { /* reported below */ }
+    try { state = JSON.parse(readFileSync(runRecordPath(runDirectory, 'run.json'), 'utf-8')) as OperationalRunState; } catch { /* reported below */ }
   }
   let events: EventLike[] = [];
   let eventsCoverage: OperationalProjection['sourceCoverage']['events'] = 'missing';
   try {
-    const path = join(runDirectory, 'events.jsonl');
+    const path = runRecordPath(runDirectory, 'events.jsonl');
     if (existsSync(path)) {
       events = readOperatorEvents(runDirectory);
       eventsCoverage = 'read';

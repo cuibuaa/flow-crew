@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { concludeRun } from '../src/scheduler/sched_policy/run-completion.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -39,7 +40,7 @@ afterEach(() => {
 
 function createRealityRun(markdown: string) {
   const created = createRun(projectDir, 'test', 'name: test', []);
-  writeFileSync(join(runDir(projectDir, created.runId), 'reality_checks.md'), markdown, 'utf-8');
+  writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'reality_checks.md'), markdown, 'utf-8');
   const state = readRunState(projectDir, created.runId);
   state.status = 'complete';
   return { ...created, state };
@@ -61,7 +62,7 @@ async function expectMalformedAdmission(
 
   const created = createRealityRun(markdown);
   const gate = await concludeRun(created.state, { status: 'complete', reasonCode: 'workflow_complete' });
-  const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+  const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
 
   expect(gate.status).toBe('reality_gate_failed');
   expect(gateReport).toMatchObject({
@@ -89,13 +90,13 @@ async function expectMalformedAdmission(
   });
 
   const artifact = JSON.parse(readFileSync(
-    join(created.runDirPath, '.reality-gate.json'),
+    runRecordPath(created.runDirPath, '.reality-gate.json'),
     'utf-8',
   )) as { pass: boolean; checksRun: number; results: Array<{ details: string }> };
   expect(artifact).toMatchObject({ pass: false, checksRun: 1 });
   expect(artifact.results[0].details).toContain(expectedDiagnostic);
   expect(artifact.results[0].details).toMatch(/Fix the named declaration.*rerun Reality-Gate/i);
-  expect(readFileSync(join(created.runDirPath, '.reality-gate.failures.md'), 'utf-8'))
+  expect(readFileSync(runRecordPath(created.runDirPath, '.reality-gate.failures.md'), 'utf-8'))
     .toContain(expectedDiagnostic);
 }
 
@@ -108,7 +109,7 @@ describe('malformed Reality-check admission', () => {
     const gate = await concludeRun(created.state, { status: 'complete', reasonCode: 'workflow_complete' });
 
     expect(gate.status).toBe('complete');
-    expect(existsSync(join(created.runDirPath, '.reality-gate.json'))).toBe(false);
+    expect(existsSync(runRecordPath(created.runDirPath, '.reality-gate.json'))).toBe(false);
   });
 
   it('turns YAML parsing failure under an existing heading into a hard gate failure', async () => {
@@ -128,7 +129,7 @@ describe('malformed Reality-check admission', () => {
 
     const created = createRealityRun(markdown);
     const gate = await concludeRun(created.state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
 
     expect(gate.status).toBe('reality_gate_failed');
     expect(gateReport).toMatchObject({
@@ -208,7 +209,7 @@ describe('malformed Reality-check admission', () => {
     const created = createRealityRun(markdown);
 
     const gate = await concludeRun(created.state, { status: 'complete', reasonCode: 'workflow_complete' });
-    const gateReport = readRealityGateReport(join(runDir(projectDir, created.runId), '.reality-gate.json'));
+    const gateReport = readRealityGateReport(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'));
 
     expect(gate.status).toBe('reality_gate_failed');
     expect(gateReport.results.map(({ name, pass }) => ({ name, pass }))).toEqual([

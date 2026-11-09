@@ -56,7 +56,7 @@ describe('planner results contain consumed dispatch fields', () => {
     });
     expect(admission.errors).toEqual([]);
     expect(admission.pass).toBe(true);
-    expect(stages[1].artifact_contract?.produces).toContainEqual(expect.objectContaining({ path: 'verdict_review.json' }));
+    expect(stages[1].artifact_contract?.produces).toContainEqual(expect.objectContaining({ path: 'work/verdict_review.json' }));
   });
 
   it.each([

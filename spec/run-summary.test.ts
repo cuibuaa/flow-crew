@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -61,7 +62,7 @@ describe('Reality-Gate advisory summary', () => {
       setFcGlobalDir(join(root, 'fc-home'));
       const projectDir = join(root, 'project'); mkdirSync(projectDir);
       const created = createRun(projectDir, 'test', 'name: test', ['active_work']);
-      const path = join(runDir(projectDir, created.runId), 'run.json');
+      const path = runRecordPath(runDir(projectDir, created.runId), 'run.json');
       const state = JSON.parse(readFileSync(path, 'utf8'));
       state.status = 'complete';
       state.stages.active_work = { status: 'complete', retries: 0 };
@@ -90,7 +91,7 @@ describe('Reality-Gate advisory summary', () => {
       state.status = 'complete';
       state.completedAt = new Date().toISOString();
       writeRunState(projectDir, created.runId, state);
-      writeFileSync(join(runDir(projectDir, created.runId), '.reality-gate.json'), JSON.stringify({
+      writeFileSync(runRecordPath(runDir(projectDir, created.runId), '.reality-gate.json'), JSON.stringify({
         pass: true,
         checkedAt: new Date().toISOString(),
         checksRun: 1,
@@ -159,10 +160,10 @@ describe('Reality-Gate advisory summary', () => {
         { stageId: 'legacy_work', iteration: 0, status: { status: 'failed', retries: 0 } },
       ];
       writeRunState(projectDir, created.runId, state);
-      const evidenceDir = join(runDir(projectDir, created.runId), evidenceRoot);
+      const evidenceDir = runRecordPath(runDir(projectDir, created.runId), evidenceRoot);
       mkdirSync(evidenceDir, { recursive: true });
       writeFileSync(join(evidenceDir, 'output.md'), JSON.stringify({ status: 'delivered', summary: 'historical output remains reachable', files_modified: [], checks: [], caveats: ['historical caveat'] }), 'utf-8');
-      writeFileSync(join(runDir(projectDir, created.runId), 'stages', 'active_work', 'output.md'), 'active output', 'utf-8');
+      writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'stages', 'active_work', 'output.md'), 'active output', 'utf-8');
       let narrativePrompt = '';
       const adapter: Adapter = {
         run: async (prompt) => {
@@ -231,12 +232,12 @@ describe('engine-assembled terminal reports', () => {
       if (status === 'incomplete') state.failureReason = 'Bounded repair attempts exhausted.';
       writeRunState(project, id, state);
       const reason = 'verdict/metric.json mismatch: metric says fail, verdict says pass';
-      writeFileSync(join(directory, 'stages/review/output.md'), JSON.stringify(gateRecord(true)));
-      writeFileSync(join(directory, 'verdict_review.json'), JSON.stringify(gateRecord(true)));
+      writeFileSync(runRecordPath(directory, 'stages/review/output.md'), JSON.stringify(gateRecord(true)));
+      writeFileSync(runRecordPath(directory, 'verdict_review.json'), JSON.stringify(gateRecord(true)));
       archiveGateRoundEvidence(directory, { iteration: 1, round: 1 }, ['review'],
         new Map([['review', { pass: false, reason }]]));
       if (status === 'complete') {
-        writeFileSync(join(directory, 'stages/review/output.md'), JSON.stringify({ ...gateRecord(true), reason: 'Repair verified.' }));
+        writeFileSync(runRecordPath(directory, 'stages/review/output.md'), JSON.stringify({ ...gateRecord(true), reason: 'Repair verified.' }));
         archiveGateRoundEvidence(directory, { iteration: 2, round: 1 }, ['review'],
           new Map([['review', { pass: false, reason: 'A later contract refusal.' }]]));
       }
@@ -258,10 +259,10 @@ describe('engine-assembled terminal reports', () => {
 
   it.each(['missing', 'invalid'])('links an archived rejection with a %s engine record without guessing its conclusion', async condition => {
     await terminalFixture(async (project, id, directory) => {
-      writeFileSync(join(directory, 'verdict_review.json'), JSON.stringify(gateRecord(true)));
+      writeFileSync(runRecordPath(directory, 'verdict_review.json'), JSON.stringify(gateRecord(true)));
       archiveGateRoundEvidence(directory, { iteration: 1, round: 2 }, ['review'],
         new Map([['review', { pass: false, reason: 'Refused.' }]]));
-      const path = join(directory, 'gate_reevaluation/iteration_1/round_2/engine_verdict_review.json');
+      const path = runRecordPath(directory, 'gate_reevaluation/iteration_1/round_2/engine_verdict_review.json');
       if (condition === 'missing') rmSync(path);
       else writeFileSync(path, JSON.stringify({ gateId: 'review', engine_effective_pass: 'false' }));
       const report = await generateRunSummary(project, id);
@@ -274,8 +275,8 @@ describe('engine-assembled terminal reports', () => {
 
   it('shows typed changes, literal checks, caveats and independent verdict without a model or Git', async () => {
     await terminalFixture(async (project, id, directory) => {
-      writeFileSync(join(directory, 'stages/work/output.md'), JSON.stringify(workRecord()));
-      writeFileSync(join(directory, 'stages/review/output.md'), JSON.stringify(gateRecord(true)));
+      writeFileSync(runRecordPath(directory, 'stages/work/output.md'), JSON.stringify(workRecord()));
+      writeFileSync(runRecordPath(directory, 'stages/review/output.md'), JSON.stringify(gateRecord(true)));
       const run = vi.fn(async () => { throw new Error('No summary model available'); });
       const report = await generateRunSummary(project, id, { run });
       expect(run).not.toHaveBeenCalled();
@@ -287,7 +288,7 @@ describe('engine-assembled terminal reports', () => {
       expect(report).toContain('greeting: pass — greeting.txt:1');
       expect(report).toContain('Git measurement unavailable');
       expect(readRunState(project, id).auxiliaryAttempts?._summary).toBeUndefined();
-      expect(readFileSync(join(directory, 'summary.md'), 'utf8')).toBe(report);
+      expect(readFileSync(runRecordPath(directory, 'summary.md'), 'utf8')).toBe(report);
     });
   });
 
@@ -299,11 +300,11 @@ describe('engine-assembled terminal reports', () => {
         { index: 2, startedAt: state.startedAt, status: 'complete', exitCode: 0 },
       ];
       writeRunState(project, id, state);
-      writeFileSync(join(directory, 'stages/work/output_attempt_1.md'), JSON.stringify(workRecord('Greeting attempt failed.')));
+      writeFileSync(runRecordPath(directory, 'stages/work/output_attempt_1.md'), JSON.stringify(workRecord('Greeting attempt failed.')));
       const repaired = workRecord('Greeting repaired.'); repaired.checks[0].exit_code = 0;
-      writeFileSync(join(directory, 'stages/work/output_attempt_2.md'), JSON.stringify(repaired));
-      writeFileSync(join(directory, 'stages/review/output_attempt_1.md'), JSON.stringify(gateRecord(false)));
-      writeFileSync(join(directory, 'stages/review/output_attempt_2.md'), JSON.stringify(gateRecord(true)));
+      writeFileSync(runRecordPath(directory, 'stages/work/output_attempt_2.md'), JSON.stringify(repaired));
+      writeFileSync(runRecordPath(directory, 'stages/review/output_attempt_1.md'), JSON.stringify(gateRecord(false)));
+      writeFileSync(runRecordPath(directory, 'stages/review/output_attempt_2.md'), JSON.stringify(gateRecord(true)));
       const report = await generateRunSummary(project, id);
       expect(report).toContain('Greeting attempt failed.');
       expect(report).toContain('exit 7');
@@ -319,7 +320,7 @@ describe('engine-assembled terminal reports', () => {
 
   it.each([true, false])('uses declared reporter totals and direct exits without parsing display output (totals=%s)', async totals => {
     await terminalFixture(async (project, id, directory) => {
-      writeFileSync(join(directory, 'validation_delta_review.json'), JSON.stringify({
+      writeFileSync(runRecordPath(directory, 'validation_delta_review.json'), JSON.stringify({
         stageId: 'review', checkedAt: '2026-10-09T00:00:00Z', pass: false,
         immutablePath: 'validation_delta_review_attempt_1_exact.json',
         current: [
@@ -349,10 +350,10 @@ describe('engine-assembled terminal reports', () => {
         current: [{ role: 'test', display: 'npm run test', state: pass ? 'passed' : 'failed',
           exitCode: pass ? 0 : 1, durationMs: 12, output: '# tests 2\n# fail ' + (pass ? '0' : '1'), failureIdentifiers: [] }],
         delta: [{ role: 'test', state: pass ? 'pass' : 'regression', reason: pass ? 'Green' : 'Locale failed' }] });
-      writeFileSync(join(directory, 'validation_delta_review_attempt_1_failed.json'), JSON.stringify(receipt('earlier', false)));
+      writeFileSync(runRecordPath(directory, 'validation_delta_review_attempt_1_failed.json'), JSON.stringify(receipt('earlier', false)));
       const accepted = { ...receipt('later', true), immutablePath: 'validation_delta_review_attempt_2_passed.json' };
-      writeFileSync(join(directory, 'validation_delta_review_attempt_2_passed.json'), JSON.stringify(accepted));
-      writeFileSync(join(directory, 'validation_delta_review.json'), JSON.stringify(accepted));
+      writeFileSync(runRecordPath(directory, 'validation_delta_review_attempt_2_passed.json'), JSON.stringify(accepted));
+      writeFileSync(runRecordPath(directory, 'validation_delta_review.json'), JSON.stringify(accepted));
       const report = await generateRunSummary(project, id);
       expect(report).toContain('direct exit 1');
       expect(report).toContain('Command unverified; independent gate owns disposition');
@@ -364,7 +365,7 @@ describe('engine-assembled terminal reports', () => {
 
   it.each(['legacy prose: 9999 passed; npm run test exit 0', '{"status":"delivered"}', 'null'])('links unsupported output without claiming verification: %s', async output => {
     await terminalFixture(async (project, id, directory) => {
-      writeFileSync(join(directory, 'stages/work/output.md'), output);
+      writeFileSync(runRecordPath(directory, 'stages/work/output.md'), output);
       const report = await generateRunSummary(project, id);
       expect(report).toContain('Typed result unavailable or invalid');
       expect(report).toContain('No engine validation receipts recorded');
@@ -378,7 +379,7 @@ describe('engine-assembled terminal reports', () => {
       const state = readRunState(project, id); state.status = 'failed'; state.failureReason = 'No usable locale source';
       state.stages.work = { status: 'failed', exitCode: 1, retries: 0, error: 'Blocked: missing source' };
       state.stages.review.status = 'pending'; writeRunState(project, id, state);
-      writeFileSync(join(directory, 'stages/work/output.md'), JSON.stringify({ ...workRecord(), status: 'blocked' }));
+      writeFileSync(runRecordPath(directory, 'stages/work/output.md'), JSON.stringify({ ...workRecord(), status: 'blocked' }));
       const report = await generateRunSummary(project, id);
       expect(report).toContain('Status: **failed**');
       expect(report).toContain('No usable locale source');
@@ -390,7 +391,7 @@ describe('engine-assembled terminal reports', () => {
 
   it('shows deterministic hard checks and their measured command exits alongside advisories', async () => {
     await terminalFixture(async (project, id, directory) => {
-      writeFileSync(join(directory, '.reality-gate.json'), JSON.stringify({ results: [
+      writeFileSync(runRecordPath(directory, '.reality-gate.json'), JSON.stringify({ results: [
         { name: 'greeting content', type: 'exec-script-exit-zero', pass: false, details: 'greeting missing',
           evidence: { command: 'node verify.mjs', exit: { code: 9 } } },
         { name: 'artifact exists', type: 'file-exists-nonempty', pass: true, details: 'greeting.mjs exists' },
@@ -408,8 +409,8 @@ describe('engine-assembled terminal reports', () => {
 
   it('keeps partial report data when a collector entry is malformed', async () => {
     await terminalFixture(async (project, id, directory) => {
-      writeFileSync(join(directory, 'stages/work/output.md'), JSON.stringify(workRecord()));
-      writeFileSync(join(directory, 'validation_delta_review.json'), JSON.stringify({ stageId: 'review',
+      writeFileSync(runRecordPath(directory, 'stages/work/output.md'), JSON.stringify(workRecord()));
+      writeFileSync(runRecordPath(directory, 'validation_delta_review.json'), JSON.stringify({ stageId: 'review',
         current: [null], delta: [], pass: false }));
       const report = await generateRunSummary(project, id);
       expect(report).toContain('Added the greeting.');

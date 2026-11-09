@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import { concludeRun } from './run-completion.js';
 /** Deduplicated scheduler guidance and stable blockage escalation; terminal owner lookup is shared, campaign persistence is supplied. */
 import { appendGuidanceEnvelope, RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
@@ -16,7 +17,7 @@ export function appendSchedulerGuidanceOnce(
   knownStageIds: readonly string[] = [],
 ): void {
   try {
-    const ledgerPath = join(runDirPath, 'supervisor_guidance.md');
+    const ledgerPath = runRecordPath(runDirPath, 'supervisor_guidance.md');
     const prior = existsSync(ledgerPath) ? readFileSync(ledgerPath, 'utf-8') : '';
     if (prior.includes(marker)) return;
     appendGuidanceEnvelope({
@@ -49,7 +50,7 @@ export function observeStableBlockage(input: {
       threshold: input.threshold,
     });
     if (!observed.escalatedNow) return observed;
-    const signalsDir = join(input.runDirPath, 'signals');
+    const signalsDir = runRecordPath(input.runDirPath, 'signals');
     mkdirSync(signalsDir, { recursive: true });
     writeFileSync(join(signalsDir, 'repeated_blockage.json'), `${JSON.stringify({
       version: 1,
@@ -72,7 +73,7 @@ export function createBlockageConcluder(writeCampaignEntry: (projectDir: string,
     state: StoreState,
     ctx: { projectDir: string; runId: string; runDirPath: string; iteration: number },
   ): StoreState | null {
-    const signalPath = join(ctx.runDirPath, 'signals', 'repeated_blockage.json');
+    const signalPath = runRecordPath(ctx.runDirPath, 'signals', 'repeated_blockage.json');
     if (!existsSync(signalPath)) return null;
     let signal: Record<string, unknown>;
     try {

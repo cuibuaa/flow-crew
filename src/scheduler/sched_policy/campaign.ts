@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
 /** Campaign phase readers, review health and iteration/campaign output; receives gate and scope-planning readers. */
 import { type CampaignTriggerType, type StoreState, isPausedRunStatus, requireRunArtifactDirectory, runDir, campaignsRoot as storeCampaignsRoot } from '../../store.js';
@@ -55,7 +56,7 @@ function phaseMetadataFromArtifact(artifact: unknown, gateId: string): CampaignP
 
 function parseGatePhaseMetadata(projectDir: string, state: StoreState, gateId: string): CampaignPhaseMetadata | null {
   try {
-    const parsed = JSON.parse(readFileSync(join(runDir(projectDir, state.runId), `verdict_${gateId}.json`), 'utf-8'));
+    const parsed = JSON.parse(readFileSync(runRecordPath(runDir(projectDir, state.runId), `verdict_${gateId}.json`), 'utf-8'));
     const metadata = phaseMetadataFromArtifact(parsed, gateId);
     return metadata ? { ...metadata, pass: readGateEvaluation(projectDir, gateId, state.runId)?.pass === true } : null;
   } catch { return null; } // Missing/malformed verdicts cannot establish a phase.
@@ -71,7 +72,7 @@ export function orderedGateIdsForState(projectDir: string, state: StoreState): s
 
   const ids = new Set<string>();
   try {
-    const files = readdirSync(runPath).filter(f => f.startsWith('verdict_') && f.endsWith('.json'));
+    const files = readdirSync(runRecordPath(runPath, '.')).filter(f => f.startsWith('verdict_') && f.endsWith('.json'));
     for (const file of files) ids.add(file.replace('verdict_', '').replace('.json', ''));
   } catch { /* non-critical */
     // No verdicts yet.
@@ -127,7 +128,7 @@ export function createCampaignWriters(services: CampaignWriterServices) {
     maxInnerRetries?: number,
   ): void {
     const runDirPath = requireRunArtifactDirectory(projectDir, runId);
-    const logPath = join(runDirPath, 'iteration_log.md');
+    const logPath = runRecordPath(runDirPath, 'iteration_log.md');
     const lines: string[] = [`# Iteration ${iteration}`];
     if (innerRetriesUsed !== undefined && maxInnerRetries !== undefined && maxInnerRetries > 0) {
       lines.push(`Gate re-evaluations used: ${innerRetriesUsed}/${maxInnerRetries}`);
@@ -142,7 +143,7 @@ export function createCampaignWriters(services: CampaignWriterServices) {
       const ss = state.stages[sid];
       if (!ss) continue;
       lines.push(`## ${sid} (${ss.status})`);
-      lines.push(`Evidence: ${runDirPath}/evidence-ledger.jsonl`);
+      lines.push(`Evidence: ${runRecordPath(runDirPath, 'evidence-ledger.jsonl')}`);
       if (ss.error) lines.push(`Error: ${ss.error}`);
       if (ss.duration_ms !== undefined) lines.push(`Duration: ${Math.round(ss.duration_ms / 1000)}s`);
       // Include actual gate verdict if available
@@ -182,7 +183,7 @@ export function createCampaignWriters(services: CampaignWriterServices) {
     let gatesPassed = 0;
     let gatesTotal = 0;
     try {
-      const files = readdirSync(runPath).filter(f => f.startsWith('verdict_') && f.endsWith('.json'));
+      const files = readdirSync(runRecordPath(runPath, '.')).filter(f => f.startsWith('verdict_') && f.endsWith('.json'));
       for (const f of files) {
         try {
           const v = readGateEvaluation(projectDir, f.slice('verdict_'.length, -'.json'.length), state.runId);

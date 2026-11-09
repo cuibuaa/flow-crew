@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -30,7 +31,7 @@ beforeEach(() => {
   registry = new TaskRegistry({ baseDir: join(root, 'registry') });
   runId = createRun(project, 'fixture', 'name: fixture\nstages: [{id: work, role: coder, scope: [], artifact_contract: {version: 1, produces: [], reads: []}}]\n', ['work']).runId;
   directory = runDir(project, runId);
-  writeFileSync(join(directory, 'scheduler.pid'), String(DEAD_PID));
+  writeFileSync(runRecordPath(directory, 'scheduler.pid'), String(DEAD_PID));
   atomicWriteJson(supervisionPaths(registry.baseDir, unit).running, {
     version: SUPERVISION_PROTOCOL_VERSION,
     shimPid: DEAD_PID, shimCommand: 'lost controller', agentPid: DEAD_PID,
@@ -68,8 +69,8 @@ describe('lost shim process proof and lifecycle settlement', () => {
       state.status = 'running';
       state.retiredStageUsage = [{ stageId: 'earlier', iteration: 1, status: { status: 'complete', retries: 0 } }];
     });
-    const projection = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
-    const history = join(directory, projection.stateFormat.history.path);
+    const projection = JSON.parse(readFileSync(runRecordPath(directory, 'run.json'), 'utf8'));
+    const history = runRecordPath(directory, projection.stateFormat.history.path);
     if (damage === 'missing') rmSync(history);
     else writeFileSync(history, damage === 'truncated' ? '' : 'x'.repeat(projection.stateFormat.history.committedBytes));
     const damagedBytes = damage === 'missing' ? undefined : readFileSync(history);
@@ -84,22 +85,22 @@ describe('lost shim process proof and lifecycle settlement', () => {
       },
     });
     expect(code, io.read()?.toString()).toBe(0);
-    const settled = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
+    const settled = JSON.parse(readFileSync(runRecordPath(directory, 'run.json'), 'utf8'));
     expect(settled).toMatchObject({ status: 'cancelled', failureReason: 'Cancelled by user', completedAt: expect.any(String) });
     expect(settled.stateFormat.history).toEqual(projection.stateFormat.history);
     if (damagedBytes) expect(readFileSync(history)).toEqual(damagedBytes);
     else expect(() => readFileSync(history)).toThrow();
     expect(registry.get(task.id)?.status).toBe('cancelled');
-    const summary = readFileSync(join(directory, 'summary.md'), 'utf8');
+    const summary = readFileSync(runRecordPath(directory, 'summary.md'), 'utf8');
     expect(summary).toContain('Status: **cancelled**');
     expect(summary).toContain('Historical evidence was not loaded');
-    expect(existsSync(join(directory, 'progress.md'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'progress.md'))).toBe(false);
     expect(await control.cancelRun(runId)).toMatchObject({ ok: true, status: 'cancelled' });
   });
 
   it.each(['absent', 'malformed', 'partial'])('closes task cancellation with an %s run projection', async damage => {
-    if (damage === 'absent') rmSync(join(directory, 'run.json'));
-    else writeFileSync(join(directory, 'run.json'), damage === 'malformed' ? '{invalid' : JSON.stringify({ runId, projectDir: project, status: 'running' }));
+    if (damage === 'absent') rmSync(runRecordPath(directory, 'run.json'));
+    else writeFileSync(runRecordPath(directory, 'run.json'), damage === 'malformed' ? '{invalid' : JSON.stringify({ runId, projectDir: project, status: 'running' }));
     const task = registry.create({ projectDir: project, run_id: runId, status: 'running', systemd_unit: unit });
     const signal = vi.fn();
     const control = cancellation(backend(), signal);
@@ -122,10 +123,10 @@ describe('lost shim process proof and lifecycle settlement', () => {
 
   it.each(['projection', 'binding'])('closes the registered task without control over a corrupt run %s', async damage => {
     if (damage === 'projection') {
-      const state = JSON.parse(readFileSync(join(directory, 'run.json'), 'utf8'));
-      writeFileSync(join(directory, 'run.json'), JSON.stringify({ ...state, runId: 'unbound-projection' }));
+      const state = JSON.parse(readFileSync(runRecordPath(directory, 'run.json'), 'utf8'));
+      writeFileSync(runRecordPath(directory, 'run.json'), JSON.stringify({ ...state, runId: 'unbound-projection' }));
     }
-    const original = readFileSync(join(directory, 'run.json'));
+    const original = readFileSync(runRecordPath(directory, 'run.json'));
     const task = registry.create({ projectDir: project, run_id: damage === 'binding' ? 'invalid/binding' : runId, status: 'running', systemd_unit: unit });
     const signal = vi.fn();
     const control = cancellation(backend(), signal);
@@ -138,7 +139,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
     expect(code, io.read()?.toString()).toBe(0);
     expect(await remote.mock.results[0].value).toMatchObject({ ok: true, observation: { runReadable: false } });
     expect(registry.get(task.id)?.status).toBe('cancelled');
-    expect(readFileSync(join(directory, 'run.json'))).toEqual(original);
+    expect(readFileSync(runRecordPath(directory, 'run.json'))).toEqual(original);
     expect(signal).not.toHaveBeenCalled();
   });
 
@@ -176,7 +177,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
   it('resumes the same recovered run after manual retry of a terminal-unknown unit', async () => {
     const brief = 'Resume the interrupted execution';
     const admission = createBriefAdmission(inspectBrief(brief), { kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString() });
-    writeFileSync(join(directory, 'task_brief.md'), brief);
+    writeFileSync(runRecordPath(directory, 'task_brief.md'), brief);
     updateRunState(project, runId, state => {
       state.status = 'running';
       delete state.recovery;
@@ -239,7 +240,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
       delete state.recovery;
       state.failureReason = 'RECOVERY_FATE_UNKNOWN: interrupted process fate is unproven';
     });
-    const before = readFileSync(join(directory, 'run.json'), 'utf8');
+    const before = readFileSync(runRecordPath(directory, 'run.json'), 'utf8');
     const task = registry.create({ projectDir: project, run_id: runId, status: path === 'running' ? 'running' : 'stuck', systemd_unit: unit });
     let clock = Date.now();
     const units = backend();
@@ -258,7 +259,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
     clock += 120_000;
     await orchestrator.tickOnce();
     expect(registry.get(task.id)?.status).toBe('stuck');
-    expect(readFileSync(join(directory, 'run.json'), 'utf8')).toBe(before);
+    expect(readFileSync(runRecordPath(directory, 'run.json'), 'utf8')).toBe(before);
     expect(launch).not.toHaveBeenCalled();
   });
 
@@ -317,7 +318,7 @@ describe('lost shim process proof and lifecycle settlement', () => {
   });
 
   it('fences a live owned scheduler and attempts its stop despite a dead shim', async () => {
-    writeFileSync(join(directory, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(directory, 'scheduler.pid'), String(process.pid));
     writeSchedulerProcessIdentity(directory, runId);
     const signal = vi.fn();
     const task = registry.create({ projectDir: project, run_id: runId, status: 'running', systemd_unit: unit });
@@ -330,9 +331,9 @@ describe('lost shim process proof and lifecycle settlement', () => {
   });
 
   it('settles after scheduler PID reuse without signalling the unrelated process', async () => {
-    writeFileSync(join(directory, 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(directory, 'scheduler.pid'), String(process.pid));
     writeSchedulerProcessIdentity(directory, runId);
-    const identityPath = join(directory, 'scheduler.identity.json');
+    const identityPath = runRecordPath(directory, 'scheduler.identity.json');
     const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
     identity.startToken.value = identity.startToken.kind === 'linux'
       ? String(BigInt(identity.startToken.value) + 1n) : `${identity.startToken.value} previous-process`;

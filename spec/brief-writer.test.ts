@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, existsSync, symlinkSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -226,7 +227,7 @@ it.each(['provider', 'reply', 'setup'])('host stop at %s reruns the same quick c
   expect(rerun.status, rerun.stdout + rerun.stderr).toBe(0);
   const runs = readdirSync(join(engine, 'runs'));
   expect(runs).toHaveLength(1);
-  const run = JSON.parse(readFileSync(join(engine, 'runs', runs[0], 'run.json'), 'utf8'));
+  const run = JSON.parse(readFileSync(runRecordPath(join(engine, 'runs', runs[0]), 'run.json'), 'utf8'));
   expect(run.status).toBe('complete');
   expect(run.projectDir).toBe(join(root, 'source-wt', readdirSync(join(root, 'source-wt'))[0]));
   expect(readFileSync(join(run.projectDir, 'sub/foo.txt'), 'utf8')).toBe('tracked input');
@@ -288,9 +289,9 @@ it('raw text reaches the single entry with evidence attached', async () => {
     try { return JSON.parse(readFileSync(join(path, 'run.json'), 'utf8')).projectDir === join(root, 'source-wt', `brief-${written.digest.slice(0, 12)}`); } catch { return false; }
   })!;
   expect(readFileSync(join(written.evidenceDir!, 'setup.json'), 'utf8')).toContain('\"state\": \"ready\"');
-  expect(JSON.parse(readFileSync(join(run, 'run.json'), 'utf8')).workflowName).toBe('entry');
-  expect(readFileSync(join(run, 'task_brief.md'), 'utf8')).toBe(written.brief);
-  expect(readFileSync(join(run, 'brief-writing', 'original.txt'), 'utf8')).toBe(raw);
+  expect(JSON.parse(readFileSync(runRecordPath(run, 'run.json'), 'utf8')).workflowName).toBe('entry');
+  expect(readFileSync(runRecordPath(run, 'task_brief.md'), 'utf8')).toBe(written.brief);
+  expect(readFileSync(runRecordPath(run, 'brief-writing', 'original.txt'), 'utf8')).toBe(raw);
 });
 
 it.each(['dirty', 'target_collision', 'authored'])('keeps setup refusals before launch: %s', async refusal => {
@@ -316,7 +317,7 @@ it.each(['dirty', 'target_collision', 'authored'])('keeps setup refusals before 
   const runRoot = join(fcGlobalDir(), 'runs');
   const runs = (() => { try { return readdirSync(runRoot); } catch { return []; } })();
   expect(runs.some(id => {
-    try { return JSON.parse(readFileSync(join(runRoot, id, 'run.json'), 'utf8')).projectDir.startsWith(root); }
+    try { return JSON.parse(readFileSync(runRecordPath(runRoot, id, 'run.json'), 'utf8')).projectDir.startsWith(root); }
     catch { return false; }
   })).toBe(false);
 });
@@ -464,7 +465,7 @@ it.each([
   if (kind === 'existing_file') { task = 'task.md'; writeFileSync(join(dir, task), 'raw file'); }
   if (kind === 'continuation') {
     const run = join(engine, 'runs', 'stored'); mkdirSync(run, { recursive: true });
-    writeFileSync(join(run, 'task_brief.md'), task);
+    writeFileSync(runRecordPath(run, 'task_brief.md'), task);
     extra.push('--existing-run-id', 'stored');
   }
   const env = { ...process.env, FC_HOME: engine, FLOWCREW_DAEMON_SOCKET: join(root, 'd.sock'),

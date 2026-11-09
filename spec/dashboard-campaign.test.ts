@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -120,7 +121,7 @@ describe('dashboard campaign API', () => {
     const response = await app.inject({ method: 'DELETE', url: '/api/run-campaigns/display-alias' });
     expect(response.statusCode).toBe(200);
     expect(response.json().orphaned).toBe(1);
-    const state = JSON.parse(readFileSync(join(fcGlobalDir(), 'runs', created.runId, 'run.json'), 'utf8'));
+    const state = JSON.parse(readFileSync(runRecordPath(join(fcGlobalDir(), 'runs', created.runId), 'run.json'), 'utf8'));
     expect(state.campaignId).toBe('');
     expect(state.campaignStorageKey).toBe('');
     expect(state.campaignName).toBe('');
@@ -137,7 +138,7 @@ describe('dashboard campaign API', () => {
     writeJsonl(campaignPath, [{ runId: 'delete-run', campaignId: 'delete-me', status: 'complete' }]);
     const runDir = join(homeDir, '.fc', 'runs', 'delete-run');
     mkdirSync(runDir, { recursive: true });
-    writeFileSync(join(runDir, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runDir, 'run.json'), JSON.stringify({
       runId: 'delete-run',
       workflowName: 'default',
       projectDir,
@@ -153,7 +154,7 @@ describe('dashboard campaign API', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ ok: true, orphaned: 1, removedHistory: true });
     expect(existsSync(campaignPath)).toBe(false);
-    const runState = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8'));
+    const runState = JSON.parse(readFileSync(runRecordPath(runDir, 'run.json'), 'utf-8'));
     expect(runState).toMatchObject({ campaignId: '', campaign_id: '', campaignStorageKey: '', campaignName: '' });
   });
 

@@ -6,6 +6,8 @@
  * Maintenance contract: this is a permanent user-surface regression suite,
  * not a run-specific gate artifact. Keep it active in the default Vitest set.
  */
+import { runRecordPath } from '../src/run-layout.js';
+
 import './test-support/policy-runtime.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
@@ -115,7 +117,7 @@ describe('supervision CLI surface invariants', () => {
     const fixture = createFixture();
     const runRoot = join(fixture.fcHome, 'runs');
     const runId = 'supervision-terminal-run';
-    const runPath = join(runRoot, runId);
+    const runPath = runRecordPath(runRoot, runId);
     mkdirSync(runPath, { recursive: true });
     const registry = new TaskRegistry({ baseDir: fixture.fcHome });
     const stale = registry.create({
@@ -124,7 +126,7 @@ describe('supervision CLI surface invariants', () => {
       run_id: runId,
       status: 'running',
     });
-    writeFileSync(join(runPath, 'run.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'run.json'), JSON.stringify({
       runId,
       status: 'complete',
       completedAt: '2026-08-06T20:04:00.000Z',

@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { sweepRunScratch } from './invocation-scratch.js';
 import { appendFileSync, closeSync, mkdirSync, openSync, rmSync } from './engine-fs.js';
@@ -207,7 +208,7 @@ export function mergeTaskWithRunState(
   if (!task.run_id) return { ...task };
   const runPath = isAbsolute(task.run_id) ? task.run_id : join(runRoot, task.run_id);
   try {
-    const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as OperationalRunState & {
+    const state = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as OperationalRunState & {
       status?: unknown;
       completedAt?: unknown;
       failureReason?: unknown;

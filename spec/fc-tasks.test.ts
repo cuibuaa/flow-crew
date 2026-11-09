@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import {
   appendFileSync,
   mkdirSync,
@@ -60,7 +61,7 @@ function canonicalLaunchSentence(taskId: number | string): string {
 function writeEntry(session: string, filename: string, value: unknown): string {
   const directory = join(root, session);
   mkdirSync(directory, { recursive: true });
-  const path = join(directory, filename);
+  const path = runRecordPath(directory, filename);
   writeFileSync(path, typeof value === 'string' ? value : `${JSON.stringify(value)}\n`, 'utf-8');
   return path;
 }
@@ -73,7 +74,7 @@ function writeEngineTask(engineRoot: string, value: unknown): void {
 function writeEngineRun(engineRoot: string, runId: string, value: unknown): void {
   const directory = join(engineRoot, 'runs', runId);
   mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, 'run.json'), `${JSON.stringify(value)}\n`, 'utf-8');
+  writeFileSync(runRecordPath(directory, 'run.json'), `${JSON.stringify(value)}\n`, 'utf-8');
 }
 
 function render(session: string, overrides = {}): RenderFcTasksResult {

@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { latestAttemptWrites } from '../src/scheduler/sched_admission/frontier.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -86,7 +87,7 @@ async function runStatic(
   ].join('\n');
   const workflow = WorkflowConfigSchema.parse(parseYaml(declaredDispatch(yaml, contracts)));
   const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((item) => item.id));
-  writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
+  writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
   let active = 0;
   let maxActive = 0;
   const adapter: Adapter = {
@@ -130,7 +131,7 @@ async function runPhysicalWriteScenario(mode: 'one-writer' | 'two-writers') {
   ].join('\n');
   const workflow = WorkflowConfigSchema.parse(parseYaml(declaredDispatch(yaml)));
   const created = createRun(projectDir, workflow.name, yaml, workflow.stages.map((item) => item.id));
-  writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
+  writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
   mkdirSync(join(projectDir, 'src'), { recursive: true });
 
   let active = 0;
@@ -215,14 +216,14 @@ describe('safe scope batching', () => {
     const destinations: string[] = [];
     const contracts = Object.fromEntries(['left', 'right'].map(id => [id, {
       version: 1 as const, produces: [
-        { id: 'build', root: 'run' as const, path: `stages/${id}/build`, kind: 'directory' as const },
-        { id: 'published', root: 'run' as const, path: `stages/${id}/build/dist`, kind: 'directory' as const },
+        { id: 'build', root: 'run' as const, path: `work/stages/${id}/build`, kind: 'directory' as const },
+        { id: 'published', root: 'run' as const, path: `work/stages/${id}/build/dist`, kind: 'directory' as const },
       ],
       reads: [],
     }]));
     const measured = await runStatic([['src/left.ts'], ['src/right.ts']], id => [`src/${id}.ts`], (id, opts) => {
       writeFileSync(join(projectDir, `src/${id}.ts`), `export const ${id} = 1;`);
-      const outputRoot = join(opts.runDir, 'stages', id, 'build');
+      const outputRoot = stageWorkPath(opts.runDir, 'stages', id, 'build');
       const stagedDistDir = join(outputRoot, 'staged');
       mkdirSync(stagedDistDir, { recursive: true });
       for (const name of ['left', 'right']) {

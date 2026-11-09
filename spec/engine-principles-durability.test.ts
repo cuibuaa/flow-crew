@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import type { PlanRevisionRequest } from './test-support/fixture-types.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -36,7 +37,7 @@ afterEach(() => {
 function revise(value: PlanRevisionRequest = request) {
   return applyPlanRevision({ projectDir: project, runId, request: value, parseStage: parseDispatchedStageConfig, admit: () => ({ pass: true, errors: [] }),  });
 }
-function decisionPath() { return join(directory, 'stages/writer/plan_revision_decision_recover_projection.json'); }
+function decisionPath() { return runRecordPath(directory, 'stages/writer/plan_revision_decision_recover_projection.json'); }
 
 describe('revision decisions survive interruption and concurrent publication', () => {
   it('reconstructs an accepted decision lost after the plan commit without admitting twice', () => {
@@ -48,7 +49,7 @@ describe('revision decisions survive interruption and concurrent publication', (
     expect(recovered.state.queryState?.planHistory).toEqual(committed.queryState?.planHistory);
     expect(recovered.state.planControl).toEqual(committed.planControl);
     expect(JSON.parse(readFileSync(decisionPath(), 'utf8'))).toEqual(first.decision);
-    expect(readdirSync(join(directory, 'plan_history')).some((name) => name.endsWith('.tmp'))).toBe(false);
+    expect(readdirSync(runRecordPath(directory, 'plan_history')).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
   it('waits for an idle boundary without journaling a permanent refusal', () => {
@@ -94,7 +95,7 @@ describe('revision decisions survive interruption and concurrent publication', (
   it('refuses an accepted projection without journal authority even when it names an existing history digest', () => {
     const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
       ? Object.fromEntries(Object.entries(value).filter(([,value])=>value!==undefined).sort(([a],[b])=>a.localeCompare(b)).map(([key,value])=>[key,canonical(value)])) : value;
-    mkdirSync(join(directory,'stages/writer'),{recursive:true});
+    mkdirSync(runRecordPath(directory,'stages/writer'),{recursive:true});
     writeFileSync(decisionPath(),JSON.stringify({version:1,requestId:request.requestId,accepted:true,at:new Date().toISOString(),baseRevision:0,
       requestDigest:createHash('sha256').update(JSON.stringify(canonical(request))).digest('hex'),errors:[],revision:0,digest:request.baseDigest}));
     let called=false;

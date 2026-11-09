@@ -1,3 +1,4 @@
+import { runRecordPath } from '../run-layout.js';
 /**
  * Surgical failure diagnosis for CLI adapters.
  *
@@ -16,7 +17,7 @@
 
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { basename, join } from 'node:path';
+import { basename } from 'node:path';
 import { mkdirSync, writeFileSync } from '../engine-fs.js';
 import { findExecutableOnPath } from './availability.js';
 
@@ -63,7 +64,7 @@ export function resolveAdapterCapabilityIdentity(
 
 function capabilityPath(runDir: string, identity: AdapterCapabilityIdentity, namespace: string): string {
   const digest = createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 24);
-  return join(runDir, 'adapter_capabilities', `${basename(namespace)}_${digest}.json`);
+  return runRecordPath(runDir, 'adapter_capabilities', `${basename(namespace)}_${digest}.json`);
 }
 
 export function readAdapterCapabilityMemory(
@@ -82,7 +83,7 @@ export function rememberUnsupportedEffort(
 ): void {
   const target = capabilityPath(runDir, identity, namespace);
   try {
-    mkdirSync(join(runDir, 'adapter_capabilities'), { recursive: true });
+    mkdirSync(runRecordPath(runDir, 'adapter_capabilities'), { recursive: true });
     if (existsSync(target)) return;
     const memory: AdapterCapabilityMemory = { version: 1, capability: 'reasoning_effort_unsupported',
       identity, learnedAt: new Date().toISOString() };

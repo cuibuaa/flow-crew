@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import {
   appendFileSync,
@@ -48,7 +49,7 @@ function seed(session: string, entry: FcTaskEntry): void {
 function seedValue(session: string, filename: string, value: unknown): string {
   const directory = join(root, session);
   mkdirSync(directory, { recursive: true });
-  const path = join(directory, filename);
+  const path = runRecordPath(directory, filename);
   writeFileSync(path, `${JSON.stringify(value)}\n`, 'utf-8');
   return path;
 }
@@ -61,7 +62,7 @@ function seedEngineTask(engineRoot: string, value: unknown): void {
 function seedEngineRun(engineRoot: string, runId: string, value: unknown): void {
   const directory = join(engineRoot, 'runs', runId);
   mkdirSync(directory, { recursive: true });
-  writeFileSync(join(directory, 'run.json'), `${JSON.stringify(value)}\n`, 'utf-8');
+  writeFileSync(runRecordPath(directory, 'run.json'), `${JSON.stringify(value)}\n`, 'utf-8');
 }
 
 class Capture {

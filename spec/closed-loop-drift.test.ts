@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { appendFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -196,7 +197,7 @@ describe('closed-loop drift projection', () => {
       '',
       '**Graded floor:** `dose_minutes >= 20 minutes`. A value below this floor fails this criterion.',
     ].join('\n');
-    writeFileSync(join(value.runDir, 'run.json'), `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+    writeFileSync(runRecordPath(value.runDir, 'run.json'), `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
     const before = fixtureMutationHash(value);
 
     const projection = readRunDriftProjection(value.runDir, { state });
@@ -246,9 +247,9 @@ describe('closed-loop drift projection', () => {
 
   it('keeps malformed and legacy evidence visibly unavailable instead of fabricating zero', () => {
     const value = fixture();
-    writeFileSync(join(value.runDir, 'research_round_2_no_candidate_consumed.json'), '{broken\n');
-    writeFileSync(join(value.runDir, 'plan_retry_state.json'), '{broken\n');
-    writeFileSync(join(value.runDir, 'events.jsonl'), '{broken\n');
+    writeFileSync(runRecordPath(value.runDir, 'research_round_2_no_candidate_consumed.json'), '{broken\n');
+    writeFileSync(runRecordPath(value.runDir, 'plan_retry_state.json'), '{broken\n');
+    writeFileSync(runRecordPath(value.runDir, 'events.jsonl'), '{broken\n');
     const before = fixtureMutationHash(value);
     const malformed = readRunDriftProjection(value.runDir);
     expect(fixtureMutationHash(value)).toBe(before);

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -130,7 +131,7 @@ describe('terminal outcome waits for required settlement', () => {
     // of the host's wall clock and filesystem timestamp rounding.
     const freshAt = (Date.parse(state.startedAt) + 100) / 1000;
     utimesSync(join(project, 'report.md'), freshAt, freshAt);
-    if (disposition === 'rejected') writeFileSync(join(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'The required dedicated audit work artifact is absent.' }));
+    if (disposition === 'rejected') writeFileSync(runRecordPath(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: false, reason: 'The required dedicated audit work artifact is absent.' }));
     const result = await tryTerminateOnTerminalState(state, { projectDir: project, runId: created.runId, runDirPath: runDir(project, created.runId), iteration: 1, adapter: new ScriptedAdapter({}) });
     expect(result.decision).toBe('deferred');
     expect(state.status).toBe('running');

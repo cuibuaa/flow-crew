@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import * as bootFacts from '../src/checkpoint-liveness.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -114,7 +115,7 @@ function writeRun(
     ...(parked ? { parked } : {}),
     ...(failureReason ? { failureReason } : {}),
   }, null, 2), 'utf-8');
-  writeFileSync(join(dir, 'workflow.yaml'), JSON.stringify({ name: 'fixture', defaults: {},
+  writeFileSync(runRecordPath(dir, 'workflow.yaml'), JSON.stringify({ name: 'fixture', defaults: {},
     stages: [{ id: 'work', role: 'coder', scope: [], artifact_contract: { version: 1, produces: [], reads: [] } }] }));
   return dir;
 }
@@ -426,7 +427,7 @@ describe('Orchestrator', () => {
   ] satisfies UnitStatus[])('completes a clean read-only bound run with run-root deliverables ($kind)', async unit => {
     const runId = 'read-only-audit';
     const runPath = writeRun(runId, 'complete');
-    writeFileSync(join(runPath, 'report.md'), '# Audit\n\nThe declared inputs passed inspection.\n');
+    writeFileSync(runRecordPath(runPath, 'report.md'), '# Audit\n\nThe declared inputs passed inspection.\n');
     const task = registry.create({
       ...admittedBrief('# Audit\nRead the project without changing it and deliver report.md in the run root.'),
       projectDir: tempDir,
@@ -443,7 +444,7 @@ describe('Orchestrator', () => {
 
     expect(registry.get(task.id)).toMatchObject({ status: 'done', run_id: runId, attempt: 1 });
     expect(registry.get(task.id)?.completing_commit).toBeUndefined();
-    expect(readFileSync(join(runPath, 'report.md'), 'utf8')).toContain('passed inspection');
+    expect(readFileSync(runRecordPath(runPath, 'report.md'), 'utf8')).toContain('passed inspection');
     expect(prefix).not.toHaveBeenCalled();
     expect(recent).not.toHaveBeenCalled();
     expect(dirty).not.toHaveBeenCalled();
@@ -497,7 +498,7 @@ describe('Orchestrator', () => {
     const runPath = writeRun(runId, runStatus, runStatus === 'parked' ? { requestId: 'bound-request', pausedAt: new Date(clock).toISOString() } : undefined);
     if (runStatus === 'parked') addPendingApproval(runId, 'bound-request');
     if (runStatus === 'running') {
-      writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+      writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
       writeSchedulerProcessIdentity(runPath, runId);
     }
     const task = registry.create({
@@ -517,7 +518,7 @@ describe('Orchestrator', () => {
   it.each(['unit-exit', 'queued-retry', 'manual-retry'])('reports a parked recovery without approval at %s', async path => {
     const runId = `recovery-${path}`;
     const runPath = writeRun(runId, 'parked', undefined, 'RECOVERY_FATE_UNKNOWN: consumers may still be alive');
-    const before = readFileSync(join(runPath, 'run.json'), 'utf8');
+    const before = readFileSync(runRecordPath(runPath, 'run.json'), 'utf8');
     const task = registry.create({ brief_text: 'must not replay', projectDir: tempDir,
       status: path === 'unit-exit' ? 'running' : path === 'manual-retry' ? 'stuck' : 'deferred', run_id: runId });
     systemd.states.set(task.systemd_unit, FAILED_UNIT_EXIT);
@@ -532,7 +533,7 @@ describe('Orchestrator', () => {
     advance(120_000);
     await orchestrator.tickOnce();
     expect(registry.get(task.id)?.status).toBe('stuck');
-    expect(readFileSync(join(runPath, 'run.json'), 'utf8')).toBe(before);
+    expect(readFileSync(runRecordPath(runPath, 'run.json'), 'utf8')).toBe(before);
     expect(systemd.runs).toHaveLength(0);
   });
 
@@ -629,7 +630,7 @@ describe('Orchestrator', () => {
     const runId = 'registered-continuation';
     const admitted = admittedBrief('Continue the admitted work.');
     const runPath = writeRun(runId, status);
-    const runJson = join(runPath, 'run.json');
+    const runJson = runRecordPath(runPath, 'run.json');
     writeFileSync(runJson, JSON.stringify({
       ...JSON.parse(readFileSync(runJson, 'utf8')),
       status: status === 'stopped' ? 'failed' : status,
@@ -643,8 +644,8 @@ describe('Orchestrator', () => {
       { id: 'work', role: 'coder', depends_on: ['done'], scope: [], artifact_contract: { version: 1, produces: [], reads: [] } },
     ], runPath, 'Fixture admitted before continuation.'));
     for (const [id, stage] of Object.entries(readRunState(tempDir, runId).stages)) {
-      mkdirSync(join(runPath, 'stages', id), { recursive: true });
-      writeFileSync(join(runPath, 'stages', id, 'status.json'), JSON.stringify(stage));
+      mkdirSync(runRecordPath(runPath, 'stages', id), { recursive: true });
+      writeFileSync(runRecordPath(runPath, 'stages', id, 'status.json'), JSON.stringify(stage));
     }
     if (status === 'stopped') writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')), status, failureReason: 'Cancelled by user' }));
     const before = readFileSync(runJson, 'utf8');
@@ -695,7 +696,7 @@ describe('Orchestrator', () => {
     const runId = 'queued-cancellation';
     const admitted = admittedBrief('Continue the admitted work.');
     const runPath = writeRun(runId, status);
-    const runJson = join(runPath, 'run.json');
+    const runJson = runRecordPath(runPath, 'run.json');
     writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
       taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission }));
     const archived = readFileSync(runJson, 'utf8');
@@ -732,7 +733,7 @@ describe('Orchestrator', () => {
     const runId = 'continuation-probe-race';
     const admitted = admittedBrief('Continue the admitted work.');
     const runPath = writeRun(runId, 'stopped');
-    const runJson = join(runPath, 'run.json');
+    const runJson = runRecordPath(runPath, 'run.json');
     writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
       taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission }));
     const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'cancelled' });
@@ -764,7 +765,7 @@ describe('Orchestrator', () => {
     const parkedId = 'unrelated-approval';
     const admitted = admittedBrief('Continue the admitted work.');
     const runPath = writeRun(runId, 'stopped');
-    const runJson = join(runPath, 'run.json');
+    const runJson = runRecordPath(runPath, 'run.json');
     writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
       taskDescription: admitted.brief_text, briefAdmission: admitted.brief_admission }));
     const task = registry.create({ ...admitted, projectDir: tempDir, run_id: runId, status: 'cancelled' });
@@ -799,14 +800,14 @@ describe('Orchestrator', () => {
     const runId = 'invalid-continuation';
     const admitted = admittedBrief('Continue work.');
     const runPath = writeRun(runId, 'stopped');
-    const runJson = join(runPath, 'run.json');
+    const runJson = runRecordPath(runPath, 'run.json');
     writeFileSync(runJson, JSON.stringify({ ...JSON.parse(readFileSync(runJson, 'utf8')),
       projectDir: kind === 'wrong-project' ? join(tempDir, 'other') : tempDir,
       taskDescription: admitted.brief_text,
       briefAdmission: kind === 'wrong-admission' ? admittedBrief('Other work.').brief_admission : admitted.brief_admission,
     }));
     if (kind === 'live-owner') {
-      writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid));
+      writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid));
       writeSchedulerProcessIdentity(runPath, runId);
     }
     const task = registry.create({ ...admitted, projectDir: tempDir,
@@ -820,7 +821,7 @@ describe('Orchestrator', () => {
   it.each(['running', 'deferred', 'cancelled'])('never automatically resumes a stopped run from a %s task after restart', async status => {
     const runId = 'held-work';
     const runPath = writeRun(runId, 'stopped');
-    const before = readFileSync(join(runPath, 'run.json'), 'utf8');
+    const before = readFileSync(runRecordPath(runPath, 'run.json'), 'utf8');
     const task = registry.create({ ...admittedBrief('Held work.'), projectDir: tempDir,
       run_id: runId, status: status as 'running' | 'deferred' | 'cancelled' });
     registry.update(task.id, { started_at: new Date(clock).toISOString(), defer_kind: 'retry' });
@@ -830,7 +831,7 @@ describe('Orchestrator', () => {
     await orchestrator.tickOnce();
     advance(600_000);
     await orchestrator.tickOnce();
-    expect(readFileSync(join(runPath, 'run.json'), 'utf8')).toBe(before);
+    expect(readFileSync(runRecordPath(runPath, 'run.json'), 'utf8')).toBe(before);
     expect(systemd.runs).toHaveLength(0);
   });
 
@@ -838,7 +839,7 @@ describe('Orchestrator', () => {
     const runId = 'parked-recovery';
     const admitted = admittedBrief('Resume the recovered work.');
     const runPath = writeRun(runId, 'parked');
-    const runJson = join(runPath, 'run.json');
+    const runJson = runRecordPath(runPath, 'run.json');
     updateRunState(tempDir, runId, state => {
       state.taskDescription = admitted.brief_text;
       state.briefAdmission = admitted.brief_admission;
@@ -909,7 +910,7 @@ describe('Orchestrator', () => {
     const runId = 'queued-continuation';
     const admitted = admittedBrief('Continue the admitted work.');
     const runPath = writeRun(runId, status);
-    const runJson = join(runPath, 'run.json');
+    const runJson = runRecordPath(runPath, 'run.json');
     writeFileSync(runJson, JSON.stringify({
       ...JSON.parse(readFileSync(runJson, 'utf8')),
       stages: {},
@@ -1108,7 +1109,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
   it('invalidates the run probe cache before register admission', async () => {
     activeRunsByProject();
     const runPath = writeRun('just-started', 'running');
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(runPath, 'just-started');
     const diskOrchestrator = new Orchestrator({
       registry, systemd, git, cliPath: '/tmp/flowcrew-cli.js',
@@ -1125,7 +1126,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
     const task = registry.create({ brief_text: 'queued task', projectDir: tempDir, status: 'deferred' });
     activeRunsByProject();
     const runPath = writeRun('started-before-drain', 'running');
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(runPath, 'started-before-drain');
     const diskOrchestrator = new Orchestrator({
       registry, systemd, git, cliPath: '/tmp/flowcrew-cli.js',
@@ -1312,7 +1313,7 @@ describe('Orchestrator queue policies (skip-on-overlap / backoff / catch-up)', (
   it('defers a readable running bound run instead of starting a new run (C2)', async () => {
     const runId = 'bound-running';
     const runPath = writeRun(runId, 'running');
-    writeFileSync(join(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
+    writeFileSync(runRecordPath(runPath, 'scheduler.pid'), String(process.pid), 'utf-8');
     writeSchedulerProcessIdentity(runPath, runId);
     const task = registry.create({
       brief_text: 'must not relaunch',

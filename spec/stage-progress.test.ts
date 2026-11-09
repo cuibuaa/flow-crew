@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,7 +30,7 @@ beforeEach(() => {
   rmSync(join(project, 'ready'), { force: true });
   writeFileSync(join(project, 'config', 'agents', 'qa.yaml'), 'name: qa\ndescription: fixture\ntools: []\nprompt: review\n');
   run = createRun(project, 'progress', 'name: progress\nstages: []', [stageId]);
-  writeFileSync(join(run.runDirPath, 'task_brief.md'), '# Review the result\n');
+  writeFileSync(runRecordPath(run.runDirPath, 'task_brief.md'), '# Review the result\n');
   cancel = new AbortController();
   validation = undefined;
 });
@@ -56,7 +57,7 @@ async function startValidation(code: string) {
     role, command: process.execPath, args: ['-e', index === 0 ? code : ''],
     display: `fixture ${role}`,
   }));
-  writeFileSync(join(run.runDirPath, 'validation_baseline.json'), JSON.stringify({
+  writeFileSync(runRecordPath(run.runDirPath, 'validation_baseline.json'), JSON.stringify({
     version: 1, source: 'ship-setup-ready-record', capturedAt: new Date().toISOString(),
     baseline: { version: 1, discovery: { state: 'configured', commands, missingRoles: [] },
       results: commands.map(command => ({ role: command.role, display: command.display, state: 'passed', exitCode: 0,
@@ -74,7 +75,7 @@ async function startValidation(code: string) {
 function monitor() { return new StageWatchdog(project, run.runId, config); }
 
 function savedProgress() {
-  return JSON.parse(readFileSync(join(run.runDirPath, 'stage_watchdog.json'), 'utf8'));
+  return JSON.parse(readFileSync(runRecordPath(run.runDirPath, 'stage_watchdog.json'), 'utf8'));
 }
 
 describe.skipIf(process.platform !== 'linux')('one progress record for engine work and idle cancellation', () => {
@@ -93,7 +94,7 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
     await delay(150);
     await supervisor.tick();
     const lastProgressAt = savedProgress().stageProgress[stageId].lastProgressAt;
-    const signal = join(run.runDirPath, 'signals', `abort_${stageId}.json`);
+    const signal = runRecordPath(run.runDirPath, 'signals', `abort_${stageId}.json`);
     for (const idleMs of [config.pollIntervalMs * 2, config.idleThresholdMs - 1]) {
       vi.spyOn(Date, 'now').mockReturnValue(lastProgressAt + idleMs);
       await supervisor.tick();
@@ -121,7 +122,7 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
       await supervisor.tick();
       expect(savedProgress().stageProgress[stageId].lastProgressAt).toBe(Date.now());
     }
-    expect(existsSync(join(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(false);
+    expect(existsSync(runRecordPath(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(false);
     expect(inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status }).activeCommandCount).toBe(1);
     cancel.abort();
     await validation;
@@ -140,17 +141,17 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
     expect(typeof processWork).toBe('string');
     // A previous engine may have persisted the removed short-bound fields.
     Object.assign(saved.stageProgress[stageId], { processWaiting: true, idleThresholdMs: config.pollIntervalMs * 2 });
-    writeEngineFile(join(run.runDirPath, 'stage_watchdog.json'), JSON.stringify(saved));
+    writeEngineFile(runRecordPath(run.runDirPath, 'stage_watchdog.json'), JSON.stringify(saved));
     vi.spyOn(Date, 'now').mockReturnValue(lastProgressAt + config.pollIntervalMs * 2);
     const restarted = monitor();
     restarted.restoreProgress();
     await restarted.tick();
-    expect(existsSync(join(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(false);
+    expect(existsSync(runRecordPath(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(false);
     expect(savedProgress().stageProgress[stageId]).toMatchObject({ lastProgressAt, processWork,
       idleThresholdMs: config.idleThresholdMs, protectedFromIdleAbort: false });
     vi.spyOn(Date, 'now').mockReturnValue(lastProgressAt + config.idleThresholdMs);
     await restarted.tick();
-    expect(existsSync(join(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(true);
+    expect(existsSync(runRecordPath(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(true);
   });
 
   it('ends finalization that has a closed stream and no new work', async () => {
@@ -158,7 +159,7 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
     const activity = new CommandActivityTracker({ runDir: run.runDirPath, stageId,
       attemptIndex: status.attempts![0].index, attemptStartedAt: status.attempts![0].startedAt });
     activity.close();
-    const output = join(run.runDirPath, 'stages', stageId, 'output.md');
+    const output = runRecordPath(run.runDirPath, 'stages', stageId, 'output.md');
     writeFileSync(output, 'result');
     // Freeze the artifact independently of filesystem timestamp resolution.
     utimesSync(output, 1, 1);
@@ -168,16 +169,16 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
     for (const idleMs of [config.pollIntervalMs * 2, config.idleThresholdMs - 1]) {
       vi.spyOn(Date, 'now').mockReturnValue(lastProgressAt + idleMs);
       await supervisor.tick();
-      expect(existsSync(join(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(false);
+      expect(existsSync(runRecordPath(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(false);
     }
     vi.spyOn(Date, 'now').mockReturnValue(lastProgressAt + config.idleThresholdMs);
     await supervisor.tick();
-    expect(existsSync(join(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(true);
+    expect(existsSync(runRecordPath(run.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(true);
   });
 
   it('does not make an unchanged terminal artifact immune to idle detection', () => {
     const status = startAttempt();
-    writeFileSync(join(run.runDirPath, 'stages', stageId, 'output.md'), 'result');
+    writeFileSync(runRecordPath(run.runDirPath, 'stages', stageId, 'output.md'), 'result');
     const facts = inspectStageExecutionFacts({ runDir: run.runDirPath, stageId, status });
     expect(facts.outputObserved).toBe(true);
     expect(facts.protectedFromIdleAbort).toBe(false);
@@ -194,8 +195,8 @@ describe.skipIf(process.platform !== 'linux')('one progress record for engine wo
       if (opts.stageId === '_summary') return fixtureResult({ output: 'summary', exitCode: 0, duration_ms: 0 }, opts);
       calls++;
       if (calls > 1) return fixtureResult({ output: 'unexpected repeat', exitCode: 0, duration_ms: 0 }, opts);
-      mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
-      writeEngineFile(join(opts.runDir, 'signals', `abort_${stageId}.json`), JSON.stringify({
+      mkdirSync(runRecordPath(opts.runDir, 'signals'), { recursive: true });
+      writeEngineFile(runRecordPath(opts.runDir, 'signals', `abort_${stageId}.json`), JSON.stringify({
         version: 1, stageId, attemptIndex: opts.attemptIndex, source: 'watchdog',
         timestamp: new Date().toISOString(), reason: 'Verified idle local command',
       }));

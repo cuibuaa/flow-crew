@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { fixtureResult, declaredDispatch } from './test-support/declared-dispatch.js';
 import { gateArtifactContract, planArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -56,11 +57,11 @@ describe('planning and reality declaration admission', () => {
       async run(_prompt: string, role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
           planAttempts += 1;
-          const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')) as ReturnType<typeof extractBriefCriteria>;
+          const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')) as ReturnType<typeof extractBriefCriteria>;
           expect(criteria.criteria).toHaveLength(12);
           const refs = criteria.criteria.map((criterion) => criterion.id);
           for (const ref of refs) expect(role.prompt).toContain(ref);
-          write(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringifyYaml({ stages: [
+          write(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringifyYaml({ stages: [
             {dynamic_dispatch: false,  id: 'work', role: 'coder', depends_on: [], dependency_reasons: {}, scope: ['docs/work.md'],
               prompt_template: 'Write docs/work.md.', criterion_refs: refs,
               artifact_contract:{version:1,produces:[{id:'work',root:'project',path:'docs/work.md'}],reads:[]} },
@@ -69,7 +70,7 @@ describe('planning and reality declaration admission', () => {
             {dynamic_dispatch: false, id: 'repair', role: 'coder', depends_on: ['gate'], dependency_reasons: { gate: 'Correct rejected work.' },
               retry_to: ['gate'], scope: ['docs/work.md'], prompt_template: 'Correct docs/work.md using the gate rejection.', criterion_refs: [] },
           ] }), { gate: gateArtifactContract('gate') }));
-          write(join(opts.runDir, 'reality_checks.md'), [
+          write(stageWorkPath(opts.runDir, 'reality_checks.md'), [
             '## Reality checks', '```yaml', 'checks:', '  - name: work artifact',
             '    reads: [{id: work, root: project, path: docs/work.md, source: {kind: stage, stage: work, artifact: work}}]',
             '    type: file-exists-nonempty', '    params: { paths: [docs/work.md] }', '```',
@@ -83,7 +84,7 @@ describe('planning and reality declaration admission', () => {
         }
         if (opts.stageId === 'gate') {
           const criteria = extractBriefCriteria(brief).criteria;
-          write(join(opts.runDir, 'fixture_verdict_gate.json'), JSON.stringify({ pass: true,
+          write(stageWorkPath(opts.runDir, 'fixture_verdict_gate.json'), JSON.stringify({ pass: true,
             criteria: Object.fromEntries(criteria.map((criterion) => [criterion.id,
               { status: 'pass', evidence: 'the work artifact exists' }])),
           }));
@@ -98,8 +99,8 @@ describe('planning and reality declaration admission', () => {
     const result = await runWorkflow(workflow, stringifyYaml(workflow), project, adapter,
       new Map(), undefined, agentsDir, undefined, brief, true);
     const runPath = runDir(project, result.runId);
-    const admission = JSON.parse(readFileSync(join(runPath, 'dispatch_admission.json'), 'utf8')) as { pass: boolean; errors: string[] };
-    const events = readFileSync(join(runPath, 'events.jsonl'), 'utf8');
+    const admission = JSON.parse(readFileSync(runRecordPath(runPath, 'dispatch_admission.json'), 'utf8')) as { pass: boolean; errors: string[] };
+    const events = readFileSync(runRecordPath(runPath, 'events.jsonl'), 'utf8');
     expect({ planAttempts, admitted: admission.pass, errors: admission.errors,
       retries: events.match(/"type":"plan_dispatch_retry"/g)?.length ?? 0,
       operatorGuidance: events.match(/"source":"operator","type":"guidance_written"/g)?.length ?? 0,

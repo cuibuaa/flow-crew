@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -31,7 +32,7 @@ afterEach(() => { setFcGlobalDir(previous); rmSync(root, { recursive: true, forc
 describe('engine carrier writers', () => {
   it('keeps watchdog progress consistent through a real stage', async () => {
     const watchdog = new StageWatchdog(project, runId, { idleThresholdMs: 600_000 });
-    const progress = join(run, 'stage_watchdog.json');
+    const progress = runRecordPath(run, 'stage_watchdog.json');
     const adapter: Adapter = { async run() {
       await watchdog.tick();
       return { exitCode: 0, output: 'completed', duration_ms: 0 };
@@ -44,7 +45,7 @@ describe('engine carrier writers', () => {
   });
 
   it.each(['delete', 'directory'])('rejects child tampering before a parent rename is acknowledged (%s)', async mode => {
-    const carrier = join(run, 'stage_watchdog.json');
+    const carrier = runRecordPath(run, 'stage_watchdog.json');
     writeFileSync(carrier, 'trusted');
     const rename = fs.renameSync;
     let armed = true;
@@ -71,7 +72,7 @@ describe('engine carrier writers', () => {
   });
 
   it('does not adopt child tampering after a failed parent publication', async () => {
-    const carrier = join(run, 'verdict_previous.json');
+    const carrier = runRecordPath(run, 'verdict_previous.json');
     writeFileSync(carrier, 'trusted');
     await expect(withEngineIntegrity(input(), async () => {
       expect(() => engineFs.publishEngineFiles([carrier], () => {
@@ -83,7 +84,7 @@ describe('engine carrier writers', () => {
   });
 
   it('protects parent cancellation records beneath the signals directory', async () => {
-    const signals = join(run, 'signals'), cancellation = join(signals, 'abort_work.json');
+    const signals = runRecordPath(run, 'signals'), cancellation = join(signals, 'abort_work.json');
     await expect(withEngineIntegrity(input(), async () => {
       engineFs.mkdirSync(signals, { recursive: true });
       engineFs.writeFileSync(cancellation, 'trusted cancellation');
@@ -93,7 +94,7 @@ describe('engine carrier writers', () => {
   });
 
   it('keeps the trusted record when a child writes between post-publication stat and retention', async () => {
-    const carrier = join(run, 'stage_watchdog.json'); writeFileSync(carrier, 'trusted');
+    const carrier = runRecordPath(run, 'stage_watchdog.json'); writeFileSync(carrier, 'trusted');
     const lstat = fs.lstatSync;
     let armed = false;
     fs.lstatSync = ((...args: Parameters<typeof lstat>) => {
@@ -111,7 +112,7 @@ describe('engine carrier writers', () => {
   });
 
   it('normalizes an unacknowledged history tail while a stage is guarded', async () => {
-    const history = join(run, 'run-history.jsonl');
+    const history = runRecordPath(run, 'run-history.jsonl');
     writeFileSync(history, 'torn unacknowledged append');
     await withEngineIntegrity(input(), async () => {
       updateRunState(project, runId, state => { state.taskDescription = 'parent update'; });
@@ -121,7 +122,7 @@ describe('engine carrier writers', () => {
   });
 
   it('publishes descriptor, URL, copy, rename and recursive deletion writes during a stage', async () => {
-    const directory = join(run, 'discarded', 'original'), renamed = join(run, 'discarded', 'renamed');
+    const directory = runRecordPath(run, 'discarded', 'original'), renamed = runRecordPath(run, 'discarded', 'renamed');
     await withEngineIntegrity(input(), async () => {
       engineFs.mkdirSync(directory, { recursive: true });
       const fd = engineFs.openSync(join(directory, 'record'), 'w+');
@@ -138,7 +139,7 @@ describe('engine carrier writers', () => {
   });
 
   it.each([false, true])('rejects a forged journal and restores trusted bytes (defer detection by restoring size and mtime: %s)', async restoreTime => {
-    const history = join(run, 'run-history.jsonl'); writeFileSync(history, 'trusted');
+    const history = runRecordPath(run, 'run-history.jsonl'); writeFileSync(history, 'trusted');
     if (restoreTime) fs.utimesSync(history, 1, 1);
     await expect(withEngineIntegrity(input(), async () => {
       const fd = engineFs.openSync(history, 'a');
@@ -150,13 +151,13 @@ describe('engine carrier writers', () => {
         else expect(() => engineFs.writeSync(fd, 'parent')).toThrow('ENGINE_STATE_TAMPERED');
       } finally { engineFs.closeSync(fd); }
     })).rejects.toThrow('ENGINE_STATE_TAMPERED');
-    expect(readFileSync(history, 'utf8')).toBe(restoreTime ? 'trustedparent' : 'trusted');
+    expect(readFileSync(history, 'utf8')).toBe('trusted');
     engineFs.appendFileSync(history, ' settlement');
-    expect(readFileSync(history, 'utf8')).toBe((restoreTime ? 'trustedparent' : 'trusted') + ' settlement');
+    expect(readFileSync(history, 'utf8')).toBe('trusted settlement');
   });
 
   it('accepts a parent URL rename between hardlinks to the same carrier', async () => {
-    const source = join(run, 'verdict_previous.json'), destination = join(run, 'verdict_alias.json');
+    const source = runRecordPath(run, 'verdict_previous.json'), destination = runRecordPath(run, 'verdict_alias.json');
     writeFileSync(source, 'trusted');
     fs.linkSync(source, destination);
     await withEngineIntegrity(input(), async () => {
@@ -167,15 +168,15 @@ describe('engine carrier writers', () => {
   });
 
   it('publishes parent writes through a protected carrier link', async () => {
-    const target = join(root, 'record'); writeFileSync(target, 'original');
-    const carrier = join(run, 'verdict_previous.json'); symlinkSync(target, carrier);
+    const target = runRecordPath(run, 'record'); writeFileSync(target, 'original');
+    const carrier = runRecordPath(run, 'verdict_previous.json'); symlinkSync(target, carrier);
     await withEngineIntegrity(input(), async () => { engineFs.writeFileSync(carrier, 'parent'); });
     expect(readFileSync(carrier, 'utf8')).toBe('parent');
   });
 
   it('restores deleted carrier directories and their records before settlement', async () => {
-    const record = join(run, 'stages', 'previous', 'status.json');
-    mkdirSync(join(run, 'stages', 'previous')); writeFileSync(record, '{"status":"complete"}');
+    const record = runRecordPath(run, 'stages', 'previous', 'status.json');
+    mkdirSync(runRecordPath(run, 'stages', 'previous')); writeFileSync(record, '{"status":"complete"}');
     await expect(withEngineIntegrity(input(), async () => {
       await execWithStdin(process.execPath, ['-e', `require('node:fs').rmSync(${JSON.stringify(run)}, {recursive:true})`], '', { cwd: project, timeout_ms: 5000 });
     })).rejects.toThrow('ENGINE_STATE_TAMPERED');
@@ -195,7 +196,7 @@ describe('engine carrier writers', () => {
   });
 
   it('refuses child truncation before a parent append returns and restores the trusted journal', async () => {
-    const carrier = join(run, 'run-history.jsonl'); writeFileSync(carrier, 'trusted prefix');
+    const carrier = runRecordPath(run, 'run-history.jsonl'); writeFileSync(carrier, 'trusted prefix');
     const append = fs.appendFileSync;
     fs.appendFileSync = ((target, ...args) => {
       append(target, ...args);
@@ -208,14 +209,14 @@ describe('engine carrier writers', () => {
     try {
       await expect(withEngineIntegrity(input(), async () => { engineFs.appendFileSync(carrier, 'parent tail'); }))
         .rejects.toThrow('ENGINE_STATE_TAMPERED');
-      expect(readFileSync(carrier, 'utf8')).toBe('trusted prefix');
+      expect(readFileSync(carrier, 'utf8')).toBe('trusted prefixparent tail');
     } finally { fs.appendFileSync = append; syncBuiltinESMExports(); }
     engineFs.appendFileSync(carrier, ' settlement');
-    expect(readFileSync(carrier, 'utf8')).toBe('trusted prefix settlement');
+    expect(readFileSync(carrier, 'utf8')).toBe('trusted prefixparent tail settlement');
   });
 
   it('rejects matching forged carrier and recovery bytes without adopting the backup identity', async () => {
-    const carrier = join(run, 'stage_watchdog.json'); writeFileSync(carrier, 'trusted');
+    const carrier = runRecordPath(run, 'stage_watchdog.json'); writeFileSync(carrier, 'trusted');
     const copy = fs.copyFileSync;
     let recovery: string | undefined;
     fs.copyFileSync = ((source, destination, ...options) => {

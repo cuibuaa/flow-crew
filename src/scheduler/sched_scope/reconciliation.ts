@@ -1,8 +1,8 @@
+import { runRecordPath } from '../../run-layout.js';
 // Project the settlement content decision into the durable audit and stage summary.
 import { publishJsonCreateOnly } from '../../canonical-json.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
 import { attachStageConstraintAudit, readRunState, readStageStatus, runDir, writeStageStatus, isRunningStageStatus } from '../../store.js';
-import { join } from 'node:path';
 import { normalizedProjectPath } from '../sched_admission/scope-services.js';
 import { type ScopeBatchContext } from './scope-batch.js';
 import { settleProjectWrites } from './write-enforcement.js';
@@ -31,7 +31,7 @@ export function createScopeReconciler() {
     writeStageStatus(input.projectDir, input.runId, input.stage.id, status);
     const root = runDir(input.projectDir, input.runId);
     const path = `stages/${input.stage.id}/constraint_audit_attempt_${attempt.index}.json`;
-    publishJsonCreateOnly(join(root, path), { version: 1, stageId: input.stage.id, attemptIndex: attempt.index,
+    publishJsonCreateOnly(runRecordPath(root, path), { version: 1, stageId: input.stage.id, attemptIndex: attempt.index,
       declaredScope, ...enforcement,
       writes: attempt.writes ?? [], writeAttribution: attempt.writeAttribution ?? 'unknown',
       timeout: attempt.timeout, completedAt: new Date().toISOString() });

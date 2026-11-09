@@ -1,6 +1,7 @@
+import { runRecordPath, stageWorkPath } from './run-layout.js';
 import { atomicWrite, mkdirSync, rmSync } from './engine-fs.js';
 import { readFileSync, readdirSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { join } from 'node:path';
 import type { RunResult } from './adapters/base.js';
 import { isRetryableAdapterFailure } from './adapters/failure.js';
 
@@ -22,7 +23,7 @@ export function isSessionUuid(value: unknown): value is string {
 }
 
 function sessionPath(runDir: string, stageId: string): string {
-  return join(runDir, 'stages', stageId, 'session.json');
+  return runRecordPath(runDir, 'stages', stageId, 'session.json');
 }
 
 export function readSession(runDir: string, stageId: string, adapter?: string): SessionMetadata | undefined {
@@ -39,7 +40,7 @@ export function readSession(runDir: string, stageId: string, adapter?: string): 
 }
 
 export function writeSession(runDir: string, stageId: string, metadata: SessionMetadata): void {
-  const dir = join(runDir, 'stages', stageId);
+  const dir = runRecordPath(runDir, 'stages', stageId);
   mkdirSync(dir, { recursive: true });
   // The resume identity must survive a restart before it is reported as saved.
   atomicWrite(sessionPath(runDir, stageId), JSON.stringify(metadata, null, 2) + '\n', { durability: 'durable' });
@@ -77,37 +78,26 @@ export function settleSession(
 
 export function stageSessionHome(runDir: string, stageId: string, adapter = 'codex'): string {
   if (!ADAPTER_NAMESPACE.test(adapter)) throw new Error('Session home requires an adapter namespace');
-  return join(runDir, 'stages', stageId, `${adapter}_home`);
+  return stageWorkPath(runDir, 'stages', stageId, 'homes', adapter);
 }
 
-export function isSessionHomeName(name: string): boolean {
-  return /_home$/i.test(name) && ADAPTER_NAMESPACE.test(name.slice(0, -5));
-}
-
-/** A stage can change adapters between attempts. Retire every native home at
- * the lifecycle boundary, independently of its latest session metadata. */
+/** Every home is below this stage's work tree; directory spelling grants nothing. */
 export function finalizeStageSessions(runDir: string, stageId: string): void {
-  const stageDir = join(runDir, 'stages', stageId);
-  try {
-    for (const name of readdirSync(stageDir)) {
-      if (isSessionHomeName(name)) finalizeSessionHome(join(stageDir, name), 0);
-    }
-  } catch { /* best-effort */ }
+  const homes = stageWorkPath(runDir, 'stages', stageId, 'homes');
+  try { for (const name of readdirSync(homes)) finalizeSessionHome(join(homes, name), 0, false, { runDir, stageId, adapter: name }); } catch { /* best effort */ }
 }
 
 /** Native homes are transient on success unless retained for an admitted
  * continuation. Only metadata owned by this home is retired with it.
  * Failure homes remain credential-free for diagnosis; completed
  * SQLite write-ahead logs can be discarded after the owned process exits. */
-export function finalizeSessionHome(home: string, exitCode: number, preserve = false): void {
+export function finalizeSessionHome(home: string, exitCode: number, preserve = false, session?: { runDir: string; stageId: string; adapter: string }): void {
   if (exitCode === 0) {
     if (!preserve) {
       try {
         rmSync(home, { recursive: true, force: true });
-        const stageDir = dirname(home);
-        const adapter = basename(home).slice(0, -5);
-        if (isSessionHomeName(basename(home)) && readSession(dirname(dirname(stageDir)), basename(stageDir), adapter)) {
-          rmSync(join(stageDir, 'session.json'), { force: true });
+        if (session && readSession(session.runDir, session.stageId, session.adapter)) {
+          rmSync(runRecordPath(session.runDir, 'stages', session.stageId, 'session.json'), { force: true });
         }
       } catch { /* best-effort */ }
     }

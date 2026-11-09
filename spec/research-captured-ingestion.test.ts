@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -39,13 +40,13 @@ beforeEach(() => {
   state.stages[gate.id] = { status: 'complete', retries: 0, attempts: [{ index: 1, status: 'complete', disposition: 'repaired', startedAt: new Date(0).toISOString(), completedAt: new Date(1).toISOString(), exitCode: 0 }] };
   beginResearchInputGeneration(project, state);
   writeRunState(project, runId, state);
-  writeFileSync(join(directory, `verdict_${gate.id}.json`), JSON.stringify({ pass: true, reason: 'Independent review agrees.' }));
+  writeFileSync(runRecordPath(directory, `verdict_${gate.id}.json`), JSON.stringify({ pass: true, reason: 'Independent review agrees.' }));
 });
 afterEach(() => {
   setFcGlobalDir(previousStore);
   rmSync(root, { recursive: true, force: true });
 });
-const read = (file: string) => JSON.parse(readFileSync(join(directory, file), 'utf8'));
+const read = (file: string) => JSON.parse(readFileSync(runRecordPath(directory, file), 'utf8'));
 function capture(value: object) {
   writeFileSync(join(project, resultFile), JSON.stringify(value));
   return captureResearchGateCandidate(project, directory, gate.id);
@@ -59,8 +60,8 @@ async function advance() {
 describe('captured research evidence is the ingestion source', () => {
   it.each([false, true])('banks the exact repaired-gate candidate after an old producer overwrites the latest result (legacy snapshot=%s)', async legacy => {
     const old = { label: 'measurement-old', outcome: 'measured', result: 0.1 };
-    writeFileSync(join(directory, 'research_journal.json'), JSON.stringify({ rounds: [old] }));
-    writeFileSync(join(directory, 'research_round_1_consumed.json'), JSON.stringify(old));
+    writeFileSync(runRecordPath(directory, 'research_journal.json'), JSON.stringify({ rounds: [old] }));
+    writeFileSync(runRecordPath(directory, 'research_round_1_consumed.json'), JSON.stringify(old));
     const measured = { label: 'measurement-new', result: 0.2, result_std: 0.01, admissible: true, evidence: 'artifacts/new-evidence.json' };
     capture(measured);
     if (legacy) {
@@ -123,7 +124,7 @@ describe('captured research evidence is the ingestion source', () => {
 
   it('records why a captured measurement was excluded by unsettled gates', async () => {
     capture({ label: 'unaccepted-measurement', result: 0.2, admissible: true });
-    writeFileSync(join(directory, `verdict_${gate.id}.json`), JSON.stringify({ pass: false, reason: 'Measurement did not reproduce.' }));
+    writeFileSync(runRecordPath(directory, `verdict_${gate.id}.json`), JSON.stringify({ pass: false, reason: 'Measurement did not reproduce.' }));
     await advance();
     expect(readResearchGateCandidate(directory, gate.id)?.settlement).toMatchObject({ disposition: 'rejected', reason: expect.stringContaining('review_new') });
     expect(readRunEvents(project, runId).some(event => event.type === 'research_gate_candidate_settled' && event.detail?.includes('rejected'))).toBe(true);

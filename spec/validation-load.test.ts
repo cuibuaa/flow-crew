@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -91,7 +92,7 @@ describe('host load is telemetry, never a command judgment', () => {
     const adapter: Adapter = { async run(_prompt, _role, opts) {
       calls.push(opts.stageId);
       if (opts.stageId === 'review') {
-        const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+        const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
         return { output: JSON.stringify({ pass: true, reason: 'Independent criteria satisfied; validation unverified if any command failed', audit_findings: { version: 1, findings: [] },
           criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: 'pass', evidence: 'Read value' }])) }), exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' };
       }
@@ -115,7 +116,7 @@ describe('host load is telemetry, never a command judgment', () => {
     expect(fact.regressions ?? []).toEqual([]);
     expect(fact.pass).toBe(exitCode === 0); expect(fact.delta.find(entry => entry.role === 'test')?.state).toBe(exitCode === 0 ? 'verified' : 'unverified');
     expect(fact.executions[0].commands[0]).toMatchObject({ exitCode, state: exitCode === 0 ? 'passed' : 'failed', measurement, load: load() });
-    expect(readFileSync(join(directory, 'iteration_log.md'), 'utf8')).toContain(`Gate verdict: PASS; validation: test: ${measurement.replaceAll('_', ' ')}`);
+    expect(readFileSync(runRecordPath(directory, 'iteration_log.md'), 'utf8')).toContain(`Gate verdict: PASS; validation: test: ${measurement.replaceAll('_', ' ')}`);
     const summary = renderRunSummary(project, directory, final);
     expect(summary).toContain(exitCode === 0 ? 'passed (verified)' : 'failed (unverified)');
     const watched = pollWatch(createWatchState(), { runsRoot: resolve(directory, '..'), candidateRunIds: () => [final.runId] });

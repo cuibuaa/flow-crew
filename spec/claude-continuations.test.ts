@@ -1,3 +1,5 @@
+import { stageSessionHome } from '../src/adapter-session.js';
+import { runRecordPath } from '../src/run-layout.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -76,8 +78,8 @@ describe('Claude cold same-attempt continuations (G03)', () => {
   it.each(['correction', 'guidance', 'interrupt'] as const)('starts fresh after %s with original duties and structured predecessor evidence', async mode => {
     process.env.FC_CLAUDE_CONTINUATION_MODE = mode;
     const created = createRun(project, 'fixture', 'name: fixture\nstages:\n  - id: work\n    role: coder\n', ['work']);
-    mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
-    writeFileSync(join(created.runDirPath, 'task_brief.md'), '# Synthetic session continuation\n');
+    mkdirSync(runRecordPath(created.runDirPath, 'signals'), { recursive: true });
+    writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '# Synthetic session continuation\n');
     let injected = false;
     let injectionError: unknown;
     class ObservedClaudeAdapter extends ClaudeAdapter {
@@ -121,8 +123,8 @@ describe('Claude cold same-attempt continuations (G03)', () => {
     expect(status.status).toBe('complete');
     expect(status.attempts).toHaveLength(1);
     expect(calls.map(call => call.home)).toEqual([
-      join(root, 'source'),
-      join(root, 'source'),
+      stageSessionHome(created.runDirPath, 'work', 'claude'),
+      stageSessionHome(created.runDirPath, 'work', 'claude'),
     ]);
     const inputs = readRunStateView(project, created.runId, {
       includePromptText: true,
@@ -134,7 +136,7 @@ describe('Claude cold same-attempt continuations (G03)', () => {
     expect(inputs[1].record?.userPrompt).toBe(calls[1].stdin);
     expect(inputs.every(input => input.integrity === 'verified')).toBe(true);
     if (mode !== 'correction') {
-      const events = readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf8').trim().split('\n')
+      const events = readFileSync(runRecordPath(created.runDirPath, 'events.jsonl'), 'utf8').trim().split('\n')
         .map(line => JSON.parse(line) as { type: string; boundary?: string; delivered?: boolean });
       expect(events.some(event => event.type === 'stage_command_started')).toBe(false);
       expect(events.filter(event => event.type === 'guidance_delivery_checked' && event.delivered)).toEqual([

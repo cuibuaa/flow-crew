@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import { errorMessage, within } from './source_services/cli-inputs.js';
 import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
@@ -355,7 +356,7 @@ function runDirectory(globalRoot: string, runId: string): string {
 }
 
 function readRunState(runDir: string, fs: LandFileSystem): StoreState {
-  const statePath = join(runDir, 'run.json');
+  const statePath = runRecordPath(runDir, 'run.json');
   if (!fs.exists(statePath)) throw new Error(`run state does not exist: ${statePath}`);
   let parsed: unknown;
   try {
@@ -416,7 +417,7 @@ function terminalArtifacts(
     const snapshots = state.terminalArtifact === basename(path)
       ? recordedTerminalArtifactSnapshotNames(state.terminalArtifact)
       : [terminalArtifactSnapshotName(path)];
-    const snapshotPath = snapshots.map((name) => join(runDir, name)).find((candidate) => fs.exists(candidate)) ?? join(runDir, snapshots[0]);
+    const snapshotPath = snapshots.map((name) => runRecordPath(runDir, name)).find((candidate) => fs.exists(candidate)) ?? runRecordPath(runDir, snapshots[0]);
     const project = safeExistingPath(projectDir, projectPath, fs);
     const snapshot = safeExistingPath(runDir, snapshotPath, fs);
     const reasons = [project.reason, snapshot.reason].filter((item): item is string => Boolean(item));

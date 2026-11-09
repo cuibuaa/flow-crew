@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { cancelRunStateAtPath } from './scheduler/sched_policy/run-completion.js';
 import { readFileSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
@@ -451,7 +452,7 @@ export class RunCancellationCoordinator {
     if (latestRun) {
       try {
         schedulerPid = parseSchedulerPidMarker(
-          readFileSync(join(latestRun.runPath, 'scheduler.pid'), 'utf-8'),
+          readFileSync(runRecordPath(latestRun.runPath, 'scheduler.pid'), 'utf-8'),
         );
       } catch { /* scheduler has not claimed the run, or already cleaned up */ }
     }
@@ -518,7 +519,7 @@ export class RunCancellationCoordinator {
       if (!isAbsolute(runIdOrPath)) requireSafeRunId(runIdOrPath);
       const identity = resolveRunIdentity(isAbsolute(runIdOrPath) ? resolve(runIdOrPath) : join(this.runsDir, runIdOrPath), isAbsolute(runIdOrPath) ? undefined : this.runsDir);
       const runPath = identity.directory;
-      const state = JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8')) as StoreState;
+      const state = JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8')) as StoreState;
       if (!state || typeof state.projectDir !== 'string' || typeof state.status !== 'string') return undefined;
       const status = resolveRunStatus(state.status);
       if (status.kind === 'known') state.status = status.status;

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -56,18 +57,18 @@ function seed(research: boolean) {
     state.stages.new_measurement = { status: 'complete', retries: 0 };
   });
   for (const gate of ['review_alpha', 'review_beta', 'recurring_gate', 'new_review']) {
-    writeFileSync(join(directory, `verdict_${gate}.json`), JSON.stringify({ pass: true, reason: 'Synthetic independent review.' }));
+    writeFileSync(runRecordPath(directory, `verdict_${gate}.json`), JSON.stringify({ pass: true, reason: 'Synthetic independent review.' }));
   }
   mkdirSync(join(project, 'artifacts/research'), { recursive: true });
   const rounds = ['alpha', 'beta'].map((label, index) => ({ label: `measurement-${label}`, result: (index + 1) / 10 }));
-  writeFileSync(join(directory, 'research_journal.json'), JSON.stringify({ rounds }));
+  writeFileSync(runRecordPath(directory, 'research_journal.json'), JSON.stringify({ rounds }));
   rounds.forEach((round, index) => {
     writeFileSync(join(project, resultPath), JSON.stringify(round));
     if (research) {
       const candidate = captureResearchGateCandidate(project, directory, `review_${index ? 'beta' : 'alpha'}`);
       settleResearchGateCandidate(project, directory, candidate, 'ingested', 'Synthetic reviewed outcome ingested.');
     }
-    writeFileSync(join(directory, `research_round_${index + 1}_consumed.json`), JSON.stringify(round));
+    writeFileSync(runRecordPath(directory, `research_round_${index + 1}_consumed.json`), JSON.stringify(round));
   });
   // A downstream gate can recapture consumed beta without owning a new round.
   if (research) captureResearchGateCandidate(project, directory, 'recurring_gate');
@@ -92,7 +93,7 @@ describe('research round identity across outer iteration resets', () => {
     expect(prepared.state.stageEvidence).toEqual(expect.arrayContaining([
       expect.objectContaining({ stageId: 'new_measurement', iteration: 2 }),
     ]));
-    expect(existsSync(join(directory, 'verdict_new_review.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'verdict_new_review.json'))).toBe(false);
     // Use the real verdict reader, bypassing validation-delta receipts only:
     // the reset must keep each retained gate's own authored verdict available.
     const ready = createReadyFinder({
@@ -107,8 +108,8 @@ describe('research round identity across outer iteration resets', () => {
   it.each(['journal', 'consumed'] as const)('derives retained work from the %s record rather than completion alone', async record => {
     seed(true);
     if (record === 'journal') {
-      for (const index of [1, 2]) unlinkSync(join(directory, `research_round_${index}_consumed.json`));
-    } else unlinkSync(join(directory, 'research_journal.json'));
+      for (const index of [1, 2]) unlinkSync(runRecordPath(directory, `research_round_${index}_consumed.json`));
+    } else unlinkSync(runRecordPath(directory, 'research_journal.json'));
     const prepared = await reset();
     expect(prepared.state.stages.round_beta.status).toBe('complete');
     for (const id of ['recurring_check', 'recurring_gate', 'recurring_input']) expect(prepared.state.stages[id].status).toBe('pending');
@@ -123,7 +124,7 @@ describe('research round identity across outer iteration resets', () => {
     expect(prepared.state.stages.round_beta.status).toBe('complete');
     expect(prepared.state.stages.recurring_input.status).toBe('pending');
     expect(prepared.state.stages.review_beta.status).toBe('pending');
-    expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'verdict_review_beta.json'))).toBe(false);
     const ready = createReadyFinder({ loadGateContract: () => null,
       readGateEvaluation: (dir, id, run, contract) => readGateEvaluation(dir, id, run, contract, false),
     })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
@@ -133,13 +134,13 @@ describe('research round identity across outer iteration resets', () => {
 
   it('remeasures a round whose own verdict failed even when its capture was ingested', async () => {
     seed(true);
-    writeFileSync(join(directory, 'verdict_review_beta.json'), JSON.stringify({ pass: false, reason: 'Review failed.' }));
+    writeFileSync(runRecordPath(directory, 'verdict_review_beta.json'), JSON.stringify({ pass: false, reason: 'Review failed.' }));
     const prepared = await reset();
     expect(prepared.kind).toBe('ready');
     expect(prepared.state.stages.round_alpha.status).toBe('complete');
     expect(prepared.state.stages.round_beta.status).toBe('pending');
     expect(prepared.state.stages.review_beta.status).toBe('pending');
-    expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'verdict_review_beta.json'))).toBe(false);
     const ready = createReadyFinder({ loadGateContract: () => null,
       readGateEvaluation: (dir, id, run, contract) => readGateEvaluation(dir, id, run, contract, false),
     })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
@@ -148,8 +149,8 @@ describe('research round identity across outer iteration resets', () => {
 
   it.each(['pending', 'rejected'] as const)('remeasures a round whose passing gate captured a consumed fallback (%s)', async settlement => {
     seed(true);
-    writeFileSync(join(directory, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'measurement-alpha', result: 0.1 }] }));
-    unlinkSync(join(directory, 'research_round_2_consumed.json'));
+    writeFileSync(runRecordPath(directory, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'measurement-alpha', result: 0.1 }] }));
+    unlinkSync(runRecordPath(directory, 'research_round_2_consumed.json'));
     unlinkSync(join(project, resultPath));
     const fallback = captureResearchGateCandidate(project, directory, 'review_beta');
     expect(fallback.source).toBe('research_round_1_consumed.json');
@@ -162,7 +163,7 @@ describe('research round identity across outer iteration resets', () => {
     expect(prepared.state.stages.round_alpha.status).toBe('complete');
     expect(prepared.state.stages.round_beta.status).toBe('pending');
     expect(prepared.state.stages.review_beta.status).toBe('pending');
-    expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'verdict_review_beta.json'))).toBe(false);
     const ready = createReadyFinder({ loadGateContract: () => null,
       readGateEvaluation: (dir, id, run, contract) => readGateEvaluation(dir, id, run, contract, false),
     })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
@@ -171,7 +172,7 @@ describe('research round identity across outer iteration resets', () => {
 
   it.each(['{broken', '{}', '{"rounds":null}', 'null'])('continues iteration setup with a corrupt journal: %s', async journal => {
     seed(true);
-    writeFileSync(join(directory, 'research_journal.json'), journal);
+    writeFileSync(runRecordPath(directory, 'research_journal.json'), journal);
     const prepared = await reset();
     expect(prepared.kind).toBe('ready');
     expect(prepared.state.status).toBe('running');
@@ -184,15 +185,15 @@ describe('research round identity across outer iteration resets', () => {
     seed(true);
     // Alpha was consumed; beta passed its own gate but an independent gate failed.
     const alpha = { label: 'measurement-alpha', result: 0.1 };
-    writeFileSync(join(directory, 'research_journal.json'), JSON.stringify({ rounds: [alpha] }));
-    unlinkSync(join(directory, 'research_round_2_consumed.json'));
+    writeFileSync(runRecordPath(directory, 'research_journal.json'), JSON.stringify({ rounds: [alpha] }));
+    unlinkSync(runRecordPath(directory, 'research_round_2_consumed.json'));
     // A prior consumed beta is not the capture rejected by this iteration.
     writeFileSync(join(project, resultPath), JSON.stringify({ label: 'measurement-beta', result: 0.2 }));
     captureResearchGateCandidate(project, directory, 'review_beta');
     const otherGate = StageConfigSchema.parse({ id: 'other_review', role: 'qa', is_gate: true });
     const active = [...stages, otherGate];
     updateRunState(project, runId, state => { state.stages.other_review = { status: 'complete', retries: 0 }; });
-    writeFileSync(join(directory, 'verdict_other_review.json'), JSON.stringify({ pass: false, reason: 'Independent check failed.' }));
+    writeFileSync(runRecordPath(directory, 'verdict_other_review.json'), JSON.stringify({ pass: false, reason: 'Independent check failed.' }));
     const advance = () => advanceSettledResearch(readRunState(project, runId), active, stages, readRunState(project, runId).currentIteration!, [], 0, 1, 5,
       new Set(), project, runId, directory,
       { name: 'research-reexec', description: '', defaults: {}, stages: active }, new ScriptedAdapter({}),
@@ -203,7 +204,7 @@ describe('research round identity across outer iteration resets', () => {
     expect(prepared.state.stages.round_alpha.status).toBe('complete');
     expect(prepared.state.stages.round_beta.status).toBe('pending');
     expect(prepared.state.stages.review_beta.status).toBe('pending');
-    expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'verdict_review_beta.json'))).toBe(false);
     const ready = createReadyFinder({ loadGateContract: () => null,
       readGateEvaluation: (dir, id, run, contract) => readGateEvaluation(dir, id, run, contract, false),
     })(prepared.kind === 'ready' ? prepared.sorted : [], prepared.state);
@@ -215,21 +216,21 @@ describe('research round identity across outer iteration resets', () => {
       for (const stage of active) state.stages[stage.id] = { status: 'complete', retries: 0 };
     });
     for (const id of ['review_beta', 'recurring_gate', 'other_review']) {
-      writeFileSync(join(directory, `verdict_${id}.json`), JSON.stringify({ pass: true, reason: 'Independent check passed.' }));
+      writeFileSync(runRecordPath(directory, `verdict_${id}.json`), JSON.stringify({ pass: true, reason: 'Independent check passed.' }));
     }
     await advance();
     await advance();
-    expect(JSON.parse(readFileSync(join(directory, 'research_journal.json'), 'utf8')).rounds.map((round: { label: string }) => round.label))
+    expect(JSON.parse(readFileSync(runRecordPath(directory, 'research_journal.json'), 'utf8')).rounds.map((round: { label: string }) => round.label))
       .toEqual(['measurement-alpha', 'measurement-beta-fresh']);
   });
 
   it('resets completed rounds without durable outcomes, including captured but unconsumed outcomes', async () => {
     seed(true);
-    unlinkSync(join(directory, 'research_journal.json'));
-    for (const index of [1, 2]) unlinkSync(join(directory, `research_round_${index}_consumed.json`));
+    unlinkSync(runRecordPath(directory, 'research_journal.json'));
+    for (const index of [1, 2]) unlinkSync(runRecordPath(directory, `research_round_${index}_consumed.json`));
     const prepared = await reset();
     expect(stages.every(stage => prepared.state.stages[stage.id].status === 'pending')).toBe(true);
-    expect(existsSync(join(directory, 'verdict_review_alpha.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'verdict_review_alpha.json'))).toBe(false);
   });
 
   it('continues to reset completed static stages and verdicts for ordinary workflows', async () => {
@@ -238,6 +239,6 @@ describe('research round identity across outer iteration resets', () => {
     expect(prepared.kind).toBe('ready');
     if (prepared.kind !== 'ready') throw new Error('Unexpected terminal iteration.');
     expect(stages.every(stage => prepared.state.stages[stage.id].status === 'pending')).toBe(true);
-    expect(existsSync(join(directory, 'verdict_review_beta.json'))).toBe(false);
+    expect(existsSync(runRecordPath(directory, 'verdict_review_beta.json'))).toBe(false);
   });
 });

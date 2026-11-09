@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -46,8 +47,8 @@ function fixture(dynamic: boolean, repairs: number, iterations = 3, withRepair =
   let ready = false;
   const calls: Array<{ stage: string; iteration: number }> = [];
   const adapter: Adapter = { async run(_prompt, _agent, opts) {
-    calls.push({ stage: opts.stageId, iteration: JSON.parse(readFileSync(join(opts.runDir, 'run.json'), 'utf8')).currentIteration });
-    if (opts.stageId === 'plan') writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringify({ stages })));
+    calls.push({ stage: opts.stageId, iteration: JSON.parse(readFileSync(runRecordPath(opts.runDir, 'run.json'), 'utf8')).currentIteration });
+    if (opts.stageId === 'plan') writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(stringify({ stages })));
     const output = opts.stageId === 'plan' ? 'Authored the execution plan.'
       : opts.stageId === 'review' ? JSON.stringify({ pass: ready, reason: ready ? 'External condition fixed.' : 'External condition unavailable.',
         criteria: Object.fromEntries(criterionRefs.map(id => [id, { status: ready ? 'pass' : 'fail', evidence: 'Checked external readiness.' }])),
@@ -86,7 +87,7 @@ it.each([false, true])('continues a rejected gate in the next iteration, retaini
   const done = readStageStatus(project, before.runId, 'done');
   const repair = readStageStatus(project, before.runId, 'repair');
   const gate = readStageStatus(project, before.runId, 'review');
-  const archive = join(root, 'state', 'runs', before.runId, 'gate_reevaluation', 'iteration_1', 'round_1', 'repair_diff.json');
+  const archive = runRecordPath(join(root, 'state', 'runs', before.runId), 'gate_reevaluation', 'iteration_1', 'round_1', 'repair_diff.json');
   const archived = readFileSync(archive, 'utf8');
   f.fix();
   f.calls.length = 0;
@@ -140,10 +141,10 @@ it('spends successive iteration budgets and retains the normal admitted rejectio
   expect(after.stages.done).toEqual(before.stages.done);
   expect(after.stages.plan).toEqual(before.stages.plan);
   f.calls.length = 0;
-  const persisted = readFileSync(join(root, 'state', 'runs', before.runId, 'run.json'), 'utf8');
+  const persisted = readFileSync(runRecordPath(join(root, 'state', 'runs', before.runId), 'run.json'), 'utf8');
   await expect(f.run(before.runId)).rejects.toThrow(/iteration budget exhausted.*2\/2/i);
   expect(f.calls).toEqual([]);
-  expect(readFileSync(join(root, 'state', 'runs', before.runId, 'run.json'), 'utf8')).toBe(persisted);
+  expect(readFileSync(runRecordPath(join(root, 'state', 'runs', before.runId), 'run.json'), 'utf8')).toBe(persisted);
 });
 
 it.each([true, false])('reports exhausted iteration budget before queuing an operator task resume (saved budget=%s)', async savedBudget => {
@@ -154,7 +155,7 @@ it.each([true, false])('reports exhausted iteration budget before queuing an ope
     updateRunState(project, before.runId, state => { delete state.maxIterations; });
     setEngineDefaults({ gate_retry_loops: 0, stage_technical_retries: 0, max_iterations: 9 });
   }
-  const persisted = readFileSync(join(root, 'state', 'runs', before.runId, 'run.json'), 'utf8');
+  const persisted = readFileSync(runRecordPath(join(root, 'state', 'runs', before.runId), 'run.json'), 'utf8');
   const registry = new TaskRegistry({ baseDir: join(root, 'registry') });
   const task = registry.create({ kind: 'quick', name: 'Continuation fixture', projectDir: project,
     brief_text: f.brief, brief_admission: before.briefAdmission,
@@ -164,14 +165,14 @@ it.each([true, false])('reports exhausted iteration budget before queuing an ope
   await expect(orchestrator.resume(task.id)).rejects.toThrow(/iteration budget exhausted.*1\/1/i);
 
   expect(registry.get(task.id)).toEqual(task);
-  expect(readFileSync(join(root, 'state', 'runs', before.runId, 'run.json'), 'utf8')).toBe(persisted);
+  expect(readFileSync(runRecordPath(join(root, 'state', 'runs', before.runId), 'run.json'), 'utf8')).toBe(persisted);
 });
 
 it.each(['absent', 'invalid'])('reopens a completed nonpassing gate with an %s verdict', async verdict => {
   const f = fixture(false, 0, 3, false);
   const before = await f.seedPrematureIncomplete();
   expect(before.status).toBe('incomplete');
-  const path = join(root, 'state', 'runs', before.runId, 'verdict_review.json');
+  const path = runRecordPath(join(root, 'state', 'runs', before.runId), 'verdict_review.json');
   if (verdict === 'absent') rmSync(path);
   else writeFileSync(path, '{invalid');
   f.fix();

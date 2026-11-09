@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
@@ -97,7 +98,7 @@ async function fixture(mode: 'root' | 'shell' | 'child-process' = 'root') {
 
 function gate(project: string, baseline: ProjectValidationBaseline) {
   const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['review']);
-  writeFileSync(join(created.runDirPath, 'validation_baseline.json'), JSON.stringify({
+  writeFileSync(runRecordPath(created.runDirPath, 'validation_baseline.json'), JSON.stringify({
     version: 1, source: 'ship-setup-ready-record', baseline,
   }));
   const status = (complete: boolean) => writeStageStatus(project, created.runId, 'review', {

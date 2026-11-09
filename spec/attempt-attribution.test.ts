@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -93,7 +94,7 @@ describe('durable attempt attribution on every publisher', () => {
 
   it('attributes a standalone worker without a run-state projection', async () => {
     const created = fixture();
-    rmSync(join(created.runDirPath, 'run.json'));
+    rmSync(runRecordPath(created.runDirPath, 'run.json'));
     const { attribution: _unused, ...opts } = workerOpts(created);
     await runStage({ run: async () => result() }, opts);
     expect(events(created)).toEqual([
@@ -105,8 +106,8 @@ describe('durable attempt attribution on every publisher', () => {
   it.each(['watchdog'] as const)('attributes the worker control signal from %s', async source => {
     const created = fixture();
     await runStage({ run: async () => {
-      mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
-      atomicWrite(join(created.runDirPath, 'signals', 'abort_opaque.json'), JSON.stringify({
+      mkdirSync(runRecordPath(created.runDirPath, 'signals'), { recursive: true });
+      atomicWrite(runRecordPath(created.runDirPath, 'signals', 'abort_opaque.json'), JSON.stringify({
         version: 1, stageId: 'opaque', attemptIndex: 1, source, reason: 'control boundary',
         timestamp: new Date().toISOString(),
       }));
@@ -182,7 +183,7 @@ describe('durable attempt attribution on every publisher', () => {
     startLedger(created);
     completeStageAttempt(project, created.runId, 'opaque', 0, { exitCode: 0, duration_ms: 1 });
     setEngineDefaults({ plan_stage_retries: 1 });
-    writeFileSync(join(created.runDirPath, 'dispatch.yaml'), 'stages: []\n');
+    writeFileSync(runRecordPath(created.runDirPath, 'dispatch.yaml'), 'stages: []\n');
     const planner: StageConfig = { id: 'opaque', role: 'reviewer', depends_on: [], skills: [],
       dynamic_dispatch: true, is_gate: false, criterion_refs: [], prompt_template: 'plan',
       artifact_contract: { version: 1, produces: [], reads: [] } };

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,11 +30,11 @@ async function measure(baseline: number, result: number, resultStd?: number, int
   await tryAdvanceResearch(state, {
     projectDir: project, runId: created.runId, runDirPath: created.runDirPath, iteration: 1, adapter: {} as Adapter,
   });
-  const read = (name: string) => JSON.parse(readFileSync(join(created.runDirPath, name), 'utf8'));
+  const read = (name: string) => JSON.parse(readFileSync(runRecordPath(created.runDirPath, name), 'utf8'));
   return {
-    journal: existsSync(join(created.runDirPath, 'research_journal.json')) ? read('research_journal.json') : undefined,
-    rejection: existsSync(join(created.runDirPath, 'research_integrity_rejections.json')) ? read('research_integrity_rejections.json') : undefined,
-    decision: existsSync(join(created.runDirPath, 'research_decision.json')) ? read('research_decision.json') : undefined,
+    journal: existsSync(runRecordPath(created.runDirPath, 'research_journal.json')) ? read('research_journal.json') : undefined,
+    rejection: existsSync(runRecordPath(created.runDirPath, 'research_integrity_rejections.json')) ? read('research_integrity_rejections.json') : undefined,
+    decision: existsSync(runRecordPath(created.runDirPath, 'research_decision.json')) ? read('research_decision.json') : undefined,
   };
 }
 

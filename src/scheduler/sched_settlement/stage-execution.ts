@@ -1,4 +1,5 @@
 import { classifyEnding } from '../../attempt-ending.js';
+import { runRecordPath } from '../../run-layout.js';
 import { confirmedRepairFindings } from './gate-archives.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 import { appendGateEvidenceInstruction } from './gate-archives.js';
@@ -197,7 +198,7 @@ export async function executeSingleStage(
       artifactObligationTemplate: stage.prompt_template,
       artifactContract: stage.artifact_contract,
       outputSchema: stageRecordSchema({ isGate: stage.is_gate,
-        criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
+        criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
       planRevision: state.queryState?.planRevision,
       artifactStatuses: state.stages,
       timeout_ms: prepared.budgetMs,

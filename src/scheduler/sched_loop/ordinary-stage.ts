@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 import { unlinkSync } from '../../engine-fs.js';
 import { decisionSchema } from '../../decision-graph.js';
 import { decisionInput, focusedReviewInput } from '../../decision-context.js';
@@ -43,7 +44,7 @@ export async function executeOrdinaryStage(
         agents.set(stage.role, applyBasePrompt(parseAgent(raw), loadBasePrompt(resolvedAgentsDir)));
       }
       const agent = agents.get(stage.role)!;
-      if (stage.is_gate && state.decisionGraph?.enabled[stage.id] && existsSync(join(runDirPath, `verdict_${stage.id}.json`))) unlinkSync(join(runDirPath, `verdict_${stage.id}.json`));
+      if (stage.is_gate && state.decisionGraph?.enabled[stage.id] && existsSync(runRecordPath(runDirPath, `verdict_${stage.id}.json`))) unlinkSync(runRecordPath(runDirPath, `verdict_${stage.id}.json`));
       const initialTimeout = stageInitialTimeout();
       let technicalRetry = technicalRetries.get(stage.id);
       const currentRetries = state.stages[stage.id]?.retries ?? 0;
@@ -87,7 +88,7 @@ export async function executeOrdinaryStage(
             const summaryPaths: string[] = [];
             for (const previousRunId of selection.summaryRunIds) {
               const prevRunDir = runDir(projectDir, previousRunId);
-              const iterLog = join(prevRunDir, 'evidence-ledger.jsonl');
+              const iterLog = runRecordPath(prevRunDir, 'evidence-ledger.jsonl');
               if (existsSync(iterLog) && !summaryPaths.includes(iterLog)) summaryPaths.push(iterLog);
             }
             const alert = checkCampaignHealth(selection.entries);
@@ -136,7 +137,7 @@ export async function executeOrdinaryStage(
       }
       resolvedPrompt = appendAttemptDeadlineContract(resolvedPrompt, prepared.budgetMs);
       const coordinate = state.gateRetryRound;
-      const roundDiffPath = coordinate ? join(runDirPath, 'gate_reevaluation', `iteration_${coordinate.iteration}`, `round_${coordinate.round}`, 'repair_diff.json') : undefined;
+      const roundDiffPath = coordinate ? runRecordPath(runDirPath, 'gate_reevaluation', `iteration_${coordinate.iteration}`, `round_${coordinate.round}`, 'repair_diff.json') : undefined;
       let fixStageIds: string[] | undefined;
       if (roundDiffPath && existsSync(roundDiffPath)) fixStageIds = JSON.parse(readFileSync(roundDiffPath, 'utf8')).repairStageIds;
       const reviewDecision = sorted.find(s => s.decision?.kind === 'review' && s.decision.successors.includes(stage.id));
@@ -154,7 +155,7 @@ export async function executeOrdinaryStage(
         isolatedInput,
         decisionResult: stage.decision?.kind === 'shape' ? 'shape' : Boolean(stage.decision && !stage.is_gate),
         outputSchema: stage.decision && !stage.is_gate ? decisionSchema(stage) : stageRecordSchema({ isGate: stage.is_gate,
-          criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(join(runDirPath, 'gate_contract.json')) || existsSync(join(runDirPath, 'supervisor_guidance.md'))) }),
+          criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
         planRevision: state.queryState?.planRevision,
         artifactStatuses: state.stages,
         timeout_ms: prepared.budgetMs,

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -55,7 +56,7 @@ describe('durable registration queue', () => {
         state.engineCheckpoint = captureEngineCheckpoint(root, id);
         state.deploymentHold = { version: 1, id: 'fixture', requestedAt: '2026-01-01T00:00:00.000Z', heldAt: '2026-01-01T00:00:00.000Z', releasedAt: '2026-01-01T00:00:00.000Z' };
       });
-      writeFileSync(join(runDir(root, id), 'task_brief.md'), task.brief_text);
+      writeFileSync(runRecordPath(runDir(root, id), 'task_brief.md'), task.brief_text);
       const response = await handleDaemonRegistrationRequest(first, { cmd: 'register', acknowledgement: 'persisted', task: { ...task, run_id: id } }, { pid: process.pid, build: { algorithm: 'sha256', hash: 'fixture', files: 1, newestMtimeMs: 0 } });
       expect(response.acknowledgement).toBe('persisted');
       expect(registry.get(response.id)).toMatchObject({ status: 'pending', run_id: id, attempt: 1 });

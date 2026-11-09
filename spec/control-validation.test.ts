@@ -1,4 +1,5 @@
 import { validationReport } from './test-support/structured-validation.js';
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -149,7 +150,7 @@ async function partialWorkflow(confirmed: boolean) {
         const recorded = JSON.parse(child.stdout!).record;
         expect(recorded.exitCode).toBe(1); reproduction = recorded.sequence;
       }
-      const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+      const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
       return result({ pass: !reject, reason: reject ? 'Confirmed repairable defect' : 'Semantic criteria satisfied',
         ...(reject ? { repairability: { version: 1, disposition: 'repairable', evidence: `ledger #${reproduction}` } } : {}),
         criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: reject ? 'fail' : 'pass', evidence: 'Read value' }])),
@@ -203,7 +204,7 @@ describe('one projection across historic receipts and every reader', () => {
     const root = project(), { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture', ['author', 'review']);
     const command = { role: 'test' as const, command: 'fixture', args: [], display: 'source-mutating command',
       exitCode: 0, state: 'passed' as const, durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'none' as const };
-    writeFileSync(join(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
+    writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
       version: 1, projectDir: root, discovery: { state: 'configured', configPath: 'fixture', commands: [command], missingRoles: [] }, results: [], gateCriteria: [],
     } }));
     const seeded = seedAttemptValidation(root, runId, [command]);
@@ -217,11 +218,11 @@ describe('one projection across historic receipts and every reader', () => {
     if (fact.kind !== 'validation') throw Error('Fixture validation missing');
     const attempt = { index: 1, status: 'complete' as const, startedAt: '2000-01-01T00:00:00Z', completedAt: '2000-01-01T00:00:01Z', exitCode: 0 };
     writeStageStatus(root, runId, 'review', { status: 'complete', retries: 0, attempts: [attempt] });
-    const receiptPath = join(base, 'validation_delta_review.json');
+    const receiptPath = runRecordPath(base, 'validation_delta_review.json');
     writeFileSync(receiptPath, JSON.stringify({ version: 2, stageId: 'review', checkedAt: attempt.completedAt,
       ledgerSequence: fact.sequence, current: [command], delta: fact.delta, pass: false }));
-    writeFileSync(join(base, 'verdict_review.json'), JSON.stringify({ pass: true, audit_findings: { version: 1, findings: [] } }));
-    const before = readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8'), receiptBefore = readFileSync(receiptPath, 'utf8');
+    writeFileSync(runRecordPath(base, 'verdict_review.json'), JSON.stringify({ pass: true, audit_findings: { version: 1, findings: [] } }));
+    const before = readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8'), receiptBefore = readFileSync(receiptPath, 'utf8');
     const unverified = { exitCode: 0, state: 'unverified', measurement: 'unverified', sourceBound: false };
     expect(projectValidationFact(fact)).toMatchObject({ pass: false, executions: [{ commands: [unverified] }], delta: [{ state: 'unverified' }] });
     expect(readValidationDelta(receiptPath)).toMatchObject({ pass: false, current: [unverified], delta: [{ state: 'unverified' }] });
@@ -239,7 +240,7 @@ describe('one projection across historic receipts and every reader', () => {
     expect(summary).toContain('source-mutating command: unverified (direct exit 0)');
     expect(summary).toContain('comparison unverified');
     expect(summary).not.toContain('comparison verified');
-    expect(readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
+    expect(readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
     expect(readFileSync(receiptPath, 'utf8')).toBe(receiptBefore);
   });
 
@@ -259,7 +260,7 @@ describe('one projection across historic receipts and every reader', () => {
     const command = { role: 'test', display: 'legacy check', state: 'passed', exitCode: 0,
       output: '', durationMs: 1, failureIdentifiers: [], failureIdentity: 'none' };
     const current = [command, { ...command, display: 'another check' }, { ...command, role: 'lint', display: 'lint check' }];
-    const path = join(base, 'validation_delta_review.json');
+    const path = runRecordPath(base, 'validation_delta_review.json');
     for (const display of [undefined, command.display]) {
       const receipt = JSON.stringify({ version, stageId: 'review', current, pass: false,
         delta: [{ role: 'test', ...(display === undefined ? {} : { display }), state: 'unresolved',
@@ -284,7 +285,7 @@ describe('one projection across historic receipts and every reader', () => {
     const commands = fixture.commands;
     const baseline = { version: 1, projectDir: root, results: commands, gateCriteria: [], discovery: { state: 'configured', configPath: 'fixture', missingRoles: [],
       commands: commands.map(command => ({ role: command.role, command: 'fixture', args: [], display: command.display })) } };
-    writeFileSync(join(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline }));
+    writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline }));
     const fact = seedAttemptValidation(root, runId, commands, { delta: commands.map(command => ({ role: command.role, display: command.display, state: 'not_measured', reason: 'Historical stored interpretation', newFailureIdentifiers: [] })) });
     const attempt = readStageStatus(root, runId, 'author').attempts!.at(-1)!;
     appendEvidence(base, { kind: 'attempt', stageId: 'author', attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt, exitCode: 0,
@@ -294,7 +295,7 @@ describe('one projection across historic receipts and every reader', () => {
       gate: { pass: true, validationRequired: true, kind: 'pass', verdictSha256: null,
         validation: commands.map(command => ({ role: command.role, exitCode: command.exitCode, state: command.state, measurement: command.measurement!, load: command.load })) } });
     await recordGateValidationDelta(root, runId, 'review');
-    const before = readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8');
+    const before = readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8');
     const view = readRunStateView(root, runId);
     expect(view.stages.review.gate?.validation?.map(result => result.measurement)).toEqual(['verified', 'verified', 'verified']);
     expect(JSON.stringify(summarizeRunStateView(view))).toContain('\"measurement\":\"verified\"');
@@ -306,7 +307,7 @@ describe('one projection across historic receipts and every reader', () => {
     expect(verdict.pass).toBe(true);
     expect(verdict.validation?.map(command => command.state)).toEqual(['passed', 'passed', 'passed']);
     expect(verdict.validation?.map(command => command.storedState)).toEqual(commands.map(command => command.state));
-    const delta = readValidationDelta(join(base, 'validation_delta_review.json'))!;
+    const delta = readValidationDelta(runRecordPath(base, 'validation_delta_review.json'))!;
     expect(delta.current.map(command => command.state)).toEqual(['passed', 'passed', 'passed']);
     expect(delta.delta.map(entry => entry.state)).toEqual(['verified', 'verified', 'verified']);
     const alerts = pollWatch(createWatchState(), { runsRoot: resolve(base, '..'), candidateRunIds: () => [runId] }).alerts.filter(alert => alert.kind === 'validation_measurement');
@@ -318,14 +319,14 @@ describe('one projection across historic receipts and every reader', () => {
     expect(summary).toContain('recorded state not_measured');
     const display = evidenceContext(root, base);
     for (const field of ['"storedState":"not_measured"', '"measurement":"verified"', '"state":"passed"']) expect(display).toContain(field);
-    expect(readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
-    writeFileSync(join(base, 'validation_delta_legacy.json'), JSON.stringify({ version: 2, pass: false, stageId: 'legacy', current: commands, delta: fact.delta }));
-    const legacy = readValidationDelta(join(base, 'validation_delta_legacy.json'))!;
+    expect(readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
+    writeFileSync(runRecordPath(base, 'validation_delta_legacy.json'), JSON.stringify({ version: 2, pass: false, stageId: 'legacy', current: commands, delta: fact.delta }));
+    const legacy = readValidationDelta(runRecordPath(base, 'validation_delta_legacy.json'))!;
     for (const command of legacy.current) expect(command).toMatchObject({ state: 'passed', measurement: 'verified' });
     expect(legacy.delta.map(entry => entry.state)).toEqual(['verified', 'verified', 'verified']);
     expect(legacy.pass).toBe(true);
     expect(renderRunSummary(root, base, readRunState(root, runId))).toContain('legacy — comparison verified');
-    expect(readFileSync(join(base, 'validation_delta_legacy.json'), 'utf8')).toBe(JSON.stringify({ version: 2, pass: false, stageId: 'legacy', current: commands, delta: fact.delta }));
+    expect(readFileSync(runRecordPath(base, 'validation_delta_legacy.json'), 'utf8')).toBe(JSON.stringify({ version: 2, pass: false, stageId: 'legacy', current: commands, delta: fact.delta }));
   });
 
   it('keeps inline red comparison unknown when the base execution is unavailable', () => {
@@ -346,7 +347,7 @@ describe('one projection across historic receipts and every reader', () => {
     }));
     const delta = commands.map(({ role }) => ({ role, state: 'pass' as const,
       reason: 'Historical absence was called a pass', newFailureIdentifiers: [] }));
-    writeFileSync(join(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
+    writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
       version: 1, projectDir: root, discovery: { state: 'unknown', configPath: 'fixture', commands: [], missingRoles: ['build', 'test', 'lint'] },
       results: [], gateCriteria: [],
     } }));
@@ -354,16 +355,16 @@ describe('one projection across historic receipts and every reader', () => {
     appendEvidence(base, { kind: 'attempt', stageId: fact.stageId, attemptIndex: fact.attemptIndex,
       attemptStartedAt: fact.attemptStartedAt, exitCode: 0, status: 'complete', treeHash: fact.treeHash, files: [],
       measurements: { inputTokens: 0, outputTokens: 0, durationMs: 1, provenance: 'adapter-reported' } });
-    const before = readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8');
+    const before = readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8');
     expect(projectValidationFact(fact)).toMatchObject({ pass: false,
       delta: commands.map(({ role }) => ({ role, state: 'unverified' })) });
-    const path = join(base, 'validation_delta_legacy.json');
+    const path = runRecordPath(base, 'validation_delta_legacy.json');
     writeFileSync(path, JSON.stringify({ version: 2, stageId: 'legacy', current: commands, delta, pass: true }));
     expect(readValidationDelta(path)).toMatchObject({ pass: false,
       delta: commands.map(({ role }) => ({ role, state: 'unverified' })) });
     expect(evidenceContext(root, base)).toContain('"pass":false');
     expect(renderRunSummary(root, base, readRunState(root, runId))).not.toContain('comparison verified');
-    expect(readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
+    expect(readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
   });
 
   it('retains runner errors with exit zero and never projects them as a pass', async () => {
@@ -389,7 +390,7 @@ describe('one projection across historic receipts and every reader', () => {
     expect(delta[0].state).toBe('unverified');
     const baseline = { version: 1, projectDir: root, results: [command], gateCriteria: [], discovery: { state: 'configured', configPath: 'fixture', missingRoles: [],
       commands: [{ role: 'test', command: 'fixture', args: [], display: command.display }] } };
-    writeFileSync(join(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline }));
+    writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline }));
     const fact = seedAttemptValidation(root, runId, [command], { delta });
     const projected = projectValidationFact(fact);
     expect(projectValidationFact(projected)).toEqual(projected);
@@ -401,9 +402,9 @@ describe('one projection across historic receipts and every reader', () => {
     expect(verdict.validation![0]).toMatchObject({ ...expected, storedState: 'launch_error' });
     const alerts = pollWatch(createWatchState(), { runsRoot: resolve(base, '..'), candidateRunIds: () => [runId] }).alerts;
     expect(alerts).toContainEqual(expect.objectContaining({ kind: 'validation_measurement', ...expected, storedState: 'launch_error' }));
-    const before = readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8');
+    const before = readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8');
     for (const ledgerSequence of [undefined, fact.sequence]) {
-      const path = join(base, 'validation_delta_review.json');
+      const path = runRecordPath(base, 'validation_delta_review.json');
       const raw = JSON.stringify({ version: 2, stageId: 'review', pass: false, current: [command], delta, ledgerSequence });
       writeFileSync(path, raw);
       const receipt = readValidationDelta(path)!;
@@ -414,7 +415,7 @@ describe('one projection across historic receipts and every reader', () => {
       const summary = renderRunSummary(root, base, readRunState(root, runId));
       expect(summary).toContain('recorded state launch_error');
       expect(summary).not.toContain('comparison verified');
-      expect(readFileSync(join(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
+      expect(readFileSync(runRecordPath(base, 'evidence-ledger.jsonl'), 'utf8')).toBe(before);
     }
   });
 });
@@ -422,12 +423,12 @@ describe('one projection across historic receipts and every reader', () => {
 
 it('accepts an explicitly unrun command as unverified in both review and terminal records', async () => {
   const root = project(), { runId, runDirPath: base } = createRun(root, 'fixture', 'name: fixture', ['review']);
-  writeFileSync(join(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
+  writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
     version: 1, projectDir: root, discovery: { state: 'configured', configPath: 'fixture', commands: [
       { role: 'test', command: 'declared', args: [], display: 'declared' },
     ], missingRoles: ['build', 'lint'] }, results: [], gateCriteria: [],
   } }));
-  writeFileSync(join(base, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Independent acceptance of the stated unrun command',
+  writeFileSync(runRecordPath(base, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Independent acceptance of the stated unrun command',
     audit_findings: { version: 1, findings: [] }, validation_review: { commands: [{ role: 'test', display: 'declared', disposition: 'unknown', reason: 'No execution was available' }], request_base: [] } }));
   const gate = readGateEvaluation(root, 'review', runId)!;
   expect(gate.pass).toBe(true);
@@ -450,14 +451,14 @@ it('keeps legacy exit-zero runner and dependency errors unverified through gate 
     { role: 'build', command: 'build', args: [], display: 'build' },
     { role: 'test', command: 'test', args: [], display: 'test' },
   ];
-  writeFileSync(join(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
+  writeFileSync(runRecordPath(base, 'validation_baseline.json'), JSON.stringify({ version: 1, baseline: {
     version: 1, projectDir: root, discovery: { state: 'configured', configPath: 'fixture', commands, missingRoles: ['lint'] }, results: [], gateCriteria: [],
   } }));
   seedAttemptValidation(root, runId, [
     { role: 'build', display: 'build', state: 'launch_error', exitCode: 0, durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'unknown' },
     { role: 'test', display: 'test', state: 'passed', exitCode: 0, dependencyPreparationFailed: true, durationMs: 1, output: '', failureIdentifiers: [], failureIdentity: 'unknown' },
   ]);
-  writeFileSync(join(base, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Independent acceptance with two legacy execution gaps', audit_findings: { version: 1, findings: [] } }));
+  writeFileSync(runRecordPath(base, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Independent acceptance with two legacy execution gaps', audit_findings: { version: 1, findings: [] } }));
   const gate = readGateEvaluation(root, 'review', runId)!;
   expect(gate.pass).toBe(true);
   expect(gate.validation?.map(result => projectValidationResult(result).measurement)).toEqual(['unverified', 'unverified']);

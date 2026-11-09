@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -58,7 +59,7 @@ function workflow(maxIterations = 3): { config: WorkflowConfig; yaml: string } {
 
 function createCampaignRun(workflowYaml: string) {
   const created = createRun(projectDir, 'default', workflowYaml, ['plan']);
-  writeFileSync(join(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
+  writeFileSync(runRecordPath(runDir(projectDir, created.runId), 'scheduler.pid'), String(process.pid));
   const state = readRunState(projectDir, created.runId);
   state.autoApprove = true;
   state.campaignId = 'btc-training';
@@ -113,7 +114,7 @@ describe('terminal final contract workflow behavior', () => {
       async run(_prompt: string, _role: AgentConfig, opts: RunOpts): Promise<RunResult> {
         calls.push(opts.stageId);
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             `  - id: ${gateId}`,
             '    role: qa',
@@ -134,7 +135,7 @@ describe('terminal final contract workflow behavior', () => {
         }
         if (opts.stageId === gateId) {
           gateAttempts++;
-          writeJson(join(opts.runDir, `fixture_verdict_${gateId}.json`), gateAttempts === 1
+          writeJson(stageWorkPath(opts.runDir, `fixture_verdict_${gateId}.json`), gateAttempts === 1
             ? { pass: false, reason: 'missing_required_replay_artifact', model_success: false, study_complete: false }
             : { pass: true, reason: 'model_success', model_success: true, study_complete: true });
           return fixtureResult(result(`gate attempt ${gateAttempts}`), opts);
@@ -170,7 +171,7 @@ describe('terminal final contract workflow behavior', () => {
         calls.push(opts.stageId);
         if (opts.stageId === 'plan') {
           planCalls++;
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(planCalls === 1
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(planCalls === 1
             ? [
                 'stages:',
                 `  - id: ${phaseGate}`,
@@ -202,7 +203,7 @@ describe('terminal final contract workflow behavior', () => {
           return fixtureResult(result(`planned ${planCalls}`), opts);
         }
         if (opts.stageId === phaseGate) {
-          writeJson(join(opts.runDir, `fixture_verdict_${phaseGate}.json`), {
+          writeJson(stageWorkPath(opts.runDir, `fixture_verdict_${phaseGate}.json`), {
             pass: true,
             reason: 'phase3_complete_continue_next_phase',
             phase: 'phase3',
@@ -214,7 +215,7 @@ describe('terminal final contract workflow behavior', () => {
         }
         if (opts.stageId === finalGate) {
           const verdict = { ...terminalVerdict(), pass: true };
-          writeJson(join(opts.runDir, `fixture_verdict_${finalGate}.json`), verdict);
+          writeJson(stageWorkPath(opts.runDir, `fixture_verdict_${finalGate}.json`), verdict);
           return fixtureResult(result('terminal final completion'), opts);
         }
         return fixtureResult(result(`unexpected ${opts.stageId}`, 1), opts);
@@ -247,7 +248,7 @@ describe('terminal final contract workflow behavior', () => {
     const gateId = 'btc_transfer_gate';
     mkdirSync(runDir(projectDir, runId), { recursive: true });
     mkdirSync(join(projectDir, '.fc', 'campaigns'), { recursive: true });
-    writeJson(join(runDir(projectDir, runId), `verdict_${gateId}.json`), terminalVerdict(88.5));
+    writeJson(runRecordPath(runDir(projectDir, runId), `verdict_${gateId}.json`), terminalVerdict(88.5));
     writeFileSync(join(projectDir, '.fc', 'campaigns', 'btc-training.jsonl'), JSON.stringify({
       seq: 1,
       runId,

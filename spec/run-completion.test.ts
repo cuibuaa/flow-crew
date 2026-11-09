@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { createRun } from './test-support/create-run.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -64,7 +65,7 @@ it.each(['complete', 'failed', 'incomplete', 'ceiling_hit', 'escalated', 'cancel
 );
 
 it('records corrupt-candidate cleanup errors and still publishes the original terminal outcome', () => {
-  writeFileSync(join(directory, 'research_gate_candidate.json'), '{corrupt');
+  writeFileSync(runRecordPath(directory, 'research_gate_candidate.json'), '{corrupt');
   const error = vi.spyOn(log, 'error');
   const state = store.readRunState(project, runId);
   state.status = 'failed';
@@ -76,11 +77,11 @@ it('records corrupt-candidate cleanup errors and still publishes the original te
   expect(campaign).toHaveBeenCalledWith(project, state);
   expect(store.readRunState(project, runId)).toMatchObject({ status: 'failed', failureReason: 'Original scheduler failure' });
   expect(readRunEvents(project, runId).find(event => event.type === 'run_completed')).toMatchObject({ type: 'run_completed', detail: 'Original scheduler failure' });
-  expect(readFileSync(join(directory, 'research_gate_candidate.json'), 'utf8')).toBe('{corrupt');
+  expect(readFileSync(runRecordPath(directory, 'research_gate_candidate.json'), 'utf8')).toBe('{corrupt');
 });
 
 it('does not retry a transient cleanup failure after completion, including with reread state', () => {
-  const corrupt = join(directory, 'research_gate_candidate.json');
+  const corrupt = runRecordPath(directory, 'research_gate_candidate.json');
   writeFileSync(corrupt, '{corrupt');
   const error = vi.spyOn(log, 'error');
   const state = store.readRunState(project, runId);

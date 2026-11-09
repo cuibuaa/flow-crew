@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../../src/run-layout.js';
 import '../test-support/policy-runtime.js';
 import { parse as parseYaml } from 'yaml';
 import { planRetryRequirement, preparePlanRetryCandidate, recordPlanRetryRefusal } from '../../src/plan-retry-monotone.js';
@@ -58,8 +59,8 @@ function writeRoles(roles: string[]): string {
 function setupPlainRun(): string {
   const created = createRun(projectDir, 'plan-only', planWorkflow.yaml, ['plan']);
   const rd = runDir(projectDir, created.runId);
-  writeFileSync(join(rd, 'scheduler.pid'), String(process.pid));
-  writeFileSync(join(rd, 'task_brief.md'), '# Test task\nDo the thing.');
+  writeFileSync(runRecordPath(rd, 'scheduler.pid'), String(process.pid));
+  writeFileSync(runRecordPath(rd, 'task_brief.md'), '# Test task\nDo the thing.');
   const state = readRunState(projectDir, created.runId);
   state.autoApprove = true;
   writeRunState(projectDir, created.runId, state);
@@ -79,7 +80,7 @@ function setupResearchAdmissionRun(): string {
     stop: { beat: 0.5, maxRounds: 2 },
   };
   writeRunState(projectDir, runId, state);
-  writeFileSync(join(rd, 'task_brief.md'), [
+  writeFileSync(runRecordPath(rd, 'task_brief.md'), [
     '---',
     'terminal_states:',
     '  shipped:',
@@ -183,24 +184,24 @@ describe('FIX 1 (pure) — decideEmptyDispatchAction retries under budget, escal
 
 describe('FIX 1 (pure) — buildRetryPreamble renders the dispatch-specific re-prompt', () => {
   it('preserves valid work and evidence while permitting invalid partial work to be redone', () => {
-    const rd = join(projectDir, 'rd'); mkdirSync(join(rd, 'stages', 'work'), { recursive: true });
-    writeFileSync(join(rd, 'stages', 'work', 'status.json'), JSON.stringify({ error: 'command failed' }));
+    const rd = join(projectDir, 'rd'); mkdirSync(runRecordPath(rd, 'stages', 'work'), { recursive: true });
+    writeFileSync(runRecordPath(rd, 'stages', 'work', 'status.json'), JSON.stringify({ error: 'command failed' }));
     const prompt = buildRetryPreamble(1, 1000, rd, 'work');
     expect(prompt).toContain('Preserve valid work and recorded evidence');
     expect(prompt).toContain('complete the admitted duties within the current scope and immutable deadline');
-    expect(JSON.parse(prompt.split('\n')[1])).toMatchObject({ stageId: 'work', attemptIndex: 2, budgetMs: 1000, previousError: 'command failed', ledgerPath: join(rd, 'evidence-ledger.jsonl') });
+    expect(JSON.parse(prompt.split('\n')[1])).toMatchObject({ stageId: 'work', attemptIndex: 2, budgetMs: 1000, previousError: 'command failed', ledgerPath: runRecordPath(rd, 'evidence-ledger.jsonl') });
   });
 
   it('emits structured dispatch refusal facts and the replacement duty without reprinting the schema', () => {
-    const rd = join(projectDir, 'rd'); mkdirSync(join(rd, 'stages', 'plan'), { recursive: true });
-    writeFileSync(join(rd, 'stages', 'plan', 'status.json'),
+    const rd = join(projectDir, 'rd'); mkdirSync(runRecordPath(rd, 'stages', 'plan'), { recursive: true });
+    writeFileSync(runRecordPath(rd, 'stages', 'plan', 'status.json'),
       JSON.stringify({ status: 'pending', retries: 1, admissionFailure: { code: 'dispatch_refused', attemptIndex: 0 }, error: 'invalid dispatch.yaml: some stages referenced unknown role(s): "wizard". Available roles: planner.' }));
-    writeFileSync(join(rd, 'dispatch.yaml'), 'stages: []');
+    writeFileSync(runRecordPath(rd, 'dispatch.yaml'), 'stages: []');
     recordPlanRetryRefusal({ runDirPath: rd, prepared: preparePlanRetryCandidate({ runDirPath: rd, stageId: 'plan', iteration: 1, attemptIndex: 1 }), maxAttempts: 3,
       unsatisfied: [planRetryRequirement({ code: 'role_unknown', field: 'role', stageId: 'cast', message: 'Unknown role wizard; available roles: planner.' })] });
     const p = buildRetryPreamble(1, 1000, rd, 'plan');
     expect(p).toContain('# RE-PLAN facts');
-    expect(JSON.parse(p.split('\n')[1])).toMatchObject({ stageId: 'plan', attemptIndex: 2, budgetMs: 1000, dispatchPath: join(rd, 'dispatch.yaml') });
+    expect(JSON.parse(p.split('\n')[1])).toMatchObject({ stageId: 'plan', attemptIndex: 2, budgetMs: 1000, dispatchPath: runRecordPath(rd, 'dispatch.yaml') });
     expect(p).toContain('wizard');
     expect(p).not.toMatch(/dispatch\.yaml interface/);
     const admission = JSON.parse(p.split('# Plan retry facts\n')[1].split('\n')[0]);
@@ -224,11 +225,11 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
           planCalls++;
           if (planCalls === 1) {
             // First plan: emit an EMPTY dispatch (a transient flake).
-            writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch('stages: []'));
+            writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch('stages: []'));
             return fixtureResult(ok('planned (empty — flake)'), opts);
           }
           // Retry: emit a valid single stage.
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: do the work'].join('\n')));
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(['stages:', '  - id: work', '    role: qa', '    depends_on: [plan]', '    dependency_reasons:', '      plan: consumes the admitted plan proposal', '    scope: []', '    criterion_refs: []', '    prompt_template: do the work'].join('\n')));
           return fixtureResult(ok('planned (valid)'), opts);
         }
         return fixtureResult(ok(`did ${opts.stageId}`), opts);
@@ -250,7 +251,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     const adapter = {
       async run(_p: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(['stages:', '  - id: cast', '    role: wizard', '    depends_on: [plan]', '    task: cast a spell'].join('\n')));
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(['stages:', '  - id: cast', '    role: wizard', '    depends_on: [plan]', '    task: cast a spell'].join('\n')));
           return fixtureResult(ok('planned (unknown role)'), opts);
         }
         return fixtureResult(ok(`did ${opts.stageId}`), opts);
@@ -278,7 +279,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
         if (opts.stageId === 'plan') {
           planCalls += 1;
           planPrompts.push(prompt);
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(planCalls === 1
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(planCalls === 1
             ? measuringOwnerDispatch
             : separatedResearchDispatch));
           return fixtureResult(ok(`planned attempt ${planCalls}`), opts);
@@ -307,11 +308,11 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(measureCalls).toBe(1);
     expect(final.status).toBe('shipped');
     expect(planPrompts[1]).toContain('research result producer path docs/round.json cannot be owned by a terminal writer');
-    expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'));
-    expect(planPrompts[1]).toContain(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'));
-    expect(parseYaml(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8')))
+    expect(planPrompts[1]).toContain(runRecordPath(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'));
+    expect(planPrompts[1]).toContain(runRecordPath(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'));
+    expect(parseYaml(readFileSync(runRecordPath(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8')))
       .toEqual(parseYaml(declaredDispatch(measuringOwnerDispatch)));
-    const archived = JSON.parse(readFileSync(join(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'), 'utf-8')) as { errors: Array<{message: string}> };
+    const archived = JSON.parse(readFileSync(runRecordPath(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'), 'utf-8')) as { errors: Array<{message: string}> };
     expect(archived.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('separate measurement from terminalization');
   }, 60_000);
 
@@ -322,7 +323,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     const state = readRunState(projectDir, runId);
     state.terminalStates = { complete: { paths: ['docs/final.md'] } };
     writeRunState(projectDir, runId, state);
-    writeFileSync(join(rd, 'task_brief.md'), [
+    writeFileSync(runRecordPath(rd, 'task_brief.md'), [
       '---',
       'terminal_states:',
       '  complete:',
@@ -336,7 +337,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     const adapter = {
       async run(_prompt: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: finalize',
             '    role: qa',
@@ -373,7 +374,7 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(readFileSync(join(projectDir, 'src', 'generated.ts'), 'utf-8'))
       .toBe('export const value = "after gate";\n');
     expect(final.failureReason).toContain('unreviewed product writes (src/generated.ts)');
-    const audit = JSON.parse(readFileSync(join(rd, 'stages', 'finalize', `constraint_audit_attempt_${finalizerCalls}.json`), 'utf-8')) as {
+    const audit = JSON.parse(readFileSync(runRecordPath(rd, 'stages', 'finalize', `constraint_audit_attempt_${finalizerCalls}.json`), 'utf-8')) as {
       rolledBackWrites: string[];
       durableWrites: string[];
     };

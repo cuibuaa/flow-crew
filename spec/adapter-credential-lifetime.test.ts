@@ -18,6 +18,7 @@ beforeEach(() => {
   source = join(root, 'source'); project = join(root, 'project'); runDir = join(root, 'run');
   const bin = join(root, 'bin');
   for (const directory of [source, project, runDir, bin, join(root, 'plugins'), join(root, 'skills')]) mkdirSync(directory);
+  writeFileSync(join(runDir, 'run.json'), JSON.stringify({ storageLayout: 2 }));
   // These are deliberately invalid fixture bytes. No operator credentials are used.
   for (const name of names) writeFileSync(join(source, name), 'fake-credential-fixture');
   vi.stubEnv('CODEX_HOME', source);

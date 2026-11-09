@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from './run-layout.js';
 import { type DispatchAdmissionError } from './scheduler/sched_admission/dispatch.js';
 import { createHash } from 'node:crypto';
 import { atomicWrite, mkdirSync, writeFileSync } from './engine-fs.js';
@@ -98,7 +99,7 @@ export function planRetryRequirement(
 }
 
 function statePath(runDirPath: string): string {
-  return join(runDirPath, PLAN_RETRY_STATE_FILE);
+  return runRecordPath(runDirPath, PLAN_RETRY_STATE_FILE);
 }
 
 function safeRunRelativePath(runDirPath: string, path: string): string {
@@ -107,7 +108,7 @@ function safeRunRelativePath(runDirPath: string, path: string): string {
   if (!rel || rel.startsWith('..') || rel.includes(`..${process.platform === 'win32' ? '\\' : '/'}`)) {
     throw new Error(`plan retry evidence path escapes the run directory: ${path}`);
   }
-  return absolute;
+  return runRecordPath(runDirPath, rel);
 }
 
 function readState(runDirPath: string): MonotonePlanRetryState | undefined {
@@ -178,11 +179,11 @@ export function preparePlanRetryCandidate(input: {
   iteration: number;
   attemptIndex: number;
 }): PreparedPlanRetryCandidate {
-  const dispatchPath = join(input.runDirPath, 'dispatch.yaml');
+  const dispatchPath = stageWorkPath(input.runDirPath, 'dispatch.yaml');
   const proposed: PlanRetryPair = {
     dispatch: existsSync(dispatchPath) ? readFileSync(dispatchPath, 'utf8') : '',
-    ...(existsSync(join(input.runDirPath, 'reality_checks.md'))
-      ? { realityChecks: readFileSync(join(input.runDirPath, 'reality_checks.md'), 'utf8') }
+    ...(existsSync(runRecordPath(input.runDirPath, 'reality_checks.md'))
+      ? { realityChecks: readFileSync(runRecordPath(input.runDirPath, 'reality_checks.md'), 'utf8') }
       : {}),
   };
   const state = readState(input.runDirPath);
@@ -288,7 +289,7 @@ export function recordPlanRetryRefusal(input: {
     attempts,
     ...(terminal ? { terminal } : {}),
   };
-  atomicWriteJson(join(input.runDirPath, root, 'observation.json'), attempt);
+  atomicWriteJson(runRecordPath(input.runDirPath, root, 'observation.json'), attempt);
   atomicWriteJson(statePath(input.runDirPath), state);
   return { state, stop: Boolean(terminal), reason: terminal?.reason, disposition };
 }
@@ -328,7 +329,7 @@ export function recordPlanRetryAdmission(input: {
     attempts: [...prior.attempts, attempt],
     terminal: { disposition: 'admitted', reason: 'The complete replacement proposal passed plan admission.' },
   };
-  atomicWriteJson(join(input.runDirPath, root, 'observation.json'), attempt);
+  atomicWriteJson(runRecordPath(input.runDirPath, root, 'observation.json'), attempt);
   atomicWriteJson(statePath(input.runDirPath), state);
 }
 

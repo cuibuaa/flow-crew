@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import {
   mkdirSync,
   mkdtempSync,
@@ -87,7 +88,7 @@ afterAll(() => {
 });
 
 function writeState(overrides: Record<string, unknown> = {}): void {
-  writeFileSync(join(fixture.runDir, 'run.json'), JSON.stringify({
+  writeFileSync(runRecordPath(fixture.runDir, 'run.json'), JSON.stringify({
     runId: fixture.runId,
     workflowName: 'fixture',
     projectDir: fixture.project,
@@ -224,7 +225,7 @@ function fcTaskStatus(closure: FcTaskClosureFixture): string {
 function writeAlternateTerminalRun(runId: string): void {
   const runDirectory = join(fixture.state, 'runs', runId);
   mkdirSync(runDirectory, { recursive: true });
-  writeFileSync(join(runDirectory, 'run.json'), JSON.stringify({
+  writeFileSync(runRecordPath(runDirectory, 'run.json'), JSON.stringify({
     runId,
     workflowName: 'fixture',
     projectDir: fixture.project,
@@ -622,7 +623,7 @@ describe('flowcrew land inventory and refusal boundary', () => {
 
   it('accepts the scheduler snapshot when the project copy was clobbered', async () => {
     rmSync(join(fixture.project, 'docs', 'result.md'));
-    const snapshotPath = join(fixture.runDir, terminalArtifactSnapshotName('docs/result.md'));
+    const snapshotPath = runRecordPath(fixture.runDir, terminalArtifactSnapshotName('docs/result.md'));
     mkdirSync(dirname(snapshotPath), { recursive: true });
     writeFileSync(snapshotPath, '# Preserved result\n', 'utf-8');
 
@@ -636,7 +637,7 @@ describe('flowcrew land inventory and refusal boundary', () => {
   it('reads a historical snapshot through its recorded basename identity', async () => {
     writeState({ terminalArtifact: 'result.md' });
     rmSync(join(fixture.project, 'docs', 'result.md'));
-    writeFileSync(join(fixture.runDir, 'terminal_result.md'), '# Preserved legacy result\n', 'utf-8');
+    writeFileSync(runRecordPath(fixture.runDir, 'terminal_result.md'), '# Preserved legacy result\n', 'utf-8');
     const report = await runLand(['land', '--run', fixture.runId], { git: gitRunner() });
     expect(report.artifacts[0]).toMatchObject({ projectPresent: false, snapshotPresent: true, present: true });
   });
@@ -648,7 +649,7 @@ describe('flowcrew land inventory and refusal boundary', () => {
       terminalArtifact: rootFilename,
       terminalStates: { complete: { paths: [rootFilename] }, escalated: { paths: [otherPath] } },
     });
-    const unrelatedSnapshot = join(fixture.runDir, terminalArtifactSnapshotName(otherPath));
+    const unrelatedSnapshot = runRecordPath(fixture.runDir, terminalArtifactSnapshotName(otherPath));
     mkdirSync(dirname(unrelatedSnapshot), { recursive: true });
     writeFileSync(unrelatedSnapshot, '# An unrelated outcome\n', 'utf-8');
 
@@ -869,7 +870,7 @@ describe('flowcrew land external archive', () => {
     const closure = seedFcTaskClosure();
     writeProjectFile('docs/result.md', '# Unique ignored report\n');
     writeProjectFile('evidence/only-copy.bin', 'unique evidence\n');
-    const runEvidence = join(fixture.runDir, 'stages', 'measure', 'evidence.bin');
+    const runEvidence = runRecordPath(fixture.runDir, 'stages', 'measure', 'evidence.bin');
     mkdirSync(dirname(runEvidence), { recursive: true });
     writeFileSync(runEvidence, 'unique run evidence\n');
     const root = archiveRoot();
@@ -926,7 +927,7 @@ describe('flowcrew land external archive', () => {
     const runner = vi.fn<LandGitRunner>((request) => {
       if (request.operation === 'worktrees') {
         if (mutation === 'source') writeProjectFile('docs/result.md', 'changed source\n');
-        if (mutation === 'run-store') writeFileSync(join(fixture.runDir, 'late-evidence.json'), '{}\n');
+        if (mutation === 'run-store') writeFileSync(runRecordPath(fixture.runDir, 'late-evidence.json'), '{}\n');
         if (mutation === 'new-ignored') writeProjectFile('docs/new.md', 'new unique evidence\n');
         if (mutation === 'destination' || mutation === 'archive-alias' || mutation === 'manifest') {
           const directory = join(root, readdirSync(root)[0]);

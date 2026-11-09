@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,7 +44,7 @@ function seed(status: TaskStatus, runStatus: string) {
   const id = rows.length + 1, runId = `fixture-${id}`;
   const path = join(fcGlobalDir(), 'runs', runId); mkdirSync(path, { recursive: true });
   const state = { runId, projectDir: project, status: runStatus, stages: {} };
-  writeFileSync(join(path, 'run.json'), JSON.stringify(state));
+  writeFileSync(runRecordPath(path, 'run.json'), JSON.stringify(state));
   const task: TaskEntry = { id, name: 'Synthetic history', projectDir: project, systemd_unit: `fixture-${id}.service`, run_id: runId,
     status, attempt: 1, max_retries: 0, created_at: '2025-01-01T00:00:00.000Z', tick_log_path: join(root, `tick-${id}.jsonl`) };
   rows.push(task);

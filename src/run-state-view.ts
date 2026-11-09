@@ -1,4 +1,5 @@
 import { projectValidationResult } from './project-validation.js';
+import { runRecordPath } from './run-layout.js';
 import { parseJsonlWithDiagnostics } from './jsonl.js';
 import { stageAttemptKey } from './stage-live-log.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -102,6 +103,10 @@ function contained(root: string, path: string): boolean {
 }
 
 /** Reject lexical traversal and existing symlink escapes before reading/writing carriers. */
+function recordCarrierPath(root: string, path: string): string {
+  return carrierPath(root, relative(root, runRecordPath(root, path)));
+}
+
 function carrierPath(root: string, path: string): string {
   if (isAbsolute(path) || path.split(/[\\/]/).some((part) => part === '..') || !path || path.includes('\0')) throw new RunStateViewError('STATE_PATH_INVALID', `declare a confined relative path: ${path}`);
   const canonicalRoot = realpathSync(root);
@@ -126,7 +131,7 @@ export function invocationInputPath(runDirectory: string, identity: Pick<Invocat
   quantity.positive().parse(identity.attemptIndex);
   quantity.positive().parse(identity.invocationIndex);
   timestamp.parse(identity.attemptStartedAt);
-  return carrierPath(runDirectory, join('stages', identity.stageId, 'invocations', stageAttemptKey(identity.attemptIndex, identity.attemptStartedAt), `invocation_${identity.invocationIndex}.json.gz`));
+  return recordCarrierPath(runDirectory, join('stages', identity.stageId, 'invocations', stageAttemptKey(identity.attemptIndex, identity.attemptStartedAt), `invocation_${identity.invocationIndex}.json.gz`));
 }
 
 function checkedInvocation(value: unknown): InvocationInputRecord {
@@ -144,13 +149,13 @@ export function readInvocationInput(path: string): InvocationInputRecord {
 
 /** Locate retained input by execution identity, without a mutable prompt copy. */
 export function latestInvocationInput(runDirectory: string, stageId: string): { path: string; record: InvocationInputRecord } | undefined {
-  const root = carrierPath(runDirectory, join('stages', safeId.parse(stageId), 'invocations'));
+  const root = recordCarrierPath(runDirectory, join('stages', safeId.parse(stageId), 'invocations'));
   const inputs: Array<{ path: string; record: InvocationInputRecord }> = [];
   try {
     for (const entry of readdirSync(root, { recursive: true, encoding: 'utf8' })) {
       if (!/^attempt_\d+_[0-9a-f]{24}\/invocation_\d+\.json\.gz$/.test(entry)) continue;
       try {
-        const path = carrierPath(runDirectory, join('stages', stageId, 'invocations', entry));
+        const path = recordCarrierPath(runDirectory, join('stages', stageId, 'invocations', entry));
         const record = readInvocationInput(path);
         if (record.stageId === stageId && invocationInputPath(runDirectory, record) === path) inputs.push({ path, record });
       } catch { /* an invalid old record cannot hide a retained input */ }
@@ -174,7 +179,7 @@ export function recordInvocationInput(runDirectory: string, input: InvocationInp
     userSha256: sha256(input.userPrompt),
     ...(input.transport ? { transport: { ...input.transport, sha256: sha256(input.transport.payload) } } : {}),
   });
-  const run = JSON.parse(readFileSync(carrierPath(runDirectory, 'run.json'), 'utf8')) as { runId?: unknown; stages?: Record<string, unknown>; auxiliaryAttempts?: Record<string, unknown> };
+  const run = JSON.parse(readFileSync(recordCarrierPath(runDirectory, 'run.json'), 'utf8')) as { runId?: unknown; stages?: Record<string, unknown>; auxiliaryAttempts?: Record<string, unknown> };
   const knownActor = Object.hasOwn(run.stages ?? {}, record.stageId) || (record.stageId === '_summary' && Array.isArray(run.auxiliaryAttempts?._summary));
   if (run.runId !== record.runId || basename(resolve(runDirectory)) !== record.runId || !knownActor) throw new RunStateViewError('INVOCATION_RUN_BINDING', 'invocation must bind an initialized run and a known stage');
   const path = invocationInputPath(runDirectory, record);
@@ -416,7 +421,7 @@ export function readRunStateView(projectDir: string, runId: string, options: Run
   for (let attempt = 0; attempt < maximum; attempt += 1) {
     const fence = new ViewReadFence();
     const runDirectory = realpathSync(runDir(projectDir, runId));
-    const path = (value: string) => carrierPath(runDirectory, value);
+    const path = (value: string) => recordCarrierPath(runDirectory, value);
     const raw = fence.read(path('run.json'));
     if (raw === undefined) throw new RunStateViewError('STATE_RUN_ABSENT', `run ${runId} has no run.json`);
     const archived = readArchivedRunState(projectDir, runId);

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../run-layout.js';
 import { diagnosticDataCode } from './failure.js';
 import { stageLiveLogPath } from '../stage-live-log.js';
 import { atomicWrite, appendFileSync, mkdirSync } from '../engine-fs.js';
@@ -233,7 +234,7 @@ export class CodexAdapter implements Adapter {
     let invocationPrompt = prompt;
     // Materialize only the schema this CLI will consume, outside its write authority.
     const schemaPath = opts.outputSchema && generationCompatibleSchema(opts.outputSchema)
-      ? join(opts.runDir, 'stages', opts.stageId, 'output_schema.json') : undefined;
+      ? runRecordPath(opts.runDir, 'stages', opts.stageId, 'output_schema.json') : undefined;
 
     let result: ExecResult | undefined;
     const invocations: NativeInvocationUsage[] = [];
@@ -242,7 +243,7 @@ export class CodexAdapter implements Adapter {
     const liveLogPath = stageLiveLogPath(opts.runDir, opts.stageId, opts.attemptIndex, opts.attemptStartedAt);
     try {
       if (schemaPath) {
-        mkdirSync(join(opts.runDir, 'stages', opts.stageId), { recursive: true });
+        mkdirSync(runRecordPath(opts.runDir, 'stages', opts.stageId), { recursive: true });
         atomicWrite(schemaPath, JSON.stringify(opts.outputSchema));
       }
       // SURGICAL param-fix retry: when the failure output NAMES a fixable
@@ -361,7 +362,7 @@ export class CodexAdapter implements Adapter {
       const keepForSuccessor = opts.preserveSession === true
         && result?.exitCode === 0
         && isSessionUuid(result.sessionId);
-      finalizeSessionHome(codexHome, result?.exitCode ?? 1, keepForSuccessor);
+      finalizeSessionHome(codexHome, result?.exitCode ?? 1, keepForSuccessor, { runDir: opts.runDir, stageId: opts.stageId, adapter: this.sessionKind });
     }
   }
 

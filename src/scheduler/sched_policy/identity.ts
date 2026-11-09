@@ -10,12 +10,14 @@ export function isTerminalStatus(status: string | undefined): boolean {
   return status !== undefined && isTerminalRunStatus(status);
 }
 
+const schedulerRun = (pidPath: string): string => basename(dirname(pidPath)) === 'engine' ? dirname(dirname(pidPath)) : dirname(pidPath);
+
 const localSchedulerClaims = new Set<string>();
 
 function establishLocalSchedulerClaim(schedulerPidPath: string, runId: string): boolean {
   const claimPath = join(canonicalRunDirectory(dirname(schedulerPidPath)), basename(schedulerPidPath));
   try {
-    writeSchedulerProcessIdentity(dirname(claimPath), runId);
+    writeSchedulerProcessIdentity(schedulerRun(claimPath), runId);
     localSchedulerClaims.add(claimPath);
     return true;
   } catch {
@@ -24,14 +26,14 @@ function establishLocalSchedulerClaim(schedulerPidPath: string, runId: string): 
         unlinkSync(schedulerPidPath);
       }
     } catch { /* absent or replaced */ }
-    removeSchedulerProcessIdentity(dirname(claimPath), process.pid);
+    removeSchedulerProcessIdentity(schedulerRun(claimPath), process.pid);
     return false;
   }
 }
 
 export function claimSchedulerPid(schedulerPidPath: string, runId: string): boolean {
   const claimPath = join(canonicalRunDirectory(dirname(schedulerPidPath)), basename(schedulerPidPath));
-  const runPath = dirname(claimPath);
+  const runPath = schedulerRun(claimPath);
   if (localSchedulerClaims.has(claimPath)) return false;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -56,7 +58,7 @@ export function removeSchedulerPidIfOwned(schedulerPidPath: string): void {
   try {
     if (readFileSync(schedulerPidPath, 'utf-8').trim() === String(process.pid)) {
       unlinkSync(schedulerPidPath);
-      removeSchedulerProcessIdentity(dirname(resolve(schedulerPidPath)), process.pid);
+      removeSchedulerProcessIdentity(schedulerRun(resolve(schedulerPidPath)), process.pid);
     }
   } catch { /* already removed or replaced by a newer owner */ }
 }

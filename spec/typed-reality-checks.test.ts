@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,7 +46,7 @@ describe('typed dispatch reality checks and the one-release Markdown read alias'
     expect(renderPlanInterface()).toContain('reality_checks');
     const f = fixture();
     expect(inspect(f, plan).pass).toBe(true);
-    writeFileSync(join(f.runDirPath, 'reality_checks.md'), markdown);
+    writeFileSync(runRecordPath(f.runDirPath, 'reality_checks.md'), markdown);
     expect(inspect(f, { stages }).pass).toBe(true);
   });
 
@@ -70,7 +71,7 @@ describe('typed dispatch reality checks and the one-release Markdown read alias'
     const f = fixture();
     const missing = { ...check, reads: [{ id: 'result', root: 'project', path: 'result.json', source: { kind: 'stage', stage: 'absent', artifact: 'result' } }] };
     const typed = inspect(f, { stages, reality_checks: [missing] });
-    writeFileSync(join(f.runDirPath, 'reality_checks.md'), `## Reality checks\n${stringify({ checks: [missing] })}`);
+    writeFileSync(runRecordPath(f.runDirPath, 'reality_checks.md'), `## Reality checks\n${stringify({ checks: [missing] })}`);
     const recorded = inspect(f, { stages });
     expect(typed.pass).toBe(false);
     expect(typed.errors).toEqual(recorded.errors);
@@ -79,13 +80,13 @@ describe('typed dispatch reality checks and the one-release Markdown read alias'
 
   it('publishes typed checks through the existing admitted snapshot only after admission', () => {
     const f = fixture();
-    const checksPath = join(f.runDirPath, 'reality_checks.md');
+    const checksPath = runRecordPath(f.runDirPath, 'reality_checks.md');
     writeFileSync(checksPath, 'old admitted bytes');
     const inject = createDispatchInjector(f.services).injectDispatchedStages;
-    writeFileSync(join(f.runDirPath, 'dispatch.yaml'), stringify({ stages, reality_checks: null }));
+    writeFileSync(stageWorkPath(f.runDirPath, 'dispatch.yaml'), stringify({ stages, reality_checks: null }));
     expect(inject('plan', f.roleRegistry, [...f.sorted], f.state, f.projectDir, f.runId)).toEqual([]);
     expect(readFileSync(checksPath, 'utf8')).toBe('old admitted bytes');
-    writeFileSync(join(f.runDirPath, 'dispatch.yaml'), stringify({ stages, reality_checks: [check] }));
+    writeFileSync(stageWorkPath(f.runDirPath, 'dispatch.yaml'), stringify({ stages, reality_checks: [check] }));
     expect(inject('plan', f.roleRegistry, [...f.sorted], f.state, f.projectDir, f.runId)).toHaveLength(3);
     expect(parseChecksFromMarkdown(readFileSync(checksPath, 'utf8'))).toEqual(parseRealityChecks([check]));
     expect(f.state.admittedRealityChecks?.markdown).toBe(readFileSync(checksPath, 'utf8'));

@@ -1,3 +1,4 @@
+import { requestPath, runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { seedAttemptValidation } from './test-support/attempt-validation.js';
 import { hashRollbackFileSync } from '../src/rollback-content-store.js';
@@ -142,7 +143,7 @@ async function waitForFile(directory: string, accept: (name: string) => boolean)
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     const match = readdirSync(directory).find(accept);
-    if (match) return join(directory, match);
+    if (match) return runRecordPath(directory, match);
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`timed out waiting for fixture file in ${directory}`);
@@ -171,10 +172,10 @@ describe('engine behaviour contracts', () => {
       }],
     });
     const baseline = validationBaseline(projectDir);
-    write(join(created.runDirPath, 'validation_baseline.json'), JSON.stringify({
+    write(runRecordPath(created.runDirPath, 'validation_baseline.json'), JSON.stringify({
       version: 1, capturedAt: new Date().toISOString(), source: 'ship-setup-ready-record', baseline,
     }));
-    write(join(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true }));
+    write(runRecordPath(created.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true }));
     const prompt = buildStagePrompt({
       dependsOn: [], promptTemplate: 'audit', projectDir, runId: created.runId,
       runDir: created.runDirPath, taskDescription: '# fixture', isGate: true, stageId: 'qa',
@@ -190,15 +191,15 @@ describe('engine behaviour contracts', () => {
     });
     const regressedVerdict = readGateEvaluation(projectDir, 'qa', created.runId);
     const control = createRun(projectDir, 'fixture', 'name: fixture', ['qa']);
-    write(join(control.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true }));
+    write(runRecordPath(control.runDirPath, 'verdict_qa.json'), JSON.stringify({ pass: true }));
     const noBaselineVerdict = readGateEvaluation(projectDir, 'qa', control.runId);
     expect(prompt).not.toContain('Engine-enforced validation baseline');
     expect(unchanged?.pass).toBe(false);
     expect(unchangedVerdict?.pass).toBe(true);
     expect(regressed?.pass).toBe(false);
     expect(regressed?.immutablePath).not.toBe(unchanged?.immutablePath);
-    expect(existsSync(join(created.runDirPath, unchanged!.immutablePath!))).toBe(true);
-    expect(existsSync(join(created.runDirPath, regressed!.immutablePath!))).toBe(true);
+    expect(existsSync(runRecordPath(created.runDirPath, unchanged!.immutablePath!))).toBe(true);
+    expect(existsSync(runRecordPath(created.runDirPath, regressed!.immutablePath!))).toBe(true);
     expect(regressedVerdict).toMatchObject({ pass: true, validation: [expect.objectContaining({ exitCode: 1, measurement: 'unverified', disposition: 'unknown' })] });
     expect(noBaselineVerdict?.pass).toBe(true);
   });
@@ -265,9 +266,9 @@ describe('engine behaviour contracts', () => {
       parseDispatchedStageConfig({ id: 'finalize', role: 'writer', scope: [terminalPath, outputPath] }),
       parseDispatchedStageConfig({ id: 'review', role: 'qa', is_gate: true, depends_on: ['finalize'], scope: [] }),
     ];
-    write(join(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Accepted the produced report.' }));
+    write(runRecordPath(created.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Accepted the produced report.' }));
     writeRunState(projectDir, created.runId, state);
-    write(join(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
+    write(runRecordPath(created.runDirPath, 'dispatch_admission.json'), JSON.stringify({
       version: 1, pass: true, checkedAt: new Date().toISOString(), errors: [],
       terminalOwners: { [terminalPath]: 'finalize' },
     }));
@@ -275,8 +276,8 @@ describe('engine behaviour contracts', () => {
       projectDir, runId: created.runId, runDirPath: created.runDirPath, iteration: 1,
       adapter: { run: async () => ({ output: '', exitCode: 0, duration_ms: 0 }) },
     });
-    const archivedPath = join(created.runDirPath, 'declared_outputs', outputPath);
-    const manifest = JSON.parse(readFileSync(join(created.runDirPath, 'declared_outputs_manifest.json'), 'utf-8')) as { outputs: unknown[] };
+    const archivedPath = runRecordPath(created.runDirPath, 'declared_outputs', outputPath);
+    const manifest = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'declared_outputs_manifest.json'), 'utf-8')) as { outputs: unknown[] };
     const safe = createArchivedPathVerifier(projectDir, created.runDirPath, {
       hashFile: hashRollbackFileSync,
     })(outputPath);
@@ -296,17 +297,17 @@ describe('engine behaviour contracts', () => {
     const stateRoot = join(root, 'fc-home');
     const runId = 'guide-after';
     const directory = join(stateRoot, 'runs', runId);
-    write(join(directory, 'run.json'), JSON.stringify({
+    write(runRecordPath(directory, 'run.json'), JSON.stringify({
       runId, status: 'running', taskDescription: '# guide',
       stages: { 'invalid target': { status: 'running' }, valid_stage: { status: 'running' } },
     }));
     const quarantined = sourceCli(['guide', '--run', runId, '--stage', 'invalid target', 'operator evidence'], stateRoot);
     const queued = sourceCli(['guide', '--run', runId, '--stage', 'valid_stage', 'valid evidence'], stateRoot);
-    const requests = readFileSync(join(directory, 'user_input.md'), 'utf-8');
-    expect(existsSync(join(directory, 'supervisor_guidance.md'))).toBe(false);
+    const requests = readFileSync(requestPath(directory, 'user_input.md'), 'utf-8');
+    expect(existsSync(runRecordPath(directory, 'supervisor_guidance.md'))).toBe(false);
     expect(requests).toContain('"quarantined":true');
     routePendingOperatorGuidanceToStage(directory, 'valid_stage');
-    const ledger = readFileSync(join(directory, 'supervisor_guidance.md'), 'utf-8');
+    const ledger = readFileSync(runRecordPath(directory, 'supervisor_guidance.md'), 'utf-8');
     expect(quarantined.status).toBe(1);
     expect(quarantined.stderr).toContain('quarantined');
     expect(quarantined.stderr).toContain('not queued');
@@ -427,10 +428,10 @@ describe('engine behaviour contracts', () => {
     mkdirSync(projectDir);
     setFcGlobalDir(stateRoot);
     const activeReservation = reserveRun(projectDir);
-    expect(existsSync(join(activeReservation.runDirPath, RUN_RESERVATION_FILE))).toBe(true);
+    expect(existsSync(runRecordPath(activeReservation.runDirPath, RUN_RESERVATION_FILE))).toBe(true);
     const initializedReservation = reserveRun(projectDir);
     initializeReservedRun(projectDir, initializedReservation.runId, 'fixture', 'name: fixture', ['work']);
-    expect(existsSync(join(initializedReservation.runDirPath, 'run.json'))).toBe(true);
+    expect(existsSync(runRecordPath(initializedReservation.runDirPath, 'run.json'))).toBe(true);
     const unknownId = 'unknown-mutator-target';
     appendRunEvent(projectDir, unknownId, {
       type: 'stage_complete', runId: unknownId, timestamp: new Date().toISOString(),
@@ -443,8 +444,8 @@ describe('engine behaviour contracts', () => {
       readRunState(projectDir, initializedReservation.runId),
       [],
     );
-    expect(existsSync(join(stateRoot, 'runs', unknownId, RUN_RESERVATION_FILE))).toBe(true);
-    expect(existsSync(join(stateRoot, 'runs', iterationLogId, RUN_RESERVATION_FILE))).toBe(true);
+    expect(existsSync(runRecordPath(join(stateRoot, 'runs', unknownId), RUN_RESERVATION_FILE))).toBe(true);
+    expect(existsSync(runRecordPath(join(stateRoot, 'runs', iterationLogId), RUN_RESERVATION_FILE))).toBe(true);
     const escapedDirectory = join(stateRoot, 'escape');
     write(join(escapedDirectory, 'run.json'), JSON.stringify({ runId: '../escape' }));
     expect(() => appendRunEvent(projectDir, '../escape', {
@@ -545,10 +546,10 @@ describe('engine behaviour contracts', () => {
     const projectDir = join(root, 'project');
     const directory = join(root, 'run');
     mkdirSync(directory);
-    write(join(directory, 'research_round_1_no_candidate_consumed.json'), JSON.stringify({
+    write(runRecordPath(directory, 'research_round_1_no_candidate_consumed.json'), JSON.stringify({
       label: 'no-safe-candidate', outcome: 'no_candidate', reason: 'all candidates failed safety',
     }));
-    write(join(directory, 'brief_criteria.json'), JSON.stringify({
+    write(runRecordPath(directory, 'brief_criteria.json'), JSON.stringify({
       criteria: [{ id: 'criterion-measured', text: 'Report the measured candidate score.' }],
     }));
     const prompt = buildStagePrompt({
@@ -622,10 +623,10 @@ describe('engine behaviour contracts', () => {
   it('installs follow interrupt handlers before emitting the first event', () => {
     const root = temporaryRoot();
     const directory = join(root, 'runs', 'race-run');
-    write(join(directory, 'run.json'), JSON.stringify({
+    write(runRecordPath(directory, 'run.json'), JSON.stringify({
       runId: 'race-run', status: 'running', projectDir: join(root, 'project'), stages: {},
     }));
-    appendFileSync(join(directory, 'events.jsonl'), `${JSON.stringify({
+    appendFileSync(runRecordPath(directory, 'events.jsonl'), `${JSON.stringify({
       type: 'guidance_written', runId: 'race-run', timestamp: new Date().toISOString(),
       stageId: 'work', detail: 'awaited-after-handler',
     })}\n`);

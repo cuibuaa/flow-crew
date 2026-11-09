@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -68,8 +69,8 @@ class WatchFixture {
     files: Record<string, number> = { 'status.json': 0 },
   ): void {
     const runDir = join(this.root, runId);
-    const stagesDir = this.directories.has(join(runDir, 'stages'))
-      ? join(runDir, 'stages')
+    const stagesDir = this.directories.has(runRecordPath(runDir, 'stages'))
+      ? runRecordPath(runDir, 'stages')
       : this.addDirectory(runDir, 'stages');
     const stageDir = this.addDirectory(stagesDir, stageId);
     for (const [name, mtimeMs] of Object.entries(files)) {
@@ -89,10 +90,10 @@ class WatchFixture {
     options: { pid?: number; live?: boolean } = {},
   ): void {
     const runDir = this.addDirectory(this.root, runId);
-    this.files.set(join(runDir, 'run.json'), JSON.stringify(state));
-    this.mtimes.set(join(runDir, 'run.json'), 0);
+    this.files.set(runRecordPath(runDir, 'run.json'), JSON.stringify(state));
+    this.mtimes.set(runRecordPath(runDir, 'run.json'), 0);
     if (options.pid !== undefined) {
-      this.files.set(join(runDir, 'scheduler.pid'), String(options.pid));
+      this.files.set(runRecordPath(runDir, 'scheduler.pid'), String(options.pid));
       if (options.live !== false) this.livePids.add(options.pid);
     }
   }

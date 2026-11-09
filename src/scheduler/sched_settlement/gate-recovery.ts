@@ -1,7 +1,8 @@
+import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Collect gate facts and choose exact recovery routes; project verified research settlement. Contract refusal receives only the campaign publisher.
 import { resolveResearchPaths } from '../../research-paths.js';
-import { GateVerdict, RUN_STATUS, ResearchConfig, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir, stageDir } from '../../store.js';
+import { GateVerdict, RUN_STATUS, ResearchConfig, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir } from '../../store.js';
 import { RESEARCH_DECISION_STATUS_ALIASES, StageConfig } from '../sched_admission/configuration.js';
 import { DispatchAdmissionReport, stageScopeOwnsPath } from '../sched_admission/dispatch.js';
 import { isStageInSkippedBranch, transitivelyDependsOn } from '../sched_admission/frontier.js';
@@ -125,13 +126,13 @@ export function gateRetryDiagnosticSnapshot(
   const verdictArtifacts: GateRetryDiagnosticArtifact[] = [];
   let verdictFiles: string[] = [];
   try {
-    verdictFiles = readdirSync(runDirPath)
+    verdictFiles = readdirSync(runRecordPath(runDirPath, '.'))
       .filter((file) => /^verdict_.*\.json$/.test(file))
       .sort();
   } catch { /* run directory is expected to exist; retain an empty diagnostic on failure */ }
   for (const file of verdictFiles) {
     try {
-      const parsed = JSON.parse(readFileSync(join(runDirPath, file), 'utf-8')) as Record<string, unknown>;
+      const parsed = JSON.parse(readFileSync(runRecordPath(runDirPath, file), 'utf-8')) as Record<string, unknown>;
       verdictArtifacts.push({ file, ...(typeof parsed.pass === 'boolean' ? { pass: parsed.pass } : {}) });
     } catch (error) {
       verdictArtifacts.push({ file, parseError: error instanceof Error ? error.message : String(error) });
@@ -142,7 +143,7 @@ export function gateRetryDiagnosticSnapshot(
   const evaluations = new Map(runtimeFacts.evaluations.map((evaluation) => [evaluation.id, evaluation]));
   const gates = uniqueGateStages(allStages).map((stage) => {
     const status = state.stages[stage.id];
-    const metricPath = join(runDirPath, 'stages', stage.id, 'metric.json');
+    const metricPath = stageWorkPath(runDirPath, 'stages', stage.id, 'metric.json');
     let metricArtifact: Record<string, unknown> | undefined;
     let metricParseError: string | undefined;
     if (existsSync(metricPath)) {
@@ -255,7 +256,7 @@ export function recoverVerifiedResearchSettlement(
   if (!runtime.allPass) return null;
   let admission: DispatchAdmissionReport;
   try {
-    admission = JSON.parse(readFileSync(join(runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
+    admission = JSON.parse(readFileSync(runRecordPath(runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
   } catch {
     return null;
   }
@@ -271,8 +272,8 @@ export function recoverVerifiedResearchSettlement(
     let verdict: Record<string, unknown>;
     let metric: Record<string, unknown>;
     try {
-      verdictBytes = readFileSync(join(runDirPath, `verdict_${gate.id}.json`));
-      metricBytes = readFileSync(join(stageDir(projectDir, runId, gate.id), 'metric.json'));
+      verdictBytes = readFileSync(runRecordPath(runDirPath, `verdict_${gate.id}.json`));
+      metricBytes = readFileSync(stageWorkPath(runDir(projectDir, runId), 'stages', gate.id, 'metric.json'));
       verdict = JSON.parse(verdictBytes.toString('utf-8')) as Record<string, unknown>;
       metric = JSON.parse(metricBytes.toString('utf-8')) as Record<string, unknown>;
     } catch {
@@ -308,7 +309,7 @@ export function recoverVerifiedResearchSettlement(
       campaignSucceeded,
       evidenceDigest,
     };
-    const decisionPath = join(runDirPath, 'research_decision.json');
+    const decisionPath = runRecordPath(runDirPath, 'research_decision.json');
     let alreadyPublished = false;
     try {
       const existing = JSON.parse(readFileSync(decisionPath, 'utf-8')) as Record<string, unknown>;
@@ -319,8 +320,8 @@ export function recoverVerifiedResearchSettlement(
     if (!alreadyPublished) {
       writeFileSync(decisionPath, `${JSON.stringify({ version: 1, ...projection }, null, 2)}\n`, 'utf-8');
     }
-    mkdirSync(join(runDirPath, 'signals'), { recursive: true });
-    writeFileSync(join(runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
+    mkdirSync(runRecordPath(runDirPath, 'signals'), { recursive: true });
+    writeFileSync(runRecordPath(runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
       version: 1,
       ...projection,
     }, null, 2)}\n`, 'utf-8');

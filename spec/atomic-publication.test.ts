@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { spawn } from 'node:child_process';
 import { CommandActivityTracker } from '../src/command-activity.js';
 import { createHash } from 'node:crypto';
@@ -64,7 +65,7 @@ describe('atomic publication', () => {
 
   it('publishes live command progress without syncing either file or directory', () => {
     const root = temporaryDirectory();
-    const path = join(root, 'stages', 'work', 'command_activity.json');
+    const path = runRecordPath(root, 'stages', 'work', 'command_activity.json');
     const spy = vi.spyOn(fs, 'fsyncSync').mockImplementation(() => { throw new Error('unexpected progress sync'); });
     syncBuiltinESMExports();
     try {
@@ -75,7 +76,7 @@ describe('atomic publication', () => {
       tracker.close();
       expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ completedCount: 1, active: [], streamClosed: true });
       expect(spy).not.toHaveBeenCalled();
-      expect(readdirSync(join(root, 'stages', 'work'))).toEqual(['command_activity.json']);
+      expect(readdirSync(runRecordPath(root, 'stages', 'work'))).toEqual(['command_activity.json']);
     } finally { spy.mockRestore(); syncBuiltinESMExports(); }
   });
 
@@ -171,7 +172,7 @@ describe('adapter session persistence failure', () => {
   const sessionId = '12345678-1234-4234-8234-123456789abc';
   it.each([0, 1, 124, 125, 137])('is explicit to the caller without masking control exit %i', exitCode => {
     const root = temporaryDirectory();
-    const path = join(root, 'stages', 'build', 'session.json');
+    const path = runRecordPath(root, 'stages', 'build', 'session.json');
     mkdirSync(path, { recursive: true }); // Force failure during publication, after parent creation.
     const metadata = { version: 1 as const, sessionId, ownerStageId: 'build', capturedAt: new Date(0).toISOString() };
     expect(() => writeSession(root, 'build', metadata)).toThrow();
@@ -182,6 +183,6 @@ describe('adapter session persistence failure', () => {
     expect(result.sessionId).toBeUndefined();
     expect(readSession(root, 'build')).toBeUndefined();
     expect(statSync(path).isDirectory()).toBe(true);
-    expect(readdirSync(join(root, 'stages', 'build'))).toEqual(['session.json']);
+    expect(readdirSync(runRecordPath(root, 'stages', 'build'))).toEqual(['session.json']);
   });
 });

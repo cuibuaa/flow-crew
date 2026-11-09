@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { isolatedProjectCommand } from './test-support/isolated-project-command.js';
 import {
@@ -114,7 +115,7 @@ function preflightDependencies(
 function writeRunningRun(runsRoot: string): void {
   const runDir = join(runsRoot, 'live-run');
   mkdirSync(runDir, { recursive: true });
-  writeFileSync(join(runDir, 'run.json'), `${JSON.stringify({
+  writeFileSync(runRecordPath(runDir, 'run.json'), `${JSON.stringify({
     runId: 'live-run',
     projectDir: fixture.project,
     status: 'running',

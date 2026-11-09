@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 import { atomicWrite } from '../../engine-fs.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Admit idle-boundary plan amendments through the existing revision transaction; receives the shared full-dispatch admission predicate.
@@ -12,7 +13,6 @@ import { topoSort } from '../sched_admission/frontier.js';
 import { inspectRealityCheckReachability } from '../sched_admission/reality-reads.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 
 export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof createDispatchAdmission>) {
@@ -21,7 +21,7 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
     sorted.splice(0, sorted.length, ...topoSort(stages));
     refreshRunQueryState(state, sorted);
     writeRunState(projectDir, runId, state);
-    atomicWrite(join(directory, 'workflow.yaml'), stringifyYaml({ ...workflow, stages: sorted }));
+    atomicWrite(runRecordPath(directory, 'workflow.yaml'), stringifyYaml({ ...workflow, stages: sorted }));
   }
 
   function admitRevisionCandidate(stages: StageConfig[], state: StoreState, projectDir: string, directory: string, roles: Map<string, { name: string; description: string }>): RevisionAdmission {
@@ -33,7 +33,7 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
       criteria: criteria?.criteria.length === 0 && !state.briefAdmission ? undefined : criteria,
       criterionDischarges: validatedCriterionDischarges(directory, state, criteria?.briefDigest), projectDir, runDir: directory });
     for (const stage of stages) if (!roles.has(stage.role)) report.errors.push(admissionError('role_unknown', `PLAN_REVISION_ROLE_UNKNOWN: ${stage.id}.role ${stage.role} is not configured`, 'role', stage.id));
-    const checksPath = join(directory, 'reality_checks.md');
+    const checksPath = runRecordPath(directory, 'reality_checks.md');
     if (existsSync(checksPath)) report.errors.push(...inspectRealityCheckReachability({ markdown: readFileSync(checksPath, 'utf8'), projectDir, runDir: directory, stages, terminalStates: state.terminalStates, research: state.research }).map(message => admissionError('reality_check_invalid', message, 'reality_checks')));
     report.pass = report.errors.length === 0;
     return { ...report, errors: report.errors.map(error => error.message) };
@@ -65,18 +65,18 @@ export function createPlanSettlement(inspectDispatchAdmission: ReturnType<typeof
     }
     for (const stage of [...sorted]) {
       if (!/^[a-z][a-z0-9_]{0,63}$/.test(stage.id)) continue;
-      const requestPath = join(directory, 'stages', stage.id, 'plan_revision_request.json');
+      const requestPath = stageWorkPath(directory, 'stages', stage.id, 'plan_revision_request.json');
       if (!existsSync(requestPath)) continue;
       const text = readFileSync(requestPath, 'utf8');
       if (!text.trim()) continue; // untouched native write-capability slot
       const digest = createHash('sha256').update(text).digest('hex');
-      const refusalPath = join(directory, 'stages', stage.id, `plan_revision_refusal_${digest}.json`);
+      const refusalPath = runRecordPath(directory, 'stages', stage.id, `plan_revision_refusal_${digest}.json`);
       if (existsSync(refusalPath)) continue;
       try {
         const request = JSON.parse(text) as { requestId?: unknown; stageId?: unknown };
         if (request.stageId !== stage.id) throw new Error('PLAN_REVISION_STAGE_BINDING: request carrier and stageId differ');
         if (typeof request.requestId === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(request.requestId)
-          && existsSync(join(directory, 'stages', stage.id, `plan_revision_decision_${request.requestId}.json`))) continue;
+          && existsSync(runRecordPath(directory, 'stages', stage.id, `plan_revision_decision_${request.requestId}.json`))) continue;
         const result = applyPlanRevision({ projectDir, runId, request,
           parseStage: parseDispatchedStageConfig,
           admit: (candidate, current) => admitRevisionCandidate(candidate, current, projectDir, directory, roles),

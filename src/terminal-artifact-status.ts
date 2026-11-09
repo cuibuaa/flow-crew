@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { realpathSync, statSync } from 'node:fs';
 import { compareContentIdentities, readContentIdentity, type ContentIdentity } from './content-identity.js';
 import { basename, isAbsolute, resolve } from 'node:path';
@@ -136,7 +137,7 @@ function discoverFreshTerminalArtifact(
         if (projectCandidate) candidates.push({ path: projectCandidate, root: projectDir });
       }
       if (evidence.runDir) {
-        const snapshot = safeDeclaredCandidate(evidence.runDir, terminalArtifactSnapshotName(rawPath));
+        const snapshot = runRecordPath(evidence.runDir, terminalArtifactSnapshotName(rawPath));
         if (snapshot) candidates.push({ path: snapshot, root: evidence.runDir });
       }
       if (!candidates.some(candidate => freshTerminalArtifact(state, rawPath, candidate.path, candidate.root, evidence))) continue;

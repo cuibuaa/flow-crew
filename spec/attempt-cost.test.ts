@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -109,10 +110,10 @@ describe('attempt token evidence', () => {
     vi.useFakeTimers();
     const stageId = 'abort_with_telemetry';
     const created = createRun(projectDir, 'abort-cost', 'name: abort-cost', [stageId]);
-    mkdirSync(join(created.runDirPath, 'signals'), { recursive: true });
+    mkdirSync(runRecordPath(created.runDirPath, 'signals'), { recursive: true });
     const adapter: Adapter = {
       async run(_prompt, _agent, opts): Promise<RunResult> {
-        const signalPath = join(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
+        const signalPath = runRecordPath(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
         atomicWrite(signalPath, JSON.stringify({
           version: 1,
           stageId: opts.stageId,
@@ -140,7 +141,7 @@ describe('attempt token evidence', () => {
       runDir: created.runDirPath,
       retries: 0,
     });
-    expect(existsSync(join(created.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(true);
+    expect(existsSync(runRecordPath(created.runDirPath, 'signals', `abort_${stageId}.json`))).toBe(true);
     await vi.advanceTimersByTimeAsync(2_100);
     const result = await running;
     const attempt = readStageStatus(projectDir, created.runId, stageId).attempts?.[0];

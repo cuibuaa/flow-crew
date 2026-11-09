@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, linkSync, mkdirSync, openSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from './engine-fs.js';
 import { constants, existsSync, fstatSync, fsyncSync, lstatSync, opendirSync, readFileSync, readlinkSync, readSync } from 'node:fs';
@@ -636,7 +637,7 @@ function resolveEngineRun(
   }
 
   const runRecord = readRegularFile(
-    join(runPath, 'run.json'),
+    runRecordPath(runPath, 'run.json'),
     (descriptor) => readRunRecordFields(descriptor, ENGINE_RUN_FIELD_LIMITS),
   );
   if (!sameContainedDirectory(runRoot, runPath, runDirectoryIdentity)) {
@@ -650,7 +651,7 @@ function resolveEngineRun(
       return { state: 'stale', taskId: task.id, detail };
     }
     const reservationRecord = readBoundedRegularFile(
-      join(runPath, '.run-reservation.json'),
+      runRecordPath(runPath, '.run-reservation.json'),
       MAX_ENGINE_RESERVATION_BYTES,
     );
     if (!sameContainedDirectory(runRoot, runPath, runDirectoryIdentity)) {

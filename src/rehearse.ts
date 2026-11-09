@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { EXIT_CODE } from './exit-code.js';
 /**
@@ -439,7 +440,7 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
           let terminalPath = '';
           let terminalStatus = '';
           try {
-            const decision = JSON.parse(readFileSync(join(opts.runDir, 'research_decision.json'), 'utf-8')) as {
+            const decision = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'research_decision.json'), 'utf-8')) as {
               terminalPath?: unknown;
               terminalStatus?: unknown;
             };
@@ -491,7 +492,7 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
 
       let journalRounds = 0;
       try {
-        const journal = JSON.parse(readFileSync(join(runDirPath, 'research_journal.json'), 'utf-8')) as { rounds: Array<{ label: string; result: number; confirmFailed?: boolean }> };
+        const journal = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_journal.json'), 'utf-8')) as { rounds: Array<{ label: string; result: number; confirmFailed?: boolean }> };
         journalRounds = journal.rounds.length;
         const decoy = journal.rounds.find((r) => r.label.includes('decoy'));
         const summary = journal.rounds.map((r) => `${r.label}=${r.result}${r.confirmFailed ? '(confirm rejected; excluded)' : ''}`).join(' · ');
@@ -520,7 +521,7 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
       }
 
       if (rc.confirm && beat !== undefined && shipProbe !== undefined) {
-        if (existsSync(join(runDirPath, 'research_confirm.json'))) add('ok', 'The confirm command was executed and recorded in `research_confirm.json`');
+        if (existsSync(runRecordPath(runDirPath, 'research_confirm.json'))) add('ok', 'The confirm command was executed and recorded in `research_confirm.json`');
         else add('warn', 'Confirm was never executed — a ship decision may never have been proposed');
       }
 
@@ -610,10 +611,10 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
         );
         noCandidateRunDir = join(tempFcHome, 'runs', noCandidateState.runId!);
         const noCandidateJournal = JSON.parse(
-          readFileSync(join(noCandidateRunDir, 'research_journal.json'), 'utf-8'),
+          readFileSync(runRecordPath(noCandidateRunDir, 'research_journal.json'), 'utf-8'),
         ) as { rounds?: Array<{ label?: string; outcome?: string }> };
         const noCandidateRound = noCandidateJournal.rounds?.find((round) => round.outcome === 'no_candidate');
-        const noCandidateMarker = readdirSync(noCandidateRunDir)
+        const noCandidateMarker = readdirSync(runRecordPath(noCandidateRunDir, '.'))
           .find((name) => /research_round_\d+_no_candidate_consumed\.json$/.test(name));
         if (noCandidateRound && noCandidateMarker) {
           add('ok', `Declared outcome no_candidate exercised: journal label=${noCandidateRound.label}; terminal status=${noCandidateState.status}; consumed artifact=${noCandidateMarker}`);

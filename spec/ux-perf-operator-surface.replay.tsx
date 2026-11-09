@@ -1,8 +1,10 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 // @vitest-environment jsdom
 
 import { atomicWrite } from '../src/engine-fs.js';
 import { fixtureArtifactContract } from './test-support/declared-dispatch.js';
+import { createRun } from './test-support/create-run.js';
 
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -17,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cmdShipPreflightWithDeps } from '../src/cli-ship-preflight.js';
 import { startRpcServer, type RpcResponse } from '../src/orchestrator-rpc.js';
 import { runStage } from '../src/worker.js';
-import { fcGlobalDir, setFcGlobalDir } from '../src/store.js';
+import { fcGlobalDir, setFcGlobalDir, writeStageStatus } from '../src/store.js';
 import type { Adapter, AgentConfig } from '../src/adapters/base.js';
 import RunDetail from '../ui/src/components/RunDetail';
 
@@ -110,7 +112,7 @@ function followGuidanceEvent(runDirectory: string): Promise<{ status: number | n
     let stdout = '';
     let stderr = '';
     let settled = false;
-    const appendTimer = setTimeout(() => appendFileSync(join(runDirectory, 'events.jsonl'), `${JSON.stringify({
+    const appendTimer = setTimeout(() => appendFileSync(runRecordPath(runDirectory, 'events.jsonl'), `${JSON.stringify({
       type: 'guidance_written',
       runId: 'live-run',
       timestamp: '2026-09-03T10:01:45.000Z',
@@ -141,9 +143,9 @@ function followGuidanceEvent(runDirectory: string): Promise<{ status: number | n
 
 function writeRun(id: string, status: 'running' | 'complete', mtimeMs: number): string {
   const runDirectory = join(fcHome, 'runs', id);
-  mkdirSync(join(runDirectory, 'stages', 'implement'), { recursive: true });
+  mkdirSync(runRecordPath(runDirectory, 'stages', 'implement'), { recursive: true });
   const startedAt = '2026-09-03T10:00:00.000Z';
-  const runJson = join(runDirectory, 'run.json');
+  const runJson = runRecordPath(runDirectory, 'run.json');
   writeFileSync(runJson, JSON.stringify({
     runId: id,
     projectDir: resolve(project),
@@ -160,7 +162,7 @@ function writeRun(id: string, status: 'running' | 'complete', mtimeMs: number): 
         : { status: 'complete', retries: 0, duration_ms: 120_000, attempts: [{ index: 1, status: 'complete', startedAt, completedAt: '2026-09-03T10:02:00.000Z' }] },
     },
   }), 'utf-8');
-  writeFileSync(join(runDirectory, 'events.jsonl'), `${JSON.stringify(status === 'running' ? {
+  writeFileSync(runRecordPath(runDirectory, 'events.jsonl'), `${JSON.stringify(status === 'running' ? {
     type: 'admission_rejected',
     runId: id,
     timestamp: '2026-09-03T10:01:30.000Z',
@@ -567,14 +569,13 @@ describe('operator dashboard vocabulary', () => {
   });
 
   it('unchanged-base seam: clears stale status and explains an empty engine abort through runStage', async () => {
-    const runId = 'operator-item-10';
     const stageId = 'implement';
-    const runDirectory = join(fcHome, 'runs', runId);
-    const stageDirectory = join(runDirectory, 'stages', stageId);
-    mkdirSync(join(runDirectory, 'signals'), { recursive: true });
+    const { runId, runDirPath: runDirectory } = createRun(project, 'operator-fixture', 'name: operator-fixture\nstages: []\n', [stageId]);
+    const stageDirectory = runRecordPath(runDirectory, 'stages', stageId);
+    mkdirSync(runRecordPath(runDirectory, 'signals'), { recursive: true });
     mkdirSync(stageDirectory, { recursive: true });
-    writeFileSync(join(runDirectory, 'task_brief.md'), '# Operator fixture\n', 'utf-8');
-    writeFileSync(join(stageDirectory, 'status.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runDirectory, 'task_brief.md'), '# Operator fixture\n', 'utf-8');
+    writeStageStatus(project, runId, stageId, {
       status: 'failed',
       retries: 0,
       error: 'stale prior failure',
@@ -587,12 +588,12 @@ describe('operator dashboard vocabulary', () => {
         completedAt: '2026-09-03T10:00:00.000Z',
         error: 'retained in history',
       }],
-    }), 'utf-8');
+    });
     let runningStatus: Record<string, unknown> | undefined;
     const adapter: Adapter = {
       run: async (_prompt, _role, options) => {
         runningStatus = JSON.parse(readFileSync(join(stageDirectory, 'status.json'), 'utf-8')) as Record<string, unknown>;
-        atomicWrite(join(runDirectory, 'signals', `abort_${stageId}.json`), JSON.stringify({
+        atomicWrite(runRecordPath(runDirectory, 'signals', `abort_${stageId}.json`), JSON.stringify({
           version: 1,
           stageId,
           attemptIndex: 2,
@@ -643,11 +644,10 @@ describe('operator dashboard vocabulary', () => {
   });
 
   it('unchanged-base seam: omits cache noise and keeps scoped writes through runStage', async () => {
-    const runId = 'operator-artifact-paths';
     const stageId = 'implement';
-    const runDirectory = join(fcHome, 'runs', runId);
-    mkdirSync(join(runDirectory, 'stages', stageId), { recursive: true });
-    writeFileSync(join(runDirectory, 'task_brief.md'), '# Operator fixture\n', 'utf-8');
+    const { runId, runDirPath: runDirectory } = createRun(project, 'operator-fixture', 'name: operator-fixture\nstages: []\n', [stageId]);
+    mkdirSync(runRecordPath(runDirectory, 'stages', stageId), { recursive: true });
+    writeFileSync(runRecordPath(runDirectory, 'task_brief.md'), '# Operator fixture\n', 'utf-8');
     mkdirSync(join(project, 'fixture-root'), { recursive: true });
     const adapter: Adapter = {
       run: async () => {

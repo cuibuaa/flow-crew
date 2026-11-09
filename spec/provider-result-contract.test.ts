@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -36,7 +37,7 @@ beforeEach(() => {
   previousStore = fcGlobalDir();
   setFcGlobalDir(join(root, 'state'));
   ({ runId, runDirPath: runDir } = createRun(projectDir, 'offline-provider', 'name: offline-provider\nstages: []\n', ['work']));
-  writeFileSync(join(runDir, 'task_brief.md'), 'Offline provider result trial');
+  writeFileSync(runRecordPath(runDir, 'task_brief.md'), 'Offline provider result trial');
   fixture = join(root, 'fixture.json');
   const fakeCli = `#!${process.execPath}
 const fs=require('node:fs'),p=process.env.FC_PROVIDER_SPEC_FIXTURE,f=JSON.parse(fs.readFileSync(p,'utf8'));
@@ -309,11 +310,11 @@ describe('provider-owned terminal failure contract', () => {
     const metadata = { version: 1 as const, sessionId: '11111111-1111-4111-8111-111111111111',
       ownerStageId: 'work', capturedAt: '2026-10-23T00:00:00Z', adapter };
     settleSession(runDir, 'work', { exitCode: 0 }, metadata.sessionId, undefined, undefined, { adapter });
-    const sessionPath = join(runDir, 'stages', 'work', 'session.json');
+    const sessionPath = runRecordPath(runDir, 'stages', 'work', 'session.json');
     const before = readFileSync(sessionPath, 'utf8');
     const leftover = stageSessionHome(runDir, 'work', other);
     mkdirSync(leftover, { recursive: true });
-    finalizeSessionHome(leftover, 0);
+    finalizeSessionHome(leftover, 0, false, { runDir, stageId: 'work', adapter: other });
     expect(existsSync(leftover)).toBe(false);
     expect(readFileSync(sessionPath, 'utf8')).toBe(before);
     expect(readSession(runDir, 'work', adapter)?.sessionId).toBe(metadata.sessionId);
@@ -334,12 +335,12 @@ describe('provider-owned terminal failure contract', () => {
   });
 
   it('treats legacy session metadata as Codex-owned during home retirement', () => {
-    const sessionPath = join(runDir, 'stages', 'work', 'session.json');
+    const sessionPath = runRecordPath(runDir, 'stages', 'work', 'session.json');
     writeFileSync(sessionPath, JSON.stringify({ version: 1, sessionId: '11111111-1111-4111-8111-111111111111',
       ownerStageId: 'work', capturedAt: '2026-10-23T00:00:00Z' }));
     finalizeSessionHome(stageSessionHome(runDir, 'work', 'claude'), 0);
     expect(readSession(runDir, 'work', 'codex')?.sessionId).toBe('11111111-1111-4111-8111-111111111111');
-    finalizeSessionHome(stageSessionHome(runDir, 'work', 'codex'), 0);
+    finalizeSessionHome(stageSessionHome(runDir, 'work', 'codex'), 0, false, { runDir, stageId: 'work', adapter: 'codex' });
     expect(existsSync(sessionPath)).toBe(false);
   });
 
@@ -373,7 +374,7 @@ describe('provider-owned terminal failure contract', () => {
     mkdirSync(home, { recursive: true });
     settleSession(runDir, 'work', { exitCode: 0 }, sessionId, undefined, undefined, { adapter: 'codex' });
     expect(readSession(runDir, 'work', 'codex')?.adapter).toBe('codex');
-    finalizeSessionHome(home, 0);
+    finalizeSessionHome(home, 0, false, { runDir, stageId: 'work', adapter: 'codex' });
     expect(existsSync(home)).toBe(false);
     expect(readSession(runDir, 'work', 'codex')).toBeUndefined();
     writeFileSync(fixture, JSON.stringify({ stdout: jsonl({ type: 'turn.completed' }), exitCode: 0 }));

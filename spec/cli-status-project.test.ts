@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,7 +28,7 @@ function writeRun(
 ): string {
   const directory = join(fcHome, 'runs', id);
   mkdirSync(directory, { recursive: true });
-  const runJson = join(directory, 'run.json');
+  const runJson = runRecordPath(directory, 'run.json');
   writeFileSync(runJson, JSON.stringify({
     runId: id,
     projectDir: resolve(projectDir),
@@ -113,7 +114,7 @@ describe('project-scoped status', () => {
 
   it('renders terminal run.json truth instead of a stale In progress projection', () => {
     const directory = writeRun('terminal-b', projectB, 'Terminal Project B', 'complete', 1_000);
-    writeFileSync(join(directory, 'progress.md'), '# In progress\n\nStale supervisor projection.\n', 'utf-8');
+    writeFileSync(runRecordPath(directory, 'progress.md'), '# In progress\n\nStale supervisor projection.\n', 'utf-8');
 
     const result = status();
     expect(result.status, result.stderr).toBe(0);

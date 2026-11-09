@@ -31,7 +31,7 @@ export default class ExecScriptExitZeroCheck implements RealityCheck {
   async run(raw: object, context: CheckContext) {
     return withEngineIntegrity(context.commandBoundary ?? {
       projectDir: context.projectDir,
-      runDir: resolve(context.taskDir) === resolve(context.projectDir) ? undefined : context.taskDir,
+      runDir: resolve(context.taskDir) === resolve(context.projectDir) || !existsSync(join(context.taskDir, 'run.json')) ? undefined : context.taskDir,
       stageId: '_reality',
     }, () => this.runChecked(raw, context));
   }

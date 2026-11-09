@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { classifyAdapterFailure } from '../src/adapters/failure.js';
 import { decideStageRetry } from '../src/scheduler/sched_settlement/stage-execution.js';
 import { ArtifactContractSchema } from '../src/artifact-declarations.js';
@@ -98,7 +99,7 @@ describe('scheduler admission and evidence contracts', () => {
         stageId: 'work', role, dependsOn: [], promptTemplate: 'fixture', timeout_ms: 1_000,
         technicalRetry: { delaysMs: [] }, projectDir, runId: created.runId, runDir: created.runDirPath, retries: 0,
       });
-      const events = readFileSync(join(created.runDirPath, 'events.jsonl'), 'utf8')
+      const events = readFileSync(runRecordPath(created.runDirPath, 'events.jsonl'), 'utf8')
         .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
       expect(result).toMatchObject({ exitCode: 1, providerFailure: { kind: 'transient' } });
       expect(events).toContainEqual(expect.objectContaining({ type: 'attempt_failed', providerFailure: expect.objectContaining({ kind: 'transient' }) }));
@@ -117,7 +118,7 @@ describe('scheduler admission and evidence contracts', () => {
         stageId: 'work', role, dependsOn: [], promptTemplate: 'fixture', timeout_ms: 1_000,
         technicalRetry: { delaysMs: [] }, projectDir, runId: semanticRun.runId, runDir: semanticRun.runDirPath, retries: 0,
       });
-      const semanticEvents = readFileSync(join(semanticRun.runDirPath, 'events.jsonl'), 'utf8')
+      const semanticEvents = readFileSync(runRecordPath(semanticRun.runDirPath, 'events.jsonl'), 'utf8')
         .trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
       expect(semantic.providerFailure).toBeUndefined();
       const semanticFailure = semanticEvents.find(event => event.type === 'attempt_failed');
@@ -160,12 +161,12 @@ describe('scheduler admission and evidence contracts', () => {
     const runsDir = join(root, 'runs');
     mkdirSync(projectDir, { recursive: true });
     const writeRun = (runId: string, status: string) => {
-      mkdirSync(join(runsDir, runId), { recursive: true });
-      writeFileSync(join(runsDir, runId, 'run.json'), JSON.stringify({ runId, projectDir, workflowName: 'fixture', status, stages: {}, startedAt: '2026-09-22T00:00:00.000Z' }));
+      mkdirSync(runRecordPath(runsDir, runId), { recursive: true });
+      writeFileSync(runRecordPath(runsDir, runId, 'run.json'), JSON.stringify({ runId, projectDir, workflowName: 'fixture', status, stages: {}, startedAt: '2026-09-22T00:00:00.000Z' }));
     };
     writeRun('terminal-run', RUN_STATUS.COMPLETE);
     writeRun('running-run', RUN_STATUS.RUNNING);
-    const terminalPath = join(runsDir, 'terminal-run', 'run.json');
+    const terminalPath = runRecordPath(runsDir, 'terminal-run', 'run.json');
     const terminalBytes = readFileSync(terminalPath, 'utf8');
     const registry = new TaskRegistry({ baseDir: join(root, 'registry') });
     // The registry can lag the authoritative run record during the exact shim

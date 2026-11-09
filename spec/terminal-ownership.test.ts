@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,7 +36,7 @@ describe('terminal ownership follows the current admitted plan', () => {
     { label: 'refused admission', pass: false, terminalOwners: { [terminalPath]: 'current_owner' }, expected: undefined },
   ])('prefers $label over a stale dispatch projection', ({ pass, terminalOwners, expected }) => {
     const directory = fixture();
-    writeFileSync(join(directory, 'dispatch_admission.json'), JSON.stringify({ pass: true, terminalOwners: { [terminalPath]: 'stale_owner' } }));
+    writeFileSync(runRecordPath(directory, 'dispatch_admission.json'), JSON.stringify({ pass: true, terminalOwners: { [terminalPath]: 'stale_owner' } }));
     writeFileSync(join(directory, 'run.json'), JSON.stringify({ queryState: { planRevision: { path: 'current_plan.json' } } }));
     writeFileSync(join(directory, 'current_plan.json'), JSON.stringify({ admission: { pass, terminalOwners } }));
     expect(admittedTerminalOwner(directory, terminalPath)).toBe(expected);
@@ -43,7 +44,7 @@ describe('terminal ownership follows the current admitted plan', () => {
 
   it.each(['no run record', 'no revision', 'revision without admission'] as const)('retains legacy projection fallback with %s', shape => {
     const directory = fixture();
-    writeFileSync(join(directory, 'dispatch_admission.json'), JSON.stringify({ pass: true, terminalOwners: { [terminalPath]: 'legacy_owner' } }));
+    writeFileSync(runRecordPath(directory, 'dispatch_admission.json'), JSON.stringify({ pass: true, terminalOwners: { [terminalPath]: 'legacy_owner' } }));
     if (shape === 'no revision') writeFileSync(join(directory, 'run.json'), '{}');
     if (shape === 'revision without admission') {
       writeFileSync(join(directory, 'run.json'), JSON.stringify({ queryState: { planRevision: { path: 'current_plan.json' } } }));
@@ -127,7 +128,7 @@ describe('terminal product deltas use existing content and ownership evidence', 
     const owner: StageStatus = { status: 'complete', retries: 0, attempts: [completed] };
     const run = state(project, owner);
     run.terminalStates = { complete: { paths: [terminalPath] } };
-    writeFileSync(join(project, 'dispatch_admission.json'), JSON.stringify({ pass: true, terminalOwners: { [terminalPath]: 'owner' } }));
+    writeFileSync(runRecordPath(project, 'dispatch_admission.json'), JSON.stringify({ pass: true, terminalOwners: { [terminalPath]: 'owner' } }));
     if (shape !== 'absent') {
       completed.constraintAudit = { ...audit(0, 0), path: 'audit.json' };
       writeFileSync(join(project, 'audit.json'), JSON.stringify(
@@ -148,7 +149,7 @@ describe('terminal product deltas use existing content and ownership evidence', 
       complete: { paths: [terminalPath] },
       escalated: { paths: ['results/blocker.md'], stageGlob: 'round/**', floor: { minAttemptedStages: 1 } },
     };
-    writeFileSync(join(project, 'dispatch_admission.json'), JSON.stringify({ pass: true, terminalOwners: { [terminalPath]: 'owner', 'results/blocker.md': evidenceOwner } }));
+    writeFileSync(runRecordPath(project, 'dispatch_admission.json'), JSON.stringify({ pass: true, terminalOwners: { [terminalPath]: 'owner', 'results/blocker.md': evidenceOwner } }));
     expect(terminalProductWrites(project, run, 'owner')).toEqual(evidenceOwner === 'owner' ? [] : [{ path: 'round/result.json', completedAt: Date.parse(at) }]);
   });
 });

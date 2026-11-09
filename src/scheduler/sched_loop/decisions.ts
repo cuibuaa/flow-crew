@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 import { captureRepairRoundSnapshot, type RepairRoundSnapshot } from '../sched_scope/snapshots.js';
 import { ensureRollbackBaseline } from '../sched_scope/rollback-baseline.js';
@@ -7,7 +8,7 @@ import { readEvidence } from '../../evidence-ledger.js';
 import type { AuditFinding } from '../../scoped-audit-repair.js';
 /** Settle declared edges at idle boundaries. All execution uses the ordinary scheduler. */
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname } from 'node:path';
 import { atomicWrite, mkdirSync, unlinkSync } from '../../engine-fs.js';
 import { emptyDecisionGraph, validateDecision, type DecisionRecord } from '../../decision-graph.js';
 import { changedPaths } from '../../decision-context.js';
@@ -44,7 +45,7 @@ function repend(id: string, state: StoreState): void {
 }
 function publishTarget(id: string, state: StoreState, project: string, run: string, directory: string): void {
   writeStageStatus(project, run, id, state.stages[id]);
-  const verdict = join(directory, `verdict_${id}.json`);
+  const verdict = runRecordPath(directory, `verdict_${id}.json`);
   if (existsSync(verdict)) unlinkSync(verdict);
 }
 
@@ -181,7 +182,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
         repend(planner.id, state); targetsToPublish.push(planner.id);
       }
     } else if (fixedShape) {
-      atomicWrite(join(directory, 'dispatch.yaml'), JSON.stringify({ stages: workflow.dispatch }));
+      atomicWrite(stageWorkPath(directory, 'dispatch.yaml'), JSON.stringify({ stages: workflow.dispatch }));
       if (!injectDispatchedStages(source.id, roles, sorted, state, project, run).length) {
         record.outcome = 'refused'; record.reason = 'Fixed shape failed full dispatch admission; see dispatch_admission.json.'; delete record.successor;
       } else graph.enabled[target] = source.id;
@@ -209,7 +210,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
 }
 
 function preimagePath(directory: string, iteration: number, round: number): string {
-  return join(directory, 'gate_reevaluation', `iteration_${iteration}`, `round_${round}`, 'repair_preimage.json');
+  return runRecordPath(directory, 'gate_reevaluation', `iteration_${iteration}`, `round_${round}`, 'repair_preimage.json');
 }
 function saveRepairPreimage(project: string, directory: string, iteration: number, round: number, stages: StageConfig[]): void {
   const path = preimagePath(directory, iteration, round);
@@ -217,7 +218,7 @@ function saveRepairPreimage(project: string, directory: string, iteration: numbe
   const snapshot = captureRepairRoundSnapshot(project, stages, { runDirPath: directory });
   const { files, rollbackBaseline: _baseline, ...metadata } = snapshot;
   const images = [...files].map(([name, { bytes: _bytes, text: _text, backingPath: _path, ...image }]) => [name, image]);
-  mkdirSync(join(directory, 'gate_reevaluation', `iteration_${iteration}`, `round_${round}`), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true });
   atomicWrite(path, JSON.stringify({ ...metadata, files: images }));
 }
 function finishRepairEvidence(project: string, directory: string, state: StoreState, sorted: StageConfig[]): void {

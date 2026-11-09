@@ -1,6 +1,7 @@
+import { runRecordPath } from './run-layout.js';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join, relative } from 'node:path';
+import { relative } from 'node:path';
 import { projectRunStageHistory } from './run-state-view.js';
 import { RECORDED_HANDOFF_SCHEMA, parseStageRecord, stageRecordSchema } from './handoff.js';
 import { RECORDED_PLAN_SCHEMA } from './plan-interface.js';
@@ -153,7 +154,7 @@ function renderStagesSection(state: StoreState): string {
 }
 
 function renderOrchestrationEvents(runDirectory: string): string {
-  const events = readOptionalJsonlFile<RunEvent>(join(runDirectory, 'events.jsonl')).filter((event) =>
+  const events = readOptionalJsonlFile<RunEvent>(runRecordPath(runDirectory, 'events.jsonl')).filter((event) =>
     event.type === 'parallel_scope_serialized',
   );
   if (events.length === 0) return '';
@@ -182,7 +183,7 @@ function readJson<T>(path: string): T | null {
 
 function renderRealityGateChecks(runDir: string): string {
   const report = readJson<{ results?: Array<{ name?: string; type?: string; pass?: boolean;
-    advisory?: boolean; details?: string; evidence?: { command?: string; exit?: { code?: number | null } } }> }>(join(runDir, '.reality-gate.json'));
+    advisory?: boolean; details?: string; evidence?: { command?: string; exit?: { code?: number | null } } }> }>(runRecordPath(runDir, '.reality-gate.json'));
   if (!Array.isArray(report?.results)) return '';
   const render = (items: NonNullable<typeof report>['results']): string => (items ?? []).map(item => {
     const command = typeof item.evidence?.command === 'string' ? `; command: \`${item.evidence.command}\`` : '';
@@ -196,8 +197,8 @@ function renderRealityGateChecks(runDir: string): string {
 }
 
 function readResearchData(runDir: string): ResearchData {
-  const journal = readJson<{ rounds?: ResearchRound[] }>(join(runDir, 'research_journal.json'));
-  const decision = readJson<Partial<ResearchEvaluation>>(join(runDir, 'research_decision.json'));
+  const journal = readJson<{ rounds?: ResearchRound[] }>(runRecordPath(runDir, 'research_journal.json'));
+  const decision = readJson<Partial<ResearchEvaluation>>(runRecordPath(runDir, 'research_decision.json'));
   return { rounds: Array.isArray(journal?.rounds) ? journal!.rounds! : [], decision };
 }
 
@@ -277,7 +278,7 @@ function renderStageRecords(runDir: string, state: StoreState): { details: strin
     const attempts = status.attempts ?? [];
     const records = attempts.length ? attempts.map((attempt, index) => ({
       label: `${id}${archived}, execution ${attempt.index} (${attempt.status}, exit ${attempt.exitCode ?? 'unknown'})`,
-      path: attemptPaths.find(entry => entry.attemptIndex === attempt.index && existsSync(join(runDir, entry.path)))?.path
+      path: attemptPaths.find(entry => entry.attemptIndex === attempt.index && existsSync(runRecordPath(runDir, entry.path)))?.path
         ?? (index === attempts.length - 1 ? outputPath : undefined),
       error: attempt.error, latest: index === attempts.length - 1,
       writes: attempt.writes, writeAttribution: attempt.writeAttribution,
@@ -289,14 +290,14 @@ function renderStageRecords(runDir: string, state: StoreState): { details: strin
       // Stage artifacts are cumulative; only this execution's existing ledger
       // can replace its model-authored list without misattributing old writes.
       if (entry.writes?.length) lines.push(`Recorded writes (${entry.writeAttribution ?? 'unknown'}): ${entry.writes.map(file => `\`${file}\``).join(', ')}`);
-      if (!entry.path || !existsSync(join(runDir, entry.path))) {
+      if (!entry.path || !existsSync(runRecordPath(runDir, entry.path))) {
         lines.push('Result unavailable; no checks inferred.');
         sections.push(lines.join('\n\n'));
         continue;
       }
       lines.push(`Record: \`${entry.path}\``);
       try {
-        const output = readFileSync(join(runDir, entry.path), 'utf8');
+        const output = readFileSync(runRecordPath(runDir, entry.path), 'utf8');
         const value = JSON.parse(output) as Record<string, unknown>;
         if (Array.isArray(value.stages)) {
           const plan = parseStageRecord(output, RECORDED_PLAN_SCHEMA);
@@ -340,7 +341,7 @@ function renderStageRecords(runDir: string, state: StoreState): { details: strin
     const directory = `stages/${id}`;
     append(id, status, `${directory}/output.md`, (status.attempts ?? []).map(attempt =>
       ({ attemptIndex: attempt.index, path: `${directory}/output_attempt_${attempt.index}.md` }))
-      .filter(entry => existsSync(join(runDir, entry.path))));
+      .filter(entry => existsSync(runRecordPath(runDir, entry.path))));
   }
   return { details: '## Stage results\n\n' + (sections.join('\n\n') || 'No stage results recorded.'),
     conclusions: '## What was done\n\n' + (conclusions.join('\n') || 'No typed work summaries recorded; see stage results.') };
@@ -353,7 +354,7 @@ function renderEngineGateConclusions(runDir: string, state: StoreState): string 
   for (const [id, status] of Object.entries(state.stages)) {
     const verdict = status.gate ?? status.acceptedFrom?.verdict;
     if (!verdict) continue;
-    const authored = readJson<{ audit_findings?: unknown }>(join(runDir, `verdict_${id}.json`));
+    const authored = readJson<{ audit_findings?: unknown }>(runRecordPath(runDir, `verdict_${id}.json`));
     const findings = projectLegacyFindings(verdict, authored?.audit_findings).findings;
     for (const finding of findings?.confirmed ?? []) sections.push(`- ${id}: confirmed finding ${finding.id}; reproduction ledger #${finding.record.sequence}.`);
     for (const finding of findings?.unconfirmed ?? []) sections.push(`- ${id}: unconfirmed observation ${finding.id}: ${finding.reason}; no repair requested.`);
@@ -391,8 +392,8 @@ function renderValidation(runDir: string, state: StoreState): string {
   const sections: string[] = state.validation?.length ? ['Current tree: ' + state.validation.map(result =>
     `${result.display ?? result.role}: ${projectValidationResult(result).measurement} (direct exit ${result.exitCode ?? 'absent'})`).join('; ')] : [];
   const seen = new Set<string>();
-  for (const name of readdirSync(runDir).filter(name => /^validation_delta_.+\.json$/.test(name)).sort()) {
-    const raw = readJson<GateValidationDeltaArtifact>(join(runDir, name));
+  for (const name of readdirSync(runRecordPath(runDir, '.')).filter(name => /^validation_delta_.+\.json$/.test(name)).sort()) {
+    const raw = readJson<GateValidationDeltaArtifact>(runRecordPath(runDir, name));
     if (raw?.current?.some(result => !result)) sections.push('Command receipt unavailable or invalid.');
     const receipt = raw && Array.isArray(raw.delta) && projectValidationDelta(runDir, raw);
     if (!receipt) {
@@ -421,7 +422,7 @@ function renderValidation(runDir: string, state: StoreState): string {
       : 'Baseline comparison entry unavailable or invalid.');
     sections.push(lines.join('\n\n'));
   }
-  const selection = readJson<{ baseline?: { discovery?: unknown } }>(join(runDir, 'validation_baseline.json'))?.baseline?.discovery;
+  const selection = readJson<{ baseline?: { discovery?: unknown } }>(runRecordPath(runDir, 'validation_baseline.json'))?.baseline?.discovery;
   return '## Configured validation\n\n' + (sections.join('\n\n') || `No engine validation receipts recorded; validation unverified. Command selection: ${JSON.stringify(selection ?? 'unavailable')}.`);
 }
 
@@ -463,7 +464,7 @@ export function renderRunSummary(projectDir: string, runDir: string, state: Stor
   const advisorySection = renderRealityGateChecks(runDir);
   const orchestrationSection = renderOrchestrationEvents(runDir);
   const stagesSection = renderStagesSection(state);
-  const isResearch = !!state.research || existsSync(join(runDir, 'research_journal.json'));
+  const isResearch = !!state.research || existsSync(runRecordPath(runDir, 'research_journal.json'));
 
   let summary: string;
 

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
@@ -243,7 +244,7 @@ describe('durable portable supervision shim', () => {
       'descendant.once("spawn", () => {',
       '  descendant.unref();',
       `  writeFileSync(${JSON.stringify(childPidPath)}, String(descendant.pid));`,
-      `  writeFileSync(${JSON.stringify(join(runPath, 'run.json'))}, JSON.stringify({ status: "complete" }));`,
+      `  writeFileSync(${JSON.stringify(runRecordPath(runPath, 'run.json'))}, JSON.stringify({ status: "complete" }));`,
       '  setTimeout(() => process.exit(0), 50);',
       '});',
       'descendant.once("error", (error) => { throw error; });',
@@ -274,7 +275,7 @@ describe('durable portable supervision shim', () => {
       expect(running).toBeDefined();
       expect(processIsAlive(running!.shimPid)).toBe(false);
       expect(readFileSync(wrapperStatusPath, 'utf-8').trim()).toBe('0');
-      expect(JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf-8'))).toEqual({ status: 'complete' });
+      expect(JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf-8'))).toEqual({ status: 'complete' });
       expect(exit).toMatchObject({ exitCode: 0, normalized: 0 });
       await expect(backend.isActive(unit)).resolves.toEqual({ kind: 'terminal', exitCode: 0 });
     } finally {
@@ -290,7 +291,7 @@ describe('durable portable supervision shim', () => {
     const runId = 'lost-shim-run';
     const runPath = join(root, 'runs', runId);
     mkdirSync(runPath, { recursive: true });
-    atomicWriteJson(join(runPath, 'run.json'), {
+    atomicWriteJson(runRecordPath(runPath, 'run.json'), {
       runId, projectDir: root, status: 'running', stages: { work: { status: 'running', retries: 0 } },
     });
     const task = registry.create({
@@ -331,7 +332,7 @@ describe('durable portable supervision shim', () => {
     });
     expect(result.message).toContain('may still be running');
     expect(registry.get(task.id)).toMatchObject({ status: TASK_STATUS.CANCELLED, completed_at: expect.any(String) });
-    expect(JSON.parse(readFileSync(join(runPath, 'run.json'), 'utf8'))).toMatchObject({
+    expect(JSON.parse(readFileSync(runRecordPath(runPath, 'run.json'), 'utf8'))).toMatchObject({
       status: 'cancelled', stages: { work: { status: 'failed' } },
     });
     expect(signals.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([]);

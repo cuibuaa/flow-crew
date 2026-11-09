@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { createHash } from 'node:crypto';
 import { parseJsonl, readJsonlFile } from './jsonl.js';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -128,7 +129,7 @@ function readRunStates(projectDir: string): StoreState[] {
   const states: StoreState[] = [];
   for (const runId of runIds) {
     try {
-      const raw = readFileSync(join(runsRoot(projectDir), runId, 'run.json'), 'utf-8');
+      const raw = readFileSync(runRecordPath(join(runsRoot(projectDir), runId), 'run.json'), 'utf-8');
       states.push(JSON.parse(raw) as StoreState);
     } catch { /* non-critical */
       // Incomplete or corrupt run directories should not hide valid campaigns.
@@ -172,7 +173,7 @@ function campaignEntryTimestamp(entry: Partial<CampaignHistoryEntry> & { ts?: un
 
 function runBelongsToProject(projectDir: string, runId: string): boolean {
   try {
-    const raw = readFileSync(join(runsRoot(projectDir), runId, 'run.json'), 'utf-8');
+    const raw = readFileSync(runRecordPath(join(runsRoot(projectDir), runId), 'run.json'), 'utf-8');
     const state = JSON.parse(raw) as Partial<StoreState>;
     return typeof state.projectDir === 'string'
       && projectPersistenceIdentity(state.projectDir) === projectPersistenceIdentity(projectDir);
@@ -310,7 +311,7 @@ export function readAllCampaignEntries(projectDir: string): Map<string, Campaign
           // file for a gated entry not already passing/terminal (bounds the I/O).
           if (!normalized.terminalStudyComplete && !normalized.pass && typeof normalized.gate === 'string') {
             try {
-              const evidence = JSON.parse(readFileSync(join(runsRoot(projectDir), normalized.runId, `verdict_${normalized.gate}.json`), 'utf-8'));
+              const evidence = JSON.parse(readFileSync(runRecordPath(join(runsRoot(projectDir), normalized.runId), `verdict_${normalized.gate}.json`), 'utf-8'));
               if (evidence?.study_complete === true
                 && evidence?.model_success === false
                 && evidence?.reason === 'study_complete_without_model_success') {

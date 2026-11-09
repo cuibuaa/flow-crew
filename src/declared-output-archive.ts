@@ -1,6 +1,7 @@
+import { runRecordPath } from './run-layout.js';
 import { hashRollbackFileSync } from './rollback-content-store.js';
 import { createHash } from 'node:crypto';
-import { atomicWrite, copyFileSync, mkdirSync, renameSync, rmSync, symlinkSync } from './engine-fs.js';
+import { atomicWrite, copyFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from './engine-fs.js';
 import { lstatSync, readFileSync, readlinkSync, readdirSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { externalOutputDirectory, type BriefOutputDeclaration } from './ship-inputs.js';
@@ -86,7 +87,8 @@ function archiveOne(projectDir: string, archiveBase: string, declaration: BriefO
     mkdirSync(dirname(destinationPath), { recursive: true });
     if (symlink) {
       const bytes = readlinkSync(sourcePath, { encoding: 'buffer' });
-      symlinkSync(bytes, destinationPath);
+      // A link is archived as data, never as a writable alias out of the engine tree.
+      writeFileSync(destinationPath, bytes);
       members.push(memberRecord(memberPath, bytes, true));
     } else {
       copyFileSync(sourcePath, destinationPath);
@@ -104,7 +106,7 @@ export function archiveDeclaredOutputs(
   declarations: readonly BriefOutputDeclaration[],
 ): DeclaredOutputArchiveManifest {
   const unique = [...new Map(declarations.map((entry) => [entry.path, entry])).values()];
-  const temporary = join(runDir, `.declared-outputs-${process.pid}-${Date.now()}`);
+  const temporary = runRecordPath(runDir, `.declared-outputs-${process.pid}-${Date.now()}`);
   try {
     mkdirSync(temporary, { recursive: true });
     mkdirSync(join(temporary, 'declared_outputs'), { recursive: true });
@@ -115,14 +117,14 @@ export function archiveDeclaredOutputs(
       }
       return archiveOne(projectDir, join(temporary, 'declared_outputs'), declaration);
     });
-    const finalRoot = join(runDir, 'declared_outputs');
+    const finalRoot = runRecordPath(runDir, 'declared_outputs');
     rmSync(finalRoot, { recursive: true, force: true });
     renameSync(join(temporary, 'declared_outputs'), finalRoot);
     const manifest: DeclaredOutputArchiveManifest = {
       version: 1, archivedAt: new Date().toISOString(), complete: true, outputs,
     };
     // The manifest is the durable evidence index; publish only after the tree is in place.
-    atomicWrite(join(runDir, DECLARED_OUTPUT_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, { durability: 'durable' });
+    atomicWrite(runRecordPath(runDir, DECLARED_OUTPUT_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, { durability: 'durable' });
     return manifest;
   } finally {
     rmSync(temporary, { recursive: true, force: true });
@@ -143,7 +145,7 @@ export function createArchivedPathVerifier(
   if (!fs.hashFile) return () => false;
   const indexed = new Map<string, { member: ArchivedMember; archivedPath: string }>();
   try {
-    const manifest = JSON.parse(readFileSync(join(runDir, DECLARED_OUTPUT_MANIFEST), 'utf-8')) as DeclaredOutputArchiveManifest;
+    const manifest = JSON.parse(readFileSync(runRecordPath(runDir, DECLARED_OUTPUT_MANIFEST), 'utf-8')) as DeclaredOutputArchiveManifest;
     if (manifest.version !== 1 || manifest.complete !== true || !Array.isArray(manifest.outputs)) return () => false;
     const files = new Map<string, number>(), directories = new Map<string, number>();
     manifest.outputs.forEach((output, index) => {
@@ -172,7 +174,7 @@ export function createArchivedPathVerifier(
         if (output.expectedType === 'file' && member.path !== posix.basename(output.path)) continue;
         if (normalizedProjectPath(path) !== path || firstOutput(path) !== index || indexed.has(path)) continue;
         indexed.set(path, { member, archivedPath: output.expectedType === 'file'
-          ? join(runDir, output.archiveRoot) : join(runDir, output.archiveRoot, member.path) });
+          ? runRecordPath(runDir, output.archiveRoot) : runRecordPath(runDir, output.archiveRoot, member.path) });
       }
     });
   } catch { return () => false; }
@@ -184,14 +186,16 @@ export function createArchivedPathVerifier(
     const projectPath = join(resolve(projectDir), path);
     try {
       const symlink = member.type === 'symlink';
-      if (lstatSync(projectPath).isSymbolicLink() !== symlink || lstatSync(archivedPath).isSymbolicLink() !== symlink) return false;
+      if (lstatSync(projectPath).isSymbolicLink() !== symlink) return false;
+      const archiveStat = lstatSync(archivedPath);
+      if (!archiveStat.isFile() && !(symlink && archiveStat.isSymbolicLink())) return false;
       const identity = (path: string) => symlink
         ? (() => {
             const bytes = readlinkSync(path, { encoding: 'buffer' });
             return { byteLength: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') };
           })()
         : fs.hashFile!(path);
-      const current = identity(projectPath), archived = identity(archivedPath);
+      const current = identity(projectPath), archived = symlink && archiveStat.isSymbolicLink() ? identity(archivedPath) : fs.hashFile!(archivedPath);
       return current.byteLength === member.bytes && archived.byteLength === member.bytes
         && current.sha256 === member.sha256 && archived.sha256 === member.sha256;
     } catch { return false; }

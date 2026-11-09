@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { emptyInbox } from './test-support/engine-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -75,14 +76,14 @@ function writeEvidence(
     '  - id: implement',
     '    role: coder',
   ].join('\n');
-  writeFileSync(join(dir, 'workflow.yaml'), `${workflow}\n`, 'utf-8');
+  writeFileSync(runRecordPath(dir, 'workflow.yaml'), `${workflow}\n`, 'utf-8');
   if (options.journal !== undefined) writeFileSync(join(dir, 'research_journal.json'), JSON.stringify(options.journal), 'utf-8');
-  if (options.summary !== undefined) writeFileSync(join(dir, 'summary.md'), options.summary, 'utf-8');
+  if (options.summary !== undefined) writeFileSync(runRecordPath(dir, 'summary.md'), options.summary, 'utf-8');
   if (options.confirm !== undefined) writeFileSync(join(dir, 'research_confirm.json'), JSON.stringify(options.confirm), 'utf-8');
   if (options.metric) {
     const stage = options.metric.stage ?? 'implement';
-    mkdirSync(join(dir, 'stages', stage), { recursive: true });
-    writeFileSync(join(dir, 'stages', stage, 'metric.json'), JSON.stringify({
+    mkdirSync(runRecordPath(dir, 'stages', stage), { recursive: true });
+    writeFileSync(runRecordPath(dir, 'stages', stage, 'metric.json'), JSON.stringify({
       hasMetric: true,
       metric: options.metric.metric,
       value: options.metric.value,

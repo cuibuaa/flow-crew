@@ -77,7 +77,7 @@ export function declareReviewChoices(stages: StageConfig[]): void {
     const full = structuredClone(gate);
     full.id = fullId;
     if (full.artifact_contract) for (const output of full.artifact_contract.produces) {
-      if (output.root === 'run' && output.path === `verdict_${gate.id}.json`) output.path = `verdict_${fullId}.json`;
+      if (output.root === 'run' && output.path === `work/verdict_${gate.id}.json`) output.path = `work/verdict_${fullId}.json`;
     }
     const assessment: StageConfig = { ...gate, id: assessmentId, role: gate.role, is_gate: false, scope: [],
       retry_to: undefined, dynamic_dispatch: false, prompt_template: '',

@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,12 +36,12 @@ async function launch(tamper = false) {
       prompt: name === 'planner' ? 'Produce {run_dir}/dispatch.yaml, the execution plan.' : 'Review existing work.' };
     roles.set(name, role);
   }
-  const workflowPath = join(project, 'workflow.yaml');
+  const workflowPath = runRecordPath(project, 'workflow.yaml');
   writeFileSync(workflowPath, stringify({ name: 'fixture', defaults: { max_iterations: 1, max_retries: 0 },
     stages: [{ id: 'plan', role: 'planner', dynamic_dispatch: true }] }));
   const { config, raw } = loadWorkflow(workflowPath);
   const created = prepareFixtureRun(project, config, raw);
-  writeFileSync(join(created.runDirPath, 'task_brief.md'), '# Goal\nReview existing work.\n');
+  writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), '# Goal\nReview existing work.\n');
   const calls: string[] = [], checks: number[] = [];
   const adapter: Adapter = { async run(_prompt, _role, opts) {
     calls.push(opts.stageId);
@@ -49,7 +50,7 @@ async function launch(tamper = false) {
       // publication can advance the parent's expected carrier snapshot.
       const child = await execWithStdin(process.execPath, ['-e', `
         const fs = require('node:fs'), cp = require('node:child_process');
-        const file = ${JSON.stringify(join(created.runDirPath, 'dispatch.yaml'))};
+        const file = ${JSON.stringify(stageWorkPath(created.runDirPath, 'dispatch.yaml'))};
         const proposal = ${JSON.stringify(proposal)};
         fs.writeFileSync(file, JSON.stringify(proposal));
         function check() {
@@ -69,7 +70,7 @@ async function launch(tamper = false) {
       return child;
     }
     if (opts.stageId === 'review') {
-      if (tamper) writeFileSync(join(opts.runDir, 'dispatch.yaml'), '{"stages":[]}');
+      if (tamper) writeFileSync(runRecordPath(opts.runDir, 'dispatch.yaml'), '{"stages":[]}');
       return { output: JSON.stringify({ pass: true, reason: 'Reviewed existing work.', criteria: {}, audit_findings: { version: 1, findings: [] } }), exitCode: 0, duration_ms: 1 };
     }
     return { output: 'Fixture summary.', exitCode: 0, duration_ms: 1 };
@@ -85,7 +86,7 @@ it('accepts the planner writing and rewriting dispatch.yaml with passing plan-ch
   expect(plan.status).toBe('complete');
   expect(state.status, state.failureReason).toBe('complete');
   expect(calls).toContain('review');
-  expect(parse(readFileSync(join(directory, 'dispatch.yaml'), 'utf8')).stages[0].prompt_template).toBe('Independently review existing work.');
+  expect(parse(readFileSync(runRecordPath(directory, 'dispatch.yaml'), 'utf8')).stages[0].prompt_template).toBe('Independently review existing work.');
 });
 
 it('still voids a non-plan stage changing the admitted dispatch carrier', async () => {

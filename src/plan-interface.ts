@@ -1,7 +1,7 @@
+import { engineDirectory, runRecordPath, stageWorkPath } from './run-layout.js';
 /** Public live-plan interface. Historical readers deliberately keep their own tolerant schemas. */
 import { parseCommandArgs, commandUsage } from './cli-args.js';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
 import { type Schema } from './reality-gate/checks/json-schema-match.js';
 import { REALITY_CHECK_TYPES } from './reality-gate/types.js';
 
@@ -41,7 +41,7 @@ export const RECORDED_PLAN_SCHEMA: Schema = { ...PLAN_SCHEMA, additionalProperti
 
 export function renderPlanInterface(): string {
   return '# dispatch.yaml interface\n'
-    + 'Write the complete plan to dispatch.yaml in this run directory as a JSON object {stages: [...], reality_checks?: [...]} or equivalent YAML. The planner owns this declared output; the engine admits it after the stage completes.\n'
+    + 'Write the complete plan to work/dispatch.yaml below the run envelope as a JSON object {stages: [...], reality_checks?: [...]} or equivalent YAML. The planner owns this declared output; the engine admits it after the stage completes.\n'
     + JSON.stringify(PLAN_SCHEMA) + '\n'
     + 'Use PLAN_SCHEMA above for the plan shape and plan-check below for admission errors. '
     + 'Declare optional deterministic checks in reality_checks; omission inherits admitted checks, while [] clears them. '
@@ -53,8 +53,8 @@ export function renderPlannerAdmissionCheck(projectDir: string, runDir: string):
   const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
   const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
   return '# Check draft admission before finishing\n'
-    + 'Write your complete candidate to dispatch.yaml in this run directory. Before finishing, run:\n'
-    + `${quote(process.execPath)} ${quote(cli)} plan-check --project ${quote(projectDir)} --run ${quote(runDir)} ${quote(join(runDir, 'dispatch.yaml'))}\n`
+    + 'Write your complete candidate to work/dispatch.yaml below the run envelope. Before finishing, run:\n'
+    + `${quote(process.execPath)} ${quote(cli)} plan-check --project ${quote(projectDir)} --run ${quote(runDir)} ${quote(stageWorkPath(runDir, 'dispatch.yaml'))}\n`
     + 'This read-only command runs the same admission code as the scheduler, using this run’s workflow, brief, criteria, prior discharges, inputs and reality_checks (or the historical reality_checks.md alias). '
     + 'It prints every diagnosable error together. Repair the candidate and check again within this planner attempt until pass is true (exit 0), then return your ordinary stage report. '
     + 'Do not write project deliverables while planning.';
@@ -62,7 +62,7 @@ export function renderPlannerAdmissionCheck(projectDir: string, runDir: string):
 
 /** Read-only CLI route: no scheduler launch, reconciliation, adapter or service-manager calls. */
 export async function cmdPlanCheck(args: string[]): Promise<number> {
-  const { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, copyFileSync } = await import('./engine-fs.js');
+  const { readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, copyFileSync } = await import('./engine-fs.js');
   const { resolve, dirname, join } = await import('node:path');
   const { tmpdir } = await import('node:os');
   const { admissionError, buildRoleRegistry, createDispatchAdmission, loadWorkflow } = await import('./scheduler/sched_admission/dispatch.js');
@@ -87,7 +87,7 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
       runDirPath = resolve(options.get('--run')!);
       const { readArchivedRunStateFromDirectory } = await import('./store.js');
       state = readArchivedRunStateFromDirectory(runDirPath).state as import('./store.js').StoreState;
-      baseStages = loadWorkflow(join(runDirPath, 'workflow.yaml'), true).config.stages;
+      baseStages = loadWorkflow(runRecordPath(runDirPath, 'workflow.yaml'), true).config.stages;
     } else {
       const brief = readFileSync(resolve(options.get('--brief')!), 'utf8');
       const parsedBrief = parseBriefFrontmatter(brief);
@@ -95,10 +95,12 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
       baseStages = loadWorkflow(join(engineConfigDir, 'workflows', `${workflowName}.yaml`)).config.stages;
       scratch = mkdtempSync(resolve(tmpdir(), 'fc-plan-check-'));
       runDirPath = scratch;
-      writeFileSync(join(scratch, 'task_brief.md'), brief);
-      writeFileSync(join(scratch, 'brief_criteria.json'), JSON.stringify(extractBriefCriteria(brief)));
+      mkdirSync(engineDirectory(scratch));
+      writeFileSync(join(engineDirectory(scratch), '.run-reservation.json'), '{"storageLayout":2}\n');
+      writeFileSync(runRecordPath(scratch, 'task_brief.md'), brief);
+      writeFileSync(runRecordPath(scratch, 'brief_criteria.json'), JSON.stringify(extractBriefCriteria(brief)));
       const checksPath = resolve(dirname(resolve(files[0])), 'reality_checks.md');
-      if (existsSync(checksPath)) copyFileSync(checksPath, join(scratch, 'reality_checks.md'));
+      if (existsSync(checksPath)) copyFileSync(checksPath, runRecordPath(scratch, 'reality_checks.md'));
       state = { stages: {}, terminalStates: parsedBrief.terminalStates, research: parsedBrief.research } as import('./store.js').StoreState;
       for (const error of [parsedBrief.frontmatterError, parsedBrief.researchPolicyError, parsedBrief.researchFeasibilityError]) if (error) errors.push(admissionError('brief_contract_invalid', error, 'frontmatter'));
     }

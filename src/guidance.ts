@@ -1,7 +1,8 @@
+import { runRecordPath, requestPath } from './run-layout.js';
 import { appendFileSync, mkdirSync, renameSync, unlinkSync } from './engine-fs.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname } from 'node:path';
 import { appendRunEventAtRunDir } from './run-events.js';
 import { isRunningStageStatus } from './store.js';
 
@@ -175,11 +176,11 @@ export function guidanceForStageFromText(text: string, stageId: string, attemptI
 
 export function readGuidanceForStage(runDir: string, stageId: string, attemptIndex?: number): GuidanceEnvelope[] {
   const entries: GuidanceEnvelope[] = [];
-  const ledgerPath = join(runDir, 'supervisor_guidance.md');
+  const ledgerPath = runRecordPath(runDir, 'supervisor_guidance.md');
   if (existsSync(ledgerPath)) {
     try { entries.push(...guidanceForStageFromText(readFileSync(ledgerPath, 'utf-8'), stageId, attemptIndex)); } catch { /* optional */ }
   }
-  const stagePath = join(runDir, 'stages', stageId, 'guidance.md');
+  const stagePath = runRecordPath(runDir, 'stages', stageId, 'guidance.md');
   if (existsSync(stagePath)) {
     try {
       const text = readFileSync(stagePath, 'utf-8');
@@ -213,12 +214,12 @@ export function routePendingOperatorGuidanceToStage(
   runDir: string,
   stageId: string,
 ): GuidanceEnvelope | undefined {
-  const inputPath = join(runDir, 'user_input.md');
+  const inputPath = requestPath(runDir, 'user_input.md');
   if (!existsSync(inputPath)) return undefined;
 
   let knownStageIds: string[];
   try {
-    const state = JSON.parse(readFileSync(join(runDir, 'run.json'), 'utf-8')) as {
+    const state = JSON.parse(readFileSync(runRecordPath(runDir, 'run.json'), 'utf-8')) as {
       stages?: Record<string, { status?: unknown }>;
     };
     knownStageIds = Object.keys(state.stages ?? {});
@@ -235,7 +236,7 @@ export function routePendingOperatorGuidanceToStage(
     return undefined;
   }
 
-  const claimedPath = join(
+  const claimedPath = runRecordPath(
     runDir,
     `.user_input.${stageId}.${process.pid}.${randomUUID()}.routing`,
   );
@@ -322,14 +323,15 @@ function prepareGuidanceEnvelope(input: {
  * resident engine publishes the canonical ledger and its durable events. */
 export function queueOperatorGuidance(input: Omit<Parameters<typeof prepareGuidanceEnvelope>[0], 'source'>): GuidanceEnvelope {
   const envelope = prepareGuidanceEnvelope({ ...input, source: 'operator' });
-  appendFileSync(join(input.runDir, 'user_input.md'), `${renderGuidanceEnvelope(envelope)}\n\n`, 'utf8');
+  mkdirSync(requestPath(input.runDir), { recursive: true });
+  appendFileSync(requestPath(input.runDir, 'user_input.md'), `${renderGuidanceEnvelope(envelope)}\n\n`, 'utf8');
   return envelope;
 }
 
 export function appendGuidanceEnvelope(input: Parameters<typeof prepareGuidanceEnvelope>[0]): GuidanceEnvelope {
   const envelope = prepareGuidanceEnvelope(input);
   const { target, createdAt, body, criterionIds = [] } = envelope;
-  const ledgerPath = join(input.runDir, 'supervisor_guidance.md');
+  const ledgerPath = runRecordPath(input.runDir, 'supervisor_guidance.md');
   mkdirSync(dirname(ledgerPath), { recursive: true });
   appendFileSync(ledgerPath, `${existsSync(ledgerPath) ? '\n\n' : ''}${renderGuidanceEnvelope(envelope)}\n`, 'utf-8');
   try {

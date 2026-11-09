@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { createHash } from 'node:crypto';
 import { emptyArtifactContract, gateArtifactContract } from './spec_presentation/declared-fixtures.js';
@@ -144,10 +145,10 @@ function materializeReplay(options: { verdict?: Record<string, unknown>; metric?
   const fcHome = join(root, '.fc');
   setFcGlobalDir(fcHome);
   const runDirPath = join(fcHome, 'runs', recorded.source.runId);
-  const metricDir = join(runDirPath, 'stages', 'audit_terminal');
+  const metricDir = runRecordPath(runDirPath, 'stages', 'audit_terminal');
   mkdirSync(metricDir, { recursive: true });
   const stages = settlementStages();
-  writeFileSync(join(runDirPath, 'dispatch_admission.json'), `${JSON.stringify({
+  writeFileSync(runRecordPath(runDirPath, 'dispatch_admission.json'), `${JSON.stringify({
     version: 1,
     pass: true,
     checkedAt: new Date(0).toISOString(),
@@ -157,7 +158,7 @@ function materializeReplay(options: { verdict?: Record<string, unknown>; metric?
     criteriaDigest: recorded.briefDigest,
   }, null, 2)}\n`, 'utf8');
   writeFileSync(
-    join(runDirPath, 'verdict_audit_terminal.json'),
+    runRecordPath(runDirPath, 'verdict_audit_terminal.json'),
     `${JSON.stringify(options.verdict ?? recorded.verdict, null, 2)}\n`,
     'utf8',
   );
@@ -199,10 +200,10 @@ describe('recorded research settlement replay', () => {
       campaignSucceeded: false,
       terminalOwner: 'write_ceiling',
     });
-    const decision = JSON.parse(readFileSync(join(replay.runDirPath, 'research_decision.json'), 'utf8'));
+    const decision = JSON.parse(readFileSync(runRecordPath(replay.runDirPath, 'research_decision.json'), 'utf8'));
     expect(decision).toMatchObject(projection!);
     expect(decision.terminalPath).toBe('docs/example_incumbent/ceiling_report.md');
-    expect(readFileSync(join(replay.runDirPath, 'signals', 'research_terminal_ready.json'), 'utf8'))
+    expect(readFileSync(runRecordPath(replay.runDirPath, 'signals', 'research_terminal_ready.json'), 'utf8'))
       .toContain('write_ceiling');
   });
 
@@ -211,7 +212,7 @@ describe('recorded research settlement replay', () => {
     expect(recoverVerifiedResearchSettlement(
       replay.stages, replay.state, replay.projectDir, replay.state.runId, replay.runDirPath,
     )).toBeNull();
-    expect(() => readFileSync(join(replay.runDirPath, 'research_decision.json'))).toThrow();
+    expect(() => readFileSync(runRecordPath(replay.runDirPath, 'research_decision.json'))).toThrow();
   });
 
   it('rejects a ceiling outcome whose campaign metric is a genuine win', () => {
@@ -222,7 +223,7 @@ describe('recorded research settlement replay', () => {
     expect(recoverVerifiedResearchSettlement(
       replay.stages, replay.state, replay.projectDir, replay.state.runId, replay.runDirPath,
     )).toBeNull();
-    expect(() => readFileSync(join(replay.runDirPath, 'research_decision.json'))).toThrow();
+    expect(() => readFileSync(runRecordPath(replay.runDirPath, 'research_decision.json'))).toThrow();
   });
 
   it('publishes no terminal path for a verified continue outcome', () => {
@@ -233,7 +234,7 @@ describe('recorded research settlement replay', () => {
     expect(recoverVerifiedResearchSettlement(
       replay.stages, replay.state, replay.projectDir, replay.state.runId, replay.runDirPath,
     )).toBeNull();
-    expect(() => readFileSync(join(replay.runDirPath, 'research_decision.json'))).toThrow();
+    expect(() => readFileSync(runRecordPath(replay.runDirPath, 'research_decision.json'))).toThrow();
   });
 });
 
@@ -289,8 +290,8 @@ describe('criterion discharge boundary', () => {
       criterion_refs: [recorded.criterionId],
     });
     const archivePath = 'stage_evidence/iteration_8/audit_terminal/verdict.json';
-    mkdirSync(dirname(join(replay.runDirPath, archivePath)), { recursive: true });
-    writeFileSync(join(replay.runDirPath, archivePath), `${JSON.stringify(recorded.verdict, null, 2)}\n`, 'utf8');
+    mkdirSync(dirname(runRecordPath(replay.runDirPath, archivePath)), { recursive: true });
+    writeFileSync(runRecordPath(replay.runDirPath, archivePath), `${JSON.stringify(recorded.verdict, null, 2)}\n`, 'utf8');
     replay.state.stages.round_work = { status: STAGE_STATUS.COMPLETE, retries: 0 };
     const evidence: StageEvidenceRecord[] = [{
       stageId: 'audit_terminal', iteration: 8,
@@ -327,7 +328,7 @@ describe('criterion discharge boundary', () => {
     ];
     expect(validatedCriterionDischarges(replay.runDirPath, replay.state, recorded.briefDigest))
       .toHaveLength(1);
-    writeFileSync(join(replay.runDirPath, archivePath), '{"pass":true,"criteria":{}}\n', 'utf8');
+    writeFileSync(runRecordPath(replay.runDirPath, archivePath), '{"pass":true,"criteria":{}}\n', 'utf8');
     expect(validatedCriterionDischarges(replay.runDirPath, replay.state, recorded.briefDigest))
       .toEqual([]);
 

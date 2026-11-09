@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
@@ -43,10 +44,10 @@ describe('typed declarations are repaired by complete independently admitted rep
       if(opts.stageId==='plan'){
         plans++;prompts.push(prompt);
         const declared=failure==='check_reads'||plans>1;
-        writeFileSync(join(opts.runDir,'fixture_dispatch.yaml'),stringify([{...rawStage,...(declared?{artifact_contract:contract}:{artifact_contract:{version:2,produces:[],reads:[]}})}]));writes.push('run:dispatch.yaml');
+        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'),stringify([{...rawStage,...(declared?{artifact_contract:contract}:{artifact_contract:{version:2,produces:[],reads:[]}})}]));writes.push('run:dispatch.yaml');
         if(failure==='check_reads'){
           const check={name:'report',type:'file-exists-nonempty',params:{paths:['docs/final.md']},...(plans>1?{reads:[{id:'report',root:'project',path:'docs/final.md',source:{kind:'stage',stage:'work',artifact:'report'}}]}:{})};
-          writeFileSync(join(opts.runDir,'reality_checks.md'),'## Reality checks\n```yaml\n'+stringify({checks:[check]})+'```\n');writes.push('run:reality_checks.md');
+          writeFileSync(stageWorkPath(opts.runDir,'reality_checks.md'),'## Reality checks\n```yaml\n'+stringify({checks:[check]})+'```\n');writes.push('run:reality_checks.md');
         }
       }
       if(opts.stageId==='work'){mkdirSync(join(project,'docs'),{recursive:true});writeFileSync(join(project,'docs/final.md'),'Fresh evidence from admitted work.');writes.push('docs/final.md');}

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { setEngineDefaults } from './test-support/engine-defaults-fixture.js';
 import { fixtureResult } from './test-support/declared-dispatch.js';
 import { randomBytes } from 'node:crypto';
@@ -92,14 +93,14 @@ describe('engine boundary promises', () => {
       const project = join(root, 'project');
       const runDir = join(root, 'run');
       mkdirSync(project);
-      put(join(runDir, 'validation_final.json'), '{"passed":true}\n');
+      put(runRecordPath(runDir, 'validation_final.json'), '{"passed":true}\n');
       const contextual = inspectStageArtifactContract({ stageId: 'write_report',
         template: "Write this run's validation_final.json.", projectDir: project, runDir,
         writes: ['run:validation_final.json'],
         artifactContract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'validation', root: 'run', path: 'validation_final.json' }], reads: [] }) });
       expect(contextual.violations).toEqual([]);
-      expect(contextual.producedPromptArtifacts).toEqual([join(runDir, 'validation_final.json')]);
-      expect(contextual.obligations).toEqual([expect.objectContaining({ path: join(runDir, 'validation_final.json'), source: 'declaration' })]);
+      expect(contextual.producedPromptArtifacts).toEqual([runRecordPath(runDir, 'validation_final.json')]);
+      expect(contextual.obligations).toEqual([expect.objectContaining({ path: runRecordPath(runDir, 'validation_final.json'), source: 'declaration' })]);
       const ordinary = inspectStageArtifactContract({ stageId: 'write_report',
         template: 'Write validation_final.json.', projectDir: project, runDir,
         writes: ['run:validation_final.json'],

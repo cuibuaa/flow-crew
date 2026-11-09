@@ -1,3 +1,4 @@
+import { runRecordPath } from './run-layout.js';
 import { createRequire } from 'node:module';
 import { mkdirSync } from './engine-fs.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -155,7 +156,7 @@ export function upsertRunIndex(projectDir: string, state: StoreState): void {
   const db = openDb(projectDir);
   if (!db) return;
   {
-    const runJson = join(runsRoot(projectDir), state.runId, 'run.json');
+    const runJson = runRecordPath(join(runsRoot(projectDir), state.runId), 'run.json');
     const jsonMtime = existsSync(runJson) ? statSync(runJson).mtimeMs : Date.now();
     const campaignStorageKey = resolveCampaignStorageKey(state);
     const schedulerActive = schedulerCandidate(projectDir, state.runId);
@@ -216,9 +217,9 @@ export function rebuildRunIndex(projectDir: string): number {
     try {
       for (const runId of readdirSync(runsRoot(projectDir))) {
         try {
-          const raw = readFileSync(join(runsRoot(projectDir), runId, 'run.json'), 'utf-8');
+          const raw = readFileSync(runRecordPath(join(runsRoot(projectDir), runId), 'run.json'), 'utf-8');
           const state = JSON.parse(raw) as StoreState;
-          const jsonMtime = statSync(join(runsRoot(projectDir), runId, 'run.json')).mtimeMs;
+          const jsonMtime = statSync(runRecordPath(join(runsRoot(projectDir), runId), 'run.json')).mtimeMs;
           const campaignStorageKey = resolveCampaignStorageKey(state);
           db.prepare(`
             INSERT OR REPLACE INTO runs (

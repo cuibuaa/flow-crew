@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -37,7 +38,7 @@ beforeEach(() => {
   project = join(root, 'project'); run = join(root, 'run'); destination = join(root, 'archive');
   for (const path of [project, run, destination]) mkdirSync(path);
   writeFileSync(join(project, 'result.md'), 'unique result');
-  writeFileSync(join(run, 'run.json'), '{}');
+  writeFileSync(runRecordPath(run, 'run.json'), '{}');
   Object.assign(guard, { defaultRoot: resolve(DEFAULT_LAND_ARCHIVE_ROOT), mountRoot: join('/mnt', 'h'), fixtureRoot: root, destination, capacityZero: false });
   guard.mount.mockReset().mockReturnValue({ status: 0 });
 });
@@ -57,7 +58,7 @@ it('refuses insufficient capacity before copying or creating a proof', () => {
   expect(() => archiveLandOutputs(project, run, destination, ['result.md']))
     .toThrow(/insufficient free space/);
   expect(readdirSync(destination)).toEqual([]);
-  expect(readFileSync(join(run, 'run.json'), 'utf8')).toBe('{}');
+  expect(readFileSync(runRecordPath(run, 'run.json'), 'utf8')).toBe('{}');
 });
 
 it('archives to the mounted default volume when capacity and source proofs pass', () => {

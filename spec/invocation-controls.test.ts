@@ -1,3 +1,4 @@
+import { requestPath, runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -55,7 +56,7 @@ describe('control reaches the invocation with verified retirement', () => {
         const delivered = readRunEvents(projectDir, run.runId).filter(event => event.delivered);
         expect(delivered).toEqual([expect.objectContaining({ boundary: 'model_submission', invocationIndex: 2,
           retiredCommandIds: control === 'guidance' ? ['long-b'] : ['long-a', 'long-b'] })]);
-        expect(readFileSync(join(run.runDirPath, 'stages/work/guidance_consumed.md'), 'utf8')).toContain('long-b');
+        expect(readFileSync(runRecordPath(run.runDirPath, 'stages/work/guidance_consumed.md'), 'utf8')).toContain('long-b');
         return { output: 'done', exitCode: 0, duration_ms: 1 };
       }
       opts.onInvocationInput?.({ systemPrompt: agent.prompt, userPrompt: prompt });
@@ -105,7 +106,7 @@ describe('control reaches the invocation with verified retirement', () => {
       tracker.started('unattributed-a'); tracker.started('unattributed-b');
       const signal = requestStageCommandInterrupt({ runDir: run.runDirPath, stageId: 'work', reason: 'Bounded stop' });
       const changed = { ...signal, [field]: field === 'attemptIndex' || field === 'invocationIndex' ? 2 : 'other' };
-      const path = join(run.runDirPath, 'signals/interrupt_work.json');
+      const path = requestPath(run.runDirPath, 'signals/interrupt_work.json');
       writeFileSync(path, JSON.stringify(changed));
       tracker.started('publication-boundary');
       expect(opts.abortSignal?.aborted).toBe(false); expect(existsSync(path)).toBe(false);
@@ -124,7 +125,7 @@ describe('control reaches the invocation with verified retirement', () => {
       return { output: 'done', exitCode: 0, duration_ms: 1 };
     } };
     await runStage(submitted, options);
-    const receipt = join(run.runDirPath, 'stages/work/guidance_consumed.md');
+    const receipt = runRecordPath(run.runDirPath, 'stages/work/guidance_consumed.md');
     const before = readFileSync(receipt, 'utf8');
     const neverSubmitted: Adapter = { capturesInvocationInput: true, async run() { return { output: 'No native input was submitted', exitCode: 1, duration_ms: 1 }; } };
     await runStage(neverSubmitted, options);
@@ -188,6 +189,6 @@ describe('cancellation publishes the canonical terminal attempt event', () => {
     expect(event).toMatchObject({ stageId: 'work', attemptIndex: 1, attemptStartedAt: terminal[0].attemptStartedAt });
     expect(push.describe(event).failureIdentity).toBe('exit 143');
     expect(wrapUpPrompt(event, registry.baseDir)).toContain('kind=attempt_failed');
-    expect(existsSync(join(run.runDirPath, 'events.jsonl'))).toBe(true);
+    expect(existsSync(runRecordPath(run.runDirPath, 'events.jsonl'))).toBe(true);
   });
 });

@@ -1,3 +1,4 @@
+import { runRecordPath, stageWorkPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { atomicWrite } from '../src/engine-fs.js';
 import { fixtureResult, declaredDispatch, fixtureArtifactContract } from './test-support/declared-dispatch.js';
@@ -71,7 +72,7 @@ function result(output: string, exitCode = 0): RunResult {
 }
 
 function writeVerdict(runDirPath: string, gateId: string, pass: boolean): void {
-  writeFileSync(join(runDirPath, `fixture_verdict_${gateId}.json`), JSON.stringify({
+  writeFileSync(stageWorkPath(runDirPath, `fixture_verdict_${gateId}.json`), JSON.stringify({
     pass,
     reason: pass ? 'accepted' : 'phase 4 needs repair',
   }, null, 2) + '\n');
@@ -132,7 +133,7 @@ describe('engine-owned unresolved stage obligations', () => {
         if (opts.stageId === '_summary') return fixtureResult(result('summary'), opts);
         if (opts.stageId === 'plan') {
           planCalls++;
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(firstPlan()));
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(firstPlan()));
           return fixtureResult(result(`plan ${planCalls}`), opts);
         }
         if (opts.stageId === 'gate_phase4') {
@@ -175,13 +176,13 @@ describe('engine-owned unresolved stage obligations', () => {
         if (opts.stageId === '_summary') return fixtureResult(result('summary'), opts);
         if (opts.stageId === 'plan') {
           planCalls++;
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(firstPlan()));
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(firstPlan()));
           return fixtureResult(result(`plan ${planCalls}`), opts);
         }
         if (opts.stageId === 'gate_phase4') {
           writeVerdict(opts.runDir, opts.stageId, false);
-          mkdirSync(join(opts.runDir, 'signals'), { recursive: true });
-          atomicWrite(join(opts.runDir, 'signals', 'goal_met.json'), JSON.stringify({ reason: 'premature DONE' }));
+          mkdirSync(runRecordPath(opts.runDir, 'signals'), { recursive: true });
+          atomicWrite(runRecordPath(opts.runDir, 'signals', 'goal_met.json'), JSON.stringify({ reason: 'premature DONE' }));
           return fixtureResult(result('phase 4 rejected while supervisor says done'), opts);
         }
         return fixtureResult(result(opts.stageId), opts);
@@ -213,7 +214,7 @@ describe('engine-owned unresolved stage obligations', () => {
   it('guards the no-dispatch allDone completion path', async () => {
     const { config, yaml } = workflow(1, false);
     const run = createRun(projectDir, config.name, yaml, ['plan']);
-    writeFileSync(join(runDir(projectDir, run.runId), 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(runDir(projectDir, run.runId), 'scheduler.pid'), String(process.pid));
     const seeded = readRunState(projectDir, run.runId);
     seeded.autoApprove = true;
     seeded.unresolvedStageObligations = [{
@@ -255,7 +256,7 @@ describe('engine-owned unresolved stage obligations', () => {
     ].join('\n');
     const { config, yaml } = workflow(1);
     const run = createRun(projectDir, config.name, yaml, ['plan']);
-    writeFileSync(join(runDir(projectDir, run.runId), 'scheduler.pid'), String(process.pid));
+    writeFileSync(runRecordPath(runDir(projectDir, run.runId), 'scheduler.pid'), String(process.pid));
     const seeded = readRunState(projectDir, run.runId);
     seeded.autoApprove = true;
     seeded.unresolvedStageObligations = [{ stageId: 'phase5_ci_docs', declaredIteration: 1 }];
@@ -266,7 +267,7 @@ describe('engine-owned unresolved stage obligations', () => {
         if (opts.stageId === '_summary') return fixtureResult(result('summary'), opts);
         adapterCalls++;
         if (opts.stageId === 'plan') {
-          writeFileSync(join(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
+          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
             'stages:',
             '  - id: terminal_writer',
             '    role: builder',

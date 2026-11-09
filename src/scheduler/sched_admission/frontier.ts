@@ -1,8 +1,9 @@
+import { runRecordPath } from '../../run-layout.js';
 import type { DispatchAdmissionError } from './dispatch.js';
 /** DAG reachability, readiness and single shared-tree author admission. Gate readers are explicit services. */
 import { STAGE_STATUS, type StoreState, isPendingStageStatus, isSatisfiedStageDependencyStatus, runDir, type WriteAttribution, type StageStatus } from '../../store.js';
 import { existsSync } from 'node:fs';
-import { join, posix } from 'node:path';
+import { posix } from 'node:path';
 export { parseDeclaredScope, type ParsedScope } from './scope-services.js';
 import { type StageConfig } from './configuration.js';
 import type { GateContract } from '../../scheduler.js';
@@ -141,7 +142,7 @@ export function createReadyFinder({ loadGateContract, readGateEvaluation }: Gate
         if (hasRunLocation && contract === undefined) {
           contract = loadGateContract(state.projectDir, state.runId, state.campaignStorageKey);
         }
-        const hasSpecificVerdict = hasRunLocation && existsSync(join(
+        const hasSpecificVerdict = hasRunLocation && existsSync(runRecordPath(
           runDir(state.projectDir, state.runId),
           `verdict_${d}.json`,
         ));

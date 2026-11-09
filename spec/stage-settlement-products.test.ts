@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import type { ArtifactContractInput } from './test-support/fixture-types.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -41,7 +42,7 @@ async function settle(declaration: ReturnType<typeof contract>, work: () => void
     artifactContract: declaration, artifactStatuses: statuses,
   });
 }
-const audit = () => JSON.parse(readFileSync(join(directory, 'stages/work/artifact_contract.json'), 'utf8'));
+const audit = () => JSON.parse(readFileSync(runRecordPath(directory, 'stages/work/artifact_contract.json'), 'utf8'));
 
 describe('deterministic product settlement', () => {
   it.each(['absent', 'wrong-type', 'empty'] as const)('refuses a completed stage with a declared %s file', async kind => {

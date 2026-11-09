@@ -1,5 +1,6 @@
+import { runRecordPath } from './run-layout.js';
 import { parseCommandArgs, commandUsage } from './cli-args.js';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { readRunState, runDir } from './store.js';
 import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
@@ -26,7 +27,7 @@ export function summarizeRunStateView(view: RunStateView): object {
 
 /** Required products are engine facts, independent of a role's task excerpt or guidance. */
 export function declaredOutputFacts(projectDir: string, runId: string, state = readRunState(projectDir, runId)) {
-  const briefPath = join(runDir(projectDir, runId), 'task_brief.md');
+  const briefPath = runRecordPath(runDir(projectDir, runId), 'task_brief.md');
   const outputs = state.declaredOutputs ?? (existsSync(briefPath) ? parseBriefFrontmatter(readFileSync(briefPath, 'utf8')).outputs : undefined);
   return (outputs ?? []).map(output => {
     try {
@@ -42,7 +43,7 @@ export function runStateContext(projectDir: string, runId: string, revision?: { 
   const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   // Prompt construction needs a locator and admission binding, not a scan of
   // every artifact and immutable invocation. The explicit CLI retains that view.
-  const outputs = existsSync(join(runDir(projectDir, runId), 'run.json')) ? declaredOutputFacts(projectDir, runId) : [];
+  const outputs = existsSync(runRecordPath(runDir(projectDir, runId), 'run.json')) ? declaredOutputFacts(projectDir, runId) : [];
   return `# Engine state query\nRun binding: ${JSON.stringify({ runId })}.\n${revision ? `Admitted plan revision ${revision.revision}, digest ${revision.digest}.\n` : ''}`
     + `Read current state with flowcrew state --project ${shellQuote(projectDir)} --run ${shellQuote(runId)}. `
     + 'Use --summary for current engine state; use the evidence ledger and diff for stage decisions. '

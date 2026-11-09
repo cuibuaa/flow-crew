@@ -1,6 +1,7 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { runRecordPath } from '../src/run-layout.js';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { terminalArtifactIdentity, terminalArtifactStatusMismatch } from '../src/terminal-artifact-status.js';
 import { type ContentIdentity } from '../src/content-identity.js';
@@ -116,12 +117,33 @@ describe('terminal artifact status diagnostics', () => {
       stages: { finalize: { status: 'complete' } },
       terminalStates: { complete: { paths: [complete] }, escalated: { paths: [escalated] } },
     };
-    const identities = new Map([[join(runDir, escalatedSnapshot), content('new')]]);
+    const identities = new Map([[runRecordPath(runDir, escalatedSnapshot), content('new')]]);
     const evidence = { runDir, artifactIdentity: (path: string): ContentIdentity => identities.get(path) ?? { state: 'absent' } };
     expect(terminalArtifactStatusMismatch(state, evidence)).toMatchObject({ terminalStatus: 'escalated', terminalArtifact: escalated });
-    identities.set(join(runDir, completeSnapshot), content('new'));
+    identities.set(runRecordPath(runDir, completeSnapshot), content('new'));
     expect(terminalArtifactStatusMismatch(state, evidence)).toBeUndefined();
     expect(terminalArtifactStatusMismatch({ ...state, status: 'complete', terminalArtifact: escalated })).toMatchObject({ terminalStatus: 'escalated' });
+  });
+
+  it.each([undefined, 2])('discovers a retained on-disk snapshot in layout %s without a project copy', storageLayout => {
+    const root = mkdtempSync(join(tmpdir(), 'snapshot-terminal-status-'));
+    try {
+      const runDir = join(root, 'run'), projectDir = join(root, 'project');
+      mkdirSync(runDir); mkdirSync(projectDir);
+      const declared = 'docs/result.md';
+      const state = { storageLayout, projectDir, status: 'running', terminalArtifactBaselines: {},
+        stages: { done: { status: 'complete' } }, terminalStates: { complete: { paths: [declared] } } };
+      const stateBytes = JSON.stringify(state);
+      writeFileSync(join(runDir, 'run.json'), stateBytes);
+      const name = terminalArtifactSnapshotName(declared);
+      const snapshot = join(runDir, ...(storageLayout === 2 ? ['engine', name] : [name]));
+      mkdirSync(dirname(snapshot), { recursive: true }); writeFileSync(snapshot, 'Engine-retained result.\n');
+      expect(existsSync(join(projectDir, declared))).toBe(false);
+      expect(terminalArtifactStatusMismatch(state, { runDir })).toEqual({
+        lifecycleStatus: 'running', terminalStatus: 'complete', terminalArtifact: declared,
+      });
+      expect(readFileSync(join(runDir, 'run.json'), 'utf8')).toBe(stateBytes);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it('discovers one fresh declared artifact only after every stage settles', () => {

@@ -6,6 +6,8 @@
  * Maintenance contract: this is a permanent cross-platform regression suite,
  * not a run-specific gate artifact. Keep it active in the default Vitest set.
  */
+import { runRecordPath } from '../src/run-layout.js';
+
 import {
   chmodSync,
   existsSync,
@@ -304,7 +306,7 @@ describe('portable supervision safety invariants', () => {
     const runPath = join(fixtureRoot, 'v1-run');
     mkdirSync(runPath);
     const token = processStartToken(process.pid);
-    writeFileSync(join(runPath, 'scheduler.identity.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'scheduler.identity.json'), JSON.stringify({
       version: 1,
       pid: process.pid,
       runId: 'v1-run',
@@ -357,7 +359,7 @@ describe('portable supervision safety invariants', () => {
     expect(tokenVisible).toBe(true);
     expect(token).toBeDefined();
     const mismatchedKind = token?.kind === 'linux' ? 'posix-lstart' as const : 'linux' as const;
-    writeFileSync(join(runPath, 'scheduler.identity.json'), JSON.stringify({
+    writeFileSync(runRecordPath(runPath, 'scheduler.identity.json'), JSON.stringify({
       version: 2,
       pid: child.pid,
       runId,

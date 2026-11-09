@@ -1,5 +1,5 @@
+import { runRecordPath } from '../../run-layout.js';
 // Historical unresolved scope-negotiation evidence remains readable for reporting.
-import { join } from "node:path";
 import { readFileSync, readdirSync } from "node:fs";
 
 export const SCOPE_PLANNING_INPUT_PREFIX = 'scope_negotiation_input_';
@@ -33,9 +33,9 @@ interface ScopePlanningDispositionV1 {
 
 function readJsonArtifacts<T>(runDirPath: string, prefix: string): T[] {
   let files: string[];
-  try { files = readdirSync(runDirPath); } catch { return []; }
+  try { files = readdirSync(runRecordPath(runDirPath, '.')); } catch { return []; }
   return files.filter((file) => file.startsWith(prefix) && file.endsWith('.json')).sort().flatMap((file) => {
-    try { return [JSON.parse(readFileSync(join(runDirPath, file), 'utf-8')) as T]; } catch { return []; }
+    try { return [JSON.parse(readFileSync(runRecordPath(runDirPath, file), 'utf-8')) as T]; } catch { return []; }
   });
 }
 

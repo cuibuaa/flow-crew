@@ -1,5 +1,6 @@
 import { classifyEnding } from './attempt-ending.js';
 import { runProjectCommand, VALIDATION_SELECTION_JSON_SCHEMA } from './project-validation.js';
+import { runRecordPath, stageWorkPath, stageWritePath, requestPath } from './run-layout.js';
 import { startCommandRecorder } from './recorded-command.js';
 import { listProjectFiles } from './scheduler/sched_scope/path-capabilities.js';
 import { stageLiveLogPath } from './stage-live-log.js';
@@ -17,7 +18,7 @@ import { providerFailureDetail } from './provider-result.js';
 import { invocationUsageFields, sumInvocationUsage } from './invocation-usage.js';
 import { renderPlanInterface, renderPlannerAdmissionCheck } from './plan-interface.js';
 import { ARTIFACT_CONTRACT_SCHEMA_DOC, artifactDeclarationErrors, type ArtifactContract } from './artifact-declarations.js';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import type { Adapter, AgentConfig, CommandLifecycleEvent, RunResult } from './adapters/base.js';
 import { runProcessAbortSignal } from './adapters/base.js';
 export { classifyAdapterFailure } from './adapters/failure.js';
@@ -89,7 +90,7 @@ export function plannerCriterionAssignmentContext(brief: string, runDir: string)
   return [
     '# First-proposal criterion assignments',
     'Empty/omitted criterion_refs assign all criteria conservatively. Use these exact IDs only when assigning explicit subsets. Ordinary work needs a downstream independent gate.',
-    JSON.stringify({ criterion_refs: criteria.map(criterion => criterion.id), path: join(runDir, 'brief_criteria.json') }),
+    JSON.stringify({ criterion_refs: criteria.map(criterion => criterion.id), path: runRecordPath(runDir, 'brief_criteria.json') }),
     'Read criterion text at this path; the system brief owns its full context.',
   ].join('\n');
 }
@@ -230,7 +231,7 @@ export function beginAttemptEvidenceGeneration(
   attemptIndex: number,
   attemptStartedAt: string,
 ): AttemptEvidenceGeneration {
-  const stagePath = join(runDirectory, 'stages', stageId);
+  const stagePath = runRecordPath(runDirectory, 'stages', stageId);
   const logPath = stageLiveLogPath(runDirectory, stageId, attemptIndex, attemptStartedAt);
   mkdirSync(stagePath, { recursive: true });
   const marker = `\n<!-- flowcrew-attempt ${JSON.stringify({ version: 1, stageId, attemptIndex, attemptStartedAt })} -->\n`;
@@ -243,8 +244,8 @@ export function beginAttemptEvidenceGeneration(
     segmentStart: statSync(logPath).size,
     artifactBaselines: {
       output: readContentIdentity(join(stagePath, 'output.md')),
-      verdict: readContentIdentity(join(runDirectory, `verdict_${stageId}.json`)),
-      handoff: readContentIdentity(join(runDirectory, `handoff_${stageId}.md`)),
+      verdict: readContentIdentity(runRecordPath(runDirectory, `verdict_${stageId}.json`)),
+      handoff: readContentIdentity(runRecordPath(runDirectory, `handoff_${stageId}.md`)),
     },
     recordedAt: new Date().toISOString(),
   };
@@ -271,8 +272,9 @@ export async function runStage(
   adapter: Adapter,
   opts: StageOpts,
 ): Promise<RunResult> {
-  const runState = existsSync(join(opts.runDir, 'run.json'))
+  const runState = existsSync(runRecordPath(opts.runDir, 'run.json'))
     ? readRunState(opts.projectDir, opts.runId) : undefined;
+  mkdirSync(stageWritePath(opts.runDir, 'stages', opts.stageId), { recursive: true });
   const direct = runState?.workflowName === 'direct';
   const skillNames = opts.stageSkills ?? [];
   let prompt = opts.isolatedInput?.user ?? buildStagePrompt({
@@ -300,13 +302,13 @@ export async function runStage(
     ? ensureAttemptValidationPlan(opts.projectDir, opts.runId) : undefined;
   // Use the same raw declarations as configured validation, including ignored
   // artifacts. The rendered task description has already lost frontmatter.
-  const evidenceBriefPath = join(opts.runDir, 'task_brief.md');
+  const evidenceBriefPath = runRecordPath(opts.runDir, 'task_brief.md');
   const evidenceBrief = existsSync(evidenceBriefPath) ? readFileSync(evidenceBriefPath, 'utf8') : opts.taskDescription ?? '';
   const evidenceTreeBefore = captureProjectTree(opts.projectDir, evidenceBrief);
 
   const attribution = opts.attribution ?? {
     role: opts.role.name,
-    iteration: existsSync(join(opts.runDir, 'run.json'))
+    iteration: existsSync(runRecordPath(opts.runDir, 'run.json'))
       ? readRunState(opts.projectDir, opts.runId).currentIteration ?? 1
       : 1,
   };
@@ -347,7 +349,7 @@ export async function runStage(
   // Retain delivered, targeted notices across execution boundaries. Their
   // original attempt identity remains explicit; only re-admission grants scope.
   try {
-    const priorReceipt = opts.isolatedInput ? '' : readFileSync(join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md'), 'utf-8');
+    const priorReceipt = opts.isolatedInput ? '' : readFileSync(runRecordPath(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md'), 'utf-8');
     for (const attempt of runningStatus.attempts ?? []) {
       for (const entry of guidanceForStageFromText(priorReceipt, opts.stageId, attempt.index)) {
         if (!guidanceBeforePrompt.some((current) => current.id === entry.id)) guidanceBeforePrompt.push(entry);
@@ -369,7 +371,7 @@ export async function runStage(
     source: 'worker',
   });
 
-  const guidanceReceiptPath = join(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md');
+  const guidanceReceiptPath = runRecordPath(opts.runDir, 'stages', opts.stageId, 'guidance_consumed.md');
   const collectedGuidanceIds = new Set(guidanceBeforePrompt.map((entry) => entry.id));
   const collectedGuidance = [...guidanceBeforePrompt];
   const submittedGuidanceIds = new Set<string>();
@@ -378,7 +380,7 @@ export async function runStage(
   const persistGuidanceReceipt = (): void => {
     if (!submittedGuidanceIds.size && existsSync(guidanceReceiptPath)) return;
     try {
-      mkdirSync(join(opts.runDir, 'stages', opts.stageId), { recursive: true });
+      mkdirSync(runRecordPath(opts.runDir, 'stages', opts.stageId), { recursive: true });
       const rendered = renderGuidanceDelivery(collectedGuidance.filter(entry => submittedGuidanceIds.has(entry.id)));
       const retired = [...new Set([...submittedGuidanceIds].flatMap(id => retiredForGuidance.get(id) ?? []))];
       const content = rendered ? `${rendered}\nRetired command IDs: ${JSON.stringify(retired)}\n` : 'No guidance was delivered to this execution.\n';
@@ -453,10 +455,10 @@ export async function runStage(
     .replace(/\{artifact_contract_schema\}/g, () => ARTIFACT_CONTRACT_SCHEMA_DOC)
     .replace(/\{phase_metadata_fields\}/g, PHASE_METADATA_FIELDS)
     .replace(/\{project_contract\}/g, projectContract)
-    .replace(/\{run_dir\}/g, opts.runDir)
+    .replace(/\{run_dir\}/g, stageWorkPath(opts.runDir))
     .replace(/\{project\}/g, opts.projectDir);
   try {
-    const taskBriefPath = join(opts.runDir, 'task_brief.md');
+    const taskBriefPath = runRecordPath(opts.runDir, 'task_brief.md');
     if (existsSync(taskBriefPath)) {
       const brief = readFileSync(taskBriefPath, 'utf-8').trim();
       if (brief) {
@@ -469,7 +471,7 @@ export async function runStage(
   // an implementation or gate stage must not become a planner instruction.
   if (opts.dynamicDispatch || opts.role.name === 'planner') {
     try {
-      const historyDir = join(opts.runDir, 'guidance_history');
+      const historyDir = runRecordPath(opts.runDir, 'guidance_history');
       if (existsSync(historyDir)) {
         const archives = readdirSync(historyDir)
           .filter((f) => /^iter_\d+\.md$/.test(f))
@@ -491,7 +493,7 @@ export async function runStage(
     const criterionContext = plannerCriterionAssignmentContext(opts.taskDescription ?? '', opts.runDir);
     if (criterionContext) resolvedSystemPrompt += `\n\n${criterionContext}`;
     if (opts.dynamicDispatch) resolvedSystemPrompt += `\n\n${renderPlanInterface()}\n\n${renderPlannerAdmissionCheck(opts.projectDir, opts.runDir)}`;
-    const briefPath = join(opts.runDir, 'task_brief.md');
+    const briefPath = runRecordPath(opts.runDir, 'task_brief.md');
     const brief = existsSync(briefPath) ? readFileSync(briefPath, 'utf-8') : opts.taskDescription ?? '';
     const policies = renderPlannerPolicies(parseBriefFrontmatter(brief).plannerPolicies ?? []);
     if (policies) resolvedSystemPrompt += `\n\n${policies}`;
@@ -502,13 +504,12 @@ export async function runStage(
     prompt = opts.isolatedInput.user;
   }
   const resolvedRole = { ...opts.role, prompt: resolvedSystemPrompt };
-  // One list owns both integrity recovery and final-answer publication. A
-  // wrap-up may suppress the verdict when the validated work is unfinished.
+  // A wrap-up may suppress publication when the validated work is unfinished.
   const publicationCarriers = (record?: Record<string, unknown>): string[] => {
     if (!opts.outputSchema) return [];
     const carriers = opts.isGate && (!record || !wrapUpRequestedAt || finishedStageRecord(record)) ? [`verdict_${opts.stageId}.json`] : [];
     const handoff = `handoff_${opts.stageId}.md`;
-    if (opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === handoff)) carriers.push(handoff);
+    if (opts.artifactContract?.produces.some(output => output.root === 'run' && output.path === `work/${handoff}`)) carriers.push(handoff);
     return carriers;
   };
   // Preserve the existing legacy reader when the generated author schema gains
@@ -516,7 +517,7 @@ export async function runStage(
   const recordedOutputSchema = opts.outputSchema === HANDOFF_SCHEMA ? { ...RECORDED_HANDOFF_SCHEMA,
     properties: { ...RECORDED_HANDOFF_SCHEMA.properties, validation: VALIDATION_SELECTION_JSON_SCHEMA } } : undefined;
   if (attemptValidationPlan && !attemptValidationPlan.baseline.discovery.commands.length && attemptValidationPlan.source !== 'model-selection'
-    && opts.outputSchema === HANDOFF_SCHEMA && existsSync(join(opts.runDir, 'task_brief.md'))) {
+    && opts.outputSchema === HANDOFF_SCHEMA && existsSync(runRecordPath(opts.runDir, 'task_brief.md'))) {
     // Reuse the author result, not a third decision stage or another model call.
     if (opts.outputSchema?.properties) opts = { ...opts, outputSchema: { ...opts.outputSchema,
       properties: { ...opts.outputSchema.properties, validation: VALIDATION_SELECTION_JSON_SCHEMA } } };
@@ -532,9 +533,9 @@ export async function runStage(
   }
   if (opts.artifactContract) prompt += `\n\n# Declared output and input locations\n${JSON.stringify(opts.artifactContract)}`;
 
-  prompt += `\n\n${SINGLE_AUTHOR_NOTICE}`;
-  const historicalCandidates = readdirSync(join(opts.runDir, 'stages', opts.stageId)).filter(name => /^(?:race_.*\.json|candidate_.*\.patch)$/.test(name));
-  if (historicalCandidates.length) prompt += `\n\nHistorical candidate evidence (retained without selection or execution): ${historicalCandidates.map(name => join(opts.runDir, 'stages', opts.stageId, name)).join(', ')}. Inspect unfinished candidate work and patches before continuing in this project; preserve accepted gate provenance.`;
+  prompt += `\n\nStage workspace: ${stageWorkPath(opts.runDir, 'stages', opts.stageId)}. Put probes and evidence here. The engine tree ${runRecordPath(opts.runDir, '.')} and the root run.json/events.jsonl are read-only. Run artifact paths must be inside work/.\n\n${SINGLE_AUTHOR_NOTICE}`;
+  const historicalCandidates = readdirSync(runRecordPath(opts.runDir, 'stages', opts.stageId)).filter(name => /^(?:race_.*\.json|candidate_.*\.patch)$/.test(name));
+  if (historicalCandidates.length) prompt += `\n\nHistorical candidate evidence (retained without selection or execution): ${historicalCandidates.map(name => runRecordPath(opts.runDir, 'stages', opts.stageId, name)).join(', ')}. Inspect unfinished candidate work and patches before continuing in this project; preserve accepted gate provenance.`;
   const terminalPaths = Object.values(runState?.terminalStates ?? {}).flatMap(entry => entry.paths);
   const beforeSnapshot = snapshotScopedContent(opts.projectDir, [
     ...terminalPaths, ...(opts.artifactContract?.produces ?? []).filter(artifact => artifact.root === 'project').map(artifact => artifact.path),
@@ -542,7 +543,7 @@ export async function runStage(
   // A declared run product may belong to later work, but an available product
   // cannot disappear during this attempt. This fact was only model advice;
   // deletion alone cannot preserve it, so bind the engine check to this start.
-  const availableProductsAtStart = existsSync(join(opts.runDir, 'run.json'))
+  const availableProductsAtStart = existsSync(runRecordPath(opts.runDir, 'run.json'))
     ? declaredOutputFacts(opts.projectDir, opts.runId).filter(output => output.available) : [];
   const production = artifactDeclarationErrors(opts.artifactContract, opts.stageId).length === 0 ? stageArtifactProduction({
     runId: opts.runId, stageId: opts.stageId, projectDir: opts.projectDir, runDir: opts.runDir,
@@ -555,8 +556,8 @@ export async function runStage(
   // stale/malformed envelopes are warned about and removed without firing.
   const attemptAbortController = new AbortController();
   const parentAbortSignal = runProcessAbortSignal();
-  const abortSignalPath = join(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
-  const commandInterruptSignalPath = join(opts.runDir, 'signals', `interrupt_${opts.stageId}.json`);
+  const abortSignalPath = runRecordPath(opts.runDir, 'signals', `abort_${opts.stageId}.json`);
+  const commandInterruptSignalPath = requestPath(opts.runDir, 'signals', `interrupt_${opts.stageId}.json`);
   const liveLogPath = stageLiveLogPath(opts.runDir, opts.stageId, attemptIndex, attemptStartedAt);
   const activeCommands = new Map<string, CommandLifecycleEvent>();
   const interruptedCommands = new Map<string, StageCommandInterruptSignal>();
@@ -739,9 +740,10 @@ export async function runStage(
   const requestPollTimer = setInterval(pollRequests, 1000);
   const requestWatchers: import('node:fs').FSWatcher[] = [];
   try {
-    const signalsDir = join(opts.runDir, 'signals');
+    const signalsDir = runRecordPath(opts.runDir, 'signals');
+    mkdirSync(requestPath(opts.runDir, 'signals'), { recursive: true });
     mkdirSync(signalsDir, { recursive: true });
-    for (const directory of [join(opts.runDir, 'stages', opts.stageId), signalsDir]) {
+    for (const directory of [runRecordPath(opts.runDir, 'stages', opts.stageId), signalsDir, requestPath(opts.runDir, 'signals')]) {
       requestWatchers.push(watch(directory, { persistent: false }, (_event, fileName) => {
         const name = fileName?.toString() ?? '';
         if (!name || name === `abort_${opts.stageId}.json`) pollAbortSignal();
@@ -812,7 +814,7 @@ export async function runStage(
     const captureInput = (input: Parameters<NonNullable<import('./adapters/base.js').RunOpts['onInvocationInput']>>[0], boundary: 'adapter' | 'model'): void => {
       // The public standalone worker API predates initialized run projections.
       // Keep it usable, but do not manufacture an authenticated run carrier.
-      if (!existsSync(join(opts.runDir, 'run.json'))) {
+      if (!existsSync(runRecordPath(opts.runDir, 'run.json'))) {
         appendFileSync(liveLogPath, '\nINVOCATION_INPUT_UNAVAILABLE: standalone stage has no initialized run projection.\n');
         return;
       }
@@ -935,14 +937,8 @@ export async function runStage(
       };
       invocationAbortSignal.addEventListener('abort', onAbort, { once: true });
       withEngineIntegrity({ projectDir: opts.projectDir, runDir: opts.runDir,
-        stageId: opts.stageId, dynamicDispatch: opts.dynamicDispatch, artifactContract: opts.artifactContract!,
-        publicationCarriers: publicationCarriers(),
-        onPublicationWrite: paths => {
-          recordRunEvent(opts.projectDir, opts.runId, { type: 'execution_notice', level: 'warning',
-            runId: opts.runId, timestamp: new Date().toISOString(), stageId: opts.stageId,
-            attemptIndex, attemptStartedAt, invocationIndex, source: 'worker', files: paths.map(path => join(opts.runDir, path)),
-            detail: 'Stage wrote engine-published carrier(s); restored trusted engine state. Publication uses the final validated answer.' });
-        } },
+        stageId: opts.stageId, artifactContract: opts.artifactContract!,
+        },
       async () => {
         const recorder = opts.isGate ? await startCommandRecorder(opts.runDir, async (request, signal) => {
           const before = captureProjectTree(opts.projectDir, evidenceBrief);
@@ -1213,7 +1209,10 @@ export async function runStage(
   let blockedStageResult = false;
   if (result.exitCode === 0 && opts.outputSchema) {
     try {
-      const record = stageRecord(result.output);
+      const resultPath = stageWritePath(opts.runDir, 'stages', opts.stageId, 'result.json');
+      mkdirSync(dirname(resultPath), { recursive: true });
+      atomicWrite(resultPath, result.output);
+      const record = stageRecord(readFileSync(resultPath, 'utf8'));
       validatedStageRecord = record;
       blockedStageResult = record.status === 'blocked' || record.status === 'environment_gap';
       stageWorkFinished = finishedStageRecord(record);
@@ -1221,9 +1220,11 @@ export async function runStage(
         unreviewedGap = record.status === 'environment_gap';
         throw new Error(`Blocked: ${record.summary}`);
       }
-      for (const carrier of publicationCarriers(record)) {
-        atomicWrite(join(opts.runDir, carrier), `${JSON.stringify(record)}\n`);
-        enginePublishedCarriers.push(`run:${carrier}`);
+      const destinations = publicationCarriers(record).map(carrier => ({ carrier, work: stageWritePath(opts.runDir, carrier) }));
+      for (const { carrier, work } of destinations) {
+        atomicWrite(runRecordPath(opts.runDir, carrier), `${JSON.stringify(record)}\n`);
+        atomicWrite(work, `${JSON.stringify(record)}\n`);
+        enginePublishedCarriers.push(`run:work/${carrier}`);
       }
     } catch (error) {
       result.exitCode = 1;
@@ -1244,7 +1245,7 @@ export async function runStage(
         statuses: opts.artifactStatuses,
       };
       const audit = inspectStageArtifactContract(artifactInput, blockedStageResult || Boolean(wrapUpRequestedAt && !stageWorkFinished) || result.exitCode !== 0);
-      const productFacts = existsSync(join(opts.runDir, 'run.json')) ? declaredOutputFacts(opts.projectDir, opts.runId) : [];
+      const productFacts = existsSync(runRecordPath(opts.runDir, 'run.json')) ? declaredOutputFacts(opts.projectDir, opts.runId) : [];
       // A single direct author owns the whole brief. Split plans settle each
       // stage's artifact contract; completion still requires every run product.
       const authors = runState?.planControl?.stages.filter(stage => !stage.is_gate && !stage.dynamic_dispatch && !stage.retry_to?.length);

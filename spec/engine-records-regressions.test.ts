@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -151,7 +152,7 @@ describe('engine-recorded facts used at their decision boundaries', () => {
     const orphaned = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', []);
 
     const live = createRun(projectDir, 'fixture', 'name: fixture\nstages: []\n', []);
-    writeFileSync(join(runDir(projectDir, live.runId), 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
+    writeFileSync(runRecordPath(runDir(projectDir, live.runId), 'scheduler.pid'), `${process.pid}\n`, 'utf-8');
     writeSchedulerProcessIdentity(runDir(projectDir, live.runId), live.runId);
 
     expect(listAll({ runId: terminal.runId })).toEqual([

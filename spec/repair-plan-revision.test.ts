@@ -1,3 +1,4 @@
+import { stageWorkPath, runRecordPath } from '../src/run-layout.js';
 import { withConfirmedRejections } from './test-support/confirmed-rejection.js';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, expect, it } from 'vitest';
@@ -57,7 +58,7 @@ async function scenario(options: { denied?: boolean; failed?: boolean; rejectAga
       const shared = options.shared ? ['report.txt'] : [];
       const measure = stage('measure', { scope: [options.denied ? 'outside.txt' : 'sample.txt', ...shared], depends_on: ['review', 'repair'], retry_to: ['review'] });
       const publish = stage('publish', { scope: ['final.txt', ...shared], depends_on: ['review', 'measure'], retry_to: ['review'] });
-      if (round === 1) writeFileSync(join(opts.runDir!, 'stages/repair/plan_revision_request.json'), JSON.stringify({
+      if (round === 1) writeFileSync(stageWorkPath(opts.runDir!, 'stages/repair/plan_revision_request.json'), JSON.stringify({
         version: 1, requestId: 'measurement_continuation', runId: state.runId, stageId: 'repair',
         attemptIndex: attempt.index, attemptStartedAt: attempt.startedAt,
         baseRevision: state.queryState!.planRevision!.revision, baseDigest: state.queryState!.planRevision!.digest,
@@ -85,7 +86,7 @@ async function scenario(options: { denied?: boolean; failed?: boolean; rejectAga
   } };
   const state = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), agents, undefined, agentsDir, undefined, undefined, true);
   const directory = runDir(project, state.runId);
-  const decisionPath = join(directory, 'stages/repair/plan_revision_decision_measurement_continuation.json');
+  const decisionPath = runRecordPath(directory, 'stages/repair/plan_revision_decision_measurement_continuation.json');
   return { state, calls, directory, decision: existsSync(decisionPath) ? JSON.parse(readFileSync(decisionPath, 'utf8')) : undefined };
 }
 
@@ -94,7 +95,7 @@ it('admits and finishes dependent repair slices at the last repair boundary befo
   expect(result.decision).toMatchObject({ accepted: true, revision: 1 });
   expect(result.state.status, result.state.failureReason).toBe('complete');
   expect(result.calls).toEqual(['author', 'review', 'repair', 'measure', 'publish', 'review']);
-  const archive = join(result.directory, 'gate_reevaluation/iteration_1/round_1');
+  const archive = runRecordPath(result.directory, 'gate_reevaluation/iteration_1/round_1');
   expect(JSON.parse(readFileSync(join(archive, 'rejected_verdict_review.json'), 'utf8')).pass).toBe(false);
   const diff = JSON.parse(readFileSync(join(archive, 'repair_diff.json'), 'utf8'));
   expect(diff.repairStageIds).toEqual(['repair', 'measure', 'publish']);
@@ -118,7 +119,7 @@ it('does not release a failed slice to its successor or re-review', async () => 
   expect(result.calls).toEqual(['author', 'review', 'repair', 'measure']);
   expect(result.state.stages.measure.exitCode).toBe(7);
   expect(result.state.stages.publish.attempts ?? []).toHaveLength(0);
-  expect(JSON.parse(readFileSync(join(result.directory, 'verdict_review.json'), 'utf8')).pass).toBe(false);
+  expect(JSON.parse(readFileSync(runRecordPath(result.directory, 'verdict_review.json'), 'utf8')).pass).toBe(false);
 });
 
 it('preserves the same gate and repair budget when review rejects the measured result', async () => {
@@ -137,13 +138,13 @@ it.each([false, true])('reruns dependent repair work with current inputs and fre
   expect(result.state.stages.repair.attempts).toHaveLength(2);
   expect(result.state.stages.review.attempts).toHaveLength(3);
   expect(readFileSync(join(project, 'sample.txt'), 'utf8')).toBe('measured 2\n');
-  const diff = JSON.parse(readFileSync(join(result.directory, 'gate_reevaluation/iteration_1/round_2/repair_diff.json'), 'utf8'));
+  const diff = JSON.parse(readFileSync(runRecordPath(result.directory, 'gate_reevaluation/iteration_1/round_2/repair_diff.json'), 'utf8'));
   expect(diff.repairStageIds).toEqual(['repair', 'measure', 'publish']);
   expect(diff.effectiveScopes).toEqual(Object.fromEntries(result.state.planControl!.stages
     .filter(stage => diff.repairStageIds.includes(stage.id)).map(stage => [stage.id, stage.scope ?? []])));
   expect(diff.files.find((file: { path: string }) => file.path === 'sample.txt')).toMatchObject({ before: { sha256: sha256('measured 1\n') }, after: { sha256: sha256('measured 2\n') } });
   for (const id of ['repair', 'measure', 'publish']) {
-    const audit = JSON.parse(readFileSync(join(result.directory, `stages/${id}/constraint_audit_attempt_2.json`), 'utf8'));
+    const audit = JSON.parse(readFileSync(runRecordPath(result.directory, `stages/${id}/constraint_audit_attempt_2.json`), 'utf8'));
     expect(audit.violations).toEqual([]);
     expect(audit).not.toHaveProperty('liveIncidents');
     expect(audit.rolledBackWrites).toEqual([]);

@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -25,8 +26,8 @@ describe('command activity without lifecycle event copies', () => {
     mkdirSync(projectDir, { recursive: true });
     async function execute(toolCalls: number) {
       const created = createRun(projectDir, 'tool-events', 'name: tool-events\nstages: []\n', ['work']);
-      const eventPath = join(created.runDirPath, 'events.jsonl');
-      const runPath = join(created.runDirPath, 'run.json');
+      const eventPath = runRecordPath(created.runDirPath, 'events.jsonl');
+      const runPath = runRecordPath(created.runDirPath, 'run.json');
       Object.assign(commandReads, { runPath, count: 0, active: false });
       const publications = { events: 0, run: 0 };
       let observing = true;
@@ -72,7 +73,7 @@ describe('command activity without lifecycle event copies', () => {
         expect(result.exitCode, result.output).toBe(0);
         const eventTypes = readFileSync(eventPath, 'utf8').trim().split('\n')
           .filter(Boolean).map(line => (JSON.parse(line) as { type: string }).type);
-        const activity = JSON.parse(readFileSync(join(created.runDirPath, 'stages', 'work', 'command_activity.json'), 'utf8')) as CommandActivitySnapshot;
+        const activity = JSON.parse(readFileSync(runRecordPath(created.runDirPath, 'stages', 'work', 'command_activity.json'), 'utf8')) as CommandActivitySnapshot;
         expect(activity).toMatchObject({ completedCount: toolCalls, active: [], streamClosed: true });
         expect(scripted.calls).toHaveLength(1);
         return { eventTypes, publications, runReads: commandReads.count };

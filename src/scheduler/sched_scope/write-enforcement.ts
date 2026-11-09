@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 // Settlement alone rejects project content changes, against task-frozen bytes.
 import { normalizedProjectPath, normalizedProjectContentPath } from '../sched_admission/scope-services.js';
 import { ignoredProjectPaths } from '../../project-identity.js';
@@ -5,7 +6,6 @@ import { restoreProjectPath } from './restore.js';
 import { compareRepairFileContents } from './file-images.js';
 import { type RepairRoundSnapshot } from './snapshots.js';
 import { baselineImage, readRollbackCurrentImage, settleRollbackBaselinePath, frozenEvidencePaths } from './rollback-baseline.js';
-import { join } from 'node:path';
 
 export function settleProjectWrites(input: {
   projectDir: string;
@@ -47,7 +47,7 @@ export function settleProjectWrites(input: {
         reason: comparison === 'unavailable' ? 'task-frozen evidence cannot be verified; preimage remains unknown'
           : taskFrozen ? 'task-frozen evidence content changed' : 'read-only decision/review changed project content' });
       const restoration = restoreProjectPath(input.projectDir, path, before,
-        baseline.runDirPath ? join(baseline.runDirPath, 'rollback-retained') : undefined);
+        baseline.runDirPath ? runRecordPath(baseline.runDirPath, 'rollback-retained') : undefined);
       if (restoration.retainedPath) retainedReplacements[path] = restoration.retainedPath;
       if (restoration.restored) rolledBackWrites.push(path);
       else {

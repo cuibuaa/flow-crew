@@ -1,8 +1,9 @@
+import { runRecordPath, stageWorkPath, hasSeparatedRunLayout } from './run-layout.js';
 import { commandUsage, parseCommandArgs } from './cli-args.js';
 /** Report and retire invocation scratch without scanning durable stage products. */
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { rmSync } from './engine-fs.js';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { isTerminalRunStatus } from './lifecycle-status.js';
 import { readArchivedRunStateFromDirectory, withRunStateLock, runsRoot, requireKnownRunStatus, RUN_RESERVATION_FILE, RUN_RESERVATION_TTL_MS, type StoreState } from './store.js';
 import { inspectRunScheduler } from './run-lock.js';
@@ -63,7 +64,7 @@ function assertQuiescent(runPath: string, state: StoreState): void {
 
 function retainedState(runPath: string): StoreState {
   plainDirectory(runPath);
-  if (!lstatSync(join(runPath, 'run.json')).isFile()) throw new Error('RETENTION_PATH: run record is not a regular file');
+  if (!lstatSync(runRecordPath(runPath, 'run.json')).isFile()) throw new Error('RETENTION_PATH: run record is not a regular file');
   const { state: archived } = readArchivedRunStateFromDirectory(runPath);
   const state: StoreState = { ...archived, status: requireKnownRunStatus(archived.status, 'prune run scratch') };
   if (state.runId !== basename(runPath)) throw new Error('RETENTION_PATH: run identity does not match directory');
@@ -84,11 +85,13 @@ function planRetention(runPath: string): RetentionPlan {
   if (!deletable) { keep('stages/, scratch/', 'park or deployment continuation'); return result; }
   // Invocation scratch has always been disposable at terminal publication, even on failure.
   // Do not let report citations or unfinished stages extend that lifetime.
-  if (isTerminalRunStatus(state.status) && children(runPath).includes('scratch')) {
-    if (!lstatSync(join(runPath, 'scratch')).isDirectory()) keep('scratch', 'non-directory invocation scratch');
-    else walk(join(runPath, 'scratch'), member => {
+  const scratch = hasSeparatedRunLayout(runPath) ? stageWorkPath(runPath, 'scratch') : join(runPath, 'scratch');
+  const scratchLocal = hasSeparatedRunLayout(runPath) ? 'work/scratch' : 'scratch';
+  if (isTerminalRunStatus(state.status) && children(dirname(scratch)).includes(basename(scratch))) {
+    if (!lstatSync(scratch).isDirectory()) keep(scratchLocal, 'non-directory invocation scratch');
+    else walk(scratch, member => {
       if (!member.directory && member.path !== '.tmpdir') {
-        result.remove.push({ path: `scratch/${member.path}`, bytes: member.bytes });
+        result.remove.push({ path: `${scratchLocal}/${member.path}`, bytes: member.bytes });
         result.removeBytes += member.bytes;
       }
     });
@@ -127,7 +130,7 @@ function cleanHistory(keep: number): number {
           try { readFileSync(join(path, 'run.json')); }
           catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') retireRunScratch(path); else throw error; }
         });
-        const marker = JSON.parse(readFileSync(join(path, RUN_RESERVATION_FILE), 'utf8'));
+        const marker = JSON.parse(readFileSync(runRecordPath(path, RUN_RESERVATION_FILE), 'utf8'));
         if (marker.version === 1 && marker.runId === id && typeof marker.reservedAt === 'string'
           && Date.now() - Date.parse(marker.reservedAt) > RUN_RESERVATION_TTL_MS) expired.push(id);
       } catch { /* Unknown records and reservations remain intact. */ }
@@ -143,7 +146,7 @@ function cleanHistory(keep: number): number {
           if (!['missing', 'dead', 'reused'].includes(inspectRunScheduler(id, path).kind)) throw new Error('Reservation owner is not settled');
           try { readFileSync(join(path, 'run.json')); throw new Error('Reservation has been published'); }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-          const marker = JSON.parse(readFileSync(join(path, RUN_RESERVATION_FILE), 'utf8'));
+          const marker = JSON.parse(readFileSync(runRecordPath(path, RUN_RESERVATION_FILE), 'utf8'));
           if (marker.version !== 1 || marker.runId !== id || typeof marker.reservedAt !== 'string'
             || !(Date.now() - Date.parse(marker.reservedAt) > RUN_RESERVATION_TTL_MS)) throw new Error('Reservation is no longer expired');
         } else {
@@ -181,7 +184,7 @@ export function cmdPrune(args: string[]): number {
   let unclassified = 0;
   const candidates = selected ? [selected] : children(runsRoot()).filter(runId => {
     try {
-      if (lstatSync(join(runsRoot(), runId)).isDirectory() && lstatSync(join(runsRoot(), runId, 'run.json')).isFile()) return true;
+      if (lstatSync(join(runsRoot(), runId)).isDirectory() && lstatSync(runRecordPath(join(runsRoot(), runId), 'run.json')).isFile()) return true;
     } catch { /* An uninitialized reservation is not a terminal run. */ }
     unclassified++; return false;
   });

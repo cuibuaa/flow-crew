@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { emptyArtifactContract } from './spec_presentation/declared-fixtures.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -63,7 +64,7 @@ describe('brief policy selection is explicit and does not replace core admission
     const task = brief(['evidence_statistics']);
     const { final, received } = await runPolicyWorkflow(task);
     expect(final.status, final.failureReason).toBe('complete');
-    expect(readFileSync(join(runDir(project, final.runId), 'task_brief.md'), 'utf8')).toBe(task);
+    expect(readFileSync(runRecordPath(runDir(project, final.runId), 'task_brief.md'), 'utf8')).toBe(task);
     expect(received.planner.system).toContain('# Brief planning policies');
     expect(received.planner.system).toContain('method_was_not_adjusted_to_match_expectation');
     expect(received.coder.system).not.toContain('# Brief planning policies');

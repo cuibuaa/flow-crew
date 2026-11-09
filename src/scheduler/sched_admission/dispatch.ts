@@ -1,3 +1,4 @@
+import { runRecordPath } from '../../run-layout.js';
 /** Whole-proposal admission, terminal/criterion topology and role/workflow loaders. Declared-input conflict policy is supplied by its owner. */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
@@ -155,13 +156,13 @@ export interface DispatchAdmissionReport {
 }
 
 export function readBriefCriteriaForAdmission(runDirPath: string): BriefCriteriaArtifact | undefined {
-  const path = join(runDirPath, 'brief_criteria.json');
+  const path = runRecordPath(runDirPath, 'brief_criteria.json');
   if (!existsSync(path)) return undefined;
   const parsed = JSON.parse(readFileSync(path, 'utf-8')) as BriefCriteriaArtifact;
   if (parsed.version !== 1 || typeof parsed.briefDigest !== 'string' || !Array.isArray(parsed.criteria)) {
     throw new Error('brief_criteria.json has an invalid shape');
   }
-  const briefPath = join(runDirPath, 'task_brief.md');
+  const briefPath = runRecordPath(runDirPath, 'task_brief.md');
   if (existsSync(briefPath)) {
     const currentDigest = createHash('sha256').update(readFileSync(briefPath, 'utf-8'), 'utf8').digest('hex');
     if (currentDigest !== parsed.briefDigest) throw new Error('brief_criteria.json digest does not match task_brief.md');
@@ -188,7 +189,7 @@ export function validatedCriterionDischarges(
       && entry.status.status === STAGE_STATUS.COMPLETE);
     if (!gateEvidence || !workEvidence) return false;
     try {
-      const bytes = readFileSync(join(runDirPath, record.verdictPath));
+      const bytes = readFileSync(runRecordPath(runDirPath, record.verdictPath));
       if (createHash('sha256').update(bytes).digest('hex') !== record.verdictSha256) return false;
       const verdict = JSON.parse(bytes.toString('utf-8')) as Record<string, unknown>;
       if (verdict.pass !== true || !verdict.criteria || typeof verdict.criteria !== 'object'

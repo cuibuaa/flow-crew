@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, watch, writeFileSync } from 'node:fs';
@@ -21,7 +22,7 @@ beforeEach(() => {
   ({ runId, runDirPath: run } = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']));
   recordRequest({ projectDir: project, runId, requestId: 'publish', action: 'publish',
     risk: 'external', title: 'Publish result', stageId: 'work', createdAt: new Date().toISOString() });
-  writeFileSync(join(run, 'scheduler.pid'), String(process.pid));
+  writeFileSync(runRecordPath(run, 'scheduler.pid'), String(process.pid));
   writeSchedulerProcessIdentity(run, runId);
 });
 afterEach(() => { setFcGlobalDir(prior); rmSync(root, { recursive: true, force: true }); });
@@ -34,7 +35,7 @@ describe('approval inbox publication ownership', () => {
     });
     mkdirSync(campaignsRoot(), { recursive: true });
     const history = join(campaignsRoot(), 'fixture.jsonl'); writeFileSync(history, '{}\n');
-    const before = readFileSync(join(run, 'run.json'), 'utf8');
+    const before = readFileSync(runRecordPath(run, 'run.json'), 'utf8');
     const dashboard = new URL('../src/dashboard.ts', import.meta.url).href;
     const storage = new URL('../src/store.ts', import.meta.url).href;
     const request = operation === 'rename'
@@ -52,7 +53,7 @@ describe('approval inbox publication ownership', () => {
       execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code],
         { cwd: new URL('..', import.meta.url).pathname, env: { ...process.env, HOME: root, FC_HOME: store }, encoding: 'utf8' });
     });
-    expect(readFileSync(join(run, 'run.json'), 'utf8')).toBe(before);
+    expect(readFileSync(runRecordPath(run, 'run.json'), 'utf8')).toBe(before);
     expect(readFileSync(history, 'utf8')).toBe('{}\n');
   });
 
@@ -60,13 +61,13 @@ describe('approval inbox publication ownership', () => {
     updateRunState(project, runId, state => {
       state.campaignId = 'fixture'; state.campaignStorageKey = 'fixture'; state.campaignName = 'Original';
     });
-    unlinkSync(join(run, 'scheduler.pid')); unlinkSync(join(run, 'scheduler.identity.json'));
+    unlinkSync(runRecordPath(run, 'scheduler.pid')); unlinkSync(runRecordPath(run, 'scheduler.identity.json'));
     mkdirSync(campaignsRoot(), { recursive: true });
     const history = join(campaignsRoot(), 'fixture.jsonl'); writeFileSync(history, '{}\n');
-    const before = readFileSync(join(run, 'run.json'), 'utf8');
+    const before = readFileSync(runRecordPath(run, 'run.json'), 'utf8');
     const original = storage.updateRunState;
     const update = vi.spyOn(storage, 'updateRunState').mockImplementation((...args) => {
-      engineFs.writeFileSync(join(run, 'scheduler.pid'), String(process.pid));
+      engineFs.writeFileSync(runRecordPath(run, 'scheduler.pid'), String(process.pid));
       writeSchedulerProcessIdentity(run, runId);
       return original(...args);
     });
@@ -80,7 +81,7 @@ describe('approval inbox publication ownership', () => {
         expect(response.statusCode).toBe(409);
       });
     } finally { update.mockRestore(); await app.close(); }
-    expect(readFileSync(join(run, 'run.json'), 'utf8')).toBe(before);
+    expect(readFileSync(runRecordPath(run, 'run.json'), 'utf8')).toBe(before);
     expect(readFileSync(history, 'utf8')).toBe('{}\n');
   });
 });
