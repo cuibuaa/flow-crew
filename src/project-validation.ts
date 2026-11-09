@@ -36,7 +36,15 @@ export interface ValidationReport {
   path?: string;
 }
 
+export interface ValidationRerun {
+  command: string;
+  /** The exact argv token {files} expands to declared structured failure files. */
+  args: string[];
+  timeoutMs?: number;
+}
+
 export interface ValidationCommand {
+  rerun?: ValidationRerun;
   /** Explicit non-secret project inputs, carried unchanged into execution and receipts. */
   env?: NodeJS.ProcessEnv;
   report?: ValidationReport;
@@ -49,6 +57,7 @@ export interface ValidationCommand {
 }
 
 export interface BriefValidationCommand {
+  rerun?: ValidationRerun;
   env?: NodeJS.ProcessEnv;
   report?: ValidationReport;
   role: ValidationRole;
@@ -77,6 +86,14 @@ const commandDeclaration = z.object({
 const validationDeclaration = z.object({ commands: z.object({
   build: commandDeclaration.optional(), test: commandDeclaration.optional(), lint: commandDeclaration.optional(),
 }).strict().refine(value => Object.keys(value).length > 0, 'must declare at least one role') }).strict();
+
+const projectCommandDeclaration = commandDeclaration.extend({ rerun: z.object({
+  command: argument.refine(value => value.trim().length > 0), args: z.array(argument),
+  timeoutMs: z.number().int().positive().optional(),
+}).strict().optional() });
+const projectValidationDeclaration = validationDeclaration.extend({ commands: z.object({
+  build: projectCommandDeclaration.optional(), test: projectCommandDeclaration.optional(), lint: projectCommandDeclaration.optional(),
+}).strict().refine(value => Object.keys(value).length > 0, 'must declare at least one role') });
 
 /** Fixed model output uses the same command objects as declarations; an empty
  * selection explicitly means no measurement, not a green suite. */
@@ -107,9 +124,9 @@ export function validationDispositions(results: ValidationCommandResult[], value
 }
 
 /** One closed declaration contract for project config and brief frontmatter. */
-export function parseValidationCommands(validation: unknown, evidencePathRoot: string): ValidationParseResult {
+export function parseValidationCommands(validation: unknown, evidencePathRoot: string, project = false): ValidationParseResult {
   if (validation === undefined) return { commands: [] };
-  const parsed = validationDeclaration.safeParse(validation);
+  const parsed = (project ? projectValidationDeclaration : validationDeclaration).safeParse(validation);
   if (!parsed.success) return { commands: [], error: `Invalid validation declaration at ${evidencePathRoot}#validation: `
     + parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.code === 'unrecognized_keys'
       ? `unknown ${issue.path.length === 1 && issue.path[0] === 'commands' ? 'role' : 'field'} ${issue.keys.join(', ')}` : issue.message}`).join('; ') };
@@ -137,7 +154,7 @@ export interface ValidationDiscovery {
 }
 
 export interface ValidationRunRequest extends ValidationCommand {
-  /** An enclosing stage may narrow the configured command deadline. */
+  /** Caller-owned deadline; omitted requests use the configured command bound. */
   timeoutMs?: number;
   abortSignal?: AbortSignal;
   cwd: string;
@@ -230,6 +247,8 @@ export interface ValidationCommandResult {
   exitCode?: number | null;
   durationMs: number;
   output: string;
+  /** File identities from the declared reporter, including collection failures. */
+  failureFiles?: string[];
   failureCount?: number;
   failureIdentifiers: string[];
   failureIdentity: 'known' | 'unknown' | 'none';
@@ -268,6 +287,8 @@ export interface ProjectValidationDependencies {
   maxOutputBytes?: number;
   skipExecution?: boolean;
   skipReason?: string;
+  /** A serial confirmation uses its hang bound rather than the batch allowance. */
+  timeoutMs?: number;
 }
 
 export interface ValidationDeltaResult {
@@ -291,7 +312,7 @@ export function discoverProjectValidation(projectDir: string, fs: ValidationFile
   if (!fs.exists(configPath)) return { state: 'unknown', configPath, commands: [], missingRoles: [...ROLES],
     reason: 'No validation declaration; command selection requires a repository-reading model' };
   let parsed: ValidationParseResult;
-  try { parsed = parseValidationCommands(JSON.parse(fs.readText(configPath)), configPath); }
+  try { parsed = parseValidationCommands(JSON.parse(fs.readText(configPath)), configPath, true); }
   catch (error) { throw new Error(`Invalid project validation configuration at ${configPath}: ${errorMessage(error)}`); }
   if (parsed.error) throw new Error(`Invalid project validation configuration at ${configPath}: ${parsed.error}`);
   const commands = parsed.commands.map(command => ({ ...command, display: [command.command, ...command.args].join(' '),
@@ -462,7 +483,7 @@ const executeValidationCommand: ValidationCommandRunner = async (request) => {
     const configured = loadEngineDefaults().validation_timeout_ms;
     if (Number.isFinite(configured) && configured > 0) timeoutMs = configured;
   } catch { /* retain the built-in bound if engine configuration is unavailable */ }
-  if (request.timeoutMs !== undefined) timeoutMs = Math.min(timeoutMs, Math.max(1, request.timeoutMs));
+  if (request.timeoutMs !== undefined) timeoutMs = Math.max(1, request.timeoutMs);
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const settle = (exitCode: number | null, signal?: NodeJS.Signals | null, error?: string): void => {
     if (settled) return;
@@ -564,7 +585,8 @@ async function failureFacts(command: ValidationCommand, response: ValidationRunR
     try {
       const bytes = response.report ?? (command.report.path ? undefined : response.stdout);
       if (bytes === undefined || Buffer.byteLength(bytes) > 1024 * 1024) throw new Error('Structured report missing or exceeds 1 MiB');
-      return identityFacts(decodeRunnerReport(bytes, command.report.format, root, failed), 'runner-json', failed);
+      const { files, ...reading } = decodeRunnerReport(bytes, command.report.format, root, failed);
+      return { ...identityFacts(reading, 'runner-json', failed), failureFiles: files };
     } catch (error) { return { identifiers: [], owner: 'unknown', reason: `Invalid structured report: ${errorMessage(error)}` }; }
   }
   if (!failed) return { identifiers: [], owner: 'unknown' };
@@ -594,7 +616,7 @@ export async function runProjectValidationBaseline(
       : reconcileProjectValidation(root, declaredCommands, fs);
   const results: ValidationCommandResult[] = [];
   const batchStarted = now();
-  const budgetMs = Math.max(0, Math.min(loadEngineDefaults().validation_timeout_ms, dependencies.remainingMs?.() ?? Infinity));
+  const budgetMs = Math.max(0, Math.min(dependencies.timeoutMs ?? loadEngineDefaults().validation_timeout_ms, dependencies.remainingMs?.() ?? Infinity));
   for (const [index, command] of discovery.commands.entries()) {
     const role = command.role;
     if (dependencies.skipExecution) {
@@ -642,6 +664,7 @@ export async function runProjectValidationBaseline(
       role, command: command.command, args: command.args, ...(command.env ? { env: command.env } : {}),
       identityOwner: facts.owner,
       ...(facts.failures ? { failures: facts.failures } : {}),
+      ...(facts.failureFiles ? { failureFiles: facts.failureFiles } : {}),
       testsRun: facts.testsRun ?? null,
       display: command.display,
       exitCode: response.exitCode,

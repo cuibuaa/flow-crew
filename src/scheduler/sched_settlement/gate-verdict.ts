@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { GateContract, loadGateContract, validateVerdictAgainstContract } from './gate-contract.js';
 import { projectGateVerdict, readGateVerdictDocument, GateVerdictDocument, validateSettledGateVerdict, explicitPassContradiction, validateGateCriterionEvidence, validateGateRepairability } from './gate-evidence.js';
 import { archivedGateRejections, confirmedRepairFindings } from './gate-archives.js';
-import { currentValidationResults } from './gate-validation.js';
+import { currentValidationResults, currentValidationRegressions } from './gate-validation.js';
 
 export function readTerminalStudyCompletionEvidence(projectDir: string, runId: string, stageId: string): Record<string, unknown> | null {
   const base = runDir(projectDir, runId);
@@ -109,6 +109,8 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
   let brief = ''; try { brief = readFileSync(join(base, 'task_brief.md'), 'utf8'); } catch { /* legacy */ }
   const treeHash = captureProjectTree(projectDir, brief).hash;
   const findings = assessFindings(parsed.success ? parsed.data.findings : [], ledger, { stageId, attemptIndex, treeHash });
+  const regressions = currentValidationRegressions(projectDir, runId);
+  findings.confirmed.push(...regressions);
   const results = currentValidationResults(projectDir, runId);
   const dispositions = validationDispositions(results, document.value.validation_review);
   const caused = dispositions.filter(entry => entry.disposition === 'caused_by_change');
@@ -136,9 +138,10 @@ function settleFindingAssessment(verdict: GateVerdict | null, document: GateVerd
       || !(closure.treeHash === treeHash || accepted.some(entry => entry.kind === 'attempt' && entry.sequence > closure.sequence && entry.treeHash === closure.treeHash))
       || closure.command !== original.command || closure.context?.cwd !== original.context.cwd || closure.context?.shell !== original.context.shell;
   });
-  const reason = `${closureFailed ? 'Repair reproduction remains open or does not cover the repaired tree; a passing verdict cannot close it. ' : ''}${verdict.reason ?? ''}${findings.unconfirmed.length ? ` Unconfirmed observations: ${findings.unconfirmed.map(finding => finding.id).join(', ')}; no repair requested for these.` : ''}${validationNote}${caused.length ? ` Independent gate attributes failure to the change: ${caused.map(entry => entry.display).join(', ')}.` : ''}`;
-  return { ...authored, ...(closureFailed || caused.length ? { pass: false, refusal: { kind: 'audit_findings' as const } } : {}),
-    ...(parsed.success ? { findings } : {}), ...(validation.length ? { validation } : {}), ...(reason ? { reason } : {}) };
+  const reason = `${closureFailed ? 'Repair reproduction remains open or does not cover the repaired tree; a passing verdict cannot close it. ' : ''}${verdict.reason ?? ''}${regressions.length ? ` Confirmed validation regression: ${regressions.map(finding => finding.record.command).join('; ')}.` : ''}${findings.unconfirmed.length ? ` Unconfirmed observations: ${findings.unconfirmed.map(finding => finding.id).join(', ')}; no repair requested for these.` : ''}${validationNote}${caused.length ? ` Independent gate attributes failure to the change: ${caused.map(entry => entry.display).join(', ')}.` : ''}`;
+  return { ...authored, ...(regressions.length ? { repairability: { version: 1 as const, disposition: 'repairable' as const, evidence: 'Candidate-alone failure and passing identical base-alone reproduction' } } : {}),
+    ...(closureFailed || caused.length || regressions.length ? { pass: false, refusal: { kind: 'audit_findings' as const } } : {}),
+    ...(parsed.success || regressions.length ? { findings } : {}), ...(validation.length ? { validation } : {}), ...(reason ? { reason } : {}) };
 
 }
 

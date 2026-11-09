@@ -17,6 +17,7 @@ export const FailureReadingSchema = z.object({
 
 export type FailureReading = z.infer<typeof FailureReadingSchema>;
 export interface IdentityFacts {
+  failureFiles?: string[];
   count?: number;
   testsRun?: number;
   identifiers: string[];
@@ -60,7 +61,7 @@ const VitestReport = z.object({
   }).strict()),
 }).strict();
 
-export function decodeRunnerReport(bytes: string, format: 'vitest-json', projectDir: string, failed?: boolean): FailureReading {
+export function decodeRunnerReport(bytes: string, format: 'vitest-json', projectDir: string, failed?: boolean): FailureReading & { files: string[] } {
   if (format !== 'vitest-json') throw new Error('Unsupported structured reporter');
   const report = VitestReport.parse(JSON.parse(bytes));
   if (failed !== undefined && report.success !== undefined && report.success === failed) {
@@ -69,11 +70,14 @@ export function decodeRunnerReport(bytes: string, format: 'vitest-json', project
   const assertions = report.testResults.flatMap(suite => suite.assertionResults.map(test => ({ suite, test })));
   let canonicalRoot = projectDir;
   try { canonicalRoot = realpathSync(projectDir); } catch { /* in-memory reporter fixtures */ }
+  const fileIdentity = (name: string) => (isAbsolute(name) ? relative(canonicalRoot, name) : name).split(sep).join('/');
+  const files = [...new Set(report.testResults.filter(suite => suite.status === RUNNER_FAILURE_STATUS
+    || suite.assertionResults.some(test => test.status === RUNNER_FAILURE_STATUS)).map(suite => fileIdentity(suite.name)))];
   const failures = assertions.filter(({ test }) => test.status === RUNNER_FAILURE_STATUS).map(({ suite, test }) => ({
     testId: test.fullName!,
     // Vitest emits absolute suite names. Removing the supplied checkout prefix
     // is path relativity on a structured field, never test-output normalization.
-    file: (isAbsolute(suite.name) ? relative(canonicalRoot, suite.name) : suite.name).split(sep).join('/'),
+    file: fileIdentity(suite.name),
     messageClass: 'test-failure',
   }));
   if (assertions.length !== report.numTotalTests || failures.length !== report.numFailedTests
@@ -92,7 +96,7 @@ export function decodeRunnerReport(bytes: string, format: 'vitest-json', project
     && report.testResults.every(suite => !suite.message?.length
       && (suite.status !== RUNNER_FAILURE_STATUS || suite.assertionResults.some(test => test.status === RUNNER_FAILURE_STATUS)))
     && (report.numFailedTestSuites === undefined || report.numFailedTestSuites === accountedSuites.size);
-  return FailureReadingSchema.parse({ version: 1, testsRun: report.numPassedTests + report.numFailedTests, complete, failures });
+  return { ...FailureReadingSchema.parse({ version: 1, testsRun: report.numPassedTests + report.numFailedTests, complete, failures }), files };
 }
 
 export function identityFacts(reading: unknown, owner: IdentityFacts['owner'], failed: boolean, truncated = false): IdentityFacts {

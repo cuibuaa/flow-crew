@@ -20,6 +20,16 @@
       "report": {
         "format": "vitest-json",
         "path": ".cache/validation-tests.json"
+      },
+      "rerun": {
+        "command": "/bin/sh",
+        "args": [
+          "-ec",
+          "if [ ! -d node_modules ]; then npm ci --include=dev --ignore-scripts --no-audit --no-fund; fi; if [ ! -d ui/node_modules ]; then npm ci --include=dev --prefix ui --ignore-scripts --no-audit --no-fund; fi; npm run build; node_modules/.bin/vitest run \"$@\" --no-file-parallelism --testTimeout=300000 --hookTimeout=300000 --reporter=default --reporter=./config/validation-reporter.ts --outputFile.json=.cache/validation-tests.json",
+          "validation-rerun",
+          "{files}"
+        ],
+        "timeoutMs": 10800000
       }
     },
     "lint": {

@@ -1414,7 +1414,7 @@ export async function runStage(
       if (!finding.record.context) continue;
       const replay = await runProjectCommand({ role: 'test', command: finding.record.context.shell, args: ['-c', finding.record.command!],
         display: finding.record.command!, cwd: finding.record.context.cwd, runDir: opts.runDir,
-        timeoutMs: Math.max(1, Math.min(60_000, attemptDeadline.remainingMs())), abortSignal: aggregateAbortSignal });
+        timeoutMs: Math.max(1, Math.min(finding.record.timeoutMs ?? 60_000, attemptDeadline.remainingMs())), abortSignal: aggregateAbortSignal });
       appendEvidence(opts.runDir, { kind: 'command', owner: 'code', stageId: opts.stageId, attemptIndex,
         commandId: `closure-${finding.id}`, command: finding.record.command, context: finding.record.context, exitCode: replay.exitCode,
         outputDigest: createHash('sha256').update(JSON.stringify([replay.stdout ?? '', replay.stderr ?? ''])).digest('hex'),

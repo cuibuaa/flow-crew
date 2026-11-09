@@ -311,11 +311,20 @@ console.log(JSON.stringify({complete:true,numTotalTests:ids.length,numFailedTest
 }
 
 describe('11/05 useful catches survive delayed validation', () => {
-  it.each(['cache', 'cpu'] as const)('blocks the audit %s assertion when the independent gate attributes it to the change despite pass=true', { timeout: 60_000 }, async kind => {
+  it.each(['cache', 'cpu'] as const)('retains the audit %s refusal and admits repair only with a confirmed reproduction', { timeout: 60_000 }, async kind => {
     const result = await catchFixture(kind, false);
-    expect(result.final.status, JSON.stringify({ gate: result.final.stages.review.gate, validations: result.validations })).toBe('incomplete');
-    expect(result.final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'audit_findings' } });
-    expect(result.calls).toEqual(['implement', 'review']);
+    if (kind === 'cpu') {
+      // The operator's serial candidate/base pair independently confirms this regression.
+      expect(result.validations[0].regressions).toHaveLength(1);
+      expect(result.final.status).toBe('complete');
+      expect(result.calls).toEqual(['implement', 'review', 'repair', 'review']);
+      expect(readEvidence(result.rd).some(entry => entry.kind === 'command' && entry.reproductionOf === result.validations[0].regressions![0].record.sequence && entry.exitCode === 0)).toBe(true);
+    } else {
+      expect(result.final.status, JSON.stringify({ gate: result.final.stages.review.gate, validations: result.validations })).toBe('incomplete');
+      expect(result.final.stages.review.gate).toMatchObject({ pass: false, refusal: { kind: 'audit_findings' } });
+      expect(result.calls).toEqual(['implement', 'review']);
+      expect(result.validations[0].regressions ?? []).toEqual([]);
+    }
     expect(result.validations[0].delta.find(entry => entry.role === 'test')?.state).toBe('unverified');
   });
 
@@ -323,10 +332,11 @@ describe('11/05 useful catches survive delayed validation', () => {
     const result = await catchFixture(kind, true);
     expect(result.final.status, JSON.stringify({ gate: result.final.stages.review, validations: result.validations, calls: result.calls })).toBe('complete'); expect(result.calls).toEqual(['implement', 'review', 'repair', 'review']);
     const first = result.validations[0]; expect(first.delta.find(entry => entry.role === 'test')?.state).toBe('unverified');
-    expect(first.executions.map(execution => execution.commands.map(command => command.role))).toEqual([['build','test']]);
+    expect(first.executions.map(execution => execution.commands.map(command => command.role))).toEqual([['build','test'], ['test'], ['test']]);
+    expect(first.executions.map(execution => execution.rerun)).toEqual([undefined, true, true]);
     expect(first.failures).toEqual([]);
     if (kind === 'cache') {
-      expect(first.executions.map(execution => execution.commands.find(command => command.role === 'test')!.failureCount)).toEqual([3]);
+      expect(first.executions.map(execution => execution.commands.find(command => command.role === 'test')!.failureCount)).toEqual([3, 3, 2]);
       expect(first.executions[0].commands.find(command => command.role === 'test')!.failureIdentifiers.filter(id => id.includes('environment_missing_key'))).toHaveLength(2);
       expect(first.delta.find(entry => entry.role === 'test')!.state).toBe('unverified');
       expect(result.validations[1].executions[0].commands.find(command => command.role === 'test')).toMatchObject({ exitCode: 1, failureCount: 2 });
@@ -371,7 +381,7 @@ describe('declared validation environment preserves data isolation', () => {
 });
 
 
-describe('only independent gate dispositions own causation', () => {
+describe('the independent gate owns unconfirmed failure causation', () => {
   it.each(['already_failing', 'environment', 'unknown', 'omitted', 'invalid', 'duplicate'] as const)('accepts a failed command honestly with %s disposition', async shape => {
     const root = project(); let gateInput = '';
     const display = '/bin/sh -c exit 127';
@@ -390,7 +400,8 @@ describe('only independent gate dispositions own causation', () => {
     expect(gateInput).toContain('"exitCode":127');
     expect(result.final.status).toBe('complete');
     expect(result.validations).toHaveLength(1);
-    expect(result.validations[0].executions.map(execution => execution.target)).toEqual(['attempt']);
+    expect(result.validations[0].executions.map(execution => [execution.target, execution.rerun])).toEqual([['attempt', undefined], ['attempt', true], ['base', true]]);
+    expect(result.validations[0].regressions ?? []).toEqual([]);
     expect(result.final.validation?.find(command => command.role === 'test')).toMatchObject({ exitCode: 127, state: 'failed', measurement: 'unverified' });
     expect(result.final.stages.review.gate?.validation?.find(command => command.role === 'test')).toMatchObject({
       exitCode: 127, measurement: 'unverified', disposition: ['omitted', 'invalid', 'duplicate'].includes(shape) ? 'unknown' : shape,
@@ -398,13 +409,14 @@ describe('only independent gate dispositions own causation', () => {
     expect(renderRunSummary(root, result.rd, result.final)).toContain('failed (unverified)');
   });
 
-  it('requests base only through the gate and leaves a known flaky green base unverified', async () => {
+  it('leaves a known flake unverified after a passing alone rerun and gate-requested failing base', async () => {
     const root = project(), counter = join(project(), 'flaky-count');
     const program = "import fs from 'node:fs';const p=process.argv[2];const n=fs.existsSync(p)?Number(fs.readFileSync(p,'utf8')):0;fs.writeFileSync(p,String(n+1));const code=n%2===0?1:0;console.log('flaky assertion invocation '+n+' exit '+code);process.exitCode=code;";
     writeFileSync(join(root, 'check.mjs'), program);
     for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'flaky base']]) isolatedProjectCommand('git', args, root, root);
     // The unchanged base program demonstrably alternates red and green. The
-    // subsequent configured final/base pair is red/green without a code change.
+    // subsequent configured batch/alone pair is red/green without a code change;
+    // the gate's later base supplement is red again.
     const probes = [];
     for (let n = 0; n < 2; n++) probes.push((await runProjectCommand({ role: 'test', command: process.execPath, args: ['check.mjs', counter], display: 'independent base flake probe', cwd: root, timeoutMs: 5000 })).exitCode);
     expect(probes).toEqual([1, 0]);
@@ -427,10 +439,11 @@ describe('only independent gate dispositions own causation', () => {
       return success({ status: 'delivered', summary: 'Complete', caveats: [], remaining_work: [] }, ['docs/value.txt']);
     } };
     const result = await workflow(root, adapter, `validation:\n  commands:\n    test: {command: ${JSON.stringify(process.execPath)}, args: [check.mjs, ${JSON.stringify(counter)}]}\n`);
-    expect(observedTargets).toEqual([['attempt']]);
+    expect(observedTargets).toEqual([['attempt', 'attempt']]);
     expect(reviews).toBe(2); expect(result.final.status).toBe('complete');
     expect(result.validations).toHaveLength(2);
-    expect(result.validations[1].executions.map(execution => [execution.target, execution.commands[0].exitCode])).toEqual([['attempt', 1], ['base', 0]]);
+    expect(result.validations[1].executions.map(execution => [execution.target, execution.commands[0].exitCode])).toEqual([['attempt', 1], ['attempt', 0], ['base', 1]]);
+    expect(result.validations[1].regressions ?? []).toEqual([]);
     expect(result.final.stages.review.gate?.validation?.[0]).toMatchObject({ disposition: 'already_failing', measurement: 'unverified' });
     expect(result.final.validation?.[0]).toMatchObject({ measurement: 'unverified', exitCode: 1 });
   });

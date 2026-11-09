@@ -370,7 +370,7 @@ describe('stage group settlement boundaries', () => {
 });
 
 describe('validation at the review boundary', () => {
-  it.each(['repaired', 'exhausted', 'launch_error'] as const)('records a failed command without inferring causation or uncited repair: %s', async outcome => {
+  it.each(['repaired', 'exhausted', 'launch_error'] as const)('vetoes confirmed failures and retains their failed closure; launch gaps stay unverified: %s', async outcome => {
     for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base']]) isolatedProjectCommand('git', args, projectDir, root);
     const baseline: projectValidation.ProjectValidationBaseline = {
       version: 1, projectDir,
@@ -411,10 +411,18 @@ describe('validation at the review boundary', () => {
     const final = await runWorkflow(workflow, '', projectDir, adapter, new Map(), undefined, join(import.meta.dirname, '..', 'config', 'agents'), undefined,
       'Review the completed fixture using its configured validation.', true);
     const repairs = adapter.calls.filter(call => call.stageId === 'repair');
-    expect(final.status, final.failureReason).toBe('complete');
-    expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0, gate: { pass: true, kind: 'pass' } });
-    expect(repairs).toHaveLength(0);
-    expect(commands).toHaveBeenCalledTimes(1);
+    const confirmed = outcome !== 'launch_error';
+    expect(final.status, final.failureReason).toBe(confirmed ? 'incomplete' : 'complete');
+    expect(final.stages[gateId]).toMatchObject({ status: 'complete', exitCode: 0, gate: { pass: !confirmed, kind: confirmed ? 'audit_findings' : 'pass' } });
+    expect(repairs).toHaveLength(confirmed ? 3 : 0);
+    expect(commands).toHaveBeenCalledTimes(confirmed ? 3 : 1);
+    if (confirmed) {
+      const ledger = readEvidence(runDir(projectDir, final.runId));
+      expect(final.stages[gateId].gate?.findings?.confirmed).toHaveLength(1);
+      // The fixture's actual reproduction is process.exit(1). A mock claiming
+      // repair cannot change its source tree or close that failing command.
+      expect(ledger.filter(entry => entry.kind === 'command' && entry.reproductionOf !== undefined).map(entry => entry.kind === 'command' && entry.exitCode)).toEqual([1, 1, 1]);
+    }
     expect(final.validation?.every(result => result.measurement === 'unverified')).toBe(true);
     expect(readEvidence(runDir(projectDir, final.runId)).filter(fact => fact.kind === 'validation').at(-1)?.pass).toBe(false);
   });

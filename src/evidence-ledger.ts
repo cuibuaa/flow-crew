@@ -17,6 +17,8 @@ export const VALIDATION_FACT_VERSION = 3;
 export interface TreeFile { path: string; mode: number; content: ContentIdentity; targetContent?: ContentIdentity }
 export interface ProjectTree { hash: string | null; files: TreeFile[]; reason?: string }
 export interface ValidationExecution {
+  /** Same declared rerun, executed without another validation command. */
+  rerun?: true;
   target: 'attempt' | 'base';
   cwd: string;
   commit?: string;
@@ -36,6 +38,8 @@ export interface ValidationFact {
   delta: ValidationDeltaResult[];
   failures: Array<{ role: string; display?: string; identifier: string | null; classification: 'pre-existing' | 'introduced' | 'unknown' }>;
   pass: boolean;
+  /** Existing confirmed findings/command records feed repair and closure. */
+  regressions?: import('./scoped-audit-repair.js').FindingAssessment['confirmed'];
   baseRequest?: { commands: Array<{ role: string; display: string }>; error?: string };
   baseInputSnapshot?: { manifestSha256: string; files: number; bytes: number; durationMs: number; error?: string };
 }
@@ -100,6 +104,8 @@ export type EvidenceFact = ValidationFact | {
   outputDigest?: string; treeHash?: string | null; treeAfterHash?: string | null;
   /** A repair replay cites the original failed command, using the same ledger primitive. */
   reproductionOf?: number;
+  /** Reproduction hang allowance; the enclosing attempt may narrow it. */
+  timeoutMs?: number;
 } | {
   kind: 'decision'; stageId: string; attemptIndex: number; verdict: Record<string, unknown>; owner: 'closed-schema-model';
 

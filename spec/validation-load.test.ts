@@ -82,7 +82,7 @@ describe('host load is telemetry, never a command judgment', () => {
     expect(validation.projectValidationResult({ load })).toEqual({ state: 'unverified', measurement: 'unverified' });
   });
 
-  it.each([127, 4, 1, 2, 0])('publishes exit %s under load in gate, run facts, ledger, watch and report without a second validation', async exitCode => {
+  it.each([127, 4, 1, 2, 0])('publishes exit %s under load in gate, run facts, ledger, watch and report with only the required isolated rerun', async exitCode => {
     const measurement = exitCode === 0 ? 'verified' : 'unverified';
     const project = mkdtempSync(join(tmpdir(), 'load-gate-')); roots.push(project);
     const runner = vi.spyOn(validation, 'runValidationCommand').mockResolvedValue({ exitCode, stdout: exitCode === 0 ? '' : 'arbitrary failure', load: load() });
@@ -102,7 +102,7 @@ describe('host load is telemetry, never a command judgment', () => {
     const { config, raw } = loadWorkflow(resolve('config/workflows/direct.yaml'));
     const brief = '---\noutputs: [docs/value.txt]\nvalidation:\n  commands:\n    test:\n      command: fixture-check\n      args: []\n---\n# Deliver a value\n\n## Acceptance criteria\n1. Value is independently checked.\n';
     const final = await runWorkflow(config, raw, project, adapter, new Map(), undefined, resolve('config/agents'), undefined, brief, true);
-    expect(final.status).toBe('complete'); expect(calls).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(1);
+    expect(final.status).toBe('complete'); expect(calls).toEqual(['implement', 'review']); expect(runner).toHaveBeenCalledTimes(exitCode === 0 ? 1 : 2);
     expect(final.stages.review.gate).toMatchObject({ pass: true, validation: [{ role: 'test', measurement, exitCode, load: load() }] });
     if (exitCode !== 0) {
       expect(final.stages.repair.attempts ?? []).toHaveLength(0);
@@ -110,6 +110,9 @@ describe('host load is telemetry, never a command judgment', () => {
     else expect(final.stages.review.gate?.reason).not.toContain('Validation not measured (');
     const directory = runDir(project, final.runId), fact = readEvidence(directory).find(entry => entry.kind === 'validation')!;
     if (fact.kind !== 'validation') throw Error('missing validation');
+    expect(fact.executions.map(execution => [execution.target, execution.rerun ?? false, execution.commands[0].exitCode])).toEqual(exitCode === 0
+      ? [['attempt', false, 0]] : [['attempt', false, exitCode], ['attempt', true, exitCode], ['base', true, null]]);
+    expect(fact.regressions ?? []).toEqual([]);
     expect(fact.pass).toBe(exitCode === 0); expect(fact.delta.find(entry => entry.role === 'test')?.state).toBe(exitCode === 0 ? 'verified' : 'unverified');
     expect(fact.executions[0].commands[0]).toMatchObject({ exitCode, state: exitCode === 0 ? 'passed' : 'failed', measurement, load: load() });
     expect(readFileSync(join(directory, 'iteration_log.md'), 'utf8')).toContain(`Gate verdict: PASS; validation: test: ${measurement.replaceAll('_', ' ')}`);
