@@ -1119,7 +1119,9 @@ function withTextReproduction(adapter: Adapter): Adapter {
  }};
 }
 
-it.each(['disjoint','absent','broad','narrow'] as const)('SI repair accepted gap permits independently reproduced text repair with %s criterion mapping', async mapping => {
+it.each((['disjoint','absent','broad','narrow'] as const).flatMap(mapping =>
+  (['narrow','broad','absent'] as const).map(otherMapping => ({mapping,otherMapping}))))(
+  'SI repair text finding after gap with author=$mapping other=$otherMapping', async ({mapping,otherMapping}) => {
   const {roles,workflow} = workflowFixture(3);
   const brief='---\noutputs: [work.txt]\n---\n# Produce text with an optional renderer\n\n## Requirements\n1. A missing optional renderer may be accepted using textual evidence.\n2. work.txt contains correct text.';
   const {extractBriefCriteria}=await import('../src/brief-criteria.js');
@@ -1128,7 +1130,9 @@ it.each(['disjoint','absent','broad','narrow'] as const)('SI repair accepted gap
   workflow.stages.find(s=>s.id==='repair')!.criterion_refs=[refs[1]];
   workflow.stages.find(s=>s.id==='work')!.scope = mapping === 'disjoint' ? [] : ['work.txt'];
   if (mapping === 'broad' || mapping === 'narrow') workflow.stages.find(s=>s.id==='work')!.criterion_refs = mapping === 'broad' ? refs : [refs[0]];
-  workflow.stages.splice(2,0,{...workflow.stages[1],id:'text',scope:['work.txt'],depends_on:['work']});
+  const text={...workflow.stages[1],id:'text',scope:['work.txt'],depends_on:['work']};
+  if(otherMapping==='absent')delete text.criterion_refs;else text.criterion_refs=otherMapping==='broad'?refs:[refs[1]];
+  workflow.stages.splice(2,0,text);
   workflow.stages.find(s=>s.id==='review')!.depends_on=['text'];
   normalizeStageContracts(workflow.stages);
   const calls:string[]=[];
@@ -1141,11 +1145,18 @@ it.each(['disjoint','absent','broad','narrow'] as const)('SI repair accepted gap
     return withRemaining(completed(opts,'Complete.'),[]);
   }};
   const result=await runWorkflow(workflow,stringify(workflow),project,withTextReproduction(adapter),new Map(),undefined,roles,undefined,brief,false,undefined,false,undefined,()=>manualClock().clock);
-  expect(calls).toEqual(['done','work','text','review','repair','review']);
-  expect(result.status).toBe('complete');
-  expect(readFileSync(join(project,'work.txt'),'utf8')).toBe('correct text');
+  // Broad/absent responsibility leaves gap identity unknown: the record has
+  // no criterion/resource binding for the gap. Prose cannot grant independence.
+  const independent=mapping==='disjoint'||mapping==='narrow';
+  expect(calls).toEqual(independent?['done','work','text','review','repair','review']:['done','work','text','review']);
+  expect(result.status).toBe(independent?'complete':'incomplete');
+  expect(readFileSync(join(project,'work.txt'),'utf8')).toBe(independent?'correct text':'wrong text');
   expect(result.stages.work.attempts).toHaveLength(1);
-  expect(result.stages.repair.attempts).toHaveLength(1);
+  expect(result.stages.repair.attempts??[]).toHaveLength(independent?1:0);
+  if(!independent){
+    expect(readGateEvaluation(project,'review',result.runId)?.findings?.confirmed).toHaveLength(1);
+    expect(result.decisionGraph?.records.find(record=>record.stageId==='review')?.reason).toContain('recorded facts do not establish an independent repair');
+  }
 });
 
 function withRendererReproduction(adapter: Adapter): Adapter {
@@ -1163,17 +1174,20 @@ function withRendererReproduction(adapter: Adapter): Adapter {
  }};
 }
 
-it.each(['absent','broad','narrow'] as const)('SI repair shared ownership cannot reopen the same renderer gap with %s criterion mapping',async mapping=>{
+it.each((['narrow','broad','absent'] as const).flatMap(authorMapping =>
+ (['narrow','broad','absent'] as const).map(otherMapping => ({authorMapping,otherMapping}))))(
+ 'SI repair shared ownership cannot reopen the same renderer gap with author=$authorMapping other=$otherMapping',async ({authorMapping,otherMapping})=>{
  const {roles,workflow}=workflowFixture(3);
  const brief='---\noutputs: [work.txt]\n---\n# Renderer work\n\n## Requirements\n1. The renderer executable supplies visual evidence.\n2. work.txt contains correct text.';
  const {extractBriefCriteria}=await import('../src/brief-criteria.js');const refs=extractBriefCriteria(brief).criteria.map(c=>c.id);expect(refs).toHaveLength(2);
  workflow.stages.find(s=>s.id==='work')!.scope=['renderer','work.txt'];
- workflow.stages.find(s=>s.id==='work')!.criterion_refs=[refs[0]];
+ if(authorMapping==='absent')delete workflow.stages.find(s=>s.id==='work')!.criterion_refs;
+ else workflow.stages.find(s=>s.id==='work')!.criterion_refs=authorMapping==='broad'?refs:[refs[0]];
  workflow.stages.find(s=>s.id==='repair')!.scope=['renderer','work.txt'];
  workflow.stages.find(s=>s.id==='repair')!.criterion_refs=[refs[0]];
  workflow.stages.find(s=>s.id==='review')!.criterion_refs=refs;
  const text={...workflow.stages[1],id:'text',scope:['renderer','work.txt'],depends_on:['work']};
- if(mapping==='absent')delete text.criterion_refs;else text.criterion_refs=mapping==='broad'?refs:[refs[1]];
+ if(otherMapping==='absent')delete text.criterion_refs;else text.criterion_refs=otherMapping==='broad'?refs:[refs[1]];
  workflow.stages.splice(2,0,text);workflow.stages.find(s=>s.id==='review')!.depends_on=['text'];normalizeStageContracts(workflow.stages);
  const calls:string[]=[],rendererProbes:string[]=[];
  const adapter:Adapter={async run(_prompt,_role,opts){

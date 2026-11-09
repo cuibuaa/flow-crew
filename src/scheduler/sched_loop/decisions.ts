@@ -148,27 +148,22 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     const limit = graph.maxVisits;
     const resumed = destination && isPendingStageStatus(state.stages[target]?.status ?? '') && (state.stages[target]?.attempts?.length ?? 0) > 0;
     const revisiting = Boolean(destination && (state.stages[target]?.attempts?.length || state.stages[target]?.status === STAGE_STATUS.COMPLETE));
-    // A gap author's explicit responsibility confined to these finding criteria
-    // cannot be erased by another author's broad or absent mapping. Otherwise
-    // shared scope alone does not identify the confirmed defect as that gap.
-    const gapOwners = source.is_gate && gateAccepted === false ? rejectedFindings.flatMap(finding => {
-      const owners = gateReviewedAuthorIds(source, sorted).filter(id => {
+    // Responsibility can exclude a gap author, but overlapping declarations do
+    // not identify the gap or prove independence. Without a structured exclusion
+    // the confirmed predicate alone cannot authorize reopening that author's gap.
+    const gapOwners = source.is_gate && gateAccepted === false ? rejectedFindings.flatMap(finding =>
+      gateReviewedAuthorIds(source, sorted).filter(id => {
         const author = sorted.find(stage => stage.id === id)!;
-        return (!author.criterion_refs?.length || !finding.criterion_ids.length || finding.criterion_ids.some(ref => author.criterion_refs!.includes(ref)))
+        return state.stages[id]?.attempts?.at(-1)?.endingCause === 'environment_gap'
+          && (!author.criterion_refs?.length || !finding.criterion_ids.length || finding.criterion_ids.some(ref => author.criterion_refs!.includes(ref)))
           && finding.paths.some(path => stageScopeOwnsPath(author, path));
-      });
-      const gaps = owners.filter(id => state.stages[id]?.attempts?.at(-1)?.endingCause === 'environment_gap');
-      return owners.length === gaps.length ? gaps : gaps.filter(id => {
-        const refs = sorted.find(stage => stage.id === id)!.criterion_refs;
-        return refs?.length && refs.every(ref => finding.criterion_ids.includes(ref));
-      });
-    }) : [];
+      })) : [];
     const repeatedGap = [target, ...gapOwners]
       .find(id => state.stages[id]?.attempts?.at(-1)?.endingCause === 'environment_gap');
     if (repeatedGap || unconfirmedRejection || wallExhausted || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
       || source.decision && destination?.is_gate && (destination.scope === undefined || destination.scope.length !== 0)
       || target !== 'continue' && (revisiting || source.is_gate) && !resumed && used >= limit) {
-      record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; no new attempt can close that same gap. ${choice.reason}` : unconfirmedRejection ? choice.reason : `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${choice.reason}`;
+      record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; recorded facts do not establish an independent repair; no new attempt authorized. ${choice.reason}` : unconfirmedRejection ? choice.reason : `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${choice.reason}`;
       delete record.successor;
     } else if (target === 'replan') {
       const planner = sorted.find(s => s.dynamic_dispatch);
