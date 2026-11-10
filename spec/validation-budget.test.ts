@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
@@ -24,7 +25,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function project() { const root = mkdtempSync(join(tmpdir(), 'validation-budget-')); roots.push(root); return root; }
 const success = (output: unknown, writes: string[] = []) => ({ output: JSON.stringify(output), exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' as const });
 function verdict(opts: RunOpts, pass = true, findings: unknown[] = []) {
-  const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+  const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
   return { pass, reason: 'Independent fixture checked the product and the stated validation limits.',
     criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: pass ? 'pass' : 'fail', evidence: 'Independent product predicate and ledger' }])),
     audit_findings: { version: 1, findings },

@@ -77,7 +77,6 @@ function restoreEnv(name: string, value: string | undefined): void {
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
 const previousFcHome = process.env.FC_HOME;
-const previousStoreRegistry = process.env.FC_STORE_REGISTRY;
 const previousIsolationRoot = process.env.FLOWCREW_VITEST_ROOT;
 const isolation = createVitestFileIsolation();
 installLoopbackListenFence(() => expect.getState().testPath);
@@ -95,7 +94,6 @@ process.env.HOME = isolation.home;
 process.env.USERPROFILE = isolation.home;
 delete process.env.FC_HOME;
 process.env.FLOWCREW_VITEST_ROOT = isolation.root;
-process.env.FC_STORE_REGISTRY = join(isolation.root, 'storage-roots');
 // Capacity is a fixture input, never the developer's live root-disk policy.
 const fixtureBin = join(isolation.home, 'bin');
 mkdirSync(fixtureBin);
@@ -131,6 +129,5 @@ afterAll(() => {
   restoreEnv("HOME", previousHome);
   restoreEnv("USERPROFILE", previousUserProfile);
   restoreEnv("FC_HOME", previousFcHome);
-  restoreEnv("FC_STORE_REGISTRY", previousStoreRegistry);
   restoreEnv("FLOWCREW_VITEST_ROOT", previousIsolationRoot);
 });

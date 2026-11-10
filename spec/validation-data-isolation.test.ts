@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -25,7 +26,7 @@ it('preserves the stage-measured environment when the engine replays a selected 
     const result = (record: unknown, writes: string[] = []) => ({ output: JSON.stringify(record), exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' as const });
     if (opts.stageId === 'review') {
       reviewInput = prompt;
-      const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+      const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
       return result({ pass: true, reason: 'Independent fixture inspected the product and command facts',
         criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: 'pass', evidence: 'Read output and engine receipts' }])),
         audit_findings: { version: 1, findings: [] } });

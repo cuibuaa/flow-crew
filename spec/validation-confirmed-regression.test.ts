@@ -1,3 +1,4 @@
+import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -41,7 +42,7 @@ async function measure(shape: 'regression' | 'changing-tree' | 'regression-error
   declaration(root, { build: { ...command, args: ['build.mjs'] }, test, lint: { ...command, args: ['lint.mjs'] } });
   commit(root);
   const run = createRun(root, 'confirmation', 'name: confirmation\nstages: []\n', ['implement', 'review']);
-  writeFileSync(join(run.runDirPath, 'task_brief.md'), '# Validation confirmation\n');
+  writeFileSync(runRecordPath(run.runDirPath, 'task_brief.md'), '# Validation confirmation\n');
   // Capture declarations and the committed base before an author can change bytes.
   snapshotShipSetupValidationBaseline(root, '# Validation confirmation\n', run.runDirPath);
   writeFileSync(join(root, 'docs/value.txt'), 'candidate');
@@ -70,7 +71,7 @@ async function measure(shape: 'regression' | 'changing-tree' | 'regression-error
   };
   const fact = await recordAttemptValidation(root, run.runId, 'implement', { runCommand: runner });
   writeStageStatus(root, run.runId, 'review', complete);
-  writeFileSync(join(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Scripted gate accepts', criteria: {},
+  writeFileSync(runRecordPath(run.runDirPath, 'verdict_review.json'), JSON.stringify({ pass: true, reason: 'Scripted gate accepts', criteria: {},
     audit_findings: { version: 1, findings: [] }, validation_review: { commands: [{ role: 'test', display: [command.command, ...command.args].join(' '), disposition: 'unknown', reason: 'No attribution' }], request_base: [] } }));
   return { root, ...run, fact, calls, rerunValue, verdict: readGateEvaluation(root, 'review', run.runId, undefined, false) };
 }
@@ -87,7 +88,7 @@ describe('one confirmed-regression veto', () => {
       calls.push({ stage: opts.stageId, prompt });
       const success = (value: unknown, writes: string[] = []) => ({ output: JSON.stringify(value), exitCode: 0, duration_ms: 1, writes, writeAttribution: 'structured' as const });
       if (opts.stageId === 'review') {
-        const criteria = JSON.parse(readFileSync(join(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
+        const criteria = JSON.parse(readFileSync(runRecordPath(opts.runDir, 'brief_criteria.json'), 'utf8')).criteria as Array<{ id: string }>;
         return success({ pass: true, reason: 'The scripted gate accepts despite validation failure',
           criteria: Object.fromEntries(criteria.map(({ id }) => [id, { status: 'pass', evidence: 'Scripted independent product review' }])),
           audit_findings: { version: 1, findings: [] }, ...(disposition === 'unknown' ? { validation_review: {
@@ -105,7 +106,7 @@ describe('one confirmed-regression veto', () => {
     expect(final.status).toBe('complete');
     const first = ledger.find(entry => entry.kind === 'validation') as ValidationFact;
     expect(first.executions.map(execution => execution.commands[0].exitCode)).toEqual([1, 1, 0]);
-    const rejected = JSON.parse(readFileSync(join(directory, 'gate_reevaluation/iteration_1/round_1/engine_verdict_review.json'), 'utf8'));
+    const rejected = JSON.parse(readFileSync(runRecordPath(directory, 'gate_reevaluation/iteration_1/round_1/engine_verdict_review.json'), 'utf8'));
     expect(rejected.engine_effective_pass).toBe(false);
     expect(rejected.findings.confirmed).toHaveLength(1);
     const original = rejected.findings.confirmed[0].record;

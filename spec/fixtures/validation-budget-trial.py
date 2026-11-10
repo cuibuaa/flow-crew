@@ -115,7 +115,8 @@ def main():
     runs = list((receipt_root / 'fc/runs').glob('*/run.json'))
     state = json.loads(runs[0].read_text()) if len(runs) == 1 else {}
     author = state.get('stages', {}).get('implement', {})
-    ledger = [json.loads(line) for line in (runs[0].parent / 'evidence-ledger.jsonl').read_text().splitlines()] if runs else []
+    records = runs[0].parent / 'engine' if state.get('storageLayout') == 2 else runs[0].parent if runs else None
+    ledger = [json.loads(line) for line in (records / 'evidence-ledger.jsonl').read_text().splitlines()] if records else []
     validation = [fact for fact in ledger if fact['kind'] == 'validation']
     facts = {'tree': args.tree, 'shape': args.shape, 'base': BASE, 'command': command, 'direct_harness_exit': completed.returncode,
         'elapsed_s': time.time() - started, 'harness_result': result, 'gate_invocations': gate,

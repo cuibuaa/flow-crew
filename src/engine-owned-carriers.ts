@@ -1,7 +1,4 @@
-import { createHash } from 'node:crypto';
-import { homedir } from 'node:os';
-import { atomicWrite, mkdirSync } from './engine-fs.js';
-import { lstatSync, readlinkSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, readlinkSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 
 
@@ -63,14 +60,11 @@ export function engineOwnedDatabasePaths(storeRoot: string): string[] {
  * rollback/super journals. A missing file does not make that name an output. */
 export function isEngineOwnedGlobalPath(path: string, storeRoot: string): boolean {
   const target = prospectivePhysicalPath(resolve(path));
-  const registry = prospectivePhysicalPath(storageRegistryDirectory());
-  const local = relative(registry, target);
-  return (local === '' || (!isAbsolute(local) && local !== '..' && !local.startsWith(`..${sep}`)))
-    || engineOwnedDatabasePaths(storeRoot).some((file) => target === file || target.startsWith(`${file}-`));
+  return engineOwnedDatabasePaths(storeRoot).some((file) => target === file || target.startsWith(`${file}-`));
 }
 
 export function containsEngineOwnedGlobalPath(path: string, storeRoot: string): boolean {
-  return isEngineOwnedGlobalPath(path, storeRoot) || [storageRegistryDirectory(), ...engineOwnedDatabasePaths(storeRoot)].some((file) => {
+  return isEngineOwnedGlobalPath(path, storeRoot) || engineOwnedDatabasePaths(storeRoot).some((file) => {
     const rel = relative(resolve(path), file);
     return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../'));
   });
@@ -108,46 +102,28 @@ export function isReservedRunPath(path: string): boolean {
   return local !== '/work' && !local.startsWith('/work/');
 }
 
-type StorageRoot = { path: string; dev: string; ino: string; kind: 'store' | 'work' };
-
-/** Independent of FC_HOME; tests explicitly supply a disposable registry. */
-export function storageRegistryDirectory(): string {
-  return process.env.FC_STORE_REGISTRY ?? join(homedir(), '.local', 'state', 'flowcrew', 'storage-roots');
-}
-
-function identity(path: string): Pick<StorageRoot, 'path' | 'dev' | 'ino'> | undefined {
-  path = realpathSync(path);
-  const stat = statSync(path, { bigint: true });
-  if (!stat.isDirectory()) return undefined;
-  return { path, dev: String(stat.dev), ino: String(stat.ino) };
-}
-
-/** One durable record per physical root: concurrent creators cannot lose entries.
- * Work roots use the same primitive so admission never reads candidate metadata. */
-export function registerStorageRoot(path: string, kind: StorageRoot['kind']): void {
-  const physical = identity(path);
-  if (!physical) throw new Error('Storage root must be a directory');
-  const record: StorageRoot = { ...physical, kind };
-  const directory = storageRegistryDirectory();
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const key = createHash('sha256').update(JSON.stringify(record)).digest('hex');
-  atomicWrite(join(directory, `${key}.json`), JSON.stringify(record) + '\n', { mode: 0o600, exclusive: true });
-}
-
-export function storageRoots(): StorageRoot[] {
-  const directory = storageRegistryDirectory();
-  let names: string[];
-  try { names = readdirSync(directory); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
-  const roots: StorageRoot[] = [];
-  for (const name of names.filter(name => name.endsWith('.json'))) {
-    const record = JSON.parse(readFileSync(join(directory, name), 'utf8')) as StorageRoot;
-    if (typeof record.path !== 'string' || typeof record.dev !== 'string' || typeof record.ino !== 'string'
-      || !['store', 'work'].includes(record.kind)) throw new Error('Invalid storage root identity');
-    try {
-      const current = identity(record.path);
-      if (current && current.path === record.path && current.dev === record.dev && current.ino === record.ino) roots.push(record);
-    } catch (error) { if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+/** Capture trusted configuration, never metadata from a proposed output. */
+export function physicalRoot(path: string): { path: string; dev?: bigint; ino?: bigint } {
+  path = prospectivePhysicalPath(resolve(path));
+  try {
+    const { dev, ino } = statSync(path, { bigint: true });
+    return { path, dev, ino };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return { path };
   }
-  return roots;
+}
+
+/** Real paths cover symlinks; identities also cover a renamed state directory. */
+export function withinPhysicalRoot(root: ReturnType<typeof physicalRoot>, target: string): boolean {
+  const local = relative(root.path, target);
+  if (local === '' || (!isAbsolute(local) && local !== '..' && !local.startsWith(`..${sep}`))) return true;
+  if (root.ino === undefined) return false;
+  for (let cursor = target; ; cursor = dirname(cursor)) {
+    try {
+      const entry = statSync(cursor, { bigint: true });
+      if (entry.dev === root.dev && entry.ino === root.ino) return true;
+    } catch (error) { if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+    if (dirname(cursor) === cursor) return false;
+  }
 }

@@ -14,7 +14,7 @@ import * as engineFs from '../src/engine-fs.js';
 import { engineDirectory, stageWorkPath, runRecordPath, pathInTree } from '../src/run-layout.js';
 import { buildStagePrompt } from '../src/handoff.js';
 import { runStage } from '../src/worker.js';
-import { fcGlobalDir, setFcGlobalDir, runsRoot, ensureGlobalRunsDir } from '../src/store.js';
+import { fcGlobalDir, setFcGlobalDir, runsRoot } from '../src/store.js';
 import { createRun } from './test-support/create-run.js';
 
 let root: string, project: string, run: string, runId: string, previous: string;
@@ -180,7 +180,7 @@ it('accepts a gate writing its own work verdict and publishes only its validated
 });
 
 it('gives stages a work location where probes and evidence do not void the result', async () => {
-  const workspace = buildStagePrompt({ projectDir: project, runId, runDir: run, stageId: 'work', dependsOn: [], promptTemplate: '{run_dir}' }, '').trim();
+  const workspace = buildStagePrompt({ projectDir: project, runId, runDir: run, stageId: 'work', dependsOn: [], promptTemplate: '{run_dir}' }, '').trim().split('\n\n')[0];
   const probe = runRecordPath(workspace, 'stage_evidence', 'probe', 'observed.txt');
   await withEngineIntegrity(input(), () => child(`const fs=require('node:fs'),p=${JSON.stringify(probe)};fs.mkdirSync(require('node:path').dirname(p),{recursive:true});fs.writeFileSync(p,'observed')`));
   expect(workspace).toBe(stageWorkPath(run));
@@ -340,17 +340,29 @@ it.each(['run', 'project'] as const)('refuses %s outputs aliasing an idle peer r
   }
 });
 
-it('keeps ordinary hardlinked work outputs admissible across runs', () => {
-  const other = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runDirPath;
-  const source = stageWorkPath(other, 'ordinary-source');
-  writeFileSync(source, 'stage-owned bytes');
-  const directory = stageWorkPath(run, 'results'); mkdirSync(directory);
-  fs.linkSync(source, join(directory, 'ordinary-result'));
-  const stage = { id: 'work', depends_on: [], artifact_contract: { ...contract, produces: [
-    { id: 'file', root: 'run' as const, path: 'work/results/ordinary-result', kind: 'file' as const },
-    { id: 'directory', root: 'run' as const, path: 'work/results', kind: 'directory' as const },
-  ] } };
-  expect(artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [stage] })).toEqual([]);
+it.each(['external', 'project'] as const)('refuses links into another run work tree in the %s state root', location => {
+  const store = fcGlobalDir();
+  try {
+    if (location === 'project') setFcGlobalDir(join(project, 'engine-state'));
+    const other = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runDirPath;
+    const source = stageWorkPath(other, 'ordinary-source');
+    writeFileSync(source, 'stage-owned bytes');
+    for (const outputRoot of ['run', 'project'] as const) for (const link of ['hardlink', 'symlink'] as const) {
+      const base = outputRoot === 'run' ? stageWorkPath(run) : project;
+      const directory = join(base, `${outputRoot}-${link}-results`); mkdirSync(directory);
+      const output = join(directory, 'ordinary-result');
+      if (link === 'hardlink') fs.linkSync(source, output);
+      else symlinkSync(source, output);
+      for (const kind of ['file', 'directory'] as const) {
+        const stage = { id: 'work', depends_on: [], artifact_contract: { ...contract, produces: [
+          { id: 'result', root: outputRoot, path: relative(outputRoot === 'run' ? run : project, kind === 'file' ? output : directory), kind },
+        ] } };
+        expect(artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [stage] }), `${outputRoot} ${link} ${kind}`)
+          .toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
+      }
+    }
+    expect(readFileSync(source, 'utf8')).toBe('stage-owned bytes');
+  } finally { setFcGlobalDir(store); }
 });
 
 it('keeps a project output writable when a legacy archive symlink refers to it', () => {
@@ -391,32 +403,23 @@ it.each(['run', 'project'] as const)('refuses %s hardlink outputs with an engine
   }
 });
 
-it('admits an ordinary output when a terminal peer disappears during its identity read', async () => {
+it('admits an ordinary output while its stage removes a terminal peer', async () => {
   const other = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runDirPath;
   const output = stageWorkPath(run, 'ordinary-result'); writeFileSync(output, 'ordinary output');
-  const native = fs.statSync;
   let removed = false, invoked = false;
-  fs.statSync = ((...args: Parameters<typeof fs.statSync>) => {
-    if (!removed && String(args[0]) === stageWorkPath(other)) {
-      removed = true;
-      rmSync(other, { recursive: true, force: true });
-    }
-    return Reflect.apply(native, fs, args);
-  }) as typeof fs.statSync;
-  syncBuiltinESMExports();
-  try {
-    const result = await runStage({ async run() {
-      invoked = true;
-      return { exitCode: 0, duration_ms: 1, output: '{}' };
-    } }, { stageId: 'work', projectDir: project, runDir: run, runId, role, dependsOn: [],
-      promptTemplate: 'Read the ordinary result.', timeout_ms: 10000, retries: 0, outputSchema: { type: 'object' },
-      artifactContract: { ...contract, produces: [{ id: 'result', root: 'run', path: 'work/ordinary-result', kind: 'file' }] } });
-    expect(result.exitCode, result.friendlyError).toBe(0);
-    expect(invoked).toBe(true);
-    expect(removed).toBe(true);
-    expect(readFileSync(output, 'utf8')).toBe('ordinary output');
-    expect(existsSync(run)).toBe(true);
-  } finally { fs.statSync = native; syncBuiltinESMExports(); }
+  const result = await runStage({ async run() {
+    invoked = true;
+    rmSync(other, { recursive: true, force: true });
+    removed = !existsSync(other);
+    return { exitCode: 0, duration_ms: 1, output: '{}' };
+  } }, { stageId: 'work', projectDir: project, runDir: run, runId, role, dependsOn: [],
+    promptTemplate: 'Read the ordinary result.', timeout_ms: 10000, retries: 0, outputSchema: { type: 'object' },
+    artifactContract: { ...contract, produces: [{ id: 'result', root: 'run', path: 'work/ordinary-result', kind: 'file' }] } });
+  expect(result.exitCode, result.friendlyError).toBe(0);
+  expect(invoked).toBe(true);
+  expect(removed).toBe(true);
+  expect(readFileSync(output, 'utf8')).toBe('ordinary output');
+  expect(existsSync(run)).toBe(true);
 });
 
 
@@ -439,7 +442,7 @@ it('does not count an engine record reached through a peer work symlink as a wri
   }] })).toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
 });
 
-it.each([1, 2] as const)('refuses foreign layout-%s engine grants inside the project through every output route', async layout => {
+it.each([1, 2] as const)('admits foreign layout-%s store content inside the project through every output route', async layout => {
   const peerProject = join(root, 'peer-project');
   mkdirSync(peerProject);
   // Creation occurs in a real second engine process with a different FC_HOME.
@@ -477,17 +480,17 @@ it.each([1, 2] as const)('refuses foreign layout-%s engine grants inside the pro
       path: relative(outputRoot === 'run' ? run : project, output), kind }] };
     expect(artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [
       { id: 'work', depends_on: [], artifact_contract: artifactContract },
-    ] }), route).toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
+    ] }), route).toEqual([]);
     let invoked = false;
     const result = await runStage({ async run() {
       invoked = true;
-      writeFileSync(carrier, 'counterfeit admitted plan');
+      if (route === 'future') writeFileSync(output, 'stage-owned future record');
       return { exitCode: 0, duration_ms: 1, output: '{}' };
     } }, { stageId: 'work', projectDir: project, runDir: run, runId, role, dependsOn: [],
       promptTemplate: 'Write the declared result.', timeout_ms: 10000, retries: 0,
       artifactContract, outputSchema: { type: 'object' } });
-    expect(result.exitCode, route).toBe(125);
-    expect(invoked, route).toBe(false);
+    expect(result.exitCode, route).toBe(0);
+    expect(invoked, route).toBe(true);
     expect(readFileSync(carrier, 'utf8'), route).toBe('trusted peer workflow');
   }
 });
@@ -557,29 +560,30 @@ it.each(['project', 'run'] as const)('lets successive stages use captured run me
   }
 });
 
-it('refuses a genuine alternate store namespace before a run record exists', () => {
+it('refuses this engine configured store namespace before a run record exists', () => {
   const store = fcGlobalDir();
   try {
     setFcGlobalDir(join(project, 'alternate-store'));
     createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']);
+    const artifactContract = { ...contract, produces: [{ id: 'result', root: 'project' as const,
+      path: 'alternate-store/runs/future-run/future-record', kind: 'file' as const }] };
+    expect(artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [
+      { id: 'work', depends_on: [], artifact_contract: artifactContract },
+    ] })).toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
   } finally { setFcGlobalDir(store); }
-  const artifactContract = { ...contract, produces: [{ id: 'result', root: 'project' as const,
-    path: 'alternate-store/runs/future-run/future-record', kind: 'file' as const }] };
-  expect(artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [
-    { id: 'work', depends_on: [], artifact_contract: artifactContract },
-  ] })).toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
 });
 
 
-it('refuses a foreign engine hardlink inside the project without discovering its records', () => {
-  const foreign = join(project, 'independent-store', 'runs');
+it('refuses a foreign engine hardlink outside project and own work without discovering its records', () => {
+  const foreign = join(root, 'independent-store', 'runs');
   execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
     "import { ensureGlobalRunsDir } from './src/store.ts'; ensureGlobalRunsDir();"],
   { cwd: process.cwd(), env: { ...process.env, HOME: root, FC_HOME: dirname(foreign) } });
   const carrier = join(foreign, 'record'); engineFs.writeFileSync(carrier, 'trusted foreign record');
   fs.linkSync(carrier, stageWorkPath(run, 'foreign-alias'));
+  fs.linkSync(carrier, join(project, 'foreign-alias'));
   for (const outputRoot of ['run', 'project'] as const) {
-    const output = outputRoot === 'run' ? 'work/foreign-alias' : 'independent-store/runs/record';
+    const output = outputRoot === 'run' ? 'work/foreign-alias' : 'foreign-alias';
     expect(artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [
       { id: 'work', depends_on: [], artifact_contract: { ...contract, produces: [
         { id: 'result', root: outputRoot, path: output, kind: 'file' },
@@ -612,7 +616,7 @@ it.each(['project', 'run'] as const)('refuses a stage file with an unaccounted f
 });
 
 
-it('refuses a separately created store nested inside the current stage work tree', () => {
+it('admits another engine store nested inside the current stage work tree', () => {
   const nested = stageWorkPath(run, 'nested-store');
   execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
     "import { ensureGlobalRunsDir } from './src/store.ts'; ensureGlobalRunsDir();"],
@@ -622,30 +626,10 @@ it('refuses a separately created store nested inside the current stage work tree
     id: 'work', depends_on: [], artifact_contract: { ...contract, produces: [{
       id: 'result', root: 'run', path: relative(run, carrier), kind: 'file',
     }] },
-  }] })).toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
+  }] })).toEqual([]);
 });
 
-it.each(['file', 'directory'] as const)('refuses a %s grant containing the private engine registry inside a project', kind => {
-  const previousRegistry = process.env.FC_STORE_REGISTRY;
-  const container = join(project, 'registry-container');
-  process.env.FC_STORE_REGISTRY = join(container, 'registry');
-  try {
-    ensureGlobalRunsDir();
-    const record = fs.readdirSync(process.env.FC_STORE_REGISTRY).find(name => name.endsWith('.json'))!;
-    const output = kind === 'directory' ? container : join(process.env.FC_STORE_REGISTRY, record);
-    expect(artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [{
-      id: 'work', depends_on: [], artifact_contract: { ...contract, produces: [{
-        id: 'result', root: 'project', path: relative(project, output), kind,
-      }] },
-    }] })).toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
-  } finally {
-    if (previousRegistry === undefined) delete process.env.FC_STORE_REGISTRY;
-    else process.env.FC_STORE_REGISTRY = previousRegistry;
-  }
-});
-
-
-it('admits independent engine store registration while a stage is running', async () => {
+it('admits independent engine store creation while a stage is running', async () => {
   const independent = join(root, 'concurrent-store');
   await expect(withEngineIntegrity(input(), async () => {
     execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
@@ -657,7 +641,7 @@ it('admits independent engine store registration while a stage is running', asyn
 });
 
 
-it('refuses foreign engine store namespaces outside runs without reading their contents', () => {
+it('admits foreign engine store namespaces outside runs without reading their contents', () => {
   const independent = join(project, 'alternate-store');
   execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
     "import { ensureGlobalRunsDir } from './src/store.ts'; ensureGlobalRunsDir();"],
@@ -669,7 +653,7 @@ it('refuses foreign engine store namespaces outside runs without reading their c
       id: 'work', depends_on: [], artifact_contract: { ...contract, produces: [{
         id: 'result', root: 'project', path: relative(project, output), kind: 'file',
       }] },
-    }] })).toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
+    }] })).toEqual([]);
   }
   expect(readFileSync(carrier, 'utf8')).toBe('engine-owned bytes');
 });

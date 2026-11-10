@@ -147,7 +147,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     const plan = readRunValidationBaseline(input.runDirPath);
     if (plan && plan.baseline.discovery.commands.length === 0) return { required: false, pass: true, disposition: 'no_baseline', writeAt };
     const facts = readEvidence(input.runDirPath);
-    let brief = ''; try { brief = readFileSync(join(input.runDirPath, 'task_brief.md'), 'utf8'); } catch { /* legacy terminal */ }
+    let brief = ''; try { brief = readFileSync(runRecordPath(input.runDirPath, 'task_brief.md'), 'utf8'); } catch { /* legacy terminal */ }
     const validation = validationForTree(facts, captureProjectTree(input.projectDir, brief).hash);
     // Gate and terminal decisions share receipt semantics, tree/attempt binding
     // and unknown handling. Producing identical bytes does not change the tree

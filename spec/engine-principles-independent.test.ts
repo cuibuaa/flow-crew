@@ -537,8 +537,9 @@ describe('independent restart crash-window falsifier', () => {
       import { syncBuiltinESMExports } from 'node:module'; import { join } from 'node:path';
       import { pathToFileURL } from 'node:url';
       const [dist, project, fc, runId, point, output] = process.argv.slice(1);
-      const directory = join(fc, 'runs', runId), lock = runRecordPath(directory, 'engine', '.run-state.lock');
+      const directory = join(fc, 'runs', runId);
       const runRecordPath = (root, ...parts) => parts[0] === 'run.json' || parts[0] === 'events.jsonl' ? join(root, ...parts) : join(root, 'engine', ...parts);
+      const lock = runRecordPath(directory, '.run-state.lock');
       const ack = output + '.ack', waiting = output + '.waiting';
       const canceller = ${JSON.stringify(`
         import fs from 'node:fs'; import { join } from 'node:path'; import { pathToFileURL } from 'node:url';

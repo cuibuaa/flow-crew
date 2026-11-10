@@ -7,8 +7,8 @@ import { ArtifactPathSchema, resolveArtifactLocation, artifactRootContains as co
 export { ArtifactPathSchema, resolveArtifactLocation } from './artifact-location.js';
 export type { ArtifactLocation } from './artifact-location.js';
 import type { StageStatus } from './store.js';
-import { fcGlobalDir, STAGE_STATUS } from './store.js';
-import { storageRoots, containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isReservedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
+import { configuredStateRoots, fcGlobalDir, STAGE_STATUS } from './store.js';
+import { physicalRoot, withinPhysicalRoot, containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isReservedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 const location = z.object({ root: z.enum(['project', 'run']), path: ArtifactPathSchema });
@@ -114,17 +114,18 @@ export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces
   if (artifact.root === 'run' && isReservedRunPath(artifact.path)) return true;
   if (!runDirectory || (artifact.root === 'project' && !projectDirectory)) return false;
   const runRoot = realpathSync(runDirectory);
-  const roots = storageRoots();
-  const stores = roots.filter(root => root.kind === 'store').map(root => root.path);
-  const work = roots.filter(root => root.kind === 'work').map(root => root.path);
+  const workRoot = join(runRoot, 'work');
+  const stateRoots = [...configuredStateRoots(), physicalRoot(runRoot)];
   const projectRoot = projectDirectory && realpathSync(projectDirectory);
-  const writableRoots = [...(projectRoot ? [projectRoot] : []), ...work];
+  const writableRoots = [...(projectRoot ? [projectRoot] : []), workRoot];
   const ownedByRun = (target: string): boolean =>
-    stores.some(store => contained(store, target) && !work.some(root => contained(store, root) && contained(root, target)))
+    stateRoots.some(root => withinPhysicalRoot(root, target)
+      && !(contained(root.path, runRoot) && contained(workRoot, target)))
     || !writableRoots.some(root => contained(root, target));
   const root = artifact.root === 'run' ? runRoot : projectRoot!;
   const output = resolve(root, artifact.path);
-  if (artifact.kind === 'directory' && containsEngineOwnedGlobalPath(prospectivePhysicalPath(output), fcGlobalDir())) return true;
+  if (artifact.kind === 'directory' && (stateRoots.some(root => contained(prospectivePhysicalPath(output), root.path))
+    || containsEngineOwnedGlobalPath(prospectivePhysicalPath(output), fcGlobalDir()))) return true;
   const paths = [output], visitedDirectories = new Set<string>(), outputInodes = new Set<string>();
   const linkedOutputs = new Set<string>();
   while (paths.length) {
@@ -150,8 +151,8 @@ export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces
       if (outputInodes.has(`${carrier.dev}:${carrier.ino}`)) return true;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
-  // Count every physical directory entry across project and engine-created work
-  // roots once. Unaccounted links may belong to any foreign location.
+  // Count physical entries only across the project and this run's own work.
+  // Unaccounted links may belong to any foreign location.
   if (!linkedOutputs.size) return false;
   const writableLinks = new Map<string, number>();
   const folders = [...writableRoots];

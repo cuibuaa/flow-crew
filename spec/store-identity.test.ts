@@ -1,109 +1,131 @@
-import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { registerStorageRoot, storageRegistryDirectory, storageRoots } from '../src/engine-owned-carriers.js';
+import { artifactDeclarationFindings } from '../src/artifact-declarations.js';
+import { fcGlobalDir, setFcGlobalDir, ensureGlobalRunsDir } from '../src/store.js';
+import { stageWorkPath } from '../src/run-layout.js';
+import { createRun } from './test-support/create-run.js';
 
-let root: string, previousRegistry: string | undefined;
-const moduleUrl = new URL('../src/engine-owned-carriers.ts', import.meta.url).href;
-const childArgs = (code: string) => ['--import', 'tsx', '--input-type=module', '-e', code];
-const directory = (name: string) => { const path = join(root, name); mkdirSync(path); return path; };
+let root: string, project: string, run: string, previous: string;
+const contract = { version: 1 as const, produces: [], reads: [], groups: [] };
+function findings(path: string, kind: 'file' | 'directory' = 'file') {
+  return artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [{
+    id: 'work', depends_on: [], artifact_contract: { ...contract, produces: [{
+      id: 'result', root: 'project', path: relative(project, path), kind,
+    }] },
+  }] });
+}
+const refused = (path: string, kind: 'file' | 'directory' = 'file') =>
+  expect(findings(path, kind)).toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'fc-store-identity-'));
-  previousRegistry = process.env.FC_STORE_REGISTRY;
-  process.env.FC_STORE_REGISTRY = join(root, 'registry');
+  project = join(root, 'project'); mkdirSync(project);
+  previous = fcGlobalDir(); setFcGlobalDir(join(root, 'initial-store'));
+  run = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']).runDirPath;
 });
-afterEach(() => {
-  if (previousRegistry === undefined) delete process.env.FC_STORE_REGISTRY;
-  else process.env.FC_STORE_REGISTRY = previousRegistry;
-  rmSync(root, { recursive: true, force: true });
-});
+afterEach(() => { setFcGlobalDir(previous); rmSync(root, { recursive: true, force: true }); });
 
-it('discovers a separately registered store in a fresh process with a different FC_HOME', () => {
-  const store = directory('store');
-  execFileSync(process.execPath, childArgs(`
-    import { registerStorageRoot } from ${JSON.stringify(moduleUrl)};
-    registerStorageRoot(${JSON.stringify(store)}, 'store');
-  `), { cwd: process.cwd(), env: { ...process.env, HOME: root, FC_HOME: join(root, 'creator-home') }, timeout: 15000 });
-  const found = JSON.parse(execFileSync(process.execPath, childArgs(`
-    import { storageRoots } from ${JSON.stringify(moduleUrl)};
-    process.stdout.write(JSON.stringify(storageRoots()));
-  `), { cwd: process.cwd(), env: { ...process.env, HOME: root, FC_HOME: join(root, 'reader-home') }, encoding: 'utf8', timeout: 15000 }));
-  const identity = statSync(store, { bigint: true });
-  expect(found).toEqual([{ path: store, kind: 'store', dev: String(identity.dev), ino: String(identity.ino) }]);
-});
+it.each(['direct', 'symlink', 'hardlink', 'directory', 'ancestor', 'future'] as const)(
+  'refuses this engine state inside the project via %s', route => {
+    const container = join(project, 'container'), store = join(container, 'state');
+    setFcGlobalDir(store); ensureGlobalRunsDir();
+    const carrier = join(store, 'arbitrary-record'); writeFileSync(carrier, 'engine state');
+    let output = carrier;
+    if (route === 'symlink') { output = join(project, 'alias'); symlinkSync(carrier, output); }
+    if (route === 'hardlink') { output = join(project, 'alias'); linkSync(carrier, output); }
+    if (route === 'directory') output = store;
+    if (route === 'ancestor') output = container;
+    if (route === 'future') output = join(store, 'uncreated', 'record');
+    refused(output, route === 'directory' || route === 'ancestor' ? 'directory' : 'file');
+    expect(readFileSync(carrier, 'utf8')).toBe('engine state');
+  });
 
-it('canonicalizes a symlink spelling without duplicating its store identity', () => {
-  const store = directory('store'), alias = join(root, 'alias');
-  symlinkSync(store, alias, 'dir');
-  registerStorageRoot(store, 'store');
-  registerStorageRoot(alias, 'store');
-  expect(storageRoots().map(entry => entry.path)).toEqual([store]);
-});
-
-it('does not transfer ownership to a replacement at the registered pathname', () => {
-  const store = directory('store');
-  registerStorageRoot(store, 'store');
-  renameSync(store, join(root, 'retained-old-inode'));
-  mkdirSync(store);
-  expect(storageRoots()).toEqual([]);
-  registerStorageRoot(store, 'store');
-  expect(storageRoots().map(entry => entry.path)).toEqual([store]);
+it('protects configured runs storage reached through a symlink outside FC_HOME', () => {
+  const store = join(root, 'state'), runs = join(project, 'machine-runs');
+  mkdirSync(store); mkdirSync(runs); symlinkSync(runs, join(store, 'runs'), 'dir');
+  setFcGlobalDir(store); ensureGlobalRunsDir();
+  const record = join(runs, 'arbitrary-record'); writeFileSync(record, 'engine state');
+  refused(record);
+  refused(join(runs, 'uncreated'));
+  refused(runs, 'directory');
 });
 
-it('ignores a removed registered root without making neighboring data engine-owned', () => {
-  const store = directory('store'), ordinary = directory('ordinary');
-  registerStorageRoot(store, 'store');
-  rmSync(store, { recursive: true });
-  writeFileSync(join(ordinary, 'run.json'), JSON.stringify({ storageLayout: 2, runId: 'ordinary' }));
-  expect(storageRoots()).toEqual([]);
+it('keeps the configured root physical identity after its symlink spelling changes', () => {
+  const state = join(project, 'state'), ordinary = join(project, 'ordinary'), alias = join(root, 'config-alias');
+  mkdirSync(state); mkdirSync(ordinary); symlinkSync(state, alias, 'dir');
+  setFcGlobalDir(alias); ensureGlobalRunsDir();
+  const record = join(state, 'record'); writeFileSync(record, 'engine state');
+  refused(record);
+  rmSync(alias); symlinkSync(ordinary, alias, 'dir');
+  refused(record);
+  const output = join(ordinary, 'result'); writeFileSync(output, 'ordinary data');
+  expect(findings(output)).toEqual([]);
 });
 
-it('keeps all concurrently registered roots and exposes only complete records', async () => {
-  const stores = Array.from({ length: 4 }, (_, index) => directory(`store-${index}`));
-  const readErrors: unknown[] = [];
-  const reader = setInterval(() => { try { storageRoots(); } catch (error) { readErrors.push(error); } }, 5);
-  try {
-    await Promise.all(stores.map(store => new Promise<void>((resolve, reject) => {
-      const child = spawn(process.execPath, childArgs(`
-        import { registerStorageRoot } from ${JSON.stringify(moduleUrl)};
-        registerStorageRoot(${JSON.stringify(store)}, 'store');
-      `), { cwd: process.cwd(), env: { ...process.env, HOME: root, FC_HOME: join(store, 'home') }, stdio: ['ignore', 'ignore', 'pipe'], timeout: 15000 });
-      let stderr = '';
-      child.stderr.on('data', chunk => { stderr += chunk; });
-      child.once('error', reject);
-      child.once('close', (code, signal) => code === 0 ? resolve() : reject(new Error(`child exit ${code}/${signal}: ${stderr}`)));
-    })));
-  } finally { clearInterval(reader); }
-  expect(readErrors).toEqual([]);
-  expect(storageRoots().map(entry => entry.path).sort()).toEqual([...stores].sort());
+it('protects a renamed state directory by device and inode without reading records', () => {
+  const state = join(project, 'state'), moved = join(project, 'retained-state');
+  setFcGlobalDir(state); ensureGlobalRunsDir();
+  const record = join(state, 'record'); writeFileSync(record, 'engine state');
+  renameSync(state, moved);
+  refused(join(moved, 'record'));
+  refused(join(moved, 'uncreated', 'record'));
+  expect(readFileSync(join(moved, 'record'), 'utf8')).toBe('engine state');
 });
 
-it('does not grant ownership from a copied registry record inside a candidate directory', () => {
-  const store = directory('store'), candidate = directory('candidate');
-  registerStorageRoot(store, 'store');
-  const [record] = readdirSync(storageRegistryDirectory());
-  writeFileSync(join(candidate, record), readFileSync(join(storageRegistryDirectory(), record)));
-  writeFileSync(join(candidate, 'run.json'), JSON.stringify({ storageLayout: 2, runId: 'candidate' }));
-  expect(storageRoots().map(entry => entry.path)).toEqual([store]);
+it('treats a former configured store as ordinary project content after reconfiguration', () => {
+  const state = join(project, 'previous-state');
+  setFcGlobalDir(state); ensureGlobalRunsDir();
+  const record = join(state, 'record'); writeFileSync(record, 'former engine data');
+  refused(record);
+  setFcGlobalDir(join(root, 'current-state')); ensureGlobalRunsDir();
+  expect(findings(record)).toEqual([]);
 });
 
-it('fails closed if the engine registry contains a malformed record', () => {
-  const store = directory('store');
-  registerStorageRoot(store, 'store');
-  const [record] = readdirSync(storageRegistryDirectory());
-  writeFileSync(join(storageRegistryDirectory(), record), '{');
-  expect(() => storageRoots()).toThrow();
+it('creates only its configured runs directory without persisting an ownership inventory', () => {
+  const home = join(root, 'creator-home'), state = join(root, 'creator-state'); mkdirSync(home);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('FC_')));
+  execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+    "import { ensureGlobalRunsDir } from './src/store.ts'; ensureGlobalRunsDir();"],
+  { cwd: process.cwd(), env: { ...env, HOME: home, FC_HOME: state }, timeout: 15000 });
+  expect(readdirSync(home)).toEqual([]);
+  expect(readdirSync(state)).toEqual(['runs']);
 });
 
+it('counts overlapping project and own-work roots only once', () => {
+  project = stageWorkPath(run);
+  const source = join(project, 'result'); writeFileSync(source, 'stage data');
+  linkSync(source, join(root, 'outside-link'));
+  refused(source);
+});
 
-it.each(['root', 'parent'] as const)('ignores an old store identity when its %s is replaced by a regular file', replaced => {
-  const parent = directory('parent'), store = join(parent, 'store'); mkdirSync(store);
-  registerStorageRoot(store, 'store');
-  const path = replaced === 'root' ? store : parent;
-  renameSync(path, join(root, 'retained-old-directory'));
-  writeFileSync(path, 'ordinary replacement file');
-  expect(storageRoots()).toEqual([]);
+it('refuses this engine state configured inside its own work tree', () => {
+  const state = stageWorkPath(run);
+  setFcGlobalDir(state); ensureGlobalRunsDir();
+  const record = join(state, 'arbitrary-state'); writeFileSync(record, 'engine state');
+  for (const route of ['direct', 'symlink', 'hardlink', 'directory'] as const) {
+    const output = route === 'directory' ? state : route === 'direct' ? record : join(project, route);
+    if (route === 'symlink') symlinkSync(record, output);
+    if (route === 'hardlink') linkSync(record, output);
+    const outputRoot = route === 'direct' || route === 'directory' ? 'run' as const : 'project' as const;
+    const artifactContract = { ...contract, produces: [{ id: 'result', root: outputRoot,
+      path: relative(outputRoot === 'run' ? run : project, output), kind: route === 'directory' ? 'directory' as const : 'file' as const }] };
+    expect(artifactDeclarationFindings({ projectDir: project, runDir: run, stages: [{ id: 'work', depends_on: [], artifact_contract: artifactContract }] }))
+      .toContainEqual(expect.objectContaining({ message: expect.stringContaining('ARTIFACT_FRAMEWORK_PATH') }));
+  }
+});
+
+it('pins the configured runs route when its symlink is retargeted', () => {
+  const state = join(root, 'state'), first = join(project, 'first-runs'), second = join(project, 'second-runs');
+  mkdirSync(state); mkdirSync(first); mkdirSync(second);
+  const alias = join(state, 'runs'); symlinkSync(first, alias, 'dir');
+  setFcGlobalDir(state);
+  rmSync(alias); symlinkSync(second, alias, 'dir');
+  const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']);
+  expect(dirname(created.runDirPath)).toBe(first);
+  refused(join(first, 'future-record'));
+  const output = join(second, 'ordinary-result'); writeFileSync(output, 'ordinary data');
+  expect(findings(output)).toEqual([]);
 });

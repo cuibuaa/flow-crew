@@ -1,5 +1,5 @@
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
-import { registerStorageRoot } from './engine-owned-carriers.js';
+import { physicalRoot } from './engine-owned-carriers.js';
 import { runRecordPath, engineDirectory, stageWorkPath, requestPath, controlPath, hasSeparatedRunLayout } from './run-layout.js';
 import { processLiveness } from './process-liveness.js';
 import { resolveCampaignStorageKey } from './campaigns.js';
@@ -644,18 +644,25 @@ export const FC_DIR = '.fc';
 // state and emitted real telemetry; isolation must be structural, not
 // disciplinary). The env var works when set before module load; the setter
 // covers callers inside an already-loaded process (the CLI's rehearse path).
-let _fcGlobalDir = process.env.FC_HOME ? process.env.FC_HOME : join(homedir(), FC_DIR);
+let _fcGlobalDir = physicalRoot(process.env.FC_HOME || join(homedir(), FC_DIR)).path;
+let ownStateRoots = [_fcGlobalDir, join(_fcGlobalDir, 'runs')].map(physicalRoot);
+
+/** Only this process's configured write roots; reset only by reconfiguration. */
+export function configuredStateRoots(): ReturnType<typeof physicalRoot>[] {
+  return ownStateRoots;
+}
 
 export function fcGlobalDir(): string {
   return _fcGlobalDir;
 }
 
 export function setFcGlobalDir(path: string): void {
-  _fcGlobalDir = path;
+  _fcGlobalDir = physicalRoot(path).path;
+  ownStateRoots = [_fcGlobalDir, join(_fcGlobalDir, 'runs')].map(physicalRoot);
 }
 
 export function runsRoot(_projectDir?: string): string {
-  return join(_fcGlobalDir, 'runs');
+  return ownStateRoots[1].path;
 }
 
 export function campaignsRoot(): string {
@@ -938,7 +945,7 @@ export function extractTaskTitle(desc?: string): string {
 
 export function ensureGlobalRunsDir(): void {
   mkdirSync(runsRoot(), { recursive: true });
-  registerStorageRoot(fcGlobalDir(), 'store');
+  ownStateRoots = ownStateRoots.map(root => root.ino === undefined ? physicalRoot(root.path) : root);
 }
 
 export function runDir(projectDir: string, runId: string): string {
@@ -1080,7 +1087,6 @@ export function initializeReservedRun(
   mkdirSync(engineDirectory(dir), { recursive: true });
   atomicWrite(join(engineDirectory(dir), RUN_RESERVATION_FILE), JSON.stringify({ ...reservation, storageLayout: 2 }) + '\n');
   mkdirSync(stageWorkPath(dir), { recursive: true });
-  registerStorageRoot(stageWorkPath(dir), 'work');
   mkdirSync(requestPath(dir), { recursive: true });
   mkdirSync(controlPath(dir), { recursive: true });
   const stages: Record<string, StageStatus> = {};
