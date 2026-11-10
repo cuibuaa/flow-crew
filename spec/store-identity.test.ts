@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { artifactDeclarationFindings } from '../src/artifact-declarations.js';
-import { fcGlobalDir, setFcGlobalDir, ensureGlobalRunsDir } from '../src/store.js';
+import { fcGlobalDir, setFcGlobalDir, ensureGlobalRunsDir, runsRoot, campaignsRoot } from '../src/store.js';
 import { stageWorkPath } from '../src/run-layout.js';
 import { createRun } from './test-support/create-run.js';
 
@@ -57,6 +57,9 @@ it('keeps the configured root physical identity after its symlink spelling chang
   const state = join(project, 'state'), ordinary = join(project, 'ordinary'), alias = join(root, 'config-alias');
   mkdirSync(state); mkdirSync(ordinary); symlinkSync(state, alias, 'dir');
   setFcGlobalDir(alias); ensureGlobalRunsDir();
+  expect(fcGlobalDir()).toBe(alias);
+  expect(runsRoot()).toBe(join(alias, 'runs'));
+  expect(campaignsRoot()).toBe(join(alias, 'campaigns'));
   const record = join(state, 'record'); writeFileSync(record, 'engine state');
   refused(record);
   rmSync(alias); symlinkSync(ordinary, alias, 'dir');
@@ -117,14 +120,16 @@ it('refuses this engine state configured inside its own work tree', () => {
   }
 });
 
-it('pins the configured runs route when its symlink is retargeted', () => {
+it('uses the configured runs spelling after its symlink is retargeted', () => {
   const state = join(root, 'state'), first = join(project, 'first-runs'), second = join(project, 'second-runs');
   mkdirSync(state); mkdirSync(first); mkdirSync(second);
   const alias = join(state, 'runs'); symlinkSync(first, alias, 'dir');
   setFcGlobalDir(state);
   rmSync(alias); symlinkSync(second, alias, 'dir');
   const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']);
-  expect(dirname(created.runDirPath)).toBe(first);
+  expect(dirname(created.runDirPath)).toBe(alias);
+  expect(existsSync(join(second, created.runId, 'run.json'))).toBe(true);
+  expect(existsSync(join(first, created.runId))).toBe(false);
   refused(join(first, 'future-record'));
   const output = join(second, 'ordinary-result'); writeFileSync(output, 'ordinary data');
   expect(findings(output)).toEqual([]);

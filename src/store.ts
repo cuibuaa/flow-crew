@@ -644,10 +644,10 @@ export const FC_DIR = '.fc';
 // state and emitted real telemetry; isolation must be structural, not
 // disciplinary). The env var works when set before module load; the setter
 // covers callers inside an already-loaded process (the CLI's rehearse path).
-let _fcGlobalDir = physicalRoot(process.env.FC_HOME || join(homedir(), FC_DIR)).path;
+let _fcGlobalDir = process.env.FC_HOME ? process.env.FC_HOME : join(homedir(), FC_DIR);
 let ownStateRoots = [_fcGlobalDir, join(_fcGlobalDir, 'runs')].map(physicalRoot);
 
-/** Only this process's configured write roots; reset only by reconfiguration. */
+/** Physical identities for ownership comparisons only; never used to route writes. */
 export function configuredStateRoots(): ReturnType<typeof physicalRoot>[] {
   return ownStateRoots;
 }
@@ -657,12 +657,12 @@ export function fcGlobalDir(): string {
 }
 
 export function setFcGlobalDir(path: string): void {
-  _fcGlobalDir = physicalRoot(path).path;
+  _fcGlobalDir = path;
   ownStateRoots = [_fcGlobalDir, join(_fcGlobalDir, 'runs')].map(physicalRoot);
 }
 
 export function runsRoot(_projectDir?: string): string {
-  return ownStateRoots[1].path;
+  return join(_fcGlobalDir, 'runs');
 }
 
 export function campaignsRoot(): string {
