@@ -1,4 +1,5 @@
 import { runRecordPath } from '../../run-layout.js';
+import { captureMeasuredCandidate, measureResearchCandidate, researchMeasurementState, restoreResearchBest } from '../../research-measurement.js';
 import { concludeRun } from './run-completion.js';
 /** Research artifact identity, round ingestion/advancement, confirmation and best-effort terminal hooks; file inventory, rollback settlement and campaign writer are supplied. */
 import { type ResearchRound, evaluateResearch, evaluateResearchCeilingFloor } from '../../research-policy.js';
@@ -6,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { type ResearchGateCandidate, settleResearchGateCandidate } from '../../research-candidate.js';
 import { updateFileHashSync } from '../../rollback-content-store.js';
 import { join, dirname } from 'node:path';
-import { copyFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
+import { atomicWrite, copyFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { researchEvidenceFiles, researchInputIsFresh } from '../../research-candidate.js';
 import { type Adapter } from '../../adapters/base.js';
@@ -161,7 +162,29 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     const noCandidateAbs = `${resultAbs}.no_candidate.json`;
     
     const startedMs = state.startedAt ? new Date(state.startedAt).getTime() : Date.now();
-    const candidate = ctx.candidate;
+    let candidate = ctx.candidate;
+    let engineMeasurement: Awaited<ReturnType<typeof measureResearchCandidate>> | undefined;
+    if (rc.measurement) {
+      // A corrupt acknowledged journal is not an empty campaign.
+      const journalFile = runRecordPath(ctx.runDirPath, 'research_journal.json');
+      const previousRounds = existsSync(journalFile) ? JSON.parse(readFileSync(journalFile, 'utf8')).rounds : [];
+      if (!Array.isArray(previousRounds)) throw new Error('research journal is invalid');
+      let snapshot = candidate?.measurement ?? captureMeasuredCandidate(ctx.projectDir, ctx.runDirPath, `round-${ctx.iteration}`);
+      engineMeasurement = await measureResearchCandidate(ctx.runDirPath, snapshot,
+        rc.stop?.maxWallHours === undefined ? Infinity : Math.max(0, rc.stop.maxWallHours * 3600000 - (Date.now() - startedMs)));
+      snapshot = engineMeasurement.candidate;
+      const instrument = researchMeasurementState(ctx.runDirPath);
+      engineMeasurement.heldOutExhausted ||= !!rc.measurement.held_out && instrument.heldOutUses.length >= rc.measurement.held_out.allowance;
+      const primary = rc.measurement.primary[0];
+      rc.baseline = instrument.baseline.items?.reduce((n, i) => n + i.metrics[primary], 0) ?? rc.baseline;
+      rc.higherIsBetter = rc.measurement.metrics[primary].direction === 'max';
+      const result = engineMeasurement.observation.items?.reduce((n, i) => n + i.metrics[primary], 0);
+      // Unmeasured rounds still consume budget; comparison.keep is always false.
+      candidate = { ...candidate, version: 1, kind: 'measured', capturedAt: candidate?.capturedAt ?? new Date().toISOString(), source: 'engine',
+        label: snapshot.label, sha256: snapshot.sha256, evidenceJson: JSON.stringify({ label: snapshot.label, result, measurement: engineMeasurement.observation, comparison: engineMeasurement.comparison }), measurement: snapshot };
+      restoreResearchBest(ctx.projectDir, ctx.runDirPath);
+      for (const path of rc.measurement.candidate) settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, path);
+    }
     const settleCandidate = (disposition: 'ingested' | 'rejected', reason: string): void => {
       if (candidate) settleResearchGateCandidate(ctx.projectDir, ctx.runDirPath, candidate, disposition, reason);
     };
@@ -270,12 +293,12 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
           [sourceAbs],
         );
       }
-    } else if (typeof round.result !== 'number' || !Number.isFinite(round.result)) {
+    } else if (!engineMeasurement && (typeof round.result !== 'number' || !Number.isFinite(round.result))) {
       return rejectRoundInput('invalid_measured_result', 'A measured research result requires a finite numeric result.', [sourceAbs]);
     }
     const measuredResult = noCandidate ? undefined : round.result;
     const sourceEvidenceDigest = candidate?.sha256 ?? digestSources([sourceAbs]);
-    const roundEvidenceLink = noCandidate
+    const roundEvidenceLink = (noCandidate || engineMeasurement)
       ? undefined
       : researchRoundEvidenceLink(ctx.projectDir, researchPaths.reportDir, round, state);
 
@@ -293,7 +316,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     // round identities. Re-submitting an already-journaled identity is a stable
     // blockage, not another budget-consuming round.
     const duplicate = journal.rounds.some((r) => r.label === label);
-    if (duplicate) {
+    if (duplicate && !engineMeasurement) {
       if (candidate) {
         settleCandidate('rejected', 'Captured outcome uses an already-journaled immutable identity');
         return null;
@@ -456,16 +479,19 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       return rejectGate('confirm_source_changed', 'The reviewed result was replaced before confirmation; confirmation requires the exact captured result.');
     }
 
-    journal.rounds.push({
+    if (!duplicate) journal.rounds.push({
       label,
-      outcome: noCandidate ? 'no_candidate' : 'measured',
+      outcome: noCandidate ? 'no_candidate' : engineMeasurement?.observation.status === 'unmeasured' ? 'unmeasured' : 'measured',
       ...(noCandidate
         ? { reason: round.reason!.trim(), ...(round.evidence === undefined ? {} : { evidence: round.evidence }) }
         : { result: measuredResult!, ...(roundEvidenceLink === undefined ? {} : { evidence: roundEvidenceLink }) }),
-      resultStd: (round as { result_std?: number }).result_std,
+      ...(engineMeasurement ? { comparison: engineMeasurement.comparison, measurement: engineMeasurement.observation, reason: engineMeasurement.comparison.reason } : {}),
+      resultStd: engineMeasurement ? undefined : (round as { result_std?: number }).result_std,
       wallHoursCumulative: (Date.now() - startedMs) / 3600000,
     });
-    writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8');
+    if (!duplicate) atomicWrite(journalPath, JSON.stringify(journal, null, 2) + '\n');
+    // A journaled measurement can be replayed after interruption to finish its
+    // decision/terminal projection without launching commands or spending uses.
     settleCandidate('ingested', 'Reviewed outcome appended to the research journal');
     
     try {
@@ -476,6 +502,9 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
     } catch { /* non-critical */ }
 
     const evalResult = evaluateResearch(rc, journal.rounds);
+    if (engineMeasurement?.heldOutExhausted && evalResult.decision !== 'ship') {
+      evalResult.decision = 'stop_ceiling'; evalResult.reason = 'held_out_allowance_exhausted';
+    }
     try { writeFileSync(runRecordPath(ctx.runDirPath, 'research_decision.json'), JSON.stringify(evalResult, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
 
     // Keep an immutable consumed copy immediately. A shipping round's mutable
@@ -492,9 +521,10 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, sourceRel);
     } catch { /* non-critical */ }
 
-    log.info({ runId: ctx.runId, iteration: ctx.iteration, label, result: measuredResult, outcome: noCandidate ? 'no_candidate' : 'measured', runningBest: evalResult.runningBest, decision: evalResult.decision }, 'Research round evaluated');
+    log.info({ runId: ctx.runId, iteration: ctx.iteration, label, result: measuredResult, outcome: noCandidate ? 'no_candidate' : engineMeasurement?.observation.status ?? 'measured', runningBest: evalResult.runningBest, decision: evalResult.decision }, 'Research round evaluated');
     const roundSummary = noCandidate
       ? `Research round '${label}' reported no acting candidate (${round.reason})`
+      : engineMeasurement?.observation.status === 'unmeasured' ? `Research round '${label}' unmeasured (${engineMeasurement.observation.detail})`
       : `Research round '${label}' = ${measuredResult}`;
 
     if (evalResult.decision === 'continue') {
@@ -507,7 +537,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         RUN_WIDE_GUIDANCE_TARGET,
         marker,
         `${roundSummary} (running-best ${evalResult.runningBest}, kept: ${evalResult.keptLabels.join(', ') || 'none'}). Decision: CONTINUE.\n`
-          + `▶ START ROUND ${nextRound} — use the evidence to choose the next mechanism serving the brief. Build on the kept stack and write its measured result to ${resultRel}.`,
+          + `▶ START ROUND ${nextRound} — use the evidence to choose the next mechanism serving the brief. Build on the kept stack and ${rc.measurement ? 'submit the declared candidate inputs for engine measurement' : `write its measured result to ${resultRel}`}.`,
       );
       
       try {
@@ -541,7 +571,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         
         const lastRound = journal.rounds[journal.rounds.length - 1];
         if (lastRound) lastRound.confirmFailed = true;
-        try { writeFileSync(journalPath, JSON.stringify(journal, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
+        try { atomicWrite(journalPath, JSON.stringify(journal, null, 2) + '\n'); } catch { /* non-critical */ }
         try {
           writeFileSync(join(ctx.projectDir, researchPaths.manifestFile), JSON.stringify({ runId: ctx.runId, rounds: journal.rounds }, null, 2) + '\n', 'utf-8');
           settleFrameworkRollbackPath(ctx.projectDir, ctx.runDirPath, researchPaths.manifestFile);
@@ -579,7 +609,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
         const stop = rc.stop ?? {};
         const budgetRemains = (stop.maxRounds === undefined || journal.rounds.length < stop.maxRounds)
           && (stop.maxWallHours === undefined || (elapsedMinutes / 60) < stop.maxWallHours);
-        if (budgetRemains) {
+        if (budgetRemains && !engineMeasurement) {
           const marker = `[research-floor:round-${journal.rounds.length}]`;
           appendSchedulerGuidanceOnce(
             ctx.runDirPath,
@@ -601,7 +631,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
           log.warn({ runId: ctx.runId, reason: floorCheck.reason }, 'Ceiling floor unmet — NOT terminating; steering next research round');
           return null;
         }
-        finalEval.reason = `${finalEval.reason} | WARNING: ceiling committed with floor unmet (${floorCheck.reason}) — hard round/wall budget exhausted`;
+        finalEval.reason = `${finalEval.reason} | WARNING: ceiling committed with floor unmet (${floorCheck.reason}) — ${engineMeasurement ? 'declared research stop budget' : 'hard round/wall budget'} exhausted`;
       }
     }
 
@@ -670,6 +700,7 @@ export function createResearchAdvancer(services: ResearchAdvanceServices) {
       + `Reason: ${finalEval.reason}\n\n`
       + `## Rounds\n` + journal.rounds.map((r) => r.outcome === 'no_candidate'
         ? `- ${r.label}: no candidate (${r.reason ?? 'no reason recorded'})`
+        : r.outcome === 'unmeasured' ? `- ${r.label}: unmeasured (${r.measurement?.detail ?? r.reason})`
         : `- ${r.label}: ${r.result}${r.confirmFailed ? ' (confirm gate FAILED — unconfirmed)' : ''}`).join('\n') + '\n';
     let wroteDeclaredCandidate = false;
     try {

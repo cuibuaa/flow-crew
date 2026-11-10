@@ -27,3 +27,9 @@ export function resolveResearchPaths(config?: ResearchPathConfig): ResolvedResea
     manifestFile: posix.join(reportDir, 'run_manifest.json'),
   };
 }
+
+/** Candidate ownership identifies the reviewing gate; legacy slots remain compatible. */
+export function researchOutcomePaths(config: ResearchPathConfig & { measurement?: { candidate: string[] } }): string[] {
+  const paths = resolveResearchPaths(config);
+  return config.measurement?.candidate ?? [paths.resultFile, `${paths.resultFile}.no_candidate.json`];
+}

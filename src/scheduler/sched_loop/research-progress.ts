@@ -66,7 +66,13 @@ export async function advanceSettledResearch(
     }
     if (state.research && eligible) {
       const recoveredSettlement = recoverVerifiedResearchSettlement(sorted, state, projectDir, runId, runDirPath);
-      const candidates = pendingResearchGateCandidates(runDirPath);
+      const pending = pendingResearchGateCandidates(runDirPath);
+      // A round may contain several ordered authors/reviews. Measure its final
+      // reviewed snapshot; intermediate captures are evidence, not extra rounds.
+      const candidates = state.research.measurement ? pending.slice(-1) : pending;
+      if (state.research.measurement) for (const candidate of pending.slice(0, -1)) {
+        settleResearchGateCandidate(projectDir, runDirPath, candidate, 'rejected', 'Superseded by the final reviewed candidate of this round');
+      }
       let researchResult: StoreState | null = null;
       if (recoveredSettlement) {
         rejectPendingResearchGateCandidates(projectDir, runDirPath, 'Verified terminal settlement superseded unconsumed round evidence');
@@ -86,7 +92,11 @@ export async function advanceSettledResearch(
       } else {
         // Legacy workflows without an outcome gate still submit the mutable slot.
         const hasOutcomeCapture = sorted.some(stage => stage.is_gate && readResearchGateCandidate(runDirPath, stage.id));
-        if (!hasOutcomeCapture) researchResult = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter });
+        if (state.research.measurement) {
+          const captured = sorted.filter(stage => stage.is_gate).map(stage => readResearchGateCandidate(runDirPath, stage.id))
+            .filter(candidate => candidate?.label === `round-${iteration}`).sort((a, b) => a!.capturedAt.localeCompare(b!.capturedAt)).at(-1);
+          researchResult = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter, candidate: captured });
+        } else if (!hasOutcomeCapture) researchResult = await tryAdvanceResearch(state, { projectDir, runId, runDirPath, iteration, adapter });
       }
       if (researchResult) return { kind: 'settled', state: researchResult };
       state = readRunState(projectDir, runId);

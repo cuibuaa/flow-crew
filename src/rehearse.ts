@@ -1,4 +1,6 @@
 import { runRecordPath } from './run-layout.js';
+import { splitBriefFrontmatter } from './brief-frontmatter.js';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { CliUsageError, commandUsage, parseCommandArgs } from './cli-args.js';
 import { EXIT_CODE } from './exit-code.js';
 /**
@@ -294,6 +296,32 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
       initializeTemporaryGitRepository(tempProject, tempFcHome);
       simulationPhase = 'scheduler';
 
+      // Rehearsal never executes the operator's evaluator. Like legacy result
+      // synthesis below, a declared instrument gets an explicitly synthetic
+      // substitute in this disposable project, through the real engine path.
+      if (rc.measurement) {
+        const resultFile = rc.resultFile ?? 'docs/research_round_result.json';
+        const synthetic = {
+          frozen: ['rehearsal-instrument.cjs'], candidate: [resultFile], environment: {},
+          replicates: rc.measurement.replicates,
+          metrics: { cost: { direction: 'min', scale: 'fraction' } }, primary: ['cost'],
+          development: { command: process.execPath, args: ['rehearsal-instrument.cjs', 'development'] },
+          guards: [{ name: 'synthetic_guard', command: process.execPath, args: ['rehearsal-instrument.cjs', 'guard'], pass: { field: 'ok', equals: true } }],
+          ...(rc.measurement.held_out ? { held_out: { command: process.execPath, args: ['rehearsal-instrument.cjs', 'held'], allowance: rc.measurement.held_out.allowance, pass: { field: 'ok', equals: true } } } : {}),
+          timeout_seconds: 5,
+        };
+        const frontmatter = splitBriefFrontmatter(simulationBrief)!;
+        const raw = parseYaml(frontmatter.yaml) as Record<string, unknown>;
+        raw.research = { baseline: 100, higher_is_better: false, result_file: resultFile, report_dir: rc.reportDir,
+          measurement: synthetic, stop: { max_rounds: rc.stop!.maxRounds, ...(rc.stop?.haltAfterNoImprovement ? { halt_after_no_improvement: rc.stop.haltAfterNoImprovement } : {}) } };
+        delete raw.objective;
+        simulationBrief = `---\n${stringifyYaml(raw)}---\n${frontmatter.body}`;
+        Object.assign(rc, scheduler.parseBriefFrontmatter(simulationBrief).research);
+        mkdirSync(dirname(join(tempProject, resultFile)), { recursive: true });
+        writeFileSync(join(tempProject, resultFile), JSON.stringify({ result: 100, ok: true }));
+        writeFileSync(join(tempProject, 'rehearsal-instrument.cjs'), `const fs=require('node:fs');const c=JSON.parse(fs.readFileSync(process.env.FC_RESEARCH_CANDIDATE+'/'+${JSON.stringify(resultFile)}));console.log(JSON.stringify(process.argv[2]==='development'?{items:[{id:'synthetic-item',metrics:{cost:c.result}}]}:{ok:process.argv[2]==='held'||c.ok}));`);
+        add('ok', 'Instrument rehearsal substitutes a synthetic metric and guard; frozen commands from the brief are never executed. Replicate count, round/no-improvement limits and held-out allowance are retained.');
+      }
       const resultRel = rc.resultFile ?? 'docs/research_round_result.json';
       const terminalOutputs = [...new Set(Object.values(ts ?? {}).flatMap((entry) => entry.paths ?? []))]
         .map((path, index) => ({ id: `terminal_${index}`, root: 'project' as const, path }));
@@ -323,6 +351,7 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
       const head = 1 + (shipProbe !== undefined ? 1 : 0);
       let totalRounds = Math.max(floorN, head + (halt ?? 3), head + 1);
       if (maxR !== undefined) totalRounds = Math.min(totalRounds, Math.max(maxR, head + 1));
+      if (rc.measurement) totalRounds = maxR!;
       const r1 = beat !== undefined ? base + (beat - base) * 0.5 : base + sign * (Math.abs(base) * 0.1 + 1);
       const seq: Array<{ label: string; result: number }> = [
         { label: 'rehearse_r1_mild', result: r1 },
@@ -333,11 +362,12 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
       for (let i = seq.length; i < totalRounds; i++) {
         seq.push({ label: `rehearse_r${i + 1}_flat`, result: base + (r1 - base) * Math.max(0.1, 0.8 - 0.1 * i) });
       }
+      if (rc.measurement) seq.forEach((round, i) => { round.result = [80, 60, 50][i] ?? 50; });
       // Honor the brief-declared result_schema (gate #0 validates every round
       // against it): fill required fields by declared type — label/result carry
       // the trajectory, everything else gets a type-correct placeholder.
-      const roundPayload = (label: string, result: number): string => {
-        const payload: Record<string, unknown> = { label, result };
+      const roundPayload = (label: string, result: number, guardPass = true): string => {
+        const payload: Record<string, unknown> = { label, result, ...(rc.measurement ? { ok: guardPass } : {}) };
         const schema = rc.resultSchema as { required?: string[]; properties?: Record<string, { type?: string }> } | undefined;
         for (const field of schema?.required ?? []) {
           if (field in payload) continue;
@@ -417,7 +447,7 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
       }
       seq.forEach((r, i) => {
         script[`measure_${i + 1}`] = {
-          projectFiles: { [resultRel]: roundPayload(r.label, r.result) },
+          projectFiles: { [resultRel]: roundPayload(r.label, r.result, i !== 1) },
           output: `rehearsal measured ${r.label} = ${r.result}`,
         };
       });
@@ -492,14 +522,14 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
 
       let journalRounds = 0;
       try {
-        const journal = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_journal.json'), 'utf-8')) as { rounds: Array<{ label: string; result: number; confirmFailed?: boolean }> };
+        const journal = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_journal.json'), 'utf-8')) as { rounds: Array<{ label: string; result: number; confirmFailed?: boolean; comparison?: { reason: string } }> };
         journalRounds = journal.rounds.length;
         const decoy = journal.rounds.find((r) => r.label.includes('decoy'));
-        const summary = journal.rounds.map((r) => `${r.label}=${r.result}${r.confirmFailed ? '(confirm rejected; excluded)' : ''}`).join(' · ');
+        const summary = journal.rounds.map((r) => `${r.label}=${r.result}${r.confirmFailed ? '(confirm rejected; excluded)' : ''}${r.comparison ? `(${r.comparison.reason})` : ''}`).join(' · ');
         add('ok', `Round journal: ${summary}`);
-        if (beat !== undefined && shipProbe === undefined) {
+        if (!rc.measurement && beat !== undefined && shipProbe === undefined) {
           add('warn', `No schema- and integrity-valid value can cross the declared ship target ${beat}; the ship outcome is not exercisable by this brief`);
-        } else if (beat !== undefined) {
+        } else if (!rc.measurement && beat !== undefined) {
           if (!decoy) add('warn', 'The decoy round is missing from the journal — the ship path was not exercised');
           else if (decoy.confirmFailed) add('ok', 'The decoy proposed ship, confirm rejected it, the candidate was excluded, and the loop continued');
           else if (state.status !== store.RUN_STATUS.SHIPPED) add('warn', 'The decoy passed confirm but the terminal status is not shipped — inspect the confirm semantics');
@@ -508,6 +538,11 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
         add('fail', '`research_journal.json` is missing — the engine never consumed round results (check the `result_file` path)');
       }
 
+      if (rc.measurement) {
+        const { researchMeasurementState } = await import('./research-measurement.js');
+        const measured = researchMeasurementState(runDirPath);
+        add(measured.error ? 'fail' : 'ok', `Engine calibration: ${measured.replicates.length} baseline replicates; noise=${JSON.stringify(measured.noise)}; held-out uses=${measured.heldOutUses.length}/${rc.measurement.held_out?.allowance ?? 'undeclared'}`);
+      }
       const floor = ts?.['ceiling_hit']?.floor;
       if (floor?.minAttemptedStages !== undefined && state.status === store.RUN_STATUS.CEILING_HIT) {
         if (journalRounds >= floor.minAttemptedStages) add('ok', `Ceiling floor satisfied: ${journalRounds} rounds ≥ required ${floor.minAttemptedStages}`);
@@ -532,7 +567,7 @@ export async function rehearseBrief(argv: string[], options: RunRehearsalOptions
       // always coexist with the ship/confirm probe in one run. Exercise it in
       // a second isolated run using the same parsed brief and normal scheduler
       // ingestion path.
-      const declaresNoCandidate = briefDeclaresNoCandidateOutcome(brief);
+      const declaresNoCandidate = !rc.measurement && briefDeclaresNoCandidateOutcome(brief);
       if (declaresNoCandidate) {
         noCandidateProject = mkdtempSync(join(tmpdir(), 'fc-rehearse-no-candidate-'));
         initializeTemporaryGitRepository(noCandidateProject, tempFcHome);

@@ -46,3 +46,9 @@ fixtures.
 
 Sources: [mock](../src/adapters/mock.ts), [scripted results](../src/adapters/scripted.ts),
 [rehearsal](../src/rehearse.ts), [launch admission](../src/cli.ts).
+
+The [instrument example](research-instrument.brief.md) declares frozen evaluator
+inputs, four baseline replicates, a structured guard and two held-out uses.
+`node dist/cli.js rehearse examples/research-instrument.brief.md` uses a synthetic
+instrument through the engine settlement path without executing a real evaluation.
+The original hello-research example retains its legacy result/confirm behavior.

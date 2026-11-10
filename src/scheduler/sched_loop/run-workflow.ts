@@ -1,3 +1,4 @@
+import { initializeResearchMeasurements } from '../../research-measurement.js';
 // Boundary: Manage admitted run lifetime, verified checkpoint, heartbeat, deterministic watchdog and unconditional owned cleanup around the iteration driver.
 import { Adapter, AgentConfig, withRunProcessOwnership } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
@@ -51,7 +52,8 @@ export async function runWorkflow(
     settleTerminalResearchCandidates(projectDir, launch.state);
     return launch.state;
   }
-  const {runId, runDirPath, maxIterations, baseStages, resumingExistingRun, resumeAtIteration, schedulerPidPath, launchIntentOwned} = launch;
+  const {runId, runDirPath, maxIterations: initialMaxIterations, baseStages, resumingExistingRun, resumeAtIteration, schedulerPidPath, launchIntentOwned} = launch;
+  let maxIterations = initialMaxIterations;
   workflowYaml = launch.workflowYaml;
   // Watchdog and pid cleanup cover every return after admission, including
   // brief/frontmatter validation failures before the iteration loop.
@@ -85,6 +87,21 @@ export async function runWorkflow(
   const configured = configureWorkflowBrief(workflow, projectDir, runId, runDirPath, maxIterations, resumingExistingRun, taskDescription, campaignId, inheritCampaignContext, briefAdmission);
   if (configured.kind === 'settled') return settled = configured.state;
   taskDescription = configured.taskDescription;
+  const researchState = configured.researchState ?? checkpointState;
+  const research = researchState.research;
+  if (research?.measurement) {
+    // The admitted research round budget replaces the workflow iteration cap.
+    maxIterations = Math.max(maxIterations, research.stop!.maxRounds!);
+    const measurement = await initializeResearchMeasurements(projectDir, runDirPath, research.measurement,
+      research.stop?.maxWallHours === undefined ? Infinity : Date.parse(researchState.startedAt) + research.stop.maxWallHours * 3600000);
+    if (measurement.error) throw new Error(`Research baseline is unmeasured: ${measurement.error}`);
+    const primary = research.measurement.primary[0];
+    updateRunState(projectDir, runId, state => {
+      state.maxIterations = maxIterations;
+      state.research!.baseline = measurement.baseline.items?.reduce((n, item) => n + item.metrics[primary], 0) ?? research.baseline;
+      state.research!.higherIsBetter = research.measurement!.metrics[primary].direction === 'max';
+    });
+  }
 
   const resolvedAgentsDir = agentsDir ?? join(engineConfigDir, 'agents');
   const basePrompt = loadBasePrompt(resolvedAgentsDir);

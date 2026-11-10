@@ -179,6 +179,9 @@ export async function executeSingleStage(
     try { latestStageStatus = readStageStatus(projectDir, runId, stage.id); } catch { /* first execution */ }
     const retries = state.stages[stage.id]?.retries ?? 0;
     const prepared = prepareSchedulerTechnicalAttempt(technicalRetry);
+    const researchWall = state.research?.measurement ? state.research.stop?.maxWallHours : undefined;
+    if (researchWall !== undefined) prepared.budgetMs = Math.max(1, Math.min(prepared.budgetMs,
+      Math.floor(Date.parse(state.startedAt) + researchWall * 3600000 - Date.now())));
     // Read the failure cause before the running projection clears latest error.
     const retryPreamble = retries > 0
       ? buildRetryPreamble(retries, prepared.budgetMs, runDirPath, stage.id, prepared.retryContext)
@@ -229,7 +232,7 @@ export async function executeSingleStage(
       throw new StageAttemptSettlementError(stage.id, readStageStatus(projectDir, runId, stage.id).attempts!.at(-1)!.index, new Error(result.friendlyError));
     }
     state.stages[stage.id] = readStageStatus(projectDir, runId, stage.id);
-    if (decision === 'retry') {
+    if (decision === 'retry' && (researchWall === undefined || Date.now() - Date.parse(state.startedAt) < researchWall * 3600000)) {
       state.stages[stage.id] = rependStageStatus(state.stages[stage.id], retries + Number(result.endingCause !== 'process_death'), state.stages[stage.id].error);
       writeStageStatus(projectDir, runId, stage.id, state.stages[stage.id]);
       writeRunState(projectDir, runId, state);

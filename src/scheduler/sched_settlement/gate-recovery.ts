@@ -1,7 +1,7 @@
 import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Collect gate facts and choose exact recovery routes; project verified research settlement. Contract refusal receives only the campaign publisher.
-import { resolveResearchPaths } from '../../research-paths.js';
+import { researchOutcomePaths } from '../../research-paths.js';
 import { GateVerdict, RUN_STATUS, ResearchConfig, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir } from '../../store.js';
 import { RESEARCH_DECISION_STATUS_ALIASES, StageConfig } from '../sched_admission/configuration.js';
 import { DispatchAdmissionReport, stageScopeOwnsPath } from '../sched_admission/dispatch.js';
@@ -251,7 +251,7 @@ export function recoverVerifiedResearchSettlement(
   runId: string,
   runDirPath: string,
 ): ResearchSettlementProjection | null {
-  if (!state.research || !state.terminalStates) return null;
+  if (!state.research || !state.terminalStates || state.research.measurement) return null;
   const runtime = collectGateRuntimeFacts(allStages, state, projectDir, runId);
   if (!runtime.allPass) return null;
   let admission: DispatchAdmissionReport;
@@ -358,8 +358,7 @@ export function findGateRecoveryStages(
 ): StageConfig[] {
   const byId = new Map(allStages.map((stage) => [stage.id, stage]));
   const selected = new Map<string, StageConfig>();
-  const paths = research ? resolveResearchPaths(research) : undefined;
-  const outcomePaths = paths ? [paths.resultFile, `${paths.resultFile}.no_candidate.json`] : [];
+  const outcomePaths = research ? researchOutcomePaths(research) : [];
   for (const gateId of rejectedGateIds) {
     const fact = rejectionFacts[gateId];
     const rejectionKind = fact?.rejectionKind ?? 'unclassified_rejection';
@@ -377,7 +376,7 @@ export function findGateRecoveryStages(
       for (const candidate of allStages) {
         if (candidate.is_gate || candidate.retry_to?.length || candidate.dynamic_dispatch) continue;
         if (!transitivelyDependsOn(gateId, candidate.id, byId)) continue;
-        if (!outcomePaths.some((path) => stageScopeOwnsPath(candidate, path))) continue;
+        if (!outcomePaths.some((path) => stageScopeOwnsPath(candidate, path, !!research?.measurement))) continue;
         selected.set(candidate.id, candidate);
       }
       continue;
@@ -393,12 +392,7 @@ export function gateIdsForRecoveryStages(
   research?: ResearchConfig,
 ): string[] {
   const byId = new Map(allStages.map((stage) => [stage.id, stage]));
-  const outcomePaths = research
-    ? (() => {
-        const paths = resolveResearchPaths(research);
-        return [paths.resultFile, `${paths.resultFile}.no_candidate.json`];
-      })()
-    : [];
+  const outcomePaths = research ? researchOutcomePaths(research) : [];
   return rejectedGateIds.filter((gateId) => recoveryStages.some((stage) => (
     (stage.is_gate && stage.id === gateId)
     || stage.retry_to?.includes(gateId)
@@ -406,7 +400,7 @@ export function gateIdsForRecoveryStages(
       && !stage.is_gate
       && !stage.retry_to?.length
       && transitivelyDependsOn(gateId, stage.id, byId)
-      && outcomePaths.some((path) => stageScopeOwnsPath(stage, path)))
+      && outcomePaths.some((path) => stageScopeOwnsPath(stage, path, !!research?.measurement)))
   )));
 }
 
@@ -437,15 +431,14 @@ export function isResearchOutcomeGate(
   research?: ResearchConfig,
 ): boolean {
   if (!research || !stage.is_gate) return false;
-  const paths = resolveResearchPaths(research);
-  const outcomePaths = [paths.resultFile, `${paths.resultFile}.no_candidate.json`];
+  const outcomePaths = researchOutcomePaths(research);
   const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
   return allStages.some((candidate) => (
     !candidate.is_gate
     && !candidate.retry_to?.length
     && !candidate.dynamic_dispatch
     && transitivelyDependsOn(stage.id, candidate.id, byId)
-    && outcomePaths.some((path) => stageScopeOwnsPath(candidate, path))
+    && outcomePaths.some((path) => stageScopeOwnsPath(candidate, path, !!research?.measurement))
   ));
 }
 

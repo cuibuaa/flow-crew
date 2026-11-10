@@ -1,4 +1,5 @@
 import { runRecordPath } from './run-layout.js';
+import { captureMeasuredCandidate, type CandidateSnapshot } from './research-measurement.js';
 import { writeFileSync } from './engine-fs.js';
 
 import { createHash } from 'node:crypto';
@@ -64,7 +65,7 @@ function hasCompletedPublication(projectDir: string, state: StoreState, path: st
 
 /** Snapshot mutable slots before dispatch, as attempt evidence generation does. */
 export function beginResearchInputGeneration(projectDir: string, state: StoreState): void {
-  if (!state.research) return;
+  if (!state.research || state.research.measurement) return;
   const paths = resolveResearchPaths(state.research);
   const previous = state.researchInputGeneration;
   if (previous?.startedAt === state.startedAt && previous.resultFile === paths.resultFile) return;
@@ -100,6 +101,7 @@ export interface ResearchGateCandidate {
   reason?: string;
   /** Exact reviewed bytes, including brief-specific schema and integrity fields. */
   evidenceJson?: string;
+  measurement?: CandidateSnapshot;
   settlement?: { disposition: 'ingested' | 'rejected'; reason: string };
 }
 
@@ -152,6 +154,14 @@ export function captureResearchGateCandidate(
   try { state = JSON.parse(readFileSync(runRecordPath(runDir, 'run.json'), 'utf-8')) as StoreState; } catch { /* fallback below */ }
   let candidate: ResearchGateCandidate;
   if (state?.research) {
+    if (state.research.measurement) {
+      const label = `round-${state.currentIteration ?? 1}`;
+      const measurement = captureMeasuredCandidate(projectDir, runDir, label, true);
+      candidate = { version: 1, kind: 'measured', capturedAt: new Date().toISOString(), source: 'engine', label, sha256: measurement.sha256, measurement };
+      const bound = gateStageId ? { ...candidate, gateStageId } : candidate;
+      writeFileSync(destination, `${JSON.stringify(bound, null, 2)}\n`, 'utf8');
+      return bound;
+    }
     const result = resolveResearchPaths(state.research).resultFile;
     const resultPath = join(projectDir, result);
     const sidecarPath = `${resultPath}.no_candidate.json`;

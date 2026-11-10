@@ -297,9 +297,9 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           deferredReasons.push(`${terminalStatus}: ${reason}`);
           continue;
         }
-        if (researchSelection
-            && (researchSelection.terminalStatus !== terminalStatus || researchSelection.terminalPath !== path)) {
-          const reason = `${path} declares '${terminalStatus}', but the settled research policy selected '${researchSelection.terminalStatus}' via ${researchSelection.terminalPath}`;
+        if ((state.research?.measurement && accepting && !researchSelection) || (researchSelection
+            && (researchSelection.terminalStatus !== terminalStatus || researchSelection.terminalPath !== path))) {
+          const reason = `${path} declares '${terminalStatus}', but the settled research policy selected '${researchSelection?.terminalStatus ?? 'no terminal decision'}' via ${researchSelection?.terminalPath ?? 'engine measurement pending'}`;
           if (sourcePath === projPath && admittedOwner) {
             quarantineTerminalCandidate(
               ctx.runDirPath,
@@ -318,7 +318,11 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           continue;
         }
         
-        const floorCheck = state.research && admittedOwner && terminalStatus === RUN_STATUS.CEILING_HIT
+        // Measurement ceilings are selected only after a declared hard stop. The
+        // research decision records unmet floors; they cannot buy more budget.
+        const floorCheck = state.research?.measurement && researchSelection?.terminalStatus === RUN_STATUS.CEILING_HIT
+          ? { passed: true }
+          : state.research && admittedOwner && terminalStatus === RUN_STATUS.CEILING_HIT
           ? (() => {
               let measuredRounds = 0;
               try {

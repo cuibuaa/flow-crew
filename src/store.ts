@@ -377,6 +377,8 @@ export interface ResearchIntegrityConfig {
 }
 
 export interface ResearchConfig {
+  /** Frozen engine instrument; producer result files are advisory in this mode. */
+  measurement?: import('./research-measurement.js').ResearchMeasurement;
   /** Entering running-best the loop builds on (the baseline metric value). */
   baseline: number;
   /** Higher metric is better (default true). */

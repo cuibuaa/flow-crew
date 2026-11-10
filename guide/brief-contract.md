@@ -130,6 +130,141 @@ Sources: [input/output inventory](../src/ship-inputs.ts), [setup parser](../src/
 
 ## Research rounds
 
+`research.measurement` opts into engine-owned measurement. The example
+[research-instrument.brief.md](../examples/research-instrument.brief.md) uses a
+synthetic instrument; it is a protocol demonstration, not a performance claim.
+
+```yaml
+research:
+  measurement:
+    frozen: [instrument/evaluate.cjs, instrument/answers.json]
+    candidate: [src]
+    environment: {DATASET: development-v1}
+    replicates: 4
+    metrics:
+      wall: {direction: min, scale: fraction}
+      passes: {direction: max, scale: count}
+    primary: [wall]
+    development: {command: /usr/bin/node, args: [instrument/evaluate.cjs, development]}
+    guards:
+      - name: retention
+        command: /usr/bin/node
+        args: [instrument/evaluate.cjs, retention]
+        pass: {field: passes, equals: true}
+    held_out:
+      command: /usr/bin/node
+      args: [instrument/evaluate.cjs, held-out]
+      allowance: 2
+      pass: {exit_code: 0}
+    timeout_seconds: 300
+  stop: {max_rounds: 20, max_wall_hours: 8, halt_after_no_improvement: 3}
+```
+
+The engine copies the frozen file/directory roots and executable bytes before any
+stage starts. These roots must be regular files or directories without symlinks,
+disjoint from the declared candidate roots. Relative arguments resolve from the
+frozen copy, never the producing stage's working directory. Absolute project paths
+in arguments (including `--input=PATH`) and environment values are rebound to
+the declared frozen/candidate snapshots; undeclared absolute project inputs
+refuse measurement. The trusted evaluator
+must declare its complete data/code dependency closure in `frozen`; use absolute
+executables and relative dependency arguments. Mutable candidate inputs are read
+only through `FC_RESEARCH_CANDIDATE`, an engine-owned snapshot directory, with its
+content digest in `FC_RESEARCH_CANDIDATE_SHA256`. The instrument fingerprint binds
+the declaration, executable bytes, dependency bytes, and explicit environment.
+The child receives only that environment and fixed PATH/LANG plus isolated
+HOME/TMP directories; ambient provider, shell, Python and Node settings do not
+enter measurement. HOME/TMP/PATH/LANG, injection variables and `FC_RESEARCH_*`
+are reserved. Measurement commands require Linux x86_64/aarch64, Landlock ABI >= 3 and
+`/usr/bin/python3` with its standard library. The engine installs an inherited
+write restriction before executing any evaluator or candidate code. Only private
+HOME/TMP directories and `/dev/null` permit writes; evaluators must place generated
+files in those temporary directories. Frozen originals, retained instrument,
+executables and candidate inputs cannot be written, truncated, renamed or linked
+by that process tree. A binary launch acknowledgement follows successful
+executable start and precedes evaluator output. Confinement or executable-start
+failure is recorded separately from the evaluator exit status and fails measurement
+or its guard, even when the requested guard exit code equals the launch failure code.
+Kernel inode/change-time stamps additionally detect temporary metadata edits
+(such as chmod followed by restoration), which Landlock does not restrict.
+The engine also checks the original declared frozen roots before and after each
+command. An edit there records an unmeasured observation, even if evaluator code
+embeds an original absolute path. Original candidate roots must also match the
+captured candidate before and after each command, binding embedded references to
+the candidate actually measured. Candidate and frozen identities include file
+permissions, directory membership (including empty directories) and bytes. Changes to protected instrument or candidate snapshot bytes
+refuse measurement, as do command, timeout and output-shape failures. All are
+recorded as unmeasured with a reason and can never keep a candidate.
+
+Development must print one JSON object:
+`{"items":[{"id":"stable-item-id","metrics":{"wall":12.5,"passes":1}}]}`.
+Every declared metric must be finite and nonnegative; count metrics must be integers. Item IDs must be unique and
+match the baseline/current best exactly (order is irrelevant). The engine runs
+`replicates` unchanged-baseline measurements before the first producer. For each
+fractional metric it computes population SD across 4096 pooled-ratio resamples,
+seed 1108 (32-bit LCG): sample items with replacement, independently choose two
+distinct baseline replicates for each sampled item, divide pooled right by pooled
+left. Positive per-item fractional baselines are required. Count noise is the
+square root of the mean summed squared item differences across every replicate
+pair, floored at one. For binary outcomes each squared difference is the
+disagreement indicator; arbitrary counts retain their magnitude. Nonfinite derived noise fails calibration. This uses paired item observations rather than an aggregate
+delta or the producer's claimed spread.
+
+Code keeps a candidate only when at least one declared primary metric improves
+strictly more than twice its calibrated noise, and every guard passes. Strict
+boundaries use exact decimal cross-products, matching `Fraction(str(value))`
+rather than allowing floating-point subtraction to turn equality into a gain. Fractional
+improvement is the pooled difference divided by the current best's pooled value;
+count improvement is the difference. Directions are declared per metric. The legacy scalar `stop.beat` target uses
+the first declared primary metric; retention can improve any declared primary. A guard
+requires either a specific exit code (including a nonzero code) or an exact named
+JSON field value. Missing/failed guard output fails with the recorded reason.
+Guards run only after development clears noise. Held-out runs only after
+successful development and guards; its exact pass condition is declared like a
+guard. Each use is durably charged **before** launch, including failure and
+interruption. A spent or interrupted use is never repeated. An interrupted candidate is
+unmeasured and rejected; another round may use any remaining allowance. When the allowance
+is spent, the run ceilings unless that last passing candidate has already met the
+ship target. Held-out is a confirmation measurement, not a selection metric.
+
+The engine restores the measured best's declared candidate roots after each
+round; evidence outside those roots stays available. It validates every destination
+ancestor before modifying any root. An installed ancestor symlink or non-directory
+fails the run with an unsafe-restore reason, leaving those destinations untouched;
+a leaf symlink can be removed safely without modifying its target. It journals each outcome,
+candidate digest, instrument fingerprint, numeric comparison and command receipts
+under engine ownership. Unmeasured rounds consume budget without inventing a
+metric value. A resumed run retains its baseline, noise, journal, best snapshots
+and charged held-out uses. Interrupted baseline initialization fails closed and
+cannot recalibrate from a later candidate.
+
+A positive `max_rounds` is mandatory in this mode and expands the workflow
+iteration allowance for this run, so it can complete the declared campaign in one
+run. Round, elapsed-wall and consecutive non-improvement limits still end search.
+Calibration and measurement command deadlines, and ordinary stage attempt budgets,
+are capped by the remaining wall allowance from the original run start. Expired
+calibration records an unmeasured baseline and dispatches no producer; technical
+retries stop when that allowance is spent. Existing worker shutdown grace still
+applies. Once a measurement stop budget is spent, an unmet ceiling floor is
+recorded in the decision and cannot extend search or prevent its ceiling outcome. Ordinary stage/repair attempt limits remain independent. Producer `result_file`,
+`result_std` and no-candidate slots do not select instrumented candidates; each
+settled round submits its candidate snapshot. `baseline` is optional and is
+replaced by the measured baseline. `confirm`, `result_schema`, `integrity`,
+`min_improvement` and `improvement_se_multiple` are rejected with this mode: the
+frozen instrument, structured guards and calibrated rule replace them. Gate
+ownership follows candidate inputs. Stage-authored terminal judgments cannot
+replace the measurement decision.
+
+`flowcrew rehearse` exercises these declarations through a synthetic frozen
+instrument in its disposable project, retaining replicate count, round and
+non-improvement limits, and held-out allowance. It substitutes metric/guard
+semantics and does not execute a real evaluator or measure a real candidate.
+
+Briefs without `measurement` retain the legacy result/spread/confirmation
+contract below, including its iteration-budget admission. This compatibility
+path does not claim the engine-owned measurement guarantees.
+
+
 The [tracked research brief](../examples/hello-research.brief.md) is a complete rehearsal
 example. The metric block accepts these fields:
 

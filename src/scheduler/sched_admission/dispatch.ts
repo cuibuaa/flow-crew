@@ -10,10 +10,10 @@ import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type Term
 import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { createHash } from 'node:crypto';
 import { artifactDeclarationFindings } from '../../artifact-declarations.js';
-import { resolveResearchPaths } from '../../research-paths.js';
+import { researchOutcomePaths } from '../../research-paths.js';
 import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, EMITTED_RESEARCH_DECISIONS, RecordedWorkflowConfigSchema } from './configuration.js';
 import { finiteStatusConditionDomainError, researchTerminalConditionExcludesContinue, assessTerminalConditionCoverage } from './condition-coverage.js';
-import { normalizedProjectPath, scopeMatchesProjectPath } from './scope-services.js';
+import { normalizedProjectPath, scopeMatchesProjectPath, scopeIntersectsProjectTree } from './scope-services.js';
 import { inspectStageGraph, parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
 
@@ -206,12 +206,12 @@ export function validatedCriterionDischarges(
   });
 }
 
-export function stageScopeOwnsPath(stage: StageConfig, rawPath: string): boolean {
+export function stageScopeOwnsPath(stage: StageConfig, rawPath: string, includeDescendants = false): boolean {
   const path = normalizedProjectPath(rawPath);
   if (!path || !stage.scope) return false;
   return stage.scope.some((rawScope) => {
     const scope = parseDeclaredScope(rawScope);
-    return scope.kind !== 'unknown' && scopeMatchesProjectPath(scope, path);
+    return scope.kind !== 'unknown' && (includeDescendants ? scopeIntersectsProjectTree(scope, path) : scopeMatchesProjectPath(scope, path));
   });
 }
 
@@ -327,14 +327,10 @@ export function createDispatchAdmission() {
         }
         if (input.research && !checkedResearchOwnerIds.has(owner.id)) {
           checkedResearchOwnerIds.add(owner.id);
-          const researchPaths = resolveResearchPaths(input.research);
-          const resultFile = normalizedProjectPath(researchPaths.resultFile);
-          const researchOutputs = [
-            resultFile,
-            resultFile ? `${resultFile}.no_candidate.json` : undefined,
-          ].filter((path): path is string => Boolean(path));
+          const researchOutputs = researchOutcomePaths(input.research)
+            .map(path => normalizedProjectPath(path)).filter((path): path is string => Boolean(path));
           for (const researchOutput of researchOutputs) {
-            if (stageScopeOwnsPath(owner, researchOutput)) {
+            if (stageScopeOwnsPath(owner, researchOutput, !!input.research.measurement)) {
               errors.push(admissionError('terminal_owner_scope', `terminal owner ${owner.id}.scope: research result producer path ${researchOutput} cannot be owned by a terminal writer; separate measurement from terminalization`, 'scope', owner.id));
             }
           }

@@ -44,7 +44,7 @@ export interface ResearchRound {
   /** A round may legitimately discover that there is no safe acting candidate.
    * It consumes budget and counts as no improvement without fabricating a
    * measurement equal to the baseline. */
-  outcome?: 'measured' | 'no_candidate';
+  outcome?: 'measured' | 'unmeasured' | 'no_candidate';
   reason?: string;
   /** Optional structured evidence copied from the no-candidate sidecar. */
   evidence?: unknown;
@@ -59,6 +59,9 @@ export interface ResearchRound {
    *  on every subsequent evaluation), but it still counts toward round budgets
    *  and the no-improvement streak. */
   confirmFailed?: boolean;
+  /** Set only by the engine-owned measurement settlement. */
+  comparison?: import('./research-measurement.js').Comparison;
+  measurement?: import('./research-measurement.js').Observation;
 }
 
 export interface ResearchEvaluation {
@@ -245,6 +248,9 @@ export function assessResearchShipTarget(config: ResearchConfig): ResearchShipTa
     ...(maxStdRatio === undefined ? {} : { maxStdRatio }),
   };
 
+  if (config.measurement) return { status: target === undefined ? 'ceiling_only' : 'reachable',
+    reason: 'The frozen instrument measures the baseline and candidate; producer schema/spread bounds do not apply.', bindings };
+
   if (target === undefined) {
     return {
       status: 'ceiling_only',
@@ -372,7 +378,7 @@ function applyPolicy(
       perRoundKept.push(false);
       continue;
     }
-    if (isBetter(r.result, runningBest, higherIsBetter, improvementMargin(r, minImprovement, seMultiple))) {
+    if (r.comparison ? r.comparison.keep : isBetter(r.result, runningBest, higherIsBetter, improvementMargin(r, minImprovement, seMultiple))) {
       runningBest = r.result;
       keptLabels.push(r.label);
       perRoundKept.push(true);

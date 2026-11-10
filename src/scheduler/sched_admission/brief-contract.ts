@@ -1,4 +1,5 @@
 import { runRecordPath } from '../../run-layout.js';
+import { ResearchMeasurementSchema } from '../../research-measurement.js';
 import { type BriefFrontmatterDocument, parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
 /** Brief frontmatter, duration/floor contracts; no dispatch admission or execution. */
 import { type ResearchConfirmConfig, type TerminalStatesConfig, type ResearchConfig, type ResearchIntegrityConfig, isTerminalRunStatus, TERMINAL_STATUSES, type TerminalStateEntry, type PostTerminateHook, type StoreState } from '../../store.js';
@@ -109,12 +110,12 @@ export function assessResearchIterationBudget(
     assessment.attemptDeadlines = attemptDeadlines;
   }
 
-  if (typeof maxRounds === 'number' && maxRounds > maxIterations) {
+  if (!research?.measurement && typeof maxRounds === 'number' && maxRounds > maxIterations) {
     assessment.pass = false;
     assessment.reason = `research.stop.max_rounds (${maxRounds}) exceeds the engine iteration limit (${maxIterations}); units: rounds versus iterations`;
     return assessment;
   }
-  if (typeof assessment.maxWallMs === 'number'
+  if (!research?.measurement && typeof assessment.maxWallMs === 'number'
       && typeof assessment.iterationWallCeilingMs === 'number'
       && assessment.maxWallMs > assessment.iterationWallCeilingMs) {
     assessment.pass = false;
@@ -174,7 +175,7 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
       if (feasibility.status === 'valid') out.researchFeasibility = feasibility.value;
       else out.researchFeasibilityError = feasibility.error;
     }
-    if (typeof r.baseline === 'number') {
+    if (typeof r.baseline === 'number' || r.measurement !== undefined) {
       // An unrecognised policy used to fall through to greedy_stack without a word.
       // That silence cost a real campaign: a brief wrote `policy: heuristic_policy_v1`,
       // believing the field named the opponent rather than the keep/drop rule, got the
@@ -188,7 +189,18 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
           `${JSON.stringify(r.policy)} is not one of ${RESEARCH_POLICY_IDS.join(', ')}`;
       }
       const policy: ResearchConfig['policy'] = policyParse.success ? policyParse.data : 'greedy_stack';
-      const research: ResearchConfig = { baseline: r.baseline, policy };
+      const research: ResearchConfig = { baseline: typeof r.baseline === 'number' ? r.baseline : 0, policy };
+      if (r.measurement !== undefined) {
+        const measurement = ResearchMeasurementSchema.safeParse(r.measurement);
+        if (measurement.success) research.measurement = measurement.data;
+        else out.researchPolicyError = `research.measurement: ${measurement.error.message}`;
+        const stop = r.stop as Record<string, unknown> | undefined;
+        if (!Number.isSafeInteger(stop?.max_rounds) || Number(stop?.max_rounds) < 1) out.researchPolicyError = 'engine measurement requires a positive integer stop.max_rounds';
+        if (stop?.max_wall_hours !== undefined && (typeof stop.max_wall_hours !== 'number' || !Number.isFinite(stop.max_wall_hours) || stop.max_wall_hours <= 0)) out.researchPolicyError = 'measurement stop.max_wall_hours must be finite and positive';
+        if (stop?.halt_after_no_improvement !== undefined && (!Number.isSafeInteger(stop.halt_after_no_improvement) || Number(stop.halt_after_no_improvement) < 1)) out.researchPolicyError = 'measurement halt_after_no_improvement must be a positive integer';
+        if (stop?.min_improvement !== undefined || stop?.improvement_se_multiple !== undefined) out.researchPolicyError = 'measurement uses strict calibrated > 2 sigma; remove legacy improvement margins';
+        if (r.confirm !== undefined || r.result_schema !== undefined || r.integrity !== undefined) out.researchPolicyError = 'measurement replaces confirm, result_schema and integrity; declare structured measurement guards';
+      }
       // Honor higher_is_better; coerce the common YAML-quoting mistake ("false"/"true"
       // as strings) instead of silently dropping it (which would flip every keep/ship
       // decision for a lower-is-better metric). Warn on an uncoercible value.

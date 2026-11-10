@@ -134,6 +134,11 @@ export function scopeMatchesProjectPath(scope: ParsedScope, path: string): boole
   return languagesIntersect(languageSegments(scope), path.split('/').map(value => ({ kind: 'literal', value })));
 }
 
+/** Overlap with a declared input root, including narrowly scoped descendants. */
+export function scopeIntersectsProjectTree(scope: Exclude<ParsedScope, { kind: 'unknown' }>, path: string): boolean {
+  return languagesIntersect(languageSegments(scope), [...path.split('/').map(value => ({ kind: 'literal' as const, value })), { kind: 'globstar', value: '**', dots: true }]);
+}
+
 export function literalTreeCapabilityRoot(scope: ParsedScope): string | undefined {
   if (scope.kind === 'exact' || scope.kind === 'tree') return scope.value;
   if (scope.kind !== 'glob') return undefined;

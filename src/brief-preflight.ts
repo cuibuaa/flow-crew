@@ -438,7 +438,10 @@ export function inspectBrief(
         suggestion: 'Bring stop.beat inside the declared result_schema and integrity bounds, or remove stop.beat for an explicit ceiling-only contract.',
       });
     }
-    if (!rc.confirm) {
+    if (rc.measurement) {
+      add({ code: 'research_measurement_valid', level: 'ok', consequential: false,
+        message: `Engine-owned instrument: ${rc.measurement.replicates} baseline replicates, ${rc.measurement.guards.length} guards, held-out allowance ${rc.measurement.held_out?.allowance ?? 'undeclared'}` });
+    } else if (!rc.confirm) {
       add({
         code: 'research_confirm_missing',
         level: 'warn',

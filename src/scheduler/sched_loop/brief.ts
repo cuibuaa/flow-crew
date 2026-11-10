@@ -35,7 +35,8 @@ export function configureWorkflowBrief(
   maxIterations: number, resumingExistingRun: boolean, taskDescription?: string,
   campaignId?: string,
   inheritCampaignContext = true, briefAdmission?: BriefAdmissionRecord,
-): {kind: 'settled'; state: StoreState} | {kind: 'configured'; taskDescription?: string} {
+): {kind: 'settled'; state: StoreState} | {kind: 'configured'; taskDescription?: string; researchState?: StoreState} {
+  let researchState: StoreState | undefined;
   if (taskDescription || campaignId || briefAdmission) {
     const initState = readRunState(projectDir, runId);
     if (taskDescription && !resumingExistingRun) {
@@ -100,6 +101,7 @@ export function configureWorkflowBrief(
         if (terminalStates) log.info({ runId, statuses: Object.keys(terminalStates) }, 'Terminal-state config loaded from brief frontmatter');
         if (research) log.info({ runId, policy: research.policy, baseline: research.baseline }, 'Research config loaded from brief frontmatter');
       }
+      if (s.research?.measurement) researchState = s;
       if (parsed.frontmatterError) log.warn({ runId, frontmatterError: parsed.frontmatterError }, 'brief frontmatter failed to parse — any terminal_states/research config in it was ignored');
       if (briefAdmission) {
         const s = readRunState(projectDir, runId);
@@ -107,5 +109,5 @@ export function configureWorkflowBrief(
       }
     }
   }
-  return {kind: 'configured', taskDescription};
+  return {kind: 'configured', taskDescription, researchState};
 }

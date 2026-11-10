@@ -1,0 +1,2952 @@
+{
+  "version": 1,
+  "oracle": "rsi_loop.metrics.decide (read-only import, Python bytecode disabled)",
+  "inventory": [
+    {
+      "source": "review-guard-1109/baseline-main/summary.json",
+      "status": "measured",
+      "complete": true,
+      "program_sha256": "6bdebf68f22d09963227b914775321e1d5f47a48c5d71a87d39dc09ed834f464",
+      "evaluator_sha256": "aba7a22513bb4edd84a8ceaa2495dd22f7cc6b0c2401321f583cf0ee57a79664",
+      "reject_count": 10,
+      "comparison": "baseline-main--weak-fix-v3"
+    },
+    {
+      "source": "review-guard-1109/baseline-preflight/summary.json",
+      "status": "guard_error",
+      "complete": false,
+      "program_sha256": "7b872e1ff3861eae41faed116afe04afd5fa6f30d3cffb82b591d438b866041c",
+      "evaluator_sha256": "452f52708b2cea1774f6c18c849383f8b9d360259ec13ee2e1ba78b5c27f00c3",
+      "reject_count": null,
+      "comparison": "Unpaired preflight or unavailable seam; no recorded decide comparison"
+    },
+    {
+      "source": "review-guard-1109/baseline-preflight-v2/summary.json",
+      "status": "offline_fixture",
+      "complete": false,
+      "program_sha256": "6bdebf68f22d09963227b914775321e1d5f47a48c5d71a87d39dc09ed834f464",
+      "evaluator_sha256": "aba7a22513bb4edd84a8ceaa2495dd22f7cc6b0c2401321f583cf0ee57a79664",
+      "reject_count": 10,
+      "comparison": "Unpaired preflight or unavailable seam; no recorded decide comparison"
+    },
+    {
+      "source": "review-guard-1109/frozen-main-1109e/summary.json",
+      "status": "measured",
+      "complete": true,
+      "program_sha256": "57ce71e6fc49a3c3b4b841a3c3ed3c9d0d6d448f7c9a40aa63f1d2f417eea12f",
+      "evaluator_sha256": "d96fc716ff01d8759c30be1b0db1864f62b823d5629b9dba33b3990a397cefd8",
+      "reject_count": 10,
+      "comparison": "frozen-decide-input-1109e"
+    },
+    {
+      "source": "review-guard-1109/frozen-preflight-1109e/summary.json",
+      "status": "offline_fixture",
+      "complete": false,
+      "program_sha256": "57ce71e6fc49a3c3b4b841a3c3ed3c9d0d6d448f7c9a40aa63f1d2f417eea12f",
+      "evaluator_sha256": "d96fc716ff01d8759c30be1b0db1864f62b823d5629b9dba33b3990a397cefd8",
+      "reject_count": 10,
+      "comparison": "Unpaired preflight or unavailable seam; no recorded decide comparison"
+    },
+    {
+      "source": "review-guard-1109/frozen-weak-1109e/summary.json",
+      "status": "measured",
+      "complete": true,
+      "program_sha256": "57ce71e6fc49a3c3b4b841a3c3ed3c9d0d6d448f7c9a40aa63f1d2f417eea12f",
+      "evaluator_sha256": "d96fc716ff01d8759c30be1b0db1864f62b823d5629b9dba33b3990a397cefd8",
+      "reject_count": 0,
+      "comparison": "frozen-decide-input-1109e"
+    },
+    {
+      "source": "review-guard-1109/main-fix/summary.json",
+      "status": "guard_unavailable",
+      "complete": false,
+      "program_sha256": "7a6759c969d0681df2dcab5a7611e5c20b19eb01507aabed0dd35d577e109f75",
+      "evaluator_sha256": "437aaff0c5bed86e14f9739632c9e4cf6b3c9e19e2e79950a82b388de219936a",
+      "reject_count": null,
+      "comparison": "Unpaired preflight or unavailable seam; no recorded decide comparison"
+    },
+    {
+      "source": "review-guard-1109/main-fix-v2/summary.json",
+      "status": "measured",
+      "complete": true,
+      "program_sha256": "d143b73a658000fb34dad3b3cb071a0a2d98a509b6dbfc9171fff6c20720b8e5",
+      "evaluator_sha256": "96ba4e2e15a5388ec48442dfe5612ec916db68e1a3c379afc9d7b33ae1dd93bb",
+      "reject_count": 10,
+      "comparison": "main-fix-v2--weak-fix-v3"
+    },
+    {
+      "source": "review-guard-1109/main-v2/summary.json",
+      "status": "legacy measured",
+      "complete": true,
+      "program_sha256": "de99ec4ddef721a8348957e46d6a229efdbd28ea6838ee9d8ed74ad5d5fd2804",
+      "evaluator_sha256": "c84618b7acff0aa28866807c13d2811e30e987191d986e7893971bd70064e8a6",
+      "reject_count": 10,
+      "comparison": "sensitivity-input"
+    },
+    {
+      "source": "review-guard-1109/round2-preflight-run/summary.json",
+      "status": "guard_error",
+      "complete": false,
+      "program_sha256": "21328ac46704eb11fc1980ff7528141e5105d9e4ae70c7a9da8c37b7613fac6a",
+      "evaluator_sha256": "90e6e5116184fbc10fc41a563b549eb5858b70374f48939c35332bc3aaeb0254",
+      "reject_count": null,
+      "comparison": "Unpaired preflight or unavailable seam; no recorded decide comparison"
+    },
+    {
+      "source": "review-guard-1109/round2-preflight-v2-run/summary.json",
+      "status": "offline_fixture",
+      "complete": true,
+      "program_sha256": "de82fc01d5116f96625965a9298652408de0f6c5a25de21d12c87f4598372448",
+      "evaluator_sha256": "559504100fbb7c23c09ff87fb163e7a2fcdd1f25ce15e72f3b1ff21da312c343",
+      "reject_count": 10,
+      "comparison": "Unpaired preflight or unavailable seam; no recorded decide comparison"
+    },
+    {
+      "source": "review-guard-1109/weak/summary.json",
+      "status": "legacy measured",
+      "complete": true,
+      "program_sha256": "de99ec4ddef721a8348957e46d6a229efdbd28ea6838ee9d8ed74ad5d5fd2804",
+      "evaluator_sha256": "c84618b7acff0aa28866807c13d2811e30e987191d986e7893971bd70064e8a6",
+      "reject_count": 0,
+      "comparison": "sensitivity-input"
+    },
+    {
+      "source": "review-guard-1109/weak-fix-v3/summary.json",
+      "status": "measured",
+      "complete": true,
+      "program_sha256": "3395b4bf564a806d4a3b68ede07499acc571999cd1070be52a2aad808b84ee60",
+      "evaluator_sha256": "609dea86394f8445471c088ba8bd96f1263a08af1f9e12ae5159106a6ea9d5bb",
+      "reject_count": 0,
+      "comparison": "main-fix-v2--weak-fix-v3; baseline-main--weak-fix-v3"
+    },
+    {
+      "source": "review-guard-1109/ownership/fresh-eval/summary.json",
+      "status": "single main arm; no recorded candidate comparison",
+      "cells": 1,
+      "engines": [
+        "main"
+      ]
+    },
+    {
+      "source": "review-guard-1109/fix-ownership/fresh-eval/summary.json",
+      "status": "single main arm; no recorded candidate comparison",
+      "cells": 1,
+      "engines": [
+        "main"
+      ]
+    }
+  ],
+  "metrics": {
+    "pooled_wall": {
+      "direction": "min",
+      "scale": "fraction"
+    },
+    "pooled_output_tokens": {
+      "direction": "min",
+      "scale": "fraction"
+    },
+    "hidden_passes": {
+      "direction": "max",
+      "scale": "count"
+    },
+    "complete_terminal_outcomes": {
+      "direction": "max",
+      "scale": "count"
+    }
+  },
+  "comparisons": [
+    {
+      "id": "eval-2461-1109",
+      "note": "Literal task records with stable12-v2 noise; fast-cal main2 is only renamed cand for the comparison API. No guard or fingerprint is supplied or replaced.",
+      "summary": {
+        "set": "fast",
+        "tasks": [
+          "mechanism-m1",
+          "mechanism-m2",
+          "mechanism-m3",
+          "mechanism-m4",
+          "mechanism-m5",
+          "tinydb-cache-flush-boundary",
+          "tinydb-get-multiple-ids",
+          "tinydb-middleware-initialization",
+          "tinydb-mutable-query-cache",
+          "tinydb-root-fragments",
+          "tinydb-upsert-routing",
+          "tinydb-zero-capacity-cache"
+        ],
+        "complete": true,
+        "expected_cells": 24,
+        "published_cells": 24,
+        "evaluator_sha256": "96ba4e2e15a5388ec48442dfe5612ec916db68e1a3c379afc9d7b33ae1dd93bb",
+        "engines": {
+          "cand": {
+            "commit": "66eded94084681c0ab2f2d345b7b205bcb208d04",
+            "host_wall_seconds": 4189.99218945302,
+            "output_tokens": 113373,
+            "hidden_passes": 12,
+            "cells": 12,
+            "expected_cells": 12,
+            "hidden_results_available": 12,
+            "terminal_statuses": {
+              "clock": 0,
+              "complete": 12,
+              "failed": 0,
+              "incomplete": 0,
+              "parked": 0
+            },
+            "token_unknown_attempts": {
+              "cached_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "main": {
+            "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b",
+            "host_wall_seconds": 4240.450104995012,
+            "output_tokens": 112288,
+            "hidden_passes": 12,
+            "cells": 12,
+            "expected_cells": 12,
+            "hidden_results_available": 12,
+            "terminal_statuses": {
+              "clock": 0,
+              "complete": 11,
+              "failed": 0,
+              "incomplete": 1,
+              "parked": 0
+            },
+            "token_unknown_attempts": {
+              "cached_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      "noise": {
+        "set": "fast",
+        "tasks": [
+          "mechanism-m1",
+          "mechanism-m2",
+          "mechanism-m3",
+          "mechanism-m4",
+          "mechanism-m5",
+          "tinydb-cache-flush-boundary",
+          "tinydb-get-multiple-ids",
+          "tinydb-middleware-initialization",
+          "tinydb-mutable-query-cache",
+          "tinydb-root-fragments",
+          "tinydb-upsert-routing",
+          "tinydb-zero-capacity-cache"
+        ],
+        "evaluator_sha256": "5eb0d8685167713f4aff7c0543e5ff5821d6f8c859844235929ebdc6798e26b5",
+        "source_arms": [
+          "main",
+          "main2"
+        ],
+        "metrics": {
+          "pooled_wall": 0.0662,
+          "pooled_output_tokens": 0.0716,
+          "hidden_passes": 1.0,
+          "complete_terminal_outcomes": 1.0
+        }
+      },
+      "expected": {
+        "keep": false,
+        "reason": "input_invalid",
+        "error": "noise evaluator fingerprint differs"
+      },
+      "cells": [
+        {
+          "task": "mechanism-m1",
+          "arm": "cand",
+          "host_wall_seconds": 273.77261188600096,
+          "output_tokens": 5719,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m1",
+          "arm": "main",
+          "host_wall_seconds": 331.5887494319977,
+          "output_tokens": 8353,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m2",
+          "arm": "cand",
+          "host_wall_seconds": 335.5535731110067,
+          "output_tokens": 9554,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m2",
+          "arm": "main",
+          "host_wall_seconds": 397.79352715500136,
+          "output_tokens": 10721,
+          "resolved": true,
+          "terminal": "incomplete"
+        },
+        {
+          "task": "mechanism-m3",
+          "arm": "cand",
+          "host_wall_seconds": 246.6509506690054,
+          "output_tokens": 6076,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m3",
+          "arm": "main",
+          "host_wall_seconds": 236.86134703200514,
+          "output_tokens": 5580,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m4",
+          "arm": "cand",
+          "host_wall_seconds": 399.779498240001,
+          "output_tokens": 12066,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m4",
+          "arm": "main",
+          "host_wall_seconds": 346.35089421400335,
+          "output_tokens": 10226,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m5",
+          "arm": "cand",
+          "host_wall_seconds": 300.8817925580006,
+          "output_tokens": 7900,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m5",
+          "arm": "main",
+          "host_wall_seconds": 324.793147655997,
+          "output_tokens": 9318,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-cache-flush-boundary",
+          "arm": "cand",
+          "host_wall_seconds": 368.86615467500087,
+          "output_tokens": 10003,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-cache-flush-boundary",
+          "arm": "main",
+          "host_wall_seconds": 309.5603656999956,
+          "output_tokens": 7515,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-get-multiple-ids",
+          "arm": "cand",
+          "host_wall_seconds": 314.391065693002,
+          "output_tokens": 8121,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-get-multiple-ids",
+          "arm": "main",
+          "host_wall_seconds": 335.54120654299913,
+          "output_tokens": 8341,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-middleware-initialization",
+          "arm": "cand",
+          "host_wall_seconds": 472.94866155600175,
+          "output_tokens": 14876,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-middleware-initialization",
+          "arm": "main",
+          "host_wall_seconds": 460.5668318340031,
+          "output_tokens": 13834,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-mutable-query-cache",
+          "arm": "cand",
+          "host_wall_seconds": 352.2077724019982,
+          "output_tokens": 10784,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-mutable-query-cache",
+          "arm": "main",
+          "host_wall_seconds": 368.5008128710033,
+          "output_tokens": 10882,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-root-fragments",
+          "arm": "cand",
+          "host_wall_seconds": 356.00993988499977,
+          "output_tokens": 9904,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-root-fragments",
+          "arm": "main",
+          "host_wall_seconds": 300.6838172610005,
+          "output_tokens": 7285,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-upsert-routing",
+          "arm": "cand",
+          "host_wall_seconds": 399.57563443000254,
+          "output_tokens": 9774,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-upsert-routing",
+          "arm": "main",
+          "host_wall_seconds": 445.9333263380031,
+          "output_tokens": 11281,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-zero-capacity-cache",
+          "arm": "cand",
+          "host_wall_seconds": 369.354534348,
+          "output_tokens": 8596,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-zero-capacity-cache",
+          "arm": "main",
+          "host_wall_seconds": 382.2760789590029,
+          "output_tokens": 8952,
+          "resolved": true,
+          "terminal": "complete"
+        }
+      ]
+    },
+    {
+      "id": "eval-2460-1109",
+      "note": "Literal task records with stable12-v2 noise; fast-cal main2 is only renamed cand for the comparison API. No guard or fingerprint is supplied or replaced.",
+      "summary": {
+        "set": "fast",
+        "tasks": [
+          "mechanism-m1",
+          "mechanism-m2",
+          "mechanism-m3",
+          "mechanism-m4",
+          "mechanism-m5",
+          "tinydb-cache-flush-boundary",
+          "tinydb-get-multiple-ids",
+          "tinydb-middleware-initialization",
+          "tinydb-mutable-query-cache",
+          "tinydb-root-fragments",
+          "tinydb-upsert-routing",
+          "tinydb-zero-capacity-cache"
+        ],
+        "complete": true,
+        "expected_cells": 24,
+        "published_cells": 24,
+        "evaluator_sha256": "d96fc716ff01d8759c30be1b0db1864f62b823d5629b9dba33b3990a397cefd8",
+        "engines": {
+          "cand": {
+            "commit": "238fe02e25bebca85059e9b1308c41c1cb3923fc",
+            "host_wall_seconds": 4929.728822874007,
+            "output_tokens": 114944,
+            "hidden_passes": 12,
+            "cells": 12,
+            "expected_cells": 12,
+            "hidden_results_available": 12,
+            "terminal_statuses": {
+              "clock": 0,
+              "complete": 12,
+              "failed": 0,
+              "incomplete": 0,
+              "parked": 0
+            },
+            "token_unknown_attempts": {
+              "cached_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "main": {
+            "commit": "66eded94084681c0ab2f2d345b7b205bcb208d04",
+            "host_wall_seconds": 4697.272484686022,
+            "output_tokens": 109973,
+            "hidden_passes": 12,
+            "cells": 12,
+            "expected_cells": 12,
+            "hidden_results_available": 12,
+            "terminal_statuses": {
+              "clock": 0,
+              "complete": 12,
+              "failed": 0,
+              "incomplete": 0,
+              "parked": 0
+            },
+            "token_unknown_attempts": {
+              "cached_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      "noise": {
+        "set": "fast",
+        "tasks": [
+          "mechanism-m1",
+          "mechanism-m2",
+          "mechanism-m3",
+          "mechanism-m4",
+          "mechanism-m5",
+          "tinydb-cache-flush-boundary",
+          "tinydb-get-multiple-ids",
+          "tinydb-middleware-initialization",
+          "tinydb-mutable-query-cache",
+          "tinydb-root-fragments",
+          "tinydb-upsert-routing",
+          "tinydb-zero-capacity-cache"
+        ],
+        "evaluator_sha256": "5eb0d8685167713f4aff7c0543e5ff5821d6f8c859844235929ebdc6798e26b5",
+        "source_arms": [
+          "main",
+          "main2"
+        ],
+        "metrics": {
+          "pooled_wall": 0.0662,
+          "pooled_output_tokens": 0.0716,
+          "hidden_passes": 1.0,
+          "complete_terminal_outcomes": 1.0
+        }
+      },
+      "expected": {
+        "keep": false,
+        "reason": "input_invalid",
+        "error": "noise evaluator fingerprint differs"
+      },
+      "cells": [
+        {
+          "task": "mechanism-m1",
+          "arm": "cand",
+          "host_wall_seconds": 382.3182494859939,
+          "output_tokens": 6362,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m1",
+          "arm": "main",
+          "host_wall_seconds": 373.5728225030034,
+          "output_tokens": 6222,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m2",
+          "arm": "cand",
+          "host_wall_seconds": 474.0868490389985,
+          "output_tokens": 9859,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m2",
+          "arm": "main",
+          "host_wall_seconds": 357.6995972949953,
+          "output_tokens": 7416,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m3",
+          "arm": "cand",
+          "host_wall_seconds": 360.4292475569964,
+          "output_tokens": 6725,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m3",
+          "arm": "main",
+          "host_wall_seconds": 370.6903379389987,
+          "output_tokens": 7300,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m4",
+          "arm": "cand",
+          "host_wall_seconds": 374.2226499519893,
+          "output_tokens": 7983,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m4",
+          "arm": "main",
+          "host_wall_seconds": 480.89270608300285,
+          "output_tokens": 10939,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m5",
+          "arm": "cand",
+          "host_wall_seconds": 384.1837921420083,
+          "output_tokens": 9391,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m5",
+          "arm": "main",
+          "host_wall_seconds": 386.27514744400105,
+          "output_tokens": 9085,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-cache-flush-boundary",
+          "arm": "cand",
+          "host_wall_seconds": 426.29040056900703,
+          "output_tokens": 9489,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-cache-flush-boundary",
+          "arm": "main",
+          "host_wall_seconds": 448.21731506701326,
+          "output_tokens": 9942,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-get-multiple-ids",
+          "arm": "cand",
+          "host_wall_seconds": 389.9743450899987,
+          "output_tokens": 9275,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-get-multiple-ids",
+          "arm": "main",
+          "host_wall_seconds": 362.2642182770069,
+          "output_tokens": 8251,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-middleware-initialization",
+          "arm": "cand",
+          "host_wall_seconds": 579.2714660490019,
+          "output_tokens": 16143,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-middleware-initialization",
+          "arm": "main",
+          "host_wall_seconds": 458.0763484880008,
+          "output_tokens": 13879,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-mutable-query-cache",
+          "arm": "cand",
+          "host_wall_seconds": 413.9335369850014,
+          "output_tokens": 11305,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-mutable-query-cache",
+          "arm": "main",
+          "host_wall_seconds": 392.4272517210047,
+          "output_tokens": 10209,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-root-fragments",
+          "arm": "cand",
+          "host_wall_seconds": 308.677923619005,
+          "output_tokens": 7863,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-root-fragments",
+          "arm": "main",
+          "host_wall_seconds": 333.89675468001224,
+          "output_tokens": 8841,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-upsert-routing",
+          "arm": "cand",
+          "host_wall_seconds": 469.10784084600164,
+          "output_tokens": 12690,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-upsert-routing",
+          "arm": "main",
+          "host_wall_seconds": 381.5925556909933,
+          "output_tokens": 10245,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-zero-capacity-cache",
+          "arm": "cand",
+          "host_wall_seconds": 367.2325215400051,
+          "output_tokens": 7859,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-zero-capacity-cache",
+          "arm": "main",
+          "host_wall_seconds": 351.66742949798936,
+          "output_tokens": 7644,
+          "resolved": true,
+          "terminal": "complete"
+        }
+      ]
+    },
+    {
+      "id": "fast-cal-1",
+      "note": "Literal task records with stable12-v2 noise; fast-cal main2 is only renamed cand for the comparison API. No guard or fingerprint is supplied or replaced.",
+      "summary": {
+        "set": "fast",
+        "tasks": [
+          "boltons-byte-chunks",
+          "boltons-cache-mapping",
+          "boltons-compiled-replacements",
+          "boltons-file-rotation",
+          "boltons-filled-windows",
+          "boltons-format-numbering",
+          "boltons-jsonl-seeking",
+          "mechanism-m1",
+          "mechanism-m2",
+          "mechanism-m3",
+          "mechanism-m4",
+          "mechanism-m5",
+          "sqlparse-begin-declare-splitting",
+          "sqlparse-cte-statement-type",
+          "sqlparse-nested-ordering",
+          "sqlparse-optimizer-hints",
+          "sqlparse-python-output-format",
+          "sqlparse-timezone-aliases",
+          "tinydb-cache-flush-boundary",
+          "tinydb-get-multiple-ids",
+          "tinydb-middleware-initialization",
+          "tinydb-mutable-query-cache",
+          "tinydb-root-fragments",
+          "tinydb-upsert-routing",
+          "tinydb-zero-capacity-cache"
+        ],
+        "complete": true,
+        "expected_cells": 50,
+        "published_cells": 50,
+        "evaluator_sha256": "5eb0d8685167713f4aff7c0543e5ff5821d6f8c859844235929ebdc6798e26b5",
+        "engines": {
+          "main": {
+            "commit": "9aa596b56c79a7923e4fdcc492d4ad86706cee80",
+            "host_wall_seconds": 13004.912043069024,
+            "output_tokens": 383336,
+            "hidden_passes": 24,
+            "cells": 25,
+            "expected_cells": 25,
+            "hidden_results_available": 25,
+            "terminal_statuses": {
+              "clock": 5,
+              "complete": 19,
+              "failed": 0,
+              "incomplete": 1,
+              "parked": 0
+            },
+            "token_unknown_attempts": {
+              "cached_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "cand": {
+            "commit": "9aa596b56c79a7923e4fdcc492d4ad86706cee80",
+            "host_wall_seconds": 12793.979962249927,
+            "output_tokens": 384797,
+            "hidden_passes": 24,
+            "cells": 25,
+            "expected_cells": 25,
+            "hidden_results_available": 25,
+            "terminal_statuses": {
+              "clock": 3,
+              "complete": 21,
+              "failed": 0,
+              "incomplete": 1,
+              "parked": 0
+            },
+            "token_unknown_attempts": {
+              "cached_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      "noise": {
+        "set": "fast",
+        "tasks": [
+          "mechanism-m1",
+          "mechanism-m2",
+          "mechanism-m3",
+          "mechanism-m4",
+          "mechanism-m5",
+          "tinydb-cache-flush-boundary",
+          "tinydb-get-multiple-ids",
+          "tinydb-middleware-initialization",
+          "tinydb-mutable-query-cache",
+          "tinydb-root-fragments",
+          "tinydb-upsert-routing",
+          "tinydb-zero-capacity-cache"
+        ],
+        "evaluator_sha256": "5eb0d8685167713f4aff7c0543e5ff5821d6f8c859844235929ebdc6798e26b5",
+        "source_arms": [
+          "main",
+          "main2"
+        ],
+        "metrics": {
+          "pooled_wall": 0.0662,
+          "pooled_output_tokens": 0.0716,
+          "hidden_passes": 1.0,
+          "complete_terminal_outcomes": 1.0
+        }
+      },
+      "expected": {
+        "keep": false,
+        "reason": "input_invalid",
+        "error": "noise belongs to another set/task selection"
+      },
+      "cells": [
+        {
+          "task": "boltons-byte-chunks",
+          "arm": "main",
+          "host_wall_seconds": 413.99885848903796,
+          "output_tokens": 10017,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "boltons-byte-chunks",
+          "arm": "cand",
+          "host_wall_seconds": 378.8237671009847,
+          "output_tokens": 8917,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "boltons-cache-mapping",
+          "arm": "main",
+          "host_wall_seconds": 648.7735284009832,
+          "output_tokens": 20848,
+          "resolved": false,
+          "terminal": "complete"
+        },
+        {
+          "task": "boltons-cache-mapping",
+          "arm": "cand",
+          "host_wall_seconds": 950.8090590579668,
+          "output_tokens": 31224,
+          "resolved": false,
+          "terminal": "complete"
+        },
+        {
+          "task": "boltons-compiled-replacements",
+          "arm": "main",
+          "host_wall_seconds": 985.3987080280203,
+          "output_tokens": 29174,
+          "resolved": true,
+          "terminal": "running"
+        },
+        {
+          "task": "boltons-compiled-replacements",
+          "arm": "cand",
+          "host_wall_seconds": 992.1974710319773,
+          "output_tokens": 31803,
+          "resolved": true,
+          "terminal": "running"
+        },
+        {
+          "task": "boltons-file-rotation",
+          "arm": "main",
+          "host_wall_seconds": 980.4461477469886,
+          "output_tokens": 29470,
+          "resolved": true,
+          "terminal": "running"
+        },
+        {
+          "task": "boltons-file-rotation",
+          "arm": "cand",
+          "host_wall_seconds": 397.38290772400796,
+          "output_tokens": 10208,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "boltons-filled-windows",
+          "arm": "main",
+          "host_wall_seconds": 360.6102497460088,
+          "output_tokens": 8825,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "boltons-filled-windows",
+          "arm": "cand",
+          "host_wall_seconds": 321.74844754103106,
+          "output_tokens": 7521,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "boltons-format-numbering",
+          "arm": "main",
+          "host_wall_seconds": 539.8876520580379,
+          "output_tokens": 16872,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "boltons-format-numbering",
+          "arm": "cand",
+          "host_wall_seconds": 634.6941542249988,
+          "output_tokens": 20433,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "boltons-jsonl-seeking",
+          "arm": "main",
+          "host_wall_seconds": 975.9128065699479,
+          "output_tokens": 31108,
+          "resolved": true,
+          "terminal": "running"
+        },
+        {
+          "task": "boltons-jsonl-seeking",
+          "arm": "cand",
+          "host_wall_seconds": 877.0274130619946,
+          "output_tokens": 29128,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m1",
+          "arm": "main",
+          "host_wall_seconds": 350.0746767409728,
+          "output_tokens": 8130,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m1",
+          "arm": "cand",
+          "host_wall_seconds": 305.45905303099426,
+          "output_tokens": 6921,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m2",
+          "arm": "main",
+          "host_wall_seconds": 342.42357228597393,
+          "output_tokens": 8773,
+          "resolved": true,
+          "terminal": "incomplete"
+        },
+        {
+          "task": "mechanism-m2",
+          "arm": "cand",
+          "host_wall_seconds": 377.24558212200645,
+          "output_tokens": 9703,
+          "resolved": true,
+          "terminal": "incomplete"
+        },
+        {
+          "task": "mechanism-m3",
+          "arm": "main",
+          "host_wall_seconds": 261.79578155098716,
+          "output_tokens": 6356,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m3",
+          "arm": "cand",
+          "host_wall_seconds": 238.14120093302336,
+          "output_tokens": 5434,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m4",
+          "arm": "main",
+          "host_wall_seconds": 383.28084228298394,
+          "output_tokens": 11468,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m4",
+          "arm": "cand",
+          "host_wall_seconds": 370.1551839259919,
+          "output_tokens": 10962,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m5",
+          "arm": "main",
+          "host_wall_seconds": 322.0933427680284,
+          "output_tokens": 8513,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "mechanism-m5",
+          "arm": "cand",
+          "host_wall_seconds": 337.7499113010126,
+          "output_tokens": 9504,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "sqlparse-begin-declare-splitting",
+          "arm": "main",
+          "host_wall_seconds": 962.0095601369976,
+          "output_tokens": 31293,
+          "resolved": true,
+          "terminal": "running"
+        },
+        {
+          "task": "sqlparse-begin-declare-splitting",
+          "arm": "cand",
+          "host_wall_seconds": 962.7799912629998,
+          "output_tokens": 31412,
+          "resolved": true,
+          "terminal": "running"
+        },
+        {
+          "task": "sqlparse-cte-statement-type",
+          "arm": "main",
+          "host_wall_seconds": 899.2394228370395,
+          "output_tokens": 28186,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "sqlparse-cte-statement-type",
+          "arm": "cand",
+          "host_wall_seconds": 707.9961727719638,
+          "output_tokens": 22655,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "sqlparse-nested-ordering",
+          "arm": "main",
+          "host_wall_seconds": 523.8595392790157,
+          "output_tokens": 17079,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "sqlparse-nested-ordering",
+          "arm": "cand",
+          "host_wall_seconds": 373.95132811402436,
+          "output_tokens": 10519,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "sqlparse-optimizer-hints",
+          "arm": "main",
+          "host_wall_seconds": 377.9172441769624,
+          "output_tokens": 10153,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "sqlparse-optimizer-hints",
+          "arm": "cand",
+          "host_wall_seconds": 540.4014642969705,
+          "output_tokens": 17166,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "sqlparse-python-output-format",
+          "arm": "main",
+          "host_wall_seconds": 456.7129681939841,
+          "output_tokens": 13927,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "sqlparse-python-output-format",
+          "arm": "cand",
+          "host_wall_seconds": 957.7758815129637,
+          "output_tokens": 32119,
+          "resolved": true,
+          "terminal": "running"
+        },
+        {
+          "task": "sqlparse-timezone-aliases",
+          "arm": "main",
+          "host_wall_seconds": 955.153444911004,
+          "output_tokens": 29961,
+          "resolved": true,
+          "terminal": "running"
+        },
+        {
+          "task": "sqlparse-timezone-aliases",
+          "arm": "cand",
+          "host_wall_seconds": 771.7529395609745,
+          "output_tokens": 25344,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-cache-flush-boundary",
+          "arm": "main",
+          "host_wall_seconds": 320.19584287900943,
+          "output_tokens": 8158,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-cache-flush-boundary",
+          "arm": "cand",
+          "host_wall_seconds": 330.78161553898826,
+          "output_tokens": 9234,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-get-multiple-ids",
+          "arm": "main",
+          "host_wall_seconds": 295.02107780001825,
+          "output_tokens": 7900,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-get-multiple-ids",
+          "arm": "cand",
+          "host_wall_seconds": 303.0516332309926,
+          "output_tokens": 7825,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-middleware-initialization",
+          "arm": "main",
+          "host_wall_seconds": 372.1681828610017,
+          "output_tokens": 11355,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-middleware-initialization",
+          "arm": "cand",
+          "host_wall_seconds": 383.8156304199947,
+          "output_tokens": 11641,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-mutable-query-cache",
+          "arm": "main",
+          "host_wall_seconds": 336.33846312598325,
+          "output_tokens": 9977,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-mutable-query-cache",
+          "arm": "cand",
+          "host_wall_seconds": 345.96777079900494,
+          "output_tokens": 10009,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-root-fragments",
+          "arm": "main",
+          "host_wall_seconds": 279.61530830000993,
+          "output_tokens": 7129,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-root-fragments",
+          "arm": "cand",
+          "host_wall_seconds": 281.19076852401486,
+          "output_tokens": 7143,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-upsert-routing",
+          "arm": "main",
+          "host_wall_seconds": 402.13714617001824,
+          "output_tokens": 11882,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-upsert-routing",
+          "arm": "cand",
+          "host_wall_seconds": 382.18314695201116,
+          "output_tokens": 11368,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-zero-capacity-cache",
+          "arm": "main",
+          "host_wall_seconds": 259.84767573000863,
+          "output_tokens": 6782,
+          "resolved": true,
+          "terminal": "complete"
+        },
+        {
+          "task": "tinydb-zero-capacity-cache",
+          "arm": "cand",
+          "host_wall_seconds": 270.89746820903383,
+          "output_tokens": 6604,
+          "resolved": true,
+          "terminal": "complete"
+        }
+      ]
+    },
+    {
+      "id": "sensitivity-input",
+      "note": "Recorded sensitivity input: task costs (100 versus 1) and noise are explicitly counterfactual; review receipts are historical. Current oracle contract is authoritative, including invalid historical receipts.",
+      "summary": {
+        "set": "review-sensitivity",
+        "tasks": [
+          "declared-cost-control"
+        ],
+        "complete": true,
+        "expected_cells": 2,
+        "published_cells": 2,
+        "evaluator_sha256": "c84618b7acff0aa28866807c13d2811e30e987191d986e7893971bd70064e8a6",
+        "engines": {
+          "main": {
+            "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b",
+            "host_wall_seconds": 100,
+            "output_tokens": 100,
+            "hidden_passes": 1,
+            "cells": 1,
+            "expected_cells": 1,
+            "hidden_results_available": 1,
+            "terminal_statuses": {
+              "complete": 1,
+              "incomplete": 0,
+              "failed": 0,
+              "parked": 0,
+              "clock": 0
+            },
+            "review_guard": {
+              "complete": true,
+              "program_sha256": "de99ec4ddef721a8348957e46d6a229efdbd28ea6838ee9d8ed74ad5d5fd2804",
+              "evaluator_sha256": "c84618b7acff0aa28866807c13d2811e30e987191d986e7893971bd70064e8a6",
+              "case_set_sha256": "fcd8086bc0027e5a789ea7f257beb0af9017cd8d598be943be1f8ce5f795625d",
+              "reject_count": 10,
+              "engine": {
+                "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b"
+              },
+              "cases": [
+                {
+                  "id": "m2-latin-only",
+                  "task": "mechanism-m2",
+                  "pass": false
+                },
+                {
+                  "id": "m3-unweighted",
+                  "task": "mechanism-m3",
+                  "pass": false
+                },
+                {
+                  "id": "m4-parser-only",
+                  "task": "mechanism-m4",
+                  "pass": false
+                },
+                {
+                  "id": "m5-falsy-default",
+                  "task": "mechanism-m5",
+                  "pass": false
+                },
+                {
+                  "id": "cache-late",
+                  "task": "tinydb-cache-flush-boundary",
+                  "pass": false
+                },
+                {
+                  "id": "ids-wrong-type",
+                  "task": "tinydb-get-multiple-ids",
+                  "pass": false
+                },
+                {
+                  "id": "middleware-partial",
+                  "task": "tinydb-middleware-initialization",
+                  "pass": false
+                },
+                {
+                  "id": "mutable-list-alias",
+                  "task": "tinydb-mutable-query-cache",
+                  "pass": false
+                },
+                {
+                  "id": "zero-keeps-one",
+                  "task": "tinydb-zero-capacity-cache",
+                  "pass": false
+                },
+                {
+                  "id": "fragment-any",
+                  "task": "tinydb-root-fragments",
+                  "pass": false
+                }
+              ]
+            }
+          },
+          "cand": {
+            "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b",
+            "host_wall_seconds": 1,
+            "output_tokens": 1,
+            "hidden_passes": 1,
+            "cells": 1,
+            "expected_cells": 1,
+            "hidden_results_available": 1,
+            "terminal_statuses": {
+              "complete": 1,
+              "incomplete": 0,
+              "failed": 0,
+              "parked": 0,
+              "clock": 0
+            },
+            "review_guard": {
+              "complete": true,
+              "program_sha256": "de99ec4ddef721a8348957e46d6a229efdbd28ea6838ee9d8ed74ad5d5fd2804",
+              "evaluator_sha256": "c84618b7acff0aa28866807c13d2811e30e987191d986e7893971bd70064e8a6",
+              "case_set_sha256": "fcd8086bc0027e5a789ea7f257beb0af9017cd8d598be943be1f8ce5f795625d",
+              "reject_count": 0,
+              "engine": {
+                "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b"
+              },
+              "cases": [
+                {
+                  "id": "m2-latin-only",
+                  "task": "mechanism-m2",
+                  "pass": true
+                },
+                {
+                  "id": "m3-unweighted",
+                  "task": "mechanism-m3",
+                  "pass": true
+                },
+                {
+                  "id": "m4-parser-only",
+                  "task": "mechanism-m4",
+                  "pass": true
+                },
+                {
+                  "id": "m5-falsy-default",
+                  "task": "mechanism-m5",
+                  "pass": true
+                },
+                {
+                  "id": "cache-late",
+                  "task": "tinydb-cache-flush-boundary",
+                  "pass": true
+                },
+                {
+                  "id": "ids-wrong-type",
+                  "task": "tinydb-get-multiple-ids",
+                  "pass": true
+                },
+                {
+                  "id": "middleware-partial",
+                  "task": "tinydb-middleware-initialization",
+                  "pass": true
+                },
+                {
+                  "id": "mutable-list-alias",
+                  "task": "tinydb-mutable-query-cache",
+                  "pass": true
+                },
+                {
+                  "id": "zero-keeps-one",
+                  "task": "tinydb-zero-capacity-cache",
+                  "pass": true
+                },
+                {
+                  "id": "fragment-any",
+                  "task": "tinydb-root-fragments",
+                  "pass": true
+                }
+              ]
+            }
+          }
+        }
+      },
+      "noise": {
+        "set": "review-sensitivity",
+        "tasks": [
+          "declared-cost-control"
+        ],
+        "evaluator_sha256": "c84618b7acff0aa28866807c13d2811e30e987191d986e7893971bd70064e8a6",
+        "source_arms": [
+          "main",
+          "main2"
+        ],
+        "metrics": {
+          "pooled_wall": 0.05,
+          "pooled_output_tokens": 0.05,
+          "hidden_passes": 1,
+          "complete_terminal_outcomes": 1
+        }
+      },
+      "expected": {
+        "keep": false,
+        "reason": "input_invalid",
+        "error": "'review_stage'"
+      }
+    },
+    {
+      "id": "frozen-decide-input-1109e",
+      "note": "Recorded sensitivity input: task costs (100 versus 1) and noise are explicitly counterfactual; review receipts are historical. Current oracle contract is authoritative, including invalid historical receipts.",
+      "summary": {
+        "set": "review-sensitivity",
+        "tasks": [
+          "declared-cost-control"
+        ],
+        "complete": true,
+        "expected_cells": 2,
+        "published_cells": 2,
+        "evaluator_sha256": "d96fc716ff01d8759c30be1b0db1864f62b823d5629b9dba33b3990a397cefd8",
+        "review_guard_program_sha256": "57ce71e6fc49a3c3b4b841a3c3ed3c9d0d6d448f7c9a40aa63f1d2f417eea12f",
+        "engines": {
+          "main": {
+            "commit": "66eded94084681c0ab2f2d345b7b205bcb208d04",
+            "host_wall_seconds": 100,
+            "output_tokens": 100,
+            "hidden_passes": 1,
+            "cells": 1,
+            "expected_cells": 1,
+            "hidden_results_available": 1,
+            "terminal_statuses": {
+              "complete": 1,
+              "incomplete": 0,
+              "failed": 0,
+              "parked": 0,
+              "clock": 0
+            },
+            "review_guard": {
+              "complete": true,
+              "program_sha256": "57ce71e6fc49a3c3b4b841a3c3ed3c9d0d6d448f7c9a40aa63f1d2f417eea12f",
+              "evaluator_sha256": "d96fc716ff01d8759c30be1b0db1864f62b823d5629b9dba33b3990a397cefd8",
+              "case_set_sha256": "fcd8086bc0027e5a789ea7f257beb0af9017cd8d598be943be1f8ce5f795625d",
+              "status": "measured",
+              "reject_count": 10,
+              "engine": {
+                "commit": "66eded94084681c0ab2f2d345b7b205bcb208d04"
+              },
+              "cases": [
+                {
+                  "id": "m2-latin-only",
+                  "task": "mechanism-m2",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "m3-unweighted",
+                  "task": "mechanism-m3",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "m4-parser-only",
+                  "task": "mechanism-m4",
+                  "review_stage": "review_full",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review_full",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "m5-falsy-default",
+                  "task": "mechanism-m5",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "cache-late",
+                  "task": "tinydb-cache-flush-boundary",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "ids-wrong-type",
+                  "task": "tinydb-get-multiple-ids",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "middleware-partial",
+                  "task": "tinydb-middleware-initialization",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "mutable-list-alias",
+                  "task": "tinydb-mutable-query-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "zero-keeps-one",
+                  "task": "tinydb-zero-capacity-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "fragment-any",
+                  "task": "tinydb-root-fragments",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                }
+              ]
+            }
+          },
+          "cand": {
+            "commit": "66eded94084681c0ab2f2d345b7b205bcb208d04",
+            "host_wall_seconds": 1,
+            "output_tokens": 1,
+            "hidden_passes": 1,
+            "cells": 1,
+            "expected_cells": 1,
+            "hidden_results_available": 1,
+            "terminal_statuses": {
+              "complete": 1,
+              "incomplete": 0,
+              "failed": 0,
+              "parked": 0,
+              "clock": 0
+            },
+            "review_guard": {
+              "complete": true,
+              "program_sha256": "57ce71e6fc49a3c3b4b841a3c3ed3c9d0d6d448f7c9a40aa63f1d2f417eea12f",
+              "evaluator_sha256": "d96fc716ff01d8759c30be1b0db1864f62b823d5629b9dba33b3990a397cefd8",
+              "case_set_sha256": "fcd8086bc0027e5a789ea7f257beb0af9017cd8d598be943be1f8ce5f795625d",
+              "status": "measured",
+              "reject_count": 0,
+              "engine": {
+                "commit": "66eded94084681c0ab2f2d345b7b205bcb208d04"
+              },
+              "cases": [
+                {
+                  "id": "m2-latin-only",
+                  "task": "mechanism-m2",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "m3-unweighted",
+                  "task": "mechanism-m3",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "m4-parser-only",
+                  "task": "mechanism-m4",
+                  "review_stage": "review_full",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review_full",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "m5-falsy-default",
+                  "task": "mechanism-m5",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "cache-late",
+                  "task": "tinydb-cache-flush-boundary",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "ids-wrong-type",
+                  "task": "tinydb-get-multiple-ids",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "middleware-partial",
+                  "task": "tinydb-middleware-initialization",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "mutable-list-alias",
+                  "task": "tinydb-mutable-query-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "zero-keeps-one",
+                  "task": "tinydb-zero-capacity-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "fragment-any",
+                  "task": "tinydb-root-fragments",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                }
+              ]
+            }
+          }
+        }
+      },
+      "noise": {
+        "set": "review-sensitivity",
+        "tasks": [
+          "declared-cost-control"
+        ],
+        "evaluator_sha256": "d96fc716ff01d8759c30be1b0db1864f62b823d5629b9dba33b3990a397cefd8",
+        "source_arms": [
+          "main",
+          "main2"
+        ],
+        "metrics": {
+          "pooled_wall": 0.05,
+          "pooled_output_tokens": 0.05,
+          "hidden_passes": 1,
+          "complete_terminal_outcomes": 1
+        }
+      },
+      "expected": {
+        "keep": false,
+        "reason": "guard_worse"
+      }
+    },
+    {
+      "id": "main-fix-v2--weak-fix-v3",
+      "note": "Explicit replay composition using counterfactual task costs/noise from the final sensitivity template; both original guard instrument identities retained. Not an actual paired task evaluation.",
+      "summary": {
+        "set": "review-sensitivity",
+        "tasks": [
+          "declared-cost-control"
+        ],
+        "complete": true,
+        "expected_cells": 2,
+        "published_cells": 2,
+        "evaluator_sha256": "96ba4e2e15a5388ec48442dfe5612ec916db68e1a3c379afc9d7b33ae1dd93bb",
+        "review_guard_program_sha256": "57ce71e6fc49a3c3b4b841a3c3ed3c9d0d6d448f7c9a40aa63f1d2f417eea12f",
+        "engines": {
+          "main": {
+            "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b",
+            "host_wall_seconds": 100,
+            "output_tokens": 100,
+            "hidden_passes": 1,
+            "cells": 1,
+            "expected_cells": 1,
+            "hidden_results_available": 1,
+            "terminal_statuses": {
+              "complete": 1,
+              "incomplete": 0,
+              "failed": 0,
+              "parked": 0,
+              "clock": 0
+            },
+            "review_guard": {
+              "complete": true,
+              "program_sha256": "d143b73a658000fb34dad3b3cb071a0a2d98a509b6dbfc9171fff6c20720b8e5",
+              "evaluator_sha256": "96ba4e2e15a5388ec48442dfe5612ec916db68e1a3c379afc9d7b33ae1dd93bb",
+              "case_set_sha256": "fcd8086bc0027e5a789ea7f257beb0af9017cd8d598be943be1f8ce5f795625d",
+              "status": "measured",
+              "reject_count": 10,
+              "engine": {
+                "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b"
+              },
+              "cases": [
+                {
+                  "id": "m2-latin-only",
+                  "task": "mechanism-m2",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "m3-unweighted",
+                  "task": "mechanism-m3",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "m4-parser-only",
+                  "task": "mechanism-m4",
+                  "review_stage": "review_full",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review_full",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "m5-falsy-default",
+                  "task": "mechanism-m5",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "cache-late",
+                  "task": "tinydb-cache-flush-boundary",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "ids-wrong-type",
+                  "task": "tinydb-get-multiple-ids",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "middleware-partial",
+                  "task": "tinydb-middleware-initialization",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "mutable-list-alias",
+                  "task": "tinydb-mutable-query-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "zero-keeps-one",
+                  "task": "tinydb-zero-capacity-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "fragment-any",
+                  "task": "tinydb-root-fragments",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                }
+              ]
+            }
+          },
+          "cand": {
+            "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b",
+            "host_wall_seconds": 1,
+            "output_tokens": 1,
+            "hidden_passes": 1,
+            "cells": 1,
+            "expected_cells": 1,
+            "hidden_results_available": 1,
+            "terminal_statuses": {
+              "complete": 1,
+              "incomplete": 0,
+              "failed": 0,
+              "parked": 0,
+              "clock": 0
+            },
+            "review_guard": {
+              "complete": true,
+              "program_sha256": "3395b4bf564a806d4a3b68ede07499acc571999cd1070be52a2aad808b84ee60",
+              "evaluator_sha256": "609dea86394f8445471c088ba8bd96f1263a08af1f9e12ae5159106a6ea9d5bb",
+              "case_set_sha256": "fcd8086bc0027e5a789ea7f257beb0af9017cd8d598be943be1f8ce5f795625d",
+              "status": "measured",
+              "reject_count": 0,
+              "engine": {
+                "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b"
+              },
+              "cases": [
+                {
+                  "id": "m2-latin-only",
+                  "task": "mechanism-m2",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "m3-unweighted",
+                  "task": "mechanism-m3",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "m4-parser-only",
+                  "task": "mechanism-m4",
+                  "review_stage": "review_full",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review_full",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "m5-falsy-default",
+                  "task": "mechanism-m5",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "cache-late",
+                  "task": "tinydb-cache-flush-boundary",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "ids-wrong-type",
+                  "task": "tinydb-get-multiple-ids",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "middleware-partial",
+                  "task": "tinydb-middleware-initialization",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "mutable-list-alias",
+                  "task": "tinydb-mutable-query-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "zero-keeps-one",
+                  "task": "tinydb-zero-capacity-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "fragment-any",
+                  "task": "tinydb-root-fragments",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                }
+              ]
+            }
+          }
+        }
+      },
+      "noise": {
+        "set": "review-sensitivity",
+        "tasks": [
+          "declared-cost-control"
+        ],
+        "evaluator_sha256": "96ba4e2e15a5388ec48442dfe5612ec916db68e1a3c379afc9d7b33ae1dd93bb",
+        "source_arms": [
+          "main",
+          "main2"
+        ],
+        "metrics": {
+          "pooled_wall": 0.05,
+          "pooled_output_tokens": 0.05,
+          "hidden_passes": 1,
+          "complete_terminal_outcomes": 1
+        }
+      },
+      "expected": {
+        "keep": false,
+        "reason": "guard_fingerprint_mismatch",
+        "error": "review guard program/evaluator fingerprints differ"
+      }
+    },
+    {
+      "id": "baseline-main--weak-fix-v3",
+      "note": "Explicit replay composition using counterfactual task costs/noise from the final sensitivity template; both original guard instrument identities retained. Not an actual paired task evaluation.",
+      "summary": {
+        "set": "review-sensitivity",
+        "tasks": [
+          "declared-cost-control"
+        ],
+        "complete": true,
+        "expected_cells": 2,
+        "published_cells": 2,
+        "evaluator_sha256": "aba7a22513bb4edd84a8ceaa2495dd22f7cc6b0c2401321f583cf0ee57a79664",
+        "review_guard_program_sha256": "57ce71e6fc49a3c3b4b841a3c3ed3c9d0d6d448f7c9a40aa63f1d2f417eea12f",
+        "engines": {
+          "main": {
+            "commit": "66eded94084681c0ab2f2d345b7b205bcb208d04",
+            "host_wall_seconds": 100,
+            "output_tokens": 100,
+            "hidden_passes": 1,
+            "cells": 1,
+            "expected_cells": 1,
+            "hidden_results_available": 1,
+            "terminal_statuses": {
+              "complete": 1,
+              "incomplete": 0,
+              "failed": 0,
+              "parked": 0,
+              "clock": 0
+            },
+            "review_guard": {
+              "complete": true,
+              "program_sha256": "6bdebf68f22d09963227b914775321e1d5f47a48c5d71a87d39dc09ed834f464",
+              "evaluator_sha256": "aba7a22513bb4edd84a8ceaa2495dd22f7cc6b0c2401321f583cf0ee57a79664",
+              "case_set_sha256": "fcd8086bc0027e5a789ea7f257beb0af9017cd8d598be943be1f8ce5f795625d",
+              "status": "measured",
+              "reject_count": 10,
+              "engine": {
+                "commit": "66eded94084681c0ab2f2d345b7b205bcb208d04"
+              },
+              "cases": [
+                {
+                  "id": "m2-latin-only",
+                  "task": "mechanism-m2",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "m3-unweighted",
+                  "task": "mechanism-m3",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "m4-parser-only",
+                  "task": "mechanism-m4",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "m5-falsy-default",
+                  "task": "mechanism-m5",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "cache-late",
+                  "task": "tinydb-cache-flush-boundary",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "ids-wrong-type",
+                  "task": "tinydb-get-multiple-ids",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "middleware-partial",
+                  "task": "tinydb-middleware-initialization",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "mutable-list-alias",
+                  "task": "tinydb-mutable-query-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "zero-keeps-one",
+                  "task": "tinydb-zero-capacity-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                },
+                {
+                  "id": "fragment-any",
+                  "task": "tinydb-root-fragments",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": false
+                }
+              ]
+            }
+          },
+          "cand": {
+            "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b",
+            "host_wall_seconds": 1,
+            "output_tokens": 1,
+            "hidden_passes": 1,
+            "cells": 1,
+            "expected_cells": 1,
+            "hidden_results_available": 1,
+            "terminal_statuses": {
+              "complete": 1,
+              "incomplete": 0,
+              "failed": 0,
+              "parked": 0,
+              "clock": 0
+            },
+            "review_guard": {
+              "complete": true,
+              "program_sha256": "3395b4bf564a806d4a3b68ede07499acc571999cd1070be52a2aad808b84ee60",
+              "evaluator_sha256": "609dea86394f8445471c088ba8bd96f1263a08af1f9e12ae5159106a6ea9d5bb",
+              "case_set_sha256": "fcd8086bc0027e5a789ea7f257beb0af9017cd8d598be943be1f8ce5f795625d",
+              "status": "measured",
+              "reject_count": 0,
+              "engine": {
+                "commit": "6e94a3cb4e231242387c6e6cfabee7ae85db829b"
+              },
+              "cases": [
+                {
+                  "id": "m2-latin-only",
+                  "task": "mechanism-m2",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "m3-unweighted",
+                  "task": "mechanism-m3",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "m4-parser-only",
+                  "task": "mechanism-m4",
+                  "review_stage": "review_full",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review_full",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "m5-falsy-default",
+                  "task": "mechanism-m5",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "cache-late",
+                  "task": "tinydb-cache-flush-boundary",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "ids-wrong-type",
+                  "task": "tinydb-get-multiple-ids",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "middleware-partial",
+                  "task": "tinydb-middleware-initialization",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "mutable-list-alias",
+                  "task": "tinydb-mutable-query-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "zero-keeps-one",
+                  "task": "tinydb-zero-capacity-cache",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                },
+                {
+                  "id": "fragment-any",
+                  "task": "tinydb-root-fragments",
+                  "review_stage": "review",
+                  "sessions": [
+                    {
+                      "stage": "assess",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-0"
+                    },
+                    {
+                      "stage": "review",
+                      "model": "gpt-6.1-sol",
+                      "reasoning_effort": "high",
+                      "source": "recorded-session-1"
+                    }
+                  ],
+                  "pass": true
+                }
+              ]
+            }
+          }
+        }
+      },
+      "noise": {
+        "set": "review-sensitivity",
+        "tasks": [
+          "declared-cost-control"
+        ],
+        "evaluator_sha256": "aba7a22513bb4edd84a8ceaa2495dd22f7cc6b0c2401321f583cf0ee57a79664",
+        "source_arms": [
+          "main",
+          "main2"
+        ],
+        "metrics": {
+          "pooled_wall": 0.05,
+          "pooled_output_tokens": 0.05,
+          "hidden_passes": 1,
+          "complete_terminal_outcomes": 1
+        }
+      },
+      "expected": {
+        "keep": false,
+        "reason": "guard_fingerprint_mismatch",
+        "error": "review guard program/evaluator fingerprints differ"
+      }
+    }
+  ]
+}

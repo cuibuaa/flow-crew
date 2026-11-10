@@ -38,6 +38,11 @@ export function appendResearchPathContract(
   terminalStates: TerminalStatesConfig | undefined,
 ): string {
   if (!research) return prompt;
+  if (research.measurement) return `${prompt}\n\n# Engine-owned research instrument\n`
+    + `Edit only the admitted candidate inputs: ${research.measurement.candidate.join(', ')}. The engine snapshots and measures them after independent review. `
+    + `The frozen command, dependencies and environment are retained outside your write capabilities. Producer result files and spread estimates do not enter selection. `
+    + `Read the research journal to choose the next candidate. Code applies calibrated paired noise, every structured guard and the held-out allowance; it restores the measured best after rejection. `
+    + `Terminal producers must follow research_decision.json. The framework owns the manifest and all instrument/observation records.`;
   const paths = resolveResearchPaths(research);
   const terminalPaths = Object.values(terminalStates ?? {}).flatMap((entry) => entry.paths);
   return `${prompt}\n\n# Resolved research paths (scheduler-owned)\n`

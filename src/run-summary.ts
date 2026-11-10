@@ -261,6 +261,7 @@ function renderRoundsSection(data: ResearchData): string {
   const shown = data.rounds.slice(-MAX);
   const lines = shown.map((r) => r.outcome === 'no_candidate'
     ? `- ${r.label}: no candidate${r.reason ? ` — ${r.reason}` : ''}`
+    : r.outcome === 'unmeasured' ? `- ${r.label}: unmeasured — ${r.measurement?.detail ?? r.reason ?? 'measurement unavailable'}`
     : `- ${r.label}: ${typeof r.result === 'number' ? fmtNum(r.result) : 'invalid measurement'}${kept.has(r.label) ? ' ✓ kept' : ''}`);
   let out = `## Rounds (${data.rounds.length})\n${lines.join('\n')}`;
   if (data.rounds.length > MAX) out = `## Rounds (${data.rounds.length}, showing last ${MAX})\n${lines.join('\n')}`;
