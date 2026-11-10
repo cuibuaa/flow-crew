@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join, relative } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { artifactDeclarationFindings } from '../src/artifact-declarations.js';
+import { artifactDeclarationFindings, producesEngineOwnedArtifact } from '../src/artifact-declarations.js';
 import { fcGlobalDir, setFcGlobalDir, ensureGlobalRunsDir, runsRoot, campaignsRoot } from '../src/store.js';
+import { EngineStateError, withEngineIntegrity } from '../src/engine-integrity.js';
 import { stageWorkPath } from '../src/run-layout.js';
 import { createRun } from './test-support/create-run.js';
 
@@ -148,6 +149,7 @@ it('protects the current runs target while preserving the configured write spell
 it('imports and configures the store without inspecting configured paths', () => {
   const blocker = join(root, 'not-a-directory'); writeFileSync(blocker, 'data');
   const state = join(blocker, 'initial'), next = join(blocker, 'next');
+  const home = join(root, 'import-home'); mkdirSync(home);
   const script = `
     import fs from 'node:fs';
     import { syncBuiltinESMExports } from 'node:module';
@@ -169,15 +171,15 @@ it('imports and configures the store without inspecting configured paths', () =>
   `;
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('FC_')));
   const output = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
-    cwd: process.cwd(), env: { ...env, FC_HOME: state, NEXT_FC_HOME: next, FC_HOME_PARENT: blocker },
+    cwd: process.cwd(), env: { ...env, HOME: home, FC_HOME: state, NEXT_FC_HOME: next, FC_HOME_PARENT: blocker },
     encoding: 'utf8', timeout: 15000,
   });
   expect(JSON.parse(output.trim())).toEqual([]);
 });
 
 it.each(['store', 'runs'].flatMap(route =>
-  ['file', 'file-parent', 'permission', 'loop'].map(failure => ({ route, failure }))))(
-  'refuses and records $failure resolving the configured $route at judgment time', ({ route, failure }) => {
+  ['file', 'file-parent', 'permission', 'loop', 'eloop'].map(failure => ({ route, failure }))))(
+  'refuses and records $failure resolving the configured $route at judgment time', async ({ route, failure }) => {
     const bad = join(root, 'unresolvable');
     let target = bad;
     if (failure === 'file' || failure === 'file-parent') {
@@ -191,22 +193,38 @@ it.each(['store', 'runs'].flatMap(route =>
     const directory = join(project, 'ordinary-directory'); mkdirSync(directory);
     const original = fs.lstatSync;
     fs.lstatSync = ((...args: Parameters<typeof original>) => {
-      if (failure === 'permission' && String(args[0]) === bad) {
-        throw Object.assign(new Error(`EACCES: permission denied, lstat '${bad}'`), { code: 'EACCES' });
+      if ((failure === 'permission' || failure === 'eloop') && String(args[0]) === bad) {
+        const code = failure === 'permission' ? 'EACCES' : 'ELOOP';
+        throw Object.assign(new Error(`${code}: cannot resolve '${bad}'`), { code });
       }
       return original(...args);
     }) as typeof original;
     syncBuiltinESMExports();
     try {
       expect(() => setFcGlobalDir(state)).not.toThrow();
-      const reason = failure === 'permission' ? 'EACCES' : failure === 'loop' ? 'SYMLINK_LOOP' : 'NOT_DIRECTORY';
+      const reason = failure === 'permission' ? 'EACCES' : failure === 'eloop' ? 'ELOOP' : failure === 'loop' ? 'ARTIFACT_PATH_SYMLINK_LOOP' : 'ARTIFACT_PATH_NOT_DIRECTORY';
       for (const [output, kind] of [[candidate, 'file'], [directory, 'directory']] as const) {
+        const reasons: string[] = [];
+        let owned = false;
+        expect(() => {
+          owned = producesEngineOwnedArtifact({ id: 'result', root: 'project', path: relative(project, output), kind },
+            { id: 'work', depends_on: [] }, run, project, reason => reasons.push(reason));
+        }).not.toThrow();
+        expect(owned).toBe(true);
+        expect(reasons).toEqual([expect.stringContaining(reason)]);
         let result: ReturnType<typeof findings> = [];
         expect(() => { result = findings(output, kind); }).not.toThrow();
         expect(result).toContainEqual(expect.objectContaining({
           code: 'artifact_contract', field: `artifact_contract.produces.project:${relative(project, output)}`,
           message: expect.stringContaining(reason),
         }));
+        let invoked = false;
+        const guarded = withEngineIntegrity({ projectDir: project, runDir: run, stageId: 'work',
+          artifactContract: { ...contract, produces: [{ id: 'result', root: 'project', path: relative(project, output), kind }] },
+        }, async () => { invoked = true; });
+        await expect(guarded).rejects.toBeInstanceOf(EngineStateError);
+        await expect(guarded).rejects.toThrow(reason);
+        expect(invoked).toBe(false);
       }
       expect(readFileSync(candidate, 'utf8')).toBe('stage data');
     } finally { fs.lstatSync = original; syncBuiltinESMExports(); }

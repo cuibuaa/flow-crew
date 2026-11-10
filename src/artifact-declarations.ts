@@ -110,82 +110,87 @@ export function artifactProducerReadError(read: ArtifactRead, producer: Artifact
   return undefined;
 }
 
-export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces'][number], _stage: ArtifactPlanStage, runDirectory?: string, projectDirectory?: string): boolean {
-  if (artifact.root === 'run' && isReservedRunPath(artifact.path)) return true;
-  if (!runDirectory || (artifact.root === 'project' && !projectDirectory)) return false;
-  const runRoot = realpathSync(runDirectory);
-  const workRoot = join(runRoot, 'work');
-  const stateRoots = [fcGlobalDir(), runsRoot(), runRoot].map(physicalRoot);
-  const projectRoot = projectDirectory && realpathSync(projectDirectory);
-  const writableRoots = [...(projectRoot ? [projectRoot] : []), workRoot];
-  const ownedByRun = (target: string): boolean =>
-    stateRoots.some(root => withinPhysicalRoot(root, target)
-      && !(contained(root.path, runRoot) && contained(workRoot, target)))
-    || !writableRoots.some(root => contained(root, target));
-  const root = artifact.root === 'run' ? runRoot : projectRoot!;
-  const output = resolve(root, artifact.path);
-  if (artifact.kind === 'directory' && (stateRoots.some(root => contained(prospectivePhysicalPath(output), root.path))
-    || containsEngineOwnedGlobalPath(prospectivePhysicalPath(output), fcGlobalDir()))) return true;
-  const paths = [output], visitedDirectories = new Set<string>(), outputInodes = new Set<string>();
-  const linkedOutputs = new Set<string>();
-  while (paths.length) {
-    const path = paths.pop()!, target = prospectivePhysicalPath(path);
-    if (ownedByRun(target)) return true;
-    if (isEngineOwnedGlobalPath(target, fcGlobalDir())) return true;
-    let entry;
-    try { entry = statSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (entry?.isFile()) {
-      outputInodes.add(`${entry.dev}:${entry.ino}`);
-      if (entry.nlink > 1) linkedOutputs.add(target);
+export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces'][number], _stage: ArtifactPlanStage, runDirectory?: string, projectDirectory?: string, recordRefusal?: (reason: string) => void): boolean {
+  try {
+    if (artifact.root === 'run' && isReservedRunPath(artifact.path)) return true;
+    if (!runDirectory || (artifact.root === 'project' && !projectDirectory)) return false;
+    const runRoot = realpathSync(runDirectory);
+    const workRoot = join(runRoot, 'work');
+    const stateRoots = [fcGlobalDir(), runsRoot(), runRoot].map(physicalRoot);
+    const projectRoot = projectDirectory && realpathSync(projectDirectory);
+    const writableRoots = [...(projectRoot ? [projectRoot] : []), workRoot];
+    const ownedByRun = (target: string): boolean =>
+      stateRoots.some(root => withinPhysicalRoot(root, target)
+        && !(contained(root.path, runRoot) && contained(workRoot, target)))
+      || !writableRoots.some(root => contained(root, target));
+    const root = artifact.root === 'run' ? runRoot : projectRoot!;
+    const output = resolve(root, artifact.path);
+    if (artifact.kind === 'directory' && (stateRoots.some(root => contained(prospectivePhysicalPath(output), root.path))
+      || containsEngineOwnedGlobalPath(prospectivePhysicalPath(output), fcGlobalDir()))) return true;
+    const paths = [output], visitedDirectories = new Set<string>(), outputInodes = new Set<string>();
+    const linkedOutputs = new Set<string>();
+    while (paths.length) {
+      const path = paths.pop()!, target = prospectivePhysicalPath(path);
+      if (ownedByRun(target)) return true;
+      if (isEngineOwnedGlobalPath(target, fcGlobalDir())) return true;
+      let entry;
+      try { entry = statSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (entry?.isFile()) {
+        outputInodes.add(`${entry.dev}:${entry.ino}`);
+        if (entry.nlink > 1) linkedOutputs.add(target);
+      }
+      if (artifact.kind === 'directory' && entry?.isDirectory() && !visitedDirectories.has(target)) {
+        visitedDirectories.add(target);
+        paths.push(...readdirSync(path).map((name) => join(path, name)));
+      }
     }
-    if (artifact.kind === 'directory' && entry?.isDirectory() && !visitedDirectories.has(target)) {
-      visitedDirectories.add(target);
-      paths.push(...readdirSync(path).map((name) => join(path, name)));
-    }
-  }
-  const globalCarriers = engineOwnedGlobalCarriers(fcGlobalDir());
-  for (const path of globalCarriers) {
-    try {
-      if (artifact.kind === 'directory' && contained(output, realpathSync(path))) return true;
-      const carrier = statSync(path);
-      if (outputInodes.has(`${carrier.dev}:${carrier.ino}`)) return true;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  }
-  // Count physical entries only across the project and this run's own work.
-  // Unaccounted links may belong to any foreign location.
-  if (!linkedOutputs.size) return false;
-  const writableLinks = new Map<string, number>();
-  const folders = [...writableRoots];
-  visitedDirectories.clear();
-  while (folders.length) {
-    const folder = folders.pop()!;
-    if (visitedDirectories.has(folder)) continue;
-    visitedDirectories.add(folder);
-    try { if (!lstatSync(folder).isDirectory()) continue; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
-    if (ownedByRun(folder) || isEngineOwnedGlobalPath(folder, fcGlobalDir())) continue;
-    let entries;
-    try { entries = readdirSync(folder, { withFileTypes: true }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
-    for (const entry of entries) {
-      const path = join(folder, entry.name);
+    const globalCarriers = engineOwnedGlobalCarriers(fcGlobalDir());
+    for (const path of globalCarriers) {
       try {
-        const file = lstatSync(path);
-        if (file.isDirectory()) folders.push(path);
-        else if (file.isFile() && !ownedByRun(path) && !isEngineOwnedGlobalPath(path, fcGlobalDir())) {
-          const inode = `${file.dev}:${file.ino}`;
-          if (outputInodes.has(inode)) writableLinks.set(inode, (writableLinks.get(inode) ?? 0) + 1);
-        }
+        if (artifact.kind === 'directory' && contained(output, realpathSync(path))) return true;
+        const carrier = statSync(path);
+        if (outputInodes.has(`${carrier.dev}:${carrier.ino}`)) return true;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     }
+    // Count physical entries only across the project and this run's own work.
+    // Unaccounted links may belong to any foreign location.
+    if (!linkedOutputs.size) return false;
+    const writableLinks = new Map<string, number>();
+    const folders = [...writableRoots];
+    visitedDirectories.clear();
+    while (folders.length) {
+      const folder = folders.pop()!;
+      if (visitedDirectories.has(folder)) continue;
+      visitedDirectories.add(folder);
+      try { if (!lstatSync(folder).isDirectory()) continue; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+      if (ownedByRun(folder) || isEngineOwnedGlobalPath(folder, fcGlobalDir())) continue;
+      let entries;
+      try { entries = readdirSync(folder, { withFileTypes: true }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+      for (const entry of entries) {
+        const path = join(folder, entry.name);
+        try {
+          const file = lstatSync(path);
+          if (file.isDirectory()) folders.push(path);
+          else if (file.isFile() && !ownedByRun(path) && !isEngineOwnedGlobalPath(path, fcGlobalDir())) {
+            const inode = `${file.dev}:${file.ino}`;
+            if (outputInodes.has(inode)) writableLinks.set(inode, (writableLinks.get(inode) ?? 0) + 1);
+          }
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
+    }
+    for (const path of linkedOutputs) {
+      try {
+        const file = statSync(path);
+        if (file.nlink > (writableLinks.get(`${file.dev}:${file.ino}`) ?? 0)) return true;
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+    return false;
+  } catch (error) {
+    recordRefusal?.(String(error));
+    return true;
   }
-  for (const path of linkedOutputs) {
-    try {
-      const file = statSync(path);
-      if (file.nlink > (writableLinks.get(`${file.dev}:${file.ino}`) ?? 0)) return true;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  }
-  return false;
 }
 
 /** No prompt/script parsing participates in this admission boundary. */
@@ -222,9 +227,8 @@ export function artifactDeclarationFindings(input: {
       }
     }
     for (const artifact of contract.produces) {
-      let frameworkOwned = false;
-      try { frameworkOwned = producesEngineOwnedArtifact(artifact, stage, input.runDir, input.projectDir); }
-      catch (error) { add(`${stage.id}.${artifact.id}: ${String(error)}`, artifactField(artifact, 'produces')); }
+      const frameworkOwned = producesEngineOwnedArtifact(artifact, stage, input.runDir, input.projectDir,
+        reason => add(`${stage.id}.${artifact.id}: ${reason}`, artifactField(artifact, 'produces')));
       if (frameworkOwned) add(`ARTIFACT_FRAMEWORK_PATH: ${stage.id}.${artifact.id} cannot produce engine-owned evidence ${artifact.path}`, artifactField(artifact, 'produces'));
       if (artifact.root === 'run') for (const other of input.stages) {
         if (other.id === stage.id || ancestor(stage, other.id) || ancestor(other, stage.id)) continue;

@@ -232,6 +232,15 @@ export interface EngineExecution {
 /** Storage topology plus an in-memory digest ledger; no child path grants,
  * permissions beyond those of an ordinary child process. */
 export async function withEngineIntegrity<T>(input: EngineExecution, action: () => Promise<T>): Promise<T> {
+  // Preserve output confinement, then judge ownership before resolving configuration here.
+  const outputs = input.runDir ? (input.artifactContract?.produces ?? []).map(artifact => {
+    const output = resolveArtifactLocation(artifact, input.projectDir, input.runDir!);
+    let refusalReason = '';
+    if (producesEngineOwnedArtifact(artifact, { id: input.stageId, depends_on: [] }, input.runDir, input.projectDir, reason => { refusalReason = reason; })) {
+      throw new EngineStateError(`ENGINE_STATE_REFUSED: output contains an engine carrier: ${artifact.path}${refusalReason ? `: ${refusalReason}` : ''}`);
+    }
+    return { artifact, output };
+  }) : [];
   const project = prospectivePhysicalPath(resolve(input.projectDir));
   const run = input.runDir && prospectivePhysicalPath(resolve(input.runDir));
   const store = prospectivePhysicalPath(resolve(fcGlobalDir()));
@@ -251,11 +260,7 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
   const roots = [engine, run && join(run, 'run.json'), run && join(run, 'events.jsonl'), distribution]
     .filter((root): root is string => Boolean(root));
   if (run) {
-    for (const artifact of input.artifactContract?.produces ?? []) {
-      const output = resolveArtifactLocation(artifact, project, run);
-      if (producesEngineOwnedArtifact(artifact, { id: input.stageId, depends_on: [] }, run, project)) {
-        throw new EngineStateError(`ENGINE_STATE_REFUSED: output contains an engine carrier: ${artifact.path}`);
-      }
+    for (const { artifact, output } of outputs) {
       if (artifact.root !== 'run') continue;
       publishEngineFile(artifact.kind === 'directory' ? output : dirname(output), () => mkdirSync(artifact.kind === 'directory' ? output : dirname(output), { recursive: true }));
     }
