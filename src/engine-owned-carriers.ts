@@ -102,19 +102,20 @@ export function isReservedRunPath(path: string): boolean {
   return local !== '/work' && !local.startsWith('/work/');
 }
 
-/** Capture trusted configuration, never metadata from a proposed output. */
+/** Resolve current trusted configuration at admission, never candidate metadata. */
 export function physicalRoot(path: string): { path: string; dev?: bigint; ino?: bigint } {
   path = prospectivePhysicalPath(resolve(path));
   try {
-    const { dev, ino } = statSync(path, { bigint: true });
-    return { path, dev, ino };
+    const entry = statSync(path, { bigint: true });
+    if (!entry.isDirectory()) throw new Error(`ARTIFACT_PATH_NOT_DIRECTORY: ${path} is not a directory`);
+    return { path, dev: entry.dev, ino: entry.ino };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     return { path };
   }
 }
 
-/** Real paths cover symlinks; identities also cover a renamed state directory. */
+/** Compare current physical paths and ancestor device/inode identities. */
 export function withinPhysicalRoot(root: ReturnType<typeof physicalRoot>, target: string): boolean {
   const local = relative(root.path, target);
   if (local === '' || (!isAbsolute(local) && local !== '..' && !local.startsWith(`..${sep}`))) return true;

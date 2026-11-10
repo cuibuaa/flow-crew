@@ -1,5 +1,4 @@
 import { classifyEnding, type EndingCause } from './attempt-ending.js';
-import { physicalRoot } from './engine-owned-carriers.js';
 import { runRecordPath, engineDirectory, stageWorkPath, requestPath, controlPath, hasSeparatedRunLayout } from './run-layout.js';
 import { processLiveness } from './process-liveness.js';
 import { resolveCampaignStorageKey } from './campaigns.js';
@@ -645,12 +644,6 @@ export const FC_DIR = '.fc';
 // disciplinary). The env var works when set before module load; the setter
 // covers callers inside an already-loaded process (the CLI's rehearse path).
 let _fcGlobalDir = process.env.FC_HOME ? process.env.FC_HOME : join(homedir(), FC_DIR);
-let ownStateRoots = [_fcGlobalDir, join(_fcGlobalDir, 'runs')].map(physicalRoot);
-
-/** Physical identities for ownership comparisons only; never used to route writes. */
-export function configuredStateRoots(): ReturnType<typeof physicalRoot>[] {
-  return ownStateRoots;
-}
 
 export function fcGlobalDir(): string {
   return _fcGlobalDir;
@@ -658,7 +651,6 @@ export function fcGlobalDir(): string {
 
 export function setFcGlobalDir(path: string): void {
   _fcGlobalDir = path;
-  ownStateRoots = [_fcGlobalDir, join(_fcGlobalDir, 'runs')].map(physicalRoot);
 }
 
 export function runsRoot(_projectDir?: string): string {
@@ -945,7 +937,6 @@ export function extractTaskTitle(desc?: string): string {
 
 export function ensureGlobalRunsDir(): void {
   mkdirSync(runsRoot(), { recursive: true });
-  ownStateRoots = ownStateRoots.map(root => root.ino === undefined ? physicalRoot(root.path) : root);
 }
 
 export function runDir(projectDir: string, runId: string): string {

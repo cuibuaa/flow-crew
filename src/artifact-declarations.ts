@@ -7,7 +7,7 @@ import { ArtifactPathSchema, resolveArtifactLocation, artifactRootContains as co
 export { ArtifactPathSchema, resolveArtifactLocation } from './artifact-location.js';
 export type { ArtifactLocation } from './artifact-location.js';
 import type { StageStatus } from './store.js';
-import { configuredStateRoots, fcGlobalDir, STAGE_STATUS } from './store.js';
+import { fcGlobalDir, runsRoot, STAGE_STATUS } from './store.js';
 import { physicalRoot, withinPhysicalRoot, containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isReservedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
@@ -115,7 +115,7 @@ export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces
   if (!runDirectory || (artifact.root === 'project' && !projectDirectory)) return false;
   const runRoot = realpathSync(runDirectory);
   const workRoot = join(runRoot, 'work');
-  const stateRoots = [...configuredStateRoots(), physicalRoot(runRoot)];
+  const stateRoots = [fcGlobalDir(), runsRoot(), runRoot].map(physicalRoot);
   const projectRoot = projectDirectory && realpathSync(projectDirectory);
   const writableRoots = [...(projectRoot ? [projectRoot] : []), workRoot];
   const ownedByRun = (target: string): boolean =>

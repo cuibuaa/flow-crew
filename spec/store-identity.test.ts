@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join, relative } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { artifactDeclarationFindings } from '../src/artifact-declarations.js';
@@ -53,7 +54,7 @@ it('protects configured runs storage reached through a symlink outside FC_HOME',
   refused(runs, 'directory');
 });
 
-it('keeps the configured root physical identity after its symlink spelling changes', () => {
+it('judges the configured root alias at its current target on every admission', () => {
   const state = join(project, 'state'), ordinary = join(project, 'ordinary'), alias = join(root, 'config-alias');
   mkdirSync(state); mkdirSync(ordinary); symlinkSync(state, alias, 'dir');
   setFcGlobalDir(alias); ensureGlobalRunsDir();
@@ -63,16 +64,21 @@ it('keeps the configured root physical identity after its symlink spelling chang
   const record = join(state, 'record'); writeFileSync(record, 'engine state');
   refused(record);
   rmSync(alias); symlinkSync(ordinary, alias, 'dir');
-  refused(record);
-  const output = join(ordinary, 'result'); writeFileSync(output, 'ordinary data');
-  expect(findings(output)).toEqual([]);
+  const output = join(ordinary, 'result'); writeFileSync(output, 'engine state');
+  refused(output);
+  refused(join(ordinary, 'future-record'));
+  refused(ordinary, 'directory');
+  expect(findings(record)).toEqual([]);
 });
 
-it('protects a renamed state directory by device and inode without reading records', () => {
+it('judges a renamed state directory only at its currently configured location', () => {
   const state = join(project, 'state'), moved = join(project, 'retained-state');
   setFcGlobalDir(state); ensureGlobalRunsDir();
   const record = join(state, 'record'); writeFileSync(record, 'engine state');
+  refused(record);
   renameSync(state, moved);
+  expect(findings(join(moved, 'record'))).toEqual([]);
+  setFcGlobalDir(moved);
   refused(join(moved, 'record'));
   refused(join(moved, 'uncreated', 'record'));
   expect(readFileSync(join(moved, 'record'), 'utf8')).toBe('engine state');
@@ -120,17 +126,88 @@ it('refuses this engine state configured inside its own work tree', () => {
   }
 });
 
-it('uses the configured runs spelling after its symlink is retargeted', () => {
+it('protects the current runs target while preserving the configured write spelling', () => {
   const state = join(root, 'state'), first = join(project, 'first-runs'), second = join(project, 'second-runs');
   mkdirSync(state); mkdirSync(first); mkdirSync(second);
   const alias = join(state, 'runs'); symlinkSync(first, alias, 'dir');
   setFcGlobalDir(state);
+  refused(join(first, 'future-record'));
   rmSync(alias); symlinkSync(second, alias, 'dir');
   const created = createRun(project, 'fixture', 'name: fixture\nstages: []\n', ['work']);
   expect(dirname(created.runDirPath)).toBe(alias);
   expect(existsSync(join(second, created.runId, 'run.json'))).toBe(true);
   expect(existsSync(join(first, created.runId))).toBe(false);
-  refused(join(first, 'future-record'));
-  const output = join(second, 'ordinary-result'); writeFileSync(output, 'ordinary data');
-  expect(findings(output)).toEqual([]);
+  refused(join(second, created.runId, 'run.json'));
+  refused(join(second, created.runId), 'directory');
+  refused(join(second, 'future-record'));
+  const output = join(second, 'ordinary-result'); writeFileSync(output, 'engine state');
+  refused(output);
+  expect(findings(join(first, 'future-record'))).toEqual([]);
 });
+
+it('imports and configures the store without inspecting configured paths', () => {
+  const blocker = join(root, 'not-a-directory'); writeFileSync(blocker, 'data');
+  const state = join(blocker, 'initial'), next = join(blocker, 'next');
+  const script = `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const inspected = [];
+    for (const name of ['lstatSync', 'statSync', 'realpathSync', 'readlinkSync']) {
+      const original = fs[name];
+      const tracked = (...args) => {
+        if (String(args[0]).startsWith(process.env.FC_HOME_PARENT)) inspected.push([name, String(args[0])]);
+        return original(...args);
+      };
+      Object.assign(tracked, original);
+      fs[name] = tracked;
+    }
+    syncBuiltinESMExports();
+    const store = await import('./src/store.ts');
+    store.setFcGlobalDir(process.env.NEXT_FC_HOME);
+    if (store.fcGlobalDir() !== process.env.NEXT_FC_HOME) throw new Error('configuration lost');
+    console.log(JSON.stringify(inspected));
+  `;
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('FC_')));
+  const output = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
+    cwd: process.cwd(), env: { ...env, FC_HOME: state, NEXT_FC_HOME: next, FC_HOME_PARENT: blocker },
+    encoding: 'utf8', timeout: 15000,
+  });
+  expect(JSON.parse(output.trim())).toEqual([]);
+});
+
+it.each(['store', 'runs'].flatMap(route =>
+  ['file', 'file-parent', 'permission', 'loop'].map(failure => ({ route, failure }))))(
+  'refuses and records $failure resolving the configured $route at judgment time', ({ route, failure }) => {
+    const bad = join(root, 'unresolvable');
+    let target = bad;
+    if (failure === 'file' || failure === 'file-parent') {
+      writeFileSync(bad, 'ordinary file');
+      if (failure === 'file-parent') target = join(bad, 'child');
+    } else if (failure === 'loop') symlinkSync(bad, bad);
+    else mkdirSync(bad);
+    const state = route === 'store' ? target : join(root, 'broken-runs-store');
+    if (route === 'runs') { mkdirSync(state); symlinkSync(target, join(state, 'runs')); }
+    const candidate = join(project, 'ordinary-result'); writeFileSync(candidate, 'stage data');
+    const directory = join(project, 'ordinary-directory'); mkdirSync(directory);
+    const original = fs.lstatSync;
+    fs.lstatSync = ((...args: Parameters<typeof original>) => {
+      if (failure === 'permission' && String(args[0]) === bad) {
+        throw Object.assign(new Error(`EACCES: permission denied, lstat '${bad}'`), { code: 'EACCES' });
+      }
+      return original(...args);
+    }) as typeof original;
+    syncBuiltinESMExports();
+    try {
+      expect(() => setFcGlobalDir(state)).not.toThrow();
+      const reason = failure === 'permission' ? 'EACCES' : failure === 'loop' ? 'SYMLINK_LOOP' : 'NOT_DIRECTORY';
+      for (const [output, kind] of [[candidate, 'file'], [directory, 'directory']] as const) {
+        let result: ReturnType<typeof findings> = [];
+        expect(() => { result = findings(output, kind); }).not.toThrow();
+        expect(result).toContainEqual(expect.objectContaining({
+          code: 'artifact_contract', field: `artifact_contract.produces.project:${relative(project, output)}`,
+          message: expect.stringContaining(reason),
+        }));
+      }
+      expect(readFileSync(candidate, 'utf8')).toBe('stage data');
+    } finally { fs.lstatSync = original; syncBuiltinESMExports(); }
+  });
