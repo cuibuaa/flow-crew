@@ -32,6 +32,7 @@ import { AuditFindingsSchema } from './scoped-audit-repair.js';
 import { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
 import { renderPlannerPolicies } from './planner-policies.js';
 import { extractBriefCriteria } from './brief-criteria.js';
+import { normalizedProjectPath, parseDeclaredScope } from './scheduler/sched_admission/scope-services.js';
 import { parseStageAbortSignal } from './abort-signal.js';
 import {
   RUN_STATUS,
@@ -1436,13 +1437,21 @@ export async function runStage(
     if (value && typeof value === 'object' && !Array.isArray(value)) finalRecord = value as Record<string, unknown>;
   } catch { /* No structured final answer; never substitute transcript or summary. */ }
   const settled = final.attempts?.at(-1);
+  const gapBlocks = settled?.endingCause === 'environment_gap'
+    ? validatedStageRecord!.blocks as { criterion_ids: string[]; paths: string[] } | undefined : undefined;
+  const criterionIds = new Set(gapBlocks ? extractBriefCriteria(evidenceBrief).criteria.map(criterion => criterion.id) : []);
+  const unknownCriterionIds = gapBlocks?.criterion_ids.filter(id => !criterionIds.has(id)) ?? [];
   appendEvidence(opts.runDir, { kind: 'attempt', stageId: opts.stageId, attemptIndex, attemptStartedAt,
     exitCode: settled?.exitCode ?? result.exitCode, status: final.status, treeHash: evidenceTreeAfter.hash,
     files: changedTreeFiles(evidenceTreeBefore, evidenceTreeAfter),
     remainingWork: Array.isArray(validatedStageRecord?.remaining_work) ? validatedStageRecord.remaining_work as string[] : null,
     continuation: Boolean(settled?.continuation), endingCause: settled?.endingCause ?? result.endingCause,
     environmentGap: settled?.endingCause === 'environment_gap' ? { reason: String(validatedStageRecord!.summary),
-      blocks: validatedStageRecord!.blocks as { criterion_ids: string[]; paths: string[] } | undefined ?? null } : undefined, finalRecord,
+      blocks: gapBlocks ? { ...gapBlocks, paths: gapBlocks.paths.map(path => {
+        const scope = parseDeclaredScope(path);
+        return scope.kind === 'unknown' ? path : scope.kind === 'glob' ? normalizedProjectPath(path)! : scope.value;
+      }) } : null,
+      ...(unknownCriterionIds.length ? { unknownCriterionIds } : {}) } : undefined, finalRecord,
     guidanceIds: [...submittedGuidanceIds], measurements: {
       inputTokens: result.tokens_in ?? null, outputTokens: result.tokens_out ?? null,
       durationMs: result.duration_ms, provenance: 'adapter-reported',

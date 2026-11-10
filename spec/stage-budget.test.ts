@@ -1208,3 +1208,82 @@ it.each((['narrow','broad','absent','mismatched'] as const).flatMap(authorMappin
  expect(readGateEvaluation(project,'review',result.runId)?.findings?.confirmed).toHaveLength(1);
  expect(result.decisionGraph?.records.find(record => record.stageId === 'review')?.reason).toContain('Environment gap already reported by work');
 });
+
+
+it.each([
+  { gapPath: 'renderer/', findingPath: 'renderer', sameGap: true },
+  { gapPath: './renderer', findingPath: 'renderer', sameGap: true },
+  { gapPath: './renderer/', findingPath: 'renderer/bin', sameGap: true },
+  { gapPath: 'assets', findingPath: 'assets/x.png', sameGap: true },
+  { gapPath: './assets//', findingPath: 'assets/nested/x.png', sameGap: true },
+  { gapPath: 'assets', findingPath: './assets/x.png', sameGap: true },
+  { gapPath: 'assets', findingPath: 'assets-sibling/x.png', sameGap: false },
+  { gapPath: './renderer/', findingPath: 'renderer-sibling', sameGap: false },
+])('SI gap path scope $gapPath contains $findingPath = $sameGap', async ({ gapPath, findingPath, sameGap }) => {
+  const { roles, workflow } = workflowFixture(3);
+  workflow.stages.find(stage => stage.id === 'repair')!.scope = ['renderer', 'assets', 'assets-sibling', 'renderer-sibling', 'work.txt'];
+  const calls: string[] = [];
+  const adapter: Adapter = { async run(_prompt, _role, opts) {
+    calls.push(opts.stageId);
+    if (opts.stageId === 'work') return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
+      status: 'environment_gap', summary: 'Required capability unavailable.',
+      blocks: { criterion_ids: [], paths: [gapPath] }, caveats: [], remaining_work: ['Supply the missing evidence.'],
+    }) };
+    if (opts.stageId === 'review' && !calls.includes('repair')) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
+      pass: false, reason: 'Missing required evidence.', criteria: {},
+      audit_findings: { version: 1, findings: [{ id: 'missing_evidence', paths: [findingPath], reason: 'Evidence unavailable.', criterion_ids: [], invalidates_plan: false, repair_role: 'coder' }] },
+      repairability: { version: 1, disposition: 'repairable', evidence: 'Independently reproduced missing evidence.' },
+    }) };
+    return withRemaining(completed(opts, 'Complete.'), []);
+  } };
+  const result = await runWorkflow(workflow, stringify(workflow), project, withRendererReproduction(adapter), new Map(), undefined, roles,
+    undefined, undefined, false, undefined, false, undefined, () => manualClock().clock);
+  expect(readGateEvaluation(project, 'review', result.runId)?.findings?.confirmed ?? []).toHaveLength(sameGap ? 1 : 0);
+  expect(calls).toEqual(sameGap ? ['done', 'work', 'review'] : ['done', 'work', 'review', 'repair', 'review']);
+  expect(result.status, result.failureReason).toBe('incomplete');
+  expect(result.stages.repair.attempts ?? []).toHaveLength(sameGap ? 0 : 1);
+  if (sameGap) expect(result.decisionGraph?.records.find(record => record.stageId === 'review')?.reason).toContain('Environment gap already reported by work');
+  const fact = readEvidence(runDir(project, result.runId)).find(entry => entry.kind === 'attempt' && entry.stageId === 'work');
+  expect(fact?.kind === 'attempt' && fact.environmentGap?.blocks?.paths).toEqual([gapPath.includes('renderer') ? 'renderer' : 'assets']);
+});
+
+it('SI gap path scope reports unknown blocked criterion ids to the gate', async () => {
+  const { roles, workflow } = workflowFixture(3);
+  const brief = '# Evidence request\n\n## Requirements\n1. Supply required evidence.';
+  const { extractBriefCriteria } = await import('../src/brief-criteria.js');
+  const refs = extractBriefCriteria(brief).criteria.map(criterion => criterion.id);
+  expect(refs).toHaveLength(1);
+  workflow.stages.find(stage => stage.id === 'review')!.criterion_refs = refs;
+  const unknown = 'not-a-brief-criterion';
+  workflow.stages.find(stage => stage.id === 'repair')!.scope = ['renderer', 'work.txt'];
+  const calls: string[] = [];
+  let gateSawFact = false;
+  const adapter: Adapter = { async run(prompt, _role, opts) {
+    calls.push(opts.stageId);
+    if (opts.stageId === 'work') return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
+      status: 'environment_gap', summary: 'Capability unavailable.', blocks: { criterion_ids: [refs[0], unknown], paths: ['./renderer/'] },
+      caveats: [], remaining_work: ['Supply evidence.'],
+    }) };
+    if (opts.stageId === 'repair') writeFileSync(join(project, 'renderer'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    if (opts.stageId === 'review') {
+      const fact = readEvidence(opts.runDir).find(entry => entry.kind === 'attempt' && entry.stageId === 'work');
+      expect(fact?.kind === 'attempt' && fact.environmentGap).toMatchObject({
+        blocks: { criterion_ids: [refs[0], unknown], paths: ['renderer'] }, unknownCriterionIds: [unknown],
+      });
+      expect(prompt).toContain('"unknownCriterionIds":["not-a-brief-criterion"]');
+      gateSawFact = true;
+      if (!calls.includes('repair')) return { exitCode: 0, duration_ms: 1, output: JSON.stringify({
+        pass: false, reason: 'Required evidence missing.', criteria: { [refs[0]]: { status: 'fail', evidence: 'Renderer is absent.' } },
+        audit_findings: { version: 1, findings: [{ id: 'missing_renderer', paths: ['renderer'], reason: 'Renderer is absent.', criterion_ids: [unknown], invalidates_plan: false, repair_role: 'coder' }] },
+        repairability: { version: 1, disposition: 'repairable', evidence: 'Independently reproduced missing renderer.' },
+      }) };
+    }
+    return withRemaining(completed(opts, 'Complete.'), []);
+  } };
+  const result = await runWorkflow(workflow, stringify(workflow), project, withRendererReproduction(adapter), new Map(), undefined, roles,
+    undefined, brief, false, undefined, false, undefined, () => manualClock().clock);
+  expect(gateSawFact).toBe(true);
+  expect(calls).toEqual(['done', 'work', 'review', 'repair', 'review']);
+  expect(result.stages.repair.attempts ?? []).toHaveLength(1);
+  expect(result.status, result.failureReason).toBe('complete');
+});

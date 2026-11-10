@@ -2,6 +2,7 @@ import { concludeRun } from '../sched_policy/run-completion.js';
 import { captureRepairRoundSnapshot, type RepairRoundSnapshot } from '../sched_scope/snapshots.js';
 import { ensureRollbackBaseline } from '../sched_scope/rollback-baseline.js';
 import { topoSort } from '../sched_admission/frontier.js';
+import { stageScopeOwnsPath } from '../sched_admission/dispatch.js';
 import { readEvidence } from '../../evidence-ledger.js';
 import type { AuditFinding } from '../../scoped-audit-repair.js';
 /** Settle declared edges at idle boundaries. All execution uses the ordinary scheduler. */
@@ -155,14 +156,15 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
       if (attempt?.endingCause !== 'environment_gap') return [];
       const fact = ledger.find(entry => entry.kind === 'attempt' && entry.stageId === id
         && entry.attemptIndex === attempt.index && entry.attemptStartedAt === attempt.startedAt);
-      return [{ id, blocks: fact?.kind === 'attempt' ? fact.environmentGap?.blocks : undefined }];
+      return [{ id, blocks: fact?.kind === 'attempt' ? fact.environmentGap?.blocks : undefined,
+        unknownCriterionIds: fact?.kind === 'attempt' ? fact.environmentGap?.unknownCriterionIds ?? [] : [] }];
     }) : [];
     const unspecified = gaps.filter(({ blocks }) => !blocks || !blocks.criterion_ids.length && !blocks.paths.length);
     if (unspecified.length) record.reason += ` Environment gaps without declared blocks: ${unspecified.map(gap => gap.id).join(', ')}; relatedness unknown.`;
     const repeatedGap = state.stages[target]?.attempts?.at(-1)?.endingCause === 'environment_gap' ? target
-      : gateAccepted === false ? gaps.find(({ blocks }) => blocks && (blocks.criterion_ids.length || blocks.paths.length)
-        && rejectedFindings.some(finding => (!blocks.criterion_ids.length || finding.criterion_ids.some(id => blocks.criterion_ids.includes(id)))
-          && (!blocks.paths.length || finding.paths.some(path => blocks.paths.includes(path)))))?.id : undefined;
+      : gateAccepted === false ? gaps.find(({ blocks, unknownCriterionIds }) => blocks && (blocks.criterion_ids.length || blocks.paths.length)
+        && rejectedFindings.some(finding => (!blocks.criterion_ids.length || finding.criterion_ids.some(id => blocks.criterion_ids.includes(id) && !unknownCriterionIds.includes(id)))
+          && (!blocks.paths.length || finding.paths.some(path => stageScopeOwnsPath({ ...source, scope: blocks.paths }, path)))))?.id : undefined;
     if (repeatedGap || unconfirmedRejection || wallExhausted || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
       || source.decision && destination?.is_gate && (destination.scope === undefined || destination.scope.length !== 0)
       || target !== 'continue' && (revisiting || source.is_gate) && !resumed && used >= limit) {
