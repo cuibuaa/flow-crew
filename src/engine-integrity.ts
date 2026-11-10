@@ -252,11 +252,11 @@ export async function withEngineIntegrity<T>(input: EngineExecution, action: () 
     .filter((root): root is string => Boolean(root));
   if (run) {
     for (const artifact of input.artifactContract?.produces ?? []) {
+      const output = resolveArtifactLocation(artifact, project, run);
       if (producesEngineOwnedArtifact(artifact, { id: input.stageId, depends_on: [] }, run, project)) {
         throw new EngineStateError(`ENGINE_STATE_REFUSED: output contains an engine carrier: ${artifact.path}`);
       }
       if (artifact.root !== 'run') continue;
-      const output = resolveArtifactLocation(artifact, project, run);
       publishEngineFile(artifact.kind === 'directory' ? output : dirname(output), () => mkdirSync(artifact.kind === 'directory' ? output : dirname(output), { recursive: true }));
     }
     const briefPath = runRecordPath(run, 'task_brief.md');

@@ -1,3 +1,4 @@
+import { registerStorageRoot } from './engine-owned-carriers.js';
 import { engineDirectory, runRecordPath, stageWorkPath } from './run-layout.js';
 /** Public live-plan interface. Historical readers deliberately keep their own tolerant schemas. */
 import { parseCommandArgs, commandUsage } from './cli-args.js';
@@ -95,8 +96,11 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
       baseStages = loadWorkflow(join(engineConfigDir, 'workflows', `${workflowName}.yaml`)).config.stages;
       scratch = mkdtempSync(resolve(tmpdir(), 'fc-plan-check-'));
       runDirPath = scratch;
+      registerStorageRoot(scratch, 'store');
       mkdirSync(engineDirectory(scratch));
       writeFileSync(join(engineDirectory(scratch), '.run-reservation.json'), '{"storageLayout":2}\n');
+      mkdirSync(stageWorkPath(scratch));
+      registerStorageRoot(stageWorkPath(scratch), 'work');
       writeFileSync(runRecordPath(scratch, 'task_brief.md'), brief);
       writeFileSync(runRecordPath(scratch, 'brief_criteria.json'), JSON.stringify(extractBriefCriteria(brief)));
       const checksPath = resolve(dirname(resolve(files[0])), 'reality_checks.md');

@@ -1,14 +1,14 @@
-import { hasSeparatedRunLayout, runRecordPath, stageWorkPath } from './run-layout.js';
+import { runRecordPath } from './run-layout.js';
 import type { DispatchAdmissionError } from './scheduler/sched_admission/dispatch.js';
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { ArtifactPathSchema, resolveArtifactLocation, artifactRootContains as contained } from './artifact-location.js';
 export { ArtifactPathSchema, resolveArtifactLocation } from './artifact-location.js';
 export type { ArtifactLocation } from './artifact-location.js';
 import type { StageStatus } from './store.js';
-import { fcGlobalDir, runStoreRoots, STAGE_STATUS } from './store.js';
-import { containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isReservedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
+import { fcGlobalDir, STAGE_STATUS } from './store.js';
+import { storageRoots, containsEngineOwnedGlobalPath, engineOwnedGlobalCarriers, isEngineOwnedGlobalPath, isReservedRunPath, prospectivePhysicalPath } from './engine-owned-carriers.js';
 
 const id = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 const location = z.object({ root: z.enum(['project', 'run']), path: ArtifactPathSchema });
@@ -114,28 +114,13 @@ export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces
   if (artifact.root === 'run' && isReservedRunPath(artifact.path)) return true;
   if (!runDirectory || (artifact.root === 'project' && !projectDirectory)) return false;
   const runRoot = realpathSync(runDirectory);
-  const runRoots = new Set([runRoot]);
-  const stores = runStoreRoots();
-  // Enumerate only engine-supplied stores. Captured records in project/work
-  // trees cannot enroll their directories as engine envelopes.
-  for (const store of stores) {
-    try {
-      for (const entry of readdirSync(store, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        try { runRoots.add(realpathSync(join(store, entry.name))); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || existsSync(store)) throw error; }
-  }
-  const runTrees = [...runRoots].map(root => ({ root, separated: hasSeparatedRunLayout(root) }));
+  const roots = storageRoots();
+  const stores = roots.filter(root => root.kind === 'store').map(root => root.path);
+  const work = roots.filter(root => root.kind === 'work').map(root => root.path);
   const projectRoot = projectDirectory && realpathSync(projectDirectory);
-  const writableRoots = [...(projectRoot ? [projectRoot] : []), ...runRoots];
-  const ownedInRun = (root: string, separated: boolean, target: string): boolean =>
-    contained(root, target) && (!separated || isReservedRunPath(relative(root, target).split(sep).join('/')));
+  const writableRoots = [...(projectRoot ? [projectRoot] : []), ...work];
   const ownedByRun = (target: string): boolean =>
-    runTrees.some(({ root, separated }) => ownedInRun(root, separated, target))
-    || stores.some(store => contained(store, target) && !runTrees.some(({ root, separated }) =>
-      dirname(root) === store && separated && contained(stageWorkPath(root), target)))
+    stores.some(store => contained(store, target) && !work.some(root => contained(store, root) && contained(root, target)))
     || !writableRoots.some(root => contained(root, target));
   const root = artifact.root === 'run' ? runRoot : projectRoot!;
   const output = resolve(root, artifact.path);
@@ -165,16 +150,11 @@ export function producesEngineOwnedArtifact(artifact: ArtifactContract['produces
       if (outputInodes.has(`${carrier.dev}:${carrier.ino}`)) return true;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
-  // A hardlink has no target pathname. Prove that *all* its directory entries
-  // are in writable locations, using nlink as the upper bound. A link outside
-  // this inventory may be in any store's engine tree, so fail closed without
-  // trying to discover every FC_HOME. Attest within one writable domain: the
-  // project or known stage work trees. Never combine their counts or follow symlinks.
+  // Count every physical directory entry across project and engine-created work
+  // roots once. Unaccounted links may belong to any foreign location.
   if (!linkedOutputs.size) return false;
   const writableLinks = new Map<string, number>();
-  const work = runTrees.filter(tree => tree.separated).map(tree => stageWorkPath(tree.root));
-  const folders = work.some(root => contained(root, prospectivePhysicalPath(output)))
-    ? [...work] : projectRoot ? [projectRoot] : [];
+  const folders = [...writableRoots];
   visitedDirectories.clear();
   while (folders.length) {
     const folder = folders.pop()!;
