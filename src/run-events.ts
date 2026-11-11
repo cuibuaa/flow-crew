@@ -38,6 +38,7 @@ export type RunEventType =
   | 'attempt_results_updated'
   | 'iteration_completed'
   | 'run_completed'
+  | 'research_report_superseded'
   | 'campaign_alert'
   | 'research_injected'
   | 'plan_dispatch_retry'
@@ -61,6 +62,7 @@ export interface RunEvent {
   level?: 'info' | 'warning';
   stageIds?: string[];
   files?: string[];
+  ownerRunId?: string;
   attemptIndex?: number;
   attemptStartedAt?: string;
   exitCode?: number;

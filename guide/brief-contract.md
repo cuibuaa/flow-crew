@@ -253,12 +253,27 @@ existence or prose would duplicate the engine's publication checks, without inde
 checking the candidate or instrument.
 
 The engine commits the accepted terminal status and its report destinations under the run
-lock, then publishes the report from that committed state. Normal project reports are written
-once; no pending project report or provisional acknowledgement exists. The report, pointer
+lock, then publishes the report from that committed state. A monotonic
+`researchReportSequence` commits with the first terminal destination intent. The existing
+lock primitive also serializes this order and shared report publication across runs.
+Normal project reports are written once; no pending project report or provisional acknowledgement exists. The report, pointer
 and completion event are idempotent projections of the committed state and measurement
 journal. Conclusion, explicit recovery and the daemon's existing bounded reconciliation
 sweep use the same projection. A terminal run missing these outputs is repaired without
-dispatching stages or measuring again; complete projections are left unchanged. A lost
+dispatching stages or measuring again; complete projections are left unchanged. Recovery
+compares committed destination intents by sequence and never republishes a destination
+reserved by a later terminal commit in the same project. It records a
+`research_report_superseded` warning with the destination and owning run. If all declared
+reports are superseded, `terminalArtifact` names the recovering run's own engine report,
+relative to the project. Reports and completion metadata remain recoverable even when the
+completion event or terminal-commit acknowledgement was lost. Recovery retains the original
+sequence; old unsequenced records rank below sequenced commits and receive no fresh order.
+When multiple historical unsequenced records claim a destination, recovery preserves the
+shared file and records the conflicting run with unknown order/ownership; a lone historical
+run can still restore its destination.
+Destination comparison resolves directory aliases; report publication retains its normal
+path and integrity checks. The sequence records terminal commit order, not evidence read
+from project files. A lost
 state-write acknowledgement propagates, and recovery reads the committed decision rather
 than inventing another outcome. Actual report-publication failures still commit `failed`
 before correcting exposed destinations. Committed destination intent retains those paths.

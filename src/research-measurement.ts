@@ -490,7 +490,7 @@ export function researchMeasurementState(run: string): MeasurementState { return
 
 /** Sole report author. Called after the terminal commit under its run-state lock.
  * Committed destinations survive publication errors and pointer-save failures. */
-export function writeResearchTerminalReport(state: StoreState): string[] {
+export function writeResearchTerminalReport(state: StoreState, superseded: ReadonlySet<string> = new Set()): string[] {
   const directory = runDir(state.projectDir, state.runId);
   let measured: ReturnType<typeof researchMeasurementState> | undefined;
   try { measured = researchMeasurementState(directory); } catch { /* initialization may have failed */ }
@@ -508,6 +508,7 @@ export function writeResearchTerminalReport(state: StoreState): string[] {
   const errors: string[] = [];
   delete state.terminalArtifact;
   for (const path of paths) try {
+    if (superseded.has(path)) continue;
     const absolute = resolveArtifactLocation({ root: 'project', path }, state.projectDir, directory);
     const destination = prospectivePhysicalPath(absolute);
     for (const root of [...(state.research?.measurement.frozen ?? []), ...(state.research?.measurement.candidate ?? [])]) {
@@ -518,5 +519,8 @@ export function writeResearchTerminalReport(state: StoreState): string[] {
     publish(absolute);
     if (desired.has(path)) state.terminalArtifact ??= path;
   } catch (error) { errors.push(`${path}: ${String(error)}`); }
+  if (!state.terminalArtifact && [...desired].some(path => superseded.has(path))) {
+    state.terminalArtifact = relative(state.projectDir, runRecordPath(directory, 'research_report.md'));
+  }
   return errors;
 }

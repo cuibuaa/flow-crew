@@ -160,6 +160,65 @@ const mutations: Mutation[] = [
     '|| /^[A-Za-z]:/.test(normalized)', '|| /^[A-Za-z]:\\//.test(normalized)',
   ]], spec: 'spec/research-loop.test.ts', test: 'refuses roots outside the common portable project-relative path domain at parse' },
 
+  // Recovery ownership decisions: each requested two-loop regression must catch
+  // replaying an old destination, losing its private pointer, or omitting notice.
+  ...['completion storage failure', 'lost terminal acknowledgement'].flatMap(fault => [
+    { id: 'later-publisher-' + (fault.startsWith('completion') ? 'event' : 'ack'), file: 'src/scheduler/sched_policy/run-completion.ts', edits: [[
+      '(other.researchReportSequence ?? 0) > (state.researchReportSequence ?? 0)',
+      '(other.researchReportSequence ?? 0) > Number.MAX_SAFE_INTEGER',
+    ]], spec: 'spec/research-loop.test.ts', test: 'startup preserves a later publisher after ' + fault },
+    { id: 'destination-skip-' + (fault.startsWith('completion') ? 'event' : 'ack'), file: instrument, edits: [[
+      'if (superseded.has(path)) continue;', 'if (superseded.has(path) && Boolean(0)) continue;',
+    ]], spec: 'spec/research-loop.test.ts', test: 'startup preserves a later publisher after ' + fault },
+    { id: 'private-report-pointer-' + (fault.startsWith('completion') ? 'event' : 'ack'), file: instrument, edits: [[
+      "state.terminalArtifact = relative(state.projectDir, runRecordPath(directory, 'research_report.md'));",
+      "state.terminalArtifact = [...desired][0];",
+    ]], spec: 'spec/research-loop.test.ts', test: 'startup preserves a later publisher after ' + fault },
+    { id: 'superseded-notice-' + (fault.startsWith('completion') ? 'event' : 'ack'), file: 'src/scheduler/sched_policy/run-completion.ts', edits: [[
+      "if (!events.some(event => event.type === 'research_report_superseded'",
+      "if (Boolean(0) && !events.some(event => event.type === 'research_report_superseded'",
+    ]], spec: 'spec/research-loop.test.ts', test: 'startup preserves a later publisher after ' + fault },
+  ] as Mutation[]),
+  { id: 'terminal-publication-order', file: 'src/store.ts', edits: [[
+    'projection.researchReportSequence = 1 + researchReportCommits(projection.projectDir).reduce((max, state) => Math.max(max, state.researchReportSequence ?? 0), 0);',
+    'projection.researchReportSequence = 0;',
+  ]], spec: 'spec/research-loop.test.ts', test: 'startup preserves a later publisher after lost terminal acknowledgement' },
+  { id: 'retained-publication-order', file: 'src/store.ts', edits: [[
+    'projection.researchReportSequence = previous.researchReportSequence;', 'projection.researchReportSequence = undefined;',
+  ]], spec: 'spec/research-loop.test.ts', test: 'startup preserves a later publisher after completion storage failure' },
+  { id: 'publication-project-binding', file: 'src/store.ts', edits: [[
+    '1 + researchReportCommits(projection.projectDir).reduce', '1 + researchReportCommits(projectDir).reduce',
+  ]], spec: 'spec/research-loop.test.ts', test: 'uses committed terminal order across global addressing, clock rollback and repeated recovery' },
+  { id: 'latest-destination-owner', file: 'src/scheduler/sched_policy/run-completion.ts', edits: [[
+    '.sort((a, b) => (b.researchReportSequence ?? 0) - (a.researchReportSequence ?? 0))',
+    '.sort((a, b) => (a.researchReportSequence ?? 0) - (b.researchReportSequence ?? 0))',
+  ]], spec: 'spec/research-loop.test.ts', test: 'uses committed terminal order across global addressing, clock rollback and repeated recovery' },
+  { id: 'superseded-notice-idempotence', file: 'src/scheduler/sched_policy/run-completion.ts', edits: [[
+    "if (!events.some(event => event.type === 'research_report_superseded'",
+    "if (Boolean(1) || !events.some(event => event.type === 'research_report_superseded'",
+  ]], spec: 'spec/research-loop.test.ts', test: 'uses committed terminal order across global addressing, clock rollback and repeated recovery' },
+  { id: 'resumed-publication-order', file: 'src/store.ts', edits: [[
+    'delete projection.researchReportSequence; // A resumed run receives a new terminal order.',
+    'void projection.researchReportSequence; // Mutant retains the previous terminal order.',
+  ]], spec: 'spec/research-loop.test.ts', test: 'uses committed terminal order across global addressing, clock rollback and repeated recovery' },
+
+  { id: 'historical-publication-ambiguity', file: 'src/scheduler/sched_policy/run-completion.ts', edits: [[
+    '|| state.researchReportSequence === undefined && other.researchReportSequence === undefined', '',
+  ]], spec: 'spec/research-loop.test.ts', test: 'preserves a shared historical destination when committed order is unavailable' },
+
+  { id: 'destination-ownership', file: 'src/scheduler/sched_policy/run-completion.ts', edits: [[
+    'other.researchReportPaths!.some(path => reportDestination(other.projectDir, path) === destination)',
+    'other.researchReportPaths!.some(() => true)',
+  ]], spec: 'spec/research-loop.test.ts', test: 'uses committed terminal order across global addressing, clock rollback and repeated recovery' },
+  { id: 'remaining-declared-pointer', file: instrument, edits: [[
+    'if (!state.terminalArtifact && [...desired].some(path => superseded.has(path)))',
+    'if ([...desired].some(path => superseded.has(path)))',
+  ]], spec: 'spec/research-loop.test.ts', test: 'uses committed terminal order across global addressing, clock rollback and repeated recovery' },
+
+  { id: 'physical-report-destination', file: 'src/scheduler/sched_policy/run-completion.ts', edits: [[
+    'try { return prospectivePhysicalPath(absolute); }', 'try { return absolute; }',
+  ]], spec: 'spec/research-loop.test.ts', test: 'preserves a later report published through an in-project directory alias' },
+
 ];
 try {
   const listed = command('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], root);

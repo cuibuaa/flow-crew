@@ -1,13 +1,14 @@
 import { currentValidationResults } from '../sched_settlement/gate-validation.js';
 import { projectValidationResult } from '../../project-validation.js';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { prospectivePhysicalPath } from '../../engine-owned-carriers.js';
 import { runRecordPath } from '../../run-layout.js';
 // All research terminal reports share this commit boundary, including failures/cancellation.
 import { writeResearchTerminalReport } from '../../research-measurement.js';
 import { appendRunEventAtRunDir, attemptEventFields, readRunEvents, recordRunEvent, type RunEvent } from '../../run-events.js';
 import { cancelledRunPublicationError } from '../../cancellation-policy.js';
-import { type StoreState, evaluateRealityGate, isSuccessfulRunStatus, isTerminalRunStatus, updateRunState, updateOperationalRunState, interruptedStageStatus, resolveRunStatus, runDir, RUN_STATUS, STAGE_STATUS } from '../../store.js';
+import { type StoreState, researchReportCommits, withRunStateLock, runsRoot, evaluateRealityGate, isSuccessfulRunStatus, isTerminalRunStatus, updateRunState, updateOperationalRunState, interruptedStageStatus, resolveRunStatus, runDir, RUN_STATUS, STAGE_STATUS } from '../../store.js';
 
 export type RunConclusionReason =
   | 'workflow_complete' | 'stage_failed' | 'bounded_attempts' | 'validation_unresolved' | 'provider_refusal'
@@ -43,23 +44,59 @@ function hasResearchCompletion(state: StoreState): boolean {
  * Destination intent distinguishes current engine-owned reports from archives. */
 export function projectResearchConclusion(state: StoreState, persist: () => void): void {
   if (!state.research?.measurement || !state.researchReportPaths || !isTerminalRunStatus(state.status)) return;
+  withRunStateLock(runsRoot(), () => projectResearchReports(state, persist));
+}
+
+function reportDestination(projectDir: string, path: string): string {
+  const absolute = resolve(projectDir, path);
+  try { return prospectivePhysicalPath(absolute); }
+  catch { return absolute; } // The report author retains ordinary publication-error handling.
+}
+
+function projectResearchReports(state: StoreState, persist: () => void): void {
+  const later = researchReportCommits(state.projectDir)
+    .filter(other => other.runId !== state.runId && ((other.researchReportSequence ?? 0) > (state.researchReportSequence ?? 0)
+      || state.researchReportSequence === undefined && other.researchReportSequence === undefined))
+    .sort((a, b) => (b.researchReportSequence ?? 0) - (a.researchReportSequence ?? 0));
+  const supersededPaths = (): Set<string> => {
+    const superseded = new Set<string>();
+    const events = readRunEvents(state.projectDir, state.runId);
+    for (const path of state.researchReportPaths!) {
+      const destination = reportDestination(state.projectDir, path);
+      const owner = later.find(other => other.researchReportPaths!.some(path => reportDestination(other.projectDir, path) === destination));
+      if (!owner) continue;
+      superseded.add(path);
+      const ownerRunId = owner.researchReportSequence === undefined ? undefined : owner.runId;
+      const detail = ownerRunId
+        ? `Report destination ${path} retained for later terminal publisher ${ownerRunId}`
+        : `Report destination ${path} retained: conflicting terminal intent ${owner.runId}; historical publication order and ownership are unknown`;
+      if (!events.some(event => event.type === 'research_report_superseded' && event.files?.includes(path) && event.detail === detail)) {
+        recordRunEvent(state.projectDir, state.runId, {
+          type: 'research_report_superseded', runId: state.runId, timestamp: new Date().toISOString(),
+          level: 'warning', files: [path], ownerRunId, detail,
+        });
+      }
+    }
+    return superseded;
+  };
   let pointer = state.terminalArtifact;
   const decision = () => JSON.stringify([state.status, state.reasonCode, state.failureReason, state.researchReportPaths]);
   const committed = decision();
+  const superseded = supersededPaths();
   try {
-    const errors = writeResearchTerminalReport(state);
+    const errors = writeResearchTerminalReport(state, superseded);
     if (errors.length) throw new Error(errors.join('; '));
   } catch (error) {
     if (state.status !== RUN_STATUS.CANCELLED) { state.status = RUN_STATUS.FAILED; state.reasonCode = 'scheduler_failed'; }
     state.failureReason = `Research report publication refused: ${String(error)}`;
     state.researchReportPaths = [...new Set([
-      ...state.researchReportPaths, ...(state.terminalStates?.[state.status]?.paths ?? []),
+      ...state.researchReportPaths!, ...(state.terminalStates?.[state.status]?.paths ?? []),
     ])];
     if (decision() !== committed) {
       delete state.terminalArtifact;
       persist(); // Commit failure before correcting any exposed destination.
       pointer = state.terminalArtifact;
-      writeResearchTerminalReport(state);
+      writeResearchTerminalReport(state, supersededPaths());
     }
   }
   // Pointer-save errors propagate. Recovery re-derives the same projection;

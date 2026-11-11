@@ -24,6 +24,7 @@ import { scheduleDeadline, stageWrapUpTiming, type AttemptDeadlineClock } from '
 import { type Adapter } from '../src/adapters/base.js';
 import { createRun } from './test-support/create-run.js';
 import { readRunEvents } from '../src/run-events.js';
+import * as eventOwner from '../src/run-events.js';
 import { reconcileHostInterruptedRun } from '../src/restart-recovery.js';
 import { createDaemonReconciler } from '../src/daemon-reconciliation.js';
 import { TaskRegistry } from '../src/task-registry.js';
@@ -365,6 +366,154 @@ describe('research settlement boundaries', () => {
     expect(readFileSync(runRecordPath(directory, 'research_report.md'), 'utf8')).toBe(body);
     expect(readFileSync(join(project, 'bench/REPORT.md'), 'utf8')).toBe(body);
     expect(readRunEvents(project, state.runId).filter(event => event.type === 'run_completed')).toHaveLength(1);
+  });
+  it.each(['completion storage failure', 'lost terminal acknowledgement'] as const)(
+    'startup preserves a later publisher after %s', async fault => {
+      const text = brief();
+      const research = parseBriefFrontmatter(text).research!;
+      const stages = researchStages(research);
+      const { config } = loadWorkflow(join(import.meta.dirname, '../config/workflows/research.yaml'));
+      config.stages = stages;
+      const first = createRun(project, 'research', stringify(config), stages.map(stage => stage.id));
+      const initial = readRunState(project, first.runId);
+      initial.research = research; initial.currentIteration = 1;
+      initial.terminalStates = { ceiling_hit: { paths: ['bench/REPORT.md'] } };
+      writeRunState(project, first.runId, initial);
+      const write = engineFiles.atomicWrite;
+      const record = eventOwner.recordRunEvent;
+      let interrupted = 0;
+      const injection = fault === 'completion storage failure'
+        ? vi.spyOn(eventOwner, 'recordRunEvent').mockImplementation((projectDir, runId, event) => {
+          if (runId === first.runId && event.type === 'run_completed') {
+            interrupted++; throw new Error('Temporary completion-event storage failure');
+          }
+          return record(projectDir, runId, event);
+        })
+        : vi.spyOn(engineFiles, 'atomicWrite').mockImplementation((path, data, options) => {
+          const result = write(path, data, options);
+          if (!interrupted && path === runRecordPath(first.runDirPath, 'run.json') && JSON.parse(String(data)).status === 'ceiling_hit') {
+            interrupted++; throw new Error('Lost terminal-commit acknowledgement');
+          }
+          return result;
+        });
+      await expect(runResearchLoop(project, first.runId, first.runDirPath, config, proposal(50), new Map(), agents, undefined, text))
+        .rejects.toThrow(fault === 'completion storage failure' ? 'Temporary completion-event storage failure' : 'Lost terminal-commit acknowledgement');
+      injection.mockRestore();
+      expect(interrupted).toBe(1);
+      expect(researchMeasurementState(first.runDirPath).best.items?.[0].metrics.cost).toBe(50);
+      expect(readRunEvents(project, first.runId).filter(event => event.type === 'run_completed')).toHaveLength(0);
+      const second = await run(brief(), proposal(25));
+      const newerBody = readFileSync(runRecordPath(second.directory, 'research_report.md'), 'utf8');
+      expect(researchMeasurementState(second.directory).best.items?.[0].metrics.cost).toBe(25);
+      expect(readFileSync(join(project, 'bench/REPORT.md'), 'utf8')).toBe(newerBody);
+      const warn = vi.fn();
+      const sweep = createDaemonReconciler(new TaskRegistry({ baseDir: join(root, 'registry') }), warn);
+      sweep(); sweep();
+      const after = readFileSync(join(project, 'bench/REPORT.md'), 'utf8');
+      expect(after).toBe(newerBody);
+      for (const [runId, directory, cost] of [[first.runId, first.runDirPath, 50], [second.state.runId, second.directory, 25]] as const) {
+        const recovered = readRunState(project, runId);
+        const ownBody = readFileSync(runRecordPath(directory, 'research_report.md'), 'utf8');
+        expect(ownBody).toContain('"cost": ' + cost);
+        expect(readFileSync(join(project, recovered.terminalArtifact!), 'utf8')).toBe(ownBody);
+        expect(readRunEvents(project, runId).filter(event => event.type === 'run_completed')).toHaveLength(1);
+      }
+      const skipped = readRunEvents(project, first.runId).filter(event => event.type === 'research_report_superseded');
+      expect(skipped).toMatchObject([{ level: 'warning', files: ['bench/REPORT.md'], ownerRunId: second.state.runId }]);
+      expect(skipped).toHaveLength(1);
+      expect(warn).not.toHaveBeenCalled();
+      const raw = readFileSync(runRecordPath(first.runDirPath, 'run.json'), 'utf8');
+      reconcileHostInterruptedRun(project, first.runId);
+      expect(readFileSync(runRecordPath(first.runDirPath, 'run.json'), 'utf8')).toBe(raw);
+      expect(readRunEvents(project, first.runId).filter(event => event.type === 'research_report_superseded')).toHaveLength(1);
+    },
+  );
+  it('uses committed terminal order across global addressing, clock rollback and repeated recovery', () => {
+    const research = parseBriefFrontmatter(brief()).research!;
+    const created = Array.from({ length: 4 }, () => createRun(project, 'research', 'name: research\nstages: []\n', []));
+    const commit = (index: number, completedAt: string) => storeOwner.updateRunState('', created[index].runId, state => {
+      state.research = research;
+      state.status = 'ceiling_hit'; state.completedAt = completedAt; state.reasonCode = 'research_ceiling';
+      state.failureReason = 'Publisher ' + index;
+      const paths = index === 3 ? ['bench/OTHER.md'] : index === 1 ? ['bench/REPORT.md', 'bench/FIRST.md'] : ['bench/REPORT.md'];
+      state.terminalStates = { ceiling_hit: { paths } };
+      state.researchReportPaths = paths;
+    });
+    const first = commit(1, '2030-01-01T00:00:00.000Z');
+    reconcileHostInterruptedRun(project, first.runId);
+    const middle = commit(0, '2020-01-01T00:00:00.000Z');
+    reconcileHostInterruptedRun(project, middle.runId);
+    const latest = commit(2, '2010-01-01T00:00:00.000Z');
+    reconcileHostInterruptedRun(project, latest.runId);
+    expect(first.researchReportSequence).toBe(1);
+    expect(middle.researchReportSequence).toBe(2);
+    expect(latest.researchReportSequence).toBe(3);
+    const unrelated = commit(3, '2005-01-01T00:00:00.000Z');
+    reconcileHostInterruptedRun(project, unrelated.runId);
+    expect(unrelated.researchReportSequence).toBe(4);
+    const body = readFileSync(join(project, 'bench/REPORT.md'), 'utf8');
+    rmSync(runRecordPath(created[1].runDirPath, 'research_report.md'));
+    rmSync(runRecordPath(created[1].runDirPath, 'events.jsonl'));
+    const recovered = reconcileHostInterruptedRun(project, first.runId);
+    expect(readFileSync(join(project, 'bench/REPORT.md'), 'utf8')).toBe(body);
+    expect(readFileSync(join(project, recovered.terminalArtifact!), 'utf8')).toContain('Publisher 1');
+    expect(recovered.terminalArtifact).toBe('bench/FIRST.md');
+    expect(readRunEvents(project, first.runId).filter(event => event.type === 'research_report_superseded'))
+      .toMatchObject([{ files: ['bench/REPORT.md'], ownerRunId: latest.runId }]);
+    expect(recovered.researchReportSequence).toBe(first.researchReportSequence);
+    storeOwner.updateOperationalRunState(created[1].runDirPath, () => {}, undefined, projectResearchConclusion);
+    expect(readRunEvents(project, first.runId).filter(event => event.type === 'research_report_superseded')).toHaveLength(1);
+    expect(readRunState(project, first.runId).researchReportSequence).toBe(1);
+    storeOwner.updateRunState(project, latest.runId, state => { state.status = 'running'; });
+    expect(readRunState(project, latest.runId).researchReportSequence).toBeUndefined();
+    const resumed = commit(2, '2000-01-01T00:00:00.000Z');
+    expect(resumed.researchReportSequence).toBeGreaterThan(middle.researchReportSequence!);
+  });
+  it('preserves a shared historical destination when committed order is unavailable', async () => {
+    const first = await run(brief(), proposal(50));
+    const second = await run(brief(), proposal(25));
+    const newerBody = readFileSync(join(project, 'bench/REPORT.md'), 'utf8');
+    for (const run of [first, second]) {
+      const path = runRecordPath(run.directory, 'run.json');
+      const record = JSON.parse(readFileSync(path, 'utf8'));
+      delete record.researchReportSequence; // Pre-upgrade committed records have no order.
+      writeFileSync(path, JSON.stringify(record));
+    }
+    rmSync(runRecordPath(first.directory, 'research_report.md'));
+    rmSync(runRecordPath(first.directory, 'events.jsonl'));
+    const recovered = reconcileHostInterruptedRun(project, first.state.runId);
+    expect(readFileSync(join(project, 'bench/REPORT.md'), 'utf8')).toBe(newerBody);
+    const own = readFileSync(runRecordPath(first.directory, 'research_report.md'), 'utf8');
+    expect(own).toContain('"cost": 50');
+    expect(readFileSync(join(project, recovered.terminalArtifact!), 'utf8')).toBe(own);
+    expect(recovered.researchReportSequence).toBeUndefined();
+    const warning = readRunEvents(project, first.state.runId).find(event => event.type === 'research_report_superseded');
+    expect(warning).toMatchObject({ level: 'warning', files: ['bench/REPORT.md'] });
+    expect(warning?.ownerRunId).toBeUndefined();
+    expect(warning?.detail).toContain(second.state.runId);
+    expect(warning?.detail).toContain('unknown');
+    storeOwner.updateOperationalRunState(first.directory, () => {}, undefined, projectResearchConclusion);
+    expect(readRunEvents(project, first.state.runId).filter(event => event.type === 'research_report_superseded')).toHaveLength(1);
+    // With no competing intent, legacy recovery still restores the shared report.
+    const secondPath = runRecordPath(second.directory, 'run.json');
+    const other = JSON.parse(readFileSync(secondPath, 'utf8'));
+    other.researchReportPaths = [];
+    writeFileSync(secondPath, JSON.stringify(other));
+    storeOwner.updateOperationalRunState(first.directory, () => {}, undefined, projectResearchConclusion);
+    expect(readFileSync(join(project, 'bench/REPORT.md'), 'utf8')).toBe(own);
+    expect(readRunState(project, first.state.runId).terminalArtifact).toBe('bench/REPORT.md');
+  });
+  it('preserves a later report published through an in-project directory alias', async () => {
+    const first = await run(brief(), proposal(50));
+    symlinkSync('bench', join(project, 'report-alias'));
+    const second = await run(brief(raw => { raw.terminal_states.ceiling_hit.paths = ['report-alias/REPORT.md']; }), proposal(25));
+    const newerBody = readFileSync(runRecordPath(second.directory, 'research_report.md'), 'utf8');
+    rmSync(runRecordPath(first.directory, 'events.jsonl'));
+    const recovered = reconcileHostInterruptedRun(project, first.state.runId);
+    expect(readFileSync(join(project, 'bench/REPORT.md'), 'utf8')).toBe(newerBody);
+    expect(readFileSync(join(project, recovered.terminalArtifact!), 'utf8')).toContain('"cost": 50');
+    expect(readRunEvents(project, first.state.runId).filter(event => event.type === 'research_report_superseded'))
+      .toMatchObject([{ files: ['bench/REPORT.md'], ownerRunId: second.state.runId }]);
   });
   it('startup leaves complete historical projections and a later shared project report unchanged', async () => {
     const first = await run(brief(), proposal(50));

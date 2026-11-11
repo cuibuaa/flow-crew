@@ -436,6 +436,8 @@ export interface StoreState {
   terminalArtifact?: string;
   /** Report destinations committed with terminal state, retained for publication-error recovery. */
   researchReportPaths?: string[];
+  /** Order of the terminal destination intent, committed before report publication. */
+  researchReportSequence?: number;
   /** Research-mode config (set from brief `research:` block). */
   research?: ResearchConfig;
   /** Structurally declared brief outputs archived before terminal commit. */
@@ -1338,6 +1340,7 @@ function compactProjection(state: StoreState, ref: RunHistoryRef | undefined, re
 }
 
 function copyPersistedHistoryState(target: StoreState, source: StoreState): void {
+  target.researchReportSequence = source.researchReportSequence;
   target.stateFormat = source.stateFormat;
   target.retiredStageUsage = source.retiredStageUsage;
   target.stageEvidence = source.stageEvidence;
@@ -1470,12 +1473,23 @@ function persistRunStateUnlocked(
     atomicWrite(statusPath, JSON.stringify(stage, null, 2));
   }
   const projection = compactProjection(merged, ref, currentRevision + 1);
-  publishRunProjection(projectDir, runPath, projection, merged, assertProjectionUnchanged);
+  publishRunProjection(projectDir, runPath, projection, merged, assertProjectionUnchanged, currentProjection as StoreState | undefined);
   copyPersistedHistoryState(state, { ...merged, stateFormat: projection.stateFormat });
 }
 
+/** Read committed destination intents directly, independent of index/event repair.
+ * Missing reservations are not commits; unreadable committed records fail closed. */
+export function researchReportCommits(projectDir: string): StoreState[] {
+  return readdirSync(runsRoot(), { withFileTypes: true }).filter(entry => entry.isDirectory()).flatMap(entry => {
+    let state: StoreState;
+    try { state = JSON.parse(readFileSync(join(runsRoot(), entry.name, 'run.json'), 'utf8')) as StoreState; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+    return state.projectDir === projectDir && state.researchReportPaths && isTerminalRunStatus(state.status) ? [state] : [];
+  });
+}
+
 /** Both history and operational writers share the terminal commit boundary. */
-function publishRunProjection(projectDir: string, runPath: string, projection: StoreState, summaryState: StoreState, assertProjectionUnchanged: () => void): void {
+function publishRunProjection(projectDir: string, runPath: string, projection: StoreState, summaryState: StoreState, assertProjectionUnchanged: () => void, previous?: StoreState): void {
   assertProjectionUnchanged();
   // Terminal status is the commit record for the final reader artifacts.
   // A failed artifact write leaves the previous status observable.
@@ -1485,7 +1499,27 @@ function publishRunProjection(projectDir: string, runPath: string, projection: S
     assertProjectionUnchanged();
   }
 
-  atomicWrite(runRecordPath(runPath, 'run.json'), JSON.stringify(projection) + '\n', { stagingDirectory: hasSeparatedRunLayout(runPath) ? engineDirectory(runPath) : undefined });
+  const publish = (): void => {
+    assertProjectionUnchanged();
+    atomicWrite(runRecordPath(runPath, 'run.json'), JSON.stringify(projection) + '\n', { stagingDirectory: hasSeparatedRunLayout(runPath) ? engineDirectory(runPath) : undefined });
+  };
+  if (projection.research?.measurement && projection.researchReportPaths && isTerminalRunStatus(projection.status)) {
+    if (!previous || !isTerminalRunStatus(previous.status)) {
+      // Serialize first terminal commits with shared report projection. A lost
+      // acknowledgement leaves this order durable; recovery cannot become newer.
+      withRunStateLock(runsRoot(), () => {
+        projection.researchReportSequence = 1 + researchReportCommits(projection.projectDir).reduce((max, state) => Math.max(max, state.researchReportSequence ?? 0), 0);
+        publish();
+      });
+    } else {
+      projection.researchReportSequence = previous.researchReportSequence;
+      publish(); // Pointer/failure corrections already run under the shared lock.
+    }
+  } else {
+    delete projection.researchReportSequence; // A resumed run receives a new terminal order.
+    publish();
+  }
+  summaryState.researchReportSequence = projection.researchReportSequence;
   observeRunStatusChange(runPath, projection.runId, projection.status);
   if (isTerminalRunStatus(projection.status)) {
     retireRunScratch(runPath);
@@ -1588,7 +1622,7 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
       if (state.stateFormat) state.stateFormat.revision += 1;
       publishRunProjection(identity.projectDir!, identity.directory, state, state, () => {
         if (readFileSync(path, 'utf8') !== expected) throw new RunStateProjectionConflictError(`Run state changed during operational mutation for ${identity.runId}`);
-      });
+      }, JSON.parse(expected) as StoreState);
       expected = readFileSync(path, 'utf8');
     };
     if (unchanged) observeRunStatusChange(identity.directory, identity.runId, state.status);
