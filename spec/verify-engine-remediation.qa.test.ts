@@ -403,7 +403,6 @@ describe('independent engine-remediation verification', () => {
     const selected = findGateRecoveryStages(
       [measure, gate, repair],
       ['qa'],
-      { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json' },
     );
     expect(selected.map((entry) => entry.id)).toEqual([]);
   });

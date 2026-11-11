@@ -9,67 +9,11 @@ import { appendGuidanceEnvelope, guidanceForStageFromText } from '../src/guidanc
 import { runProjectValidationBaseline } from '../src/project-validation.js';
 
 import { fcGlobalDir, setFcGlobalDir, type StoreState } from '../src/store.js';
-import { inspectDispatchAdmission, parseDispatchedStageConfig, recordGateValidationDelta, tryAdvanceResearch } from '../src/scheduler.js';
+import { inspectDispatchAdmission, parseDispatchedStageConfig, recordGateValidationDelta } from '../src/scheduler.js';
 
 const fixture = (name: string): string => mkdtempSync(join(tmpdir(), `fc-boundaries-4-${name}-`));
 
 describe('engine boundaries from recorded runs', () => {
-  it('confirms a met research round using its result and manifest-linked evidence, and still refuses an unconfirmed round', async () => {
-    const previousHome = fcGlobalDir();
-    const root = fixture('research');
-    try {
-      setFcGlobalDir(join(root, 'home'));
-      for (const [caseName, evidencePath, evidenceScore, expected] of [
-        ['confirmed', 'research/evidence.json', 0.25, 'shipped'],
-        ['unconfirmed', 'research/missing.json', 0.20, 'ceiling_hit'],
-      ] as const) {
-        const projectDir = join(root, caseName);
-        const runId = `${caseName}-round`;
-        const runDirPath = join(root, 'home', 'runs', runId);
-        const resultRel = 'research/round_result.json';
-        mkdirSync(join(projectDir, 'research'), { recursive: true });
-        mkdirSync(runDirPath, { recursive: true });
-        writeFileSync(join(projectDir, 'confirm.cjs'), [
-          "const fs = require('node:fs');",
-          'const result = JSON.parse(fs.readFileSync(process.argv[2]));',
-          "const manifest = JSON.parse(fs.readFileSync('research/run_manifest.json'));",
-          'const round = manifest.rounds.find((entry) => entry.label === result.label);',
-          'if (!round || !round.evidence || !fs.existsSync(round.evidence)) process.exit(1);',
-          'const evidence = JSON.parse(fs.readFileSync(round.evidence));',
-          'if (round.result !== result.result || evidence.result !== result.result || !evidence.primary || !evidence.confirmation) process.exit(1);',
-        ].join('\n'));
-        const state = {
-          storageLayout: 2, runId, status: 'running', startedAt: new Date(Date.now() - 2_000).toISOString(), stages: {},
-          research: { baseline: 0, policy: 'greedy_stack', higherIsBetter: true,
-            resultFile: resultRel, reportDir: 'research',
-            stop: { beat: 0.1, maxRounds: 1, haltAfterNoImprovement: 1 },
-            confirm: { command: `node confirm.cjs ${resultRel}`, requires: 'result and evidence match', timeoutSeconds: 10 } },
-        } as StoreState;
-        writeFileSync(join(runDirPath, 'run.json'), JSON.stringify(state));
-        mkdirSync(join(runDirPath, 'engine'), { recursive: true });
-        const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
-        beginResearchInputGeneration(projectDir, state);
-        writeFileSync(join(projectDir, resultRel), JSON.stringify(caseName === 'confirmed'
-          ? { label: 'measured', result: 0.25 }
-          : { label: 'measured', result: 0.25, evidence: evidencePath }));
-        writeFileSync(join(projectDir, 'research/evidence.json'), JSON.stringify({ label: 'measured', result: evidenceScore, primary: true, confirmation: true }));
-        const terminal = await tryAdvanceResearch(state, {
-          projectDir, runId, runDirPath, iteration: 1, adapter: new ScriptedAdapter({}),
-        });
-        const confirmation = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_confirm.json'), 'utf8'));
-        const manifest = JSON.parse(readFileSync(join(projectDir, 'research/run_manifest.json'), 'utf8'));
-        const consumed = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_round_1_consumed.json'), 'utf8'));
-        expect(terminal?.status, JSON.stringify(confirmation)).toBe(expected);
-        expect(confirmation.pass).toBe(caseName === 'confirmed');
-        expect(manifest.rounds[0].evidence).toBe(evidencePath);
-        expect(consumed.evidence === undefined).toBe(caseName === 'confirmed');
-        expect(manifest.rounds[0].confirmFailed === true).toBe(caseName === 'unconfirmed');
-      }
-    } finally {
-      setFcGlobalDir(previousHome);
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
 
   it('allows ordinary linked-input writes and still fails a contained regression', async () => {
     const previousHome = fcGlobalDir();

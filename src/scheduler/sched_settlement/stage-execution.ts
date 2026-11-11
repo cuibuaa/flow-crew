@@ -9,7 +9,7 @@ import { loadAdapterByName } from '../../adapters/loader.js';
 import { AttemptDeadlineClock, TechnicalRetryBudgetState, createTechnicalRetryBudgetState, nextTechnicalRetryBudget, transitionTechnicalRetryBudget } from '../../attempt-deadline.js';
 import { RUN_STATUS, STAGE_STATUS, StageAttemptSettlementError, StageStatus, StoreState, isPendingStageStatus, isRunningStageStatus, readRunState, readStageStatus, rependStageStatus, writeRunState, writeStageStatus } from '../../store.js';
 import { freshRunningStageProjection, runStage } from '../../worker.js';
-import { stageRecordSchema } from '../../handoff.js';
+import { stageRecordSchema, RESEARCH_PRODUCER_SCHEMA } from '../../handoff.js';
 import { StageConfig, WorkflowConfig, configuredTechnicalRetryLimit, failureRetryLimit, loadDefaults, parseAgent } from '../sched_admission/configuration.js';
 import { buildRetryPreamble } from '../sched_admission/dispatch-retry.js';
 import { applyBasePrompt, buildRoleRegistry, loadBasePrompt } from '../sched_admission/dispatch.js';
@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { appendUnresolvedStageObligationContext } from './completion.js';
 import { buildGateFixCorrectionContract, gateArchiveCoordinate } from './gate-archives.js';
-import { isGateReviewed, isResearchOutcomeGate } from './gate-recovery.js';
+import { isGateReviewed, gateReviewedAuthorIds } from './gate-recovery.js';
 
 export function stageInitialTimeout(): number {
   return loadDefaults().default_timeout_ms;
@@ -200,8 +200,8 @@ export async function executeSingleStage(
         : resolvedPrompt, prepared.budgetMs),
       artifactObligationTemplate: stage.prompt_template,
       artifactContract: stage.artifact_contract,
-      outputSchema: stageRecordSchema({ isGate: stage.is_gate,
-        criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
+      outputSchema: state.research?.measurement && !stage.is_gate ? RESEARCH_PRODUCER_SCHEMA : stageRecordSchema({ isGate: stage.is_gate,
+        criterionRefs: stage.criterion_refs, extendedVerdict: !state.research?.measurement && Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
       planRevision: state.queryState?.planRevision,
       artifactStatuses: state.stages,
       timeout_ms: prepared.budgetMs,
@@ -216,11 +216,10 @@ export async function executeSingleStage(
       availableSkills,
       taskDescription: taskDescription || state.taskDescription,
       isGate: stage.is_gate,
-      gateContext: { fixStageIds, roundDiffPath },
+      gateContext: { authorIds: gateReviewedAuthorIds(stage, allStages), fixStageIds, roundDiffPath },
       repairFindings: stage.retry_to && state.gateRetryRound ? confirmedRepairFindings(runDirPath, stage.retry_to, state.gateRetryRound) : [],
       gateReviewed: isGateReviewed(stage, allStages),
       dynamicDispatch: stage.dynamic_dispatch,
-      researchOutcomeGate: isResearchOutcomeGate(stage, allStages, state.research),
       criterionRefs: stage.criterion_refs,
       settlementBoundary,
     });
@@ -262,7 +261,7 @@ export function appendStageExecutionContracts(
   projectDir: string, runId: string, runDirPath: string,
 ): string {
   resolvedPrompt = appendProjectWriteContext(resolvedPrompt, stage);
-  resolvedPrompt = appendResearchPathContract(resolvedPrompt, state.research, state.terminalStates);
+  resolvedPrompt = appendResearchPathContract(resolvedPrompt, state.research, state.terminalStates, runDirPath);
   if (stage.dynamic_dispatch) {
     resolvedPrompt = appendPlannerAdmissionContract(resolvedPrompt, state.terminalStates);
     resolvedPrompt = appendUnresolvedStageObligationContext(resolvedPrompt, readRunState(projectDir, runId));

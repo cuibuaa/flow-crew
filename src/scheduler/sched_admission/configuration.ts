@@ -3,8 +3,7 @@ import { loadEngineDefaults as loadDefaults } from '../../config.js';
 import { z } from 'zod';
 import { type AgentConfig } from '../../adapters/base.js';
 import { ArtifactContractSchema, RecordedArtifactContractSchema, artifactActivation } from '../../artifact-declarations.js';
-import { type StoreState, RUN_STATUS } from '../../store.js';
-import { parseCondition } from '../../condition.js';
+import { type StoreState } from '../../store.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
 
 export { loadDefaults };
@@ -108,31 +107,6 @@ export function refreshRunQueryState(state: StoreState, stages: StageConfig[]): 
   };
 }
 
-export const RESEARCH_DECISION_STATUS_ALIASES = new Map<string, string>([
-  [RUN_STATUS.SHIPPED, 'ship'],
-  [RUN_STATUS.CEILING_HIT, 'stop_ceiling'],
-]);
-
-export const EMITTED_RESEARCH_DECISIONS = new Set(RESEARCH_DECISION_STATUS_ALIASES.values());
-
-function normalizeResearchTerminalCondition(condition: string | undefined): string | undefined {
-  if (!condition?.trim()) return condition;
-  try {
-    const parsed = parseCondition(condition);
-    if (parsed.stageId === 'research'
-        && parsed.field === 'decision'
-        && parsed.op === '=='
-        && typeof parsed.value === 'string') {
-      const emittedDecision = RESEARCH_DECISION_STATUS_ALIASES.get(parsed.value);
-      if (emittedDecision) return `research.decision == ${JSON.stringify(emittedDecision)}`;
-      if (parsed.value === RUN_STATUS.ESCALATED) {
-        return `research.terminalStatus == ${JSON.stringify(RUN_STATUS.ESCALATED)}`;
-      }
-    }
-  } catch { /* admission reports malformed conditions; parsing stays fail-closed */ }
-  return condition;
-}
-
 /**
  * Dynamic plans describe the DAG, not scheduler recovery policy. Keep accepting
  * the historical field so an otherwise usable plan is not discarded, but strip
@@ -151,7 +125,6 @@ export function parseDispatchedStageConfig(raw: unknown): StageConfig {
   if (stage.is_gate && stage.retry_to?.length) throw new Error('gate stages cannot declare retry_to; repairs own retry_to edges');
   normalizeStageContracts([stage]);
   delete stage.max_retries;
-  stage.condition = normalizeResearchTerminalCondition(stage.condition);
   return stage;
 }
 

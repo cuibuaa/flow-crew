@@ -11,7 +11,7 @@ import { inspectStageArtifactContract } from '../src/stage-artifact-contract.js'
 
 describe('engine boundary cases 57 and 59', () => {
 
-  it('guides non-research terminal routing through a real gate fact and retains research admission refusal', () => {
+  it('guides non-research terminal routing through a real gate fact and refuses undeclared condition producers', () => {
     const stage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({
       artifact_contract: fixtureArtifactContract(String(raw.id), raw.is_gate === true),
       prompt_template: 'fixture', skills: [], criterion_refs: [], is_gate: false,
@@ -42,6 +42,6 @@ describe('engine boundary cases 57 and 59', () => {
     const refused = inspectDispatchAdmission({ dispatched: undefinedFacts, baseStages: [],
       dispatchStageId: 'plan', terminalStates });
     expect(refused.pass).toBe(false);
-    expect(refused.errors.filter((error) => error.message.includes('framework research facts in a non-research run'))).toHaveLength(2);
+    expect(refused.errors.filter((error) => error.message.includes('unknown stage research'))).toHaveLength(2);
   });
 });

@@ -10,7 +10,7 @@ import { processLiveness, processStartToken, type ProcessStartToken } from './pr
 
 import { RUN_STATUS, STAGE_STATUS, interruptedStageStatus, readRunState, readStageStatus, rependStageStatus, updateRunState, updateStageStatusUnderRunLock, type StageAttempt, type StageStatus, type StoreState } from './store.js';
 import { recordRunEvent } from './run-events.js';
-import { concludeRun } from './scheduler/sched_policy/run-completion.js';
+import { concludeRun, reconcileResearchConclusion } from './scheduler/sched_policy/run-completion.js';
 import { planDigest } from './plan-revisions.js';
 import { canonicalRunId } from './cancellation-policy.js';
 import { runsRoot } from './store.js';
@@ -105,7 +105,7 @@ export function persistedPlanErrors(state: StoreState): string[] {
 export function reconcileHostInterruptedRun(projectDir: string, runId: string, evidence: { currentBootId?: string; currentGeneration?: string; expectedCheckpoint?: EngineCheckpoint; assertSchedulerAbsent?: () => void } = {}): StoreState {
   runId = canonicalRunId(runsRoot(projectDir), runId);
   let state = readRunState(projectDir, runId);
-  if (state.status !== RUN_STATUS.RUNNING) return state;
+  if (state.status !== RUN_STATUS.RUNNING) return state.researchReportPaths ? reconcileResearchConclusion(projectDir, runId) : state;
   if (state.runId !== runId || resolve(state.projectDir) !== resolve(projectDir)) throw new Error('RECOVERY_RUN_BINDING: state is not bound to this run/project');
   if (Object.hasOwn(evidence, 'expectedCheckpoint') && digest(state.engineCheckpoint ?? null) !== digest(evidence.expectedCheckpoint ?? null)) throw new Error('RECOVERY_STATE_CHANGED: checkpoint changed since daemon observation');
   evidence.assertSchedulerAbsent ??= () => {
@@ -115,15 +115,15 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
   if (!state.engineCheckpoint) {
     const snapshot = digest(state);
     const reason = 'RECOVERY_CHECKPOINT_MISSING: controller absent but descendant fate, admitted plan and generation cannot be proved; run ended without resuming or claiming stage completion';
-    let publish: (() => void) | undefined;
+    let publish: ((persist: () => void) => void) | undefined;
     return updateRunState(projectDir, runId, current => {
       evidence.assertSchedulerAbsent!();
       if (digest(current) !== snapshot) throw new Error('RECOVERY_STATE_CHANGED: run changed before unknown-fate settlement');
       concludeRun(current, { status: RUN_STATUS.FAILED, reasonCode: 'recovery_blocked', detail: reason },
         (_state, notify) => { publish = notify; });
       current.recovery = { cause: 'unknown', kind: 'blocked', reason, at: current.completedAt!, interruptedStages: Object.keys(current.stages).filter(id => current.stages[id].status === STAGE_STATUS.RUNNING) };
-    }, current => {
-      publish?.();
+    }, (current, persist) => {
+      publish?.(persist);
       recordRunEvent(projectDir, runId, { type: 'recovery_reconciled', runId, timestamp: current.recovery!.at, detail: reason, source: 'scheduler', level: 'warning' });
     });
   }
@@ -222,7 +222,7 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
   }
   const reason = errors.length ? errors.join('; ') : `${(intent?.cause ?? cause).toUpperCase()}_RESUMABLE: interrupted executions retained; completed work and iteration budget preserved`;
   let published = false;
-  let publish: (() => void) | undefined;
+  let publish: ((persist: () => void) => void) | undefined;
   updateRunState(projectDir, runId, (current) => {
     published = false;
     publish = undefined;
@@ -244,8 +244,8 @@ export function reconcileHostInterruptedRun(projectDir: string, runId: string, e
     }
     current.recovery = { cause: intent?.cause ?? cause, kind: errors.length ? 'blocked' : 'resumable', reason, at: new Date().toISOString(), fromBoot: previous.bootId, toBoot: boot, generation: previous.generation, interruptedStages };
     published = true;
-  }, (current) => {
-    publish?.();
+  }, (current, persist) => {
+    publish?.(persist);
     if (published) recordRunEvent(projectDir, runId, { type: 'recovery_reconciled', runId, timestamp: current.recovery!.at, detail: reason, source: 'scheduler', level: errors.length ? 'warning' : 'info' });
   });
   // A native cancellation may commit immediately after our lock is released.

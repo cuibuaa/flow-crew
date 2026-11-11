@@ -8,7 +8,6 @@ import { ScriptedAdapter } from '../src/adapters/scripted.js';
 import { readRunEvents } from '../src/run-events.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { completePlainWorkflow, concludeWorkflowIteration } from '../src/scheduler/sched_loop/iteration-outcome.js';
-import { createResearchBudgetFinalizer } from '../src/scheduler/sched_loop/research-terminal.js';
 import { createBlockageConcluder } from '../src/scheduler/sched_policy/guidance.js';
 import { concludeRun, cancelRunStateAtPath } from '../src/scheduler/sched_policy/run-completion.js';
 import { recoverTerminalStudyCompletion } from '../src/scheduler/sched_settlement/completion.js';
@@ -51,10 +50,8 @@ function expectOwnerConclusion(status: string) {
 
 async function finishIteration(innerRetriesUsed = 0) {
   const state = readRunState(project, runId);
-  const finalizer = createResearchBudgetFinalizer(project, runId, directory,
-    { name: 'conclusion', description: '', defaults: {}, stages: [review] }, adapter, new Map(), '', new Map());
   return (await concludeWorkflowIteration(state, [review], 1, ['review'], innerRetriesUsed, 3, 3,
-    finalizer, project, runId, directory, adapter, new Set(), new Map())).state;
+    project, runId, directory, adapter, new Set())).state;
 }
 
 function settledReview(status: 'complete' | 'failed', extra: object = {}) {

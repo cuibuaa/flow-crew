@@ -1,3 +1,4 @@
+import { readResearchHistory } from './research-history.js';
 import { runRecordPath, stageWorkPath } from './run-layout.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -313,6 +314,7 @@ interface WorkflowEvidence {
 }
 
 interface JournalRound {
+  comparison?: { keep?: boolean };
   label?: unknown;
   result?: unknown;
   confirmFailed?: unknown;
@@ -732,8 +734,7 @@ function workflowEvidence(projectDir: string, state: StoreState): WorkflowEviden
 }
 
 function journalEvidence(projectDir: string, state: StoreState): JournalEvidence {
-  const path = runRecordPath(join(runsRoot(projectDir), state.runId), 'research_journal.json');
-  const json = readOptionalJson(path);
+  const json = readResearchHistory(join(runsRoot(projectDir), state.runId));
   if (json.error) return {
     rounds: [],
     issue: issue('research-journal-unreadable', 'The research journal could not be read', { runId: state.runId, detail: json.error }),
@@ -953,7 +954,8 @@ function acceptsCampaignMeasurement(statusValue: unknown): boolean {
 }
 
 function runDirection(run: RunEvidence, metric: string): 'higher' | 'lower' | 'unknown' {
-  if (run.state.research) return run.state.research.higherIsBetter === false ? 'lower' : 'higher';
+  if (run.state.research?.measurement) return run.state.research.measurement.metrics[metric]?.direction === 'min' ? 'lower' : 'higher';
+  if (run.state.research) return (run.state.research as import('./research-history.js').HistoricalResearchConfig).higherIsBetter === false ? 'lower' : 'higher';
   const directions = run.metricArtifacts
     .filter((item) => run.workflow.roles?.get(item.stageId)?.isGate && metricKey(item.metric) === metricKey(metric))
     .map((item) => item.higherIsBetter)
@@ -979,6 +981,8 @@ function acceptedPointsFromRuns(
   const points: AcceptedMeasurementPoint[] = [];
   for (const run of runs) {
     const metricCandidates = new Map<string, string>();
+    const primary = run.state.research?.measurement?.primary[0];
+    if (primary) metricCandidates.set(metricKey(primary), primary);
     for (const entry of run.history) {
       const metric = nonEmptyString(entry.metric);
       if (metric) metricCandidates.set(metricKey(metric), metric);
@@ -995,7 +999,7 @@ function acceptedPointsFromRuns(
         const [key, metric] = [...metricCandidates.entries()][0];
         for (const [index, rawRound] of run.journal.rounds.entries()) {
           const value = finiteNumber(rawRound.result);
-          if (value === undefined || rawRound.confirmFailed === true) continue;
+          if (value === undefined || rawRound.confirmFailed === true || rawRound.comparison?.keep === false) continue;
           const round = nonEmptyString(rawRound.label) ?? `round ${index + 1}`;
           const runMetricDirection = runDirection(run, metric);
           points.push({

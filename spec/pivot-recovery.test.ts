@@ -9,7 +9,7 @@ import {
   recoverTerminalStudyCompletion,
   type CampaignEntry,
 } from '../src/scheduler.js';
-import { runDir } from '../src/store.js';
+import { runDir, readRunState, writeRunState, type StoreState } from '../src/store.js';
 
 let projectDir: string;
 let runId: string;
@@ -52,7 +52,7 @@ describe('terminal study completion contract', () => {
       threshold: 300,
     }));
 
-    const recovered = await recoverTerminalStudyCompletion(projectDir, runId, {
+    const state: StoreState = {
       runId,
       workflowName: 'default',
       projectDir,
@@ -79,12 +79,16 @@ describe('terminal study completion contract', () => {
         alertType: 'regression',
         message: '2 consecutive score declines',
       },
-    });
+    };
+    // Recovery concludes an existing run under its state lock, as in the engine.
+    writeRunState(projectDir, runId, state);
+    const recovered = await recoverTerminalStudyCompletion(projectDir, runId, state);
 
     expect(recovered?.status).toBe('complete');
     expect(recovered?.stages[gateId].status).toBe('complete');
     expect(recovered?.campaignAlert).toBeUndefined();
     expect(recovered?.researchInjection).toBeUndefined();
+    expect(readRunState(projectDir, runId).status).toBe('complete');
   });
 
   it('G2: intermediate phase progress verdict remains non-terminal', async () => {

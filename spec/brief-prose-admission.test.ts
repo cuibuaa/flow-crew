@@ -101,7 +101,7 @@ describe('brief prose admission', () => {
     const brief = '---\nresearch:\n  baseline: 0.1457\n  higher_is_better: true\n  stop:\n    beat: 0.05\n---\n## Criteria\n1. Report measured research evidence.\n';
     const report = inspectBrief(brief);
     expect(staticRehearsal(brief).status).toBe(1);
-    expect(report.findings).toContainEqual(expect.objectContaining({ code: 'research_ship_target_already_crossed', level: 'fail' }));
+    expect(report.findings).toContainEqual(expect.objectContaining({ code: 'research_policy_invalid', level: 'fail' }));
     expect(rehearsalExitCode(report.findings.map(finding => ({ level: finding.level, text: finding.message })))).toBe(1);
   });
 
@@ -124,10 +124,10 @@ describe('brief prose admission', () => {
     expect(staticRehearsal(brief).status).toBe(0);
   });
 
-  it('keeps research ceiling floors counted by measured rounds', () => {
+  it('requires migration before interpreting legacy research ceiling floors', () => {
     const brief = '---\nresearch:\n  baseline: 0\n  higher_is_better: true\n  stop:\n    beat: 1\nterminal_states:\n  ceiling_hit:\n    paths: [docs/ceiling.md]\n    floor:\n      min_attempted_stages: 3\n---\n## Criteria\n1. Report measured evidence.\n';
-    expect(inspectBrief(brief).findings.some(entry => entry.code.startsWith('terminal_floor_uncountable_'))).toBe(false);
-    expect(staticRehearsal(brief).status).toBe(0);
+    expect(inspectBrief(brief).findings.some(entry => entry.code === 'research_policy_invalid')).toBe(true);
+    expect(staticRehearsal(brief).status).toBe(1);
   });
 
   it('rejects malformed frontmatter', () => {

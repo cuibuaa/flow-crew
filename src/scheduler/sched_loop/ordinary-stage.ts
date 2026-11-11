@@ -19,7 +19,7 @@ import { applyBasePrompt, loadBasePrompt } from '../sched_admission/dispatch.js'
 import { log } from '../sched_admission/shared.js';
 import { checkCampaignHealth } from '../sched_policy/campaign.js';
 import { appendAttemptDeadlineContract } from '../sched_policy/prompt-contracts.js';
-import { gateReviewedAuthorIds, isGateReviewed, isResearchOutcomeGate } from '../sched_settlement/gate-recovery.js';
+import { gateReviewedAuthorIds, isGateReviewed } from '../sched_settlement/gate-recovery.js';
 import { appendStageExecutionContracts, createSchedulerTechnicalRetryState, prepareSchedulerTechnicalAttempt, recordSchedulerTechnicalAttemptResult, stageInitialTimeout } from '../sched_settlement/stage-execution.js';
 import { StoreState, runDir } from '../../store.js';
 import { runStage } from '../../worker.js';
@@ -52,13 +52,12 @@ export async function executeOrdinaryStage(
 
       let availableRoles: string | undefined;
       let availableChecks: string | undefined;
-      let resultSchema: string | undefined;
       let contextInventory: string | undefined;
       let ledgerDigest: string | undefined;
       if (stage.dynamic_dispatch) {
         // Context primitive: inject the on-disk data/asset inventory so the planner's Propose
         // step works from the real world-model (never signposts acquiring data already present).
-        contextInventory = summarizeContext(projectDir, state.research?.contextRoots ?? ['data']);
+        contextInventory = summarizeContext(projectDir, ['data']);
         // Ledger primitive: inject the campaign's tried directions so Propose does
         // not repeat prior work. Always computed (not gated by --no-inherit: it is the compact
         // dedup ledger, not the verbose narrative context that flag suppresses).
@@ -69,7 +68,6 @@ export async function executeOrdinaryStage(
         availableChecks = (await listCheckTypes()).map((c) => `- ${c.type}: ${c.description} (params: ${c.params})`).join('\n');
         // Single-source the round_result output contract: the planner's checks must reference
         // THIS schema (not invent fields). The engine enforces the same schema per round (Gate #0).
-        if (state.research?.resultSchema) resultSchema = JSON.stringify(state.research.resultSchema, null, 2);
       }
 
       let resolvedPrompt = stage.prompt_template;
@@ -155,7 +153,7 @@ export async function executeOrdinaryStage(
         isolatedInput,
         decisionResult: stage.decision?.kind === 'shape' ? 'shape' : Boolean(stage.decision && !stage.is_gate),
         outputSchema: stage.decision && !stage.is_gate ? decisionSchema(stage) : stageRecordSchema({ isGate: stage.is_gate,
-          criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || state.research || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
+          criterionRefs: stage.criterion_refs, extendedVerdict: Boolean(stage.artifact_contract?.produces.some(output => output.path === `work/verdict_${stage.id}.json`) || state.campaignStorageKey || existsSync(runRecordPath(runDirPath, 'gate_contract.json')) || existsSync(runRecordPath(runDirPath, 'supervisor_guidance.md'))) }),
         planRevision: state.queryState?.planRevision,
         artifactStatuses: state.stages,
         timeout_ms: prepared.budgetMs,
@@ -169,7 +167,6 @@ export async function executeOrdinaryStage(
         availableRoles,
         availableChecks,
         availableSkills,
-        resultSchema,
         contextInventory,
         ledgerDigest,
         taskDescription: taskDescription || state.taskDescription,
@@ -178,7 +175,6 @@ export async function executeOrdinaryStage(
         repairFindings: stage.retry_to && state.gateRetryRound ? confirmedRepairFindings(runDirPath, stage.retry_to, state.gateRetryRound) : [],
         gateReviewed: isGateReviewed(stage, sorted),
         dynamicDispatch: stage.dynamic_dispatch,
-        researchOutcomeGate: isResearchOutcomeGate(stage, sorted, state.research),
         criterionRefs: stage.criterion_refs,
         settlementBoundary,
       });

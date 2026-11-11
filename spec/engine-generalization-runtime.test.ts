@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/base.js';
-import { appendResearchPathContract, ensureTerminalArtifactValidation, findGateRecoveryStages, inspectDispatchAdmission, parseDispatchedStageConfig, recordGateValidationDelta, runWorkflow, tryAdvanceResearch, tryTerminateOnTerminalState, type GateRecoveryFact, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
+import { appendResearchPathContract, ensureTerminalArtifactValidation, findGateRecoveryStages, inspectDispatchAdmission, parseDispatchedStageConfig, recordGateValidationDelta, runWorkflow, tryTerminateOnTerminalState, type GateRecoveryFact, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import { validationPathImpacts } from './test-support/validation-path-impacts.js';
 import {
   runProjectValidationBaseline,
@@ -499,7 +499,7 @@ describe('engine generalization runtime bindings', () => {
       gateId: 'qa',
       authoredVerdict: { pass: true, reason: 'audit completed' },
       effectiveVerdict: { pass: false, reason: 'Research round outcome is absent: no usable evidence' },
-      rejectionKind: 'omitted_research_outcome',
+      rejectionKind: 'engine_contract_or_evidence_rejection',
     };
     const legacyFact: GateRecoveryFact = {
       gateId: 'qa',
@@ -509,16 +509,16 @@ describe('engine generalization runtime bindings', () => {
     };
     const research = { baseline: 0, policy: 'greedy_stack' as const, resultFile: 'artifacts/round.json' };
     expect(findGateRecoveryStages(
-      [measure, gate, repair], ['qa'], research, { qa: contractFact },
+      [measure, gate, repair], ['qa'], { qa: contractFact },
     ).map((entry) => entry.id)).toEqual([]);
     expect(findGateRecoveryStages(
-      [measure, gate, repair], ['qa'], research, { qa: substantiveFact },
+      [measure, gate, repair], ['qa'], { qa: substantiveFact },
     ).map((entry) => entry.id)).toEqual([]);
     expect(findGateRecoveryStages(
-      [measure, gate, repair], ['qa'], research, { qa: omittedFact },
-    ).map((entry) => entry.id)).toEqual(['measure']);
+      [measure, gate, repair], ['qa'], { qa: omittedFact },
+    ).map((entry) => entry.id)).toEqual([]); // Retired result-slot omissions cannot rerun a producer.
     expect(findGateRecoveryStages(
-      [measure, gate, repair], ['qa'], research, { qa: legacyFact },
+      [measure, gate, repair], ['qa'], { qa: legacyFact },
     ).map((entry) => entry.id)).toEqual([]);
 
     const { projectDir, agentsDir } = seedProject('recovery', 'planner', 'qa', 'repair');
@@ -700,38 +700,6 @@ describe('engine generalization runtime bindings', () => {
     expect(noBaseline).toMatchObject({ required: false, pass: true, disposition: 'no_baseline' });
   });
 
-  it('keeps round identities immutable and preserves consumed measurements', async () => {
-    const { projectDir } = seedProject('round-evidence');
-    const runDirPath = join(dirname(projectDir), 'run');
-    const resultPath = join(projectDir, 'artifacts', 'round.json');
-    mkdirSync(dirname(resultPath), { recursive: true });
-    mkdirSync(runDirPath, { recursive: true });
-    const state = {
-      runId: 'round-evidence', workflowName: 'fixture', projectDir, status: 'running', stages: {},
-      startedAt: new Date(Date.now() - 1_000).toISOString(),
-      research: { baseline: 0, policy: 'greedy_stack', resultFile: 'artifacts/round.json', reportDir: 'artifacts', stop: { maxRounds: 4 } },
-    } as StoreState;
-    const first = { label: 'round-a', result: 0.018, result_std: 0.001,
-      control: { mean: 0.01, lower: 0.009, upper: 0.011 }, evidence: { sample: 'control-pair-a', seed: 11 } };
-    const independent = { ...first, label: 'round-c', evidence: { sample: 'control-pair-c', seed: 29 } };
-    const adapter = { run: async () => ({ output: '', exitCode: 0, duration_ms: 1 }) };
-    const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
-    beginResearchInputGeneration(projectDir, state);
-    for (const [index, round] of [first, independent].entries()) {
-      writeFileSync(resultPath, JSON.stringify(round));
-      await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: index + 1, adapter });
-      expect(JSON.parse(readFileSync(runRecordPath(runDirPath, `research_round_${index + 1}_consumed.json`), 'utf-8'))).toEqual(round);
-    }
-    const journal = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_journal.json'), 'utf-8'));
-    expect(journal.rounds.map((round: { label: string; result: number }) => [round.label, round.result]))
-      .toEqual([['round-a', 0.018], ['round-c', 0.018]]);
-    writeFileSync(resultPath, JSON.stringify({ label: 'round-a', result: 0.019, evidence: { sample: 'new', seed: 41 } }));
-    await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath, iteration: 3, adapter });
-    expect(readFileSync(runRecordPath(runDirPath, 'supervisor_guidance.md'), 'utf-8')).toContain('immutable identity');
-    expect(JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_journal.json'), 'utf-8')).rounds).toEqual(journal.rounds);
-    expect(JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_round_1_consumed.json'), 'utf-8'))).toEqual(first);
-  });
-
   it('16 — identifies configured-command inputs without scope negotiation', async () => {
     const { projectDir, agentsDir } = seedProject('scope-message', 'worker');
     mkdirSync(join(projectDir, 'src'), { recursive: true });
@@ -767,90 +735,5 @@ describe('engine generalization runtime bindings', () => {
     })).toEqual([]);
 
 
-  });
-
-  it('17 — carries the exact no-candidate shape through both dispatch paths and retains runtime refusals', async () => {
-    const { projectDir, agentsDir } = seedProject('round-shape', 'planner', 'qa', 'repair');
-    const workflow: WorkflowConfig = {description: '', 
-      name: 'round-shape-paths',
-      defaults: { max_iterations: 1, max_retries: 1 },
-      stages: [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'plan', role: 'planner', dynamic_dispatch: true })],
-    };
-    let initialPrompt = '';
-    let repairPrompt = '';
-    const adapter: Adapter = { async run(prompt, _role, opts) {
-      const summary = summaryResult(opts);
-      if (summary) return fixtureResult(summary, opts);
-      if (opts.stageId === 'plan') {
-        writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch([
-          'stages:',
-          '  - id: qa',
-          '    role: qa',
-          '    scope: []',
-          '    depends_on: [plan]',
-          '    dependency_reasons: {plan: "audit the current round"}',
-          '    is_gate: true',
-          '    prompt_template: Reject the fixture once.',
-          '  - id: repair',
-          '    role: repair',
-          '    scope: []',
-          '    depends_on: [qa]',
-          '    dependency_reasons: {qa: "repair the substantive rejection"}',
-          '    retry_to: [qa]',
-          '    prompt_template: Repair the fixture.',
-        ].join('\n')));
-      } else if (opts.stageId === 'qa') {
-        initialPrompt ||= prompt;
-        writeFileSync(stageWorkPath(opts.runDir, 'fixture_verdict_qa.json'), JSON.stringify({
-          pass: false, reason: 'substantive fixture rejection',
-        }));
-      } else {
-        repairPrompt = prompt;
-      }
-      return fixtureResult({ output: opts.stageId, exitCode: 0, duration_ms: 1, writes: [], writeAttribution: 'structured' }, opts);
-    } };
-    await runWorkflow(
-      workflow,
-      'name: round-shape-paths',
-      projectDir,
-      withConfirmedRejections(adapter),
-      new Map(),
-      undefined,
-      agentsDir,
-      undefined,
-      researchBrief(2),
-      true,
-    );
-    const exactShape = '{"label":"<non-empty>","outcome":"no_candidate","reason":"<non-empty>"}';
-    expect(initialPrompt).toContain(exactShape);
-    expect(repairPrompt).toContain(exactShape);
-    expect(appendResearchPathContract('ROUND', {
-      baseline: 0, policy: 'greedy_stack', resultFile: 'artifacts/round.json',
-    }, undefined)).toContain(exactShape);
-
-    const refusalRoot = temporaryRoot('round-refusals');
-    const refusalProject = join(refusalRoot, 'project');
-    const refusalRun = join(refusalRoot, 'run');
-    mkdirSync(join(refusalProject, 'artifacts'), { recursive: true });
-    mkdirSync(refusalRun, { recursive: true });
-    const state = {
-      runId: 'refusal', workflowName: 'fixture', projectDir: refusalProject, status: 'running', stages: {},
-      startedAt: new Date(Date.now() - 1_000).toISOString(),
-      research: { baseline: 0, policy: 'greedy_stack', resultFile: 'artifacts/round.json', stop: { maxRounds: 2 } },
-    } as StoreState;
-    const measured = join(refusalProject, 'artifacts', 'round.json');
-    const sidecar = `${measured}.no_candidate.json`;
-    const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
-    beginResearchInputGeneration(refusalProject, state);
-    writeFileSync(measured, JSON.stringify({ label: 'measured', result: 1 }));
-    writeFileSync(sidecar, JSON.stringify({ label: 'none', outcome: 'no_candidate', reason: 'unsafe' }));
-    await tryAdvanceResearch(state, { projectDir: refusalProject, runId: state.runId, runDirPath: refusalRun, iteration: 1, adapter });
-    expect(JSON.parse(readFileSync(join(refusalRun, 'research_round_input_error.json'), 'utf-8')))
-      .toMatchObject({ kind: 'ambiguous_measured_and_no_candidate' });
-    rmSync(measured);
-    writeFileSync(sidecar, JSON.stringify({ label: 'none', outcome: 'no_candidate', reason: '' }));
-    await tryAdvanceResearch(state, { projectDir: refusalProject, runId: state.runId, runDirPath: refusalRun, iteration: 1, adapter });
-    expect(JSON.parse(readFileSync(join(refusalRun, 'research_round_input_error.json'), 'utf-8')))
-      .toMatchObject({ kind: 'invalid_no_candidate_shape' });
   });
 });

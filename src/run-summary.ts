@@ -1,3 +1,4 @@
+import { readResearchHistory } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -12,7 +13,7 @@ import {
   STAGE_STATUS,
 } from './store.js';
 import type { StageStatus, StoreState } from './store.js';
-import type { ResearchEvaluation, ResearchRound } from './research-policy.js';
+import type { ResearchEvaluation, ResearchRound } from './research-history.js';
 import { readOptionalJsonlFile } from './jsonl.js';
 import type { RunEvent } from './run-events.js';
 import { RUN_STATUS, resolveRunStatus, TERMINAL_STATUSES as STORE_TERMINAL_STATUSES } from './lifecycle-status.js';
@@ -169,6 +170,7 @@ function renderOrchestrationEvents(runDirectory: string): string {
 // ---------------------------------------------------------------------------
 
 interface ResearchData {
+  baseline?: import('./research-measurement.js').Observation;
   rounds: ResearchRound[];
   decision: Partial<ResearchEvaluation> | null;
 }
@@ -197,9 +199,9 @@ function renderRealityGateChecks(runDir: string): string {
 }
 
 function readResearchData(runDir: string): ResearchData {
-  const journal = readJson<{ rounds?: ResearchRound[] }>(runRecordPath(runDir, 'research_journal.json'));
+  const journal = readResearchHistory(runDir).value;
   const decision = readJson<Partial<ResearchEvaluation>>(runRecordPath(runDir, 'research_decision.json'));
-  return { rounds: Array.isArray(journal?.rounds) ? journal!.rounds! : [], decision };
+  return { rounds: journal?.rounds ?? [], decision, baseline: journal?.baseline };
 }
 
 function fmtNum(n: number): string {
@@ -209,8 +211,9 @@ function fmtNum(n: number): string {
 
 function renderResearchOutcome(state: StoreState, data: ResearchData): string {
   const rc = state.research;
-  const higherIsBetter = rc?.higherIsBetter ?? true;
-  const baseline = rc?.baseline;
+  const historical = rc as import('./research-history.js').HistoricalResearchConfig | undefined;
+  const higherIsBetter = rc?.measurement ? rc.measurement.metrics[rc.measurement.primary[0]].direction === 'max' : historical?.higherIsBetter ?? true;
+  const baseline = rc?.measurement ? data.baseline?.items?.reduce((sum, item) => sum + item.metrics[rc.measurement.primary[0]], 0) : historical?.baseline;
   const best = data.decision?.runningBest;
   const lines: string[] = [];
   // FIX C — the Decision label must derive from the TERMINAL run.json status, not the
@@ -261,8 +264,9 @@ function renderRoundsSection(data: ResearchData): string {
   const shown = data.rounds.slice(-MAX);
   const lines = shown.map((r) => r.outcome === 'no_candidate'
     ? `- ${r.label}: no candidate${r.reason ? ` — ${r.reason}` : ''}`
+    : r.outcome === 'review_rejected' ? `- ${r.label}: review rejected — ${r.reason ?? 'candidate properties rejected'}`
     : r.outcome === 'unmeasured' ? `- ${r.label}: unmeasured — ${r.measurement?.detail ?? r.reason ?? 'measurement unavailable'}`
-    : `- ${r.label}: ${typeof r.result === 'number' ? fmtNum(r.result) : 'invalid measurement'}${kept.has(r.label) ? ' ✓ kept' : ''}`);
+    : `- ${r.label}: ${typeof r.result === 'number' ? fmtNum(r.result) : 'invalid measurement'}${(r.comparison ? r.comparison.keep : kept.has(r.label)) ? ' ✓ kept' : ''}`);
   let out = `## Rounds (${data.rounds.length})\n${lines.join('\n')}`;
   if (data.rounds.length > MAX) out = `## Rounds (${data.rounds.length}, showing last ${MAX})\n${lines.join('\n')}`;
   return out;

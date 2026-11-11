@@ -13,7 +13,6 @@ import { loadGateContract } from '../sched_settlement/gate-contract.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { readGateEvaluation } from '../sched_settlement/gate-verdict.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, isPausedRunStatus, isPendingStageStatus, runDir, writeStageStatus } from '../../store.js';
-import { createResearchBudgetFinalizer } from './research-terminal.js';
 import { archiveDeclaredOutputsBeforePlainCompletion, concludeDeclaredTerminalAtQuiescence, concludeRepeatedBlockage, terminateForGateContractRefusal, writeCampaignEntry } from './services.js';
 import { isStageInSkippedBranch } from '../sched_admission/frontier.js';
 import { createHash } from 'node:crypto';
@@ -24,9 +23,8 @@ export type IterationDisposition = {kind: 'settled' | 'next-iteration' | 'contin
 export async function concludeWorkflowIteration(
   state: StoreState, sorted: StageConfig[], iteration: number, iterationDispatchedIds: string[],
   innerRetriesUsed: number, maxInnerRetries: number, maxIterations: number,
-  finishResearchCeiling: ReturnType<typeof createResearchBudgetFinalizer>,
   projectDir: string, runId: string, runDirPath: string, adapter: Adapter,
-  injectedDispatchStages: Set<string>,
+  _injectedDispatchStages: Set<string>,
 ): Promise<IterationDisposition> {
     // A retry stage that never ran because every related gate accepted the
     // work has a truthful terminal disposition: skipped, not indefinitely
@@ -90,19 +88,6 @@ export async function concludeWorkflowIteration(
         log.info({ runId, iteration, gate: pendingNextPhase.gateId, nextPhase: pendingNextPhase.nextPhase }, 'Gate passed with nextPhase set — continuing to next iteration instead of marking complete');
         return { kind: 'next-iteration', state };
       }
-      // Research policy owns termination even when ordinary gates pass.
-      if (state.research) {
-        if (iteration < maxIterations) {
-          log.info({ runId, iteration }, 'Research run: gate passed but policy has not shipped/ceilinged — continuing (policy is sole terminal authority)');
-          return { kind: 'next-iteration', state };
-        }
-        return { kind: 'settled', state: await finishResearchCeiling(
-          state,
-          iteration,
-          'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)',
-          { stages: sorted, injectedDispatchStages },
-        ) };
-      }
       // Terminal-state already handled by the top gate + eager post-batch gate
       // (with an isTerminalStatus early-return after executeIteration), so
       // reaching here means a plain gate-passed completion.
@@ -118,19 +103,6 @@ export async function concludeWorkflowIteration(
       if (state.status === RUN_STATUS.FAILED) {
         writeCampaignEntry(projectDir, state);
         return { kind: 'settled', state };
-      }
-      // Research policy owns termination even when ordinary gates pass.
-      if (state.research) {
-        if (iteration < maxIterations) {
-          log.info({ runId, iteration }, 'Research run: no terminal from policy yet — continuing (policy is sole terminal authority)');
-          return { kind: 'next-iteration', state };
-        }
-        return { kind: 'settled', state: await finishResearchCeiling(
-          state,
-          iteration,
-          'research ceiling: iteration budget exhausted without a policy ship/ceiling (insufficient measured rounds)',
-          { stages: sorted, injectedDispatchStages },
-        ) };
       }
       // Terminal-state already handled by the top + eager gates (see above).
       const unresolvedStageIds = guardPlainCompletionWithStageObligations(

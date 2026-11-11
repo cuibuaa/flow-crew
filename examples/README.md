@@ -9,14 +9,15 @@ Run from the repository root after the [local build](../guide/getting-started.md
 node dist/cli.js rehearse examples/hello-research.brief.md
 ```
 
-The [brief](hello-research.brief.md) counts tracked TypeScript with a numeric baseline, round
-schema, stop budget, confirmation command and terminal paths. Rehearsal uses a scripted
-adapter in a disposable project/state and calls no model. It deliberately exercises a false
-ship candidate whose confirmation fails, then a ceiling. Exit zero with Contract ready checks
-wiring; it does not measure a real result for your project. The engine log path printed by
-rehearsal remains available after temporary project/state cleanup.
+The [brief](hello-research.brief.md) declares frozen evaluator inputs, baseline replicates,
+structured guards, held-out allowance and a submission budget. Rehearsal constructs and
+admits the same producer and independent candidate-property reviewer as a real run, then
+dispatches them through the scheduler with labelled scripted results in private temporary
+project/state directories. It calls no model or declared instrument. A ready verdict proves
+dispatch wiring, not an improvement or working instrument. The printed diagnostic log remains
+available after temporary project/state cleanup.
 
-Inspect only the static contract when you do not want its shell confirmation executed:
+For static input checks only:
 
 ```bash
 node dist/cli.js rehearse examples/hello-research.brief.md --static-only
@@ -47,8 +48,6 @@ fixtures.
 Sources: [mock](../src/adapters/mock.ts), [scripted results](../src/adapters/scripted.ts),
 [rehearsal](../src/rehearse.ts), [launch admission](../src/cli.ts).
 
-The [instrument example](research-instrument.brief.md) declares frozen evaluator
-inputs, four baseline replicates, a structured guard and two held-out uses.
-`node dist/cli.js rehearse examples/research-instrument.brief.md` uses a synthetic
-instrument through the engine settlement path without executing a real evaluation.
-The original hello-research example retains its legacy result/confirm behavior.
+The [instrument example](research-instrument.brief.md) declares four baseline replicates,
+a structured guard and two held-out uses. Both shipped research briefs use the measurement
+contract. Real runs fail closed at calibration before dispatch if their instrument is unavailable.

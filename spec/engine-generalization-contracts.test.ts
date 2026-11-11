@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assessResearchIterationBudget, checkGates, deriveCriterionDischarges, inspectDispatchAdmission, findAllRetryToStages, parseBriefFrontmatter, parseDispatchedStageConfig, resolveImmutableEvidenceBindings, scopeContainsPath, StageConfigSchema, normalizeStageContracts, type StageConfig } from '../src/scheduler.js';
+import { checkGates, deriveCriterionDischarges, inspectDispatchAdmission, findAllRetryToStages, parseBriefFrontmatter, parseDispatchedStageConfig, resolveImmutableEvidenceBindings, scopeContainsPath, StageConfigSchema, normalizeStageContracts, type StageConfig } from '../src/scheduler.js';
 import { createRun } from './test-support/create-run.js';
 import {
   STAGE_STATUS,
@@ -51,24 +51,6 @@ function stage(raw: Record<string, unknown>): StageConfig {
     criterion_refs: [],
     ...raw,
   });
-}
-
-function researchConfig(maxRounds = 5, maxWallHours?: number) {
-  const parsed = parseBriefFrontmatter([
-    '---',
-    'research:',
-    '  baseline: 0',
-    '  policy: greedy_stack',
-    '  result_file: artifacts/round.json',
-    '  report_dir: artifacts',
-    '  stop:',
-    `    max_rounds: ${maxRounds}`,
-    ...(maxWallHours === undefined ? [] : [`    max_wall_hours: ${maxWallHours}`]),
-    '---',
-    '# Contract fixture',
-  ].join('\n'));
-  if (!parsed.research) throw new Error('fixture research config did not parse');
-  return parsed.research;
 }
 
 function admission(stages: StageConfig[], extra: Partial<Parameters<typeof inspectDispatchAdmission>[0]> = {}) {
@@ -140,45 +122,6 @@ describe('engine generalization binding contracts', () => {
     const observed = inspectStageArtifactContract({ ...input, writes: ['run:work/verdict_audit.json'] });
     expect(observed.violations).toEqual([]);
     expect(observed.observations).toEqual([expect.objectContaining({ path: join(runDir, 'work/verdict_audit.json'), fresh: true, bytes: 13 })]);
-  });
-
-  it('keeps framework research provenance separate from planner path estimates', () => {
-    const research = researchConfig();
-    const report = admission([stage({ id: 'writer', scope: ['artifacts/**'] })], { research });
-    expect(report.pass, report.errors.map(error => typeof error === 'string' ? error : error.message).join('; ')).toBe(true);
-  });
-
-  it('3 — compares and reports rounds, wall capacity, and every attempt deadline in explicit units', () => {
-    const binding = { attemptTimeoutMs: 3 * 3_600_000, technicalRetries: 1 };
-    const overWall = assessResearchIterationBudget(researchConfig(5, 16), 5, binding);
-    const exactWall = assessResearchIterationBudget(researchConfig(5, 15), 5, binding);
-    const overRounds = assessResearchIterationBudget(researchConfig(6, 15), 5, binding);
-    const ordinaryControl = assessResearchIterationBudget(researchConfig(4, 12), 5, binding);
-
-    expect(overWall).toMatchObject({
-      pass: false,
-      maxRounds: 5,
-      maxIterations: 5,
-      maxWallHours: 16,
-      maxWallMs: 57_600_000,
-      iterationWallCeilingHours: 15,
-      iterationWallCeilingMs: 54_000_000,
-    });
-    expect(overWall.reason).toContain('default_timeout_ms × max_iterations');
-    expect(overWall.attemptDeadlines).toEqual([
-      { attempt: 1, kind: 'base', budgetMs: 10_800_000, budgetHours: 3 },
-      { attempt: 2, kind: 'technical_retry', budgetMs: 21_600_000, budgetHours: 6 },
-    ]);
-    expect(exactWall.pass).toBe(true);
-    expect(ordinaryControl).toMatchObject({
-      pass: true,
-      maxRounds: 4,
-      maxWallHours: 12,
-      iterationWallCeilingHours: 15,
-    });
-    expect(overRounds.pass).toBe(false);
-    expect(overRounds.reason).toContain('max_rounds (6) exceeds');
-    expect(overRounds.reason).toContain('units: rounds versus iterations');
   });
 
   it('4 — keeps a declared but skipped gate non-passing and unable to discharge its criterion', () => {

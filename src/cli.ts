@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readResearchHistory } from './research-history.js';
 import { runRecordPath } from './run-layout.js';
 import { CliUsageError, commandName, commandUsage, parseCommandArgs } from './cli-args.js';
 import { EXIT_CODE } from './exit-code.js';
@@ -1236,27 +1237,9 @@ async function cmdQuick(preview = false) {
     process.exit(EXIT_CODE.failed);
   }
 
-  const { assessResearchIterationBudget, loadWorkflow, runWorkflow } = await import('./scheduler.js');
+  const { loadWorkflow, runWorkflow } = await import('./scheduler.js');
   const { config, raw } = loadWorkflow(workflowPath, initializedContinuation);
   if (maxIterations && !initializedContinuation) config.defaults.max_iterations = maxIterations;
-  if (!initializedContinuation) {
-    const budgetDefaults = loadEngineDefaults();
-    const budgetAssessment = assessResearchIterationBudget(
-      parsedBrief.research,
-      config.defaults.max_iterations ?? budgetDefaults.max_iterations,
-      {
-        attemptTimeoutMs: budgetDefaults.default_timeout_ms,
-        technicalRetries: budgetDefaults.stage_technical_retries,
-      },
-    );
-    if (!budgetAssessment.pass) {
-      const refusal = `Launch refused: ${budgetAssessment.reason}. Adjust the named authored budget or its named engine binding.`;
-      recordLaunchRefusal(refusal);
-      console.error(refusal);
-      process.exitCode = EXIT_CODE.failed;
-      return;
-    }
-  }
 
   const resolvedAgentsDir = join(engineConfigDir, 'agents');
   const agents = new Map<string, unknown>();
@@ -1420,11 +1403,9 @@ function runIdsByRecency(root: string): string[] {
 }
 
 function printResearchProgress(runDir: string): void {
-  const journalPath = runRecordPath(runDir, 'research_journal.json');
-  if (!existsSync(journalPath)) return;
-  let journal: { rounds?: { label?: string; result?: number; wallHoursCumulative?: number }[] };
-  try { journal = JSON.parse(readFileSync(journalPath, 'utf-8')); } catch { return; }
-  const rounds = Array.isArray(journal.rounds) ? journal.rounds : [];
+  const { value: journal } = readResearchHistory(runDir);
+  if (!journal) return;
+  const rounds = journal.rounds;
   console.log('\n## Research progress');
   if (rounds.length === 0) {
     console.log('  (no rounds journaled yet — agent is working on the first direction)');

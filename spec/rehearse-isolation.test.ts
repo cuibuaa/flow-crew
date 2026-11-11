@@ -134,7 +134,7 @@ describe('rehearsal Git isolation', () => {
     expect(result.error).toBeUndefined();
     expect(result.status, output).toBe(0);
     expect(output).toContain('✅ Contract ready');
-    expect(output).toContain('0 tokens');
+    expect(output).toContain('No model chooser');
     expect(output).not.toContain('gpg failed');
     expect(output).not.toContain('Buffer <');
     expect(output).not.toContain('at cmdRehearse');
@@ -157,7 +157,7 @@ describe('rehearsal Git isolation', () => {
     expect(result.error).toBeUndefined();
     expect(result.status, output).toBe(0);
     expect(output).toContain('✅ Contract ready');
-    expect(output).toContain('0 tokens');
+    expect(output).toContain('No model chooser');
     expect(readFileSync(brief, 'utf-8')).toBe(briefSource);
     expect(readFileSync(sentinel, 'utf-8')).toBe('unchanged\n');
     expect(readdirSync(fixture.project).sort()).toEqual(['brief.md', 'sentinel.txt']);
@@ -206,9 +206,9 @@ describe('rehearsal Git isolation', () => {
     expect(result.error).toBeUndefined();
     expect(result.status, output).toBe(0);
     expect(output).toContain('✅ Contract ready');
-    expect(output).toContain('0 tokens');
+    expect(output).toContain('No model chooser');
     expect(output).not.toContain('criterion_');
-    expect(output).not.toContain('dispatch');
+    expect(output).toContain('produce → review');
   });
 
   it.each([false, true])('reports external output admission (forbidden=%s) and leaves the real directory absent', { timeout: 100_000 }, forbidden => {
@@ -245,8 +245,8 @@ describe('rehearsal Git isolation', () => {
   it('rejects an occupied declared output before simulation', { timeout: 100_000 }, () => {
     const fixture = rehearsalFixture();
     const brief = join(fixture.project, 'occupied-output.md');
-    const resultPath = join(fixture.project, 'docs', 'hello-research', 'round_result.json');
-    mkdirSync(join(fixture.project, 'docs', 'hello-research'), { recursive: true });
+    const resultPath = join(fixture.project, 'docs', 'research-instrument', 'ceiling_report.md');
+    mkdirSync(join(fixture.project, 'docs', 'research-instrument'), { recursive: true });
     writeFileSync(resultPath, 'x'.repeat(286 * 1024));
     writeFileSync(brief, readFileSync(helloBrief, 'utf-8'), 'utf-8');
 
@@ -255,7 +255,7 @@ describe('rehearsal Git isolation', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.status, output).toBe(1);
-    expect(output).toContain('Declared output docs/hello-research/round_result.json is already occupied');
+    expect(output).toContain('Declared output docs/research-instrument/ceiling_report.md is already occupied');
     expect(output).toContain(`${286 * 1024} bytes`);
     expect(output).toContain('❌');
   });

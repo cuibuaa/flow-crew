@@ -1,27 +1,13 @@
 import { currentValidationResults } from '../sched_settlement/gate-validation.js';
 import { projectValidationResult } from '../../project-validation.js';
-// Boundary: Settle terminal research evidence before publishing a run's truthful outcome.
-import { rejectPendingResearchGateCandidates } from '../../research-candidate.js';
-import { readOptionalJsonlFile } from '../../jsonl.js';
-import { appendRunEventAtRunDir, attemptEventFields, recordRunEvent, type RunEvent } from '../../run-events.js';
-import { type StoreState, evaluateRealityGate, isSuccessfulRunStatus, isTerminalRunStatus, runDir, writeRunState, updateOperationalRunState, interruptedStageStatus, resolveRunStatus, RUN_STATUS, STAGE_STATUS } from '../../store.js';
-import { log } from '../sched_admission/shared.js';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-
-/** Cleanup errors are recorded without replacing the result or an escaping exception. */
-export function settleTerminalResearchCandidates(projectDir: string, state: StoreState | undefined): void {
-  if (!state?.research || !isTerminalRunStatus(state.status)) return;
-  try {
-    const directory = runDir(projectDir, state.runId);
-    // A fallback must not retry a failed cleanup after completion was published.
-    // Match this outcome so a prior stopped run does not suppress resumed work.
-    if (readOptionalJsonlFile<RunEvent>(join(directory, 'events.jsonl'))
-      .some(event => event.type === 'run_completed' && event.timestamp === state.completedAt)) return;
-    rejectPendingResearchGateCandidates(projectDir, directory, `Run ended ${state.status} before captured outcome ingestion: ${state.failureReason ?? 'terminal outcome settled'}`);
-  } catch (error) {
-    log.error({ err: error, runId: state.runId }, 'Failed to settle pending research gate candidates');
-  }
-}
+import { runRecordPath } from '../../run-layout.js';
+// All research terminal reports share this commit boundary, including failures/cancellation.
+import { writeResearchTerminalReport } from '../../research-measurement.js';
+import { appendRunEventAtRunDir, attemptEventFields, readRunEvents, recordRunEvent, type RunEvent } from '../../run-events.js';
+import { cancelledRunPublicationError } from '../../cancellation-policy.js';
+import { type StoreState, evaluateRealityGate, isSuccessfulRunStatus, isTerminalRunStatus, updateRunState, updateOperationalRunState, interruptedStageStatus, resolveRunStatus, runDir, RUN_STATUS, STAGE_STATUS } from '../../store.js';
 
 export type RunConclusionReason =
   | 'workflow_complete' | 'stage_failed' | 'bounded_attempts' | 'validation_unresolved' | 'provider_refusal'
@@ -45,7 +31,57 @@ interface RunConclusion {
 
 /** A locked operational mutation supplies its existing commit boundary instead
  * of re-entering the run lock. Publication must run only after that commit. */
-type ConclusionCommit = (state: StoreState, publish: () => void) => void;
+type ConclusionCommit = (state: StoreState, publish: (persist: () => void) => void) => void;
+
+function hasResearchCompletion(state: StoreState): boolean {
+  return readRunEvents(state.projectDir, state.runId).some(event => event.type === 'run_completed'
+    && event.timestamp === state.completedAt && event.runStatus === state.status);
+}
+
+/** Idempotent projection of the committed research decision and measurement journal.
+ * Runs under the existing state lock, both after conclusion and during recovery.
+ * Destination intent distinguishes current engine-owned reports from archives. */
+export function projectResearchConclusion(state: StoreState, persist: () => void): void {
+  if (!state.research?.measurement || !state.researchReportPaths || !isTerminalRunStatus(state.status)) return;
+  let pointer = state.terminalArtifact;
+  const decision = () => JSON.stringify([state.status, state.reasonCode, state.failureReason, state.researchReportPaths]);
+  const committed = decision();
+  try {
+    const errors = writeResearchTerminalReport(state);
+    if (errors.length) throw new Error(errors.join('; '));
+  } catch (error) {
+    if (state.status !== RUN_STATUS.CANCELLED) { state.status = RUN_STATUS.FAILED; state.reasonCode = 'scheduler_failed'; }
+    state.failureReason = `Research report publication refused: ${String(error)}`;
+    state.researchReportPaths = [...new Set([
+      ...state.researchReportPaths, ...(state.terminalStates?.[state.status]?.paths ?? []),
+    ])];
+    if (decision() !== committed) {
+      delete state.terminalArtifact;
+      persist(); // Commit failure before correcting any exposed destination.
+      pointer = state.terminalArtifact;
+      writeResearchTerminalReport(state);
+    }
+  }
+  // Pointer-save errors propagate. Recovery re-derives the same projection;
+  // a lost acknowledgement never invents another research decision.
+  if (state.terminalArtifact !== pointer) persist();
+  if (!hasResearchCompletion(state)) recordRunEvent(state.projectDir, state.runId, {
+    type: 'run_completed', runId: state.runId, timestamp: state.completedAt!, runStatus: state.status,
+    iteration: state.currentIteration, detail: state.failureReason ?? state.status,
+  });
+}
+
+/** Explicit recovery/control entrance; ordinary archive readers remain read-only. */
+export function reconcileResearchConclusion(projectDir: string, runId: string): StoreState {
+  return updateOperationalRunState(runDir(projectDir, runId), () => {}, undefined, (state, persist) => {
+    // Completed runs are historical evidence. In particular, a later run may
+    // legitimately have replaced a shared project report with its own output.
+    if (existsSync(runRecordPath(runDir(projectDir, runId), 'research_report.md'))
+        && (!(state.terminalStates?.[state.status]?.paths.length) || state.terminalArtifact && existsSync(join(projectDir, state.terminalArtifact)))
+        && hasResearchCompletion(state)) return;
+    projectResearchConclusion(state, persist);
+  });
+}
 
 export function concludeRun(state: StoreState, outcome: RunConclusion & {
   status: 'failed' | 'incomplete' | 'escalated' | 'cancelled' | 'reality_gate_failed';
@@ -53,6 +89,7 @@ export function concludeRun(state: StoreState, outcome: RunConclusion & {
 export function concludeRun(state: StoreState, outcome: RunConclusion, commit?: ConclusionCommit): StoreState | Promise<StoreState>;
 export function concludeRun(state: StoreState, outcome: RunConclusion, commit?: ConclusionCommit): StoreState | Promise<StoreState> {
   if (!isTerminalRunStatus(outcome.status)) throw new Error(`Cannot conclude a run with status ${outcome.status}`);
+  const callerState = state;
   // Preserve the decision's original stage disposition before reality verification.
   // Status alone cannot distinguish a completed workflow from superseded work.
   if (outcome.pendingStageNote !== undefined) for (const stage of Object.values(state.stages)) {
@@ -61,30 +98,51 @@ export function concludeRun(state: StoreState, outcome: RunConclusion, commit?: 
     stage.error = outcome.pendingStageNote;
   }
   const finish = (): StoreState => {
-    state.validation = currentValidationResults(state.projectDir, state.runId).map(result => ({
-      role: result.role, display: result.display, command: result.command, args: result.args, env: result.env, exitCode: result.exitCode, error: result.error, unfinished: result.unfinished, dependencyPreparationFailed: result.dependencyPreparationFailed, storedState: result.storedState ?? result.state,
-      load: result.load, sourceBound: result.sourceBound, ...projectValidationResult(result),
-    }));
-    state.status = outcome.status;
-    state.reasonCode = outcome.reasonCode;
-    if (outcome.detail !== undefined) state.failureReason = outcome.detail;
-    state.completedAt = outcome.completedAt ?? new Date().toISOString();
-    settleTerminalResearchCandidates(state.projectDir, state);
-    const publish = (): void => {
+    const apply = (current: StoreState): void => {
+      // Reports are part of the same locked decision as run.json. In particular,
+      // an async measurement/reality result cannot publish past cancellation.
+      if (current.status === RUN_STATUS.CANCELLED) {
+        if (outcome.status !== RUN_STATUS.CANCELLED) throw cancelledRunPublicationError(current.runId);
+        return;
+      }
+      Object.assign(current, state);
+      current.validation = currentValidationResults(current.projectDir, current.runId).map(result => ({
+        role: result.role, display: result.display, command: result.command, args: result.args, env: result.env, exitCode: result.exitCode, error: result.error, unfinished: result.unfinished, dependencyPreparationFailed: result.dependencyPreparationFailed, storedState: result.storedState ?? result.state,
+        load: result.load, sourceBound: result.sourceBound, ...projectValidationResult(result),
+      }));
+      current.status = outcome.status;
+      current.reasonCode = outcome.reasonCode;
+      if (outcome.detail !== undefined) current.failureReason = outcome.detail;
+      current.completedAt = outcome.completedAt ?? new Date().toISOString();
+      if (current.research?.measurement) current.researchReportPaths = [...new Set([
+        ...(current.researchReportPaths ?? []), ...(current.terminalStates?.[current.status]?.paths ?? []),
+      ])];
+    };
+    let accepted = false;
+    const publish = (persist: () => void): void => {
+      if (!accepted) return;
+      // The terminal decision and destination intent are durable before the
+      // first report is exposed. No proposal or pending project report exists.
+      projectResearchConclusion(state, persist);
       outcome.writeCampaignEntry?.(state.projectDir, state);
-      recordRunEvent(state.projectDir, state.runId, {
+      if (!state.research?.measurement) recordRunEvent(state.projectDir, state.runId, {
         type: 'run_completed', runId: state.runId, timestamp: state.completedAt!,
         ...(outcome.eventFields?.() ?? { iteration: state.currentIteration, detail: state.failureReason ?? state.status }),
       });
     };
-    if (commit) commit(state, publish);
-    else {
-      writeRunState(state.projectDir, state.runId, state);
-      publish();
-    }
-    return state;
+    if (commit) { apply(state); accepted = true; commit(state, publish); }
+    else state = updateRunState(state.projectDir, state.runId, current => {
+      accepted = current.status !== RUN_STATUS.CANCELLED || outcome.status === RUN_STATUS.CANCELLED;
+      apply(current);
+      state = current;
+      Object.assign(callerState, current, { terminalArtifact: current.terminalArtifact });
+    }, (_current, persist) => publish(persist));
+    Object.assign(callerState, state, { terminalArtifact: state.terminalArtifact });
+    return callerState;
   };
   if (!isSuccessfulRunStatus(outcome.status)) return finish();
+  // Reality checks judge candidate evidence. The engine's own report is an
+  // output of this decision, never a proposed input to its verification.
   return evaluateRealityGate(state.projectDir, state.runId, outcome.status).then(gate => {
     Object.assign(state, gate);
     if (gate.realityGate?.pass === false) {
@@ -97,7 +155,7 @@ export function concludeRun(state: StoreState, outcome: RunConclusion, commit?: 
 /** Native cancellation fences the run and closes its interrupted stage ledgers together. */
 export function cancelRunStateAtPath(directory: string, completedAt: string): { state: StoreState; preservedRunStatus?: string } {
   let preservedRunStatus: string | undefined;
-  let publish: (() => void) | undefined;
+  let publish: ((persist: () => void) => void) | undefined;
   const interrupted: RunEvent[] = [];
   const state = updateOperationalRunState(directory, state => {
     if (resolveRunStatus(state.status).kind === 'unknown' || isTerminalRunStatus(state.status) && !(state.status === RUN_STATUS.FAILED && state.recovery?.kind === 'blocked')) {
@@ -118,9 +176,10 @@ export function cancelRunStateAtPath(directory: string, completedAt: string): { 
     }
     concludeRun(state, { status: RUN_STATUS.CANCELLED, reasonCode: 'cancelled', detail: 'Cancelled by user', completedAt },
       (_state, notify) => { publish = notify; });
-  }, 'cancellation', () => {
+  }, 'cancellation', (_state, persist) => {
     for (const event of interrupted) appendRunEventAtRunDir(directory, event);
-    publish?.();
+    if (publish) publish(persist);
+    else projectResearchConclusion(_state, persist);
   });
   return { state, preservedRunStatus };
 }

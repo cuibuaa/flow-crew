@@ -20,7 +20,7 @@ let root: string, project: string, previous: string;
 const brief = '# Update the greeting\n\nChoose a sensible greeting convention.\n\n## Acceptance criteria\n1. Produce the greeting and report any unavailable resource.\n';
 const gap = 'Offline: the desired download from example.invalid is unavailable; completed the local greeting.';
 const assumptions = ['Use the existing greeting convention for new content.'];
-const choose = { successor: 'implement', reason: 'One coherent greeting change.', metric_search: false, assumptions, missing_author_facts: [] };
+const choose = { successor: 'implement', reason: 'One coherent greeting change.', assumptions };
 const delivered = { status: 'delivered', summary: gap, checks: [], caveats: [gap], remaining_work: [] };
 const roles = join(import.meta.dirname, '../config/agents');
 function verdict(opts: RunOpts): string {
@@ -120,7 +120,7 @@ describe('nothing waits for a person after launch', () => {
     expect(state.stages.choose.attempts?.map(attempt => attempt.status)).toEqual(['failed', 'complete']);
   });
 
-  it.each([{ max_rounds: 2 }, { max_wall_hours: 1000 }])('keeps prelaunch research budget admission before the chooser: %j', async stop => {
+  it.each([{ max_rounds: 2 }, { max_wall_hours: 1000 }])('refuses retired research declarations before the chooser: %j', async stop => {
     const { config, raw } = loadWorkflow(join(import.meta.dirname, '../config/workflows/entry.yaml'));
     config.defaults.max_iterations = 1;
     const text = `---\n${JSON.stringify({ research: { baseline: 0.5, policy: 'greedy_stack', stop } })}\n---\n${brief}`;
@@ -129,21 +129,31 @@ describe('nothing waits for a person after launch', () => {
     const fixture = adapter();
     const state = await runWorkflow(config, raw, project, fixture.implementation, new Map(), undefined, roles, undefined, text, true, undefined, true, admission);
     expect(state.status).toBe('failed');
-    expect(state.failureReason).toContain('Research budget admission refused');
+    expect(state.failureReason).toContain('declare research.measurement');
     expect(fixture.calls).toEqual([]);
   });
 
-  it.each([
-    { ...choose, successor: 'plan', metric_search: true },
-    { ...choose, missing_author_facts: ['The author must supply the baseline dataset.'] },
-  ])('ends with a named missing author fact instead of guessing or waiting: %j', async output => {
-    const fixture = adapter({ choose: output }); const state = await execute(fixture.implementation);
-    expect(state.status).toBe('failed');
-    expect(state.failureReason).toContain('Author must add missing facts before launch');
+  it('keeps a metric-oriented brief engineering by declaration without demanding research fields', async () => {
+    const fixture = adapter();
+    const state = await execute(fixture.implementation,
+      '---\ninputs: []\noutputs: []\n---\n# Improve a measured metric\nSearch for lower output-token cost.\n\n## Acceptance criteria\n1. Produce the greeting and report unavailable resources.\n');
+    expect(state.status, state.failureReason).toBe('complete');
     expect(state.research).toBeUndefined();
-    expect(state.parked).toBeUndefined();
-    expect(fixture.calls).toEqual(['choose']);
-    expect(state.decisionGraph?.records[0].outcome).toBe('refused');
-    expect(renderRunSummary(project, runDir(project, state.runId), state)).toContain('Author must add missing facts');
+    expect(fixture.calls).toEqual(['choose', 'implement', 'assess', 'review']);
+    expect(fixture.prompts[0]).toContain('parsed declaration alone');
+    expect(fixture.prompts[0]).not.toContain('missing_author_facts');
+    expect(state.decisionGraph?.records[0].outcome).toBe('chosen');
   });
+  it('corrects a stale metric_search chooser reply without demanding research facts from an engineering declaration', async () => {
+    const fixture = adapter(); let choices = 0;
+    const state = await execute({ async run(prompt, role, opts) {
+      if (opts.stageId === 'choose' && ++choices === 1) return { output: JSON.stringify({ ...choose,
+        metric_search: true, missing_author_facts: ['research.measurement', 'research.stop'] }), exitCode: 0, duration_ms: 1 };
+      return fixture.implementation.run(prompt, role, opts);
+    } }, '---\ninputs: []\noutputs: []\n---\n# Improve a measured metric\n\n## Acceptance criteria\n1. Produce the greeting and report unavailable resources.\n');
+    expect(state.status, state.failureReason).toBe('complete'); expect(state.research).toBeUndefined();
+    expect(choices).toBe(2); expect(state.stages.choose.attempts?.map(attempt => attempt.status)).toEqual(['failed', 'complete']);
+    expect(state.decisionGraph?.records.some(record => record.reason.includes('Author must add missing facts'))).toBe(false);
+  });
+
 });

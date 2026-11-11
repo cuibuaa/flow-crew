@@ -31,7 +31,7 @@ structured retention guard. The engine measures candidates with a frozen
 instrument, calibrates four baseline replicates, requires the guard, and charges
 at most two held-out uses. This demonstrates the protocol, not an optimization
 or a benchmark result. Independent review checks the candidate before settlement.
-Write the final report only when the engine selects its declared terminal path.
+Return producer notes with hypothesis, changed files and evidence that the brief properties hold. The engine alone writes the terminal report.
 
 ## Report criteria
 

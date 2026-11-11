@@ -186,6 +186,17 @@ describe('campaign context relevance selector', () => {
 });
 
 describe('campaign context production path', () => {
+  it('keeps distinct trial rounds when engine display labels repeat across runs', () => {
+    writeCampaignEntries([historyEntry({ runId: 'first-run' }), historyEntry({ runId: 'second-run' }), historyEntry({ runId: 'first-run' })]);
+    for (const [runId, result] of [['first-run', 90], ['second-run', 80]] as const) {
+      const directory = join(fcHome, 'runs', runId); mkdirSync(directory, { recursive: true });
+      writeFileSync(runRecordPath(directory, 'research_journal.json'), JSON.stringify({ rounds: [{ label: 'round-1', result }] }));
+    }
+    const digest = summarizeLedger(projectDir, CAMPAIGN_ID);
+    expect(digest).toContain('Tried directions (2)');
+    expect(digest).toContain('first-run/round-1 → 90'); expect(digest).toContain('second-run/round-1 → 80');
+  });
+
   it('caps the tried-direction display and leaves a run knowledge_graph.json unread', () => {
     const runId = 'ledger-run';
     writeCampaignEntries([

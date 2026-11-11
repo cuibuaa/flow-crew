@@ -1,15 +1,14 @@
 import { runRecordPath, stageWorkPath } from '../../run-layout.js';
 import { concludeRun } from '../sched_policy/run-completion.js';
-// Boundary: Collect gate facts and choose exact recovery routes; project verified research settlement. Contract refusal receives only the campaign publisher.
-import { researchOutcomePaths } from '../../research-paths.js';
-import { GateVerdict, RUN_STATUS, ResearchConfig, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir } from '../../store.js';
-import { RESEARCH_DECISION_STATUS_ALIASES, StageConfig } from '../sched_admission/configuration.js';
-import { DispatchAdmissionReport, stageScopeOwnsPath } from '../sched_admission/dispatch.js';
-import { isStageInSkippedBranch, transitivelyDependsOn } from '../sched_admission/frontier.js';
+// Boundary: Collect gate facts and choose confirmed recovery routes. Contract refusal receives only the campaign publisher.
+import { GateVerdict, RUN_STATUS, STAGE_STATUS, StoreState, isTerminalRunStatus, runDir } from '../../store.js';
+import { StageConfig } from '../sched_admission/configuration.js';
+
+import { isStageInSkippedBranch } from '../sched_admission/frontier.js';
 import { log } from '../sched_admission/shared.js';
-import { appendSchedulerGuidanceOnce } from '../sched_policy/guidance.js';
-import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from '../../engine-fs.js';
+
+
+
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { GateContract, loadGateContract } from './gate-contract.js';
@@ -40,7 +39,6 @@ export interface GateRecoveryFact {
   rejectionKind:
     | 'repairable_failure'
     | 'irreparable_rejection'
-    | 'omitted_research_outcome'
     | 'engine_contract_or_evidence_rejection'
     | 'unclassified_rejection';
 }
@@ -58,8 +56,6 @@ export function classifyGateRecoveryFact(
     : effectiveVerdict?.pass === false
       && (effectiveVerdict.repairability?.disposition === 'repairable' || authoredVerdict?.pass === false)
     ? 'repairable_failure'
-    : kind === 'research_outcome_absent'
-    ? 'omitted_research_outcome'
     : kind || authoredVerdict?.pass === true && effectiveVerdict?.pass === false
     ? 'engine_contract_or_evidence_rejection'
     : effectiveVerdict?.pass === false
@@ -89,13 +85,6 @@ export function structuredFailingGateCriteria(
       : '';
     return status === 'pass' ? [] : [criterionId];
   });
-}
-
-export function researchAdvanceEligible(input: {
-  gatesSettled: boolean;
-  stageFailed: boolean;
-}): boolean {
-  return input.gatesSettled && !input.stageFailed;
 }
 
 export interface GateRetryDiagnosticArtifact {
@@ -227,116 +216,6 @@ export function collectGateRuntimeFacts(allStages: StageConfig[], state: StoreSt
   };
 }
 
-export interface ResearchSettlementProjection {
-  decision: 'ship' | 'stop_ceiling';
-  terminalStatus: string;
-  terminalPath: string;
-  terminalOwner: string;
-  gateId: string;
-  verificationPassed: true;
-  campaignSucceeded: boolean;
-  evidenceDigest: string;
-}
-
-/**
- * Publish a terminal research decision from a completed settlement audit. The
- * gate's effective verdict answers "was verification successful?"; metric.pass
- * independently answers "did the campaign win?". A verified ceiling therefore
- * remains publishable while any failed effective gate blocks publication.
- */
-export function recoverVerifiedResearchSettlement(
-  allStages: StageConfig[],
-  state: StoreState,
-  projectDir: string,
-  runId: string,
-  runDirPath: string,
-): ResearchSettlementProjection | null {
-  if (!state.research || !state.terminalStates || state.research.measurement) return null;
-  const runtime = collectGateRuntimeFacts(allStages, state, projectDir, runId);
-  if (!runtime.allPass) return null;
-  let admission: DispatchAdmissionReport;
-  try {
-    admission = JSON.parse(readFileSync(runRecordPath(runDirPath, 'dispatch_admission.json'), 'utf-8')) as DispatchAdmissionReport;
-  } catch {
-    return null;
-  }
-  if (!admission.pass) return null;
-
-  const contract = loadGateContract(projectDir, runId, state.campaignStorageKey);
-  for (const gate of [...allStages].reverse()) {
-    if (!gate.is_gate || state.stages[gate.id]?.status !== STAGE_STATUS.COMPLETE) continue;
-    const effective = readGateEvaluation(projectDir, gate.id, runId, contract);
-    if (effective?.pass !== true) continue;
-    let verdictBytes: Buffer;
-    let metricBytes: Buffer;
-    let verdict: Record<string, unknown>;
-    let metric: Record<string, unknown>;
-    try {
-      verdictBytes = readFileSync(runRecordPath(runDirPath, `verdict_${gate.id}.json`));
-      metricBytes = readFileSync(stageWorkPath(runDir(projectDir, runId), 'stages', gate.id, 'metric.json'));
-      verdict = JSON.parse(verdictBytes.toString('utf-8')) as Record<string, unknown>;
-      metric = JSON.parse(metricBytes.toString('utf-8')) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const phaseComplete = metric.phaseComplete === true || metric.phase_complete === true
-      || verdict.phaseComplete === true || verdict.phase_complete === true;
-    const metricOutcome = typeof metric.outcome === 'string' ? metric.outcome.trim() : '';
-    const verdictOutcome = typeof verdict.outcome === 'string' ? verdict.outcome.trim() : metricOutcome;
-    if (!phaseComplete || !metricOutcome || verdictOutcome !== metricOutcome || metricOutcome === 'continue') continue;
-    const decision = RESEARCH_DECISION_STATUS_ALIASES.get(metricOutcome);
-    if (decision !== 'ship' && decision !== 'stop_ceiling') continue;
-    if (typeof metric.pass !== 'boolean') continue;
-    const campaignSucceeded = metric.pass;
-    // The terminal label and the domain comparison must agree. Audit success
-    // remains independent: it authorizes publication of either truthful result.
-    if ((decision === 'ship') !== campaignSucceeded) continue;
-    const terminalPath = state.terminalStates[metricOutcome]?.paths?.[0];
-    if (!terminalPath) continue;
-    const terminalOwner = admission.terminalOwners[terminalPath];
-    if (!terminalOwner || !allStages.some((stage) => stage.id === terminalOwner)) continue;
-    const evidenceDigest = createHash('sha256')
-      .update(verdictBytes)
-      .update(metricBytes)
-      .digest('hex');
-    const projection: ResearchSettlementProjection = {
-      decision,
-      terminalStatus: metricOutcome,
-      terminalPath,
-      terminalOwner,
-      gateId: gate.id,
-      verificationPassed: true,
-      campaignSucceeded,
-      evidenceDigest,
-    };
-    const decisionPath = runRecordPath(runDirPath, 'research_decision.json');
-    let alreadyPublished = false;
-    try {
-      const existing = JSON.parse(readFileSync(decisionPath, 'utf-8')) as Record<string, unknown>;
-      alreadyPublished = existing.evidenceDigest === evidenceDigest
-        && existing.terminalPath === terminalPath
-        && existing.terminalOwner === terminalOwner;
-    } catch { /* first publication */ }
-    if (!alreadyPublished) {
-      writeFileSync(decisionPath, `${JSON.stringify({ version: 1, ...projection }, null, 2)}\n`, 'utf-8');
-    }
-    mkdirSync(runRecordPath(runDirPath, 'signals'), { recursive: true });
-    writeFileSync(runRecordPath(runDirPath, 'signals', 'research_terminal_ready.json'), `${JSON.stringify({
-      version: 1,
-      ...projection,
-    }, null, 2)}\n`, 'utf-8');
-    appendSchedulerGuidanceOnce(
-      runDirPath,
-      terminalOwner,
-      `[research-settlement:${evidenceDigest}]`,
-      `Audit ${gate.id} verified the terminal outcome while campaignSucceeded=${campaignSucceeded}. Read research_decision.json and write exactly ${terminalPath}; do not write another terminal path.`,
-      Object.keys(state.stages),
-    );
-    return projection;
-  }
-  return null;
-}
-
 /** Check all is_gate stages. Preserve the established public result shape. */
 export function checkGates(allStages: StageConfig[], state: StoreState, projectDir: string, runId?: string): { allPass: boolean; failedGateIds: string[] } {
   const { allPass, failedGateIds } = collectGateRuntimeFacts(allStages, state, projectDir, runId);
@@ -349,16 +228,13 @@ export function findAllRetryToStages(allStages: StageConfig[], failedGateIds: st
   return allStages.filter(s => referencesFailedGate(s, id => failedSet.has(id)));
 }
 
-/** Typed engine omissions may rerun an outcome producer; model prose cannot. */
+/** Confirmed independent findings alone authorize admitted repair routes. */
 export function findGateRecoveryStages(
   allStages: StageConfig[],
   rejectedGateIds: string[],
-  research?: ResearchConfig,
   rejectionFacts: Readonly<Record<string, GateRecoveryFact | undefined>> = {},
 ): StageConfig[] {
-  const byId = new Map(allStages.map((stage) => [stage.id, stage]));
   const selected = new Map<string, StageConfig>();
-  const outcomePaths = research ? researchOutcomePaths(research) : [];
   for (const gateId of rejectedGateIds) {
     const fact = rejectionFacts[gateId];
     const rejectionKind = fact?.rejectionKind ?? 'unclassified_rejection';
@@ -372,15 +248,7 @@ export function findGateRecoveryStages(
       continue;
     }
 
-    if (rejectionKind === 'omitted_research_outcome' && research) {
-      for (const candidate of allStages) {
-        if (candidate.is_gate || candidate.retry_to?.length || candidate.dynamic_dispatch) continue;
-        if (!transitivelyDependsOn(gateId, candidate.id, byId)) continue;
-        if (!outcomePaths.some((path) => stageScopeOwnsPath(candidate, path, !!research?.measurement))) continue;
-        selected.set(candidate.id, candidate);
-      }
-      continue;
-    }
+
   }
   return [...selected.values()];
 }
@@ -389,24 +257,17 @@ export function gateIdsForRecoveryStages(
   allStages: StageConfig[],
   rejectedGateIds: readonly string[],
   recoveryStages: readonly StageConfig[],
-  research?: ResearchConfig,
 ): string[] {
-  const byId = new Map(allStages.map((stage) => [stage.id, stage]));
-  const outcomePaths = research ? researchOutcomePaths(research) : [];
   return rejectedGateIds.filter((gateId) => recoveryStages.some((stage) => (
     (stage.is_gate && stage.id === gateId)
     || stage.retry_to?.includes(gateId)
-    || (research !== undefined
-      && !stage.is_gate
-      && !stage.retry_to?.length
-      && transitivelyDependsOn(gateId, stage.id, byId)
-      && outcomePaths.some((path) => stageScopeOwnsPath(stage, path, !!research?.measurement)))
+
   )));
 }
 
 /** The authors whose results a gate reviews: its non-gate ancestors up to the nearest gates, which review the rest. */
 export function gateReviewedAuthorIds(gate: StageConfig, allStages: StageConfig[]): string[] {
-  const byId = new Map(allStages.map((stage) => [stage.id, stage]));
+  const byId = new Map(allStages.map(stage => [stage.id, stage]));
   const reviewed = new Set<string>();
   const queue = [...(gate.depends_on ?? [])];
   while (queue.length > 0) {
@@ -421,25 +282,6 @@ export function gateReviewedAuthorIds(gate: StageConfig, allStages: StageConfig[
 /** A gate confirms or rejects this author's result: one that reviews the author, or the gate its repair returns to. */
 export function isGateReviewed(stage: StageConfig, allStages: StageConfig[]): boolean {
   return Boolean(stage.retry_to?.length) || allStages.some((gate) => gate.is_gate && gateReviewedAuthorIds(gate, allStages).includes(stage.id));
-}
-
-/** Bind research outcome semantics only to a gate whose dependency closure
- * contains an ordinary stage that owns the mutable result/sidecar slot. */
-export function isResearchOutcomeGate(
-  stage: StageConfig,
-  allStages: StageConfig[],
-  research?: ResearchConfig,
-): boolean {
-  if (!research || !stage.is_gate) return false;
-  const outcomePaths = researchOutcomePaths(research);
-  const byId = new Map(allStages.map((candidate) => [candidate.id, candidate]));
-  return allStages.some((candidate) => (
-    !candidate.is_gate
-    && !candidate.retry_to?.length
-    && !candidate.dynamic_dispatch
-    && transitivelyDependsOn(stage.id, candidate.id, byId)
-    && outcomePaths.some((path) => stageScopeOwnsPath(candidate, path, !!research?.measurement))
-  ));
 }
 
 export function createGateContractRefusalHandler(writeCampaignEntry: (projectDir: string, state: StoreState) => void) {

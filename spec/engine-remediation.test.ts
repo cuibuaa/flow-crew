@@ -38,10 +38,9 @@ import type {
   ProjectValidationBaseline,
   ValidationCommandResult,
 } from '../src/project-validation.js';
-import { beginResearchInputGeneration, readResearchGateCandidate } from '../src/research-candidate.js';
 import { recordAdmittedPlan } from '../src/plan-revisions.js';
 import { appendRunEvent, readRunEvents } from '../src/run-events.js';
-import { assessResearchIterationBudget, appendIterationLog, findGateRecoveryStages, inspectDispatchAdmission, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, restoreProjectPath, runWorkflow, tryTerminateOnTerminalState, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
+import { appendIterationLog, findGateRecoveryStages, inspectDispatchAdmission, loadWorkflow, parseBriefFrontmatter, parseDispatchedStageConfig, readGateEvaluation, recordGateValidationDelta, restoreProjectPath, runWorkflow, tryTerminateOnTerminalState, type StageConfig, type WorkflowConfig } from '../src/scheduler.js';
 import {
   inspectShipSetupRecord,
   shipSetupBriefDigest,
@@ -508,116 +507,6 @@ describe('engine behaviour contracts', () => {
     expect(current.report.daemonFreshness.sourceToDist.state).toBe('current');
     expect(statSync(join(projectDir, 'dist', 'probe.js')).mtimeMs).toBe(outputMtime);
     expect(stale.report.daemonFreshness.sourceToDist.state).toBe('stale');
-  });
-
-  it('refuses a research round budget larger than the engine iteration budget', { timeout: 20_000 }, async () => {
-    const root = temporaryRoot();
-    const projectDir = join(root, 'project');
-    const agentsDir = writeRole(projectDir, 'worker');
-    setFcGlobalDir(join(root, 'fc-home'));
-    const brief = [
-      '---', 'research:', '  baseline: 0', '  policy: greedy_stack', '  result_file: docs/result.json',
-      '  stop:', '    max_rounds: 15', '---', '# Goal', '## What the report must show', '1. Record a round.',
-    ].join('\n');
-    const parsed = parseBriefFrontmatter(brief);
-    const assessment = assessResearchIterationBudget(parsed.research, 5);
-    const admission = createBriefAdmission(inspectBrief(brief), {
-      kind: 'explicit', source: 'cli_current_input_flag', at: new Date().toISOString(),
-    });
-    const stage: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], []),
-      id: 'worker', role: 'worker', depends_on: [], prompt_template: 'work', skills: [], dynamic_dispatch: false, is_gate: false,
-    };
-    let calls = 0;
-    const final = await runWorkflow(
-      { name: 'budget-after', defaults: { max_iterations: 5, max_retries: 0 }, stages: [stage] },
-      'name: budget-after', projectDir, { async run(_record0, _record1, recordOpts: import("../src/adapters/base.js").RunOpts) { calls += 1; return fixtureResult({ output: 'unexpected', exitCode: 0, duration_ms: 1 }, recordOpts); } },
-      new Map(), undefined, agentsDir, undefined, brief, true, undefined, true, admission,
-    );
-    const fits = assessResearchIterationBudget({ ...parsed.research!, stop: { ...parsed.research!.stop, maxRounds: 5 } }, 5);
-    expect(assessment.pass).toBe(false);
-    expect(final.status).toBe('failed');
-    expect(final.failureReason).toContain('max_rounds (15) exceeds');
-    expect(calls).toBe(0);
-    expect(fits.pass).toBe(true);
-  });
-
-  it('names the captured research record without author narrative in the QA prompt', () => {
-    const root = temporaryRoot();
-    const projectDir = join(root, 'project');
-    const directory = join(root, 'run');
-    mkdirSync(directory);
-    write(runRecordPath(directory, 'research_round_1_no_candidate_consumed.json'), JSON.stringify({
-      label: 'no-safe-candidate', outcome: 'no_candidate', reason: 'all candidates failed safety',
-    }));
-    write(runRecordPath(directory, 'brief_criteria.json'), JSON.stringify({
-      criteria: [{ id: 'criterion-measured', text: 'Report the measured candidate score.' }],
-    }));
-    const prompt = buildStagePrompt({
-      dependsOn: [], promptTemplate: 'audit', projectDir, runId: 'fixture', runDir: directory,
-      taskDescription: '# fixture', isGate: true, researchOutcomeGate: true,
-      stageId: 'qa', criterionRefs: ['criterion-measured'],
-    });
-    const captured = readResearchGateCandidate(directory, 'qa');
-    expect(captured?.kind).toBe('no_candidate');
-    expect(captured?.gateStageId).toBe('qa');
-    expect(prompt).toContain('Framework-captured research round outcome');
-    expect(prompt).not.toContain('no-safe-candidate');
-    expect(prompt).not.toContain('all candidates failed safety');
-    const locator = JSON.parse(prompt.split('Framework-captured research round outcome\n')[1].split('\n')[0]);
-    expect(JSON.parse(readFileSync(locator.path, 'utf8'))).toMatchObject(captured!);
-    expect(locator).toMatchObject({ version: 1, kind: 'no_candidate', sha256: captured?.sha256 });
-
-    const currentDirectory = join(root, 'current-run');
-    mkdirSync(currentDirectory);
-    write(join(currentDirectory, 'research_round_1_no_candidate_consumed.json'), JSON.stringify({
-      label: 'prior', outcome: 'no_candidate', reason: 'prior round',
-    }));
-    const resultFile = join(projectDir, 'docs', 'result.json');
-    const currentState = {
-      runId: 'current-run', startedAt: new Date(Date.now() - 1_000).toISOString(),
-      stages: {},
-      research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/result.json', stop: {} },
-    } as StoreState;
-    beginResearchInputGeneration(projectDir, currentState);
-    write(join(currentDirectory, 'run.json'), JSON.stringify(currentState));
-    write(resultFile, JSON.stringify({ label: 'current', result: 42 }));
-    const measuredPrompt = buildStagePrompt({
-      dependsOn: [], promptTemplate: 'audit current result', projectDir, runId: 'current-run', runDir: currentDirectory,
-      taskDescription: '# fixture', isGate: true, researchOutcomeGate: true,
-      stageId: 'qa-current', criterionRefs: ['criterion-measured'],
-    });
-    const current = readResearchGateCandidate(currentDirectory, 'qa-current');
-    expect(current).toMatchObject({ kind: 'measured', gateStageId: 'qa-current', label: 'current', result: 42 });
-    expect(measuredPrompt).not.toContain('label="current"; result=42');
-    const measuredLocator = JSON.parse(measuredPrompt.split('Framework-captured research round outcome\n')[1].split('\n')[0]);
-    expect(JSON.parse(readFileSync(measuredLocator.path, 'utf8'))).toMatchObject(current!);
-
-    const closeoutPrompt = buildStagePrompt({
-      dependsOn: [], promptTemplate: 'audit closeout only', projectDir, runId: 'fixture', runDir: directory,
-      taskDescription: '# fixture', isGate: true, researchOutcomeGate: false,
-      stageId: 'closeout', criterionRefs: ['criterion-measured'],
-    });
-    expect(closeoutPrompt).not.toContain('Framework-captured research round outcome');
-    expect(readResearchGateCandidate(directory, 'closeout')).toBeUndefined();
-  });
-
-  it('redispatches the owning producer only for missing-outcome rejection', () => {
-    const producer: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], []),
-      id: 'measure', role: 'worker', scope: ['docs/result.json'], depends_on: [], prompt_template: 'measure',
-      skills: [], dynamic_dispatch: false, is_gate: false,
-    };
-    const gate: StageConfig = { criterion_refs: [], artifact_contract: artifacts([{ id: 'verdict', root: 'run', path: "verdict_qa.json" }], [], []),
-      id: 'qa', role: 'qa', depends_on: ['measure'], prompt_template: 'audit', skills: [], dynamic_dispatch: false, is_gate: true,
-    };
-    const repair: StageConfig = { criterion_refs: [], artifact_contract: artifacts([], [], []),
-      id: 'repair_report', role: 'worker', depends_on: ['qa'], retry_to: ['qa'], prompt_template: 'repair',
-      skills: [], dynamic_dispatch: false, is_gate: false,
-    };
-    const research = { baseline: 0, policy: 'greedy_stack' as const, resultFile: 'docs/result.json', stop: {} };
-    const omitted = findGateRecoveryStages([producer, gate, repair], ['qa'], research, { qa: { gateId: 'qa', authoredVerdict: { pass: true }, effectiveVerdict: { pass: false, refusal: { kind: 'research_outcome_absent' } }, rejectionKind: 'omitted_research_outcome' } });
-    const quality = findGateRecoveryStages([producer, gate, repair], ['qa'], research);
-    expect(omitted.map((stage) => stage.id)).toEqual(['measure']);
-    expect(quality.map((stage) => stage.id)).toEqual([]);
   });
 
   it('installs follow interrupt handlers before emitting the first event', () => {

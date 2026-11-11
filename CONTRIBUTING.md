@@ -67,8 +67,8 @@ Public specs use deterministic fixtures and explicit state isolation. They must 
 on personal files, agent CLIs, live network, private run history or installation-specific
 paths. [The purity check](spec/spec-purity.test.ts) enforces that boundary and names the
 file, line and rule. Keep environment-specific harnesses outside the public repository.
-Use immutable injected research evidence or the framework manifest for round checks;
-[brief contract](guide/brief-contract.md#research-rounds) explains mutable slots.
+Research review checks candidate properties. Engine-owned measurements and structured guards judge numbers;
+[brief contract](guide/brief-contract.md#research-rounds) describes the single contract.
 
 Keep public ignores generic. Clone-local private exclusions belong in `.git/info/exclude`;
 forced staging can bypass ignore rules, so review staged bytes too. Never publish credentials,

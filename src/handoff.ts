@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import { evidenceContext } from './evidence-ledger.js';
 import { readGuidanceForStage, renderGuidanceDelivery } from './guidance.js';
 import { validate, type Schema } from './reality-gate/checks/json-schema-match.js';
-import { captureResearchGateCandidate, researchGateCandidateFile } from './research-candidate.js';
 
 export const MAX_PREDECESSOR_CONTEXT_BYTES = 8_000;
 const SKILLS_DIR = 'config/skills';
@@ -27,9 +26,6 @@ interface HandoffOpts {
   availableSkills?: string;
   taskDescription?: string;
   isGate?: boolean;
-  /** True only for a gate whose dependency closure owns the current research
-   * outcome slot. Other gates must not be made responsible for producing it. */
-  researchOutcomeGate?: boolean;
   stageId?: string;
   criterionRefs?: string[];
 }
@@ -46,6 +42,12 @@ export const HANDOFF_SCHEMA = object({
   caveats: strings, ...completion,
   blocks: { anyOf: [object({ criterion_ids: strings, paths: strings }), { type: 'null' }] },
 });
+
+/** Research proposals add labelled advisory notes to the ordinary result carrier. */
+export const RESEARCH_PRODUCER_SCHEMA: Schema = { ...HANDOFF_SCHEMA,
+  properties: { ...HANDOFF_SCHEMA.properties, notes: object({ hypothesis: text, files_changed: strings, property_evidence: text }) },
+  required: [...HANDOFF_SCHEMA.required!, 'notes'],
+};
 
 // Old results carry an author-reported file list. Deleting the read field would
 // hide those records; new generation uses the engine's existing write ledger.
@@ -147,23 +149,11 @@ export function buildStagePrompt(opts: HandoffOpts, context = evidenceContext(op
   const guidanceDelivery = opts.stageId
     ? renderGuidanceDelivery(readGuidanceForStage(opts.runDir, opts.stageId))
     : '';
-  const researchCandidateBlock = (() => {
-    if (!opts.isGate || !opts.researchOutcomeGate || !opts.stageId) return '';
-    const candidate = captureResearchGateCandidate(opts.projectDir, opts.runDir, opts.stageId);
-    if (candidate.kind === 'absent' && candidate.reason === 'run is not in research mode') return '';
-    return `## Framework-captured research round outcome\n${JSON.stringify({
-      version: candidate.version, kind: candidate.kind,
-      path: runRecordPath(opts.runDir, researchGateCandidateFile(opts.stageId)),
-      ...(candidate.sha256 ? { sha256: candidate.sha256 } : {}),
-    })}\nRead the captured structured outcome at this path. A no_candidate round is not a measured candidate and must not be rejected merely for lacking a numeric candidate measurement.`;
-  })();
-
   const parts = [
     guidanceDelivery,
     context,
     body,
     criterionBlock,
-    researchCandidateBlock,
     '## Environment gaps\nIf your active result schema offers the environment_gap status and this environment cannot supply a capability or resource needed for the work, report status: "environment_gap", with summary stating what is missing, what you observed, and what remains. Set blocks to { criterion_ids: [...], paths: [...] } naming exactly the criteria and project-relative paths this gap blocks, independently of your stage responsibility mapping. Nonempty dimensions jointly constrain the blocked work; an empty dimension is unconstrained. Use null when the blocked work is unknown. Null, legacy omission or wholly empty blocks are reported as unknown to the gate. This is a structured declaration, not a work failure. The engine sends it to the independent gate without retrying it. Only the gate decides acceptance under its criteria. Do not use it merely because work is unfinished.',
     opts.isGate ? '## Reproduced findings and validation\nA finding to be repaired must cite its reproduction record: set reproduction to the integer sequence in evidence-ledger.jsonl. Run a targeted command with exit 0 meaning the defect is absent and a positive exit meaning it is present. Use the injected engine-recorded command endpoint through your native shell tool, supplying command, absolute cwd and shell as JSON; the engine executes and records it and returns record.sequence. This works even when a native transport omits cwd and shell. Native commands are also eligible when their structured events include explicit absolute cwd and shell, exit and output. The recorded command is replayed with that shell (-c) in that cwd and the same engine command environment. Include any required shell options in an explicit executable invocation in the command. The engine records the complete command, context, structured exit code, output digest and tree hash; read the ledger after the command completes and cite its sequence. Missing execution context, a missing citation, a passing command or a changed tree is an unconfirmed observation and opens no repair. Do not run configured validation inside the gate. For each failed, unfinished or unrun command, return validation_review.commands with its exact role/display, disposition caused_by_change|already_failing|environment|unknown and reason. You alone judge causation from logs, diff and optional base evidence. To settle a failure needing base, return validation_review.request_base with exact role/display; the engine obtains one bounded base batch and returns the facts for your final verdict in this attempt. Otherwise return request_base: []. Missing or invalid dispositions stay unknown and unverified. A caused_by_change disposition prevents acceptance; repair still needs the independent confirmed reproduction above. Host load is telemetry only. Failed, unfinished and unrun commands remain unverified even on acceptance. Keep independent read-only scope [] and run your own experiments.' : '',
     anchor,

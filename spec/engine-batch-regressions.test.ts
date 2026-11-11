@@ -7,8 +7,6 @@ import { inspectBrief } from '../src/brief-preflight.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, readRunState, setFcGlobalDir } from '../src/store.js';
 import { configureWorkflowBrief } from '../src/scheduler/sched_loop/brief.js';
-import { captureResearchGateCandidate } from '../src/research-candidate.js';
-import { createResearchAdvancer } from '../src/scheduler/sched_policy/research.js';
 import { StageConfigSchema } from '../src/scheduler/sched_admission/configuration.js';
 import { createScopeBatchContext } from '../src/scheduler/sched_scope/scope-batch.js';
 import { settleProjectWrites } from '../src/scheduler/sched_scope/write-enforcement.js';
@@ -52,72 +50,6 @@ it.each([false, true])('replaces an outward leaf alias without following its tar
   expect(restoreProjectPath(restoreRoot, path, before)).toEqual({ restored: true });
   expect(readFileSync(outside, 'utf8')).toBe('Outside bytes.');
   expect(readFileSync(join(project, path), 'utf8')).toBe('Admitted bytes.');
-});
-
-const researchBrief = '---\nresearch:\n  baseline: 0\n  policy: greedy_stack\n  result_file: docs/round.json\n  report_dir: docs\n  stop: {beat: 100, max_rounds: 3}\n---\n# Goal\nMeasure independent rounds.\n';
-function admitResearch(resuming = false) {
-  const configured = configureWorkflowBrief({ name: 'research', description: '', defaults: {}, stages: [] }, project, runId, run, 3, resuming, researchBrief);
-  expect(configured.kind).toBe('configured');
-}
-function publish(relative: string, value: unknown, mtime: number) {
-  const path = join(project, relative); mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(value)); utimesSync(path, mtime / 1000, mtime / 1000);
-}
-async function advance(files: string[] = []) {
-  const state = readRunState(project, runId);
-  await createResearchAdvancer({ listProjectFilesAt: () => files, settleFrameworkRollbackPath() {}, writeCampaignEntry() {} })
-    .tryAdvanceResearch(state, { projectDir: project, runId, runDirPath: run, iteration: 1, adapter: { async run() { throw new Error('Unexpected confirmation'); } } });
-}
-
-it.each(['measured', 'no_candidate'] as const)('ingests a new %s round after a stepped-back clock, exactly once', async kind => {
-  const start = Date.now(); vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(start);
-  admitResearch();
-  vi.setSystemTime(start - 1500);
-  const path = 'docs/round.json' + (kind === 'no_candidate' ? '.no_candidate.json' : '');
-  publish(path, kind === 'measured' ? { label: 'round-one', result: 1 } : { label: 'round-one', outcome: 'no_candidate', reason: 'No admissible improvement' }, start - 1500);
-  expect(statSync(join(project, path)).mtimeMs).toBeLessThan(Date.parse(readRunState(project, runId).startedAt));
-  expect(captureResearchGateCandidate(project, run, 'review').kind).toBe(kind);
-  await advance(); await advance();
-  const journal = JSON.parse(readFileSync(runRecordPath(run, 'research_journal.json'), 'utf8'));
-  expect(journal.rounds).toHaveLength(1);
-  expect(journal.rounds[0].outcome).toBe(kind);
-  expect(captureResearchGateCandidate(project, run, 'review').kind).toBe(kind);
-});
-
-it('rejects old and unchanged results regardless of mtime and preserves the admission snapshot on resume', async () => {
-  const value = { label: 'old-round', result: 1 }, future = Date.now() + 60_000;
-  publish('docs/round.json', value, future); admitResearch();
-  expect(captureResearchGateCandidate(project, run).kind).toBe('absent');
-  publish('docs/round.json', value, future + 10_000);
-  expect(captureResearchGateCandidate(project, run).kind).toBe('absent');
-  await advance(); expect(existsSync(runRecordPath(run, 'research_journal.json'))).toBe(false);
-  publish('docs/round.json', { label: 'new-round', result: 2 }, Date.now() - 1500);
-  const generation = readRunState(project, runId).researchInputGeneration;
-  admitResearch(true);
-  expect(readRunState(project, runId).researchInputGeneration).toEqual(generation);
-  expect(captureResearchGateCandidate(project, run).kind).toBe('measured');
-  await advance();
-  expect(JSON.parse(readFileSync(runRecordPath(run, 'research_journal.json'), 'utf8')).rounds).toHaveLength(1);
-});
-
-it('rejects simultaneously published measured and no-candidate outcomes after rollback', async () => {
-  admitResearch(); const rolledBack = Date.now() - 1500;
-  publish('docs/round.json', { label: 'measured', result: 1 }, rolledBack);
-  publish('docs/round.json.no_candidate.json', { label: 'none', outcome: 'no_candidate', reason: 'none' }, rolledBack);
-  expect(captureResearchGateCandidate(project, run).kind).toBe('invalid');
-  await advance(); expect(existsSync(runRecordPath(run, 'research_journal.json'))).toBe(false);
-  expect(readFileSync(runRecordPath(run, 'research_round_input_error.json'), 'utf8')).toContain('ambiguous_measured_and_no_candidate');
-});
-
-it.each([false, true])('links inferred evidence only when its content was published in this run (changed=%s)', async changed => {
-  publish('docs/evidence.json', { label: 'round-one', result: 1 }, Date.now() + 60_000);
-  admitResearch();
-  const rolledBack = Date.now() - 1500;
-  publish('docs/round.json', { label: 'round-one', result: 1 }, rolledBack);
-  if (changed) publish('docs/evidence.json', { label: 'round-one', result: 1, measurement: 'independent paired observation' }, rolledBack);
-  await advance(['docs/evidence.json']);
-  const round = JSON.parse(readFileSync(runRecordPath(run, 'research_journal.json'), 'utf8')).rounds[0];
-  expect(round.evidence).toBe(changed ? 'docs/evidence.json' : undefined);
 });
 
 it('observes stream growth and current command identity during rollback without counting unchanged bytes again', async () => {

@@ -164,6 +164,6 @@ describe('verification-owned orchestration edge probes', () => {
         resultFile: 'docs/round.json',
         reportDir: 'docs',
       },
-    }).join('\n')).toContain('valid no-candidate round writes only its sidecar');
+    }).join('\n')).toContain('ARTIFACT_INPUT_ABSENT');
   });
 });

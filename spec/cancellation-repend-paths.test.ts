@@ -1,6 +1,6 @@
 import { runRecordPath } from '../src/run-layout.js';
 import './test-support/policy-runtime.js';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -13,7 +13,6 @@ import { WorkflowConfigSchema } from '../src/scheduler/sched_admission/configura
 import { settleGateRetries } from '../src/scheduler/sched_loop/gate-loop.js';
 import { prepareWorkflowIteration } from '../src/scheduler/sched_loop/iteration-setup.js';
 import * as iteration from '../src/scheduler/sched_loop/iteration.js';
-import { advanceSettledResearch } from '../src/scheduler/sched_loop/research-progress.js';
 import * as services from '../src/scheduler/sched_loop/services.js';
 import * as stageBatch from '../src/scheduler/sched_loop/stage-batch.js';
 import { createRun } from './test-support/create-run.js';
@@ -96,6 +95,7 @@ it('continues after the actual next-iteration reset with settled retry ledgers',
     new ScriptedAdapter({}), run.workflow.stages, run.yaml);
   expect(prepared.kind).toBe('ready');
   expect(readRunState(project, run.runId).stages.review).toMatchObject({ status: 'pending', retries: 0 });
+  expect(existsSync(runRecordPath(run.runDirPath, 'verdict_review.json'))).toBe(false);
   await cancelAndContinue(run, 'repair');
 });
 
@@ -136,25 +136,4 @@ it('continues after terminal ambiguity repends its admitted owner and ledger', a
   });
   expect(result).toMatchObject({ decision: 'deferred', reasons: [expect.stringContaining('multiple fresh terminal outcomes')] });
   await cancelAndContinue(run, 'repair', true);
-});
-
-it('continues after research progress repends its terminal finalizer and ledger', async () => {
-  const run = fixture();
-  updateRunState(project, run.runId, state => {
-    state.research = { baseline: 0, policy: 'greedy_stack', resultFile: 'round_result.json', stop: { maxRounds: 3 } };
-  });
-  mkdirSync(runRecordPath(run.runDirPath, 'signals'));
-  writeFileSync(runRecordPath(run.runDirPath, 'signals/research_terminal_ready.json'), JSON.stringify({ terminalOwner: 'repair' }));
-  const interrupted = new Error('Fixture scheduler stopped before terminal finalizer dispatch');
-  const dispatch = vi.spyOn(iteration, 'executeIteration').mockImplementation(async () => {
-    await cancelAndContinue(run, 'repair', true);
-    throw interrupted;
-  });
-  // This research round has no outcome gate and no new mutable result to ingest;
-  // its durable ready signal asks the admitted finalizer to run again.
-  const stages = run.workflow.stages.filter(stage => stage.id === 'repair');
-  await expect(advanceSettledResearch(readRunState(project, run.runId), stages, stages, 1, [], 0, 1, 3,
-    new Set(), project, run.runId, run.runDirPath, { ...run.workflow, stages }, new ScriptedAdapter({}),
-    new Map(), run.roles, new Map())).rejects.toBe(interrupted);
-  expect(dispatch).toHaveBeenCalledOnce();
 });

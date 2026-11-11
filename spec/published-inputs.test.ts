@@ -27,9 +27,13 @@ function fixture() {
 describe('published declaration inputs', () => {
   it.each(['planner', 'research'])('loads the built-in %s workflow with a complete contract', (name) => {
     const { config } = loadWorkflow(join(projectRoot, 'config', 'workflows', `${name}.yaml`));
-    for (const stage of config.stages) expect(ArtifactContractSchema.parse(stage.artifact_contract)).toEqual({
-      version: 1, produces: [{ id: 'dispatch', root: 'run', path: 'work/dispatch.yaml', kind: 'file', nonempty: true }], reads: [], groups: [],
-    });
+    for (const stage of config.stages) {
+      const parsed = ArtifactContractSchema.parse(stage.artifact_contract);
+      expect(parsed).toMatchObject({ version: 1, reads: [], groups: [] });
+      expect(parsed.produces).toEqual(name === 'planner'
+        ? [{ id: 'dispatch', root: 'run', path: 'work/dispatch.yaml', kind: 'file', nonempty: true }]
+        : stage.is_gate ? [{ id: 'verdict', root: 'run', path: 'work/verdict_review.json', kind: 'file', nonempty: false }] : []);
+    }
   });
 
   it('loads every role through the shared base prompt after consolidating its safety boundary', () => {

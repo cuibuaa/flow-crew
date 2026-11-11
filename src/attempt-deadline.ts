@@ -48,6 +48,19 @@ const SYSTEM_CLOCK: AttemptDeadlineClock = {
   clearTimer: (timer) => clearTimeout(timer),
 };
 
+/** Node timers have a signed 32-bit delay. Chunk the wait, never the allowance;
+ * the deadline owner supplies the remaining time at every wake-up. */
+export function scheduleDeadline(callback: () => void, remainingMs: () => number, clock = SYSTEM_CLOCK): () => void {
+  let timer: ReturnType<typeof setTimeout>;
+  const check = () => {
+    const remaining = remainingMs();
+    if (remaining <= 0) callback();
+    else timer = clock.setTimer(check, Math.max(1, Math.min(MAX_TIMER_DELAY_MS, Math.ceil(remaining))));
+  };
+  check();
+  return () => clock.clearTimer(timer);
+}
+
 function positiveSafeInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive safe integer`);
   return value;
@@ -73,7 +86,7 @@ export class AttemptDeadlineController {
   private readonly deadlineMono: number;
   private readonly controller = new AbortController();
   private readonly wrapUpController = new AbortController();
-  private timer?: ReturnType<typeof setTimeout>;
+  private cancelTimer?: () => void;
   private deadlineReachedWall?: number;
 
   constructor(input: {
@@ -171,7 +184,7 @@ export class AttemptDeadlineController {
   }
 
   dispose(): void {
-    if (this.timer) this.clock.clearTimer(this.timer);
+    this.cancelTimer?.();
   }
 
   private observeWrapUp(): void {
@@ -190,11 +203,12 @@ export class AttemptDeadlineController {
     }
     const untilWarning = this.wrapUpAt && !this.wrapUpSignal.aborted
       ? stageWrapUpTiming(this.budgetMs).warningAfterMs - this.elapsedMs() : remaining;
-    this.timer = this.clock.setTimer(() => {
+    const nextCheck = this.clock.monotonicNow() + Math.min(remaining, untilWarning);
+    this.cancelTimer = scheduleDeadline(() => {
       this.observeWrapUp();
       if (this.remainingMs() > 0) this.scheduleDeadlineCheck();
       else this.abortAtDeadline();
-    }, Math.max(1, Math.min(MAX_TIMER_DELAY_MS, Math.ceil(remaining), Math.ceil(untilWarning))));
+    }, () => nextCheck - this.clock.monotonicNow(), this.clock);
   }
 
   private abortAtDeadline(): void {

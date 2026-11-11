@@ -15,6 +15,14 @@ type ScopeSegment =
 const globSyntax = /[*!?[{]|[+@]\(/;
 const complexGlobSyntax = /[![{]|[+@?*]\(/;
 
+/** Embed a literal filesystem root in the existing scope language. Canonical
+ * singleton classes quote punctuation; the terminal globstar denotes its tree. */
+export function literalProjectScope(path: string): string {
+  if (normalizedProjectPath(path) !== path) throw new Error('root must be a normalized project-relative path');
+  return quoteScopeRoot(path) + '/**';
+}
+const quoteScopeRoot = (path: string): string => path.replace(/[*!?[\]{}()+@]/g, character => `[${character}]`);
+
 function scopeSegments(path: string): ScopeSegment[] {
   return path.split('/').map((segment): ScopeSegment => {
     if (segment === '**') return { kind: 'globstar', value: '**' };
@@ -26,7 +34,7 @@ export function parseDeclaredScope(rawValue: string): ParsedScope {
   const raw = rawValue.trim();
   const slashNormalized = raw.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
   if (!slashNormalized) return { kind: 'unknown', raw, reason: 'empty scope entry' };
-  if (isAbsolute(slashNormalized) || /^[A-Za-z]:\//.test(slashNormalized)) {
+  if (isAbsolute(slashNormalized) || /^[A-Za-z]:/.test(slashNormalized)) {
     return { kind: 'unknown', raw, reason: 'scope must be project-relative' };
   }
   const segments = slashNormalized.split('/');
@@ -50,7 +58,7 @@ function languageSegments(scope: Exclude<ParsedScope, { kind: 'unknown' }>): Sco
   // A literal terminal tree includes its node and every descendant, including
   // dotfiles. Other globstars keep Node's normal dot-segment boundary.
   const root = literalTreeCapabilityRoot(scope);
-  return root ? [...scopeSegments(root), { kind: 'globstar', value: '**', dots: true }] : scope.segments;
+  return root ? [...root.split('/').map((value): ScopeSegment => ({ kind: 'literal', value })), { kind: 'globstar', value: '**', dots: true }] : scope.segments;
 }
 
 function nodeGlobMatches(path: string, pattern: string): boolean {
@@ -112,7 +120,7 @@ export function normalizedProjectPath(value: string, projectDir?: string): strin
   let path = value.trim().replace(/\\/g, '/');
   if (projectDir && isAbsolute(path)) path = relative(projectDir, path).replace(/\\/g, '/');
   const normalized = posix.normalize(path);
-  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../') || isAbsolute(normalized) || /^[A-Za-z]:\//.test(normalized)) return undefined;
+  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../') || isAbsolute(normalized) || /^[A-Za-z]:/.test(normalized)) return undefined;
   return normalized;
 }
 
@@ -145,5 +153,6 @@ export function literalTreeCapabilityRoot(scope: ParsedScope): string | undefine
   const pattern = normalizedProjectPath(scope.raw);
   if (!pattern?.endsWith('/**')) return undefined;
   const root = pattern.slice(0, -3);
-  return root && !globSyntax.test(root) ? root : undefined;
+  const literal = root.replace(/\[(.)\]/g, '$1');
+  return root && quoteScopeRoot(literal) === root ? literal : undefined;
 }

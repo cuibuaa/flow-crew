@@ -3,32 +3,16 @@ import { concludeRun } from '../sched_policy/run-completion.js';
 // Boundary: Materialize admitted task metadata and brief configuration, and refuse malformed research/budget inputs before agents execute.
 import { BriefAdmissionRecord } from '../../brief-preflight.js';
 import { resolveCampaignStorageKey } from '../../campaigns.js';
-import { recordRunEvent } from '../../run-events.js';
-import { assessResearchIterationBudget, entryWorkflow, parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
-import { WorkflowConfig, loadDefaults } from '../sched_admission/configuration.js';
+
+import { entryWorkflow, parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
+import { WorkflowConfig } from '../sched_admission/configuration.js';
 import { log } from '../sched_admission/shared.js';
-import { StoreState, type ResearchConfig, readRunState, writeRunState } from '../../store.js';
+import { StoreState, readRunState, writeRunState } from '../../store.js';
 import { writeCampaignEntry } from './services.js';
 import { writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { terminalArtifactIdentity } from '../../terminal-artifact-status.js';
-import { beginResearchInputGeneration } from '../../research-candidate.js';
-
-/** The same bounded budget admission applies at entry and to later declarations. */
-export function refuseResearchBudget(state: StoreState, research: ResearchConfig | undefined, maxIterations: number): boolean {
-  const defaults = loadDefaults();
-  const assessment = assessResearchIterationBudget(research, maxIterations, {
-    attemptTimeoutMs: defaults.default_timeout_ms, technicalRetries: defaults.stage_technical_retries,
-  });
-  if (assessment.pass) return false;
-  delete state.parked;
-  concludeRun(state, { status: 'failed', reasonCode: 'admission_refused',
-    detail: `Research budget admission refused: ${assessment.reason}. Adjust the named authored budget or its named engine binding before launch.` });
-  recordRunEvent(state.projectDir, state.runId, { type: 'admission_rejected', runId: state.runId,
-    timestamp: state.completedAt!, detail: state.failureReason });
-  return true;
-}
 
 export function configureWorkflowBrief(
   workflow: WorkflowConfig, projectDir: string, runId: string, runDirPath: string,
@@ -96,17 +80,13 @@ export function configureWorkflowBrief(
         }
         if (research) s.research = research;
         if (outputs) s.declaredOutputs = outputs;
-        beginResearchInputGeneration(projectDir, s);
         writeRunState(projectDir, runId, s);
         if (terminalStates) log.info({ runId, statuses: Object.keys(terminalStates) }, 'Terminal-state config loaded from brief frontmatter');
-        if (research) log.info({ runId, policy: research.policy, baseline: research.baseline }, 'Research config loaded from brief frontmatter');
+        if (research) log.info({ runId, replicates: research.measurement.replicates }, 'Research config loaded from brief frontmatter');
       }
       if (s.research?.measurement) researchState = s;
       if (parsed.frontmatterError) log.warn({ runId, frontmatterError: parsed.frontmatterError }, 'brief frontmatter failed to parse — any terminal_states/research config in it was ignored');
-      if (briefAdmission) {
-        const s = readRunState(projectDir, runId);
-        if (refuseResearchBudget(s, research, maxIterations)) return { kind: 'settled', state: s };
-      }
+
     }
   }
   return {kind: 'configured', taskDescription, researchState};

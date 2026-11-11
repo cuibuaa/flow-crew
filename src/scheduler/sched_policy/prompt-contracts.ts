@@ -2,7 +2,6 @@ import { runRecordPath } from '../../run-layout.js';
 /** Scheduler-owned execution and admission prompt contracts; builds strings only and changes no contract bytes. */
 import { type StageConfig } from '../sched_admission/configuration.js';
 import { type ResearchConfig, type TerminalStatesConfig, type StoreState } from '../../store.js';
-import { resolveResearchPaths } from '../../research-paths.js';
 import type { AgentConfig } from '../../adapters/base.js';
 
 export const SINGLE_AUTHOR_NOTICE = 'Execution model: every authoring stage runs one author. Requests in brief text or frontmatter for competing candidates run as single-author work under this notice. Independent gates have their own stage budgets.';
@@ -35,27 +34,15 @@ export function appendProjectWriteContext(prompt: string, stage: StageConfig): s
 export function appendResearchPathContract(
   prompt: string,
   research: ResearchConfig | undefined,
-  terminalStates: TerminalStatesConfig | undefined,
+  _terminalStates: TerminalStatesConfig | undefined,
+  directory?: string,
 ): string {
-  if (!research) return prompt;
-  if (research.measurement) return `${prompt}\n\n# Engine-owned research instrument\n`
-    + `Edit only the admitted candidate inputs: ${research.measurement.candidate.join(', ')}. The engine snapshots and measures them after independent review. `
-    + `The frozen command, dependencies and environment are retained outside your write capabilities. Producer result files and spread estimates do not enter selection. `
-    + `Read the research journal to choose the next candidate. Code applies calibrated paired noise, every structured guard and the held-out allowance; it restores the measured best after rejection. `
-    + `Terminal producers must follow research_decision.json. The framework owns the manifest and all instrument/observation records.`;
-  const paths = resolveResearchPaths(research);
-  const terminalPaths = Object.values(terminalStates ?? {}).flatMap((entry) => entry.paths);
-  return `${prompt}\n\n# Resolved research paths (scheduler-owned)\n`
-    + `- mutable latest measured result: ${paths.resultFile}\n`
-    + `- mutable no-candidate alternative: ${paths.resultFile}.no_candidate.json\n`
-    + `- framework round manifest (written before confirmation): ${paths.manifestFile}\n`
-    + `- terminal outputs: ${terminalPaths.length > 0 ? terminalPaths.join(', ') : 'none declared'}\n`
-    + `The measured result and no-candidate sidecar are mutually exclusive mutable slots. `
-    + `When no safe acting candidate exists, write exactly {"label":"<non-empty>","outcome":"no_candidate","reason":"<non-empty>"} to ${paths.resultFile}.no_candidate.json; the discriminator field is outcome, not status. `
-    + `Hard checks must declare inputs that are available on every permitted round outcome. `
-    + `${paths.manifestFile} is written after the scheduler accepts a round and before that round's confirmation gate. `
-    + `Its evidence locator records accepted observations; configured validation and independent gates review authored tests. `
-    + `A hard check that references ${paths.resultFile} is still rejected at admission even when a producer declares that path; a check that requires the absent ${paths.manifestFile} before the first accepted round is rejected as a temporal cycle.`;
+  if (!research?.measurement) return prompt;
+  return `${prompt}\n\n# Engine-owned measurement loop\n`
+    + `Candidate roots: ${research.measurement.candidate.join(', ')}. Frozen roots: ${research.measurement.frozen.join(', ')}. `
+    + `Submit a content change and producer notes (hypothesis, files_changed, property_evidence); unchanged content is no candidate. `
+    + `Review judges candidate properties only. Read ${directory ? runRecordPath(directory, 'research_measurement/state.json') : 'engine/research_measurement/state.json'} for previous engine measurements. `
+    + `The engine alone measures, applies guards and held-out allowance, restores the best, and writes terminal reports. Stages never run the instrument or write terminal reports.`;
 }
 
 export function appendPlannerAdmissionContract(

@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { calibrateResearchNoise, captureMeasuredCandidate, decideResearchComparison, initializeResearchMeasurements, measureResearchCandidate, researchMeasurementState, ResearchMeasurementSchema, restoreResearchBest, type Metric, type Observation, type ResearchMeasurement } from '../src/research-measurement.js';
 import { createDispatchAdmission } from '../src/scheduler/sched_admission/dispatch.js';
 import { parseDispatchedStageConfig } from '../src/scheduler/sched_admission/configuration.js';
-import { isResearchOutcomeGate } from '../src/scheduler/sched_settlement/gate-recovery.js';
 import { parseBriefFrontmatter } from '../src/scheduler/sched_admission/brief-contract.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { producesEngineOwnedArtifact } from '../src/artifact-declarations.js';
@@ -218,7 +217,8 @@ describe('engine measurement lifecycle', { timeout: 300000 }, () => {
   });
   it('replays the original measured candidate when a later capture reuses its label', async () => {
     await setup(); const original = candidate('same-round', { cost: 80 });
-    const first = await measureResearchCandidate(run, original);
+    const submission = { notes: { hypothesis: 'Improve the general candidate.', files_changed: ['candidate.json'], property_evidence: 'Independent checks retained.' }, review: { pass: true, reason: 'Properties hold.' } };
+    const first = await measureResearchCandidate(run, original, Infinity, submission);
     writeFileSync(join(project, 'candidate.json'), '{"cost":1,"ok":true,"held":true}');
     const later = captureMeasuredCandidate(project, run, 'same-round', true);
     expect(later.sha256).not.toBe(original.sha256);
@@ -226,6 +226,8 @@ describe('engine measurement lifecycle', { timeout: 300000 }, () => {
     expect(replay.candidate).toEqual(original);
     expect(replay.observation).toEqual(first.observation);
     expect(researchMeasurementState(run).heldOutUses).toHaveLength(1);
+    expect(researchMeasurementState(run).rounds).toMatchObject([{ label: 'same-round', ...submission, comparison: first.comparison }]);
+    expect(researchMeasurementState(run).rounds).toHaveLength(1);
   });
   it('never rolls allowance accounting back when an older rejected result is replayed', async () => {
     await setup(); const first = candidate('first-refusal', { held: false });
@@ -234,6 +236,17 @@ describe('engine measurement lifecycle', { timeout: 300000 }, () => {
     await measureResearchCandidate(run, first);
     expect(researchMeasurementState(run).heldOutUses).toHaveLength(2);
     expect(researchMeasurementState(run).revision).toBe(2);
+  });
+  it('never exceeds the held-out allowance across distinct improving submissions', async () => {
+    await setup(config => { config.held_out!.allowance = 1; });
+    const first = await measureResearchCandidate(run, candidate('allowed', { cost: 50 }));
+    expect(first.comparison.keep).toBe(true);
+    const spawn = vi.spyOn(commandOwner, 'spawnOwnedCommand');
+    const refused = await measureResearchCandidate(run, candidate('beyond-allowance', { cost: 25 }));
+    expect(refused.comparison).toMatchObject({ keep: false, reason: 'held_out_allowance_exhausted' });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(researchMeasurementState(run).heldOutUses).toHaveLength(1);
+    expect(researchMeasurementState(run).best.items![0].metrics.cost).toBe(50);
   });
   it('refuses to repeat a spent held-out use after interruption', async () => {
     await setup(); const captured = candidate('interrupted', {});
@@ -256,7 +269,7 @@ describe('engine measurement lifecycle', { timeout: 300000 }, () => {
   it('times out and retires an owned measurement command', async () => {
     await setup(c => { c.timeout_seconds = .05; });
     const result = await measureResearchCandidate(run, candidate('timeout', { sleep: true }));
-    expect(result.observation.status).toBe('unmeasured'); expect(result.observation.detail).toContain('measurement_timeout');
+    expect(result.observation.status).toBe('unmeasured'); expect(result.observation.detail).toMatch(/measurement_timeout|research_wall_budget_exhausted/);
   });
   it('preserves an unavailable executable as an explicit unmeasured baseline', async () => {
     await setup(c => { c.development.command = join(root, 'missing-executable'); });
@@ -407,16 +420,4 @@ describe.each([1, 2])('measurement ownership in storage layout %s', layout => {
 it('rejects malformed instrument declarations instead of falling back to producer numbers', () => {
   const brief = '---\nresearch:\n  baseline: 100\n  measurement: {replicates: 1}\n  stop: {max_rounds: 3}\n---\nTry candidates.';
   expect(parseBriefFrontmatter(brief).researchPolicyError).toContain('measurement');
-});
-
-it.each(['candidate/data.json', 'candidate/*.json', 'candidate/**'])('keeps terminal writers out of measured candidate trees (%s)', scope => {
-  const measurement = ResearchMeasurementSchema.parse({ frozen: ['evaluate.cjs'], candidate: ['candidate'], replicates: 2, metrics, primary: ['cost'], development: { command: process.execPath, args: ['evaluate.cjs'] } });
-  const owner = parseDispatchedStageConfig({ id: 'report', role: 'doc_writer', scope: [scope, 'report.md'], depends_on: [], dependency_reasons: {}, condition: 'research.decision != continue', is_gate: false, skills: [], criterion_refs: [], prompt_template: 'Report the engine decision.', artifact_contract: { version: 1, produces: [{ id: 'report', root: 'project', path: 'report.md', kind: 'file' }], reads: [], groups: [] } });
-  const research = { baseline: 100, policy: 'greedy_stack' as const, measurement, stop: { maxRounds: 3 } };
-  const report = createDispatchAdmission()({ dispatched: [owner], baseStages: [], dispatchStageId: 'plan', terminalStates: { ceiling_hit: { paths: ['report.md'] } }, research });
-  expect(report.errors.some(error => error.code === 'terminal_owner_scope')).toBe(true);
-  const disjoint = { ...owner, scope: ['other/*.json', 'report.md'] };
-  expect(createDispatchAdmission()({ dispatched: [disjoint], baseStages: [], dispatchStageId: 'plan', terminalStates: { ceiling_hit: { paths: ['report.md'] } }, research }).pass).toBe(true);
-  const gate = { ...owner, id: 'review', is_gate: true, scope: [], depends_on: [owner.id] };
-  expect(isResearchOutcomeGate(gate, [owner, gate], research)).toBe(true);
 });

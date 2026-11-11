@@ -110,10 +110,11 @@ describe('GAP-3 — parseBriefFrontmatter surfaces frontmatter errors instead of
     const brief = ['---', 'research:', '  baseline: 1.0', '  policy: greedy_stack', '---', '# body'].join('\n');
     const out = parseBriefFrontmatter(brief);
     expect(out.frontmatterError).toBeUndefined();
-    expect(out.research?.baseline).toBe(1.0);
+    expect(out.research).toBeUndefined();
+    expect(out.workflowError).toContain('declare research.measurement');
   });
 
-  it('parses the A+(a) research.confirm block when declared', () => {
+  it('refuses the retired A+(a) research.confirm block with migration guidance', () => {
     const brief = [
       '---', 'research:', '  baseline: 1.0', '  policy: greedy_stack',
       '  confirm:', '    command: ./scripts/reconfirm.sh', '    requires: beat on a fresh split', '    timeout_seconds: 120',
@@ -121,9 +122,8 @@ describe('GAP-3 — parseBriefFrontmatter surfaces frontmatter errors instead of
     ].join('\n');
     const out = parseBriefFrontmatter(brief);
     expect(out.frontmatterError).toBeUndefined();
-    expect(out.research?.confirm?.command).toBe('./scripts/reconfirm.sh');
-    expect(out.research?.confirm?.requires).toBe('beat on a fresh split');
-    expect(out.research?.confirm?.timeoutSeconds).toBe(120);
+    expect(out.research).toBeUndefined();
+    expect(out.workflowError).toContain('declare research.measurement');
   });
 });
 

@@ -142,17 +142,18 @@ sharing a mutable project tree wait for the active author to settle. Settlement 
 task-declared immutable evidence, with exact task outputs taking precedence.
 See [scope reconciliation](../src/scheduler/sched_scope/reconciliation.ts).
 
-All new runs enter `entry.yaml`. Its model chooser selects a fixed author/review/repair shape or
-releases the dynamic planner; declarations never select a shape. The fixed author's result routes
+A brief declaring `research.measurement` constructs its producer and independent property reviewer directly.
+Engineering briefs enter `entry.yaml`; its chooser selects a fixed author/review/repair shape or
+releases the dynamic planner. The parsed declaration alone decides research versus engineering. The fixed author's result routes
 through a read-only assessment to focused or full independent review. Full review remains available.
 Historical workflow files remain readable for admitted runs and library fixtures.
 
 Any stage can declare `decision: {successors: [next_stage, replan], default: next_stage}`.
 A decision returns one JSON object with `successor` and `reason`; review decisions also return
-closed risk-area objects and the chooser returns `assumptions`, `missing_author_facts` and `metric_search`.
+closed risk-area objects and the engineering chooser returns `assumptions`.
 The default must belong to the declared set. `continue` releases ordinary dependencies; `replan`
 reruns planning at an idle boundary in the same iteration. Invalid ordinary outputs take the
-declared default and record why; invalid chooser outputs fail their attempt and use the existing retry. Missing author-owned facts end the run with a named result. Outside-set
+declared default and record why; invalid chooser outputs fail their attempt and use the existing retry. Outside-set
 choices are refused and recorded. Declared paths remain subject to full plan, scope, result-duty
 and finite-budget admission. Replanning cannot change executed duties or discard result obligations.
 Gate verdicts and historical repair edges translate to these same bounded successor transitions.

@@ -103,7 +103,7 @@ export async function cmdPlanCheck(args: string[]): Promise<number> {
       const checksPath = resolve(dirname(resolve(files[0])), 'reality_checks.md');
       if (existsSync(checksPath)) copyFileSync(checksPath, runRecordPath(scratch, 'reality_checks.md'));
       state = { stages: {}, terminalStates: parsedBrief.terminalStates, research: parsedBrief.research } as import('./store.js').StoreState;
-      for (const error of [parsedBrief.frontmatterError, parsedBrief.researchPolicyError, parsedBrief.researchFeasibilityError]) if (error) errors.push(admissionError('brief_contract_invalid', error, 'frontmatter'));
+      for (const error of [parsedBrief.frontmatterError, parsedBrief.researchPolicyError]) if (error) errors.push(admissionError('brief_contract_invalid', error, 'frontmatter'));
     }
     const { report } = inspectDispatchProposal({
       inspectDispatchAdmission: createDispatchAdmission(),

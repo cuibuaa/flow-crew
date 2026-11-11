@@ -1,5 +1,4 @@
 import { runRecordPath, stageWorkPath } from '../../run-layout.js';
-import { concludeRun } from '../sched_policy/run-completion.js';
 import { captureRepairRoundSnapshot, type RepairRoundSnapshot } from '../sched_scope/snapshots.js';
 import { ensureRollbackBaseline } from '../sched_scope/rollback-baseline.js';
 import { topoSort } from '../sched_admission/frontier.js';
@@ -13,7 +12,7 @@ import { atomicWrite, mkdirSync, unlinkSync } from '../../engine-fs.js';
 import { emptyDecisionGraph, validateDecision, type DecisionRecord } from '../../decision-graph.js';
 import { changedPaths } from '../../decision-context.js';
 import { readRunEvents, recordRunEvent } from '../../run-events.js';
-import { RUN_STATUS, STAGE_STATUS, readStageOutput, rependStageStatus, writeStageStatus, writeRunState, isPendingStageStatus, type StoreState } from '../../store.js';
+import { STAGE_STATUS, readStageOutput, rependStageStatus, writeStageStatus, writeRunState, isPendingStageStatus, type StoreState } from '../../store.js';
 import { loadDefaults, type StageConfig, type WorkflowConfig } from '../sched_admission/configuration.js';
 import { collectGateRuntimeFacts, classifyGateRecoveryFact, findGateRecoveryStages, gateReviewedAuthorIds } from '../sched_settlement/gate-recovery.js';
 import { archiveGateRoundEvidence, archiveRejectedGateRuntimeFacts, gateArchiveCoordinate } from '../sched_settlement/gate-archives.js';
@@ -107,7 +106,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
       if (fact?.rejectionKind === 'irreparable_rejection' || facts.contractRefusals.length) {
         if (terminateForGateContractRefusal(state, facts, project, run, iteration)) return state;
       }
-      const recoveries = facts.rejectedGateIds.length ? findGateRecoveryStages(sorted, facts.rejectedGateIds, state.research,
+      const recoveries = facts.rejectedGateIds.length ? findGateRecoveryStages(sorted, facts.rejectedGateIds,
         fact ? { [source.id]: classifyGateRecoveryFact(source.id, fact.authoredVerdict, fact.effectiveVerdict) } : {}) : [];
       const successor = facts.allPass ? 'continue' : recoveries[0]?.id ?? declaration.default;
       choice = validateDecision(stage, JSON.stringify({ successor, reason: facts.allPass ? 'Effective independent gate accepted.' : fact?.effectiveVerdict?.reason ?? 'Invalid or absent gate result; take the declared default without accepting work.' }));
@@ -122,28 +121,11 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
     } else {
       choice = validateDecision(stage, readStageOutput(project, run, source.id), source.decision?.kind === 'review' ? changedPaths(project, state) : []);
     }
-    if (source.decision?.kind === 'shape') {
-      const raw = JSON.parse(readStageOutput(project, run, source.id));
-      if (raw.metric_search === true && !state.research) {
-        choice.missing_author_facts = [...new Set([...(choice.missing_author_facts ?? []), 'research.baseline', 'research.policy', 'research.stop'])];
-      }
-    }
     const record: DecisionRecord = { ...choice, ...(gateAccepted === undefined ? {} : { gateAccepted }), planRevision: state.queryState?.planRevision?.revision, declaredSuccessors: declaration.successors, key, stageId: source.id, iteration };
     for (const [target, owner] of Object.entries(graph.enabled)) if (owner === source.id) delete graph.enabled[target];
-    if (choice.missing_author_facts?.length) {
-      record.outcome = 'refused';
-      delete record.successor;
-      record.reason = `Author must add missing facts before launch: ${choice.missing_author_facts.join(', ')}. ${choice.reason}`;
-      graph.records.push(record);
-      event(record, state, project, run);
-      concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: 'admission_refused', detail: record.reason });
-      return state;
-    }
     graph.records.push(record);
     const targetsToPublish: string[] = [];
     const target = choice.successor;
-    const wallExhausted = state.research?.stop?.maxWallHours !== undefined
-      && Date.now() - Date.parse(state.startedAt) >= state.research.stop.maxWallHours * 3_600_000;
     const destination = sorted.find(s => s.id === target);
     const fixedShape = source.decision?.kind === 'shape' && target === 'implement';
     const used = graph.visits[`${iteration}/${target}`] ?? 0;
@@ -166,7 +148,7 @@ export function settleDecisions(sorted: StageConfig[], state: StoreState, projec
       : gateAccepted === false ? gaps.find(({ blocks, unknownCriterionIds }) => blocks && (blocks.criterion_ids.length || blocks.paths.length)
         && rejectedFindings.some(finding => (!blocks.criterion_ids.length || finding.criterion_ids.some(id => blocks.criterion_ids.includes(id) && !unknownCriterionIds.includes(id)))
           && (!blocks.paths.length || finding.paths.some(path => stageScopeOwnsPath({ ...source, scope: blocks.paths }, path)))))?.id : undefined;
-    if (repeatedGap || unconfirmedRejection || wallExhausted || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
+    if (repeatedGap || unconfirmedRejection || (state.currentIteration ?? 1) > (state.maxIterations ?? loadDefaults().max_iterations) || target !== 'continue' && target !== 'replan' && !destination && !fixedShape
       || source.decision && destination?.is_gate && (destination.scope === undefined || destination.scope.length !== 0)
       || target !== 'continue' && (revisiting || source.is_gate) && !resumed && used >= limit) {
       record.outcome = 'refused'; record.reason = repeatedGap ? `Environment gap already reported by ${repeatedGap}; no further attempt on that gap authorized. ${record.reason}` : unconfirmedRejection ? record.reason : `Successor refused: unknown destination, non-read-only gate, or exhausted visit budget (${used}/${limit}). ${record.reason}`;

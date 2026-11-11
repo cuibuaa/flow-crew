@@ -45,7 +45,7 @@ describe('skill-consolidation release contract', () => {
     const uncovered = admit([work],{criteria});
     expect(uncovered.pass).toBe(false);
     expect(uncovered.errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('not assigned to a gate');
-    expect(admit([stage('owner',{condition:'research.decision == continue'})],{terminalStates}).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('non-research run');
+    expect(admit([stage('owner',{condition:'research.decision == continue'})],{terminalStates}).errors.map(error => typeof error === 'string' ? error : error.message).join(';')).toContain('unknown stage research');
   });
 
   it('retires terminal-path prose inference for level-two sections and declarations', () => {

@@ -1,63 +1,41 @@
 ---
 research:
-  baseline: 0
-  policy: greedy_stack
-  higher_is_better: true
-  result_file: docs/hello-research/round_result.json
-  report_dir: docs/hello-research
-  result_schema:
-    type: object
-    required: [label, result]
-    properties:
-      label:
-        type: string
-      result:
-        type: number
-  confirm:
-    command: |
-      test "$(git ls-files '*.ts' | wc -l)" -ge 1
-    requires: At least one tracked TypeScript file must exist.
-  stop:
-    beat: 1
-    max_rounds: 3
-    halt_after_no_improvement: 1
+  measurement:
+    frozen: [examples/research-instrument/evaluate.cjs, examples/research-instrument/retention.json]
+    candidate: [examples/research-instrument/candidate.json]
+    replicates: 4
+    metrics:
+      cost: {direction: min, scale: fraction}
+    primary: [cost]
+    development: {command: /usr/bin/node, args: [examples/research-instrument/evaluate.cjs, development]}
+    guards:
+      - name: retention
+        command: /usr/bin/node
+        args: [examples/research-instrument/evaluate.cjs, guard]
+        pass: {field: pass, equals: true}
+    held_out:
+      command: /usr/bin/node
+      args: [examples/research-instrument/evaluate.cjs, held-out]
+      allowance: 2
+      pass: {field: pass, equals: true}
+    timeout_seconds: 10
+  stop: {max_rounds: 6, halt_after_no_improvement: 3}
 terminal_states:
-  shipped:
-    paths: [docs/hello-research/ship_report.md]
   ceiling_hit:
-    paths: [docs/hello-research/ceiling_report.md]
-    floor:
-      min_attempted_stages: 1
+    paths: [docs/research-instrument/ceiling_report.md]
 ---
-# Hello Research: find tracked TypeScript
+# Synthetic engine-owned instrument demonstration
 
-## Goal
+Choose a lower synthetic cost in the declared candidate JSON, preserving its
+structured retention guard. The engine measures candidates with a frozen
+instrument, calibrates four baseline replicates, requires the guard, and charges
+at most two held-out uses. This demonstrates the protocol, not an optimization
+or a benchmark result. Independent review checks the candidate before settlement.
+Return producer notes with hypothesis, changed files and evidence that the brief properties hold. The engine alone writes the terminal report.
 
-Use a read-only command to establish whether this repository contains at least
-one tracked TypeScript file.
+## Report criteria
 
-## Round contract
-
-- Try one read-only counting method per round; do not change source files. Write only the declared research round slot and
-  evidence required by the admitted plan.
-- Record the method in `label` and the number of tracked `.ts` files in
-  `result`.
-- Write exactly one JSON object to
-  `docs/hello-research/round_result.json`, for example:
-
-```json
-{"label":"git-ls-files","result":42}
-```
-
-The framework owns the ship or ceiling report. Do not create either terminal
-artifact yourself. This brief is a scripted rehearsal example, not evidence of a
-measured improvement. See [examples](README.md) for the runnable recipe.
-
-## What each round's report must show
-
-1. The counting method this round used, named in `label`, and why it is
-   read-only.
-2. The number of tracked TypeScript files it found, recorded in `result`, with
-   the exact command that produced it and that command's direct exit code.
-3. Whether this round's method disagrees with any earlier round's, and by how
-   many files.
+1. Show the engine's baseline replicate count and calibrated noise, candidate
+   digest and frozen instrument fingerprint.
+2. Show each kept or rejected candidate with its numeric comparison and guard
+   output, and the recorded held-out uses and terminal reason.

@@ -5,7 +5,7 @@ export { checkCampaignHealth, findCampaignPhaseMetadata } from './scheduler/sche
 export { RUN_VALIDATION_BASELINE_FILE } from './scheduler/sched_policy/terminal.js';
 export type { TerminalValidationFreshnessResult } from './scheduler/sched_policy/terminal.js';
 export type { CampaignAlert, CampaignEntry } from './scheduler/sched_policy/campaign.js';
-export { assessResearchIterationBudget, parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
+export { parseBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
 export { buildRetryPreamble, decideEmptyDispatchAction, diagnoseEmptyDispatch, promoteAdmittedRealityChecks, restoreAdmittedRealityChecks } from './scheduler/sched_admission/dispatch-retry.js';
 export { StageConfigSchema, WorkflowConfigSchema, normalizeStageContracts, parseDispatchedStageConfig } from './scheduler/sched_admission/configuration.js';
 export { findScopeConflict, selectRunnableBatch } from './scheduler/sched_admission/frontier.js';
@@ -13,7 +13,7 @@ export { GATE_VERDICT_CORRECTION_VERSION, canResumeOwnGateSession, gateVerdictCo
 export { applyBasePrompt, buildRoleRegistry, collectTransitiveDependents, formatDispatchStageSchemaFailure, loadBasePrompt, loadWorkflow, resolveDispatchDependencies, validatedCriterionDischarges } from './scheduler/sched_admission/dispatch.js';
 export { assessTerminalConditionCoverage } from './scheduler/sched_admission/condition-coverage.js';
 export { inspectRealityCheckReachability } from './scheduler/sched_admission/reality-reads.js';
-export type { ParsedBriefFrontmatter, ResearchIterationBudgetAssessment, ResearchIterationBudgetBindings } from './scheduler/sched_admission/brief-contract.js';
+export type { ParsedBriefFrontmatter } from './scheduler/sched_admission/brief-contract.js';
 export type { EmptyDispatchAction } from './scheduler/sched_admission/dispatch-retry.js';
 export type { StageConfig, WorkflowConfig } from './scheduler/sched_admission/configuration.js';
 export type { ScopeConflict } from './scheduler/sched_admission/frontier.js';
@@ -29,10 +29,10 @@ export type { GateContract } from './scheduler/sched_settlement/gate-contract.js
 export { loadGateContract } from './scheduler/sched_settlement/gate-contract.js';
 export { recordGateValidationDelta, snapshotShipSetupValidationBaseline } from './scheduler/sched_settlement/gate-validation.js';
 export { deriveCriterionDischarges, readGateEvaluation } from './scheduler/sched_settlement/gate-verdict.js';
-export type { GateRecoveryFact, ResearchSettlementProjection } from './scheduler/sched_settlement/gate-recovery.js';
-export { checkGates, findAllRetryToStages, findGateRecoveryStages, isResearchOutcomeGate, recoverVerifiedResearchSettlement, researchAdvanceEligible } from './scheduler/sched_settlement/gate-recovery.js';
+export type { GateRecoveryFact } from './scheduler/sched_settlement/gate-recovery.js';
+export { checkGates, findAllRetryToStages, findGateRecoveryStages } from './scheduler/sched_settlement/gate-recovery.js';
 export { recoverTerminalStudyCompletion } from './scheduler/sched_settlement/completion.js';
 export { archivedGateRejections, buildGateDispatchPreamble } from './scheduler/sched_settlement/gate-archives.js';
 export { recordSchedulerTechnicalAttemptResult } from './scheduler/sched_settlement/stage-execution.js';
-export { findAllReady, inspectDispatchAdmission, tryAdvanceResearch, writeRepairRoundDiffArtifact } from './scheduler/sched_loop/services.js';
+export { findAllReady, inspectDispatchAdmission, writeRepairRoundDiffArtifact } from './scheduler/sched_loop/services.js';
 export { runWorkflow } from './scheduler/sched_loop/run-workflow.js';

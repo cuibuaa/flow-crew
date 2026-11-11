@@ -1,33 +1,7 @@
 /** Finite condition validation and ordinary-quiescence coverage; no runtime terminal decision. */
 import { parseCondition } from '../../condition.js';
 import { STAGE_STATUS } from '../../store.js';
-import { EMITTED_RESEARCH_DECISIONS, type StageConfig } from './configuration.js';
-import { normalizedProjectPath } from './scope-services.js';
-
-export function researchTerminalConditionExcludesContinue(
-  condition: string | undefined,
-  declaration: { status: string; path: string },
-): boolean {
-  if (!condition?.trim()) return false;
-  try {
-    const parsed = parseCondition(condition);
-    if (parsed.stageId !== 'research') return false;
-    if (parsed.field === 'decision') {
-      if (parsed.op === '!=' && parsed.value === 'continue') return true;
-      return parsed.op === '=='
-        && typeof parsed.value === 'string'
-        && EMITTED_RESEARCH_DECISIONS.has(parsed.value);
-    }
-    if (parsed.op !== '==' || typeof parsed.value !== 'string') return false;
-    if (parsed.field === 'terminalPath') {
-      return normalizedProjectPath(parsed.value) === normalizedProjectPath(declaration.path);
-    }
-    if (parsed.field === 'terminalStatus') return parsed.value === declaration.status;
-    return false;
-  } catch {
-    return false;
-  }
-}
+import { type StageConfig } from './configuration.js';
 
 export function finiteStatusConditionDomainError(
   stageId: string,

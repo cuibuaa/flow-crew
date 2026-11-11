@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { inspectBrief } from '../src/brief-preflight.js';
-import { assessResearchShipTarget, evaluateResearch } from '../src/research-policy.js';
 import type { ResearchConfig } from '../src/store.js';
 
 function config(overrides: Partial<ResearchConfig> = {}): ResearchConfig {
@@ -71,76 +70,6 @@ function relationCodes(brief: string): string[] {
     .map((finding) => finding.code)
     .filter((code) => code.startsWith('research_ship_target_'));
 }
-
-describe('item 6 — every locally provable ship-target relation is compared', () => {
-  it('refuses the recorded already-crossed target while retaining the policy comparison it exposed', () => {
-    const brief = researchBrief({ baseline: 0.1457, beat: 0.10 });
-    expect(relationCodes(brief)).toContain('research_ship_target_already_crossed');
-    expect(inspectBrief(brief).contractReady).toBe(false);
-
-    expect(evaluateResearch(config({ stop: { beat: 0.10, maxRounds: 2 } }), [
-      { label: 'r1', result: 0.15 },
-    ])).toMatchObject({ decision: 'ship', runningBest: 0.15, keptLabels: ['r1'] });
-  });
-
-  it('preserves a materially different feasible target and the ordinary ship judgment', () => {
-    const brief = researchBrief({ baseline: 0.1457, beat: 0.20 });
-    expect(relationCodes(brief)).toEqual([]);
-    expect(assessResearchShipTarget(config())).toMatchObject({ status: 'reachable' });
-    expect(evaluateResearch(config(), [{ label: 'independent-r2', result: 0.21 }]))
-      .toMatchObject({ decision: 'ship', runningBest: 0.21, keptLabels: ['independent-r2'] });
-  });
-
-  it('does not turn an external historical best into an invented empirical ceiling', () => {
-    const assessment = assessResearchShipTarget(config());
-    const observedButUnauthorizedHistoricalBest = 0.018;
-    expect(observedButUnauthorizedHistoricalBest).toBeLessThan(assessment.bindings.baseline);
-    expect(assessment.status).toBe('reachable');
-    expect(assessment.reason).not.toContain(String(observedButUnauthorizedHistoricalBest));
-  });
-
-  it('refuses targets excluded by either schema or integrity bounds', () => {
-    expect(relationCodes(researchBrief({
-      baseline: 0.1,
-      beat: 0.5,
-      resultMinimum: -0.3,
-      resultMaximum: 0.3,
-    }))).toContain('research_ship_target_unreachable');
-    expect(relationCodes(researchBrief({
-      baseline: 0.1,
-      beat: 0.6,
-      outlierFactor: 5,
-    }))).toContain('research_ship_target_unreachable');
-  });
-
-  it('enumerates every assessment disposition in both metric directions', () => {
-    const population = [
-      config({ stop: undefined }),
-      config({ stop: { beat: 0.10 } }),
-      config({ baseline: 0.2, higherIsBetter: false, stop: { beat: 0.3 } }),
-      config(),
-      config({ resultSchema: { properties: { result: { type: 'number', maximum: 0.18 } } } }),
-      config({
-        baseline: 0.2,
-        higherIsBetter: false,
-        stop: { beat: 0.1 },
-        resultSchema: { properties: { result: { type: 'number', minimum: 0.15 } } },
-      }),
-    ];
-    expect(population.map((entry) => assessResearchShipTarget(entry).status)).toEqual([
-      'ceiling_only',
-      'already_crossed',
-      'already_crossed',
-      'reachable',
-      'unreachable',
-      'unreachable',
-    ]);
-  });
-
-  it('keeps the existing ceiling-only warning instead of inventing a target failure', () => {
-    expect(relationCodes(researchBrief({ baseline: 0.1457 }))).toEqual(['research_ship_target_missing']);
-  });
-});
 
 describe('item 15 — anti-anchoring field polarity is mention-local', () => {
   const finding = (requirement: string): boolean => inspectBrief(decisionBrief(requirement)).findings

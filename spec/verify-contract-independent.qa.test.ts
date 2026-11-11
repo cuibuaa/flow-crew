@@ -17,65 +17,6 @@ const makeStage = (raw: Record<string, unknown>) => parseDispatchedStageConfig({
 });
 
 describe('independent dispatch-admission QA probes', () => {
-  it('rejects terminal ownership of research output through exact, tree, and glob scopes', () => {
-    for (const scope of [
-      ['docs/round.json', 'docs/final.md'],
-      ['docs/', 'docs/final.md'],
-      ['docs/**'],
-    ]) {
-      const owner = makeStage({
-        id: 'measure', role: 'researcher', scope, depends_on: [], dependency_reasons: {},
-        condition: 'research.decision != continue',
-      });
-      const report = inspectDispatchAdmission({
-        dispatched: [owner], baseStages: [], dispatchStageId: 'plan',
-        terminalStates: { complete: { paths: ['docs/final.md'] } },
-        research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json' },
-      });
-      expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n'), scope.join(',')).toContain('research result producer path docs/round.json');
-    }
-  });
-
-  it('rejects every tested predicate that can be true or is unproved on continue', () => {
-    for (const condition of [
-      undefined,
-      'research.decision == continue',
-      'research.decision != shipped',
-      'audit.decision != continue',
-    ]) {
-      const owner = makeStage({
-        id: 'finalize', role: 'writer', scope: ['docs/final.md'], depends_on: [],
-        dependency_reasons: {}, condition,
-      });
-      const report = inspectDispatchAdmission({
-        dispatched: [owner], baseStages: [], dispatchStageId: 'plan',
-        terminalStates: { complete: { paths: ['docs/final.md'] } },
-        research: { baseline: 0, policy: 'greedy_stack' },
-      });
-      expect(report.pass, String(condition)).toBe(false);
-      expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('must be mechanically false when research.decision is continue');
-    }
-  });
-
-  it('admits only tested narrow predicates that are false on continue', () => {
-    for (const condition of [
-      'research.decision != continue',
-      'research.decision == shipped',
-      'research.terminalPath == docs/final.md',
-      'research.terminalStatus == complete',
-    ]) {
-      const owner = makeStage({
-        id: 'finalize', role: 'writer', scope: ['docs/final.md'], depends_on: [],
-        dependency_reasons: {}, condition,
-      });
-      const report = inspectDispatchAdmission({
-        dispatched: [owner], baseStages: [], dispatchStageId: 'plan',
-        terminalStates: { complete: { paths: ['docs/final.md'] } },
-        research: { baseline: 0, policy: 'greedy_stack' },
-      });
-      expect(report.pass, `${condition}: ${report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')}`).toBe(true);
-    }
-  });
 
   it('rejects duplicate ownership independently for each terminal path', () => {
     const first = makeStage({

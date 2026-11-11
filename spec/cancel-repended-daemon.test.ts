@@ -103,7 +103,7 @@ it.each([true, false])(
     const done2 = readStageStatus(fixture.project, run.runId, 'done2');
     const priorWork = readStageStatus(fixture.project, run.runId, 'work');
     expect(priorWork.retries).toBe(1);
-    // terminal.ts/research-progress.ts publish a pending ledger this way; the
+    // Scheduler terminal handling publishes a pending ledger this way; the
     // iteration driver can also retain the previous settled ledger.
     if (matching) writeStageStatus(fixture.project, run.runId, 'work', rependStageStatus(priorWork, 0));
     else updateRunState(fixture.project, run.runId, state => { state.stages.work = rependStageStatus(state.stages.work, 0); });

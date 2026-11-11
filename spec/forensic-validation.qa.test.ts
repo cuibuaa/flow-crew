@@ -149,9 +149,9 @@ describe('scheduler admission and evidence contracts', () => {
       stages: [{ artifact_contract: ArtifactContractSchema.parse({ version: 1, produces: [{ id: 'report', root: 'project', path: 'docs/report.json' }], reads: [] }), id: 'writer', role: 'researcher', depends_on: [], prompt_template: '', skills: [], criterion_refs: [], scope: ['docs/report.json'], is_gate: false }],
     });
     const prompt = appendResearchPathContract('confirm the round', research, undefined);
-    expect(refused.join('\n')).toContain('writes it only after the current round');
-    expect(prompt).toContain('framework round manifest (written before confirmation): docs/run_manifest.json');
-    expect(prompt).toContain("Its evidence locator records accepted observations");
+    expect(refused.join('\n')).toContain('ARTIFACT_INPUT_ABSENT');
+    expect(prompt).not.toContain('framework round manifest');
+    expect(prompt).toBe('confirm the round'); // A retired execution config supplies no active prompt contract.
     expect(ordinary).toEqual([]);
   });
 

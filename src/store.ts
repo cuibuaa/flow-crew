@@ -20,7 +20,6 @@ import { cancelledRunPublicationError, canonicalRunDirectory, requireSafeRunId, 
 import { parseChecksFromBrief, readRealityGateReport, runAllChecks } from './reality-gate/index.js';
 import type { RealityGateExit, RealityGateReport } from './reality-gate/types.js';
 import type { BriefAdmissionRecord } from './brief-preflight.js';
-import type { ResearchFeasibilityConfig } from './research-feasibility.js';
 import type { AdapterFailureKind } from './adapters/base.js';
 import type { ProviderFailure } from './provider-result.js';
 import { invocationUsageFields, sumInvocationUsage, tokensComplete, type InvocationUsage, type NativeInvocationUsage, type TokenUsage } from './invocation-usage.js';
@@ -190,10 +189,10 @@ export function isContinuingStage(stage: StageStatus): boolean {
 
 /** The declaration limits each stage's retained budget slices; interruptions
  * have no continuation marker and spend neither this allowance nor iterations. */
-export function continuationExhausted(state: StoreState): boolean {
-  return state.maxContinuations !== undefined && Object.values(state.stages).some(stage =>
+export function continuationExhausted(state: StoreState, allowance = state.maxContinuations): boolean {
+  return allowance !== undefined && Object.values(state.stages).some(stage =>
     stage.continuation && (stage.attempts ?? []).filter(attempt => attempt.continuation
-      && (attempt.iteration ?? 1) === (state.currentIteration ?? 1)).length > state.maxContinuations!);
+      && (attempt.iteration ?? 1) === (state.currentIteration ?? 1)).length > allowance);
 }
 
 /**
@@ -323,128 +322,17 @@ export interface TerminalStateEntry {
 }
 export type TerminalStatesConfig = Record<string, TerminalStateEntry>;
 
-/**
- * Research-mode config parsed from a brief's `research:` frontmatter block.
- * Drives the native research loop (researcher → implement → measure → decide).
- * Replaces the per-phase prose decision-tables that brief authors previously
- * hand-wrote for cumulative-stacking exploration.
- *
- * `policy` controls the keep/drop + continue/stop decision after each measured
- * round:
- *   - greedy_stack: keep a direction iff it improves the running-best;
- *     continue while any round improves; stop when a full round yields no gain.
- */
-export type ResearchPolicy = 'greedy_stack';
+/** Active research declarations. readRunState intentionally reads historical JSON
+ * without parsing it as a new brief; unknown historical fields remain untouched. */
 export interface ResearchStopConditions {
-  /** Ship + stop when running-best ≥ this value (the headline target / do-nothing baseline). */
   beat?: number;
-  /** Stop after this many research rounds (phases). */
-  maxRounds?: number;
-  /** Stop when cumulative wall hours reach this. */
+  maxRounds: number;
   maxWallHours?: number;
-  /** Stop after N consecutive rounds with no improvement to running-best. */
   haltAfterNoImprovement?: number;
-  /**
-   * A round counts as a genuine IMPROVEMENT (resets the no-improvement streak + becomes
-   * the new running-best) only if it beats the prior best by at least this ABSOLUTE margin.
-   * Filters out within-noise knob-tuning that otherwise resets the ceiling counter forever. Default 0.
-   */
-  minImprovement?: number;
-  /**
-   * ...or by at least this multiple of the round's own cross-run standard error (result_std),
-   * when reported. Default 1 — an improvement must exceed ~1 SE to count. Set 0 to disable.
-   * The effective margin is max(minImprovement, improvementSEMultiple * result_std).
-   */
-  improvementSEMultiple?: number;
 }
-/**
- * Domain-AGNOSTIC per-round integrity gates, declared in the brief's `research.integrity`
- * block. The engine applies these generically — it has NO built-in knowledge of any
- * domain's fields/thresholds. A brief declares e.g.
- *   integrity: { field_floors: { worst_case_score: 50 }, reject_if_positive: [failure_count] }
- * and the engine rejects rounds violating them, without the engine knowing what
- * those fields mean. Variability and outlier bounds apply only when declared.
- */
-export interface ResearchIntegrityConfig {
-  /** Reject if result_std/|result| exceeds this brief-declared uncertainty bound. */
-  maxStdRatio?: number;
-  /** Brief-declared improvement bound as a multiple of |baseline| (baseline≠0). */
-  outlierFactor?: number;
-  /** Reject if round[field] < min — brief-declared numeric floors (domain-specific values live here, not in code). */
-  fieldFloors?: Record<string, number>;
-  /** Reject if round[field] > 0 — brief-declared "this field must be zero/absent". */
-  rejectIfPositive?: string[];
-}
-
 export interface ResearchConfig {
-  /** Frozen engine instrument; producer result files are advisory in this mode. */
-  measurement?: import('./research-measurement.js').ResearchMeasurement;
-  /** Entering running-best the loop builds on (the baseline metric value). */
-  baseline: number;
-  /** Higher metric is better (default true). */
-  higherIsBetter?: boolean;
-  policy: ResearchPolicy;
-  stop?: ResearchStopConditions;
-  /** Per-round integrity gates (brief-declared; engine stays domain-agnostic). */
-  integrity?: ResearchIntegrityConfig;
-  /** Structurally computable pre-run selection feasibility, parsed from the brief. */
-  feasibility?: ResearchFeasibilityConfig;
-  /** Present when a declared feasibility block was rejected instead of silently dropped. */
-  feasibilityError?: string;
-  /**
-   * OPAQUE JSON Schema for the round_result file (single source of the output contract).
-   * The engine never interprets the fields — it only (a) injects it into the planner as
-   * {result_schema} so checks reference the declared shape, and (b) validates each round's
-   * result against it. Domain field names live here (the brief), never in the engine.
-   */
-  resultSchema?: Record<string, unknown>;
-  /**
-   * Context primitive roots (project-relative) the engine inventories into {context_inventory}
-   * so the planner's Propose step sees the real on-disk world-model. Default: ['data'].
-   * Engineering objectives can widen this (e.g. ['src', 'data']).
-   */
-  contextRoots?: string[];
-  /**
-   * Project-relative file where the agent writes the latest round's measured
-   * result as JSON `{ "label": "...", "result": <number> }`. The framework
-   * reads it, journals it (framework-owned, in the run dir), computes the
-   * decision via the policy, and drives continue/ship/ceiling — so the agent
-   * never writes a prose decision table. Default: docs/research_round_result.json
-   */
-  resultFile?: string;
-  /**
-   * Optional project-relative directory for research evidence discovery and run_manifest.json.
-   * Without it, the framework uses the directory containing resultFile; the
-   * default result file therefore keeps the historical docs/ directory.
-   */
-  reportDir?: string;
-  /**
-   * Optional CONFIRM gate (A+(a)): before a candidate is accepted as a `ship`, the engine runs
-   * this brief-declared shell command and only allows `shipped` if it exits 0; otherwise the
-   * terminal status is downgraded to `ceiling_hit`. This is the verify-before-trust mechanism —
-   * the engine carries NO domain knowledge; the command + its contract live entirely in the brief
-   * (e.g. "re-run the candidate on a fresh independent split and assert it still beats baseline").
-   * Generic: runs through the SAME exec-script-exit-zero check the reality gate uses.
-   */
-  confirm?: ResearchConfirmConfig;
-}
-
-/**
- * A+(a) confirm gate: a brief-declared, domain-agnostic verify-before-trust contract.
- * The engine treats `command` as opaque shell text run via the exec-script-exit-zero check
- * (exit 0 = confirmed). `requires` is optional human-readable documentation of the contract
- * (surfaced in events/reports); it does not alter engine behavior — the exit-zero contract is
- * the machine-checked assertion.
- */
-export interface ResearchConfirmConfig {
-  /** Explicit handler reads; old persisted configurations remain readable. */
-  reads?: import('./artifact-declarations.js').ArtifactRead[];
-  /** Shell command run before a `ship`; exit 0 confirms the candidate. */
-  command: string;
-  /** Optional human-readable assertion the command is expected to enforce (documentation only). */
-  requires?: string;
-  /** Optional timeout for the confirm command in seconds (default 300). */
-  timeoutSeconds?: number;
+  measurement: import('./research-measurement.js').ResearchMeasurement;
+  stop: ResearchStopConditions;
 }
 
 /** Regression/plateau labels survive only in historical stored alerts. Current
@@ -546,10 +434,10 @@ export interface StoreState {
   terminalArtifactBaselines?: Record<string, import('./content-identity.js').ContentIdentity>;
   /** Filename (basename) of the terminal file that triggered termination — used for handoff to /ship follow-ups. */
   terminalArtifact?: string;
+  /** Report destinations committed with terminal state, retained for publication-error recovery. */
+  researchReportPaths?: string[];
   /** Research-mode config (set from brief `research:` block). */
   research?: ResearchConfig;
-  /** Content identities captured before this research run dispatches producers. */
-  researchInputGeneration?: import('./research-candidate.js').ResearchInputGeneration;
   /** Structurally declared brief outputs archived before terminal commit. */
   declaredOutputs?: Array<{
     path: string;
@@ -1653,7 +1541,7 @@ export function writeRunState(projectDir: string, runId: string, state: StoreSta
   withRunStateLock(identity.directory, () => persistRunStateUnlocked(projectDir, identity.runId, state, undefined, identity.directory));
 }
 
-export function updateRunState(projectDir: string, runId: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState) => void): StoreState {
+export function updateRunState(projectDir: string, runId: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState, persist: () => void) => void): StoreState {
   const identity = resolveRunIdentity(runDir(projectDir, runId), runsRoot(projectDir));
   return updateRunStateInDirectory(projectDir, identity.runId, identity.directory, mutator, afterCommit);
 }
@@ -1666,7 +1554,7 @@ export function updateOperationalRunStateAtPath(directory: string, mutator: (sta
 
 /** Cancellation publishes matching changed stage ledgers under the run lock.
  * Preserve pre-existing disagreements; ordinary writers retain the cancelled fence. */
-export function updateOperationalRunState(directory: string, mutator: (state: StoreState) => void, interruption?: 'cancellation', afterCommit?: () => void): StoreState {
+export function updateOperationalRunState(directory: string, mutator: (state: StoreState) => void, interruption?: 'cancellation', afterCommit?: (state: StoreState, persist: () => void) => void): StoreState {
   const identity = resolveRunIdentity(directory);
   if (!identity.projectDir) throw new Error('RUN_IDENTITY_BINDING: run has no project directory');
   return withRunStateLock(identity.directory, () => {
@@ -1682,12 +1570,9 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
         || !isJsonPersistedEqual(historiesFromState(previous), historiesFromState(state))) {
       throw new Error('Operational mutation cannot change run history');
     }
-    if (isJsonPersistedEqual(previous, state)) {
-      observeRunStatusChange(identity.directory, identity.runId, state.status);
-      return state;
-    }
-    requireKnownRunStatus(state.status, `write operational run state ${identity.runId}`);
-    if (previous.status === RUN_STATUS.CANCELLED && !interruption) throw cancelledRunPublicationError(identity.runId);
+    const unchanged = isJsonPersistedEqual(previous, state);
+    if (!unchanged) requireKnownRunStatus(state.status, `write operational run state ${identity.runId}`);
+    if (!unchanged && previous.status === RUN_STATUS.CANCELLED && !interruption) throw cancelledRunPublicationError(identity.runId);
     if (interruption) for (const [id, status] of Object.entries(state.stages)) {
       if (isJsonPersistedEqual(previous.stages[id], status)) continue;
       const stagePath = runRecordPath(identity.directory, 'stages', id);
@@ -1698,11 +1583,17 @@ export function updateOperationalRunState(directory: string, mutator: (state: St
       mkdirSync(stagePath, { recursive: true });
       atomicWrite(join(stagePath, 'status.json'), JSON.stringify(status, null, 2));
     }
-    if (state.stateFormat) state.stateFormat.revision += 1;
-    publishRunProjection(identity.projectDir, identity.directory, state, state, () => {
-      if (readFileSync(path, 'utf8') !== raw) throw new RunStateProjectionConflictError(`Run state changed during operational mutation for ${identity.runId}`);
-    });
-    afterCommit?.();
+    let expected = raw;
+    const persist = (): void => {
+      if (state.stateFormat) state.stateFormat.revision += 1;
+      publishRunProjection(identity.projectDir!, identity.directory, state, state, () => {
+        if (readFileSync(path, 'utf8') !== expected) throw new RunStateProjectionConflictError(`Run state changed during operational mutation for ${identity.runId}`);
+      });
+      expected = readFileSync(path, 'utf8');
+    };
+    if (unchanged) observeRunStatusChange(identity.directory, identity.runId, state.status);
+    else persist();
+    afterCommit?.(state, persist);
     return state;
   });
 }
@@ -1719,7 +1610,7 @@ export function interruptedStageStatus(previous: StageStatus, completedAt: strin
   return previous.status === STAGE_STATUS.RUNNING ? { ...previous, status: STAGE_STATUS.FAILED } : previous;
 }
 
-function updateRunStateInDirectory(projectDir: string, runId: string, runPath: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState) => void): StoreState {
+function updateRunStateInDirectory(projectDir: string, runId: string, runPath: string, mutator: (state: StoreState) => void, afterCommit?: (state: StoreState, persist: () => void) => void): StoreState {
   // Serialize read/mutate/commit under the run-local lock. This closes the old
   // mtime check-to-rename race while retaining a byte-exact CAS for a legacy
   // writer that does not yet participate in the lock.
@@ -1731,13 +1622,14 @@ function updateRunStateInDirectory(projectDir: string, runId: string, runPath: s
       mutator(state);
       try {
         persistRunStateUnlocked(projectDir, runId, state, { raw }, runPath);
-        // Opt-in recovery notification stays ordered before cancellation's
-        // acknowledgement. This callback must not re-enter the run-state lock.
-        afterCommit?.(state);
-        return state;
       } catch (error) {
         if (!(error instanceof RunStateProjectionConflictError)) throw error;
+        continue;
       }
+      // Publication is ordered under the same lock, after the durable decision.
+      // A callback may save its pointer or publication failure without re-entry.
+      afterCommit?.(state, () => persistRunStateUnlocked(projectDir, runId, state, undefined, runPath));
+      return state;
     }
     throw new RunStateProjectionConflictError(`Run state changed during five mutation attempts for ${runId}`);
   });

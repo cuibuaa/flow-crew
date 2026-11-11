@@ -85,7 +85,7 @@ describe('typed gate recovery routes', () => {
   it.each([
     ['validation_regression', 'Gate contract violation: unrelated wording', 'engine_contract_or_evidence_rejection'],
     ['validation_unresolved', 'Review omitted the research outcome', 'engine_contract_or_evidence_rejection'],
-    ['research_outcome_absent', 'No prefix is required to describe this refusal', 'omitted_research_outcome'],
+    ['research_outcome_absent', 'No prefix is required to describe this refusal', 'engine_contract_or_evidence_rejection'],
   ] as const)('routes %s by the engine refusal type', (kind, reason, rejectionKind) => {
     expect(classifyGateRecoveryFact(gateId, { pass: true }, { pass: false, reason, refusal: { kind } }).rejectionKind)
       .toBe(rejectionKind);
@@ -117,7 +117,7 @@ describe('typed gate recovery routes', () => {
       const gate = parseDispatchedStageConfig({ id: gateId, role: 'qa', is_gate: true });
       const repair = parseDispatchedStageConfig({ id: 'repair', role: 'coder', retry_to: [gateId] });
       expect(fact.rejectionKind).toBe('repairable_failure');
-      expect(findGateRecoveryStages([gate, repair], [gateId], undefined, { [gateId]: fact })
+      expect(findGateRecoveryStages([gate, repair], [gateId], { [gateId]: fact })
         .map(stage => stage.id)).toEqual([]);
       const irreparable: GateVerdict = { ...effective,
         repairability: { version: 1, disposition: 'irreparable', evidence: 'Required GPU unavailable' } };
@@ -261,7 +261,7 @@ describe('settled gate results', () => {
       expect(entry.rejectionKind).toBe(kind ? undefined : 'engine_contract_or_evidence_rejection');
       if (kind) expect(entry.effectiveVerdict?.pass).toBe(true);
       const fact = classifyGateRecoveryFact(gateId, entry.authoredVerdict, entry.effectiveVerdict);
-      expect(findGateRecoveryStages([gate, repair], facts.rejectedGateIds, undefined, { [gateId]: fact })
+      expect(findGateRecoveryStages([gate, repair], facts.rejectedGateIds, { [gateId]: fact })
         .map(stage => stage.id)).toEqual([]);
     },
   );

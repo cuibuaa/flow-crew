@@ -5,12 +5,6 @@ import { entryWorkflow } from './scheduler/sched_admission/brief-contract.js';
 import { hasRealityChecksHeading, parseChecksFromMarkdown } from './reality-gate/index.js';
 import { isNegatedRequirementLine, isNegatedRequirementMention } from './brief-negation.js';
 import { extractBriefCriteria } from './brief-criteria.js';
-import {
-  evaluateResearchFeasibility,
-  type ResearchFeasibilityEvaluation,
-} from './research-feasibility.js';
-import { assessResearchShipTarget } from './research-policy.js';
-import { RUN_STATUS } from './store.js';
 
 export interface BriefPreflightFinding {
   code: string;
@@ -33,7 +27,6 @@ export interface BriefPreflightReport {
     error?: string;
   };
   contractReady: boolean;
-  researchFeasibility?: ResearchFeasibilityEvaluation[];
   findings: BriefPreflightFinding[];
 }
 
@@ -212,13 +205,6 @@ function operatorFigureEvidence(brief: string): { line: number; excerpt: string 
   return undefined;
 }
 
-function feasibilityDistributionText(evaluation: ResearchFeasibilityEvaluation): string {
-  const summary = evaluation.distribution;
-  if (!summary) return '';
-  const location = summary.location;
-  return ` Structural distribution: n=${summary.sampleSize}, mean=${summary.mean}, median=${summary.median}, spread=${summary.spread}, selected ${summary.selectedStatistic}=${summary.selectedValue}, rank=${location.lowerRank}-${location.upperRank}/${location.of}, midrank percentile=${location.percentile}.`;
-}
-
 /** Inspect one exact brief string without reading or changing project state. */
 export function inspectBrief(
   brief: string,
@@ -298,67 +284,8 @@ export function inspectBrief(
   }
 
   const rc = parsed.research;
-  let researchFeasibility: ResearchFeasibilityEvaluation[] | undefined;
-  if (parsed.researchPolicyError) {
-    add({
-      code: 'research_policy_invalid',
-      level: 'fail',
-      message: `research.policy is invalid: ${parsed.researchPolicyError}`,
-      consequential: true,
-      risk: 'An unrecognised policy silently becomes greedy_stack, whose keep/drop rule is measured against research.baseline; a brief that meant a different rule gets one it never chose and only finds out from the campaign\'s terminal decision.',
-      suggestion: 'Set research.policy to greedy_stack, or omit it to take greedy_stack deliberately.',
-    });
-  }
-  if (parsed.researchFeasibilityError) {
-    add({
-      code: 'research_feasibility_invalid',
-      level: 'fail',
-      message: `The declared research.feasibility contract is invalid: ${parsed.researchFeasibilityError}`,
-      consequential: true,
-      risk: 'A malformed structural model cannot support a pre-run feasibility decision and must not be silently ignored.',
-      suggestion: 'Use one documented research.feasibility model with finite structural inputs, a positive hard_floor, and unique labelled rules.',
-    });
-  } else if (parsed.researchFeasibility) {
-    researchFeasibility = evaluateResearchFeasibility(parsed.researchFeasibility);
-    for (const evaluation of researchFeasibility) {
-      const distribution = feasibilityDistributionText(evaluation);
-      if (evaluation.decision === 'not_computable') {
-        add({
-          code: 'research_feasibility_not_computable',
-          level: 'warn',
-          message: `Research feasibility “${evaluation.label}” cannot be computed from pre-run structural quantities: ${evaluation.reason} No qualifying-member count was synthesized.`,
-          consequential: true,
-          risk: 'The run may still discover that the rule is empty, but inventing an expectation would be less honest than carrying the uncertainty explicitly.',
-          suggestion: 'Measure the named structural distribution before a later run, then replace not_computable with a computable model.',
-        });
-      } else if (evaluation.decision === 'fail') {
-        add({
-          code: 'research_feasibility_below_floor',
-          level: 'fail',
-          message: `Research feasibility “${evaluation.label}” is ${evaluation.displayQualifyingMemberCount}, below hard_floor=${evaluation.hardFloor}.${distribution}`,
-          consequential: true,
-          risk: 'The pre-registered selection rule is structurally infeasible before any outcome is measured.',
-          suggestion: 'Revise or drop the rule before opening outcomes; do not tune it after measurement starts.',
-        });
-      } else if (evaluation.decision === 'warn') {
-        add({
-          code: 'research_feasibility_tight',
-          level: 'warn',
-          message: `Research feasibility “${evaluation.label}” is ${evaluation.displayQualifyingMemberCount}: it meets hard_floor=${evaluation.hardFloor} but is below warn_below=${evaluation.warnBelow}.${distribution}`,
-          consequential: true,
-          risk: 'The rule is feasible on its declared hard floor but has little structural margin.',
-          suggestion: 'Proceed only if the tight rule is intentional; otherwise revise it before outcomes are opened.',
-        });
-      } else {
-        add({
-          code: 'research_feasibility_ok',
-          level: 'ok',
-          message: `Research feasibility “${evaluation.label}” is ${evaluation.displayQualifyingMemberCount}, meeting hard_floor=${evaluation.hardFloor}${evaluation.warnBelow === undefined ? '' : ` and warn_below=${evaluation.warnBelow}`}.${distribution}`,
-          consequential: false,
-        });
-      }
-    }
-  }
+  if (parsed.researchPolicyError) add({ code: 'research_policy_invalid', level: 'fail', consequential: true,
+    message: parsed.researchPolicyError, suggestion: 'Declare research.measurement; move numeric protections into structured guards.' });
 
   const suppliedNumbers = (document?.value as Record<string, unknown> | undefined)?.supplied_numbers;
   if (suppliedNumbers !== undefined && (!Array.isArray(suppliedNumbers)
@@ -403,82 +330,8 @@ export function inspectBrief(
     }
   }
 
-  if (!rc) {
-    add({
-      code: 'research_absent',
-      level: 'warn',
-      message: 'No `research:` block (engineering brief) — static contract checks only; the research loop was not simulated',
-      consequential: false,
-      suggestion: 'Add a numeric-baseline `research:` block only when this task needs the metric loop; otherwise keep the engineering brief and rely on its static contract checks.',
-    });
-  } else {
-    add({
-      code: 'research_valid',
-      level: 'ok',
-      message: `research: policy=${rc.policy} baseline=${rc.baseline} result_file=${rc.resultFile ?? '(default)'}`,
-      consequential: false,
-    });
-    const targetAssessment = assessResearchShipTarget(rc);
-    if (targetAssessment.status === 'already_crossed') {
-      add({
-        code: 'research_ship_target_already_crossed',
-        level: 'fail',
-        message: `The declared ship target is already crossed: ${targetAssessment.reason}.`,
-        consequential: true,
-        risk: 'The first later round that is kept becomes ship-eligible even though it did not establish the intended target gain.',
-        suggestion: `Choose a target strictly ${targetAssessment.bindings.higherIsBetter ? 'above' : 'below'} the baseline, or remove stop.beat for an explicit ceiling-only contract.`,
-      });
-    } else if (targetAssessment.status === 'unreachable') {
-      add({
-        code: 'research_ship_target_unreachable',
-        level: 'fail',
-        message: `The declared ship target cannot be exercised: ${targetAssessment.reason}.`,
-        consequential: true,
-        risk: 'Every schema-valid round is prevented from reaching ship, so the campaign can consume its full ceiling without a keepable shipping candidate.',
-        suggestion: 'Bring stop.beat inside the declared result_schema and integrity bounds, or remove stop.beat for an explicit ceiling-only contract.',
-      });
-    }
-    if (rc.measurement) {
-      add({ code: 'research_measurement_valid', level: 'ok', consequential: false,
-        message: `Engine-owned instrument: ${rc.measurement.replicates} baseline replicates, ${rc.measurement.guards.length} guards, held-out allowance ${rc.measurement.held_out?.allowance ?? 'undeclared'}` });
-    } else if (!rc.confirm) {
-      add({
-        code: 'research_confirm_missing',
-        level: 'warn',
-        message: 'No `research.confirm` declared — a ship decision would be accepted without a data check',
-        consequential: true,
-        risk: 'A metric improvement could be shipped without an independent data-level confirmation.',
-        suggestion: 'Declare `research.confirm.command` and its required evidence, or remove research shipping as an allowed outcome.',
-      });
-    } else {
-      add({
-        code: 'research_confirm_valid',
-        level: 'ok',
-        message: `Confirm command declared: ${rc.confirm.command}`,
-        consequential: false,
-      });
-    }
-    if (rc.stop?.beat === undefined) {
-      add({
-        code: 'research_ship_target_missing',
-        level: 'warn',
-        message: 'No `stop.beat` declared — a ship decision will never be proposed (ceiling-only exploration)',
-        consequential: true,
-        risk: 'The loop can explore and terminate at its ceiling but has no numeric target that authorizes shipping.',
-        suggestion: 'Declare a finite `research.stop.beat` target, or explicitly choose a ceiling-only exploration contract.',
-      });
-    }
-    if (rc.stop?.maxRounds === undefined && rc.stop?.maxWallHours === undefined && rc.stop?.haltAfterNoImprovement === undefined) {
-      add({
-        code: 'research_stop_rule_missing',
-        level: 'warn',
-        message: 'No stop rule declared — the loop is limited only by `max_iterations`',
-        consequential: true,
-        risk: 'The research loop has no task-owned round, wall-time, or stagnation boundary.',
-        suggestion: 'Add at least one of `stop.max_rounds`, `stop.max_wall_hours`, or `stop.halt_after_no_improvement`.',
-      });
-    }
-  }
+  if (rc) add({ code: 'research_measurement_valid', level: 'ok', consequential: false,
+    message: `Engine-owned instrument: ${rc.measurement.replicates} baseline replicates, ${rc.measurement.guards.length} guards, held-out allowance ${rc.measurement.held_out?.allowance ?? 'undeclared'}` });
 
   const terminalStates = parsed.terminalStates;
   if (!terminalStates || Object.keys(terminalStates).length === 0) {
@@ -517,7 +370,7 @@ export function inspectBrief(
     // an explicit evidence pattern, independently of the brief's prose.
     for (const [status, entry] of Object.entries(terminalStates)) {
       if (entry.floor?.minAttemptedStages === undefined || entry.stageGlob !== undefined) continue;
-      if (status === RUN_STATUS.CEILING_HIT && rc) continue;
+      if (rc) continue;
       const first = entry.paths[0];
       if (!first) continue;
       const directory = first.includes('/') ? first.slice(0, first.lastIndexOf('/')) : '.';
@@ -531,27 +384,7 @@ export function inspectBrief(
         suggestion: `Set stage_glob explicitly to \`${glob}\` (or the intended pattern) and require a stage to write concrete matching evidence files; otherwise remove min_attempted_stages and gate on named evidence.`,
       });
     }
-    const floor = terminalStates.ceiling_hit?.floor;
-    if (floor?.minAttemptedStages !== undefined && rc?.stop?.maxRounds !== undefined
-        && floor.minAttemptedStages > rc.stop.maxRounds) {
-      add({
-        code: 'terminal_floor_unreachable',
-        level: 'fail',
-        message: `Ceiling floor is unreachable: it requires at least ${floor.minAttemptedStages} rounds, but stop.max_rounds=${rc.stop.maxRounds}; termination could only force a floor-unmet submission`,
-        consequential: true,
-        risk: 'No execution can both obey the maximum round count and satisfy the declared ceiling floor.',
-        suggestion: 'Lower `terminal_states.ceiling_hit.floor.min_attempted_stages`, raise `research.stop.max_rounds`, or remove the conflicting floor.',
-      });
-    }
-    if (floor?.minAttemptedStages !== undefined && rc?.stop?.haltAfterNoImprovement !== undefined
-        && rc.stop.haltAfterNoImprovement < floor.minAttemptedStages) {
-      add({
-        code: 'terminal_floor_defers_early_stop',
-        level: 'ok',
-        message: `floor(${floor.minAttemptedStages}) > halt_after_no_improvement(${rc.stop.haltAfterNoImprovement}): an early ceiling decision will be deferred as intended`,
-        consequential: false,
-      });
-    }
+
   }
 
   return {
@@ -560,7 +393,6 @@ export function inspectBrief(
     inputKind,
     frontmatter,
     contractReady: !findings.some((finding) => finding.level === 'fail'),
-    ...(researchFeasibility === undefined ? {} : { researchFeasibility }),
     findings,
   };
 }

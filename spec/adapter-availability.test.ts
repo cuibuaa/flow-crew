@@ -393,7 +393,7 @@ describe('CLI adapter behavior', () => {
     const mockDir = join(fixture.root, 'mock');
     const brief = structuredBrief();
     mkdirSync(mockDir);
-    writeFileSync(join(mockDir, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single fixture change.', metric_search: false, assumptions: [], missing_author_facts: [] }) }));
+    writeFileSync(join(mockDir, 'choose.json'), JSON.stringify({ output_text: JSON.stringify({ successor: 'implement', reason: 'Single fixture change.', assumptions: [] }) }));
     writeFileSync(join(mockDir, 'implement.json'), JSON.stringify({
       output_text: 'fixture stage failure detail',
       exit_code: 1,

@@ -48,7 +48,7 @@ See [lifecycle and operations](guide/operations.md#identities-and-lifecycle) and
 
 | Point it at… | Kind | What comes back |
 |---|---|---|
-| Improve a measured baseline | Research | Journaled measurements and a ship, ceiling, incomplete or failure outcome; confirmation when declared |
+| Improve a measured baseline | Research | Journaled measurements and a ship, ceiling, incomplete or failure outcome; engine-owned calibration, guards and held-out allowance |
 | Implement a module to a spec | Engineering | Implementation, independent verdicts and configured validation results |
 | Refactor while preserving behavior | Engineering | Reviewed changes checked against the brief's criteria and configured tests |
 | Investigate an intermittent defect | Engineering / campaign | Related run history and evidence for the reproducer, diagnosis and fix required by the brief |
@@ -105,9 +105,8 @@ CLIs are installed, or the only installed CLI. [Adapter configuration](guide/con
 flowcrew rehearse examples/hello-research.brief.md
 ```
 
-Rehearsal calls no model and exercises scripted research settlement in a disposable project.
-It runs the brief's declared shell confirmation; inspect unfamiliar commands first, or use
-`--static-only`. A ready verdict checks wiring, not research quality. [Example recipe](examples/README.md#rehearse-a-research-contract).
+Rehearsal calls no model and dispatches the real research producer/reviewer shape with scripted results
+in a disposable project. It never runs declared instrument commands; `--static-only` checks inputs. A ready verdict checks wiring, not research quality. [Example recipe](examples/README.md#rehearse-a-research-contract).
 
 ### 4. Hand off with `/ship`
 
@@ -145,12 +144,12 @@ is a complete example that runs as written, through rehearsal.
 
 ```text
 > Improve docs-search relevance over the measured baseline. Declare a fresh-split
-> confirmation and a search budget. An honest ceiling or incomplete outcome is fine.
+> instrument with structured guards and a search budget. An honest ceiling or incomplete outcome is fine.
 > /ship
 ```
 
 The numeric policy computes keep/drop and continue/ship/ceiling from recorded rounds.
-A declared confirmation runs on a ship decision; failure rejects that candidate.
+The engine calibrates a frozen instrument, measures changed independently reviewed submissions, applies guards and writes the terminal report.
 [Research contract](guide/brief-contract.md#research-rounds).
 
 ### Engineering — satisfy a contract

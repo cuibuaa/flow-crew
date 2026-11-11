@@ -31,7 +31,7 @@ acceptance must rerun the retained specs against the final source.
 | E16 | declined | Independent setup copies preserve source isolation; hardlinks permit source mutation and copy failure already refuses READY. See [project validation](../spec/project-validation.test.ts). |
 | E17 | declined | Older build members may be declared products or required evidence; directory names do not grant disposal authority. Disposable copies use [invocation scratch](../spec/validation-scratch.test.ts). |
 | E18 | declined | Explicit pytest temporary trees inside declared artifacts retain that artifact's lifetime; default disposable fixtures use [invocation scratch](../spec/validation-scratch.test.ts). |
-| E19 | fixed | Run-owned publication evidence replaces wall-clock freshness checks, preserving stale and ambiguous-result refusals; see [research publication](../spec/research-generation.test.ts) and [batch regressions](../spec/engine-batch-regressions.test.ts). |
+| E19 | fixed | Legacy publication inference is retired; changed-content submission and independent review now own research admission. See [research regressions](../spec/research-loop.test.ts). |
 
 E12-progress is a separately repaired backward-clock progress defect, outside the
 19 original dispositions. Execution identity and byte growth establish progress
@@ -46,13 +46,10 @@ restoration failure and leaves outside bytes untouched. Outward leaf aliases can
 still be replaced safely; see [restoration](../src/scheduler/sched_scope/restore.ts)
 and the ancestor-substitution controls in [batch regressions](../spec/engine-batch-regressions.test.ts).
 
-R2 accepts completed current-iteration same-value production when its settled
-write ledger proves publication. Content changes also prove publication; old
-unchanged files without that proof remain stale. File identity binds aliases
-without accepting unrelated equal-content copies. See [research candidate source](../src/research-candidate.ts),
-[research publication specs](../spec/research-generation.test.ts) and the
-[brief contract](brief-contract.md). Independent review and duplicate-consumption
-protections still apply.
+The legacy result-slot publication mechanism has been retired. Research submissions are
+identified by candidate-root content digests against the retained best. Unchanged content
+is journaled without measurement. See [the loop](../src/scheduler/sched_policy/research.ts),
+[regressions](../spec/research-loop.test.ts) and the [brief contract](brief-contract.md).
 
 
 Current run retention retires invocation scratch while preserving historical stage workspaces.

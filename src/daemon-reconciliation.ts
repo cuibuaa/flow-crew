@@ -1,6 +1,6 @@
 import { isAbsolute, join } from 'node:path';
 import { TaskRegistry, TASK_LIST_STATUS } from './task-registry.js';
-import { listRunningRunIdsFromIndex } from './run-index.js';
+import { listRunIdsFromIndex } from './run-index.js';
 import { inspectRunScheduler } from './run-lock.js';
 import { readRunState, runsRoot, RUN_STATUS } from './store.js';
 import { resolveRunIdentity } from './cancellation-policy.js';
@@ -27,9 +27,10 @@ export function createDaemonReconciler(
     }));
     if (uncertainBinding) return;
     // The existing index discovers/rebuilds new directories. Limit hydration per
-    // tick rather than scanning every historical carrier. A missing index is
-    // not evidence of absence and does not authorize a fallback writer.
-    const ids = listRunningRunIdsFromIndex('') ?? [];
+    // tick. Terminal decisions also need projection after an interrupted commit;
+    // recovery only writes reports carrying current committed destination intent.
+    // A missing index never authorizes a fallback writer.
+    const ids = listRunIdsFromIndex('') ?? [];
     if (!ids.length) { cursor = 0; return; }
     const boot = readHostBootId();
     for (let i = 0, count = Math.min(ids.length, 32); i < count; i++) {
@@ -38,7 +39,7 @@ export function createDaemonReconciler(
       try {
         const state = readRunState('', id);
         const checkpoint = state.engineCheckpoint;
-        if (state.status !== RUN_STATUS.RUNNING) continue;
+        if (state.status !== RUN_STATUS.RUNNING && !state.researchReportPaths) continue;
         const scheduler = inspectRunScheduler(id, join(runsRoot(), id));
         if (scheduler.kind === 'live' || scheduler.kind === 'corrupt' || scheduler.kind === 'unverifiable') continue;
         // Existing recovery owns generation/plan/attempt/intent refusals and

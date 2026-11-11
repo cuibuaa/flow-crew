@@ -61,20 +61,15 @@ validation:
 ---
 ```
 
-Follow it with the goal, constraints and extractable acceptance criteria. Every brief enters the same
-model chooser, which chooses a coherent author/review/repair shape or a decomposition. The operator
-does not name a shape. Legacy `workflow:` metadata is accepted but has no routing effect;
-every value still enters the chooser. The CLI shape override remains unavailable.
-The chooser chooses and records nonblocking assumptions when scope is open. Invalid chooser
-output fails its attempt and uses the existing retry. A missing author-owned research fact ends
-the run with a result naming what the author must add before a new launch; it is never guessed.
-Research supplied before launch passes the existing round/wall budget admission without
-increasing the run's iteration or wall allowance. No rule over brief words chooses a shape.
+Follow it with the goal, constraints and extractable acceptance criteria. Engineering enters a
+model chooser, which chooses author/review/repair work or decomposition. A `research.measurement`
+declaration fixes the research shape directly: one producer and independent candidate-property
+review in an engine-owned loop. No model chooses or plans the research workflow. Legacy
+`workflow:` metadata has no routing effect; no CLI shape override is available.
 
-`objective:` is an exact alias for `research:`, with `research` winning when both exist.
-A numeric `baseline` activates the metric loop. An engineering `objective` containing only
-`confirm` does not activate confirmation. Use normal engineering gates and configured
-validation for a pass/fail task.
+`objective:` remains an alias for `research:` and follows the same measurement-only schema. Declare the contract once; using both headers is refused.
+A research block without `measurement` is refused with a migration diagnostic. Use ordinary
+engineering gates and configured validation for a known pass/fail task.
 
 Sources: [frontmatter](../src/scheduler/sched_admission/brief-contract.ts),
 [criteria extraction](../src/brief-criteria.ts), [preflight](../src/brief-preflight.ts).
@@ -87,13 +82,11 @@ If a stage cannot obtain a resource, it continues as far as possible and names t
 its structured result. Independent gates assess that result; the human reads it at wrap-up.
 Historical authorization frontmatter has no engine meaning.
 
-The entry chooser always chooses a shape and records `assumptions` in its closed-schema
+The engineering entry chooser chooses a shape and records `assumptions` in its closed-schema
 result. Those assumptions are retained in the run record and summary. Invalid output fails
-the attempt and uses the existing retry allowance. Missing author-owned facts are not
-assumptions: `missing_author_facts` ends the run with a result naming what the author must
-add. In particular a model-identified metric search without a research declaration cannot
-invent a baseline, policy or stop conditions. Prelaunch conversation, preflight and rehearsal
-still ask for missing information before launch.
+its attempt and uses the existing retry allowance. The chooser cannot change the declared
+mode or demand research fields from an engineering brief. Research authoring errors are
+reported by parse/preflight before execution.
 
 ## Inputs, outputs and validation
 
@@ -130,9 +123,13 @@ Sources: [input/output inventory](../src/ship-inputs.ts), [setup parser](../src/
 
 ## Research rounds
 
-`research.measurement` opts into engine-owned measurement. The example
-[research-instrument.brief.md](../examples/research-instrument.brief.md) uses a
-synthetic instrument; it is a protocol demonstration, not a performance claim.
+`research.measurement` is the only research contract. Roots use normalized,
+portable project-relative filesystem names; drive-qualified roots, traversal and
+Git metadata roots are refused at parse. Scope construction quotes punctuation
+literally, so a root such as `src/[a].json` never grants writes to `src/a.json`.
+See the runnable synthetic
+[example](../examples/research-instrument.brief.md); it demonstrates the protocol,
+not a benchmark result.
 
 ```yaml
 research:
@@ -158,200 +155,142 @@ research:
       pass: {exit_code: 0}
     timeout_seconds: 300
   stop: {max_rounds: 20, max_wall_hours: 8, halt_after_no_improvement: 3}
+terminal_states:
+  ceiling_hit: {paths: [reports/research.md]}
 ```
 
-The engine copies the frozen file/directory roots and executable bytes before any
-stage starts. These roots must be regular files or directories without symlinks,
-disjoint from the declared candidate roots. Relative arguments resolve from the
-frozen copy, never the producing stage's working directory. Absolute project paths
-in arguments (including `--input=PATH`) and environment values are rebound to
-the declared frozen/candidate snapshots; undeclared absolute project inputs
-refuse measurement. The trusted evaluator
-must declare its complete data/code dependency closure in `frozen`; use absolute
-executables and relative dependency arguments. Mutable candidate inputs are read
-only through `FC_RESEARCH_CANDIDATE`, an engine-owned snapshot directory, with its
-content digest in `FC_RESEARCH_CANDIDATE_SHA256`. The instrument fingerprint binds
-the declaration, executable bytes, dependency bytes, and explicit environment.
-The child receives only that environment and fixed PATH/LANG plus isolated
-HOME/TMP directories; ambient provider, shell, Python and Node settings do not
-enter measurement. HOME/TMP/PATH/LANG, injection variables and `FC_RESEARCH_*`
-are reserved. Measurement commands require Linux x86_64/aarch64, Landlock ABI >= 3 and
-`/usr/bin/python3` with its standard library. The engine installs an inherited
-write restriction before executing any evaluator or candidate code. Only private
-HOME/TMP directories and `/dev/null` permit writes; evaluators must place generated
-files in those temporary directories. Frozen originals, retained instrument,
-executables and candidate inputs cannot be written, truncated, renamed or linked
-by that process tree. A binary launch acknowledgement follows successful
-executable start and precedes evaluator output. Confinement or executable-start
-failure is recorded separately from the evaluator exit status and fails measurement
-or its guard, even when the requested guard exit code equals the launch failure code.
-Kernel inode/change-time stamps additionally detect temporary metadata edits
-(such as chmod followed by restoration), which Landlock does not restrict.
-The engine also checks the original declared frozen roots before and after each
-command. An edit there records an unmeasured observation, even if evaluator code
-embeds an original absolute path. Original candidate roots must also match the
-captured candidate before and after each command, binding embedded references to
-the candidate actually measured. Candidate and frozen identities include file
-permissions, directory membership (including empty directories) and bytes. Changes to protected instrument or candidate snapshot bytes
-refuse measurement, as do command, timeout and output-shape failures. All are
-recorded as unmeasured with a reason and can never keep a candidate.
+The declaration constructs a producer and a read-only independent reviewer. The producer
+chooses the next candidate from the brief and the engine journal; it never chooses a workflow.
+A producer that fails or cannot dispatch fails the run. A round submits candidate-root content:
+when its digest equals the current best's, the engine journals `no_candidate`, spends one
+round of non-improvement, and runs no measurement. There are no author labels or result slots.
 
-Development must print one JSON object:
-`{"items":[{"id":"stable-item-id","metrics":{"wall":12.5,"passes":1}}]}`.
-Every declared metric must be finite and nonnegative; count metrics must be integers. Item IDs must be unique and
-match the baseline/current best exactly (order is irrelevant). The engine runs
-`replicates` unchanged-baseline measurements before the first producer. For each
-fractional metric it computes population SD across 4096 pooled-ratio resamples,
-seed 1108 (32-bit LCG): sample items with replacement, independently choose two
-distinct baseline replicates for each sampled item, divide pooled right by pooled
-left. Positive per-item fractional baselines are required. Count noise is the
-square root of the mean summed squared item differences across every replicate
-pair, floored at one. For binary outcomes each squared difference is the
-disagreement indicator; arbitrary counts retain their magnitude. Nonfinite derived noise fails calibration. This uses paired item observations rather than an aggregate
-delta or the producer's claimed spread.
+Review judges the candidate against the brief's stated scope, frozen instrument and checks
+retaining their power. Review does not judge improvement, numbers, terminal-report prose or
+missing engine reports. Rejected submissions are journaled with the review reason and never
+measured or kept. The next round starts from the retained best.
 
-Code keeps a candidate only when at least one declared primary metric improves
-strictly more than twice its calibrated noise, and every guard passes. Strict
-boundaries use exact decimal cross-products, matching `Fraction(str(value))`
-rather than allowing floating-point subtraction to turn equality into a gain. Fractional
-improvement is the pooled difference divided by the current best's pooled value;
-count improvement is the difference. Directions are declared per metric. The legacy scalar `stop.beat` target uses
-the first declared primary metric; retention can improve any declared primary. A guard
-requires either a specific exit code (including a nonzero code) or an exact named
-JSON field value. Missing/failed guard output fails with the recorded reason.
-Guards run only after development clears noise. Held-out runs only after
-successful development and guards; its exact pass condition is declared like a
-guard. Each use is durably charged **before** launch, including failure and
-interruption. A spent or interrupted use is never repeated. An interrupted candidate is
-unmeasured and rejected; another round may use any remaining allowance. When the allowance
-is spent, the run ceilings unless that last passing candidate has already met the
-ship target. Held-out is a confirmation measurement, not a selection metric.
+Every producer result carries labelled `notes` with `hypothesis`, `files_changed` and
+`property_evidence`. These are advisory text, never numeric measurement evidence.
 
-The engine restores the measured best's declared candidate roots after each
-round; evidence outside those roots stays available. It validates every destination
-ancestor before modifying any root. An installed ancestor symlink or non-directory
-fails the run with an unsafe-restore reason, leaving those destinations untouched;
-a leaf symlink can be removed safely without modifying its target. It journals each outcome,
-candidate digest, instrument fingerprint, numeric comparison and command receipts
-under engine ownership. Unmeasured rounds consume budget without inventing a
-metric value. A resumed run retains its baseline, noise, journal, best snapshots
-and charged held-out uses. Interrupted baseline initialization fails closed and
-cannot recalibrate from a later candidate.
+Before any producer, the engine copies frozen roots, candidate roots and executable bytes,
+then executes exactly the declared baseline replicate count. Failed calibration fails closed.
+The incumbent is the per-item mean of every baseline replicate, paired by item ID. Raw count observations remain integers; their baseline means can be fractional. Replicate
+count is author-declared (the existing schema requires at least two); no new minimum is imposed.
+The frozen instrument must include its complete code/data dependency closure. A file that
+loads code from a live checkout outside those roots does not make that dependency frozen.
 
-A positive `max_rounds` is mandatory in this mode and expands the workflow
-iteration allowance for this run, so it can complete the declared campaign in one
-run. Round, elapsed-wall and consecutive non-improvement limits still end search.
-Calibration and measurement command deadlines, and ordinary stage attempt budgets,
-are capped by the remaining wall allowance from the original run start. Expired
-calibration records an unmeasured baseline and dispatches no producer; technical
-retries stop when that allowance is spent. Existing worker shutdown grace still
-applies. Once a measurement stop budget is spent, an unmet ceiling floor is
-recorded in the decision and cannot extend search or prevent its ceiling outcome. Ordinary stage/repair attempt limits remain independent. Producer `result_file`,
-`result_std` and no-candidate slots do not select instrumented candidates; each
-settled round submits its candidate snapshot. `baseline` is optional and is
-replaced by the measured baseline. `confirm`, `result_schema`, `integrity`,
-`min_improvement` and `improvement_se_multiple` are rejected with this mode: the
-frozen instrument, structured guards and calibrated rule replace them. Gate
-ownership follows candidate inputs. Stage-authored terminal judgments cannot
-replace the measurement decision.
+Development prints one JSON object, for example
+`{"items":[{"id":"task-a","metrics":{"wall":12.5,"passes":1}}]}`.
+Metrics are finite and nonnegative; count observations are integers. Stable unique item IDs
+must match across observations. Fractional baseline items must be positive.
 
-`flowcrew rehearse` exercises these declarations through a synthetic frozen
-instrument in its disposable project, retaining replicate count, round and
-non-improvement limits, and held-out allowance. It substitutes metric/guard
-semantics and does not execute a real evaluator or measure a real candidate.
+For fractional noise the engine uses 4096 seeded cluster resamples (LCG seed 1108): choose
+one ordered pair of distinct replicate runs, then sample paired items with replacement,
+keeping that run pair for the entire resample. The population SD of pooled right/left ratios
+includes whole-run shared shifts. Count noise is the root mean squared difference of complete
+run totals across replicate pairs, with the existing one-count floor. Nonfinite noise fails
+calibration. This replaces per-item replicate pairing, which cancelled shared run shifts.
 
-Briefs without `measurement` retain the legacy result/spread/confirmation
-contract below, including its iteration-budget admission. This compatibility
-path does not claim the engine-owned measurement guarantees.
+A candidate is kept only if a primary metric improves strictly more than twice calibrated
+noise and every guard passes. Fraction improvement uses pooled totals relative to the current
+best; count improvement uses the difference. Exact decimal cross-products preserve strict
+boundaries. Guards require an exact named JSON value or declared exit code (including nonzero).
+They run only after development clears noise. Held-out runs only after development and guards
+pass. Each held-out use is durably spent before launch, including failure or interruption;
+uses cannot exceed the declared allowance and interrupted uses are never repeated.
 
+Frozen and candidate roots must be regular local files/directories, disjoint and non-overlapping,
+without symlinks. Identity binds bytes, permissions and directory membership, including empty
+directories. The fingerprint binds the instrument declaration, frozen files, executable bytes
+and explicit environment. Terminal reports must be outside frozen and candidate roots; publication checks physical destinations too. Relative arguments resolve within the retained instrument; absolute
+declared project arguments and environment paths are rebound to retained inputs. Undeclared
+absolute project inputs refuse measurement. Evaluators read candidate snapshots from
+`FC_RESEARCH_CANDIDATE`; `FC_RESEARCH_CANDIDATE_SHA256` gives their digest.
 
-The [tracked research brief](../examples/hello-research.brief.md) is a complete rehearsal
-example. The metric block accepts these fields:
+Commands receive only declared environment, fixed PATH/LANG and private HOME/TMP. Reserved
+injection variables and `FC_RESEARCH_*` cannot be declared. Linux x86_64/aarch64, Landlock ABI
+at least 3 and `/usr/bin/python3` are required for write confinement. Only private HOME/TMP
+and `/dev/null` are writable. The executable-start acknowledgement distinguishes launch failure
+from a command exit code. Before and after execution, the engine checks originals, snapshots
+and executable identity; change stamps also catch temporary permission changes restored before
+command completion. Failed confinement, altered frozen roots, invalid output and command failures
+produce an unmeasured observation that cannot keep a candidate.
 
-| Field | Meaning |
+After settlement the engine restores only candidate roots from the retained best. Every
+ancestor is checked before the first mutation; an installed ancestor alias fails safely,
+and a leaf alias can be removed without changing its target. Other evidence stays in place.
+
+The loop consumes only these stop fields:
+
+| Field | Consumer and meaning |
 |---|---|
-| `baseline` | Numeric reference activating the native loop |
-| `policy` | `greedy_stack` (default); invalid names are diagnosed |
-| `higher_is_better` | Direction; defaults higher; boolean strings are also recognized |
-| `result_file`, `report_dir` | Mutable round slot and report directory; [resolver](../src/research-paths.ts) supplies omitted paths |
-| `result_schema` | JSON schema for each measured round |
-| `context_roots` | Context inventory roots |
-| `integrity.max_std_ratio`, `outlier_factor` | Declared variability/outlier bounds |
-| `integrity.field_floors` | Numeric minimums for named result fields |
-| `integrity.reject_if_positive` | Named fields that must not be positive |
-| `confirm.command`, `requires`, `timeout_seconds`, `reads` | Optional real shell check, human assertion, bound and rooted reads |
-| `stop.beat` | Ship target, inclusive in the declared direction |
-| `stop.max_rounds`, `max_wall_hours`, `halt_after_no_improvement` | Stop budgets |
-| `stop.min_improvement`, `improvement_se_multiple` | Required gain beyond running best and reported uncertainty |
-| `feasibility` | Optional structural preflight model; see below |
+| `max_rounds` | `researchStopReason`: mandatory positive submission budget |
+| `max_wall_hours` | `researchStopReason`, stage and measurement deadlines: elapsed allowance from original run start |
+| `halt_after_no_improvement` | `researchStopReason`: consecutive submissions not kept, including unchanged/rejected submissions |
+| `beat` | `researchStopReason`: optional inclusive target on the first primary metric after a kept candidate |
 
-A measured round supplies numeric `result`, a nonblank `label`, and optionally `result_std` and declared
-schema fields. No safe acting candidate uses the fresh `<result_file>.no_candidate.json`
-sidecar with `label`, `outcome: no_candidate` and a nonblank `reason`. Exactly one slot may
-be fresh. No-candidate rounds consume stop budget without inventing a baseline observation.
-Duplicate journaled labels are refused. Accepted rounds enter `research_journal.json` and
-the report directory's exact `run_manifest.json` before confirmation.
+Held-out exhaustion also stops search. A successful target becomes `shipped`; other budget
+stops become `ceiling_hit`, including an honest search with no kept candidate. Measurement
+commands use the smaller of authored `timeout_seconds` and remaining run wall allowance;
+there is no separate engine maximum on `timeout_seconds`. Research terminal floors cannot
+extend the search budget. Ordinary engineering terminal floors retain their own behavior.
 
-Before dispatch, the engine snapshots the content identities of both result slots and existing
-inferred `evidence.json` files in `run.json.researchInputGeneration`. Admission and inference
-share the same confined regular-file domain, with the existing 4 MiB evidence limit; aliases
-and special files are not read as evidence. Content identities use the existing nonblocking,
-no-follow regular-file reader. Explicit result slots retain confined internal aliases, using
-their canonical file identity; inferred evidence still requires a regular directory entry.
-A new publication changes content relative to that snapshot or is evidenced by a completed
-current-iteration producer attempt's settled write ledger. Equal measurement bytes remain valid
-when that ledger proves current production; touching an old file alone does not prove it.
-Backward clock steps therefore cannot discard a newly published round. The snapshot
-survives resume, while journal labels and immutable consumed copies prevent counting a round
-twice. A legacy run without a snapshot preserves pending publications recorded in the closed
-current-iteration producer attempt's write ledger, using the same publication rule. Independent review still decides whether
-that result is accepted, without repeating completed production. The existing confined project
-alias resolver and regular-file device/inode identity bind a result slot to that producer's
-recorded write, including project-local hardlinks. An independent file with identical bytes
-does not prove publication. Other pre-existing files are snapshotted as old; a completed stage
-name alone does not prove publication. Once established,
-the snapshot survives every resume.
+An unfinished budget handoff retains its files and re-pends the unfinished stage and
+its consumers through the shared continuation lifecycle. Neither an unfinished producer
+nor an unfinished reviewer can submit a candidate. The existing `max_continuations`
+allowance bounds retained slices per stage and submission; without it, the finite run
+iteration allowance supplies the continuation bound. Exhaustion yields `incomplete`
+without measuring or discarding the unfinished work. Handoffs never become journal rounds.
 
-Variability and outlier bounds apply only when declared. Reported uncertainty still determines
-whether a gain counts; surprising gains and high variance need independent review or a declared
-confirmation check.
+The engine is the sole terminal-report author. It composes `engine/research_report.md` and
+the declared terminal report from `engine/research_measurement/state.json`: baseline replicates,
+mean incumbent, noise, fingerprint, each submission's comparison/decision/guards, and separately
+labelled producer notes. Reality checks inspect candidate evidence before the terminal decision;
+an engine-authored terminal report is the output of that decision, not a pending input to it.
+Do not declare checks that require the terminal report before the decision. Checking its
+existence or prose would duplicate the engine's publication checks, without independently
+checking the candidate or instrument.
 
-The latest result and sidecar change between rounds. Immutable round evidence and the
-framework manifest record accepted observations. Configured validation and independent
-review decide whether authored tests remain valid after later work. Hard-check reachability
-is checked against the round timeline.
+The engine commits the accepted terminal status and its report destinations under the run
+lock, then publishes the report from that committed state. Normal project reports are written
+once; no pending project report or provisional acknowledgement exists. The report, pointer
+and completion event are idempotent projections of the committed state and measurement
+journal. Conclusion, explicit recovery and the daemon's existing bounded reconciliation
+sweep use the same projection. A terminal run missing these outputs is repaired without
+dispatching stages or measuring again; complete projections are left unchanged. A lost
+state-write acknowledgement propagates, and recovery reads the committed decision rather
+than inventing another outcome. Actual report-publication failures still commit `failed`
+before correcting exposed destinations. Committed destination intent retains those paths.
+Cancellation fences both state and report publication; an in-flight measurement's later
+journal settlement may refresh the cancelled report, retaining the committed cancelled status.
+`terminalArtifact` names a successfully published report for the final status. Cancellation
+remains authoritative even if a declared report cannot be published.
+Stages never write this report. Measurement result records retain
+command receipts and crash-safe held-out spending. A measurement comparison and its round journal entry commit together; recovery replays the same receipt without rerunning a spent instrument use. Resumption retains the baseline, noise,
+best and spent allowance; interrupted initialization cannot recalibrate from a later candidate.
 
-An unknown policy produces a strict-parser error and a preflight finding.
-`plan-check` refuses that error; an explicit quick launch can retain the
-parser's `greedy_stack` fallback. Set a valid name rather than assuming the diagnostic is an
-unconditional launch barrier.
+`flowcrew rehearse` uses the same constructor, admission, ready frontier and isolated stage
+execution for the producer and reviewer. Its scripted results are labelled synthetic. It
+fails if the constructed producer cannot dispatch, calls no model, and never executes declared
+instrument commands. It verifies dispatch wiring; scientific calibration and instrument
+availability are tested by the real run's fail-closed initialization.
 
-The policy computes keep/drop and continue/ship/ceiling. Improvement must clear the configured
-absolute margin and, when reported, uncertainty margin. Confirmation runs only when declared
-and a ship decision is reached. Failure prevents that candidate from being kept and permits
-further search; missing confirmation produces an advisory warning. Static budget checks compare round, iteration and wall limits; a large round limit
-cannot override the engine iteration bound.
+### Migration from retired briefs
 
-Sources: [policy](../src/research-policy.ts), [research settlement](../src/scheduler/sched_policy/research.ts),
-[research path contract](../src/scheduler/sched_policy/prompt-contracts.ts),
-[candidate validation](../src/research-candidate.ts).
+Declare `research.measurement` with frozen/candidate roots, metrics, primary metrics, baseline
+replicates and development command. Move integrity/confirmation predicates into structured
+`guards` and, for limited independent checks, `held_out`. Remove `result_file`, `result_schema`,
+`report_dir`, `integrity`, `confirm`, `feasibility`, sidecars, author labels, `baseline`, `policy`,
+`higher_is_better`, `context_roots` and legacy improvement margins. The engine measures its own
+baseline and noise. Keep the supported stop fields above and declare a terminal report path.
+No stage should write numeric result files, manifests or terminal reports. Historical records
+remain readable without being migrated or rewritten.
 
-### Structural feasibility and statistics
-
-`feasibility` requires positive finite `hard_floor`, optional `warn_below` at least that floor,
-and nonempty `rules` with unique labels. A rule names one model:
-
-- `independent_repeated_conjunction`: positive integer `population` and `periods`,
-  `per_period_rate` between zero and one; estimates population × rate^periods.
-- `formation_count_distribution`: nonempty nonnegative integer `counts`; evaluates the
-  minimum formation count and reports its distribution.
-- `not_computable`: nonblank `reason` naming the unavailable structural quantity.
-
-This static contract can be parsed without activating a numeric loop. It does not establish
-that the chosen model fits the real problem. Unknown fields/models return parser errors;
-preflight reports them, while `plan-check` refuses them.
-
-Sources: [feasibility](../src/research-feasibility.ts), [planning policies](../src/planner-policies.ts).
+Sources: [loop and report owner](../src/scheduler/sched_policy/research.ts),
+[instrument and numeric rule](../src/research-measurement.ts),
+[active input parser](../src/scheduler/sched_admission/brief-contract.ts),
+[historical read types](../src/research-history.ts).
 
 ## Evidence authoring policy
 
@@ -368,7 +307,7 @@ The value must be an array of finite YAML numbers; `[]` declares none, and any o
 is refused. A nonempty array requires both exact anti-anchoring fields above as positive
 result requirements; missing either makes preflight and rehearse fail.
 This declaration works without operator wording in the body. Prose-only expectations produce
-warnings; `research.baseline`, ordinary counts, and the planning-policy selection do not
+warnings; ordinary counts and the planning-policy selection do not
 by themselves declare supplied numbers.
 
 For other evidence, state the user-visible consequence, boundaries, counter-examples and
@@ -525,7 +464,7 @@ promises that a model will obey. Keep the detailed contract above authoritative.
 
 `terminal_states` maps a known terminal run status to a path string, path list or object with
 `paths` (or `path`). Declare only whole-run terminal products. Nonterminal keys are ignored
-with diagnostics. Each terminal path has one final ordinary producer; ordered authors and
+with diagnostics. For engineering each terminal path has one final ordinary producer; ordered authors and
 repairs may share its write scope. Admission checks the producer's mandatory gate and criterion
 ancestors. Intermediate reports belong in outputs,
 not terminal declarations.
@@ -533,8 +472,8 @@ not terminal declarations.
 An entry may include `floor.min_attempted_stages`, `floor.min_wall_minutes` and `stage_glob`
 (entry-level wins over floor-level). For generic terminal-file evaluation, attempted-stage proof counts fresh nonempty files
 matching the declared evidence pattern. Result checks determine whether those receipts prove the outcome; file length does not.
-Native research ceiling evaluation instead counts journaled rounds, including valid
-no-candidate attempts; neither counts arbitrary scheduler executions. With an attempted-stage floor satisfied,
+Research reports are engine-owned and stopping is determined by the declared search budget.
+For engineering, with an attempted-stage floor satisfied,
 wall time is advisory; without it, wall time can be the sole floor. Use substantive artifacts
 and criteria rather than elapsed time as evidence of work.
 

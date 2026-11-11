@@ -1,3 +1,4 @@
+import { ResearchMeasurementSchema } from '../src/research-measurement.js';
 import { runRecordPath } from '../src/run-layout.js';
 import { emptyInbox } from './test-support/engine-fixtures.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -153,6 +154,24 @@ afterEach(() => {
 });
 
 describe('campaign page evidence classifier', () => {
+  it('projects only engine-kept measurement rounds into the accepted campaign best', async () => {
+    const state = runState('native-measurement-selection', { status: RUN_STATUS.CEILING_HIT, research: {
+      measurement: ResearchMeasurementSchema.parse({ frozen: ['instrument'], candidate: ['src'], replicates: 2,
+        metrics: { cost: { direction: 'min', scale: 'fraction' } }, primary: ['cost'], development: { command: process.execPath, args: [] } }),
+      stop: { maxRounds: 3 },
+    } });
+    writeEvidence(state);
+    const directory = join(runsRoot(), state.runId); mkdirSync(runRecordPath(directory, 'research_measurement'), { recursive: true });
+    writeFileSync(runRecordPath(directory, 'research_measurement/state.json'), JSON.stringify({ rounds: [
+      { label: 'round-1', result: 90, comparison: { keep: true } },
+      { label: 'round-2', result: 80, comparison: { keep: true } },
+      { label: 'round-3', result: 1, comparison: { keep: false, reason: 'guard_worse' } },
+    ] }));
+    const view = await readCampaignOperatorView(projectDir, campaignId, pageSources([state]));
+    expect(view.research.value?.selected?.points.map(point => point.value)).toEqual([90, 80]);
+    expect(view.research.value?.selected?.best).toMatchObject({ value: 80 });
+  });
+
   it('keeps a bare engineering benchmark engineering and does not create a research trend', async () => {
     const state = runState('engineering-benchmark');
     writeEvidence(state, { metric: { metric: 'latency_ms', value: 42 } });

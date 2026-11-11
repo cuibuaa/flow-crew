@@ -641,18 +641,6 @@ describe('durable bounded continuation', () => {
     state.currentIteration = 2;
     expect(() => workflowContinuation(state, project, created.runId, workflow)).toThrow('iteration budget exhausted');
   });
-  it('B12 applies a research wall ceiling to repeated budget boundaries', async () => {
-    const { roles, workflow } = workflowFixture(5);
-    let time = manualClock();
-    const created = createRun(project, workflow.name, stringify(workflow), workflow.stages.map(stage => stage.id));
-    updateRunState(project, created.runId, state => { state.currentIteration = 1; state.maxIterations = 5; state.research = { stop: { maxWallHours: 0 } } as typeof state.research; });
-    const adapter: Adapter = { async run(prompt, _role, opts) { if (opts.stageId !== 'work' || prompt.includes('# Stage budget wrap-up'))
-        return completed(opts); return new Promise(resolve => { opts.abortSignal!.addEventListener('abort', () => resolve({ exitCode: 137, output: 'slice', duration_ms: 1 }), { once: true }); time.advanceTo(stageWrapUpTiming(budget).warningAfterMs); }); } };
-    const result = await runWorkflow(workflow, stringify(workflow), project, withConfirmedRejections(adapter), new Map(), undefined, roles, created.runId, undefined, false, undefined, false, undefined, () => { time = manualClock(); return time.clock; });
-    expect(result.status).toBe('incomplete');
-    expect(result.failureReason).toContain('research wall budget');
-    expect(result.currentIteration).toBe(1);
-  });
   it('B13 rejects an infinite or nonpositive live iteration allowance', () => {
     for (const max_iterations of [Infinity, NaN, 0, -1, 1.5])
       expect(() => WorkflowConfigSchema.parse({ name: 'fixture', defaults: { max_iterations }, stages: [{ id: 'work', role: 'coder' }] })).toThrow();

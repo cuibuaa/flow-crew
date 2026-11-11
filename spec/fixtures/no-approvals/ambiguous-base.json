@@ -3,7 +3,6 @@
     "output": {
       "successor": "implement",
       "reason": "The greeting format is unspecified.",
-      "metric_search": false,
       "questions": [
         {
           "missing": "greeting convention",

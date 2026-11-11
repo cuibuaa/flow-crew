@@ -1,19 +1,17 @@
 import { concludeRun } from '../sched_policy/run-completion.js';
-// Boundary: Sequence prepared iterations, ordinary execution, fresh gate retry settlement, research advancement and final outcomes; calls responsibility owners.
+// Boundary: Sequence prepared iterations, ordinary execution, fresh gate retry settlement, iteration evidence and final outcomes; calls responsibility owners.
 import { Adapter, AgentConfig } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
 import { StageConfig, WorkflowConfig } from '../sched_admission/configuration.js';
 import { clearGateContinuationsForStages } from '../sched_admission/sessions.js';
 import { isTerminalStatus } from '../sched_policy/identity.js';
 import { recoverTerminalStudyCompletion } from '../sched_settlement/completion.js';
-import { StoreState, continuationExhausted, RUN_STATUS, isContinuingStage, isPausedRunStatus, readRunState } from '../../store.js';
+import { StoreState, continuationExhausted, RUN_STATUS, STAGE_STATUS, isRunningStageStatus, writeRunState, isContinuingStage, isPausedRunStatus, readRunState } from '../../store.js';
 import { settleGateRetries } from './gate-loop.js';
 import { concludeWorkflowIteration } from './iteration-outcome.js';
 import { prepareWorkflowIteration } from './iteration-setup.js';
 import { executeIteration } from './iteration.js';
-import { advanceSettledResearch } from './research-progress.js';
-import { createResearchBudgetFinalizer, settleExhaustedResearchGates } from './research-terminal.js';
-import { writeCampaignEntry } from './services.js';
+import { appendIterationLog, writeCampaignEntry } from './services.js';
 import { recordRunEvent } from '../../run-events.js';
 import { parkAtDeploymentBoundary } from '../../deployment-hold.js';
 
@@ -26,17 +24,14 @@ export async function runWorkflowIterations(
   skills?: string, taskDescription?: string, availableSkillsList?: string,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock
 ): Promise<StoreState> {
-  const finishResearchCeiling = createResearchBudgetFinalizer(projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
   const budgetBoundary = async (state: StoreState, iteration: number): Promise<boolean> => {
     const stageIds = Object.entries(state.stages).filter(([, stage]) => isContinuingStage(stage)).map(([id]) => id);
     if (!stageIds.length) return false;
-    const maxWall = state.research?.stop?.maxWallHours;
-    const wallExhausted = maxWall !== undefined && Date.now() - Date.parse(state.startedAt) >= maxWall * 3_600_000;
     recordRunEvent(projectDir, runId, { type: 'iteration_completed', runId, timestamp: new Date().toISOString(), iteration,
       detail: `Retained budget handoff for ${stageIds.join(', ')}; ${iteration}/${maxIterations} iterations spent`, source: 'scheduler' });
-    if (state.maxContinuations === undefined && iteration >= maxIterations || wallExhausted || continuationExhausted(state)) {
+    if (state.maxContinuations === undefined && iteration >= maxIterations || continuationExhausted(state)) {
       await concludeRun(state, { status: RUN_STATUS.INCOMPLETE, reasonCode: 'bounded_attempts',
-        detail: `Retained stage work needs continuation, but ${continuationExhausted(state) ? 'declared continuation budget' : wallExhausted ? 'research wall budget' : 'iteration budget'} is exhausted (${iteration}/${maxIterations}).`,
+        detail: `Retained stage work needs continuation, but ${continuationExhausted(state) ? 'declared continuation budget' : 'iteration budget'} is exhausted (${iteration}/${maxIterations}).`,
         eventFields: () => ({ iteration, detail: state.failureReason }), writeCampaignEntry });
     }
     return true;
@@ -99,12 +94,19 @@ export async function runWorkflowIterations(
       if (state.maxContinuations !== undefined) iteration--; // declaration owns slices; preserve the workflow iteration
       continue;
     }
-    const exhaustedResearch = await settleExhaustedResearchGates(state, sorted, iteration, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
-    if (exhaustedResearch) return exhaustedResearch;
-    const advanced = await advanceSettledResearch(state, sorted, baseStages, iteration, iterationDispatchedIds, innerRetriesUsed, maxInnerRetries, maxIterations, injectedDispatchStages, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
-    if (advanced.kind === 'settled') return advanced.state;
-    if (advanced.kind === 'next-iteration') continue;
-    const outcome = await concludeWorkflowIteration(advanced.state, sorted, iteration, iterationDispatchedIds, innerRetriesUsed, maxInnerRetries, maxIterations, finishResearchCeiling, projectDir, runId, runDirPath, adapter, injectedDispatchStages);
+    // Ordinary iteration evidence used to live inside research advancement.
+    // Keep it at the general iteration boundary when retiring that assembly.
+    for (const stage of sorted) {
+      if (stage.retry_to?.length && state.stages[stage.id] && isRunningStageStatus(state.stages[stage.id].status)) {
+        state.stages[stage.id] = { ...state.stages[stage.id], status: STAGE_STATUS.SKIPPED };
+        writeRunState(projectDir, runId, state);
+      }
+    }
+    appendIterationLog(projectDir, runId, iteration, state, iterationDispatchedIds, baseStages.map(stage => stage.id), innerRetriesUsed, maxInnerRetries);
+    writeCampaignEntry(projectDir, state);
+    recordRunEvent(projectDir, runId, { type: 'iteration_completed', runId, timestamp: new Date().toISOString(),
+      iteration, detail: `iteration ${iteration} completed` });
+    const outcome = await concludeWorkflowIteration(state, sorted, iteration, iterationDispatchedIds, innerRetriesUsed, maxInnerRetries, maxIterations, projectDir, runId, runDirPath, adapter, injectedDispatchStages);
     if (outcome.kind === 'settled') return outcome.state;
   }
   // Should not reach here, but safety net

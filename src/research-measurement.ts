@@ -1,3 +1,6 @@
+import { prospectivePhysicalPath } from './engine-owned-carriers.js';
+import { runDir, type StoreState } from './store.js';
+import { ArtifactPathSchema, artifactRootContains, resolveArtifactLocation } from './artifact-location.js';
 import { runRecordPath } from './run-layout.js';
 import { updateFileHashSync } from './rollback-content-store.js';
 import { createInvocationScratch } from './invocation-scratch.js';
@@ -9,8 +12,10 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { atomicWrite, chmodSync, copyFileSync, mkdirSync, renameSync, rmSync } from './engine-fs.js';
 import { spawnOwnedCommand } from './adapters/base.js';
+import { scheduleDeadline } from './attempt-deadline.js';
+import { normalizedProjectContentPath } from './scheduler/sched_admission/scope-services.js';
 
-const localPath = z.string().min(1).refine(p => !isAbsolute(p) && !p.split(/[\\/]/).some(x => x === '..' || x === '.') && !p.startsWith('.fc') && !p.includes('\\'), 'use a project-relative path without dot components');
+const localPath = ArtifactPathSchema.refine(p => normalizedProjectContentPath(p) === p && !p.startsWith('.fc'), 'use a normalized literal project-relative root without surrounding whitespace');
 const command = z.object({ command: z.string().min(1).refine(isAbsolute, 'command must be an absolute executable'), args: z.array(z.string()).default([]) }).strict();
 const condition = z.union([
   z.object({ exit_code: z.number().int() }).strict(),
@@ -25,7 +30,7 @@ export const ResearchMeasurementSchema = z.object({
   development: command,
   guards: z.array(command.extend({ name: z.string().min(1), pass: condition }).strict()).default([]),
   held_out: command.extend({ allowance: z.number().int().nonnegative(), pass: condition }).strict().optional(),
-  timeout_seconds: z.number().positive().max(3600).default(300),
+  timeout_seconds: z.number().positive().default(300),
 }).strict().superRefine((v, ctx) => {
   if (v.primary.some(m => !v.metrics[m])) ctx.addIssue({ code: 'custom', message: 'primary metrics must be declared' });
   if (new Set(v.guards.map(g => g.name)).size !== v.guards.length) ctx.addIssue({ code: 'custom', message: 'guard names must be unique' });
@@ -66,8 +71,12 @@ function paired(base: Observation, candidate: Observation, metrics: Record<strin
   const left = ids(base), right = ids(candidate);
   return !!left?.length && new Set(left).size === left.length && !!right && new Set(right).size === right.length
     && JSON.stringify(left) === JSON.stringify(right)
-    && [base, candidate].every(o => Object.keys(metrics).every(m => finite(sum(o.items!, m))) && o.items!.every(i => typeof i.id === 'string' && i.id.length > 0 && Object.keys(metrics).every(m => finite(i.metrics[m]) && (metrics[m].scale !== 'count' || Number.isInteger(i.metrics[m])))));
+    && [base, candidate].every(o => Object.keys(metrics).every(m => finite(sum(o.items!, m))) && o.items!.every(i => typeof i.id === 'string' && i.id.length > 0 && Object.keys(metrics).every(m => finite(i.metrics[m]))));
 }
+
+// Raw count observations are integral; a mean baseline need not be.
+const rawCounts = (observation: Observation, metrics: Record<string, Metric>): boolean => observation.items?.every(item =>
+  Object.entries(metrics).every(([name, metric]) => metric.scale !== 'count' || Number.isInteger(item.metrics[name]))) ?? false;
 
 // Compare decimal observations exactly at a strict boundary, like the POC's
 // Fraction(str(number)). IEEE subtraction can make 1.1 -> .99 exceed 10%.
@@ -96,7 +105,7 @@ function clearsNoise(base: Item[], candidate: Item[], name: string, metric: Metr
 export function decideResearchComparison(base: Observation, candidate: Observation, metrics: Record<string, Metric>, primary: string[], calibration: Calibration, guards: GuardObservation[]): Comparison {
   const result: Comparison = { keep: false, reason: 'input_invalid', metrics: {} };
   const noise = calibration.metrics;
-  if (calibration.fingerprint !== base.fingerprint || JSON.stringify([...calibration.items].sort()) !== JSON.stringify(base.items?.map(i => i.id).sort()) || !paired(base, candidate, metrics) || !primary.length || primary.some(m => !metrics[m]) || Object.keys(metrics).some(m => !finite(noise[m]))) return result;
+  if (calibration.fingerprint !== base.fingerprint || JSON.stringify([...calibration.items].sort()) !== JSON.stringify(base.items?.map(i => i.id).sort()) || !paired(base, candidate, metrics) || !rawCounts(candidate, metrics) || !primary.length || primary.some(m => !metrics[m]) || Object.keys(metrics).some(m => !finite(noise[m]))) return result;
   if (guards.some(g => g.fingerprint !== undefined && g.fingerprint !== g.expectedFingerprint)) return { ...result, reason: 'guard_fingerprint_mismatch' };
   const failure = guards.find(g => !g.passes && g.reason);
   if (failure) return { ...result, reason: failure.reason! };
@@ -112,19 +121,19 @@ export function decideResearchComparison(base: Observation, candidate: Observati
   return result;
 }
 
-/** 4096 seeded pooled-ratio resamples: independently choose two distinct no-op
- * replicates for each sampled item. SD includes drift and task variation. Count
- * noise is root mean summed squared paired differences, floored at one. */
+/** 4096 seeded cluster resamples: one distinct run pair per resample,
+ * then paired items sampled within that pair. Shared run shifts survive.
+ * Count noise uses whole-run total differences, floored at one count. */
 export function calibrateResearchNoise(replicates: Observation[], metrics: Record<string, Metric>): Record<string, number> {
   const base = replicates[0];
-  if (replicates.length < 2 || replicates.some(r => !paired(base, r, metrics) || r.candidate !== base.candidate)) throw new Error('calibration requires paired unchanged-baseline observations');
+  if (replicates.length < 2 || replicates.some(r => !paired(base, r, metrics) || !rawCounts(r, metrics) || r.candidate !== base.candidate)) throw new Error('calibration requires paired unchanged-baseline observations');
   const rows = [...base.items!].sort((a, b) => a.id.localeCompare(b.id)).map(i => replicates.map(r => r.items!.find(j => j.id === i.id)!));
   const noise: Record<string, number> = {};
   for (const [name, metric] of Object.entries(metrics)) {
     if (metric.scale === 'count') {
       let squaredDifferences = 0, pairs = 0;
       for (let a = 0; a < replicates.length; a++) for (let b = a + 1; b < replicates.length; b++) {
-        squaredDifferences += rows.reduce((n, row) => n + (row[a].metrics[name] - row[b].metrics[name]) ** 2, 0); pairs++;
+        squaredDifferences += rows.reduce((n, row) => n + row[a].metrics[name] - row[b].metrics[name], 0) ** 2; pairs++;
       }
       noise[name] = Math.sqrt(Math.max(squaredDifferences / pairs, 1));
       continue;
@@ -135,9 +144,9 @@ export function calibrateResearchNoise(replicates: Observation[], metrics: Recor
     const values: number[] = [];
     for (let n = 0; n < 4096; n++) {
       let left = 0, right = 0;
+      const a = Math.floor(random() * replicates.length), b = (a + 1 + Math.floor(random() * (replicates.length - 1))) % replicates.length;
       for (let j = 0; j < rows.length; j++) {
         const row = rows[Math.floor(random() * rows.length)];
-        const a = Math.floor(random() * row.length), b = (a + 1 + Math.floor(random() * (row.length - 1))) % row.length;
         left += row[a].metrics[name]; right += row[b].metrics[name];
       }
       values.push(right / left);
@@ -147,6 +156,14 @@ export function calibrateResearchNoise(replicates: Observation[], metrics: Recor
   }
   if (Object.values(noise).some(value => !finite(value))) throw new Error('finite calibration noise required');
   return noise;
+}
+
+/** The incumbent includes every declared replicate, paired by stable item ID. */
+export function meanResearchBaseline(replicates: Observation[], metrics: Record<string, Metric>): Observation {
+  const base = replicates[0];
+  if (!base || replicates.some(r => !paired(base, r, metrics) || !rawCounts(r, metrics) || r.candidate !== base.candidate)) throw new Error('baseline replicates must be paired');
+  return { ...base, items: base.items!.map(item => ({ id: item.id, metrics: Object.fromEntries(Object.keys(metrics).map(name =>
+    [name, replicates.reduce((sum, r) => sum + r.items!.find(i => i.id === item.id)!.metrics[name], 0) / replicates.length])) })) };
 }
 
 type Inventory = Record<string, string>;
@@ -188,6 +205,7 @@ export interface MeasurementState {
   revision: number; instrument: Instrument; replicates: Observation[]; noise?: Record<string, number>;
   baseline: Observation; best: Observation; bestPath: string; heldOutUses: Array<{ round: string; status: 'started' | 'finished'; passes?: boolean; reason?: string }>;
   error?: string;
+  rounds?: import('./research-history.js').ResearchRound[];
 }
 export interface CandidateSnapshot { path: string; sha256: string; label: string; error?: string }
 
@@ -297,14 +315,14 @@ function inputChanges(root: string, paths: string[]): string {
 }
 
 interface Receipt { fingerprint?: string; exitCode: number | null; stdout: string; stderr: string; reason?: string; output?: Record<string, unknown> }
-async function execute(instrument: Instrument, run: string, candidate: CandidateSnapshot, spec: z.infer<typeof command>, timeoutMs: number): Promise<Receipt> {
+async function execute(instrument: Instrument, run: string, candidate: CandidateSnapshot, spec: z.infer<typeof command>, deadline: number): Promise<Receipt> {
   const root = directory(run), scratch = createInvocationScratch();
   try {
     const environment = Object.fromEntries(Object.entries(instrument.config.environment).map(([key, value]) => [key, bindInput(value, instrument, root, candidate)]));
     const env = { ...environment, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: scratch.path, TMPDIR: scratch.path, TMP: scratch.path, TEMP: scratch.path,
       FC_RESEARCH_CANDIDATE: candidate.path, FC_RESEARCH_CANDIDATE_SHA256: candidate.sha256 };
     const args = spec.args.map(value => bindInput(value, instrument, root, candidate));
-    if (timeoutMs <= 0) throw new Error('research_wall_budget_exhausted');
+    if (deadline <= Date.now()) throw new Error('research_wall_budget_exhausted');
     if (candidate.error) throw new Error(candidate.error);
     if (Object.hasOwn(instrument.unavailable, spec.command)) throw new Error(instrument.unavailable[spec.command]);
     if (instrumentIdentity(instrument, root) !== instrument.fingerprint) throw new Error('instrument_fingerprint_mismatch');
@@ -318,14 +336,15 @@ async function execute(instrument: Instrument, run: string, candidate: Candidate
       inputChanges(instrument.projectDir, [...instrument.config.frozen, ...instrument.config.candidate]),
     ]);
     const before = changes();
+    if (deadline <= Date.now()) throw new Error('research_wall_budget_exhausted');
     const result = await withEngineIntegrity({ projectDir: instrument.projectDir, runDir: run, stageId: '_research_measurement' }, () => new Promise<Receipt>(resolveReceipt => {
       const { child, stop } = spawnOwnedCommand('/usr/bin/python3', ['-I', '-B', '-c', confinedMeasurement, join(root, 'executables', digest(spec.command)), ...args], { cwd: join(root, 'instrument'), env });
       let stdout = '', stderr = '', reason: string | undefined;
-      const timer = setTimeout(() => { reason = 'measurement_timeout'; stop(); }, Math.max(1, timeoutMs));
+      const cancelDeadline = scheduleDeadline(() => { reason = 'measurement_timeout'; stop(); }, () => deadline - Date.now());
       child.stdout?.on('data', data => { stdout += String(data); if (stdout.length > 4 * 1024 * 1024) { reason = 'measurement_output_limit'; stop(); } });
       child.stderr?.on('data', data => { if (stderr.length < 8192) stderr += String(data); });
       child.on('error', error => { reason = String(error); });
-      child.on('close', exitCode => { clearTimeout(timer); resolveReceipt({ exitCode, stdout, stderr, reason }); });
+      child.on('close', exitCode => { cancelDeadline(); resolveReceipt({ exitCode, stdout, stderr, reason }); });
     }));
     if (!result.stdout.startsWith('\0')) result.reason ??= result.stdout.startsWith('\x01') ? 'measurement_executable_start_failed' : 'measurement_write_confinement_unavailable';
     else result.stdout = result.stdout.slice(1);
@@ -345,7 +364,7 @@ function observe(receipt: Receipt, instrument: Instrument, candidate: CandidateS
   const parsed = z.object({ items: z.array(z.object({ id: z.string().min(1), metrics: z.record(z.string(), z.number().finite().nonnegative()) })).min(1) }).safeParse(receipt.output);
   if (receipt.reason || receipt.exitCode !== 0 || !parsed.success) return { ...base, status: 'unmeasured', reason: 'measurement_unavailable', detail: receipt.reason ?? (receipt.exitCode !== 0 ? `exit ${receipt.exitCode}` : 'invalid item output') };
   const observation: Observation = { ...base, status: 'measured', items: parsed.data.items };
-  return paired(observation, observation, instrument.config.metrics) ? observation : { ...base, status: 'unmeasured', reason: 'input_invalid', detail: 'missing metrics or duplicate item identity' };
+  return paired(observation, observation, instrument.config.metrics) && rawCounts(observation, instrument.config.metrics) ? observation : { ...base, status: 'unmeasured', reason: 'input_invalid', detail: 'missing metrics or duplicate item identity' };
 }
 function passes(receipt: Receipt, pass: z.infer<typeof condition>): GuardObservation {
   if (receipt.reason || receipt.exitCode === null) return { passes: false, reason: 'guard_error', detail: receipt.reason ?? 'command did not produce an exit code' };
@@ -384,20 +403,21 @@ export async function initializeResearchMeasurements(project: string, run: strin
     const candidate = { path: state.bestPath, sha256, label: 'baseline' };
     for (let n = 0; n < parsed.replicates; n++) {
       const remaining = deadline - Date.now();
-      const receipt = await execute(instrument, run, candidate, parsed.development, Math.min(parsed.timeout_seconds * 1000, remaining));
+      const receipt = await execute(instrument, run, candidate, parsed.development, Math.min(Date.now() + parsed.timeout_seconds * 1000, deadline));
       save(join(root, `calibration-${n + 1}.json`), receipt);
       state.replicates.push(observe(receipt, instrument, candidate));
       if (remaining <= 0) break;
     }
-    state.baseline = state.best = state.replicates[0];
+    state.baseline = state.replicates[0];
     state.noise = calibrateResearchNoise(state.replicates, parsed.metrics);
+    state.baseline = state.best = meanResearchBaseline(state.replicates, parsed.metrics);
   } catch (error) { state.error = `${String(error)}${state.baseline.detail ? `: ${state.baseline.detail}` : ''}`; state.baseline.detail = state.error; }
   save(statePath, state);
   return state;
 }
 
 export interface MeasurementResult { candidate: CandidateSnapshot; observation: Observation; comparison: Comparison; heldOutExhausted: boolean; guards: GuardObservation[] }
-export async function measureResearchCandidate(run: string, candidate: CandidateSnapshot, remainingMs = Infinity): Promise<MeasurementResult> {
+export async function measureResearchCandidate(run: string, candidate: CandidateSnapshot, remainingMs = Infinity, submission?: Pick<import('./research-history.js').ResearchRound, 'notes' | 'review' | 'wallHoursCumulative'>): Promise<MeasurementResult> {
   const root = directory(run), statePath = join(root, 'state.json');
   const record = join(root, 'results', digest(candidate.label) + '.json');
   if (existsSync(record)) {
@@ -409,7 +429,7 @@ export async function measureResearchCandidate(run: string, candidate: Candidate
   const state = read<MeasurementState>(statePath), { instrument } = state, config = instrument.config;
   const previousRevision = state.revision;
   const deadline = Date.now() + remainingMs;
-  const runCommand = (spec: z.infer<typeof command>) => execute(instrument, run, candidate, spec, Math.min(config.timeout_seconds * 1000, deadline - Date.now()));
+  const runCommand = (spec: z.infer<typeof command>) => execute(instrument, run, candidate, spec, Math.min(Date.now() + config.timeout_seconds * 1000, deadline));
   const exhausted = !!config.held_out && state.heldOutUses.length >= config.held_out.allowance;
   const alreadySpent = exhausted || !!config.held_out && state.heldOutUses.some(u => u.round === candidate.label);
   const spentReason = exhausted ? 'held_out_allowance_exhausted' : 'held_out_interrupted';
@@ -437,6 +457,11 @@ export async function measureResearchCandidate(run: string, candidate: Candidate
   }
   if (config.held_out && state.heldOutUses.length >= config.held_out.allowance) heldOutExhausted = true;
   if (comparison.keep) { state.best = observation; state.bestPath = candidate.path; }
+  if (submission) state.rounds = [...(state.rounds ?? []), {
+    ...submission, label: candidate.label, candidate: candidate.sha256, outcome: observation.status,
+    measurement: observation, comparison, guards, reason: comparison.reason,
+    ...(observation.items ? { result: sum(observation.items, config.primary[0]) } : {}),
+  }];
   state.revision++;
   const result = { candidate, observation, comparison, heldOutExhausted, guards, development, receipts, previousRevision, nextState: state };
   mkdirSync(dirname(record), { recursive: true });
@@ -462,3 +487,36 @@ export function restoreResearchBest(project: string, run: string): void {
   snapshot(state.bestPath, project, paths);
 }
 export function researchMeasurementState(run: string): MeasurementState { return read(join(directory(run), 'state.json')); }
+
+/** Sole report author. Called after the terminal commit under its run-state lock.
+ * Committed destinations survive publication errors and pointer-save failures. */
+export function writeResearchTerminalReport(state: StoreState): string[] {
+  const directory = runDir(state.projectDir, state.runId);
+  let measured: ReturnType<typeof researchMeasurementState> | undefined;
+  try { measured = researchMeasurementState(directory); } catch { /* initialization may have failed */ }
+  const journal = measured ? { baseline: measured.baseline, replicates: measured.replicates, noise: measured.noise,
+    fingerprint: measured.instrument.fingerprint, best: measured.best, heldOutUses: measured.heldOutUses, error: measured.error } : { error: 'Measurement not initialized' };
+  const rounds = measured?.rounds ?? [];
+  const body = `# Research report\n\nStatus: ${state.status}\nReason: ${state.failureReason ?? state.reasonCode ?? 'unknown'}\n\n## Engine measurement journal\n\n\`\`\`json\n${JSON.stringify(journal, null, 2)}\n\`\`\`\n\n`
+    + rounds.map(round => { const { notes, ...engine } = round; return `## ${round.label}\n\n### Engine decision\n\n\`\`\`json\n${JSON.stringify(engine, null, 2)}\n\`\`\`\n\n### Producer notes (advisory; no numeric authority)\n\n\`\`\`json\n${JSON.stringify(notes ?? { unavailable: true }, null, 2)}\n\`\`\`\n`; }).join('\n');
+  const publish = (path: string): void => {
+    if (!existsSync(path) || readFileSync(path, 'utf8') !== body) atomicWrite(path, body);
+  };
+  publish(runRecordPath(directory, 'research_report.md'));
+  const desired = new Set(state.terminalStates?.[state.status]?.paths ?? []);
+  const paths = new Set([...(state.researchReportPaths ?? []), ...desired]);
+  const errors: string[] = [];
+  delete state.terminalArtifact;
+  for (const path of paths) try {
+    const absolute = resolveArtifactLocation({ root: 'project', path }, state.projectDir, directory);
+    const destination = prospectivePhysicalPath(absolute);
+    for (const root of [...(state.research?.measurement.frozen ?? []), ...(state.research?.measurement.candidate ?? [])]) {
+      const input = prospectivePhysicalPath(resolve(state.projectDir, root));
+      if (artifactRootContains(input, destination) || artifactRootContains(destination, input)) throw new Error('terminal report overlaps measurement inputs');
+    }
+    mkdirSync(dirname(absolute), { recursive: true });
+    publish(absolute);
+    if (desired.has(path)) state.terminalArtifact ??= path;
+  } catch (error) { errors.push(`${path}: ${String(error)}`); }
+  return errors;
+}

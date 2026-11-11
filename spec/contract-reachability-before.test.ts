@@ -23,14 +23,13 @@ import type { Adapter, AgentConfig, RunOpts, RunResult } from '../src/adapters/b
 import { cmdEventsWithDeps } from '../src/cli-events.js';
 import { rehearseBriefIsolated } from './test-support/rehearse.js';
 import {
-  briefDeclaresNoCandidateOutcome,
   type IsolatedRehearsalResult,
 } from '../src/rehearse.js';
 import {
   inspectDispatchAdmission,
   inspectRealityCheckReachability,
   runWorkflow,
-  tryAdvanceResearch,
+
   type StageConfig,
   type WorkflowConfig,
 } from '../src/scheduler.js';
@@ -101,48 +100,6 @@ afterAll(() => {
 });
 
 describe('research ingestion and planner refusal evidence', () => {
-  it.each([
-    { name: 'measured', sidecar: false, record: { label: 'candidate', result: 0.12 }, outcome: 'measured' },
-    { name: 'no candidate', sidecar: true, record: { label: 'candidate', outcome: 'no_candidate', reason: 'No safe candidate' }, outcome: 'no_candidate' },
-    { name: 'legacy discriminator', sidecar: true, record: { label: 'candidate', status: 'no_candidate', reason: 'No safe candidate' }, outcome: 'no_candidate' },
-    { name: 'missing identity', sidecar: true, record: { label: '', status: 'no_candidate', note: 'Not a reason' }, outcome: undefined },
-  ])('ingests $name without rerunning a completed producer', async ({ sidecar, record, outcome, name }) => {
-    const root = temporaryRoot('round-ingestion'), projectDir = join(root, 'project'), runDirectory = join(root, 'run');
-    mkdirSync(runDirectory, { recursive: true });
-    const path = join(projectDir, `artifacts/round.json${sidecar ? '.no_candidate.json' : ''}`);
-    const completedAt = new Date(Date.now() - 100).toISOString();
-    const producer = { status: 'complete', retries: 0, completedAt };
-    const state = { runId: 'fixture', workflowName: 'research', projectDir, status: 'running',
-      startedAt: new Date(Date.now() - 1_000).toISOString(), stages: { measure: producer },
-      research: { baseline: 0.1, policy: 'greedy_stack', resultFile: 'artifacts/round.json', reportDir: 'artifacts', stop: { maxRounds: 2 } },
-    } as StoreState;
-    const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
-    beginResearchInputGeneration(projectDir, state);
-    write(path, JSON.stringify(record));
-    const result = await tryAdvanceResearch(state, { projectDir, runId: state.runId, runDirPath: runDirectory, iteration: 1, adapter: inertAdapter });
-    expect(state.stages.measure).toEqual({ status: 'complete', retries: 0, completedAt });
-    if (!outcome) {
-      expect(result).toBeNull();
-      expect(readJson(runRecordPath(runDirectory, 'research_round_input_error.json'))).toMatchObject({ kind: 'missing_label' });
-      expect(existsSync(path)).toBe(true);
-      expect(existsSync(runRecordPath(runDirectory, 'research_round_contract_repair.json'))).toBe(false);
-      return;
-    }
-    expect(readJson(runRecordPath(runDirectory, 'research_journal.json')).rounds).toEqual([
-      expect.objectContaining({ label: record.label, outcome, ...(!sidecar ? { result: record.result } : {}) }),
-    ]);
-    expect(existsSync(runRecordPath(runDirectory, 'research_round_input_error.json'))).toBe(false);
-    if (sidecar) {
-      expect(result).toBeNull();
-      expect(existsSync(path)).toBe(false);
-      expect(readdirSync(runRecordPath(runDirectory, '.')).some(file => /no_candidate_consumed\.json$/.test(file))).toBe(true);
-    } else expect(existsSync(runRecordPath(runDirectory, 'research_round_1_consumed.json'))).toBe(true);
-    if (name === 'legacy discriminator') {
-      expect(readJson(runRecordPath(runDirectory, 'research_round_contract_repair.json'))).toMatchObject({
-        kind: 'no_candidate_status_alias', fromField: 'status', toField: 'outcome',
-      });
-    }
-  });
 
   it('enumerates terminal-owner cardinalities zero, one, and three through admission', () => {
     const terminalPaths = ['artifacts/ship.md', 'artifacts/ceiling.md', 'artifacts/escalation.md'];
@@ -421,299 +378,6 @@ function pairedBoundedResearchBrief(): string {
     ].join('\n'));
 }
 
-describe('declared rehearsal outcomes and bounded ship probes', () => {
-  beforeAll(async () => {
-    for (const [target, baseline] of [[0.05, 0.04], [0.2, 0.15]] as const) {
-      const result = await rehearseBriefIsolated(boundedResearchBrief(target, baseline), {
-        projectDir: temporaryRoot(`rehearsal-input-${String(target).replace('.', '-')}`),
-        keep: true,
-        label: `bounded-target-${target}`,
-      });
-      if (!result.retainedArtifacts || !result.retainedOutcomeArtifacts?.no_candidate) {
-        throw new Error(`rehearsal ${target} did not retain all outcome artifacts`);
-      }
-      const runDirectory = result.retainedArtifacts.runDir;
-      const noCandidate = result.retainedOutcomeArtifacts.no_candidate;
-      rehearsalObservations.push({
-        target,
-        result,
-        run: readJson(runRecordPath(runDirectory, 'run.json')),
-        journal: readJson(runRecordPath(runDirectory, 'research_journal.json')),
-        runFiles: readdirSync(runRecordPath(runDirectory, '.')),
-        noCandidateRun: readJson(runRecordPath(noCandidate.runDir, 'run.json')),
-        noCandidateJournal: readJson(runRecordPath(noCandidate.runDir, 'research_journal.json')),
-        noCandidateRunFiles: readdirSync(runRecordPath(noCandidate.runDir, '.')),
-      });
-      temporaryRoots.push(result.retainedArtifacts.projectDir);
-      temporaryRoots.push(noCandidate.projectDir);
-      temporaryRoots.push(dirname(dirname(runDirectory)));
-      temporaryRoots.push(dirname(result.diagnosticsLogPath));
-    }
-  }, 120_000);
-
-  it('writes, journals, and consumes the declared no-candidate outcome', () => {
-    for (const observation of rehearsalObservations) {
-      expect(observation.result.exitCode).toBe(0);
-      expect(observation.noCandidateJournal.rounds).toEqual(expect.arrayContaining([
-        expect.objectContaining({ label: 'rehearse_no_candidate', outcome: 'no_candidate' }),
-      ]));
-      expect(observation.noCandidateRunFiles.some((name) => /no_candidate_consumed\.json$/.test(name))).toBe(true);
-    }
-    const outcomes = rehearsalObservations.flatMap((observation) => (
-      observation.noCandidateJournal.rounds.map((round: Record<string, unknown>) => round.outcome)
-    ));
-    expect(outcomes.filter((outcome) => outcome === 'no_candidate')).toHaveLength(2);
-  });
-
-  it('enumerates and exercises ship proposal, no-candidate ingestion, and ceiling settlement', () => {
-    const observations = rehearsalObservations.map((observation) => ({
-      target: observation.target,
-      shipped: observation.journal.rounds.some((round: Record<string, unknown>) => (
-        String(round.label).includes('decoy') && round.confirmFailed === true
-      )) && observation.runFiles.includes('research_confirm.json'),
-      no_candidate: observation.noCandidateJournal.rounds.some((round: Record<string, unknown>) => (
-        round.outcome === 'no_candidate'
-      )),
-      ceiling_hit: observation.run.status === 'ceiling_hit'
-        && existsSync(join(observation.result.retainedArtifacts!.projectDir, 'artifacts', 'ceiling.md')),
-    }));
-
-    expect(observations).toEqual([
-      { target: 0.05, shipped: true, no_candidate: true, ceiling_hit: true },
-      { target: 0.2, shipped: true, no_candidate: true, ceiling_hit: true },
-    ]);
-  });
-
-  it('uses an admitted threshold crossing and executes confirm at both bounded targets', () => {
-    for (const observation of rehearsalObservations) {
-      const texts = observation.result.findings.map((finding) => finding.text);
-      expect(observation.journal.rounds.some((round: Record<string, unknown>) => (
-        String(round.label).includes('decoy')
-      ))).toBe(true);
-      expect(observation.runFiles).toContain('research_confirm.json');
-      expect(texts).not.toContain('The decoy round is missing from the journal — the ship path was not exercised');
-      expect(texts).not.toContain('Confirm was never executed — a ship decision may never have been proposed');
-      expect(readJson(runRecordPath(observation.result.retainedArtifacts!.runDir, 'research_confirm.json')))
-        .toMatchObject({ pass: false });
-    }
-    expect(rehearsalObservations.map(({ target, journal }) => ({
-      target,
-      mild: journal.rounds.find((round: Record<string, unknown>) => (
-        round.label === 'rehearse_r1_mild'
-      ))?.result,
-    }))).toEqual([
-      { target: 0.05, mild: 0.045 },
-      { target: 0.2, mild: 0.175 },
-    ]);
-    expect(rehearsalObservations.map(({ target, journal }) => ({
-      target,
-      decoy: journal.rounds.find((round: Record<string, unknown>) => (
-        round.label === 'rehearse_r2_decoy'
-      ))?.result,
-    }))).toEqual([
-      { target: 0.05, decoy: 0.05 },
-      { target: 0.2, decoy: 0.2 },
-    ]);
-    expect(rehearsalObservations.map(({ target, run }) => ({ target, status: run.status }))).toEqual([
-      { target: 0.05, status: 'ceiling_hit' },
-      { target: 0.2, status: 'ceiling_hit' },
-    ]);
-  });
-
-  it('does not synthesize a no-candidate probe for a brief that declares only measured outcomes', async () => {
-    const brief = boundedResearchBrief(0.05, 0.04)
-      .replace('- Emit `outcome: no_candidate` when no safe acting candidate exists.\n', '')
-      .replace('Write either the measured result object or the mutually exclusive no-candidate sidecar.', 'Write the measured result object.');
-    const result = await rehearseBriefIsolated(brief, {
-      projectDir: temporaryRoot('rehearsal-no-no-candidate-input'),
-      keep: true,
-      label: 'no-no-candidate-declaration',
-    });
-    if (!result.retainedArtifacts) throw new Error('control rehearsal did not retain artifacts');
-    temporaryRoots.push(result.retainedArtifacts.projectDir);
-    temporaryRoots.push(dirname(dirname(result.retainedArtifacts.runDir)));
-    temporaryRoots.push(dirname(result.diagnosticsLogPath));
-
-    expect(result.exitCode).toBe(0);
-    expect(result.retainedOutcomeArtifacts?.no_candidate).toBeUndefined();
-    expect(result.findings.some((finding) => finding.text.includes('Declared outcome no_candidate exercised'))).toBe(false);
-  }, 60_000);
-
-  it('does not mistake explicit no-candidate prohibitions for outcome declarations', async () => {
-    const negatedDeclaration = 'No no-candidate outcome is declared. Do not emit outcome: no_candidate; measured results only.';
-    const brief = boundedResearchBrief(0.05, 0.04)
-      .replace('- Emit `outcome: no_candidate` when no safe acting candidate exists.', negatedDeclaration)
-      .replace('Write either the measured result object or the mutually exclusive no-candidate sidecar.', 'Write the measured result object.');
-    expect(briefDeclaresNoCandidateOutcome(brief)).toBe(false);
-    expect(briefDeclaresNoCandidateOutcome(boundedResearchBrief(0.05, 0.04))).toBe(true);
-    expect([
-      'Emit outcome: no_candidate when no safe acting candidate exists.',
-      'Write a no-candidate sidecar when every candidate is unsafe.',
-      'No no-candidate outcome is declared.',
-      'Do not emit outcome: no_candidate.',
-      'Measured results only.',
-    ].map(briefDeclaresNoCandidateOutcome)).toEqual([true, true, false, false, false]);
-
-    const result = await rehearseBriefIsolated(brief, {
-      projectDir: temporaryRoot('rehearsal-negated-no-candidate-input'),
-      keep: true,
-      label: 'negated-no-candidate-declaration',
-    });
-    if (!result.retainedArtifacts) throw new Error('negated-declaration rehearsal did not retain artifacts');
-    temporaryRoots.push(result.retainedArtifacts.projectDir);
-    temporaryRoots.push(dirname(dirname(result.retainedArtifacts.runDir)));
-    temporaryRoots.push(dirname(result.diagnosticsLogPath));
-
-    expect(result.exitCode).toBe(0);
-    expect(result.retainedOutcomeArtifacts?.no_candidate).toBeUndefined();
-    expect(result.findings.some((finding) => finding.text.includes('Declared outcome no_candidate exercised'))).toBe(false);
-  }, 60_000);
-
-  it('uses a schema-valid uncertainty payload to exercise ship and confirm for a paired metric', async () => {
-    const result = await rehearseBriefIsolated(pairedBoundedResearchBrief(), {
-      projectDir: temporaryRoot('rehearsal-paired-spread-input'),
-      keep: true,
-      label: 'paired-spread-ship-probe',
-    });
-    if (!result.retainedArtifacts) throw new Error('paired rehearsal did not retain artifacts');
-    temporaryRoots.push(result.retainedArtifacts.projectDir);
-    temporaryRoots.push(dirname(dirname(result.retainedArtifacts.runDir)));
-    temporaryRoots.push(dirname(result.diagnosticsLogPath));
-    if (result.retainedOutcomeArtifacts?.no_candidate) {
-      temporaryRoots.push(result.retainedOutcomeArtifacts.no_candidate.projectDir);
-    }
-    const journal = readJson(runRecordPath(result.retainedArtifacts.runDir, 'research_journal.json'));
-    const texts = result.findings.map((finding) => finding.text);
-
-    expect(result.exitCode).toBe(0);
-    expect(journal.rounds).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: 'rehearse_r1_mild', result: 0.045, resultStd: 0.001 }),
-      expect.objectContaining({ label: 'rehearse_r2_decoy', result: 0.05, resultStd: 0.001, confirmFailed: true }),
-    ]));
-    expect(existsSync(runRecordPath(result.retainedArtifacts.runDir, 'research_confirm.json'))).toBe(true);
-    expect(texts).not.toContain('The decoy round is missing from the journal — the ship path was not exercised');
-    expect(texts).not.toContain('Confirm was never executed — a ship decision may never have been proposed');
-  }, 60_000);
-
-  it('reports a bounded target with no admissible crossing instead of emitting permanent ship warnings', async () => {
-    const result = await rehearseBriefIsolated(boundedResearchBrief(0.5, 0.1), {
-      projectDir: temporaryRoot('rehearsal-unreachable-target-input'),
-      keep: true,
-      label: 'unreachable-bounded-target',
-    });
-    if (!result.retainedArtifacts) throw new Error('bounded control rehearsal did not retain artifacts');
-    temporaryRoots.push(result.retainedArtifacts.projectDir);
-    if (result.retainedOutcomeArtifacts?.no_candidate) {
-      temporaryRoots.push(result.retainedOutcomeArtifacts.no_candidate.projectDir);
-    }
-    temporaryRoots.push(dirname(dirname(result.retainedArtifacts.runDir)));
-    temporaryRoots.push(dirname(result.diagnosticsLogPath));
-    const texts = result.findings.map((finding) => finding.text);
-
-    expect(texts).toContain('No schema- and integrity-valid value can cross the declared ship target 0.5; the ship outcome is not exercisable by this brief');
-    expect(texts).not.toContain('The decoy round is missing from the journal — the ship path was not exercised');
-    expect(texts).not.toContain('Confirm was never executed — a ship decision may never have been proposed');
-  }, 60_000);
-});
-
-describe('environment refusal precedence', () => {
-  function runBackgroundQuick(root: string, brief = '# Goal\nProbe.\n', acknowledge = false) {
-    const bin = join(root, 'bin');
-    const home = join(root, 'home');
-    const fcHome = join(root, 'fc-home');
-    const codexHome = join(root, 'codex-home');
-    const project = join(root, 'project');
-    for (const path of [bin, home, fcHome, codexHome, project]) mkdirSync(path, { recursive: true });
-    const nodeLink = join(bin, basename(process.execPath));
-    if (!existsSync(nodeLink)) symlinkSync(process.execPath, nodeLink);
-    return spawnSync(
-      process.execPath,
-      [
-        '--import', 'tsx', join(PROJECT_ROOT, 'src', 'cli.ts'), 'quick', '--background',
-        '--project', project,
-        ...(acknowledge ? ['--acknowledge-brief-warnings'] : []),
-        '-',
-      ],
-      {
-        cwd: PROJECT_ROOT,
-        env: {
-          ...process.env,
-          PATH: bin,
-          HOME: home,
-          FC_HOME: fcHome,
-          CODEX_HOME: codexHome,
-          NO_COLOR: '1',
-        },
-        input: brief,
-        encoding: 'utf8',
-        timeout: 30_000,
-      },
-    );
-  }
-
-  const criterionBearingBrief = [
-    '# Goal',
-    'Probe.',
-    '',
-    '## What the report must show',
-    '',
-    '1. Report the directly observed probe result.',
-    '',
-  ].join('\n');
-
-  it('names the missing adapter before the non-Git refusal', () => {
-    const root = temporaryRoot('adapter-absent');
-    const result = runBackgroundQuick(root);
-    const output = `${result.stdout}${result.stderr}`;
-
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(1);
-    expect(output).toContain('No adapter CLI is installed or visible on PATH.');
-    expect(output).toContain('npm i -g @openai/codex');
-    expect(result.stderr).not.toContain('[brief_criteria_missing]');
-  });
-
-  it('refuses the non-Git source before invoking a visible adapter', () => {
-    const root = temporaryRoot('adapter-present');
-    const codex = join(root, 'bin', 'codex');
-    write(codex, '#!/bin/sh\nexit 0\n');
-    chmodSync(codex, 0o755);
-    const result = runBackgroundQuick(root);
-    const output = `${result.stdout}${result.stderr}`;
-
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('automatic setup requires a Git working tree with a committed HEAD');
-    expect(output).not.toContain('No adapter CLI is installed or visible on PATH.');
-  });
-
-  it('keeps the environment refusal first when the same adapter-free launch has a criterion', () => {
-    const root = temporaryRoot('adapter-absent-with-criterion');
-    const result = runBackgroundQuick(root, criterionBearingBrief, true);
-    const output = `${result.stdout}${result.stderr}`;
-
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(1);
-    expect(output).toContain('No adapter CLI is installed or visible on PATH.');
-    expect(result.stderr).not.toContain('[brief_criteria_missing]');
-  });
-
-  it('passes both precedence refusals when an adapter and a criterion are present', () => {
-    const root = temporaryRoot('adapter-present-with-criterion');
-    const codex = join(root, 'bin', 'codex');
-    write(codex, '#!/bin/sh\nexit 0\n');
-    chmodSync(codex, 0o755);
-    const result = runBackgroundQuick(root, criterionBearingBrief, true);
-    const output = `${result.stdout}${result.stderr}`;
-
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(1);
-    expect(output).toContain('no exact setup record exists');
-    expect(output).not.toContain('No adapter CLI is installed or visible on PATH.');
-    expect(result.stderr).not.toContain('[brief_criteria_missing]');
-  });
-});
-
 describe('violation paths at durable and human event layers', () => {
   it('retains the path in both JSON and the published human event row', async () => {
     const root = temporaryRoot('event-path');
@@ -883,4 +547,102 @@ describe('violation paths at durable and human event layers', () => {
     expect(humanViolationRows).toEqual([]);
     expect(humanViolationRows.every((line) => line.includes(`paths=${violatingPath}`))).toBe(true);
   }, 30_000);
+});
+
+describe('environment refusal precedence', () => {
+  function runBackgroundQuick(root: string, brief = '# Goal\nProbe.\n', acknowledge = false) {
+    const bin = join(root, 'bin');
+    const home = join(root, 'home');
+    const fcHome = join(root, 'fc-home');
+    const codexHome = join(root, 'codex-home');
+    const project = join(root, 'project');
+    for (const path of [bin, home, fcHome, codexHome, project]) mkdirSync(path, { recursive: true });
+    const nodeLink = join(bin, basename(process.execPath));
+    if (!existsSync(nodeLink)) symlinkSync(process.execPath, nodeLink);
+    return spawnSync(
+      process.execPath,
+      [
+        '--import', 'tsx', join(PROJECT_ROOT, 'src', 'cli.ts'), 'quick', '--background',
+        '--project', project,
+        ...(acknowledge ? ['--acknowledge-brief-warnings'] : []),
+        '-',
+      ],
+      {
+        cwd: PROJECT_ROOT,
+        env: {
+          ...process.env,
+          PATH: bin,
+          HOME: home,
+          FC_HOME: fcHome,
+          CODEX_HOME: codexHome,
+          NO_COLOR: '1',
+        },
+        input: brief,
+        encoding: 'utf8',
+        timeout: 30_000,
+      },
+    );
+  }
+
+  const criterionBearingBrief = [
+    '# Goal',
+    'Probe.',
+    '',
+    '## What the report must show',
+    '',
+    '1. Report the directly observed probe result.',
+    '',
+  ].join('\n');
+
+  it('names the missing adapter before the non-Git refusal', () => {
+    const root = temporaryRoot('adapter-absent');
+    const result = runBackgroundQuick(root);
+    const output = `${result.stdout}${result.stderr}`;
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(output).toContain('No adapter CLI is installed or visible on PATH.');
+    expect(output).toContain('npm i -g @openai/codex');
+    expect(result.stderr).not.toContain('[brief_criteria_missing]');
+  });
+
+  it('refuses the non-Git source before invoking a visible adapter', () => {
+    const root = temporaryRoot('adapter-present');
+    const codex = join(root, 'bin', 'codex');
+    write(codex, '#!/bin/sh\nexit 0\n');
+    chmodSync(codex, 0o755);
+    const result = runBackgroundQuick(root);
+    const output = `${result.stdout}${result.stderr}`;
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('automatic setup requires a Git working tree with a committed HEAD');
+    expect(output).not.toContain('No adapter CLI is installed or visible on PATH.');
+  });
+
+  it('keeps the environment refusal first when the same adapter-free launch has a criterion', () => {
+    const root = temporaryRoot('adapter-absent-with-criterion');
+    const result = runBackgroundQuick(root, criterionBearingBrief, true);
+    const output = `${result.stdout}${result.stderr}`;
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(output).toContain('No adapter CLI is installed or visible on PATH.');
+    expect(result.stderr).not.toContain('[brief_criteria_missing]');
+  });
+
+  it('passes both precedence refusals when an adapter and a criterion are present', () => {
+    const root = temporaryRoot('adapter-present-with-criterion');
+    const codex = join(root, 'bin', 'codex');
+    write(codex, '#!/bin/sh\nexit 0\n');
+    chmodSync(codex, 0o755);
+    const result = runBackgroundQuick(root, criterionBearingBrief, true);
+    const output = `${result.stdout}${result.stderr}`;
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(output).toContain('no exact setup record exists');
+    expect(output).not.toContain('No adapter CLI is installed or visible on PATH.');
+    expect(result.stderr).not.toContain('[brief_criteria_missing]');
+  });
 });

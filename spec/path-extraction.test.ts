@@ -54,39 +54,4 @@ describe('declared reality-check reads', () => {
     const errors = inspectRealityCheckReachability({ markdown: markdownFor('exec-script-exit-zero', { script: 'cat present.json future.json; console.error(manifest.rounds)' }, reads), projectDir, stages: [] });
     expect(errors).toEqual([expect.stringContaining('ARTIFACT_READ_UNBOUND')]);
   });
-  it('still rejects an explicitly declared read of the mutable optional research result', () => {
-    const path = 'docs/round.json';
-    const measure = stage({ criterion_refs: [], id: 'measure', role: 'researcher', scope: [path], depends_on: [], dependency_reasons: {}, artifact_contract: artifacts([{ id: 'result', root: 'project', path }]) });
-    const errors = inspectRealityCheckReachability({ markdown: markdownFor('json-schema-match', { file: path, schema: { type: 'object' } }, [producedRead('result', path, measure.id)]), projectDir: temporaryProject(), stages: [measure], research: { baseline: 0, policy: 'greedy_stack', resultFile: path } });
-    expect(errors.join('\n')).toContain('valid no-candidate round writes only its sidecar');
-  });
-  it('keeps the measurement-owner and continue-predicate admission probes red', () => {
-    const measuringOwner = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []),
-      id: 'measure', role: 'researcher', scope: ['docs/round.json', 'docs/final.md'],
-      depends_on: [], dependency_reasons: {}, condition: 'research.decision != continue',
-    });
-    const measuringReport = inspectDispatchAdmission({
-      dispatched: [measuringOwner], baseStages: [], dispatchStageId: 'plan',
-      terminalStates: { complete: { paths: ['docs/final.md'] } },
-      research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json' },
-    });
-    expect(measuringReport.pass).toBe(false);
-    expect(measuringReport.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain(
-      'research result producer path docs/round.json cannot be owned by a terminal writer',
-    );
-
-    const continueOwner = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []),
-      id: 'finalize', role: 'writer', scope: ['docs/final.md'], depends_on: [],
-      dependency_reasons: {}, condition: 'research.decision == continue',
-    });
-    const continueReport = inspectDispatchAdmission({
-      dispatched: [continueOwner], baseStages: [], dispatchStageId: 'plan',
-      terminalStates: { complete: { paths: ['docs/final.md'] } },
-      research: { baseline: 0, policy: 'greedy_stack' },
-    });
-    expect(continueReport.pass).toBe(false);
-    expect(continueReport.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain(
-      'must be mechanically false when research.decision is continue',
-    );
-  });
 });

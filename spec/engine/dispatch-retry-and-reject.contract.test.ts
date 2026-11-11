@@ -267,55 +267,6 @@ describe('FIX 1 (e2e) — empty dispatch is RETRYABLE, not fatal', () => {
     expect(final.failureReason ?? '').not.toMatch(/Refine the task brief and try again\.?$/); // NOT the old generic punt
   });
 
-  it('archives an admission refusal, exposes its exact error on retry, and admits the repaired proposal', async () => {
-    const runId = setupResearchAdmissionRun();
-    const rd = runDir(projectDir, runId);
-    const agentsDir = writeRoles(['planner', 'qa']);
-    let planCalls = 0;
-    let measureCalls = 0;
-    const planPrompts: string[] = [];
-    const adapter = {
-      async run(prompt: string, _r: AgentConfig, opts: RunOpts): Promise<RunResult> {
-        if (opts.stageId === 'plan') {
-          planCalls += 1;
-          planPrompts.push(prompt);
-          writeFileSync(stageWorkPath(opts.runDir, 'fixture_dispatch.yaml'), declaredDispatch(planCalls === 1
-            ? measuringOwnerDispatch
-            : separatedResearchDispatch));
-          return fixtureResult(ok(`planned attempt ${planCalls}`), opts);
-        }
-        if (opts.stageId === 'measure') {
-          measureCalls += 1;
-          mkdirSync(join(projectDir, 'docs'), { recursive: true });
-          writeFileSync(join(projectDir, 'docs', 'round.json'), JSON.stringify({ label: 'repair_converged', result: 1 }));
-          return fixtureResult(ok('measured'), opts);
-        }
-        if (opts.stageId === 'finalize') {
-          mkdirSync(join(projectDir, 'docs'), { recursive: true });
-          writeFileSync(join(projectDir, 'docs', 'final.md'), '# admitted terminal\n');
-          return fixtureResult(ok('finalized'), opts);
-        }
-        return fixtureResult(ok(`did ${opts.stageId}`), opts);
-      },
-      async discuss(): Promise<RunResult> { return ok(''); },
-      spawnDiscuss() { throw new Error('unused'); },
-      async spawnInteractive() { throw new Error('unused'); },
-    } as unknown as Adapter;
-
-    const final = await runWorkflow(planWorkflow.config, planWorkflow.yaml, projectDir, adapter, new Map(), undefined, agentsDir, runId);
-
-    expect(planCalls).toBe(2);
-    expect(measureCalls).toBe(1);
-    expect(final.status).toBe('shipped');
-    expect(planPrompts[1]).toContain('research result producer path docs/round.json cannot be owned by a terminal writer');
-    expect(planPrompts[1]).toContain(runRecordPath(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'));
-    expect(planPrompts[1]).toContain(runRecordPath(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'));
-    expect(parseYaml(readFileSync(runRecordPath(rd, 'dispatch_rejections', 'attempt_1', 'dispatch.yaml'), 'utf-8')))
-      .toEqual(parseYaml(declaredDispatch(measuringOwnerDispatch)));
-    const archived = JSON.parse(readFileSync(runRecordPath(rd, 'dispatch_rejections', 'attempt_1', 'dispatch_admission.json'), 'utf-8')) as { errors: Array<{message: string}> };
-    expect(archived.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('separate measurement from terminalization');
-  }, 60_000);
-
   it('refuses terminal settlement for a finalizer product delta with no independent review', async () => {
     const runId = setupPlainRun();
     const rd = runDir(projectDir, runId);

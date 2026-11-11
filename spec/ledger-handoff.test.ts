@@ -162,7 +162,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     const adapter: Adapter = { async run(user, role, opts) {
       calls.push({ id: opts.stageId, system: role.prompt, user, opts });
       let output = delivered('AUTHOR_NARRATIVE_SENTINEL');
-      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One change.', metric_search: false, assumptions: [], missing_author_facts: [] });
+      if (opts.stageId === 'choose') output = JSON.stringify({ successor: 'implement', reason: 'One change.', assumptions: [] });
       if (opts.stageId === 'implement') writeFileSync(join(project, 'greeting.txt'), 'wrong\n');
       if (opts.stageId === 'assess') output = JSON.stringify({ successor: 'review', reason: 'Inspect the greeting.', risk_areas: [{ file: 'greeting.txt', risk: 'Greeting correctness.', experiment: 'Read the greeting independently.' }] });
       if (opts.stageId === 'repair') { writeFileSync(join(project, 'greeting.txt'), 'required greeting\n'); output = JSON.stringify({ successor: 'assess', reason: 'REPAIR_NARRATIVE_SENTINEL' }); }
@@ -212,7 +212,7 @@ describe('ledger handoff at the rendered adapter boundary', () => {
     writeFileSync(runRecordPath(created.runDirPath, 'task_brief.md'), task);
     const stage = StageConfigSchema.parse({ id: 'choose', role: 'planner', scope: [],
       decision: { kind: 'shape', successors: ['implement', 'plan'], default: 'plan' } });
-    const answer = { successor: 'implement', reason: 'Own previous choice.', metric_search: false, assumptions: [], missing_author_facts: [] };
+    const answer = { successor: 'implement', reason: 'Own previous choice.', assumptions: [] };
     const inputs: Array<{ user: string; opts: RunOpts }> = [];
     const adapter: Adapter = { async run(user, _role, opts) {
       inputs.push({ user, opts });

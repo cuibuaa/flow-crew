@@ -75,7 +75,7 @@ it('grants the entry fixed-shape choice before dispatching its conditional imple
   const adapter: Adapter = { async run(_prompt, _role, opts) {
     calls.push(opts.stageId);
     return { output: JSON.stringify(opts.stageId === 'choose'
-      ? { successor: 'implement', reason: 'One implementation duty.', metric_search: false, assumptions: [], missing_author_facts: [] }
+      ? { successor: 'implement', reason: 'One implementation duty.', assumptions: [] }
       : { status: 'delivered', summary: 'Completed selected duty.', checks: [], caveats: [], remaining_work: [] }),
     exitCode: 0, duration_ms: 1 };
   } };

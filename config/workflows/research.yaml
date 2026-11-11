@@ -1,14 +1,16 @@
 name: research
 description: >
-  Research-exploration loop. The brief carries a `research:` frontmatter block
-  (baseline, policy, stop conditions). Each iteration the planner dynamically
-  dispatches a round (researcher proposes a direction → implement → measure →
-  submit a candidate). With research.measurement the FRAMEWORK runs the frozen
-  instrument; legacy briefs publish result_file. The FRAMEWORK journals outcomes (run-dir, agent-unreachable), and computes keep/drop +
-  continue/ship/ceiling via the decision policy — no prose decision tables.
-  The loop terminates natively when the policy says ship or ceiling.
+  Engine-owned measurement loop. research.measurement binds the candidate scope.
+  The engine calibrates, dispatches a producer and independent property review,
+  measures changed submissions, restores the best and writes the terminal report.
 stages:
-  - id: plan
-    role: planner
-    dynamic_dispatch: true
-    artifact_contract: {version: 1, produces: [], reads: [], groups: []}
+  - id: produce
+    role: coder
+    scope: []
+    artifact_contract: {version: 1, produces: [], reads: []}
+  - id: review
+    role: qa
+    scope: []
+    depends_on: [produce]
+    is_gate: true
+    artifact_contract: {version: 1, produces: [], reads: []}

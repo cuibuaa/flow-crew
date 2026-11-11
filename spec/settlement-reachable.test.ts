@@ -19,7 +19,6 @@ import {
   inspectRealityCheckReachability,
   parseDispatchedStageConfig,
   promoteAdmittedRealityChecks,
-  recoverVerifiedResearchSettlement,
   restoreAdmittedRealityChecks,
   validatedCriterionDischarges,
 } from '../src/scheduler.js';
@@ -178,64 +177,6 @@ describe('recorded research settlement replay', () => {
       .toBe('stage_evidence/iteration_8/YXVkaXRfdGVybWluYWw/verdict.json');
     expect(recorded.source.files).toEqual(expectedRecordedSourceFiles);
   });
-
-  it('turns the recorded failed final state into a verified ceiling decision', () => {
-    expect(recorded.recordedFailure).toMatchObject({ status: 'failed', iteration: 9, admissionPass: false });
-    expect(recorded.manifestStop.consecutive_no_improvement)
-      .toBe(recorded.manifestStop.configured_halt_after_no_improvement);
-
-    const replay = materializeReplay();
-    const projection = recoverVerifiedResearchSettlement(
-      replay.stages,
-      replay.state,
-      replay.projectDir,
-      replay.state.runId,
-      replay.runDirPath,
-    );
-
-    expect(projection).toMatchObject({
-      decision: 'stop_ceiling',
-      terminalStatus: 'ceiling_hit',
-      verificationPassed: true,
-      campaignSucceeded: false,
-      terminalOwner: 'write_ceiling',
-    });
-    const decision = JSON.parse(readFileSync(runRecordPath(replay.runDirPath, 'research_decision.json'), 'utf8'));
-    expect(decision).toMatchObject(projection!);
-    expect(decision.terminalPath).toBe('docs/example_incumbent/ceiling_report.md');
-    expect(readFileSync(runRecordPath(replay.runDirPath, 'signals', 'research_terminal_ready.json'), 'utf8'))
-      .toContain('write_ceiling');
-  });
-
-  it('keeps a failed effective gate blocking even when the metric says ceiling_hit', () => {
-    const replay = materializeReplay({ verdict: { ...recorded.verdict, pass: false } });
-    expect(recoverVerifiedResearchSettlement(
-      replay.stages, replay.state, replay.projectDir, replay.state.runId, replay.runDirPath,
-    )).toBeNull();
-    expect(() => readFileSync(runRecordPath(replay.runDirPath, 'research_decision.json'))).toThrow();
-  });
-
-  it('rejects a ceiling outcome whose campaign metric is a genuine win', () => {
-    const replay = materializeReplay({
-      verdict: { ...recorded.verdict, score: 0.06, threshold: 0.05 },
-      metric: { ...recorded.metric, value: 0.06, pass: true },
-    });
-    expect(recoverVerifiedResearchSettlement(
-      replay.stages, replay.state, replay.projectDir, replay.state.runId, replay.runDirPath,
-    )).toBeNull();
-    expect(() => readFileSync(runRecordPath(replay.runDirPath, 'research_decision.json'))).toThrow();
-  });
-
-  it('publishes no terminal path for a verified continue outcome', () => {
-    const replay = materializeReplay({
-      verdict: { ...recorded.verdict, outcome: 'continue' },
-      metric: { ...recorded.metric, outcome: 'continue' },
-    });
-    expect(recoverVerifiedResearchSettlement(
-      replay.stages, replay.state, replay.projectDir, replay.state.runId, replay.runDirPath,
-    )).toBeNull();
-    expect(() => readFileSync(runRecordPath(replay.runDirPath, 'research_decision.json'))).toThrow();
-  });
 });
 
 describe('criterion discharge boundary', () => {
@@ -250,7 +191,7 @@ describe('criterion discharge boundary', () => {
   };
 
   it('admits settlement-only coverage only with a matching engine discharge', () => {
-    const stages = [...settlementStages().map((entry) => ({ ...entry, criterion_refs: ['other'] })),
+    const stages = [...settlementStages().map((entry) => ({ ...entry, condition: entry.id === 'write_ceiling' ? 'audit_terminal.pass == true' : entry.condition, criterion_refs: ['other'] })),
       stage({ id: 'repair_terminal', depends_on: ['audit_terminal'], retry_to: ['audit_terminal'],
         dependency_reasons: { audit_terminal: 'Correct rejected terminal evidence.' }, scope: [], criterion_refs: [] })];
     const input = {
@@ -258,7 +199,6 @@ describe('criterion discharge boundary', () => {
       baseStages: [],
       dispatchStageId: 'plan',
       terminalStates: recorded.terminalStates,
-      research: recorded.research,
       criteria: {
         version: 1 as const,
         briefDigest: recorded.briefDigest,
@@ -377,7 +317,6 @@ describe('admitted check reuse boundary', () => {
       projectDir,
       stages: [],
       terminalStates: recorded.terminalStates,
-      research: recorded.research,
     });
     expect(errors).toHaveLength(2);
     expect(errors.every((error) => error.includes('REALITY_READ_DECLARATION_REQUIRED'))).toBe(true);

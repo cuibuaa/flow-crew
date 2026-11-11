@@ -2,7 +2,6 @@ import { runRecordPath } from '../../run-layout.js';
 // Boundary: Select and evaluate authored verdict carriers, project terminal-study evidence, derive digest-bound criterion discharges; no stage launching.
 import { captureProjectTree, readEvidence } from '../../evidence-ledger.js';
 import { projectValidationResult, validationDispositions } from '../../project-validation.js';
-import { readResearchGateCandidate } from '../../research-candidate.js';
 import { assessFindings, AuditFindingsSchema, projectLegacyFindings } from '../../scoped-audit-repair.js';
 import { CriterionDischargeRecord, GateVerdict, STAGE_STATUS, StageEvidenceRecord, StoreState, readRunState, readStageStatus, writeStageStatus, runDir, stageDir } from '../../store.js';
 import { declaredOutputFacts } from '../../run-state-access.js';
@@ -90,7 +89,7 @@ export function settleGateEvaluation(projectDir: string, runId: string, stageId:
   if ((status.status !== STAGE_STATUS.COMPLETE && status.status !== STAGE_STATUS.FAILED) || status.continuation || status.gate) return;
   const state = readRunState(projectDir, runId);
   const document = readGateVerdictDocument(runDir(projectDir, runId), stageId);
-  const rawVerdict = evaluateGateVerdict(document, projectDir, stageId, runId, loadGateContract(projectDir, runId, state.campaignStorageKey))
+  const rawVerdict = evaluateGateVerdict(document, projectDir, stageId, runId, state.research?.measurement ? null : loadGateContract(projectDir, runId, state.campaignStorageKey))
     ?? { pass: false, refusal: { kind: 'missing_verdict' as const }, reason: 'Gate did not produce a verdict' };
   const verdict = settleFindingAssessment(rawVerdict, document, projectDir, stageId, runId)!;
   if (status.status === STAGE_STATUS.FAILED) return;
@@ -179,6 +178,7 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
       if (stages.some(stage => stage.id !== stageId && !stage.is_gate && !stage.dynamic_dispatch && !stage.retry_to?.length
           && state.stages[stage.id]?.status !== STAGE_STATUS.COMPLETE && !transitivelyDependsOn(stageId, stage.id, byId)
           && scopeContainsPath(stage.scope ?? [], output.path))) continue;
+      if (state.research?.measurement && Object.values(state.terminalStates ?? {}).some(entry => entry.paths.includes(output.path))) continue;
       if (!output.available) return { pass: false, refusal: { kind: 'declared_output' }, reason: `DECLARED_OUTPUT_REQUIRED: ${output.path}: ${output.reason}; restore the required product before gate acceptance; Guidance cannot override the brief` };
     }
   }
@@ -194,12 +194,6 @@ function evaluateGateVerdict(document: GateVerdictDocument | null, projectDir: s
     const findings = AuditFindingsSchema.safeParse(v.audit_findings);
     if (!findings.success) return reject('audit_findings', `AUDIT_FINDINGS_INVALID: ${findings.error.message}`);
     if (raw.pass === true && findings.data.findings.length) return { pass: false, refusal: { kind: 'audit_findings' }, reason: 'AUDIT_FINDINGS_OPEN: a passing verdict cannot contain unresolved structured findings' };
-  }
-  if (runId && v.pass === true) {
-    const candidate = readResearchGateCandidate(base, stageId);
-    if (candidate && (candidate.kind === 'invalid' || candidate.kind === 'absent')) {
-      return { pass: false, refusal: { kind: candidate.kind === 'absent' ? 'research_outcome_absent' : 'research_outcome_invalid' }, reason: `Research round outcome is ${candidate.kind}: ${candidate.reason ?? 'no usable evidence'}` };
-    }
   }
   const contradiction = explicitPassContradiction(v, 'verdict');
   if (contradiction) {
@@ -261,7 +255,7 @@ export function deriveCriterionDischarges(input: {
 
   const byId = new Map(input.stages.map((stage) => [stage.id, stage]));
   const terminalOwnerIds = new Set(Object.values(admission.terminalOwners));
-  const contract = loadGateContract(input.projectDir, input.runId, input.state.campaignStorageKey);
+  const contract = input.state.research?.measurement ? null : loadGateContract(input.projectDir, input.runId, input.state.campaignStorageKey);
   const records = new Map<string, CriterionDischargeRecord>();
   for (const gate of input.stages) {
     const refs = admission.criterionGateRefs?.[gate.id] ?? [];

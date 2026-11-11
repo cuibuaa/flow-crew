@@ -1,32 +1,13 @@
-import { runRecordPath } from '../../run-layout.js';
+import { ArtifactPathSchema } from '../../artifact-location.js';
 import { ResearchMeasurementSchema } from '../../research-measurement.js';
 import { type BriefFrontmatterDocument, parseBriefFrontmatterDocument } from '../../brief-frontmatter.js';
 /** Brief frontmatter, duration/floor contracts; no dispatch admission or execution. */
-import { type ResearchConfirmConfig, type TerminalStatesConfig, type ResearchConfig, type ResearchIntegrityConfig, isTerminalRunStatus, TERMINAL_STATUSES, type TerminalStateEntry, type PostTerminateHook, type StoreState } from '../../store.js';
+import { type TerminalStatesConfig, type ResearchConfig, isTerminalRunStatus, TERMINAL_STATUSES, type TerminalStateEntry, type PostTerminateHook, type StoreState } from '../../store.js';
 import { join } from 'node:path';
-import { writeFileSync } from '../../engine-fs.js';
 import { existsSync, readdirSync, statSync } from 'node:fs';
-import { type ResearchFeasibilityConfig, parseResearchFeasibility } from '../../research-feasibility.js';
 import { type BriefOutputDeclaration, extractBriefOutputDeclarations } from '../../ship-inputs.js';
-import { nextTechnicalRetryBudget } from '../../attempt-deadline.js';
-import { ResearchPolicySchema, RESEARCH_POLICY_IDS } from '../../research-policy.js';
-import { ArtifactReadSchema } from '../../artifact-declarations.js';
 import { log } from './shared.js';
 import { parsePlannerPolicySelection, type PlannerPolicyName } from '../../planner-policies.js';
-
-export function recordConfirmNotRun(runDirPath: string, confirm: ResearchConfirmConfig | undefined, terminalStatus: string): void {
-  if (!confirm?.command) return;
-  const path = runRecordPath(runDirPath, 'research_confirm.json');
-  if (existsSync(path)) return; // a real confirm result was already written (ship path) — leave it.
-  try {
-    writeFileSync(path, JSON.stringify({
-      status: 'not_run',
-      reason: `confirm runs on a 'ship' terminal; this run terminated '${terminalStatus}', so the brief-declared confirm was not executed`,
-      command: confirm.command,
-      requires: confirm.requires,
-    }, null, 2) + '\n', 'utf-8');
-  } catch { /* non-critical */ }
-}
 
 export interface ParsedBriefFrontmatter {
   maxContinuations?: number;
@@ -34,12 +15,8 @@ export interface ParsedBriefFrontmatter {
   plannerPolicies?: PlannerPolicyName[];
   workflowError?: string;
   terminalStates?: TerminalStatesConfig;
-  /** Metric-loop config. A numeric baseline is the sole activator. */
+  /** The only active research contract is an engine-owned measurement declaration. */
   research?: ResearchConfig;
-  /** Static preflight contract, independently reachable without activating a metric loop. */
-  researchFeasibility?: ResearchFeasibilityConfig;
-  /** Strict-parser error retained even when no metric-loop config is created. */
-  researchFeasibilityError?: string;
   researchPolicyError?: string;
   outputs?: BriefOutputDeclaration[];
   stripped: string;
@@ -47,87 +24,10 @@ export interface ParsedBriefFrontmatter {
   frontmatterErrorKind?: BriefFrontmatterDocument['errorKind'];
 }
 
-export interface ResearchIterationBudgetAssessment {
-  pass: boolean;
-  maxRounds?: number;
-  maxIterations: number;
-  maxWallHours?: number;
-  maxWallMs?: number;
-  iterationWallCeilingMs?: number;
-  iterationWallCeilingHours?: number;
-  attemptDeadlines?: Array<{
-    attempt: number;
-    kind: 'base' | 'technical_retry';
-    budgetMs: number;
-    budgetHours: number;
-  }>;
-  reason?: string;
-}
-
-export interface ResearchIterationBudgetBindings {
-  attemptTimeoutMs: number;
-  technicalRetries: number;
-}
-
-/** Compare every configured binding on research duration in one unit-explicit
- * assessment. A terminal owner can run in the settling iteration, so authored
- * rounds fit exactly at the engine iteration ceiling. Technical retries retain
- * their ordinary per-attempt deadlines; the list makes each derived deadline
- * visible beside the aggregate wall binding. */
-export function assessResearchIterationBudget(
-  research: ResearchConfig | undefined,
-  maxIterations: number,
-  bindings?: ResearchIterationBudgetBindings,
-): ResearchIterationBudgetAssessment {
-  const maxRounds = research?.stop?.maxRounds;
-  const maxWallHours = research?.stop?.maxWallHours;
-  const assessment: ResearchIterationBudgetAssessment = {
-    pass: true,
-    ...(typeof maxRounds === 'number' ? { maxRounds } : {}),
-    maxIterations,
-    ...(typeof maxWallHours === 'number'
-      ? { maxWallHours, maxWallMs: maxWallHours * 3_600_000 }
-      : {}),
-  };
-
-  if (bindings) {
-    const attemptTimeoutMs = bindings.attemptTimeoutMs;
-    const technicalRetries = Math.max(0, Math.floor(bindings.technicalRetries));
-    const iterationWallCeilingMs = attemptTimeoutMs * maxIterations;
-    assessment.iterationWallCeilingMs = iterationWallCeilingMs;
-    assessment.iterationWallCeilingHours = iterationWallCeilingMs / 3_600_000;
-    const attemptDeadlines: NonNullable<ResearchIterationBudgetAssessment['attemptDeadlines']> = [];
-    let budgetMs = attemptTimeoutMs;
-    for (let retry = 0; retry <= technicalRetries; retry++) {
-      attemptDeadlines.push({
-        attempt: retry + 1,
-        kind: retry === 0 ? 'base' : 'technical_retry',
-        budgetMs,
-        budgetHours: budgetMs / 3_600_000,
-      });
-      if (retry < technicalRetries) budgetMs = nextTechnicalRetryBudget(budgetMs);
-    }
-    assessment.attemptDeadlines = attemptDeadlines;
-  }
-
-  if (!research?.measurement && typeof maxRounds === 'number' && maxRounds > maxIterations) {
-    assessment.pass = false;
-    assessment.reason = `research.stop.max_rounds (${maxRounds}) exceeds the engine iteration limit (${maxIterations}); units: rounds versus iterations`;
-    return assessment;
-  }
-  if (!research?.measurement && typeof assessment.maxWallMs === 'number'
-      && typeof assessment.iterationWallCeilingMs === 'number'
-      && assessment.maxWallMs > assessment.iterationWallCeilingMs) {
-    assessment.pass = false;
-    assessment.reason = `research.stop.max_wall_hours (${maxWallHours} hours / ${assessment.maxWallMs} ms) exceeds the engine wall capacity from default_timeout_ms × max_iterations (${assessment.iterationWallCeilingHours} hours / ${assessment.iterationWallCeilingMs} ms)`;
-  }
-  return assessment;
-}
-
-/** All new briefs enter the same model chooser; frontmatter only supplies declarations. */
+/** A measurement declaration owns research shape; engineering enters the chooser. */
 export function entryWorkflow(parsed: ParsedBriefFrontmatter): { workflow: string; reason: string; error?: string } {
-  const error = (parsed.frontmatterErrorKind === 'yaml' ? parsed.frontmatterError : undefined) ?? parsed.workflowError;
-  return { workflow: 'entry', reason: 'The model chooser selects the shape from the task and declarations.', ...(error ? { error } : {}) };
+  const error = (parsed.frontmatterErrorKind === 'yaml' ? parsed.frontmatterError : undefined) ?? parsed.workflowError ?? parsed.researchPolicyError;
+  return { workflow: parsed.research ? 'research' : 'entry', reason: parsed.research ? 'The measurement declaration fixes the research loop.' : 'The model chooser selects the engineering shape.', ...(error ? { error } : {}) };
 }
 
 export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
@@ -153,121 +53,41 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
     const reason = error instanceof Error ? error.message : String(error);
     return { stripped, frontmatterError: reason, workflowError: reason };
   }
-  // Legacy workflow metadata is inert, like other unconsumed metadata. It
-  // neither selects a shape nor prevents an old brief entering the chooser.
-  // Terminal-state, research-result, and report-directory paths have their own
-  // lifecycle contracts. Only the brief's explicit output collection belongs
-  // to the terminal archive added for `outputs:`; otherwise a consumed mutable
-  // research slot would make an unrelated terminal artifact impossible to
-  // commit merely because it is absent at closeout.
+  // Only explicit products belong to output archival.
   const outputs = extractBriefOutputDeclarations(brief).filter((entry) => (
     /^(?:outputs?|deliverables?|artifacts?)(?:\.|$)/.test(entry.source)
   ));
   if (outputs.length > 0) out.outputs = outputs;
 
-  // `research:` and `objective:` are exact aliases. Static feasibility is parsed
-  // independently; only a numeric baseline creates the native metric-loop config.
-  const resRaw = (parsed as Record<string, unknown>).research ?? (parsed as Record<string, unknown>).objective;
-  if (resRaw && typeof resRaw === 'object') {
-    const r = resRaw as Record<string, unknown>;
-    if (r.feasibility !== undefined) {
-      const feasibility = parseResearchFeasibility(r.feasibility);
-      if (feasibility.status === 'valid') out.researchFeasibility = feasibility.value;
-      else out.researchFeasibilityError = feasibility.error;
-    }
-    if (typeof r.baseline === 'number' || r.measurement !== undefined) {
-      // An unrecognised policy used to fall through to greedy_stack without a word.
-      // That silence cost a real campaign: a brief wrote `policy: heuristic_policy_v1`,
-      // believing the field named the opponent rather than the keep/drop rule, got the
-      // default, and the run's premature ceiling was only traced back to it by reading
-      // this line. Report it the way the neighbouring feasibility parse reports its
-      // failures -- an error on `out` that brief-preflight raises as a finding -- rather
-      // than throwing, because nothing in this function throws.
-      const policyParse = ResearchPolicySchema.safeParse(r.policy ?? 'greedy_stack');
-      if (!policyParse.success) {
-        out.researchPolicyError =
-          `${JSON.stringify(r.policy)} is not one of ${RESEARCH_POLICY_IDS.join(', ')}`;
-      }
-      const policy: ResearchConfig['policy'] = policyParse.success ? policyParse.data : 'greedy_stack';
-      const research: ResearchConfig = { baseline: typeof r.baseline === 'number' ? r.baseline : 0, policy };
-      if (r.measurement !== undefined) {
+  // Active inputs have one strict contract. Historical run JSON is read separately.
+  const resRaw = Object.hasOwn(parsed, 'research') ? (parsed as Record<string, unknown>).research : (parsed as Record<string, unknown>).objective;
+  const duplicate = Object.hasOwn(parsed, 'research') && Object.hasOwn(parsed, 'objective');
+  if (resRaw !== undefined || duplicate) {
+    const migration = 'Legacy research is retired; declare research.measurement with frozen/candidate roots and structured guards.';
+    const fail = (detail: string) => { out.researchPolicyError = `${migration} ${detail}`; out.workflowError = out.researchPolicyError; };
+    if (duplicate) fail('Declare the measurement contract once; research and its objective alias cannot both be present.');
+    else if (!resRaw || typeof resRaw !== 'object' || Array.isArray(resRaw)) fail('Research must be a mapping.');
+    else {
+      const r = resRaw as Record<string, unknown>;
+      const unknown = Object.keys(r).filter(key => !['measurement', 'stop'].includes(key));
+      const stop = r.stop as Record<string, unknown> | undefined;
+      const stopKeys = stop && typeof stop === 'object' ? Object.keys(stop) : [];
+      const retired = stopKeys.filter(key => !['beat', 'max_rounds', 'max_wall_hours', 'halt_after_no_improvement'].includes(key));
+      if (r.measurement === undefined || unknown.length || retired.length) fail(`Remove retired fields: ${[...unknown, ...retired.map(k => 'stop.' + k)].join(', ') || 'research without measurement'}.`);
+      else {
         const measurement = ResearchMeasurementSchema.safeParse(r.measurement);
-        if (measurement.success) research.measurement = measurement.data;
-        else out.researchPolicyError = `research.measurement: ${measurement.error.message}`;
-        const stop = r.stop as Record<string, unknown> | undefined;
-        if (!Number.isSafeInteger(stop?.max_rounds) || Number(stop?.max_rounds) < 1) out.researchPolicyError = 'engine measurement requires a positive integer stop.max_rounds';
-        if (stop?.max_wall_hours !== undefined && (typeof stop.max_wall_hours !== 'number' || !Number.isFinite(stop.max_wall_hours) || stop.max_wall_hours <= 0)) out.researchPolicyError = 'measurement stop.max_wall_hours must be finite and positive';
-        if (stop?.halt_after_no_improvement !== undefined && (!Number.isSafeInteger(stop.halt_after_no_improvement) || Number(stop.halt_after_no_improvement) < 1)) out.researchPolicyError = 'measurement halt_after_no_improvement must be a positive integer';
-        if (stop?.min_improvement !== undefined || stop?.improvement_se_multiple !== undefined) out.researchPolicyError = 'measurement uses strict calibrated > 2 sigma; remove legacy improvement margins';
-        if (r.confirm !== undefined || r.result_schema !== undefined || r.integrity !== undefined) out.researchPolicyError = 'measurement replaces confirm, result_schema and integrity; declare structured measurement guards';
+        if (!measurement.success) fail(`research.measurement: ${measurement.error.message}`);
+        else if (!Number.isSafeInteger(stop?.max_rounds) || Number(stop?.max_rounds) < 1) fail('stop.max_rounds must be a positive integer.');
+        else if (stop?.max_wall_hours !== undefined && (typeof stop.max_wall_hours !== 'number' || !Number.isFinite(stop.max_wall_hours) || stop.max_wall_hours <= 0)) fail('stop.max_wall_hours must be finite and positive.');
+        else if (stop?.halt_after_no_improvement !== undefined && (!Number.isSafeInteger(stop.halt_after_no_improvement) || Number(stop.halt_after_no_improvement) < 1)) fail('stop.halt_after_no_improvement must be a positive integer.');
+        else if (stop?.beat !== undefined && (typeof stop.beat !== 'number' || !Number.isFinite(stop.beat))) fail('stop.beat must be finite.');
+        else out.research = { measurement: measurement.data, stop: {
+          maxRounds: Number(stop!.max_rounds),
+          ...(stop!.max_wall_hours === undefined ? {} : { maxWallHours: Number(stop!.max_wall_hours) }),
+          ...(stop!.halt_after_no_improvement === undefined ? {} : { haltAfterNoImprovement: Number(stop!.halt_after_no_improvement) }),
+          ...(stop!.beat === undefined ? {} : { beat: Number(stop!.beat) }),
+        } };
       }
-      // Honor higher_is_better; coerce the common YAML-quoting mistake ("false"/"true"
-      // as strings) instead of silently dropping it (which would flip every keep/ship
-      // decision for a lower-is-better metric). Warn on an uncoercible value.
-      if (typeof r.higher_is_better === 'boolean') {
-        research.higherIsBetter = r.higher_is_better;
-      } else if (typeof r.higher_is_better === 'string') {
-        const v = r.higher_is_better.trim().toLowerCase();
-        if (v === 'false' || v === 'true') research.higherIsBetter = v === 'true';
-        else log.warn({ value: r.higher_is_better }, 'research.higher_is_better is not a boolean — ignoring (defaults to higher-is-better)');
-      } else if (r.higher_is_better !== undefined) {
-        log.warn({ value: r.higher_is_better }, 'research.higher_is_better is not a boolean — ignoring (defaults to higher-is-better)');
-      }
-      if (typeof r.result_file === 'string') research.resultFile = r.result_file;
-      if (typeof r.report_dir === 'string') research.reportDir = r.report_dir;
-      if (out.researchFeasibility !== undefined) research.feasibility = out.researchFeasibility;
-      if (out.researchFeasibilityError !== undefined) research.feasibilityError = out.researchFeasibilityError;
-      // Per-round integrity gates — brief-declared so the engine carries no domain
-      // field/threshold knowledge. snake_case in YAML → camelCase in config.
-      if (r.integrity && typeof r.integrity === 'object') {
-        const ig = r.integrity as Record<string, unknown>;
-        const integrity: ResearchIntegrityConfig = {};
-        if (typeof ig.max_std_ratio === 'number') integrity.maxStdRatio = ig.max_std_ratio;
-        if (typeof ig.outlier_factor === 'number') integrity.outlierFactor = ig.outlier_factor;
-        if (ig.field_floors && typeof ig.field_floors === 'object') {
-          const ff: Record<string, number> = {};
-          for (const [k, v] of Object.entries(ig.field_floors as Record<string, unknown>)) if (typeof v === 'number') ff[k] = v;
-          if (Object.keys(ff).length) integrity.fieldFloors = ff;
-        }
-        if (Array.isArray(ig.reject_if_positive)) {
-          const rip = ig.reject_if_positive.filter((x): x is string => typeof x === 'string');
-          if (rip.length) integrity.rejectIfPositive = rip;
-        }
-        research.integrity = integrity;
-      }
-      // Single-source output contract: an opaque JSON Schema for round_result, used to
-      // validate each round + injected to the planner so its checks reference the declared shape.
-      if (r.result_schema && typeof r.result_schema === 'object') research.resultSchema = r.result_schema as Record<string, unknown>;
-      if (Array.isArray(r.context_roots)) {
-        const roots = r.context_roots.filter((x): x is string => typeof x === 'string');
-        if (roots.length) research.contextRoots = roots;
-      }
-      // A+(a) CONFIRM gate — verify-before-trust as a generic mechanism. The brief declares a
-      // shell command (and optional human-readable contract); the engine runs it before a `ship`
-      // (via the same exec-script-exit-zero check the reality gate uses) and only allows `shipped`
-      // if it exits 0, else downgrades to `ceiling_hit`. The engine holds NO domain knowledge —
-      // the command/assertion is entirely brief-owned (e.g. "re-run on a fresh split, assert beat").
-      if (r.confirm && typeof r.confirm === 'object') {
-        const c = r.confirm as Record<string, unknown>;
-        if (typeof c.command === 'string' && c.command.trim()) {
-          const confirm: ResearchConfirmConfig = { command: c.command };
-          if (c.reads !== undefined) confirm.reads = ArtifactReadSchema.array().parse(c.reads);
-          if (typeof c.requires === 'string') confirm.requires = c.requires;
-          if (typeof c.timeout_seconds === 'number') confirm.timeoutSeconds = c.timeout_seconds;
-          research.confirm = confirm;
-        }
-      }
-      if (r.stop && typeof r.stop === 'object') {
-        const s = r.stop as Record<string, unknown>;
-        research.stop = {};
-        if (typeof s.beat === 'number') research.stop.beat = s.beat;
-        if (typeof s.max_rounds === 'number') research.stop.maxRounds = s.max_rounds;
-        if (typeof s.max_wall_hours === 'number') research.stop.maxWallHours = s.max_wall_hours;
-        if (typeof s.halt_after_no_improvement === 'number') research.stop.haltAfterNoImprovement = s.halt_after_no_improvement;
-        if (typeof s.min_improvement === 'number') research.stop.minImprovement = s.min_improvement;
-        if (typeof s.improvement_se_multiple === 'number') research.stop.improvementSEMultiple = s.improvement_se_multiple;
-      }
-      out.research = research;
     }
   }
 
@@ -333,6 +153,16 @@ export function parseBriefFrontmatter(brief: string): ParsedBriefFrontmatter {
       }
     }
     if (entry) ts[status] = entry;
+  }
+  if (out.research) {
+    const roots = [...out.research.measurement.frozen, ...out.research.measurement.candidate];
+    const reports = Object.values(ts).flatMap(entry => entry.paths);
+    const invalid = reports.find(path => !ArtifactPathSchema.safeParse(path).success
+      || roots.some(root => path === root || path.startsWith(root + '/') || root.startsWith(path + '/')));
+    if (invalid !== undefined) {
+      out.workflowError = out.researchPolicyError = `Research terminal report ${JSON.stringify(invalid)} must be a confined file outside frozen and candidate roots.`;
+      delete out.research;
+    }
   }
   if (Object.keys(ts).length > 0) out.terminalStates = ts;
   return out;

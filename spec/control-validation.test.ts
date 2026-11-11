@@ -195,7 +195,7 @@ describe('repair admission and certification have distinct evidence demands', ()
     const verdict = { pass: false, refusal: { kind: 'validation_unresolved' as const }, findings: { confirmed: [{ id: 'value' }], unconfirmed: [] } } as unknown as import('../src/store.js').GateVerdict;
     const fact = classifyGateRecoveryFact('review', { pass: false }, verdict);
     const repair = { id: 'repair', retry_to: ['review'] } as import('../src/scheduler/sched_admission/configuration.js').StageConfig;
-    expect(findGateRecoveryStages([repair], ['review'], undefined, { review: fact })).toEqual([repair]);
+    expect(findGateRecoveryStages([repair], ['review'], { review: fact })).toEqual([repair]);
   });
 });
 

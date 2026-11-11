@@ -1,4 +1,5 @@
-import { initializeResearchMeasurements } from '../../research-measurement.js';
+import { parseBriefFrontmatter } from '../sched_admission/brief-contract.js';
+import { runResearchLoop, researchStages } from '../sched_policy/research.js';
 // Boundary: Manage admitted run lifetime, verified checkpoint, heartbeat, deterministic watchdog and unconditional owned cleanup around the iteration driver.
 import { Adapter, AgentConfig, withRunProcessOwnership } from '../../adapters/base.js';
 import { AttemptDeadlineClock } from '../../attempt-deadline.js';
@@ -17,7 +18,7 @@ import { configureWorkflowBrief } from './brief.js';
 import { prepareWorkflowLaunch } from './launch.js';
 import { runWorkflowIterations } from './workflow-loop.js';
 import { writeCampaignEntry } from './services.js';
-import { concludeRun, settleTerminalResearchCandidates } from '../sched_policy/run-completion.js';
+import { concludeRun, projectResearchConclusion, reconcileResearchConclusion } from '../sched_policy/run-completion.js';
 import { join } from 'node:path';
 import { engineConfigDir } from '../../config.js';
 import { recordRunEvent } from '../../run-events.js';
@@ -40,6 +41,8 @@ export async function runWorkflow(
   briefAdmission?: BriefAdmissionRecord,
   attemptDeadlineClockFactory?: () => AttemptDeadlineClock,
 ): Promise<StoreState> {
+  const declared = taskDescription ? parseBriefFrontmatter(taskDescription) : undefined;
+  if (declared?.research) workflow = { ...workflow, name: 'research', stages: researchStages(declared.research), dispatch: undefined };
   let launch;
   try { launch = prepareWorkflowLaunch(workflow, workflowYaml, projectDir, existingRunId, taskDescription, briefAdmission); }
   catch (error) {
@@ -49,11 +52,10 @@ export async function runWorkflow(
     throw error;
   }
   if (launch.kind === 'settled') {
-    settleTerminalResearchCandidates(projectDir, launch.state);
-    return launch.state;
+    return launch.state.researchReportPaths ? reconcileResearchConclusion(projectDir, launch.state.runId) : launch.state;
   }
   const {runId, runDirPath, maxIterations: initialMaxIterations, baseStages, resumingExistingRun, resumeAtIteration, schedulerPidPath, launchIntentOwned} = launch;
-  let maxIterations = initialMaxIterations;
+  const maxIterations = initialMaxIterations;
   workflowYaml = launch.workflowYaml;
   // Watchdog and pid cleanup cover every return after admission, including
   // brief/frontmatter validation failures before the iteration loop.
@@ -89,19 +91,6 @@ export async function runWorkflow(
   taskDescription = configured.taskDescription;
   const researchState = configured.researchState ?? checkpointState;
   const research = researchState.research;
-  if (research?.measurement) {
-    // The admitted research round budget replaces the workflow iteration cap.
-    maxIterations = Math.max(maxIterations, research.stop!.maxRounds!);
-    const measurement = await initializeResearchMeasurements(projectDir, runDirPath, research.measurement,
-      research.stop?.maxWallHours === undefined ? Infinity : Date.parse(researchState.startedAt) + research.stop.maxWallHours * 3600000);
-    if (measurement.error) throw new Error(`Research baseline is unmeasured: ${measurement.error}`);
-    const primary = research.measurement.primary[0];
-    updateRunState(projectDir, runId, state => {
-      state.maxIterations = maxIterations;
-      state.research!.baseline = measurement.baseline.items?.reduce((n, item) => n + item.metrics[primary], 0) ?? research.baseline;
-      state.research!.higherIsBetter = research.measurement!.metrics[primary].direction === 'max';
-    });
-  }
 
   const resolvedAgentsDir = agentsDir ?? join(engineConfigDir, 'agents');
   const basePrompt = loadBasePrompt(resolvedAgentsDir);
@@ -112,11 +101,13 @@ export async function runWorkflow(
 
   watchdog = new StageWatchdog(projectDir, runId, { idleThresholdMs: heartbeatDefaults.stage_idle_timeout_ms });
   watchdog.start();
+  if (research) return settled = await runResearchLoop(projectDir, runId, runDirPath, workflow, adapter, agents,
+    resolvedAgentsDir, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
   return settled = await runWorkflowIterations(baseStages, workflowYaml, maxIterations, resumeAtIteration, resumingExistingRun, projectDir, runId, runDirPath, workflow, adapter, agents, resolvedAgentsDir, roleRegistry, skills, taskDescription, availableSkillsList, attemptDeadlineClockFactory);
   } catch (error) {
     const reason = `Scheduler failed: ${error instanceof Error ? error.message : String(error)}`;
     log.error({ err: error }, reason);
-    let publish: (() => void) | undefined;
+    let publish: ((persist: () => void) => void) | undefined;
     settled = updateRunState(projectDir, runId, state => {
       if (state.status !== RUN_STATUS.RUNNING) return;
       const completedAt = new Date().toISOString();
@@ -129,11 +120,13 @@ export async function runWorkflow(
       concludeRun(state, { status: RUN_STATUS.FAILED, reasonCode: 'scheduler_failed', detail: reason,
         eventFields: () => ({ iteration: state.currentIteration, detail: reason }), writeCampaignEntry },
       (_state, notify) => { publish = notify; });
-    }, () => publish?.());
+    }, (current, persist) => {
+      if (publish) publish(persist);
+      else projectResearchConclusion(current, persist);
+    });
     return settled;
   } finally {
     // Complete research bookkeeping while this scheduler still owns the run.
-    settleTerminalResearchCandidates(projectDir, settled);
     closeRollbackBaseline(projectDir, runDirPath);
     await schedulerHeartbeat?.stop();
     watchdog?.stop();

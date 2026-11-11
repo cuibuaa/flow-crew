@@ -10,9 +10,8 @@ import { type CriterionDischargeRecord, type StoreState, STAGE_STATUS, type Term
 import { type BriefCriteriaArtifact } from '../../brief-criteria.js';
 import { createHash } from 'node:crypto';
 import { artifactDeclarationFindings } from '../../artifact-declarations.js';
-import { researchOutcomePaths } from '../../research-paths.js';
-import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, EMITTED_RESEARCH_DECISIONS, RecordedWorkflowConfigSchema } from './configuration.js';
-import { finiteStatusConditionDomainError, researchTerminalConditionExcludesContinue, assessTerminalConditionCoverage } from './condition-coverage.js';
+import { type WorkflowConfig, WorkflowConfigSchema, normalizeStageContracts, type StageConfig, parseDispatchedStageConfig, RecordedWorkflowConfigSchema } from './configuration.js';
+import { finiteStatusConditionDomainError, assessTerminalConditionCoverage } from './condition-coverage.js';
 import { normalizedProjectPath, scopeMatchesProjectPath, scopeIntersectsProjectTree } from './scope-services.js';
 import { inspectStageGraph, parseDeclaredScope, parallelScopeAdmissionWarnings, transitivelyDependsOn } from './frontier.js';
 import { applySharedRoleContract } from '../sched_policy/prompt-contracts.js';
@@ -244,37 +243,15 @@ export function createDispatchAdmission() {
           errors.push(admissionError('stage_graph', `${stage.id}.decision: unknown successor ${successor}`, 'decision.successors', stage.id));
         }
       }
-      if (stage.is_gate && !all.some((repair) => !repair.is_gate && !repair.dynamic_dispatch && repair.retry_to?.includes(stage.id))) {
+      if (stage.is_gate && !input.research && !all.some((repair) => !repair.is_gate && !repair.dynamic_dispatch && repair.retry_to?.includes(stage.id))) {
         errors.push(admissionError('stage_retry_to', `${stage.id}: missing repair route; declare an ordinary repair stage with retry_to: [${stage.id}], depends_on: [${stage.id}], and scope for the permitted repairs. The engine bounds repair rounds by gate_retry_loops without re-planning.`, 'retry_to', stage.id));
-      }
-      if (input.research && stage.id === 'research') {
-        errors.push(admissionError('stage_id', `${stage.id}.id: reserved for framework-owned research policy facts; choose a different stage ID`, 'id', stage.id));
       }
       if (stage.condition?.trim()) {
         try {
           const parsed = parseCondition(stage.condition);
-          if (!input.research && parsed.stageId === 'research') {
-            errors.push(admissionError('stage_condition', `${stage.id}.condition: references framework research facts in a non-research run; remove the condition or declare research mode`, 'condition', stage.id));
-          }
+          if (!byId.has(parsed.stageId)) errors.push(admissionError('stage_condition', `${stage.id}.condition: unknown stage ${parsed.stageId}; conditions require a declared stage fact`, 'condition', stage.id));
           const finiteDomainError = finiteStatusConditionDomainError(stage.id, parsed);
           if (finiteDomainError) errors.push(admissionError('stage_condition', finiteDomainError, 'condition', stage.id));
-          if (parsed.stageId === 'research' && parsed.op === '==') {
-            if (parsed.field === 'decision') {
-              if (typeof parsed.value !== 'string' || !EMITTED_RESEARCH_DECISIONS.has(parsed.value)) {
-                errors.push(admissionError('stage_condition', `${stage.id}.condition: research.decision literal ${JSON.stringify(parsed.value)} cannot occur; expected one of ${[...EMITTED_RESEARCH_DECISIONS].join(', ')}`, 'condition', stage.id));
-              }
-            } else if (parsed.field === 'terminalStatus') {
-              const statuses = new Set(Object.keys(input.terminalStates ?? {}));
-              if (typeof parsed.value !== 'string' || !statuses.has(parsed.value)) {
-                errors.push(admissionError('stage_condition', `${stage.id}.condition: research.terminalStatus literal ${JSON.stringify(parsed.value)} is not declared by terminal_states`, 'condition', stage.id));
-              }
-            } else if (parsed.field === 'terminalPath') {
-              const paths = new Set(Object.values(input.terminalStates ?? {}).flatMap((entry) => entry.paths));
-              if (typeof parsed.value !== 'string' || !paths.has(parsed.value)) {
-                errors.push(admissionError('stage_condition', `${stage.id}.condition: research.terminalPath literal ${JSON.stringify(parsed.value)} is not declared by terminal_states`, 'condition', stage.id));
-              }
-            }
-          }
         } catch (error) {
           errors.push(admissionError('stage_condition', `${stage.id}.condition: ${error instanceof Error ? error.message : String(error)}`, 'condition', stage.id));
         }
@@ -296,8 +273,7 @@ export function createDispatchAdmission() {
 
     const terminalOwners: Record<string, string> = {};
     const ownerIds = new Set<string>();
-    const checkedResearchOwnerIds = new Set<string>();
-    const terminalDeclarations = Object.entries(input.terminalStates ?? {})
+    const terminalDeclarations = Object.entries(input.research ? {} : input.terminalStates ?? {})
       .flatMap(([status, entry]) => entry.paths.map((path) => ({ status, path })));
     const declarationsByPath = new Map<string, Array<{ status: string; path: string }>>();
     for (const declaration of terminalDeclarations) {
@@ -322,19 +298,7 @@ export function createDispatchAdmission() {
         const owner = owners[0];
         terminalOwners[rawPath] = owner.id;
         ownerIds.add(owner.id);
-        if (input.research && !researchTerminalConditionExcludesContinue(owner.condition, declaration)) {
-          errors.push(admissionError('terminal_owner_condition', `terminal owner ${owner.id}.condition: must be mechanically false when research.decision is continue; use research.terminalPath == ${JSON.stringify(rawPath)} (preferred), matching research.terminalStatus, or another narrow non-continue equality`, 'condition', owner.id));
-        }
-        if (input.research && !checkedResearchOwnerIds.has(owner.id)) {
-          checkedResearchOwnerIds.add(owner.id);
-          const researchOutputs = researchOutcomePaths(input.research)
-            .map(path => normalizedProjectPath(path)).filter((path): path is string => Boolean(path));
-          for (const researchOutput of researchOutputs) {
-            if (stageScopeOwnsPath(owner, researchOutput, !!input.research.measurement)) {
-              errors.push(admissionError('terminal_owner_scope', `terminal owner ${owner.id}.scope: research result producer path ${researchOutput} cannot be owned by a terminal writer; separate measurement from terminalization`, 'scope', owner.id));
-            }
-          }
-        }
+
     }
 
     if (terminalDeclarations.length > 0 && Object.keys(terminalOwners).length === terminalDeclarations.length) {

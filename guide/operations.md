@@ -178,9 +178,8 @@ the run with a result naming what the author must supply before launching again.
 Historical approval logs and paused run records remain readable by the CLI, dashboard and
 wrap-up readers. They grant no new authority and have no decision/resume endpoint.
 
-Exhausted research gates use their admitted escalation terminal owner. Without that owner,
-the run finishes incomplete with the failing criteria and missing-owner evidence. It does
-not ask a person to repeat the gate decision. Proven resumable host interruptions retain their
+Research review rejection journals an unmeasured rejected submission. A producer or review execution failure
+fails the run. The engine owns numeric decisions, stopping and every terminal report. Proven resumable host interruptions retain their
 orchestration checkpoints without requesting human approval.
 
 Cancellation closes active control state as `cancelled` and attempts to stop its owned

@@ -131,7 +131,6 @@ export interface StageOpts {
   availableRoles?: string;
   availableChecks?: string;
   availableSkills?: string;
-  resultSchema?: string;
   contextInventory?: string;
   ledgerDigest?: string;
   taskDescription?: string;
@@ -141,7 +140,6 @@ export interface StageOpts {
   repairFindings?: import('./scoped-audit-repair.js').FindingAssessment['confirmed'];
   gateReviewed?: boolean;
   dynamicDispatch?: boolean;
-  researchOutcomeGate?: boolean;
   criterionRefs?: string[];
   resumeSessionId?: string;
   sessionOwnerStageId?: string;
@@ -289,7 +287,6 @@ export async function runStage(
     availableSkills: opts.availableSkills,
     taskDescription: opts.taskDescription,
     isGate: opts.isGate,
-    researchOutcomeGate: opts.researchOutcomeGate,
     criterionRefs: opts.criterionRefs,
     stageId: opts.stageId,
     role: opts.role.name,
@@ -447,7 +444,6 @@ export async function runStage(
     .replace(/\{available_roles\}/g, opts.availableRoles ?? '')
     .replace(/\{available_checks\}/g, opts.availableChecks ?? 'none')
     .replace(/\{available_skills\}/g, opts.availableSkills ?? 'none')
-    .replace(/\{result_schema\}/g, opts.resultSchema ?? 'none')
     .replace(/\{context_inventory\}/g, opts.contextInventory ?? 'none')
     .replace(/\{ledger_digest\}/g, opts.ledgerDigest ?? 'none')
     .replace(/\{terminal_statuses\}/g, TERMINAL_STATUSES.join(', '))

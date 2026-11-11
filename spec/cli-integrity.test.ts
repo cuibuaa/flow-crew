@@ -122,7 +122,7 @@ describe('rehearsal language and diagnostic integrity', () => {
     expect(result.status, result.stderr || result.stdout).toBe(0);
     expect(result.stdout).toContain('Rehearsal report');
     expect(result.stdout).toContain('Contract ready');
-    expect(result.stdout).toContain('floor(stages≥1)');
+    expect(result.stdout).toContain('Engine-owned instrument: 4 baseline replicates');
     expect(result.stdout).not.toContain('≥-');
     expect(result.stdout).not.toMatch(/[\u3400-\u9fff]/u);
     expect(result.stdout).not.toMatch(/^\{"level":\d+/m);

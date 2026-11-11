@@ -9,8 +9,8 @@ export interface Schema {
    *  as `string` alone silently rejected every union: the array is truthy, so validation
    *  ran, then every comparison in matchesType compared a string against an array and the
    *  `typeof value === type` fallback could not match, so nullable fields ALWAYS failed
-   *  regardless of their value. Reality gates and research-loop `result_schema` both go
-   *  through validate(), so both were affected. */
+   *  regardless of their value. Reality checks and structured stage records both use
+   *  validate(), so both require union support. */
   type?: string | string[];
   required?: string[];
   additionalProperties?: boolean | Schema;
@@ -56,8 +56,8 @@ export default class JsonSchemaMatchCheck implements RealityCheck {
   }
 }
 
-/** Pure, reusable validator (also used per-round by the research loop to enforce the
- *  brief-declared round_result schema). Returns a list of human-readable path errors. */
+/** Pure validator shared by reality checks and structured stage records.
+ * Returns a list of human-readable path errors. */
 export function validate(value: unknown, schema: Schema, path: string): string[] {
   const errors: string[] = [];
   if (schema.anyOf) {

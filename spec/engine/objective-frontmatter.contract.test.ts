@@ -14,20 +14,16 @@ const body = (key: string) => [
 ].join('\n');
 
 describe('Objective primitive — research/objective frontmatter', () => {
-  it('parses the legacy `research:` block', () => {
-    const r = parseBriefFrontmatter(body('research')).research;
-    expect(r?.baseline).toBe(14.82);
-    expect(r?.policy).toBe('greedy_stack');
-    expect(r?.stop?.beat).toBe(15.0);
-    expect(r?.stop?.haltAfterNoImprovement).toBe(3);
+  it('refuses the legacy research block', () => {
+    const parsed = parseBriefFrontmatter(body('research'));
+    expect(parsed.research).toBeUndefined();
+    expect(parsed.workflowError).toContain('declare research.measurement');
   });
 
-  it('parses the `objective:` alias identically', () => {
-    const r = parseBriefFrontmatter(body('objective')).research;
-    expect(r?.baseline).toBe(14.82);
-    expect(r?.policy).toBe('greedy_stack');
-    expect(r?.stop?.beat).toBe(15.0);
-    expect(r?.stop?.haltAfterNoImprovement).toBe(3);
+  it('refuses the retired objective alias identically', () => {
+    const parsed = parseBriefFrontmatter(body('objective'));
+    expect(parsed.research).toBeUndefined();
+    expect(parsed.workflowError).toContain('declare research.measurement');
   });
 
   it('strips the frontmatter from the brief body either way', () => {

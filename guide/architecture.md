@@ -13,7 +13,7 @@ flowchart LR
   Settlement --> Records
 ```
 
-This diagram summarizes the engineering path, not every terminal research branch.
+This diagram summarizes engineering. Research declares a separate engine-owned measurement loop: calibration, producer, independent candidate-property review, measurement, numeric selection and budget stop. The engine writes its terminal report.
 The scheduler owns graph execution and settlement; the worker owns one adapter execution.
 Planning and judging are model work when live adapters are selected. Admission, declared
 checks, deadlines, process identity and publication integrity are code boundaries.
@@ -23,7 +23,7 @@ registries; unknown roles and invalid whole-plan topology refuse admission.
 [Agent protocol](agent-protocol.md) owns dispatch/verdict/artifact schemas and retained continuation.
 [Brief contract](brief-contract.md) owns research policy and deterministic checks.
 Ordinary failed work follows admitted bounded repairs, then stops; it does not force an
-unbounded outer re-plan. Deliberate next-phase/research advancement can plan more work.
+unbounded outer re-plan. Deliberate next-phase engineering work can plan more work. Research keeps its declaration-owned producer/reviewer shape for every submission.
 
 Sources: [workflow loop](../src/scheduler/sched_loop/workflow-loop.ts),
 [worker](../src/worker.ts), [gate loop](../src/scheduler/sched_loop/gate-loop.ts),

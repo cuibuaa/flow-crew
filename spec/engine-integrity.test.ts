@@ -76,7 +76,7 @@ describe('structural engine state protection', () => {
   it.each(['run', 'store', 'project-link', 'future-database', 'live-distribution', 'project-inside-run', 'project-inside-distribution'])('refuses engine storage inside authored work: %s', async mode => {
     let args = input();
     if (mode === 'project-inside-distribution') args = { ...args, projectDir: join(import.meta.dirname, '../dist/future-project') };
-    if (mode === 'live-distribution') args = { ...args, projectDir: join(import.meta.dirname, '..') };
+    if (mode === 'live-distribution') args = { ...args, projectDir: realpathSync(join(import.meta.dirname, '../dist')) }; // Exercise the actual distribution even with an external build output root.
     if (mode === 'project-inside-run') args = { ...args, projectDir: runRecordPath(run, 'future-project') };
     if (mode === 'run') { args = { ...args, runDir: project }; }
     if (mode === 'store') setFcGlobalDir(join(project, 'engine'));

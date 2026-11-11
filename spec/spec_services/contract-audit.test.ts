@@ -31,21 +31,4 @@ describe('collected contract audit', () => {
       assert.match(inspectRealityCheckReachability({ markdown: check(reads), projectDir, stages }).join('\n'), /ARTIFACT_READ_UNBOUND.*missing/);
     } finally { rmSync(projectDir, { recursive: true, force: true }); }
   });
-
-  it('refuses a declared hard read of the optional no-candidate result slot', () => {
-    const projectDir = mkdtempSync(join(tmpdir(), 'flowcrew-contract-audit-'));
-    try {
-      mkdirSync(join(projectDir, 'docs'));
-      const stages = [parseDispatchedStageConfig({
-        id: 'measure', role: 'researcher', scope: ['docs/round.json'], depends_on: [],
-        dependency_reasons: {}, prompt_template: 'measure or emit the no-candidate sidecar',
-        skills: [], is_gate: false, criterion_refs: [],
-        artifact_contract: { version: 1, produces: [{ id: 'round', root: 'project', path: 'docs/round.json' }], reads: [] },
-      })];
-      const markdown = '## Reality checks\n```yaml\nchecks:\n  - name: numeric result exists\n    type: exec-script-exit-zero\n    reads: [{id: round, root: project, path: docs/round.json, source: {kind: stage, stage: measure, artifact: round}}]\n    params:\n      script: test -s docs/round.json\n```\n';
-      assert.match(inspectRealityCheckReachability({ markdown, projectDir, stages,
-        research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json', reportDir: 'docs' },
-      }).join('\n'), /valid no-candidate round writes only its sidecar/);
-    } finally { rmSync(projectDir, { recursive: true, force: true }); }
-  });
 });

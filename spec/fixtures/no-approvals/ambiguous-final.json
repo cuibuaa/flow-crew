@@ -3,11 +3,9 @@
     "output": {
       "successor": "implement",
       "reason": "Use the existing convention for the ambiguous greeting.",
-      "metric_search": false,
       "assumptions": [
         "Use the existing greeting convention for new content."
-      ],
-      "missing_author_facts": []
+      ]
     }
   }
 }

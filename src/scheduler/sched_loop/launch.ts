@@ -15,7 +15,7 @@ import { RUN_VALIDATION_BASELINE_FILE } from '../sched_policy/terminal.js';
 import { snapshotShipSetupValidationBaseline } from '../sched_settlement/gate-validation.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
 import { RUN_STATUS, STAGE_STATUS, StoreState, continuationExhausted, isContinuingStage, initializeReservedRun, isPausedRunStatus, isResumableRunStatus, readRunReservation, readRunState, rependStageStatus, requireKnownRunStatus, reserveRun, runDir, runsRoot, updateRunState, writeRunState } from '../../store.js';
-import { atomicWrite, mkdirSync, rmSync, unlinkSync, writeFileSync } from '../../engine-fs.js';
+import { atomicWrite, mkdirSync, rmSync, writeFileSync } from '../../engine-fs.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { deploymentHeld } from '../../deployment-hold.js';
 import { assertContinuationCompatible } from '../../engine-continuation.js';
@@ -181,18 +181,13 @@ export function prepareWorkflowLaunch(
       // Relaunch hygiene: this run previously reached a terminal state. Refresh the
       // lifecycle markers and purge prior-run signals so we don't (a) compute a
       // stale/negative duration off the old completedAt, (b) honor a leftover
-      // goal_met.json/replan.json and terminate the rerun prematurely, or (c) let
-      // tryAdvanceResearch journal a stale result file from the previous run as a
-      // phantom round (its freshness check keys off startedAt).
+      // goal_met.json/replan.json and terminate the rerun prematurely.
       state.startedAt = new Date().toISOString();
       delete state.completedAt;
       delete state.failureReason;
       delete state.reasonCode;
       delete state.terminalArtifact;
       try { rmSync(runRecordPath(runDirPath, 'signals'), { recursive: true, force: true }); } catch { /* best effort */ }
-      // Reset the integrity-rejection tally so a prior run's rejections don't shrink
-      // this rerun's budget.
-      try { unlinkSync(runRecordPath(runDirPath, 'research_integrity_rejections.json')); } catch { /* best effort */ }
       writeFileSync(runRecordPath(runDirPath, 'workflow.yaml'), workflowYaml, 'utf-8');
     }
     });

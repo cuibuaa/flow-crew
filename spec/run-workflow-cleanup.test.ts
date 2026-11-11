@@ -22,9 +22,6 @@ vi.mock('../src/jsonl.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/jsonl.js')>(),
   readOptionalJsonlFile: () => fixture.events,
 }));
-vi.mock('../src/research-candidate.js', () => ({
-  rejectPendingResearchGateCandidates: (...args: unknown[]) => { fixture.calls.push('settle'); fixture.reject(...args); },
-}));
 vi.mock('../src/adapters/base.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/adapters/base.js')>(),
   withRunProcessOwnership: async (_project: string, _run: string, body: () => unknown) => body(),
@@ -65,7 +62,7 @@ vi.mock('../src/scheduler/sched_loop/services.js', () => ({ writeCampaignEntry: 
 import { runWorkflow } from '../src/scheduler/sched_loop/run-workflow.js';
 const invoke = () => runWorkflow({ name: 'fixture' } as WorkflowConfig, '', '/workspace/project', {} as Adapter, new Map());
 beforeEach(() => {
-  fixture.state = { runId: 'fixture', projectDir: '/workspace/project', status: 'running', stages: {}, research: { baseline: 0, policy: 'greedy_stack' } } as StoreState;
+  fixture.state = { runId: 'fixture', projectDir: '/workspace/project', status: 'running', stages: {} } as StoreState;
   fixture.calls = [];
   fixture.events = [];
   fixture.admitted = false;
@@ -73,52 +70,20 @@ beforeEach(() => {
   fixture.iterations.mockImplementation(async () => { fixture.state.status = 'complete'; return fixture.state; });
 });
 
-it('settles terminal research candidates before releasing scheduler ownership', async () => {
+it('releases scheduler ownership after an ordinary workflow completes', async () => {
   await expect(invoke()).resolves.toBe(fixture.state);
-  expect(fixture.calls).toEqual(['settle', 'remove-pid', 'release-intent']);
-  expect(fixture.read).not.toHaveBeenCalled();
-});
-
-it('does no candidate IO or terminal state reread for an ordinary workflow', async () => {
-  delete fixture.state.research;
-  await expect(invoke()).resolves.toBe(fixture.state);
-  expect(fixture.reject).not.toHaveBeenCalled();
-  expect(fixture.read).not.toHaveBeenCalled();
   expect(fixture.calls).toEqual(['remove-pid', 'release-intent']);
+  expect(fixture.read).not.toHaveBeenCalled();
 });
 
-it.each(['complete', 'failed'] as const)('records candidate cleanup failure without replacing a %s result', async status => {
-  const cleanupError = new Error('Synthetic unreadable candidate');
-  fixture.reject.mockImplementation(() => { throw cleanupError; });
-  if (status === 'failed') fixture.iterations.mockRejectedValue(new Error('Original scheduler failure'));
-  await expect(invoke()).resolves.toBe(fixture.state);
-  expect(fixture.state.status).toBe(status);
-  if (status === 'failed') expect(fixture.state.failureReason).toBe('Scheduler failed: Original scheduler failure');
-  expect(fixture.error).toHaveBeenCalledWith({ err: cleanupError, runId: 'fixture' }, 'Failed to settle pending research gate candidates');
-  expect(fixture.calls).toEqual(['settle', 'remove-pid', 'release-intent']);
-});
-
-it('does not mask an escaping lifecycle exception with candidate cleanup failure', async () => {
+it('preserves the original lifecycle exception while closing rollback ownership', async () => {
   const original = new Error('Original owned cleanup failure');
-  const cleanup = new Error('Synthetic candidate failure');
   fixture.close.mockImplementation(() => { throw original; });
-  fixture.reject.mockImplementation(() => { throw cleanup; });
   await expect(invoke()).rejects.toBe(original);
-  expect(fixture.error).toHaveBeenCalledWith({ err: cleanup, runId: 'fixture' }, 'Failed to settle pending research gate candidates');
 });
 
-it('uses the same best effort research-only cleanup for a terminal launch refusal', async () => {
-  fixture.admitted = true;
-  fixture.state.status = 'failed';
-  const cleanup = new Error('Synthetic candidate failure');
-  fixture.reject.mockImplementation(() => { throw cleanup; });
+it('returns an already settled launch without taking cleanup ownership', async () => {
+  fixture.admitted = true; fixture.state.status = 'failed';
   await expect(invoke()).resolves.toBe(fixture.state);
-  expect(fixture.error).toHaveBeenCalledWith({ err: cleanup, runId: 'fixture' }, 'Failed to settle pending research gate candidates');
-  expect(fixture.calls).toEqual(['settle']);
-});
-
-it('leaves parked research candidates pending', async () => {
-  fixture.iterations.mockImplementation(async () => { fixture.state.status = 'parked'; return fixture.state; });
-  await expect(invoke()).resolves.toBe(fixture.state);
-  expect(fixture.reject).not.toHaveBeenCalled();
+  expect(fixture.calls).toEqual([]);
 });

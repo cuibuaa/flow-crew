@@ -57,8 +57,8 @@ Source: [dispatch/bootstrap](../src/cli.ts), [early ledger](../src/cli-fc-tasks.
 | `ship-setup` | Required `--brief`, `--target`, `--base`, `--branch`; optional `--project`, `--json`. Value options accept equals, duplicates refuse. Exit 0 only for ready record publication, 1 refusal. |
 
 Doctor can inspect authentication state and the dashboard listener. Preflight may inspect
-isolated daemon/build identity; neither is a model launch. Rehearsal runs real declared shell
-confirmation in its disposable project unless static-only. Review it first.
+isolated daemon/build identity; neither is a model launch. Rehearsal dispatches the constructed research shape in its disposable project with scripted results.
+It applies the same pre-producer stop decision and refuses an already exhausted allowance. It never runs declared instrument commands.
 
 Sources: [core diagnostics](../src/cli.ts), [maintenance](../src/cli-doctor.ts),
 [preflight parser](../src/cli-ship-preflight.ts), [rehearse parser](../src/rehearse.ts),

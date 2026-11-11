@@ -61,7 +61,7 @@ def main():
     if args.shape == 'build-silent': commands = {'build': {'command': 'node', 'args': ['-e', 'process.exitCode=2']}, **commands}
     brief = scratch / 'brief.md'
     brief.write_text('---\nworkflow: direct\ninputs: [notes.md, evidence]\noutputs: [docs/report.md, docs/details.md]\nvalidation: ' + json.dumps({'commands': commands}) + '\n---\n# Write a greeting\n\nUse the declared evidence to write the same greeting in both artifacts.\n\n## What the report must show\n1. Both artifacts contain the greeting supported by the declared evidence.\n2. The declared source inputs retain their original content.\n')
-    decision = {'reason': 'Deterministic validation-budget fixture.', 'assumptions': [], 'metric_search': False, 'missing_author_facts': []}
+    decision = {'reason': 'Deterministic validation-budget fixture.', 'assumptions': []}
     scripts = {'choose': {'output': {**decision, 'successor': 'implement'}},
         'assess': {'output': {'reason': 'Read product and available validation facts.', 'successor': 'review', 'risk_areas': [{'file':'docs/report.md','risk':'Greeting validity','experiment':'Read both greeting outputs and the stated validation facts.'}]}},
         'implement': {'output': {'status':'delivered','summary':'Greeting artifacts complete.','caveats':[],'remaining_work':[]}}}

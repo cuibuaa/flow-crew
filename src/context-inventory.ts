@@ -2,7 +2,7 @@
  * Context primitive — the loop's world-model (Atom Architecture / autonomous-loop design).
  *
  * A compact, task-agnostic digest of the data/code assets that already exist on disk under the
- * objective's `context_roots` (default `data/`). Injected into the planner/researcher prompt as
+ * planner's context roots (currently `data/`). Injected into the planner/researcher prompt as
  * {context_inventory} so the Propose step cannot signpost "acquire X" for data already present
  * (the failure observed when a research run mis-recommended buying L2 data it already had).
  *

@@ -13,12 +13,11 @@ import {
   readGuidanceForStage,
   RUN_WIDE_GUIDANCE_TARGET,
 } from '../src/guidance.js';
-import { inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, readGateEvaluation, resolveDispatchDependencies, researchAdvanceEligible, tryAdvanceResearch, tryTerminateOnTerminalState } from '../src/scheduler.js';
+import { inspectDispatchAdmission, inspectRealityCheckReachability, parseDispatchedStageConfig, readGateEvaluation, resolveDispatchDependencies, tryTerminateOnTerminalState } from '../src/scheduler.js';
 import { inspectBriefOutputs } from '../src/ship-inputs.js';
 import { recordBlockageOccurrence } from '../src/blockage-ledger.js';
 import { CommandActivityTracker } from '../src/command-activity.js';
 import { inspectStageExecutionFacts } from '../src/stage-watchdog.js';
-import { evaluateResearch } from '../src/research-policy.js';
 import { buildStagePrompt } from '../src/handoff.js';
 import { createRun } from './test-support/create-run.js';
 import { fcGlobalDir, runDir, setFcGlobalDir, writeRunState } from '../src/store.js';
@@ -192,27 +191,8 @@ describe('canonical criteria and atomic dispatch admission', () => {
     expect(ordinaryWithoutGate.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('not assigned to a gate');
   });
 
-  it('rejects an unconditional research finalizer and malformed dynamic schema', () => {
+  it('rejects a malformed dynamic scope declaration', () => {
     expect(() => parseDispatchedStageConfig({id:'work',role:'coder',scope:'src/**'})).toThrow(/scope/);
-    const plan = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'plan', role: 'planner', depends_on: [], dependency_reasons: {}, scope: [] });
-    const measure = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'measure', role: 'researcher', depends_on: ['plan'], dependency_reasons: { plan: 'Consumes the research plan.' }, scope: ['docs/round.json'] });
-    const finalizer = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []), id: 'finalize', role: 'writer', depends_on: ['measure'], dependency_reasons: { measure: 'Consumes the accepted measurement.' }, scope: ['docs/final.md'] });
-    const report = inspectDispatchAdmission({
-      dispatched: [measure, finalizer], baseStages: [plan], dispatchStageId: 'plan',
-      terminalStates: { ceiling_hit: { paths: ['docs/final.md'] } },
-      research: { baseline: 0, policy: 'greedy_stack' },
-    });
-    expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('must be mechanically false when research.decision is continue');
-
-    const reserved = inspectDispatchAdmission({
-      dispatched: [stage({ criterion_refs: [], artifact_contract: artifacts([], [], []),
-        id: 'research', role: 'researcher', depends_on: ['plan'],
-        dependency_reasons: { plan: 'Consumes the research plan.' }, scope: ['docs/round.json'],
-      })],
-      baseStages: [plan], dispatchStageId: 'plan',
-      research: { baseline: 0, policy: 'greedy_stack' },
-    });
-    expect(reserved.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('reserved for framework-owned research policy facts');
   });
 
   it('preserves explicit root dependencies instead of silently wiring them to the planner', () => {
@@ -221,66 +201,9 @@ describe('canonical criteria and atomic dispatch admission', () => {
     expect(root.depends_on).toEqual([]);
     expect(root.dependency_reasons).toEqual({});
   });
-
-  it('releases policy writers on the framework-emitted terminal facts', () => {
-    const root = temporaryRoot();
-    const previousStateRoot = fcGlobalDir();
-    setFcGlobalDir(root);
-    try {
-      const taskRunDir = join(root, 'runs', 'run');
-      mkdirSync(taskRunDir, { recursive: true });
-      for (const expected of [
-        { condition: 'research.decision == ship', decision: 'ship', terminalStatus: 'shipped' },
-        { condition: 'research.decision == stop_ceiling', decision: 'stop_ceiling', terminalStatus: 'ceiling_hit' },
-      ]) {
-        writeFileSync(runRecordPath(taskRunDir, 'research_decision.json'), JSON.stringify(expected));
-        expect(evaluateCondition(expected.condition, 'unused-project', 'run')).toBe(true);
-      }
-    } finally {
-      setFcGlobalDir(previousStateRoot);
-    }
-  });
-
-  it('mechanically rejects a sole terminal owner that also owns the research result', () => {
-    const measureAndFinalize = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []),
-      id: 'measure', role: 'researcher', depends_on: [], dependency_reasons: {},
-      scope: ['docs/round.json', 'docs/final.md'],
-      condition: 'research.decision != continue',
-    });
-    const report = inspectDispatchAdmission({
-      dispatched: [measureAndFinalize], baseStages: [], dispatchStageId: 'plan',
-      terminalStates: { complete: { paths: ['docs/final.md'] } },
-      research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json' },
-    });
-    expect(report.pass).toBe(false);
-    expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toMatch(/terminal owner measure.*research result.*docs\/round\.json/);
-  });
-
-  it.each([
-    'research.decision == continue',
-    'research.decision != shipped',
-    'research.decision == invented_terminal',
-  ])('mechanically rejects a terminal predicate that does not prove exclusion on continue: %s', (condition) => {
-    const finalizer = stage({ criterion_refs: [], artifact_contract: artifacts([], [], []),
-      id: 'finalize', role: 'writer', depends_on: [], dependency_reasons: {},
-      scope: ['docs/final.md'], condition,
-    });
-    const report = inspectDispatchAdmission({
-      dispatched: [finalizer], baseStages: [], dispatchStageId: 'plan',
-      terminalStates: { complete: { paths: ['docs/final.md'] } },
-      research: { baseline: 0, policy: 'greedy_stack' },
-    });
-    expect(report.pass).toBe(false);
-    expect(report.errors.map(error => typeof error === 'string' ? error : error.message).join('\n')).toContain('must be mechanically false when research.decision is continue');
-  });
 });
 
 describe('gate settlement and research evidence', () => {
-  it('does not advance a round while a gate or stage is unsettled', () => {
-    expect(researchAdvanceEligible({ gatesSettled: false, stageFailed: false })).toBe(false);
-    expect(researchAdvanceEligible({ gatesSettled: true, stageFailed: true })).toBe(false);
-    expect(researchAdvanceEligible({ gatesSettled: true, stageFailed: false })).toBe(true);
-  });
 
   it('treats contradictory pass/repair fields and missing criterion evidence as rejection', () => {
     const project = temporaryRoot();
@@ -292,72 +215,6 @@ describe('gate settlement and research evidence', () => {
     writeFileSync(runRecordPath(docs, 'dispatch_admission.json'), JSON.stringify({ version: 1, pass: true, terminalOwners: {}, errors: [], checkedAt: 'now', criterionGateRefs: { qa: ['c1'] } }));
     writeFileSync(runRecordPath(docs, 'verdict_qa.json'), JSON.stringify({ pass: true }));
     expect(readGateEvaluation(project, 'qa')).toMatchObject({ pass: false, reason: expect.stringContaining('missing criteria evidence') });
-  });
-
-  it('treats a no-candidate round as no improvement without a fake baseline metric or ship', () => {
-    const evaluated = evaluateResearch(
-      { baseline: 10, policy: 'greedy_stack', stop: { beat: 9, maxRounds: 2 } },
-      [{ label: 'no_safe_action', outcome: 'no_candidate', reason: 'all candidates violated a hard constraint' }],
-    );
-    expect(evaluated).toMatchObject({ runningBest: 10, keptLabels: [], latestKept: false, decision: 'continue' });
-  });
-
-  it('journals the no-candidate sidecar with its discriminator and no numeric result', async () => {
-    const projectDir = temporaryRoot();
-    const taskRunDir = join(projectDir, 'run');
-    mkdirSync(join(projectDir, 'docs'), { recursive: true });
-    mkdirSync(taskRunDir, { recursive: true });
-    const sidecar = join(projectDir, 'docs', 'round.json.no_candidate.json');
-    const state = {
-      runId: 'run', workflowName: 'test', projectDir, status: 'running', stages: {},
-      startedAt: new Date(Date.now() - 1000).toISOString(),
-      research: { baseline: 10, policy: 'greedy_stack', resultFile: 'docs/round.json', reportDir: 'docs', stop: { maxRounds: 2 } },
-    } as StoreState;
-    const { beginResearchInputGeneration } = await import('../src/research-candidate.js');
-    beginResearchInputGeneration(projectDir, state);
-    writeFileSync(sidecar, JSON.stringify({
-      outcome: 'no_candidate', label: 'round_without_action', reason: 'every candidate violated a hard constraint', evidence: { rejected: 4 },
-    }));
-    await tryAdvanceResearch(state, { projectDir, runId: 'run', runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter });
-    const journal = JSON.parse(readFileSync(runRecordPath(taskRunDir, 'research_journal.json'), 'utf-8')) as { rounds: Array<Record<string, unknown>> };
-    expect(journal.rounds[0]).toMatchObject({ outcome: 'no_candidate', label: 'round_without_action', evidence: { rejected: 4 } });
-    expect(journal.rounds[0]).not.toHaveProperty('result');
-  });
-
-  it('rejects a terminal artifact that contradicts the settled research terminal path', async () => {
-    const projectDir = temporaryRoot();
-    const taskRunDir = join(projectDir, 'run');
-    mkdirSync(join(projectDir, 'docs'), { recursive: true });
-    mkdirSync(taskRunDir, { recursive: true });
-    const startedAt = new Date(Date.now() - 1000).toISOString();
-    writeFileSync(join(projectDir, 'docs', 'ship.md'), '# premature ship\n');
-    writeFileSync(runRecordPath(taskRunDir, 'research_decision.json'), JSON.stringify({
-      decision: 'stop_ceiling', terminalStatus: 'ceiling_hit', terminalPath: 'docs/ceiling.md', terminalOwner: 'finalize',
-    }));
-    writeFileSync(runRecordPath(taskRunDir, 'dispatch_admission.json'), JSON.stringify({
-      version: 1, pass: true, checkedAt: new Date().toISOString(), errors: [],
-      terminalOwners: { 'docs/ship.md': 'finalize', 'docs/ceiling.md': 'finalize' },
-    }));
-    const state = {
-      runId: 'run', workflowName: 'test', projectDir, status: 'running', startedAt,
-      research: { baseline: 0, policy: 'greedy_stack' },
-      terminalArtifactBaselines: {},
-      terminalStates: {
-        shipped: { paths: ['docs/ship.md'] }, ceiling_hit: { paths: ['docs/ceiling.md'] },
-      },
-      stages: {
-        finalize: {
-          status: 'complete', retries: 0,
-          attempts: [{ index: 0, status: 'complete', startedAt, writes: ['docs/ship.md'] }],
-        },
-      },
-    } as StoreState;
-    const result = await tryTerminateOnTerminalState(state, {
-      projectDir, runId: 'run', runDirPath: taskRunDir, iteration: 1, adapter: inertAdapter,
-    });
-    expect(result.decision).toBe('deferred');
-    expect(existsSync(join(projectDir, 'docs', 'ship.md'))).toBe(false);
-    expect(readdirSync(runRecordPath(taskRunDir, '.')).some((name) => name.startsWith('wrong_terminal_shipped_ship.md'))).toBe(true);
   });
 
   it('quarantines multiple non-research terminal outcomes and re-pends their sole owner', async () => {
@@ -595,6 +452,6 @@ describe('output inventory, reachability, and stage prose', () => {
       projectDir,
       stages: [work],
       research: { baseline: 0, policy: 'greedy_stack', resultFile: 'docs/round.json', reportDir: 'docs' },
-    }).join('\n')).toContain('valid no-candidate round writes only its sidecar');
+    }).join('\n')).toContain('ARTIFACT_INPUT_ABSENT');
   });
 });

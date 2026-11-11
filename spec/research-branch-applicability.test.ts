@@ -1,5 +1,6 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { StageConfigSchema, type StageConfig } from '../src/scheduler/sched_admission/configuration.js';
 import { allDone } from '../src/scheduler/sched_scope/stage-group.js';
@@ -14,7 +15,7 @@ afterEach(() => {
 });
 
 function fixture(transitive = false) {
-  const projectDir = mkdtempSync(join(process.cwd(), '.research-branch-'));
+  const projectDir = mkdtempSync(join(tmpdir(), 'research-branch-'));
   roots.push(projectDir);
   const stage = (id: string, extra: Record<string, unknown> = {}): StageConfig => StageConfigSchema.parse({
     id, role: 'worker', prompt_template: 'Branch settlement contract.', scope: [], depends_on: [],

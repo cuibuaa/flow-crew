@@ -13,17 +13,18 @@ import { dirname, join } from 'node:path';
 import { RUN_WIDE_GUIDANCE_TARGET } from '../../guidance.js';
 import { evaluateTerminalFloor } from '../sched_admission/brief-contract.js';
 import { archiveDeclaredOutputs } from '../../declared-output-archive.js';
-import { evaluateResearchCeilingFloor } from '../../research-policy.js';
 import { log } from '../sched_admission/shared.js';
 import { recordRunEvent } from '../../run-events.js';
-import { runAllChecks } from '../../reality-gate/index.js';
+
 import { isStageInSkippedBranch, transitivelyDependsOn } from '../sched_admission/frontier.js';
 import { type StageConfig } from '../sched_admission/configuration.js';
 import { lastAttributedStageWriteMs, admittedTerminalOwner, stageAttemptWroteProjectPath, terminalProductWrites } from './terminal-ownership.js';
 import { appendSchedulerGuidanceOnce, observeStableBlockage } from './guidance.js';
 import { reconcileUnresolvedStageObligations } from '../sched_settlement/completion.js';
 import { collectGateRuntimeFacts } from '../sched_settlement/gate-recovery.js';
-import { runPostTerminateHook } from './research.js';
+import { withEngineIntegrity } from '../../engine-integrity.js';
+import { spawnOwnedCommand } from '../../adapters/base.js';
+import type { PostTerminateHook } from '../../store.js';
 
 import { readRunValidationBaseline } from '../sched_settlement/gate-validation.js';
 import { captureProjectTree, readEvidence, validationForTree } from '../../evidence-ledger.js';
@@ -59,22 +60,6 @@ export interface TerminalValidationFreshnessResult {
   validationStageId?: string;
   checkedAt?: string;
   reason?: string;
-}
-
-interface ResearchTerminalSelection {
-  terminalStatus: string;
-  terminalPath: string;
-}
-
-function readResearchTerminalSelection(runDirPath: string): ResearchTerminalSelection | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(runRecordPath(runDirPath, 'research_decision.json'), 'utf-8')) as Record<string, unknown>;
-    if (parsed.decision === 'continue') return undefined;
-    if (typeof parsed.terminalStatus !== 'string' || typeof parsed.terminalPath !== 'string') return undefined;
-    return { terminalStatus: parsed.terminalStatus, terminalPath: parsed.terminalPath };
-  } catch {
-    return undefined;
-  }
 }
 
 function quarantineTerminalCandidate(runDirPath: string, sourcePath: string, label: string): string | undefined {
@@ -180,10 +165,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
     };
     const notMatchedReasons: string[] = [];
     const deferredReasons: string[] = [];
-    const researchSelection = state.research
-      ? readResearchTerminalSelection(ctx.runDirPath)
-      : undefined;
-    if (!researchSelection) {
+    {
       const freshLogicalCandidates = Object.entries(state.terminalStates).flatMap(([terminalStatus, entry]) => (
         entry.paths.flatMap((path) => {
           const projectPath = join(ctx.projectDir, path);
@@ -297,43 +279,7 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           deferredReasons.push(`${terminalStatus}: ${reason}`);
           continue;
         }
-        if ((state.research?.measurement && accepting && !researchSelection) || (researchSelection
-            && (researchSelection.terminalStatus !== terminalStatus || researchSelection.terminalPath !== path))) {
-          const reason = `${path} declares '${terminalStatus}', but the settled research policy selected '${researchSelection?.terminalStatus ?? 'no terminal decision'}' via ${researchSelection?.terminalPath ?? 'engine measurement pending'}`;
-          if (sourcePath === projPath && admittedOwner) {
-            quarantineTerminalCandidate(
-              ctx.runDirPath,
-              sourcePath,
-              `wrong_terminal_${terminalStatus}_${path.split('/').pop() ?? 'artifact'}`,
-            );
-          }
-          appendSchedulerGuidanceOnce(
-            ctx.runDirPath,
-            admittedOwner ?? RUN_WIDE_GUIDANCE_TARGET,
-            `[scheduler-hint:${terminalStatus}:${path}:research-selection]`,
-            `Terminal artifact rejected: ${reason}. Read research_decision.json and write only its terminalPath.`,
-            Object.keys(state.stages),
-          );
-          deferredReasons.push(`${terminalStatus}: ${reason}`);
-          continue;
-        }
-        
-        // Measurement ceilings are selected only after a declared hard stop. The
-        // research decision records unmet floors; they cannot buy more budget.
-        const floorCheck = state.research?.measurement && researchSelection?.terminalStatus === RUN_STATUS.CEILING_HIT
-          ? { passed: true }
-          : state.research && admittedOwner && terminalStatus === RUN_STATUS.CEILING_HIT
-          ? (() => {
-              let measuredRounds = 0;
-              try {
-                const journal = JSON.parse(readFileSync(runRecordPath(ctx.runDirPath, 'research_journal.json'), 'utf-8')) as { rounds?: unknown[] };
-                measuredRounds = Array.isArray(journal.rounds) ? journal.rounds.length : 0;
-              } catch { /* missing/corrupt journal fails the floor as zero rounds */ }
-              const startedAtMs = Date.parse(state.startedAt);
-              const elapsedMinutes = Number.isFinite(startedAtMs) ? (Date.now() - startedAtMs) / 60000 : 0;
-              return evaluateResearchCeilingFloor(entry.floor, measuredRounds, elapsedMinutes);
-            })()
-          : evaluateTerminalFloor(state, entry, ctx.projectDir);
+        const floorCheck = evaluateTerminalFloor(state, entry, ctx.projectDir);
         if (!floorCheck.passed) {
           
           const hintMarker = `[scheduler-hint:${terminalStatus}:${path}]`;
@@ -379,9 +325,8 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
         ));
         const failedWork = accepting ? Object.entries(state.stages)
           .filter(([, stage]) => stage.status === STAGE_STATUS.FAILED).map(([id]) => id) : [];
-        // Settled research policy can conclude rejected rounds honestly. An
-        // ordinary report, including a blocker report, must pass its own review.
-        const rejectedGates = accepting || !researchSelection ? gates.failedGateIds : [];
+        // A stage-authored report, including a blocker report, must pass its own review.
+        const rejectedGates = gates.failedGateIds;
         if (unresolved.length > 0 || unsettledGates.length > 0 || failedWork.length > 0 || rejectedGates.length > 0) {
           deferredReasons.push(`${terminalStatus}: required settlement is pending or rejected (${[...new Set([
             ...unresolved, ...unsettledGates.map((gate) => gate.id), ...failedWork, ...rejectedGates,
@@ -403,32 +348,6 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
           continue;
         }
 
-        if (terminalStatus === RUN_STATUS.SHIPPED && state.research?.confirm) {
-          let confirmReport: { pass: boolean; results: Array<{ details: string }> };
-          try {
-            confirmReport = await runAllChecks(
-              [{ name: 'research_confirm', type: 'exec-script-exit-zero', reads: state.research.confirm.reads ?? [], params: { script: state.research.confirm.command, timeout_seconds: state.research.confirm.timeoutSeconds ?? 300 } }],
-              { taskDir: ctx.runDirPath, projectDir: ctx.projectDir },
-            );
-          } catch (err) {
-            confirmReport = { pass: false, results: [{ details: `confirm command threw: ${err instanceof Error ? err.message : String(err)}` }] };
-          }
-          try { writeFileSync(runRecordPath(ctx.runDirPath, 'research_confirm.json'), JSON.stringify({ ...confirmReport, command: state.research.confirm.command, requires: state.research.confirm.requires, trigger: `terminal file ${path}` }, null, 2) + '\n', 'utf-8'); } catch { /* non-critical */ }
-          if (!confirmReport.pass) {
-            const detail = confirmReport.results.map((r) => r.details).join('; ') || 'confirm command did not exit 0';
-            const hintMarker = `[scheduler-hint:shipped-confirm:${path}]`;
-            appendSchedulerGuidanceOnce(
-              ctx.runDirPath,
-              RUN_WIDE_GUIDANCE_TARGET,
-              hintMarker,
-              `${path} declares a ship but the brief's confirm gate REJECTED it: ${detail}. A ship claim must pass confirm — remove/replace the premature ship artifact and either continue measuring or write an honest ceiling/escalation.`,
-            );
-            log.warn({ runId: ctx.runId, terminalStatus, path, detail }, 'Shipped terminal file REJECTED by confirm gate — NOT terminating');
-            deferredReasons.push(`${terminalStatus}: ${path} was rejected by research confirm: ${detail}`);
-            continue;
-          }
-          log.info({ runId: ctx.runId, path }, 'Shipped terminal file passed confirm gate');
-        }
         if (admittedOwner) {
           const validation = await ensureTerminalArtifactValidation({
             projectDir: ctx.projectDir,
@@ -555,4 +474,79 @@ export function createTerminalEvaluator(services: TerminalEvaluationServices) {
   }
 
   return { ensureTerminalArtifactValidation, tryTerminateOnTerminalState, concludeDeclaredTerminalAtQuiescence };
+}
+
+export async function runPostTerminateHook(
+  hook: PostTerminateHook,
+  ctx: {
+    projectDir: string;
+    runDir: string;
+    runId: string;
+    terminalStatus: string;
+    verdictPath: string;
+  },
+): Promise<void> {
+  const timeoutMs = (hook.timeoutSeconds ?? 300) * 1000;
+  const hookEnv: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    FC_PHASE: ctx.terminalStatus,
+    FC_VERDICT_FILE: ctx.verdictPath,
+    FC_RUN_DIR: ctx.runDir,
+    FC_PROJECT_DIR: ctx.projectDir,
+    FC_RUN_ID: ctx.runId,
+    ...(hook.env ?? {}),
+  };
+  const args = hook.args ?? [];
+  const logPath = runRecordPath(ctx.runDir, 'post_terminate_hook.log');
+  const startedAt = new Date().toISOString();
+
+  await withEngineIntegrity({ projectDir: ctx.projectDir, runDir: ctx.runDir,
+    stageId: '_terminal_hook',
+  }, () => new Promise<void>((resolve) => {
+    let settled = false;
+    const { child, stop } = spawnOwnedCommand(hook.command, args, {
+      cwd: ctx.projectDir,
+      env: hookEnv,
+    });
+    const chunks: string[] = [
+      `# post_terminate_hook log\n`,
+      `started_at: ${startedAt}\n`,
+      `command: ${hook.command}\n`,
+      `args: ${JSON.stringify(args)}\n`,
+      `timeout_seconds: ${hook.timeoutSeconds ?? 300}\n`,
+      `\n--- stdout/stderr ---\n`,
+    ];
+    child.stdout?.on('data', (d) => chunks.push(d.toString()));
+    child.stderr?.on('data', (d) => chunks.push(d.toString()));
+    const timer = setTimeout(() => {
+      if (settled) return;
+      log.warn({ runId: ctx.runId, command: hook.command, timeoutMs }, 'post_terminate_hook exceeded timeout, killing');
+      stop();
+    }, timeoutMs);
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      log.warn({ runId: ctx.runId, command: hook.command, err: String(err) }, 'post_terminate_hook spawn failed');
+      try { writeFileSync(logPath, chunks.join('') + `\nspawn error: ${err}\n`, 'utf-8'); } catch { /* noop */ }
+      resolve();
+    });
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chunks.push(`\n--- exit ---\ncode: ${code}\nsignal: ${signal}\ncompleted_at: ${new Date().toISOString()}\n`);
+      try { writeFileSync(logPath, chunks.join(''), 'utf-8'); } catch { /* noop */ }
+      if (code !== 0) {
+        log.warn({ runId: ctx.runId, command: hook.command, exitCode: code, signal }, 'post_terminate_hook exited non-zero (best-effort, ignored)');
+      } else {
+        log.info({ runId: ctx.runId, command: hook.command }, 'post_terminate_hook completed');
+      }
+      resolve();
+    });
+  })).catch((error: unknown) => {
+    const message = `ENGINE_STATE_REFUSED: terminal hook was not executed: ${String(error)}`;
+    log.warn({ runId: ctx.runId, message }, 'post_terminate_hook refused (best-effort, ignored)');
+    writeFileSync(logPath, message + '\n', 'utf8');
+  });
 }
