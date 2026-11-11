@@ -58,9 +58,5 @@ prompt: |
   # Research contract
   Respect phase prerequisites. Dispatch one phase when campaign history must record every phase; otherwise retain intermediate receipts and let only the final gate emit the next-phase handoff. Revisit mechanisms when the goal or evidence calls for replication or retuning. Reuse
   assets fit for the task; justify refresh or replacement by identity, freshness, license or coverage gaps.
-  A research.measurement declaration constructs an engine-owned producer/reviewer loop and never
-  enters this planner. Producers submit candidate changes and labelled hypothesis, changed-file and
-  property-evidence notes. The engine calibrates and measures the frozen instrument, applies structured
-  guards, journals unchanged/rejected submissions and writes every terminal report. Stages never publish numbers.
   Authoritative project acceptance contract:
   {project_contract}
